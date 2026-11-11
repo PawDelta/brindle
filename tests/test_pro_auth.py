@@ -66,10 +66,10 @@ def store(tmp_path):
     return credentials.FileStore(tmp_path / "pro")
 
 
-def login(transport, store, clock=None):
+def login(transport, store, clock=None, watch=None):
     clock = clock or Clock()
     shown = []
-    ent = auth.login(auth.Client(BASE, transport), store, show=shown.append,
+    ent = auth.login(auth.Client(BASE, transport), store, show=shown.append, watch=watch,
                      sleep=clock.sleep, clock=clock)
     return ent, shown, clock
 
@@ -174,9 +174,23 @@ def test_refresh_missing_new_refresh_token_is_refused(store, backend):
         auth.refresh(auth.Client(BASE, backend), store, seen)
 
 
-def test_reused_refresh_token_logs_out(store, backend):
+@pytest.mark.parametrize("saved_elsewhere", [False, True])
+def test_reused_refresh_token_logs_out(store, backend, saved_elsewhere):
+    """A refused refresh token signs out, unless the brindle that spent it
+    first saved its new pair while this request was out: that is the sign-in."""
     seen = seed(store, backend)
     backend.refresh_tokens["cpr_1"] = "used"    # someone else already spent it
+    if saved_elsewhere:
+        def refused_after_the_other_saved(form, headers):
+            other = backend.issue()
+            store.save({**seen, "access_token": other["access_token"],
+                        "refresh_token": other["refresh_token"], "access_expires_at": time.time() + 900})
+            return 400, {"error": "invalid_grant"}
+
+        backend.routes["POST /token/refresh"] = refused_after_the_other_saved
+        assert auth.refresh(auth.Client(BASE, backend), store, seen).plan == "pro"
+        assert store.load()["refresh_token"] == "cpr_2"
+        return
     with pytest.raises(AuthError) as e:
         auth.refresh(auth.Client(BASE, backend), store, seen)
     assert e.value.revoked and backend.revoked
@@ -219,6 +233,237 @@ def test_two_concurrent_refreshers_spend_the_refresh_token_once(tmp_path, backen
     assert backend.paths().count("POST /token/refresh") == 1
     assert not backend.revoked
     assert credentials.FileStore(tmp_path / "pro").load()["refresh_token"] == "cpr_2"
+
+
+@pytest.mark.variant("the reported incident: the app's engine and a CLI with different BRINDLE_HOMEs refreshing the one keychain sign-in at once")
+def test_refreshers_with_different_homes_spend_the_keychain_sign_in_once(tmp_path, backend, monkeypatch):
+    """The keychain holds one sign-in per OS user, whatever BRINDLE_HOME a
+    process has (the app's engine, a CLI or worker with a home of its own), so
+    they share one refresh lock. A spends the token and holds the request
+    until B has either hit A's lock or spent the same token itself."""
+    import fcntl
+    from subprocess import CompletedProcess
+    from brindle import config, keystore
+
+    external = credentials.FileStore(tmp_path / "keychain")
+
+    def run(self, args, stdin=None):
+        if args[0] == "-i":
+            external.save(keystore._decode(stdin.split('"')[-2]))
+        record = external.load()
+        return CompletedProcess(args, 0 if record else 44, keystore._encode(record) if record else "", "")
+
+    monkeypatch.setenv(keystore.FORCE_ENV, "keychain")
+    monkeypatch.setattr(keystore, "_keychain_reads", {})
+    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
+    homes, real_home = threading.local(), config.brindle_home
+    monkeypatch.setattr(config, "brindle_home", lambda: getattr(homes, "path", None) or real_home())
+    seen = seed(external, backend)
+    spent, a_spending, b_moved = [], threading.Event(), threading.Event()
+    real_refresh, real_flock = backend.routes["POST /token/refresh"], fcntl.flock
+
+    def refresh_route(form, headers):
+        spent.append(form["refresh_token"])
+        if len(spent) == 1:
+            a_spending.set()
+            b_moved.wait(5)
+        else:
+            b_moved.set()
+        return real_refresh(form, headers)
+
+    def flock(fd, op):
+        try:
+            return real_flock(fd, op)
+        except BlockingIOError:
+            b_moved.set()        # B is waiting on A's lock
+            raise
+
+    backend.routes["POST /token/refresh"] = refresh_route
+    monkeypatch.setattr(fcntl, "flock", flock)
+    results, errors = {}, []
+
+    def worker(home):
+        homes.path = tmp_path / home
+        try:
+            results[home] = auth.refresh(auth.Client(BASE, backend), credentials.default_store(), dict(seen))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    a = threading.Thread(target=worker, args=("home-a",))
+    a.start()
+    a_spending.wait(5)
+    b = threading.Thread(target=worker, args=("home-b",))
+    b.start()
+    a.join(10)
+    b.join(10)
+    assert errors == [] and set(results) == {"home-a", "home-b"}
+    assert spent == ["cpr_1"] and not backend.revoked
+    assert external.load()["refresh_token"] == "cpr_2"
+
+
+class FakeCallbackServer:
+    """``loopback.CallbackServer`` without a socket: the browser's redirect is
+    ``answer`` (None: none comes until the sign-in is finished from outside)."""
+
+    answer = None
+    redirect_uri = "http://127.0.0.1:49152/callback"
+
+    def __init__(self, state):
+        self.result, self.answered = None, threading.Event()
+
+    def __enter__(self):
+        if self.answer is not None:
+            self.finish(self.answer)
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def finish(self, result):
+        if not self.answered.is_set():
+            self.result = result
+            self.answered.set()
+
+    def wait(self, limit):
+        self.answered.wait(limit)
+        return self.result
+
+
+def _signing_in(db, store, backend, monkeypatch, on_progress=lambda fields: None, answer=None):
+    """The daemon's real sign-in route against the fake backend: ``login(**body)``
+    posts it; the jobs it starts are held (run one with ``held[i]()``);
+    ``on_progress`` sees each job.progress published (after it is); the
+    browser's redirect is ``answer`` (see FakeCallbackServer)."""
+    from brindle import bus
+    from brindle.daemon import routes_actions
+    from brindle.pro import loopback
+
+    held, real_publish = [], bus.publish
+
+    def publish(db, kind, **fields):
+        got = real_publish(db, kind, **fields)
+        if kind == "job.progress":
+            on_progress(fields)
+        return got
+
+    monkeypatch.setattr(loopback, "CallbackServer", type("Server", (FakeCallbackServer,), {"answer": answer}))
+    monkeypatch.setattr(bus, "publish", publish)
+    monkeypatch.setattr(routes_actions, "_spawn", held.append)
+    monkeypatch.setattr(routes_actions, "_SIGN_IN", [])
+    monkeypatch.setattr(routes_actions, "_pro_account",
+                        lambda out=None: account.ProAccount(store=store, transport=backend, out=out))
+    return (lambda **body: routes_actions.account_login(db, {}, body)), held
+
+
+def test_a_second_sign_in_request_joins_the_one_waiting_on_the_browser(db, store, backend, monkeypatch):
+    """One click that reaches the daemon twice (a remounted sign-in screen,
+    another screen's button) starts one browser flow; Try again (restart)
+    ends the waiting one, whose listener stops, and starts a fresh one."""
+    from brindle import bus
+
+    urls = threading.Event()
+    login, held = _signing_in(db, store, backend, monkeypatch,
+                              on_progress=lambda fields: "url" in fields and urls.set())
+    first = login()
+    flow = threading.Thread(target=held[0], daemon=True)
+    flow.start()
+    urls.wait(5)
+    since = bus.tail(db)[-1]["id"]
+    assert login() == first and len(held) == 1
+    again = [e["payload"] for e in bus.tail(db, since) if "url" in e["payload"]]
+    assert [(p["job"], p["url"].startswith(BASE + "/cli/authorize")) for p in again] == [(first.id, True)]
+    fresh = login(restart=True)
+    flow.join(5)
+    assert fresh != first and len(held) == 2 and not flow.is_alive()
+    ended = [e["payload"] for e in bus.tail(db, since, kinds=("job.failed",))]
+    assert [p["job"] for p in ended] == [first.id]
+    assert "POST /cli/token" not in backend.paths()
+
+
+@pytest.mark.parametrize("stage", ["before listening", "before the URL",
+                                   pytest.param("code exchange", marks=pytest.mark.variant("a race: the sign-in is replaced while its code is being exchanged"))])
+def test_a_replaced_browser_sign_in_shows_and_stores_nothing(db, store, backend, monkeypatch, stage):
+    """Try again replaces a browser sign-in at any stage: replaced before it
+    listens, or while its first progress line is being published, it never
+    publishes a URL to open; replaced while its code is exchanged, the tokens
+    it got are revoked, not saved over the new sign-in."""
+    from brindle import bus
+    from brindle.pro import loopback
+
+    replaced = []
+
+    def on_progress(fields):     # the line before the URL: "Opening your browser…"
+        if stage == "before the URL" and "text" in fields and not replaced:
+            replaced.append(login(restart=True))
+
+    login, held = _signing_in(db, store, backend, monkeypatch, on_progress=on_progress,
+                              answer=loopback.CallbackResult(code="cac_" + "g" * 43))
+    first = login()
+    if stage == "before listening":
+        login(restart=True)
+    elif stage == "code exchange":
+        def exchange(form, headers):
+            login(restart=True)
+            return 200, backend.issue()
+
+        backend.routes["POST /cli/token"] = exchange
+    held[0]()
+    mine = [e for e in bus.tail(db) if e["payload"].get("job") == first.id]
+    assert [e["kind"] for e in mine if e["kind"] != "job.progress"] == ["job.failed"]
+    assert any("url" in e["payload"] for e in mine) == (stage == "code exchange")
+    assert store.load() is None and "POST /device/authorize" not in backend.paths()
+    assert ("POST /token/revoke" in backend.paths()) == (stage == "code exchange")
+
+
+@pytest.mark.parametrize("approved", [False, pytest.param(True, marks=pytest.mark.variant("a race: the device code is approved just as the sign-in is replaced"))])
+def test_a_replaced_device_sign_in_stops_polling_and_stores_nothing(store, backend, approved):
+    """Replaced while its code is polled (the daemon's watch): a pending code
+    is not polled again; one approved anyway has its tokens revoked, unsaved."""
+    from brindle.daemon import routes_actions
+
+    watch = routes_actions._SignIn(routes_actions.Job("j1", "account.login"), True)
+
+    def device_token(form, headers):
+        watch.end()       # Try again, while this poll is out
+        return (200, backend.issue()) if approved else pending()
+
+    device_backend(backend, [])
+    backend.routes["POST /device/token"] = device_token
+    with pytest.raises(AuthError) as e:
+        login(backend, store, watch=watch)
+    assert e.value.code == auth.RESTARTED and store.load() is None
+    assert backend.paths().count("POST /device/token") == 1
+    assert ("POST /token/revoke" in backend.paths()) == approved
+
+
+def test_joining_a_device_sign_in_tells_its_code_again(db, store, backend, monkeypatch):
+    """A screen that joins a device sign-in already showing its code (after
+    navigating away and back) is told the code again, by the same job."""
+    from brindle import bus
+
+    class Joined(Exception):
+        pass
+
+    joined, joining = [], []
+    real_publish = bus.publish
+
+    def publish(db, kind, **fields):
+        got = real_publish(db, kind, **fields)
+        if "BCDF-GHJK" in str(fields.get("text")) and not joining:     # the code is on screen
+            joining.append(got)
+            joined.append((login(device=True), [e["payload"] for e in bus.tail(db, got)]))
+            raise Joined     # end the job here: what's checked is what the second request got
+        return got
+
+    login, held = _signing_in(db, store, backend, monkeypatch)
+    monkeypatch.setattr(bus, "publish", publish)
+    device_backend(backend, [])
+    first = login(device=True)
+    held[0]()
+    (job, told), = joined
+    assert job == first and len(held) == 1
+    assert {p["job"] for p in told} == {first.id} and not any("url" in p for p in told)
+    assert any("BCDF-GHJK" in p["text"] for p in told)
 
 
 @pytest.mark.variant("credentials rotate between routing's initial read and refresh lock entry")
