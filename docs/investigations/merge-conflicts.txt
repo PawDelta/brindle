@@ -292,3 +292,18 @@ Fixes:
 - Main traffic beyond 11-06 and 11-10 (git counts only for those two days).
 - Cross-repo classification beyond the three identified start messages.
 - 11-11 counts are partial.
+
+
+7. CORRECTION (supervisor, 2026-11-11)
+--------------------------------------
+
+Section 1A's "merges into session: 0" before 11-06 is wrong. It counted only
+pipeline message text. Git shows session branches took worker merges before
+11-06 too (e.g. 93 into brindle/session-23 between 10-28 and 11-05). The branch
+model did not change. What changed is how often sessions landed on main:
+brindle/session-23 and brindle/session-24 merged 12 PRs to main on 11-03 and
+11-04 (#344 to #361), and only one session PR (#390) merged after 11-04.
+Meanwhile the governance branch has been unlanded since 10-29, and
+brindle/session-8 held 251 commits until #412. The primary cause is therefore
+infrequent landing of long-lived session branches. The coordinator gaps in
+section 2 are contributing causes.
