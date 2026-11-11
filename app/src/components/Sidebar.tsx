@@ -36,7 +36,7 @@ import { inLibrary, inProfileRail, railPage, readLastSession, routeSession, sett
 import { LibraryIcon } from "./icons";
 import { LibraryRail, type LibraryCounts } from "./LibraryRail";
 import { useLibraryFolders } from "./useLibraryFolders";
-import { useLibraryRecent } from "./useLibraryRecent";
+import { recentEntries, useLibraryDocs } from "./useLibraryDocs";
 import { docStages, stageCounts } from "../screens/Knowledge/libraryStages";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
@@ -691,9 +691,10 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
   // Designs waiting on the person: the plans in the Inbox.
   const plansWaiting = useAppState((s) => s.inbox.filter((item) => item.kind === "plan").length);
   // Recent designs, and the designs the Inbox places at a stage (shared docs and the review queue).
-  const recentDocs = useLibraryRecent(folderClient, libraryOpen);
+  const libraryDocs = useLibraryDocs(folderClient, libraryOpen);
+  const recentDocs = useMemo(() => recentEntries(libraryDocs.docs), [libraryDocs]);
   const inbox = useAppState((s) => s.inbox);
-  const docStageCounts = useMemo(() => stageCounts(docStages(inbox)), [inbox]);
+  const docStageCounts = useMemo(() => stageCounts(libraryDocs.docs, docStages(inbox), libraryDocs.designs), [inbox, libraryDocs]);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
   const [folded, setFolded] = useState<Set<string>>(new Set());

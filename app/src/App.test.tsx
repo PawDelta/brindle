@@ -783,6 +783,32 @@ describe("App", () => {
     sync.stop();
   });
 
+  it("library sidebar recent and stages: shared designs with no Inbox card are counted from their own review state, and the rail lists the newest", async () => {
+    const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
+    const libraryDocs = [
+      { doc_id: "a1", title: "Waiting on sam", updated_at: 30, design: { rev: 1, ready: false, reviewers: [{ sub: "sam", required: true }], sign_offs: [] } },
+      { doc_id: "a2", title: "All signed", updated_at: 20, design: { rev: 1, ready: true, reviewers: [{ sub: "sam", required: true }], sign_offs: [{ sub: "sam", rev: 1 }] } },
+      { doc_id: "a3", title: "Personal note", updated_at: 10 },
+    ];
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [plan], libraryDocs });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await screen.findByRole("region", { name: "Session" }, { timeout: 4000 });
+    fireEvent.click(await within(screen.getByTestId("sidebar-foot-row")).findByRole("button", { name: /^Library/ }));
+    const rail = await within(nav()).findByRole("navigation", { name: "Library" });
+    await waitFor(() => expect(within(rail).getByRole("button", { name: /^In review/ }).textContent).toContain("1"));
+    expect(within(rail).getByRole("button", { name: /^Approved/ }).textContent).toContain("1");
+    expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");     // the plan; no shared design is in the queue
+    expect([...rail.querySelectorAll("button")].slice(0, 3).map((row) => row.textContent?.replace(/^\W+/, "").trim())).toEqual(["Waiting on sam", "All signed", "Personal note"]);
+    // Choosing a stage opens the Library's results narrowed to it.
+    fireEvent.click(within(rail).getByRole("button", { name: /^In review/ }));
+    await waitFor(() => expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Stage" }).value).toBe("in-review"));
+    await waitFor(() => expect([...screen.getByTestId("docs").querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"))).toEqual(["a1"]));
+    sync.stop();
+  });
+
   it("project settings: opens from a repo's sidebar heading and from Settings' link, and a shell opened there starts in that repo", async () => {
     const OTHER = "/home/u/other";
     const daemon = new FakeDaemon({
