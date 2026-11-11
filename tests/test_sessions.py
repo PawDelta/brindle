@@ -799,6 +799,29 @@ def test_a_launch_that_fails_in_a_resume(db, root, monkeypatch, failing, error, 
     assert left == ({"w1"} if collected else None) and not _live_windows(failing)
 
 
+def test_a_sidebar_drawn_during_recovery_leaves_an_older_resumed_session_running(db, root, monkeypatch):
+    # The 15:06 restart: a sidebar listed the panes before an older session's
+    # chat window opened, with a newer session live, and marked the older one
+    # paused as a chat that had gone, after its resume had brought it back.
+    from brindle import view
+
+    _recorded_sessions(db, root, monkeypatch, [("older", "a")])
+    here = tmux.current_server()
+    db.add_agent(Agent("newer", "ws-a", "supervisor", "claude", None, "interactive", "idle", "%live", None,
+                       time.time() + 10, time.time(), "t", tmux_server=here))
+    panes = tmux.PaneSnapshot(here)     # listed before the older chat's window opened
+    panes["%live"] = True
+
+    def launch(db_, a, ws, **kw):
+        db_.set_status(a.id, "starting")    # as a launch does before its window opens
+        view.snapshot(db_, ws.repo_root, panes=panes)
+        db_.update_agent(a.id, tmux_window="%older", tmux_server=here)
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    assert lifecycle.resume_after_start() == ["older"]
+    assert db.get_agent("older").status == "starting"
+
+
 def test_a_second_resume_of_a_session_waits_and_never_launches_beside_the_first(db, root, monkeypatch):
     add(db, root, "boss")
     monkeypatch.setattr(agents, "RESUME_LOCK_WAIT", 0.01)

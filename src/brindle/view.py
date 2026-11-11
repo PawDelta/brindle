@@ -249,7 +249,13 @@ def _stopped_root(db: DB, a: Agent, alive: set[str], now: float,
     if any(m.id in alive for m in members[1:]):
         return False  # its workers still show, so it does too
     superseded = newest_live_root > a.created_at
-    if not superseded and now - max(a.status_since or 0, a.created_at) <= STOPPED_ROOT_LINGER:
+    recent = now - max(a.status_since or 0, a.created_at) <= STOPPED_ROOT_LINGER
+    # A superseded session leaves at once only once it is paused or done. One
+    # whose status says it runs may be launching: a launch (a resume's after a
+    # restart) records its status before its window opens, and ``alive`` was
+    # listed before that, so it isn't gone, and pausing it here would get its
+    # new chat stopped (cull) right after its resume reported it back.
+    if recent and not (superseded and a.status in ("paused", "done")):
         return False
     if a.status not in ("paused", "done"):
         # It ended without pausing its session (agents.ended runs from inside
