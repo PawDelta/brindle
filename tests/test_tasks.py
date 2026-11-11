@@ -366,8 +366,9 @@ def cross_session_wait(db, coordination, monkeypatch):
 
 
 def _land(db, branch="session"):
+    """b's PR from ``branch`` merged, at the commit b's branch had when queued."""
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, merged_at)"
-                    " VALUES ('b', ?, ?, 'x', 0, ?)", (branch, f"u-{branch}", tasks.time.time()))
+                    " VALUES ('b', ?, ?, 'cw-b', 0, ?)", (branch, f"u-{branch}", tasks.time.time()))
 
 
 @pytest.mark.parametrize("event", [
@@ -403,6 +404,7 @@ def test_cross_session_wait_requeues_on_new_work_after_release(db, cross_session
     w = cross_session_wait
     if event == "landed":
         _land(db)
+        w.refs["refs/heads/session"] = "cw-b-new"   # b edits the file again before the queue sees the landing
     else:
         w.refs["refs/heads/session"] = "cw-b-synced"
     w.room["why"] = "machine busy"   # released, but no room to start yet

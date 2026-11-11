@@ -570,21 +570,27 @@ def cross_wait_excused(db: DB, t: Task, clash: Clash, repo_root: str) -> bool:
     return not _overlap_files(_loads(t.files), [], list(since_landing))
 
 
-def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: float, now: float) -> str | None:
+def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: float,
+                     now: float) -> tuple[str, str] | None:
     """Why ``t``'s wait for another session's ``dep`` is over, or None:
     "expired" after CROSS_SESSION_WAIT_LIMIT, "landed" once that session's
     PR from the holding branch merged after the wait began, "synced" once
-    that branch no longer holds the task's files. A worker or task holder
-    ends its wait by merging, as any dependency does."""
+    that branch no longer holds the task's files. With it, for a landing,
+    the commit that landed (the PR's pushed head; "" when unknown, which
+    excuses nothing later). A worker or task holder ends its wait by
+    merging, as any dependency does."""
     if now - since >= CROSS_SESSION_WAIT_LIMIT:
-        return "expired"
+        return "expired", ""
     roots, branch = _holder_session(db, dep, caller_ws.repo_root)
     if not roots or not branch:
         return None
     marks = ",".join("?" * len(roots))
-    if db.conn.execute(f"SELECT 1 FROM session_prs WHERE root_id IN ({marks}) AND branch = ? AND merged_at >= ?",
-                       (*roots, branch, since)).fetchone():
-        return "landed"
+    landing = db.conn.execute(f"SELECT pushed_sha FROM session_prs WHERE root_id IN ({marks}) AND branch = ?"
+                              " AND merged_at >= ? ORDER BY merged_at DESC LIMIT 1",
+                              (*roots, branch, since)).fetchone()
+    if landing:
+        # Never the branch's head now: work committed after the landing is still unlanded.
+        return "landed", landing["pushed_sha"] or ""
     files = _loads(t.files)
     deps = _loads(t.depends_on)
     isolate = bool(t.isolate)
@@ -596,7 +602,7 @@ def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: flo
             continue
         if _overlap_files(files, [], list(changed)):
             return None
-        return "synced"
+        return "synced", ""
     return None   # only a branch actually read releases it: one git couldn't read keeps waiting
 
 
@@ -615,16 +621,14 @@ def _release_cross_waits(db: DB, t: Task, caller_ws: Workspace) -> Task:
     over = {d: why for d, since in waits.items() if (why := _cross_wait_over(db, t, caller_ws, d, since, now))}
     if not over or not set_dependencies(db, t.id, [d for d in deps if d not in over], deps):
         return db.get_task(t.id) or t
-    heads = {dep: _holder_head(caller_ws.repo_root, _holder_session(db, dep, caller_ws.repo_root)[1])
-             for dep, why in over.items() if why == "landed"}
     with db.tx() as c:
-        for dep, why in over.items():
+        for dep, (why, landed) in over.items():
             prefix = _released_prefix(dep)
             c.execute("DELETE FROM task_notes WHERE task_id=? AND substr(kind, 1, ?) = ?",
                       (t.id, len(prefix), prefix))
             c.execute("INSERT INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
-                      (t.id, f"{prefix}{why}\n{heads.get(dep, '')}", now))
-    expired = [d for d, why in over.items() if why == "expired"]
+                      (t.id, f"{prefix}{why}\n{landed}", now))
+    expired = [d for d, (why, _landed) in over.items() if why == "expired"]
     if expired and t.caller_id:
         from brindle import autopilot, gates
 
