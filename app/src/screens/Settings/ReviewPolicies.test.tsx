@@ -109,6 +109,21 @@ it("shows what saving would do only for the draft on the form, and holds saves a
   await waitFor(() => expect(lib.puts.at(-1)).toMatchObject({ version: 5 }));
 });
 
+it("removes a rule in its row after a confirmation that shows the list without it, saving the whole list at the version read", async () => {
+  const { lib, client } = library();
+  await open(client);
+  fireEvent.click(screen.getByRole("button", { name: "Remove Security review" }));
+  await waitFor(() => expect(lib.impacts).toHaveLength(1));
+  // The impact asked of the Library is the list without the removed rule.
+  expect(lib.impacts[0].names).toEqual(["Staff sign-off"]);
+  await act(async () => lib.impacts[0].reply(2));
+  expect(screen.getByTestId("review-policy-remove-applies").dataset.count).toBe("2");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm remove Security review" }));
+  await waitFor(() => expect(lib.puts).toHaveLength(1));
+  expect(lib.puts[0]).toMatchObject({ org_id: "org_1", version: 4, policies: [{ id: "staff" }] });
+  expect(lib.puts[0].policies).toHaveLength(1);
+});
+
 it("overlapping reloads keep the newest read, and a draft for the org just loaded survives the older one finishing", async () => {
   const reads: { answer(r: Response): void }[] = [];
   const puts: { org_id: string; version: number }[] = [];
