@@ -38,6 +38,7 @@ class Library:
         self.lose_answer, self.lose_create, self.list_status, self.plan = False, False, 200, None
         self.sign_offs, self.author, self.refuse_accept = [], "u_e", False
         self.answer_status, self.refuse_suggest = 200, False     # once committed, answer this; refuse before committing
+        self.refuse_vote = False
         remote.routes.update({
             **{f"POST {DESIGN}/threads/{n}": functools.partial(self.act, n) for n in range(1, 12)},
             f"POST {DESIGN}/comments": self.comment, f"POST {DESIGN}/suggestions": self.suggest,
@@ -94,6 +95,8 @@ class Library:
         return self.answer()
 
     def vote(self, form, headers):
+        if self.refuse_vote:
+            return 403, {"error": "policy_denied"}
         options = self.votes.setdefault(form["decision"], {})
         for subs in options.values():
             subs[:] = [s for s in subs if s != "user_1"]
@@ -370,6 +373,17 @@ def test_what_the_person_does_on_the_doc_reaches_the_library_once(db, parts, bac
     assert [t["author"] for t in got["threads"]] == ["person", "teammate:u_a", "teammate:u_b", "person", "person"]
     assert [r["author"] for r in got["threads"][1]["replies"]] == ["person"]
     assert got["decisions"][0]["votes"] == {"org": ["person"]}
+
+    # A comment goes through, then an org rule refuses the vote: the comment's older answer can't clear
+    # the refusal, which holds the gate shut until the Library next answers in full.
+    plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "One more.")
+    plan_docs.confirm(db, pid, 1, "d1", "repo")
+    lib.refuse_vote = True
+    sd.sync(db, pid, **net)
+    assert plans.to_dto(db, plans.get(db, pid))["gate"]["state"] == "waiting"
+    lib.refuse_vote = False
+    sd.sync(db, pid, **net)
+    assert plans.to_dto(db, plans.get(db, pid))["gate"]["state"] == "ready"
 
 
 def test_an_accept_the_library_refuses_holds_the_text_until_it_goes_through(db, parts, backend):

@@ -481,6 +481,7 @@ class _Head:
 
     def __init__(self, db: DB, p: dict, doc_id: str, view: dict, client, store):
         self.db, self.p, self.doc_id, self.view, self.client, self.store = db, p, doc_id, view, client, store
+        self.refused = False            # the Library's latest verdict on a write here was an org rule's refusal
 
     @property
     def rev(self) -> Any:
@@ -490,9 +491,10 @@ class _Head:
         status, resp = ad._call("POST", _path(self.doc_id, tail), {"rev": self.rev, **body},
                                 client=self.client, store=self.store)
         if status == 200:
-            self.view = resp
+            self.view, self.refused = resp, False
         else:
             review_policies.refused(self.db, self.p, resp)
+            self.refused = self.refused or resp.get("error") in review_policies.REFUSALS
         return status, resp
 
     def send(self, tail: str, body: dict) -> bool:
@@ -699,7 +701,7 @@ def _send(db: DB, p: dict, view: dict, client, store, now: float) -> bool:
             local_rev = link(db, p["id"])["local_rev"]
             with db.tx() as c:
                 _pull_votes(c, p["id"], share_["owner"], local_rev, head.view.get("decisions") or [], now)
-        if head.view is not view:
+        if head.view is not view and not head.refused:      # an answer older than a refusal can't clear it
             _remember(db, p["id"], head.view)
         return pushed
     finally:
