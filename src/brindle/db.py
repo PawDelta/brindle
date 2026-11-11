@@ -709,6 +709,15 @@ CREATE TABLE IF NOT EXISTS session_sync (
     updated_at REAL NOT NULL,
     PRIMARY KEY (repo_root, branch)
 );
+-- One automatic resolution attempt per conflicting origin commit, retained
+-- after failure so repeated syncs do not start another worker.
+CREATE TABLE IF NOT EXISTS session_sync_resolvers (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    upstream_sha TEXT NOT NULL,
+    task_id TEXT,
+    PRIMARY KEY (repo_root, branch, upstream_sha)
+);
 -- Unlanded session work, independent of whether origin has been merged in.
 CREATE TABLE IF NOT EXISTS session_drift (
     repo_root TEXT NOT NULL,

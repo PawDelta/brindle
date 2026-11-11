@@ -16,7 +16,8 @@ A clean merge is reported to the supervisor, and the checks run on the files
 it brought in (a detached helper, ``brindle _session-sync-checks``). A
 checkout with uncommitted changes is left alone and the supervisor told. A
 conflicting merge is aborted, leaving the checkout as it was: the files go to the
-supervisor and the person's inbox, and merges into the session branch are
+supervisor and a queued resolver task. The person's inbox is involved only
+if resolution cannot proceed. Merges into the session branch are
 refused (``merge_block``) until the branch contains that origin commit, but
 for a branch that already does (a worker resolving the conflict).
 
@@ -384,10 +385,11 @@ def _sync_locked(db: DB, ws: Workspace, default: str, *, idle: bool = False) -> 
         _new, files = git.merge_local_base(ws.path, d.ref, no_ff=True)
     if files:
         text = (f"origin/{default} has {d.behind} commit(s) {ws.branch} lacks, and merging it conflicts in: "
-                f"{', '.join(files)}. Merges into {ws.branch} are refused until it is synced: have a worker "
-                f"merge origin/{default} into its branch and resolve them (a branch that contains "
+                f"{', '.join(files)}. Brindle will try to queue a resolver for when the session is quiet. "
+                f"Merges into {ws.branch} are refused until it is synced (a branch that contains "
                 f"{d.sha[:8]} still merges), or resolve it in {ws.path}.")
         _record(db, ws, d.sha, "conflict", files, tell=text)
+        _queue_resolver(db, ws, d, files)
         bus.publish_ws(db, "conflict", ws, files=files, source="session_sync", branch=ws.branch)
         return Outcome("conflict", text, before, files=files)
     new = git.out(["rev-parse", "HEAD"], ws.path)
@@ -450,6 +452,79 @@ def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
 # -- what it blocks ----------------------------------------------------------------
 
 
+def _queue_resolver(db: DB, ws: Workspace, d: Drift, files: list[str]) -> None:
+    """Queue one normal, isolated task; retain failed attempts across syncs.
+
+    Called under the session base lock. A supervisor's explicit merge task
+    takes precedence over an automatic one for the same conflict.
+    """
+    from brindle import autopilot, tasks
+
+    key = (ws.repo_root, ws.branch, d.sha)
+    if db.conn.execute("SELECT 1 FROM session_sync_resolvers WHERE repo_root=? AND branch=?"
+                       " AND upstream_sha=?", key).fetchone():
+        return
+    roots = _supervisors(db, ws)
+    if not roots:
+        return
+    owners = {a.id for a in roots}
+    previous = {r["task_id"] for r in db.conn.execute(
+        "SELECT task_id FROM session_sync_resolvers WHERE repo_root=? AND branch=?",
+        (ws.repo_root, ws.branch))}
+    existing = next((t for t in reversed(db.list_tasks(ws.repo_root))
+                     if t.caller_id in owners and t.caller_ws_id == ws.id
+                     and t.id not in previous
+                     and d.ref.lower() in t.task_text.lower()
+                     and "merg" in t.task_text.lower()
+                     and "resolv" in t.task_text.lower()
+                     and (d.sha in t.task_text or all(f in t.task_text for f in files)
+                          or set(files).issubset(json.loads(t.files or "[]")))), None)
+    task_id = existing.id if existing else None
+    # Record even a refused attempt: it needs the person, not another sweep.
+    db.conn.execute("INSERT INTO session_sync_resolvers (repo_root, branch, upstream_sha, task_id)"
+                    " VALUES (?, ?, ?, ?)", (*key, task_id))
+    if existing:
+        return
+    brief = f"merge {d.ref} into the session branch and resolve the conflict in {', '.join(files)}"
+    try:
+        profile, _ = autopilot.choose_profile(db, roots[-1].id, ws.repo_root, task=brief, files=files)
+        task = tasks.enqueue(db, roots[-1], ws, profile, f"{brief}\n\nConflicting origin commit: {d.sha}.",
+                             "assign", isolate=True, branch=None, done_when=None, files=files,
+                             depends_on=None, plan_first=False, unanswered=True)
+    except (agents.AgentError, autopilot.AutopilotError) as e:
+        log.warning("brindle: couldn't queue sync resolver for %s: %s", ws.branch, e)
+        return
+    db.conn.execute("UPDATE session_sync_resolvers SET task_id=? WHERE repo_root=? AND branch=?"
+                    " AND upstream_sha=?", (task.id, *key))
+    # Publish its quietness constraint before any sweep may dispatch it.
+    tasks.answered(db, [task.id], start=set())
+
+
+def resolver_wait(db: DB, task_id: str) -> bool:
+    """A sync resolver must wait for the same quiet session as idle sync."""
+    row = db.conn.execute("SELECT 1 FROM session_sync_resolvers WHERE task_id=?", (task_id,)).fetchone()
+    if not row:
+        return False
+    task = db.get_task(task_id)
+    ws = db.get_workspace(task.caller_ws_id) if task else None
+    return ws is None or not _quiet(db, ws)
+
+
+def _resolving(db: DB, ws: Workspace, sha: str) -> bool:
+    row = db.conn.execute("SELECT task_id FROM session_sync_resolvers WHERE repo_root=? AND branch=?"
+                          " AND upstream_sha=?", (ws.repo_root, ws.branch, sha)).fetchone()
+    task = db.get_task(row["task_id"]) if row and row["task_id"] else None
+    if task is None or task.state in ("cancelled", "failed", "merged"):
+        return False
+    if task.agent_id:
+        worker = db.get_agent(task.agent_id)
+        if worker is None or worker.status == "failed" or worker.merge_failed:
+            return False
+        if worker.status == "done" and not worker.result and not worker.pipeline:
+            return False
+    return True
+
+
 def conflict(db: DB, repo_root: str, branch: str) -> tuple[str, list[str]] | None:
     """(origin commit, files) while ``branch``'s last sync conflicted and it
     still lacks that commit; a branch that has since got it is synced."""
@@ -482,6 +557,8 @@ def merge_block(db: DB, ws: Workspace) -> str | None:
 def needs_you(db: DB, ws: Workspace) -> str | None:
     """The session checkout ``ws``'s unresolved sync conflict, for the inbox."""
     if not ws.branch or (got := conflict(db, ws.repo_root, ws.branch)) is None:
+        return None
+    if _resolving(db, ws, got[0]):
         return None
     return (f"{ws.branch} conflicts with origin/{default_branch(ws.repo_root)} in: {', '.join(got[1]) or '?'}; "
             "merges into it are blocked until it's synced")
