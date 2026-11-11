@@ -2006,6 +2006,8 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     except (git.GitError, workspaces.WorkspaceError) as e:
         return _settled(db, ws) or f"Not merged: {e}"
     if sync_result.status == "conflict":
+        bus.publish_ws(db, "conflict", ws, files=sync_result.conflicts or [], source="pipeline",
+                       branch=ws.branch, base_branch=ws.base_branch)
         if conflicts_out is not None:
             conflicts_out.extend(sync_result.conflicts or [])
         files = ", ".join(sync_result.conflicts) or "?"

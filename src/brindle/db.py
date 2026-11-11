@@ -644,6 +644,17 @@ CREATE TABLE IF NOT EXISTS session_prs (
     merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
     PRIMARY KEY (root_id, branch)
 );
+-- The session PRs that merged before the branch's next PR replaced them in
+-- session_prs (session_review.keep_merged_pr): a branch can have several.
+CREATE TABLE IF NOT EXISTS session_pr_history (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    url TEXT NOT NULL,
+    pushed_sha TEXT,
+    opened_at REAL NOT NULL,
+    merged_at REAL NOT NULL,
+    PRIMARY KEY (root_id, branch, url)
+);
 -- A session PR adopted from one opened with gh on another branch name: where it really lives,
 -- so a Push of the session branch is refused instead of missing it.
 CREATE TABLE IF NOT EXISTS session_pr_heads (
@@ -688,6 +699,15 @@ CREATE TABLE IF NOT EXISTS session_sync (
     files TEXT,
     told_sha TEXT,
     updated_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, branch)
+);
+-- Unlanded session work, independent of whether origin has been merged in.
+CREATE TABLE IF NOT EXISTS session_drift (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    oldest_at REAL,
+    file_count INTEGER NOT NULL,
+    drifting INTEGER NOT NULL,
     PRIMARY KEY (repo_root, branch)
 );
 -- The supervisors told that a repo no longer refreshes on its own: origin wants

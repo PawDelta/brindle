@@ -764,6 +764,13 @@ describe("GoalPanel", () => {
     expect(goalPhase(older, { ...UNKNOWN, ...readiness }).phase).toBe(phase);
   });
 
+  /* The session's PR merged and its branch moved on: the engine's phase has no PR, so the merged one a readiness
+     read still carries is not the session's PR any more (its next is to be opened). */
+  it("gives no PR to the phase after a merged PR, when the session's next one is to be opened", () => {
+    const merged = { state: "ready" as const, pr: { url: PR, unpushed: 1 } };
+    expect(goalPhase({ ...structuredClone(goal), goal_phase: "ready_for_pr", pr_url: null }, merged)).toEqual({ phase: "ready_for_pr", prUrl: null });
+  });
+
   it("never shows 'failed' for an older engine's failed goal", async () => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), goal_phase: undefined, state: "failed" } });
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} />);

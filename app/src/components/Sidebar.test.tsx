@@ -138,16 +138,19 @@ describe("Sidebar", () => {
     }
   });
 
-  it("pr line: a paused session keeps it, and clicking it doesn't open the session", async () => {
+  it("drift_flag: a paused session shows drift on its PR and keeps the link", async () => {
     const openUrl = vi.fn(async () => undefined);
     const url = "https://github.com/o/r/pull/390";
-    const { sync, navigate } = mount({ workspaces: [root, worker], sessions: [paused], goal: { ...goal, root_id: "sup0", goal_phase: "pr_open", pr_url: url, pr_state: { number: 390, state: "ready", done: 2, total: 2 } } }, undefined, undefined, openUrl);
+    const { daemon, sync, navigate } = mount({ workspaces: [root, worker], sessions: [paused], goal: { ...goal, root_id: "sup0", drifting: true, goal_phase: "pr_open", pr_url: url, pr_state: { number: 390, state: "ready", done: 2, total: 2 } } }, undefined, undefined, openUrl);
     onTestFinished(() => sync.stop());
     const line = await screen.findByTestId("session-pr");
-    expect(line.textContent).toBe("PR #390 · Ready to merge");
+    expect(line.querySelector('[data-state="drifting"]')).toBeTruthy();
     fireEvent.click(line);
     expect(openUrl).toHaveBeenCalledWith(url);
     expect(navigate).not.toHaveBeenCalled();
+    daemon.data.goal!.drifting = false;
+    daemon.publish("session.pr_drift", { root_id: "sup0", payload: { drifting: false } });
+    await waitFor(() => expect(line.querySelector('[data-state="drifting"]')).toBeNull());
   });
 
   it.each([
