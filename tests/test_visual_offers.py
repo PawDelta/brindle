@@ -631,6 +631,7 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     _stress("cancel then grant", ["Make a visual", "actually never mind"], None, False),
     _stress("cancel with a reason, grant", ["Make a visual", "Never mind, I found the answer."], None, False),
     _stress("cancel with unicode punctuation, grant", ["Make a visual", "Never mind…"], None, False),
+    _stress("ask and cancel in one message, grant", ["Make a visual. Don't make a visual."], None, False),
     # Capability, races, restarts.
     _stress("capability off", [lambda db, boss, worker: config.set_user("visuals_enabled", "off"), FIRST], FIRST, False),
     _stress("one quote, eight publishers", [FIRST, _publishers_race], FIRST, False),

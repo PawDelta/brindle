@@ -304,7 +304,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
                       "WHERE root_id=? AND words=? AND staged=1)", (root.id, _words(text)))
         # Tie the words to what this message raises, so one spends the other.
-        if not fold_only and scope:
+        # A cancel in the same message wins over the request it calls off.
+        if not fold_only and scope and not cancelled:
             _grant(c, root.id, scope)
             _link(c, root.id, text, "grant")
     bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
