@@ -25,6 +25,7 @@ import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../ap
 import { LoadingButton } from "../../../components/LoadingButton";
 import { PaperclipIcon } from "../../../components/icons";
 import { button, field, label, main, pill, quiet } from "../../../components/ui";
+import { CloudLoginStatus, useCloudLogin } from "../../Inbox/CloudSignIn";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
 import type { PlanDocClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
@@ -224,6 +225,17 @@ const show = (el: Element | null | undefined, block: ScrollLogicalPosition = "st
 /* What a highlight offers, where it was made: a range of a section's text, or a diagram. */
 type Picked = { x: number; y: number } & ({ kind: "text"; section: string; start: number; quote: string } | { kind: "diagram"; section: string });
 
+/* brindle's own sign-in, for a plan the Library can't confirm until it is renewed. */
+function LibrarySignIn() {
+  const login = useCloudLogin();
+  return (
+    <span className="grid justify-items-start gap-1">
+      <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={login.busy} onClick={login.start}>Sign in</button>
+      <CloudLoginStatus job={login.job} compact />
+    </span>
+  );
+}
+
 /* Someone reviewing a design another person shared: what the Library lets them do, and who wrote it.
    No plan here, so nothing to approve or build. */
 export interface Teammate {
@@ -386,7 +398,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
     } catch (e) {
       writes.end(null);
       refused?.(e);
-      if (alive.current) setError(e instanceof DaemonError && e.status === 409 && e.code !== "gate_closed" && e.code !== "review_closed" ? "This design changed since you opened it (a new revision, or it was already decided). It is being read again."
+      if (alive.current) setError(e instanceof DaemonError && e.code === "gate_unverified" ? message(e) : e instanceof DaemonError && e.status === 409 && e.code !== "gate_closed" && e.code !== "review_closed" ? "This design changed since you opened it (a new revision, or it was already decided). It is being read again."
         : e instanceof DaemonError && e.status === 403 ? `The Library refused this for your account: ${message(e)}` : `Couldn't send: ${message(e)}`);
       return null;
     } finally {
@@ -516,6 +528,13 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
       setPicks({});
     }
   };
+  /* The plan becomes a personal doc, then the person's sign-off starts the build. */
+  const stopSharing = async () => {
+    setSending("approve");
+    const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
+    if (now) await decide(true);
+    else if (alive.current) setSending(null);
+  };
   const confirm = async () => {
     const option = next && chosen(next);
     if (!next || !option) return;
@@ -614,6 +633,27 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
                   <>
                     <dt className="text-ink-3">Sharing</dt>
                     <dd className="m-0" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</dd>
+                  </>
+                )}
+                {open && gate?.unconfirmed && (
+                  <>
+                    <dt className="text-ink-3">Library</dt>
+                    <dd className="m-0 grid gap-1" data-testid="plan-unconfirmed" data-reason={gate.unconfirmed.reason} data-held={gate.unconfirmed.approval_held || undefined}>
+                      <span>{gate.unconfirmed.message}</span>
+                      {gate.unconfirmed.approval_held && <span>Your approval is saved. The build starts by itself once the Library confirms this revision is ready.</span>}
+                      {(gate.unconfirmed.reason === "sign_in" || gate.unconfirmed.reason === "other_account") && <LibrarySignIn />}
+                      {gate.unconfirmed.can_stop_sharing && !next && sharing?.stopSharingPlan && (
+                        <span>
+                          <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this doc the next time brindle reaches the Library" onClick={() => void stopSharing()}>Stop sharing and build</button>
+                        </span>
+                      )}
+                    </dd>
+                  </>
+                )}
+                {open && gate?.approval_refused && (
+                  <>
+                    <dt className="text-ink-3">Approval</dt>
+                    <dd className="m-0" data-testid="plan-approval-refused">{gate.approval_refused}</dd>
                   </>
                 )}
                 <dt className="text-ink-3">{teammate ? "Author" : "Authors"}</dt>
@@ -746,7 +786,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
             ))}
           </div>
         )}
-        {error && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
+        {error && error !== gate?.unconfirmed?.message && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
       </footer>
     </>
   );

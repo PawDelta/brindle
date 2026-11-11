@@ -1843,6 +1843,11 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sync`, {});
   }
 
+  /* Make a plan the Library can't confirm a personal doc. The engine says when it may be offered. */
+  stopSharingPlan(id: string, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/stop-sharing`, { rev });
+  }
+
   /* The person's own sign-off, as one of the plan's reviewers, on the revision on screen. */
   signOffPlan(id: string, rev: number) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sign-off`, { rev });

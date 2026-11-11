@@ -5853,8 +5853,20 @@
           "type": "object"
         },
         "PlanGateDTO": {
-          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.",
+          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
           "properties": {
+            "approval_refused": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Approval Refused"
+            },
             "policies": {
               "default": [],
               "items": {
@@ -5901,6 +5913,17 @@
               ],
               "title": "State",
               "type": "string"
+            },
+            "unconfirmed": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanUnconfirmedDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "waiting_on": {
               "default": [],
@@ -6599,6 +6622,42 @@
             "at"
           ],
           "title": "PlanThreadDTO",
+          "type": "object"
+        },
+        "PlanUnconfirmedDTO": {
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "properties": {
+            "approval_held": {
+              "default": false,
+              "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_stop_sharing": {
+              "default": false,
+              "title": "Can Stop Sharing",
+              "type": "boolean"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "offline",
+                "sign_in",
+                "key_unavailable",
+                "library_error",
+                "other_account"
+              ],
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "message"
+          ],
+          "title": "PlanUnconfirmedDTO",
           "type": "object"
         },
         "PlanVerdictDTO": {
@@ -7413,10 +7472,58 @@
           ],
           "title": "PlanPolicyWaiverDTO",
           "type": "object"
+        },
+        "PlanUnconfirmedDTO": {
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "properties": {
+            "approval_held": {
+              "default": false,
+              "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_stop_sharing": {
+              "default": false,
+              "title": "Can Stop Sharing",
+              "type": "boolean"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "offline",
+                "sign_in",
+                "key_unavailable",
+                "library_error",
+                "other_account"
+              ],
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "message"
+          ],
+          "title": "PlanUnconfirmedDTO",
+          "type": "object"
         }
       },
-      "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.",
+      "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
       "properties": {
+        "approval_refused": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approval Refused"
+        },
         "policies": {
           "default": [],
           "items": {
@@ -7463,6 +7570,17 @@
           ],
           "title": "State",
           "type": "string"
+        },
+        "unconfirmed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanUnconfirmedDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "waiting_on": {
           "default": [],
@@ -8866,6 +8984,42 @@
         "at"
       ],
       "title": "PlanThreadDTO",
+      "type": "object"
+    },
+    "PlanUnconfirmedDTO": {
+      "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+      "properties": {
+        "approval_held": {
+          "default": false,
+          "title": "Approval Held",
+          "type": "boolean"
+        },
+        "can_stop_sharing": {
+          "default": false,
+          "title": "Can Stop Sharing",
+          "type": "boolean"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "offline",
+            "sign_in",
+            "key_unavailable",
+            "library_error",
+            "other_account"
+          ],
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "message"
+      ],
+      "title": "PlanUnconfirmedDTO",
       "type": "object"
     },
     "PlanVerdictDTO": {
@@ -10957,8 +11111,20 @@
           "type": "object"
         },
         "PlanGateDTO": {
-          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.",
+          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
           "properties": {
+            "approval_refused": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Approval Refused"
+            },
             "policies": {
               "default": [],
               "items": {
@@ -11005,6 +11171,17 @@
               ],
               "title": "State",
               "type": "string"
+            },
+            "unconfirmed": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanUnconfirmedDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "waiting_on": {
               "default": [],
@@ -11703,6 +11880,42 @@
             "at"
           ],
           "title": "PlanThreadDTO",
+          "type": "object"
+        },
+        "PlanUnconfirmedDTO": {
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "properties": {
+            "approval_held": {
+              "default": false,
+              "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_stop_sharing": {
+              "default": false,
+              "title": "Can Stop Sharing",
+              "type": "boolean"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "offline",
+                "sign_in",
+                "key_unavailable",
+                "library_error",
+                "other_account"
+              ],
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "message"
+          ],
+          "title": "PlanUnconfirmedDTO",
           "type": "object"
         },
         "PlanVerdictDTO": {
@@ -13160,6 +13373,10 @@
     {
       "method": "POST",
       "path": "/v1/plans/{id}/sign-off"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/stop-sharing"
     },
     {
       "method": "POST",

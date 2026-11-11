@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import { DaemonError, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
+import { DaemonError, type DaemonClient, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
+import { DaemonContext } from "../../../api/context";
 import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
 import { changeBetween } from "./DocText";
@@ -336,6 +337,25 @@ it("a design doc whose Team plan ended says so, once, and only then", async () =
   shared.unmount();
   open(doc(1, "Workers run on your machine.", { team_ended: true }));
   expect(await screen.findAllByTestId("plan-team-ended")).toHaveLength(1);
+});
+
+it("a doc the Library can't confirm says why in plain words, with Sign in, and Stop sharing goes on to build", async () => {
+  const said = "The engine's plain words for why.";
+  const plan = doc(1, "Workers run on your machine.", { gate: { state: "ready", reason: null, required: 0, signed: 0, waiting_on: [], reviewers: [],
+    unconfirmed: { reason: "sign_in", message: said, approval_held: true, can_stop_sharing: true } } });
+  const calls: string[] = [];
+  const client = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async (_id: string, verdict: { approved: boolean }) => { calls.push(`decide ${verdict.approved}`); return plan; },
+    sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, signOffPlan: async () => plan, overridePlanPolicy: async () => plan, docScopes: async () => ({ scopes: [] }), libraryPeople: async () => ({ people: [] }),
+    stopSharingPlan: async () => { calls.push("stop"); return plan; } };
+  const daemon = { accountLogin: async () => { calls.push("login"); return { job: "j1" }; } } as unknown as DaemonClient;
+  render(<DaemonContext.Provider value={daemon}><StoreContext.Provider value={createAppStore()}><PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} /></StoreContext.Provider></DaemonContext.Provider>);
+  const why = await screen.findByTestId("plan-unconfirmed");
+  expect(why.dataset.reason).toBe("sign_in");
+  expect(why.dataset.held).toBe("true");
+  expect(why.textContent).toContain(said);
+  await act(async () => fireEvent.click(within(why).getByRole("button", { name: "Sign in" })));
+  await act(async () => fireEvent.click(within(why).getByRole("button", { name: "Stop sharing and build" })));
+  expect(calls).toEqual(["login", "stop", "decide true"]);
 });
 
 /* A design doc held by one org rule, "security", and a fake Library whose answers carry what was written. */

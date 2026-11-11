@@ -497,10 +497,22 @@ class PlanGatePolicyDTO(_DTO):
     set_at: float | None = None
 
 
+class PlanUnconfirmedDTO(_DTO):
+    """Why the Library couldn't confirm a shared plan's review when the person
+    tried to approve it. ``approval_held``: their Approve applies by itself
+    once it can; ``can_stop_sharing``: they may make it a personal doc instead."""
+
+    reason: Literal["offline", "sign_in", "key_unavailable", "library_error", "other_account"]
+    message: str
+    approval_held: bool = False
+    can_stop_sharing: bool = False
+
+
 class PlanGateDTO(_DTO):
     """A shared plan's build gate (brindle.plans.gate). ``reason``: why it
     can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
-    every org review rule covering it, including those a listed reviewer meets."""
+    every org review rule covering it, including those a listed reviewer meets.
+    ``approval_refused``: why an Approve held for the Library wasn't applied."""
 
     state: Literal["waiting", "changes_requested", "conflict", "ready", "closed"]
     reason: str | None = None
@@ -509,6 +521,8 @@ class PlanGateDTO(_DTO):
     waiting_on: list[str] = []
     reviewers: list[PlanGateRowDTO] = []
     policies: list[PlanGatePolicyDTO] = []
+    unconfirmed: PlanUnconfirmedDTO | None = None
+    approval_refused: str | None = None
 
 
 class PlanDTO(_DTO):

@@ -67,6 +67,17 @@ _RULE_STATUS = {"met": SIGNED, "waived": WAIVED}   # the Library's policy_review
 CONFLICT = "conflict"       # the plan and the Library's copy both changed since they last matched
 # The gate's states that keep a build from starting.
 GATE_SHUT = (WAITING, CHANGES, CONFLICT)
+# Why the Library couldn't confirm a shared plan's review (plan_shares.unconfirmed), in the person's words.
+OFFLINE, SIGN_IN, KEY_UNAVAILABLE, LIBRARY_ERROR, OTHER_ACCOUNT = (
+    "offline", "sign_in", "key_unavailable", "library_error", "other_account")
+UNCONFIRMED = {
+    OFFLINE: "brindle can't reach the Library right now, so it can't confirm this plan's review.",
+    SIGN_IN: "Your brindle sign-in has expired, so the Library can't confirm this plan's review.",
+    KEY_UNAVAILABLE: "Your organization's encryption key isn't available, so the Library can't confirm this "
+                     "plan's review. Contact your admin.",
+    LIBRARY_ERROR: "The Library ran into a problem and couldn't confirm this plan's review.",
+    OTHER_ACCOUNT: "This plan was shared from another brindle account. Sign in to that account to confirm its review.",
+}
 # The offer to plan a goal first (goal_doc_requests.offer): plan:open:<id>
 # until answered, then plan:accepted (waiting for the plan), plan:planned (a
 # plan was proposed) or plan:dismissed. Open and accepted hold the session's
@@ -267,6 +278,13 @@ def _review_rows(review: dict) -> tuple[dict[str, bool], list[dict]] | None:
     return out, rules
 
 
+def demands_review(review: dict) -> bool:
+    """Whether a review state has required reviewers or org rules, or can't be
+    read well enough to say it doesn't."""
+    read = _review_rows(review)
+    return read is None or any(read[0].values()) or bool(read[1])
+
+
 def _signed(review: dict) -> dict[str, float]:
     """Who signed the Library's head revision, and when: sign-offs on older ones don't count."""
     rows = review.get("sign_offs")
@@ -375,8 +393,16 @@ def _gate(c, p: dict) -> dict | None:
         state, reason = WAITING, f"Waiting on {', '.join(unmet)} ({met} of {len(required)} required sign-offs)."
     else:
         state, reason = "ready", None
+    is_open = p["state"] == "open"
+    unconfirmed = None
+    if is_open and row["unconfirmed"] is not None:
+        unconfirmed = {"reason": row["unconfirmed"],
+                       "message": UNCONFIRMED.get(row["unconfirmed"], UNCONFIRMED[LIBRARY_ERROR]),
+                       "approval_held": row["approve_wanted"] is not None,
+                       "can_stop_sharing": shared_docs.may_stop(row, shared_docs.account())}
     return {"state": state, "reason": reason, "required": len(required), "signed": met, "waiting_on": unmet,
-            "reviewers": rows, "policies": policies}
+            "reviewers": rows, "policies": policies, "unconfirmed": unconfirmed,
+            "approval_refused": row["approve_refused"] if is_open else None}
 
 
 def gate(db: DB, p: dict) -> dict | None:
@@ -692,26 +718,88 @@ def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: s
     return "\n".join(lines)
 
 
-def _check_with_library(db: DB, p: dict) -> None:
+def _check_with_library(db: DB, p: dict) -> str | None:
     """Before an approval of a shared plan: bring the Library's review state
-    up to date. If it can't be asked the approval is refused, even with no
-    required reviewers on record: the last answer can't say nobody was added
-    since. A share whose Team plan has ended comes here too: only a lapse the
-    server confirms now lets it through, not the one on record."""
+    up to date. Returns why it couldn't be asked (a key of UNCONFIRMED), and
+    the approval is then refused even with no required reviewers on record:
+    the last answer can't say nobody was added since. A share whose Team plan
+    has ended comes here too: only a lapse the server confirms now lets it
+    through, not the one on record."""
     if db.conn.execute("SELECT 1 FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone() is None:
-        return
+        return None
     from brindle.pro import shared_docs
 
     try:
         shared_docs.sync(db, p["id"])
     except Exception as e:  # noqa: BLE001 - whatever stopped it, the review state is unconfirmed
         log.info("brindle: couldn't sync plan %s before its approval", p["id"], exc_info=True)
-        raise ServiceError("gate_unverified", "couldn't confirm the review with the Library: "
-                           f"{redact.mask(str(e))}", 503) from e
+        return shared_docs.why_unconfirmed(db, p["id"], e)
+    return None
+
+
+def _hold_approval(db: DB, p: dict, why: str, was_ready: bool, wanted: dict) -> bool:
+    """Record why an approval couldn't be confirmed and, when the confirmation
+    is all that failed, the approval itself: the gate read ready when the
+    person pressed, nothing but the outage stands in the way, and it is the
+    account that shared the plan. Returns whether the approval is held."""
+    from brindle import plan_docs
+    from brindle.pro import review_policies
+
+    with db.tx() as c:
+        row = c.execute("SELECT review, access_refused FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+        if row is None:
+            return False
+        refusal = json.loads(row["review"]).get(review_policies.REFUSED)
+        held = (was_ready and why != OTHER_ACCOUNT and row["access_refused"] is None
+                and (not refusal or refusal.get("code") == "key_unavailable"))
+        c.execute("UPDATE plan_shares SET unconfirmed=?, approve_refused=NULL,"
+                  " approve_wanted=COALESCE(?, approve_wanted) WHERE plan_id=?",
+                  (why, json.dumps(wanted) if held else None, p["id"]))
+    plan_docs._changed(db, p, p["rev"])
+    return held
+
+
+def _drop_held_approval(db: DB, p: dict, why: str) -> None:
+    from brindle import plan_docs
+
+    with db.tx() as c:
+        c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=? WHERE plan_id=?", (why, p["id"]))
+    plan_docs._changed(db, p, p["rev"])
+
+
+def settle_held_approval(db: DB, plan_id: str) -> None:
+    """After a sync the Library answered: apply the Approve it couldn't confirm
+    earlier if the gate reads ready for that same revision. If it doesn't, the
+    person is told and nothing is approved. While the Team plan's end stands
+    there is no gate to read, and the approval keeps waiting."""
+    row = db.conn.execute("SELECT approve_wanted FROM plan_shares WHERE plan_id=?", (plan_id,)).fetchone()
+    if row is None or row["approve_wanted"] is None:
+        return
+    wanted = json.loads(row["approve_wanted"])
+    p = get(db, plan_id)
+    try:
+        visuals.require_enabled()
+        visuals._unlocked(p["root_id"])
+    except ServiceError:        # nothing is decided here for now: a later pass looks again
+        return
+    found = gate(db, p)
+    if found is None:
+        return
+    if wanted["rev"] != p["rev"]:
+        _drop_held_approval(db, p, f"Your approval of r{wanted['rev']} wasn't applied: the plan has changed since "
+                                   "you approved it. Read the new revision and approve again.")
+    elif found["state"] != "ready":
+        _drop_held_approval(db, p, f"Your approval wasn't applied: {found['reason']}")
+    else:
+        try:
+            decide(db, plan_id, wanted["rev"], True, wanted["picks"], wanted["comments"], wanted["note"],
+                   person=True, attachments=wanted["attachments"], confirmed=True)
+        except ServiceError as e:
+            _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}")
 
 
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
-           note: Any = None, *, person: bool, attachments: Any = None) -> dict:
+           note: Any = None, *, person: bool, attachments: Any = None, confirmed: bool = False) -> dict:
     """The person's verdict on the revision on their screen (``rev``):
     approve, or redirect with their picks and per-section comments. Only the
     person (the app, through the daemon's guarded route) decides: anyone
@@ -730,7 +818,13 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     The verdict starts from the decisions the person confirmed on the doc
     (``picks`` given here win), and carries what they wrote on it that the
     supervisor hasn't had (brindle.plan_docs.pending) and the files
-    ``attachments`` put on their note."""
+    ``attachments`` put on their note.
+
+    If the Library can't confirm the review the approval is refused
+    (``gate_unverified``, with a typed ``reason``), and held for
+    :func:`settle_held_approval`, whose call passes ``confirmed``: it has just
+    heard from the Library, and the gate is still read in the verdict's own
+    transaction."""
     from brindle import agents, plan_docs, tasks
 
     visuals.require_enabled()
@@ -744,8 +838,11 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
-    if approved:
-        _check_with_library(db, p)
+    unconfirmed, was_ready = None, False
+    if approved and not confirmed:
+        before = gate(db, p)            # what the person pressed Approve on, before asking can change it
+        was_ready = before is not None and before["state"] == "ready"
+        unconfirmed = _check_with_library(db, p)
     titles = anchors(p)
     picks = {**plan_docs.confirmed(db, p), **_picks(picks, p["decisions"])}
     comments = _comments(comments, set(titles))
@@ -756,6 +853,10 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("invalid", "say what to change: a comment, a note or a different pick", 400)
     visuals._refuse_secrets([("your note", note), *((f"your comment on {titles[c['section']]}", c["text"])
                                                     for c in comments)])
+    if unconfirmed is not None:
+        held = _hold_approval(db, p, unconfirmed, was_ready, {"rev": rev, "picks": picks, "comments": comments,
+                                                              "note": note, "attachments": attachments})
+        raise ServiceError("gate_unverified", UNCONFIRMED[unconfirmed], 503, reason=unconfirmed, approval_held=held)
     files = plan_docs._attachments(db, p, attachments)
     at = time.time()
     verdict = {"approved": bool(approved), "picks": picks, "comments": comments, "note": note, "at": at, "rev": rev,
@@ -774,6 +875,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
                             (state, record, at, p["id"], rev)).rowcount == 1
         if claimed:
             plan_docs.mark_sent(c, threads, rev)
+            c.execute("UPDATE plan_shares SET unconfirmed=NULL, approve_wanted=NULL, approve_refused=NULL"
+                      " WHERE plan_id=?", (p["id"],))
             c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) WHERE id=?", (answer, p["id"]))
             if not approved:
                 visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for

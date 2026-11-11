@@ -68,6 +68,7 @@ export interface ApiSchema {
   PlanRevisionDetailDTO: PlanRevisionDetailDTO;
   PlanSectionDTO: PlanSectionDTO;
   PlanThreadDTO: PlanThreadDTO;
+  PlanUnconfirmedDTO: PlanUnconfirmedDTO;
   PlanVerdictDTO: PlanVerdictDTO;
   PlanWorkerDTO: PlanWorkerDTO;
   PrStateDTO: PrStateDTO;
@@ -927,17 +928,20 @@ export interface PlanOptionDTO {
  * A shared plan's build gate (brindle.plans.gate). ``reason``: why it
  * can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
  * every org review rule covering it, including those a listed reviewer meets.
+ * ``approval_refused``: why an Approve held for the Library wasn't applied.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanGateDTO".
  */
 export interface PlanGateDTO {
+  approval_refused?: string | null;
   policies?: PlanGatePolicyDTO[];
   reason?: string | null;
   required: number;
   reviewers?: PlanGateRowDTO[];
   signed: number;
   state: "waiting" | "changes_requested" | "conflict" | "ready" | "closed";
+  unconfirmed?: PlanUnconfirmedDTO | null;
   waiting_on?: string[];
 }
 /**
@@ -1024,6 +1028,20 @@ export interface PlanGateRowDTO {
   status: "signed_off" | "changes_requested" | "waiting" | "waived";
   sub?: string | null;
   you?: boolean;
+}
+/**
+ * Why the Library couldn't confirm a shared plan's review when the person
+ * tried to approve it. ``approval_held``: their Approve applies by itself
+ * once it can; ``can_stop_sharing``: they may make it a personal doc instead.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanUnconfirmedDTO".
+ */
+export interface PlanUnconfirmedDTO {
+  approval_held?: boolean;
+  can_stop_sharing?: boolean;
+  message: string;
+  reason: "offline" | "sign_in" | "key_unavailable" | "library_error" | "other_account";
 }
 /**
  * One revision of a plan: the supervisor's proposal, the person's edit

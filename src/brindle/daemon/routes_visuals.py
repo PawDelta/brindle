@@ -290,6 +290,13 @@ def plan_sync(db: DB, params: dict, body: dict) -> Any:
     return _library(db, params["id"], lambda sd: sd.sync(db, params["id"]))
 
 
+def plan_stop_sharing(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import shared_docs
+
+    shared_docs.stop_sharing(db, params["id"], body.get("rev"))
+    return _plan_now(db, params["id"])
+
+
 def plan_sign_off(db: DB, params: dict, body: dict) -> Any:
     return _library(db, params["id"], lambda sd: sd.sign_off(db, params["id"], body.get("rev")))
 
@@ -486,6 +493,7 @@ ROUTES = [
     Route("/v1/plans/{id}/share", _endpoint(plan_share), methods=["POST"]),
     Route("/v1/plans/{id}/reviewers", _endpoint(plan_reviewers), methods=["POST"]),
     Route("/v1/plans/{id}/sync", _endpoint(plan_sync), methods=["POST"]),
+    Route("/v1/plans/{id}/stop-sharing", _endpoint(plan_stop_sharing), methods=["POST"]),
     Route("/v1/plans/{id}/sign-off", _endpoint(plan_sign_off), methods=["POST"]),
     Route("/v1/plans/{id}/policy-override", _endpoint(plan_policy_override), methods=["POST"]),
     Route("/v1/plans/{id}/policy-ask", _endpoint(plan_policy_ask), methods=["POST"]),
