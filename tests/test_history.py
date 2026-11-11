@@ -35,7 +35,8 @@ def test_check_milestone_writes_check_and_milestone_rows(db, repo, monkeypatch):
     out = asyncio.run(mcp_server.check_milestone())
     assert "background" in out and started and "_check-milestones" in started[0]
     cli.check_milestones_cmd("boss", root_ws.id, position=None)
-    assert db.pending_count("boss") == 1 and db.get_autopilot("boss").checking_since is None
+    # The first pass queues both the landing notice and the check result.
+    assert db.pending_count("boss") == 2 and db.get_autopilot("boss").checking_since is None
 
     rows = db.list_history(root_ws.repo_root)
     kinds = {r.kind for r in rows}
