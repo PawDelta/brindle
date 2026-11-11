@@ -262,6 +262,12 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
                      *((f"option {o['id']}", f"{o['label']}\n{o['detail'] or ''}") for o in options or [])])
 
     _private_dir(store_root(ws.repo_root))
+    if any(o.get("approves") for o in options or []):
+        # An approving option belongs to the work in progress when it is shown
+        # (None: the session's next goal claims it, see claim_approvals).
+        ap = db.get_autopilot(root.id)
+        options = [{**o, "goal": ap.goal if ap and ap.goal else None} if o.get("approves") else o
+                   for o in options]
     opts = json.dumps(options) if options else None
     # The revision is allocated, its page installed and its row written under
     # one write transaction (BEGIN IMMEDIATE serializes writers across
@@ -415,11 +421,6 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     data = {"option": option, "note": note, "at": at, "rev": rev}
     if names:
         data["attachments"] = names
-    if not note and any(o["id"] == option and o.get("approves") for o in v["options"]):
-        # An approval belongs to the goal the session has now (None: the next goal claims it).
-        ap = db.get_autopilot(v["root_id"])
-        data["approves"] = True
-        data["goal"] = ap.goal if ap and ap.goal else None
     record = json.dumps(data)
     with db.tx() as c:
         cur = c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) "
@@ -456,23 +457,33 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
 
 
 def claim_approvals(db: DB, root_id: str, goal: str) -> None:
-    """Bind the design approvals the person gave before the session had a
-    goal (``answer()`` leaves their goal unset) to ``goal``, the work that
-    follows them. An approval already bound to another goal stays there."""
+    """Bind the approving options published before the session had a goal
+    (``publish`` leaves their goal unset) to ``goal``, the work that follows
+    them. The goal lives on the option, never in the answer, so a claim can't
+    disturb an answer being delivered or rolled back. An option already
+    bound to another goal stays there."""
     with db.tx() as c:
-        c.execute("UPDATE visuals SET answer=json_set(answer, '$.goal', ?) WHERE root_id=? "
-                  "AND kind='visual' AND answer IS NOT NULL AND json_extract(answer, '$.approves')=1 "
-                  "AND json_extract(answer, '$.goal') IS NULL", (goal, root_id))
+        for row in c.execute("SELECT id, options FROM visuals WHERE root_id=? AND kind='visual' "
+                             "AND options LIKE '%\"approves\"%'", (root_id,)).fetchall():
+            options = json.loads(row["options"])
+            if any(o.get("approves") and o.get("goal") is None for o in options):
+                bound = [{**o, "goal": goal} if o.get("approves") and o.get("goal") is None else o
+                         for o in options]
+                c.execute("UPDATE visuals SET options=? WHERE id=?", (json.dumps(bound), row["id"]))
 
 
 def has_approved_design(db: DB, root_id: str, goal: str) -> bool:
     """Whether the person approved a design for ``goal``: chose, on one of
-    session ``root_id``'s visuals, the option its publisher marked
-    ``approves``, with no note. A viewed visual, a redirect, any other
-    choice, and an approval bound to another goal aren't."""
-    return db.conn.execute("SELECT 1 FROM visuals WHERE root_id=? AND kind='visual' AND answer IS NOT NULL "
-                           "AND json_extract(answer, '$.approves')=1 AND json_extract(answer, '$.goal')=?",
-                           (root_id, goal)).fetchone() is not None
+    session ``root_id``'s visuals, an option its publisher marked ``approves``
+    while that goal was the work in progress, with no note. A viewed visual,
+    a redirect, any other choice, and an option bound to another goal aren't."""
+    for row in db.conn.execute("SELECT options, answer FROM visuals WHERE root_id=? AND kind='visual' "
+                               "AND answer IS NOT NULL AND options IS NOT NULL", (root_id,)):
+        answer = json.loads(row["answer"])
+        if not answer.get("note") and any(o["id"] == answer.get("option") and o.get("approves")
+                                          and o.get("goal") == goal for o in json.loads(row["options"])):
+            return True
+    return False
 
 
 def dismiss(db: DB, visual_id: str, rev: Any) -> dict:

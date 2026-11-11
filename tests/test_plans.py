@@ -420,6 +420,48 @@ def test_approved_design_counts_as_the_plan(answer, goal_first, db, session, mon
         assert len(offers) == 1 and started == []
 
 
+@pytest.mark.variant("review: a design approved after the session moved on belongs to the goal it was shown for")
+def test_approval_stays_with_the_goal_the_design_was_shown_for(db, session, monkeypatch):
+    from brindle import autopilot, visuals
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    mcp_server.set_goal("Org presets", [{"title": "A", "check": "true"}])
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+    mcp_server.set_goal("Billing export", [{"title": "B", "check": "true"}])
+    visuals.answer(db, shown["id"], 1, option="build")        # A's design, answered while B is the goal
+    mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(4)])
+    assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+
+
+@pytest.mark.variant("review: a delivery that fails after a goal claimed the approval must still undo the answer")
+def test_failed_answer_delivery_leaves_no_approval_behind(db, session, monkeypatch):
+    from brindle import autopilot, visuals
+
+    boss, _started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    db.add_autopilot("boss")
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+
+    def fail(*a, **k):      # the first goal arrives while the answer is being delivered
+        mcp_server.set_goal("Org presets", [{"title": "A", "check": "true"}])
+        raise RuntimeError("not delivered")
+    monkeypatch.setattr(agents, "send_message", fail)
+    with pytest.raises(RuntimeError):
+        visuals.answer(db, shown["id"], 1, option="build")
+    assert visuals.get(db, shown["id"])["answer"] is None
+    assert not visuals.has_approved_design(db, "boss", "Org presets")
+
+
 @pytest.mark.variant("reported stall: a terminal-only session's workers held by an offer nobody can answer (review 0.6.3, finding 3)")
 def test_plan_offer_without_app(db, session, monkeypatch):
     from brindle import autopilot
