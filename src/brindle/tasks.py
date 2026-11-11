@@ -38,6 +38,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import PurePath
 
 from brindle import agents, bus, conflicts, git, savings, spawn
@@ -84,6 +85,98 @@ def _changed_files(ws: Workspace) -> list[str]:
     """Files ``ws``'s branch has touched relative to its base, cheaply (no
     process beyond a couple of git calls)."""
     return conflicts.changed_files(ws)
+
+
+def _has_glob(path: str) -> bool:
+    return any(c in path for c in "*?[")
+
+
+def _overlap_files(files: list[str], declared: list[str], changed: list[str],
+                   ws: Workspace | None = None) -> tuple[str, ...]:
+    """Broad declarations need concrete evidence from the holder's diff.
+
+    Defer globs on the database-only path. At inspection a recursive tree
+    glob, or one matching more than 20 tracked files, is broad. Narrow
+    declarations still reserve files before the worker edits them.
+    """
+    tracked = []
+    if ws and any(_has_glob(p) for p in files + declared):
+        try:
+            tracked = git.paths(["ls-files"], ws.path)
+        except git.GitError:
+            ws = None   # unknown breadth: require actual changed files
+
+    def broad(pattern: str) -> bool:
+        pattern = _normpath(pattern)
+        return _has_glob(pattern) and (
+            ws is None or pattern == "**" or pattern.endswith("/**")
+            or sum(_glob_match(pattern, p) for p in tracked) > 20)
+
+    shared = {p for p in changed if any(_glob_match(mine, p) for mine in files)}
+    for mine in files:
+        if broad(mine):
+            continue
+        for theirs in declared:
+            if not broad(theirs) and _glob_match(mine, theirs):
+                shared.add(theirs)
+    return tuple(sorted(shared))
+
+
+@lru_cache(maxsize=512)
+def _branch_files(repo_root: str, base_sha: str, head_sha: str) -> tuple[str, ...]:
+    """Content-addressed: moving either branch naturally invalidates its diff."""
+    return tuple(git.paths(["diff", "--name-only", f"{base_sha}...{head_sha}"], repo_root))
+
+
+def _session_changes(db: DB, ws: Workspace, own: set[str],
+                     start: str | None = None) -> Iterator[tuple[str, str, str, tuple[str, ...]]]:
+    """Other sessions' accumulated work, including after their workers are removed.
+
+    Yield (session root, dependency holder, branch, changed files). Attached
+    repositories have their own recorded session branch, independent of the
+    root agent's workspace.
+    """
+    branches: dict[tuple[str, str], str] = {}
+    for other_ws in db.find_workspaces(ws.repo_root):
+        for agent in db.list_agents(other_ws.id):
+            if agent.parent_id is None and agent.mode == "interactive" and agent.id not in own:
+                branches[agent.id, other_ws.branch] = f"workspace:{other_ws.id}"
+    for attached in db.session_repos():
+        if attached.repo_root == ws.repo_root and attached.root_id not in own and attached.branch:
+            branches.setdefault((attached.root_id, attached.branch), attached.branch)
+    if not branches:
+        return
+    try:
+        refs = git.ref_shas(ws.repo_root)
+        base = git.default_branch(ws.repo_root)
+        base_sha = start or refs.get(git._full_ref(base)) or refs.get(f"refs/remotes/origin/{base}")
+        if not base_sha:
+            return
+        for (root, branch), holder in branches.items():
+            if branch in (ws.branch, base):
+                continue
+            head = refs.get(git._full_ref(branch))
+            if head:
+                try:
+                    yield root, holder, branch, _branch_files(ws.repo_root, base_sha, head)
+                except git.GitError:
+                    continue
+    except git.GitError:
+        return
+
+
+def _session_overlap(db: DB, ws: Workspace, files: list[str], own: set[str],
+                     task_id: str | None = None) -> Clash | None:
+    pending = db.get_task(task_id) if task_id else None
+    # A satisfied cross-session dependency can supply the new branch's
+    # starting commit. Its inherited changes must not hold the task again.
+    start = _holder_start(db, ws, _loads(pending.depends_on)) if pending else None
+    for root, holder, branch, changed in _session_changes(db, ws, own, start):
+        shared = _overlap_files(files, [], list(changed))
+        if shared:
+            return Clash(f"overlaps with session {root} ({branch}) on {', '.join(shared)}; "
+                         "consider depends_on or merging first", holder, root, True, shared)
+    return None
 
 
 def active_tasks(db: DB, repo_root: str) -> list[Task]:
@@ -163,6 +256,7 @@ class Clash:
     holder: str | None = None
     holder_root: str | None = None
     cross_session: bool = False
+    shared_files: tuple[str, ...] = ()
 
 
 def _own_roots(db: DB, ws: Workspace, caller_id: str | None) -> set[str]:
@@ -172,10 +266,11 @@ def _own_roots(db: DB, ws: Workspace, caller_id: str | None) -> set[str]:
     return {autopilot.root_of(db, a.id) for a in db.list_agents(ws.id)}
 
 
-def _held(db: DB, own: set[str], warning: str, holder: str | None) -> Clash:
+def _held(db: DB, own: set[str], warning: str, holder: str | None,
+          shared_files: tuple[str, ...] = ()) -> Clash:
     from brindle import autopilot
     root = autopilot.root_of(db, holder) if holder else None
-    return Clash(warning, holder, root, root is not None and root not in own)
+    return Clash(warning, holder, root, root is not None and root not in own, shared_files)
 
 
 def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Clash | None:
@@ -185,18 +280,18 @@ def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> C
     for intent in knowledge.intents(db, knowledge.repo_key(ws.repo_root)):
         if intent["status"] != "live" or intent["session_root"] in own:
             continue
-        for mine in files:
-            for theirs in intent["paths"]:
-                if _glob_match(mine, theirs):
-                    goal = intent["summary"].strip().splitlines()[0] if intent["summary"].strip() else ""
-                    return Clash(f"overlaps with session {intent['session_root']}'s intent on {theirs}"
-                                 + (f" ({goal})" if goal else "")
-                                 + "; consider depends_on or merging first",
-                                 None, intent["session_root"], True)
+        shared = _overlap_files(files, intent["paths"], [], ws)
+        if shared:
+            goal = intent["summary"].strip().splitlines()[0] if intent["summary"].strip() else ""
+            return Clash(f"overlaps with session {intent['session_root']}'s intent on {', '.join(shared)}"
+                         + (f" ({goal})" if goal else "")
+                         + "; consider depends_on or merging first",
+                         None, intent["session_root"], True, shared)
     return None
 
 
-def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Clash | None:
+def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], *,
+                    inspect: bool = False, task_id: str | None = None) -> Clash | None:
     """A clash if ``files`` matches the declared files of a task queued in
     ``ws``'s repo that hasn't started its worker yet (its request still
     replying, waiting, or starting in the background): assign/handoff start
@@ -204,14 +299,18 @@ def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> C
     both pass the check before either worker exists. Its holder is the task
     (``task:<id>``), a dependency that resolves once it merges."""
     from brindle import autopilot
+    current = db.get_task(task_id) if task_id else None
     for t in (t for state in (UNANSWERED, *QUEUED, "starting") for t in db.list_tasks(ws.repo_root, state=state)):
-        for mine in files:
-            for theirs in _loads(t.files):
-                if _glob_match(mine, theirs):
-                    root = autopilot.root_of(db, t.caller_id) if t.caller_id else None
-                    return Clash(f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
-                                 f"{theirs}; consider depends_on or merging first",
-                                 f"task:{t.id}", root, root is not None and root not in own)
+        # At launch only earlier reservations can hold this task, never
+        # itself or a later task which may already be waiting for this one.
+        if current and (t.created_at, t.id) >= (current.created_at, current.id):
+            continue
+        shared = _overlap_files(files, _loads(t.files), [], ws if inspect else None)
+        if shared:
+            root = autopilot.root_of(db, t.caller_id) if t.caller_id else None
+            return Clash(f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
+                         f"{', '.join(shared)}; consider depends_on or merging first",
+                         f"task:{t.id}", root, root is not None and root not in own, shared)
     return None
 
 
@@ -220,7 +319,8 @@ def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | 
     """What ``files`` overlaps: another active task's declared or
     actually-changed files, a task from another session whose worker has
     reported but whose branch isn't merged yet, a task text naming the same
-    issue (#NNN) as one of those, or another session's live intent. A task is
+    issue (#NNN) as one of those, another session's accumulated branch changes,
+    or another session's live intent. A task is
     another session's when its root differs from ``caller_id``'s (without
     one: from the roots of ``ws``'s agents)."""
     return (declared_clash(db, ws, files, caller_id)
@@ -231,13 +331,12 @@ def _running_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], cha
     """A clash with a running task's declared files, or (``changed``) with
     the files its branch has actually changed, which takes git to tell."""
     for t, _agent, other_ws in running_tasks(db, ws.repo_root):
-        candidates = (_changed_files(other_ws) if other_ws else []) if changed else _loads(t.files)
-        for mine in files:
-            for theirs in candidates:
-                if _glob_match(mine, theirs):
-                    branch = other_ws.branch if other_ws else "?"
-                    return _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
-                                 "consider depends_on or merging first", t.agent_id)
+        actual = _changed_files(other_ws) if changed and other_ws else []
+        shared = _overlap_files(files, _loads(t.files), actual, ws if changed else None)
+        if shared:
+            branch = other_ws.branch if other_ws else "?"
+            return _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {', '.join(shared)}; "
+                         "consider depends_on or merging first", t.agent_id, shared)
     return None
 
 
@@ -245,7 +344,7 @@ def declared_clash(db: DB, ws: Workspace, files: list[str] | None,
                    caller_id: str | None = None) -> Clash | None:
     """``find_clash`` on what the database knows alone: the declared files of
     running and queued tasks. No git and no process: assign/handoff check
-    this before replying, and the rest (``inspected_clash``) at launch."""
+    this before replying; globs need breadth inspection at launch."""
     if not files:
         return None
     own = _own_roots(db, ws, caller_id)
@@ -253,14 +352,16 @@ def declared_clash(db: DB, ws: Workspace, files: list[str] | None,
 
 
 def inspected_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
-                    caller_id: str | None = None) -> Clash | None:
+                    caller_id: str | None = None, *, task_id: str | None = None) -> Clash | None:
     """The rest of ``find_clash``, which reads git and can wait minutes on a
     loaded machine: running tasks' changed files, other sessions' intents
     and reported but unmerged work. A queued task's start checks it just
     before launching (``_start_if_ready``)."""
     own = _own_roots(db, ws, caller_id)
     if files:
-        clash = _running_overlap(db, ws, files, own, changed=True) or _intent_overlap(db, ws, files, own)
+        clash = (_running_overlap(db, ws, files, own, changed=True)
+                 or _queued_overlap(db, ws, files, own, inspect=True, task_id=task_id)
+                 or _session_overlap(db, ws, files, own, task_id) or _intent_overlap(db, ws, files, own))
         if clash:
             return clash
     mine_issues = _issue_numbers(task_text)
@@ -268,12 +369,10 @@ def inspected_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: s
         return None
     for t, _agent, other_ws in _reported_unmerged(db, ws.repo_root):
         where = f"{t.agent_id} ({_where(other_ws)})"
-        candidates = _loads(t.files) + _changed_files(other_ws) if files else []
-        for mine in files or []:
-            for theirs in candidates:
-                if _glob_match(mine, theirs):
-                    return _held(db, own, f"overlaps with {where}, reported but not yet merged, on {theirs}; "
-                                 "consider depends_on or merging first", t.agent_id)
+        shared_files = _overlap_files(files, _loads(t.files), _changed_files(other_ws), ws) if files else ()
+        if shared_files:
+            return _held(db, own, f"overlaps with {where}, reported but not yet merged, on "
+                         f"{', '.join(shared_files)}; consider depends_on or merging first", t.agent_id, shared_files)
         shared = mine_issues & _issue_numbers(t.task_text)
         if shared:
             return _held(db, own, f"names issue #{min(shared, key=int)} like {where}, reported but not yet "
@@ -308,13 +407,24 @@ def _goal_line(db: DB, root_id: str) -> str:
     return text.strip().splitlines()[0] if text.strip() else ""
 
 
-def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str) -> None:
+def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str,
+                 task_key: str | None = None) -> None:
     """Tell both sessions' supervisors about a cross-session clash, each
     naming the other session's goal line. ``outcome`` says what happened to
     the new task (queued, refused, started with a warning)."""
     from brindle import gates, knowledge
     if not clash.holder_root:
         return
+    if task_key is not None:
+        # A logical task survives repeated assign calls and the later launch
+        # check. Keep the mark in the DB so separate MCP processes share it.
+        key = hashlib.sha256(json.dumps([caller_root, task_key]).encode()).hexdigest()
+        pair = json.dumps([clash.holder or clash.holder_root, sorted(clash.shared_files) or [clash.warning]])
+        kind = "clash:" + hashlib.sha256(pair.encode()).hexdigest()
+        with db.tx() as c:
+            if not c.execute("INSERT OR IGNORE INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
+                             (key, kind, time.time())).rowcount:
+                return
     # The event a repo's coordinator wakes on (brindle.coordinator).
     knowledge.note(db, caller_root, knowledge.CLASH,
                    {"warning": clash.warning, "holder": clash.holder,
@@ -332,11 +442,11 @@ def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str) -> None:
             gates.tell(db, to, text)
 
 
-# -- predicted conflicts between running branches -------------------------------
+# -- predicted conflicts between unmerged branches ------------------------------
 
 
 def conflict_forecast(db: DB, ws: Workspace, worker: Agent) -> list[tuple[Agent, Workspace, list[str]]]:
-    """Other running branches in ``ws``'s repo that have changed a file
+    """Other running or reported-but-unmerged branches that have changed a file
     ``ws``'s branch has changed too (actual diffs, not declared ``files``):
     (their worker, their workspace, the shared files). These are the pairs
     that will conflict when the second of them merges."""
@@ -344,7 +454,7 @@ def conflict_forecast(db: DB, ws: Workspace, worker: Agent) -> list[tuple[Agent,
     if not mine:
         return []
     found = []
-    for _t, other, other_ws in running_tasks(db, ws.repo_root):
+    for _t, other, other_ws in running_tasks(db, ws.repo_root) + _reported_unmerged(db, ws.repo_root):
         if other.id == worker.id or other_ws is None or other_ws.id == ws.id:
             continue
         if other_ws.kind != "worktree":
@@ -357,8 +467,8 @@ def conflict_forecast(db: DB, ws: Workspace, worker: Agent) -> list[tuple[Agent,
 
 def warn_predicted_conflicts(db: DB, worker: Agent) -> str | None:
     """A worker's turn ended: if its branch now shares changed files with
-    another running branch, tell its supervisor, once per pair of branches
-    (again only when more files join the overlap). Returns the warning sent,
+    another running or reported-but-unmerged branch, tell its supervisor,
+    once per pair of branches (again only when more files join the overlap). Returns the warning sent,
     or None. Never raises: this runs inside the worker's Stop hook."""
     try:
         if worker.mode not in ("assign", "handoff", "handoff_detached") or not worker.parent_id:
@@ -1272,7 +1382,7 @@ def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | 
     from brindle import autopilot
     from brindle.config import load_repo_config
 
-    clash = inspected_clash(db, caller_ws, _loads(t.files), t.task_text, t.caller_id)
+    clash = inspected_clash(db, caller_ws, _loads(t.files), t.task_text, t.caller_id, task_id=t.id)
     if clash is None:
         return True, None
     how = overlap_mode(load_repo_config(t.repo_root).overlap, clash.cross_session)
@@ -1283,7 +1393,8 @@ def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | 
     if how == "queue":
         outcome = f"queued as task {t.id} until {clash.holder} merges"
         # False: it was claimed, cancelled or changed meanwhile, and isn't this start's to launch.
-        if set_dependencies(db, t.id, [*deps, str(clash.holder)], deps) and t.caller_id:
+        if (str(clash.holder) not in deps
+                and set_dependencies(db, t.id, [*deps, str(clash.holder)], deps) and t.caller_id):
             try:
                 agents.send_message(db, t.caller_id, f"Task {t.id} waits for {clash.holder} to merge "
                                     f"before its worker starts: it {clash.warning}.", sender_id=None)
@@ -1296,7 +1407,8 @@ def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | 
     else:
         outcome, proceed = "allowed to start with a warning", True
     if clash.cross_session and t.caller_id:
-        notify_clash(db, autopilot.root_of(db, t.caller_id), clash, outcome)
+        notify_clash(db, autopilot.root_of(db, t.caller_id), clash, outcome,
+                     task_key=json.dumps([t.repo_root, t.caller_id, t.task_text]))
     return proceed, clash.warning
 
 

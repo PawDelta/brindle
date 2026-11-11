@@ -1,0 +1,180 @@
+"""Session branches and concrete file overlap in task coordination."""
+
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+from brindle import config, gates, git, tasks
+from brindle.db import Agent, Task, Workspace
+
+
+@pytest.fixture(scope="module")
+def session_branch_repo(tmp_path_factory):
+    repo = tmp_path_factory.mktemp("session-branches")
+    git.run(["init", "-q", "-b", "main"], repo)
+    (repo / "base.txt").write_text("base\n")
+    git.run(["add", "."], repo)
+    commit = ["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm"]
+    git.run([*commit, "base"], repo)
+    git.run(["checkout", "-qb", "session"], repo)
+    (repo / "shared.py").write_text("shared\n")
+    git.run(["add", "."], repo)
+    git.run([*commit, "session work"], repo)
+    first = git.out(["rev-parse", "HEAD"], repo).strip()
+    (repo / "extra.py").write_text("extra\n")
+    git.run(["add", "."], repo)
+    git.run([*commit, "more session work"], repo)
+    return str(repo), first, git.ref_shas(repo)
+
+
+@pytest.fixture
+def coordination(db, monkeypatch):
+    def workspace(name, branch, base="main", repo="/repo"):
+        ws = Workspace(name, repo, name, "worktree", branch, base, f"{repo}/{name}", None, "", 0)
+        db.add_workspace(ws)
+        return ws
+
+    a, b, w = workspace("a", "main"), workspace("b", "session"), workspace("w", "feature", "session")
+    for name, ws, parent in (("a", a, None), ("b", b, None), ("worker", w, "b")):
+        db.add_agent(Agent(name, ws.id, "developer", "claude", parent, "assign" if parent else "interactive",
+                           "processing", "", None, 0))
+    held = Task("held", a.repo_root, "worker", "b", b.id, "developer", "holder work", "assign", 1,
+                w.branch, None, tasks._dumps(["src/shared.py"]), None, "started", 0)
+    db.add_task(held)
+    changed = {w.id: [], a.id: []}
+    monkeypatch.setattr(tasks, "_changed_files", lambda ws: changed.get(ws.id, []))
+    monkeypatch.setattr(git, "ref_shas", lambda root: {})
+    monkeypatch.setattr(git, "default_branch", lambda root: "main")
+    monkeypatch.setattr(git, "merged_into", lambda *args, **kwargs: False)
+    monkeypatch.setattr(git, "paths", lambda *args, **kwargs: [f"src/file{i}.py" for i in range(30)])
+    return SimpleNamespace(a=a, b=b, w=w, held=held, changed=changed, workspace=workspace)
+
+
+def test_session_branch_visible_without_worker_and_cached_by_heads(db, session_branch_repo, monkeypatch):
+    repo, first, refs = session_branch_repo
+    refs = dict(refs)
+    latest = refs["refs/heads/session"]
+    refs["refs/heads/session"] = first
+    a = Workspace("a", repo, "a", "worktree", "main", "main", repo, None, "", 0)
+    b = replace(a, id="b", name="b", branch="session")
+    for ws in (a, b):
+        db.add_workspace(ws)
+        db.add_agent(Agent(ws.id, ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, 0))
+    monkeypatch.setattr(git, "ref_shas", lambda root: refs)
+    monkeypatch.setattr(git, "default_branch", lambda root: "main")
+    reads = []
+    paths = git.paths
+
+    def counted(args, root):
+        reads.append(args)
+        return paths(args, root)
+
+    monkeypatch.setattr(git, "paths", counted)
+    clash = tasks.find_clash(db, a, ["shared.py"], caller_id="a")
+    assert clash is not None and clash.holder_root == "b" and clash.cross_session
+    assert tasks._resolve_dependency(db, a, clash.holder, [repo])[2].id == b.id
+    assert tasks.inspected_clash(db, b, ["shared.py"], caller_id="b") is None
+    assert tasks.find_clash(db, a, ["extra.py"], caller_id="a") is None
+    assert len([r for r in reads if r[0] == "diff"]) == 1
+    refs["refs/heads/session"] = latest
+    assert tasks.find_clash(db, a, ["extra.py"], caller_id="a") is not None
+    refs["refs/heads/main"] = latest
+    assert tasks.find_clash(db, a, ["shared.py"], caller_id="a") is None
+    assert len([r for r in reads if r[0] == "diff"]) == 3
+    # Attached repositories use their recorded branch, not the root's other repo.
+    db.conn.execute("UPDATE workspaces SET repo_root='/elsewhere' WHERE id='b'")
+    db.add_session_repo("b", "attached", repo, "session")
+    refs["refs/heads/main"] = session_branch_repo[2]["refs/heads/main"]
+    assert tasks.find_clash(db, a, ["shared.py"], caller_id="a").holder_root == "b"
+
+
+def test_session_branch_forecast_keeps_reported_unmerged(db, coordination, monkeypatch):
+    c = coordination
+    c.changed[c.a.id] = c.changed[c.w.id] = ["src/shared.py"]
+    db.update_agent("worker", result="done", status="done")
+    found = tasks.conflict_forecast(db, c.a, db.get_agent("a"))
+    assert [(a.id, ws.id, files) for a, ws, files in found] == [("worker", "w", ["src/shared.py"])]
+    monkeypatch.setattr(git, "merged_into", lambda *args, **kwargs: True)
+    assert tasks.conflict_forecast(db, c.a, db.get_agent("a")) == []
+
+
+def test_broad_glob_requires_real_shared_files(db, coordination):
+    from brindle import knowledge
+
+    c = coordination
+    assert tasks.find_clash(db, c.a, ["src/**"], caller_id="a") is None
+    assert tasks.find_clash(db, c.a, ["src/*.py"], caller_id="a") is None
+    db.conn.execute("UPDATE tasks SET files=? WHERE id='held'", (tasks._dumps(["src/**"]),))
+    assert tasks.find_clash(db, c.a, ["src/shared.py"], caller_id="a") is None
+    c.changed[c.w.id] = ["src/unrelated.py"]
+    assert tasks.find_clash(db, c.a, ["src/shared.py"], caller_id="a") is None
+    c.changed[c.w.id] += ["src/shared.py"]
+    clash = tasks.find_clash(db, c.a, ["src/shared.py"], caller_id="a")
+    assert clash.holder == "worker" and clash.shared_files == ("src/shared.py",)
+    db.update_agent("worker", result="done", status="done")
+    assert tasks.find_clash(db, c.a, ["app/**"], caller_id="a") is None
+    assert tasks.find_clash(db, c.a, ["src/**"], caller_id="a").shared_files == (
+        "src/shared.py", "src/unrelated.py")
+    # Broad queued declarations and intents also need actual branch changes.
+    db.conn.execute("UPDATE tasks SET state='pending', agent_id=NULL WHERE id='held'")
+    knowledge.append(db, knowledge.repo_key(c.a.repo_root), knowledge.INTENT,
+                     {"summary": "other session", "paths": ["src/**"]}, session="b")
+    assert tasks.find_clash(db, c.a, ["src/shared.py"], caller_id="a") is None
+    # Small globs still reserve concrete files at inspection, before editing.
+    db.conn.execute("UPDATE tasks SET files=? WHERE id='held'", (tasks._dumps(["src/shared.py"]),))
+    assert tasks.find_clash(db, c.a, ["src/shared.*"], caller_id="a").holder == "task:held"
+    later = replace(c.held, id="later", agent_id=None, state="pending", files=tasks._dumps(["src/shared.*"]))
+    db.add_task(later)
+    assert tasks.inspected_clash(db, c.b, ["src/shared.*"], caller_id="b", task_id="held") is None
+    assert tasks.inspected_clash(db, c.b, ["src/shared.*"], caller_id="b", task_id="later").holder == "task:held"
+
+
+@pytest.mark.parametrize("mode", [
+    "warn",
+    pytest.param("block", marks=pytest.mark.variant(
+        "A repeated detached launch after refusal must not send a second clash notice")),
+    "queue",
+])
+def test_broad_glob_launch_deduplicates_and_preserves_modes(db, coordination, monkeypatch, mode):
+    c = coordination
+    c.changed[c.w.id] = ["src/shared.py"]
+    pending = replace(c.held, id="new", agent_id=None, caller_id="a", caller_ws_id=c.a.id,
+                      files=tasks._dumps(["src/**"]), state="pending", task_text="new work")
+    db.add_task(pending)
+    monkeypatch.setattr(config, "load_repo_config", lambda root: SimpleNamespace(overlap=mode))
+    sent = []
+    monkeypatch.setattr(gates, "tell", lambda db, to, text: sent.append(to))
+    monkeypatch.setattr(tasks.agents, "send_message", lambda *args, **kwargs: None)
+    first = tasks._launch_overlap(db, pending, c.a)
+    assert first[0] is (mode == "warn")
+    assert sorted(sent) == ["a", "b"]
+    tasks._launch_overlap(db, db.get_task(pending.id), c.a)
+    assert sorted(sent) == ["a", "b"]
+    if mode == "warn":
+        from brindle import mcp_server
+
+        monkeypatch.setattr(mcp_server, "load_repo_config", config.load_repo_config)
+        # The same logical task arriving through assign uses the same notice
+        # identity as its detached launch, even without the same task row.
+        for _ in range(2):
+            reply, warning = mcp_server._route_clash(
+                None, db, db.get_agent("a"), c.a, "developer", pending.task_text, "assign",
+                isolate=True, branch=None, done_when=None, files=["src/shared.py"],
+                depends_on=None, plan_first=None, weight=None, decision={}, why=[])
+            assert reply is None and warning is not None
+        assert len(sent) == 2
+        c.changed[c.w.id].append("src/second.py")
+        tasks._launch_overlap(db, pending, c.a)
+        assert len(sent) == 4
+        db.add_task(replace(pending, id="different", task_text="different work"))
+        tasks._launch_overlap(db, db.get_task("different"), c.a)
+        assert len(sent) == 6
+        db.add_agent(replace(db.get_agent("worker"), id="second-worker"))
+        db.update_task("held", agent_id="second-worker")
+        tasks._launch_overlap(db, pending, c.a)
+        assert len(sent) == 8
+    elif mode == "block":
+        assert db.get_task(pending.id).state == "cancelled"
+    else:
+        assert tasks._loads(db.get_task(pending.id).depends_on) == ["worker"]
