@@ -322,11 +322,19 @@ def _visual_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
     from brindle import visuals
 
     out = []
-    for v in visuals.inbox_pending(db, repo_root):
+    # An Approve held for the Library that couldn't be applied: the person was told nowhere else.
+    refused = {r["plan_id"]: r["approve_refused"] for r in db.conn.execute(
+        "SELECT s.plan_id, s.approve_refused FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
+        " WHERE s.approve_refused IS NOT NULL AND p.state='open'")} if visuals.enabled() else {}
+    pending = visuals.inbox_pending(db, repo_root)
+    listed = {v["id"] for v in pending}
+    pending += [v for v in (visuals.get(db, pid) for pid in refused.keys() - listed)
+                if not repo_root or v["repo_root"] == repo_root]
+    for v in pending:
         root = db.get_agent(v["root_id"])
         if root is None or identity_lock.locked_by(root.id):
             continue
-        reason = "asks you to choose" if v["options"] else "visual is ready"
+        reason = refused.get(v["id"]) or ("asks you to choose" if v["options"] else "visual is ready")
         out.append(InboxItemDTO(kind="visual", reason=reason, detail=v["title"],
                                 visual_id=v["id"], agent_id=root.id, workspace_id=root.workspace_id,
                                 root_id=root.id))

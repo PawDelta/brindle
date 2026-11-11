@@ -701,6 +701,145 @@ def test_required_reviewers_approval_needs_the_library(db, session, library, mon
     assert e.value.code == "gate_unverified" and plans.get(db, pid)["state"] == "open"
 
 
+NO_REVIEW = {"rev": 1, "reviewers": [], "policy_reviewers": [], "sign_offs": []}
+
+
+@pytest.fixture
+def outage(db, session, monkeypatch):
+    """A plan shared with no required reviewers, a task queued behind it, and a
+    Library that is down until ``down`` is cleared and then answers ``view``."""
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import auth, license, shared_docs
+
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    _shared(db, pid, NO_REVIEW)
+    shared_docs._remember(db, pid, NO_REVIEW)
+    asyncio.run(mcp_server.assign("developer", "build it"))
+    line = SimpleNamespace(pid=pid, view=NO_REVIEW, signed_in="me", calls=[], down=auth.TransportError("no route to 10.0.0.1"))
+
+    def sync(db_, plan_id, **kw):
+        if line.down:
+            raise line.down
+        shared_docs._remember(db_, plan_id, line.view)
+        return {}
+
+    def api(method, path, body=None, **kw):
+        if line.down:
+            raise line.down
+        line.calls.append((method, path))
+        return {"scope": {"kind": "user", "id": "me"}, "scopes": [{"kind": "user", "id": "me"}, {"kind": "group", "id": "t_1"}]}
+
+    monkeypatch.setattr(shared_docs, "sync", sync)
+    monkeypatch.setattr(shared_docs, "_require_team", lambda store: SimpleNamespace(sub="me", org_id="org_1"))
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (None, None))
+    monkeypatch.setattr(ad, "api", api)
+    monkeypatch.setattr(license, "current", lambda **kw: SimpleNamespace(sub=line.signed_in, org_id="org_1", in_grace=False,
+                                                                         features=frozenset()))
+    return line
+
+
+def _approve(app, line):
+    return app.post(f"/v1/plans/{line.pid}/decide", json={"rev": 1, "approved": True})
+
+
+def _refused_approval(app, line, reason):
+    """Approve while the Library is down: refused in plain words, and nothing starts."""
+    error = _approve(app, line).json()["error"]
+    assert (error["code"], error["reason"]) == ("gate_unverified", reason) and error["message"] == plans.UNCONFIRMED[reason]
+    return app.get(f"/v1/plans/{line.pid}").json()
+
+
+def _unshares(db):
+    return [r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM plan_unshares")]
+
+
+def _approves_by_itself(db, app, line, started):
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import auth, shared_docs
+
+    for down, reason in [(auth.AuthError("token rejected", code="invalid_grant", revoked=True), "sign_in"),
+                         (ad.Refused("kms said no", 503, "key_unavailable"), "key_unavailable"),
+                         (ad.Refused("boom", 500), "library_error"),
+                         (line.down, "offline")]:
+        line.down = down
+        held = _refused_approval(app, line, reason)["gate"]["unconfirmed"]
+        assert held["reason"] == reason and held["approval_held"] and started == []
+
+    assert shared_docs.sync_open(db) == 0 and started == []     # still down: nothing moves
+    line.down = None
+    assert shared_docs.sync_open(db) == 1
+    assert plans.get(db, line.pid)["state"] == "approved" and started == ["build it"]
+
+
+def _not_approved_when_a_reviewer_appeared(db, app, line, started):
+    from brindle.pro import shared_docs
+    from brindle.service import inbox
+
+    _refused_approval(app, line, "offline")
+    line.down, line.view = None, {**NO_REVIEW, "reviewers": ONE}
+    for _ in range(2):      # told once, and the next pass doesn't approve it either
+        shared_docs.sync_open(db)
+        gate = app.get(f"/v1/plans/{line.pid}").json()["gate"]
+        assert plans.get(db, line.pid)["state"] == "open" and started == [] and messages(db) == []
+        assert gate["approval_refused"] and gate["unconfirmed"] is None
+    told = [i for i in inbox.items(db, None) if i.kind == "visual" and i.visual_id == line.pid]
+    assert [i.reason for i in told] == [gate["approval_refused"]]
+
+
+def _stops_sharing_and_builds(db, app, line, started):
+    from brindle.pro import shared_docs
+
+    assert _refused_approval(app, line, "offline")["gate"]["unconfirmed"]["can_stop_sharing"]
+    now = app.post(f"/v1/plans/{line.pid}/stop-sharing", json={"rev": 1}).json()
+    assert now["gate"] is None and now["team_ended"] is False
+    assert _approve(app, line).json()["state"] == "approved" and started == ["build it"]
+
+    shared_docs.sync_open(db)                                   # the Library is still down: kept for later
+    assert _unshares(db) == ["doc"] and line.calls == []
+    line.down = None
+    shared_docs.sync_open(db)
+    assert line.calls == [("GET", "/analysis-docs/doc"), ("DELETE", "/analysis-docs/doc/share/group/t_1")]
+    assert _unshares(db) == []
+
+
+def _reviewers_once_existed(db, line):
+    from brindle.pro import shared_docs
+
+    shared_docs._remember(db, line.pid, {**NO_REVIEW, "reviewers": ONE, "sign_offs": _signed_off("a")})
+    shared_docs._remember(db, line.pid, NO_REVIEW)
+
+
+def _another_account(db, line):
+    line.signed_in = "someone-else"
+
+
+@pytest.mark.parametrize("scenario", [_approves_by_itself, _not_approved_when_a_reviewer_appeared,
+                                      _stops_sharing_and_builds])
+def test_held_plan_when_the_library_is_down(db, session, outage, scenario):
+    _, started = session
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        scenario(db, app, outage, started)
+
+
+@pytest.mark.parametrize("arrange", [
+    pytest.param(_reviewers_once_existed, marks=pytest.mark.variant(
+        "bypass attempt: a required reviewer removed before the outage must not reopen the way out")),
+    pytest.param(_another_account, marks=pytest.mark.variant(
+        "bypass attempt: only the account that shared the plan may unshare it")),
+])
+def test_held_plan_when_the_library_is_down_refuses_stop_sharing(db, session, outage, arrange):
+    _, started = session
+    arrange(db, outage)
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        assert not _refused_approval(app, outage, "offline")["gate"]["unconfirmed"]["can_stop_sharing"]
+        refused = app.post(f"/v1/plans/{outage.pid}/stop-sharing", json={"rev": 1})
+        assert refused.json()["error"]["code"] == "stop_sharing_refused" and refused.status_code == 409
+        assert app.get(f"/v1/plans/{outage.pid}").json()["gate"] is not None and started == []
+    assert _unshares(db) == []
+
+
 def test_only_the_person_decides_and_only_when_they_asked(db, session):
     boss, started = session
     with pytest.raises(ToolError, match="ask for one"):

@@ -13,7 +13,7 @@ export type PlanDocClient = Pick<DaemonClient, "commentPlan" | "replyPlan" | "re
 
 /* Team review through the Library (brindle/pro/shared_docs.py). Not every build of the screen has it. */
 export type PlanSharingClient = Pick<DaemonClient, "sharePlan" | "setPlanReviewers" | "syncPlan" | "signOffPlan" | "overridePlanPolicy" | "libraryPeople" | "docScopes"> &
-  Partial<Pick<DaemonClient, "askPlanPolicyAgain" | "previewPlanPolicies">>;
+  Partial<Pick<DaemonClient, "askPlanPolicyAgain" | "previewPlanPolicies" | "stopSharingPlan">>;
 
 export type KeptVisualsClient = Pick<DaemonClient, "keptVisuals">;
 

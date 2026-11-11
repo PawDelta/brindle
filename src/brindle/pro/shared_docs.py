@@ -33,6 +33,12 @@ now, for the account and org that shared it, can say so (:func:`_note_ended`),
 and only while that answer is recent and they are still signed in
 (:func:`lapse_stands`).
 
+When the Library can't confirm a review, approving is refused with a typed
+reason (:func:`why_unconfirmed`) and the Approve is held until a background
+pass hears from it (:func:`plans.settle_held_approval`). The account that
+shared a plan that never had required reviewers or org rules may stop sharing
+it instead (:func:`stop_sharing`); the Library hears at its next pass.
+
 Calls raise ``RuntimeError`` with a readable reason, as ``brindle docs`` does.
 """
 
@@ -225,8 +231,11 @@ def _reviewers(raw: Any) -> list[dict]:
 
 def _remember(db: DB, plan_id: str, view: dict) -> bool:
     """Keep the review state the Library answered with. True if it changed."""
-    review = json.dumps({k: view.get(k) for k in REVIEW}, sort_keys=True)
+    kept = {k: view.get(k) for k in REVIEW}
+    review = json.dumps(kept, sort_keys=True)
     with db.tx() as c:
+        c.execute("UPDATE plan_shares SET unconfirmed=NULL, review_asked=MAX(review_asked, ?) WHERE plan_id=?",
+                  (int(plans.demands_review(kept)), plan_id))
         return c.execute("UPDATE plan_shares SET review=? WHERE plan_id=? AND review<>?",
                          (review, plan_id, review)).rowcount == 1
 
@@ -853,6 +862,146 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict
     return link(db, p["id"])
 
 
+# -- when the Library can't confirm a review ------------------------------------------------
+
+
+def _unreachable(e: Exception) -> bool:
+    from brindle.pro import auth
+
+    return isinstance(e, auth.TransportError) or (isinstance(e, auth.AuthError) and e.code in ("network", "lock_timeout"))
+
+
+def _no_entitlement_why(store) -> str:
+    """No verified entitlement here: renewing it says whether that is the network or the sign-in."""
+    from brindle.pro import auth
+
+    client, store = ad._session(None, store)
+    try:
+        auth.refresh(client, store)
+    except Exception as e:  # noqa: BLE001 - anything but the network means they have to sign in again
+        return plans.OFFLINE if _unreachable(e) else plans.SIGN_IN
+    return plans.LIBRARY_ERROR
+
+
+def why_unconfirmed(db: DB, plan_id: str, e: Exception, store=None) -> str:
+    """What stopped the Library confirming this plan's review, as a key of
+    plans.UNCONFIRMED: the failure's own words never reach the person."""
+    from brindle import airgap
+    from brindle.pro import auth, license
+
+    if isinstance(e, ad.Refused):
+        return plans.KEY_UNAVAILABLE if e.code == "key_unavailable" else plans.LIBRARY_ERROR
+    if _unreachable(e) or airgap.enabled():
+        return plans.OFFLINE
+    if isinstance(e, auth.AuthError):
+        signed_out = e.revoked or e.code in ("invalid_grant", "invalid_token", "not_logged_in")
+        return plans.SIGN_IN if signed_out else plans.LIBRARY_ERROR
+    try:
+        ent = license.current(refresh=False, store=store)
+    except Exception:  # noqa: BLE001 - no entitlement to read
+        return _no_entitlement_why(store)
+    share_ = link(db, plan_id)
+    if share_ is not None and (ent.sub != share_["owner"] or share_["org_id"] not in (None, ent.org_id)):
+        return plans.OTHER_ACCOUNT
+    return plans.OFFLINE if ent.in_grace else plans.LIBRARY_ERROR
+
+
+def _note_unconfirmed(db: DB, plan_id: str, e: Exception, store) -> None:
+    """A background pass failed on a plan someone tried to approve: keep the reason on screen current."""
+    if db.conn.execute("SELECT 1 FROM plan_shares WHERE plan_id=? AND (unconfirmed IS NOT NULL OR approve_wanted"
+                       " IS NOT NULL)", (plan_id,)).fetchone() is None:
+        return                  # nobody is waiting on it: not worth asking the sign-in why
+    why = why_unconfirmed(db, plan_id, e, store)
+    with db.tx() as c:
+        changed = c.execute("UPDATE plan_shares SET unconfirmed=? WHERE plan_id=? AND unconfirmed IS NOT ?",
+                            (why, plan_id, why)).rowcount
+    if changed:
+        p = plans.get(db, plan_id)
+        plan_docs._changed(db, p, p["rev"])
+
+
+def account(store=None) -> str | None:
+    """Who is signed in here, by the verified entitlement held; None if that can't be said."""
+    from brindle.pro import license
+
+    try:
+        return license.current(refresh=False, store=store).sub
+    except Exception:  # noqa: BLE001 - nobody can be named
+        return None
+
+
+def may_stop(row, who: str | None) -> bool:
+    """Whether ``who`` may stop sharing a plan the Library can't confirm: the
+    account that shared it, and only if no review state seen here ever had
+    required reviewers or org rules, and the last answer was neither a
+    refusal nor unreadable. No answer yet can't show there are no rules."""
+    review = json.loads(row["review"])
+    return (row["unconfirmed"] is not None and who == row["owner"] and not row["review_asked"]
+            and not review.get(review_policies.REFUSED) and not plans.demands_review(review))
+
+
+def stop_sharing(db: DB, plan_id: str, rev: Any, *, store=None) -> None:
+    """Make a plan the Library can't confirm a personal doc, so it can be
+    approved as one. The check and the change are one transaction, so a sync
+    landing a reviewer can't slip in between. Teammates lose the document at
+    the next pass that reaches the Library (:func:`_send_unshares`)."""
+    p = plan_docs._plan(db, plan_id)
+    plan_docs._on_screen(p, rev)
+    who = account(store)
+    with db.tx() as c:
+        row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+        allowed = p["state"] == "open" and row is not None and row["doc_id"] is not None and may_stop(row, who)
+        if allowed:
+            c.execute("INSERT OR REPLACE INTO plan_unshares (doc_id, owner, created_at) VALUES (?,?,?)",
+                      (row["doc_id"], row["owner"], time.time()))
+            c.execute("DELETE FROM plan_share_threads WHERE plan_id=?", (p["id"],))
+            c.execute("DELETE FROM plan_shares WHERE plan_id=?", (p["id"],))
+    if not allowed:
+        raise ServiceError("stop_sharing_refused", "This plan's sharing can't be stopped from here: its review has "
+                           "to be confirmed by the Library.", 409)
+    plan_docs._changed(db, p, p["rev"])
+
+
+def _gone(e: Exception) -> bool:
+    return isinstance(e, ad.Refused) and e.status == 404
+
+
+def _unshare(doc_id: str, client, store) -> None:
+    """Take a document out of every scope but its owner's. Already gone counts as done."""
+    from urllib.parse import quote
+
+    try:
+        doc = ad.api("GET", ad._doc_path(doc_id), client=client, store=store)
+    except ad.Refused as e:
+        if _gone(e):
+            return
+        raise
+    owner = doc.get("scope")
+    if not isinstance(owner, dict):
+        raise RuntimeError("the Library didn't say who owns this document")
+    for scope in doc.get("scopes") or []:
+        if scope == owner:
+            continue
+        path = ad._doc_path(doc_id, f"/share/{quote(scope['kind'], safe='')}/{quote(scope['id'], safe='')}")
+        try:
+            ad.api("DELETE", path, client=client, store=store)
+        except ad.Refused as e:
+            if not _gone(e):
+                raise
+
+
+def _send_unshares(db: DB, owner: str, client, store) -> None:
+    """Unshare what this account stopped sharing. One failure leaves that one for the next pass."""
+    for row in db.conn.execute("SELECT doc_id FROM plan_unshares WHERE owner=?", (owner,)).fetchall():
+        try:
+            _unshare(row["doc_id"], client, store)
+        except Exception:  # noqa: BLE001 - offline, the org's key revoked: the next pass tries again
+            log.debug("brindle: couldn't unshare %s yet", row["doc_id"], exc_info=True)
+            continue
+        with db.tx() as c:
+            c.execute("DELETE FROM plan_unshares WHERE doc_id=?", (row["doc_id"],))
+
+
 def _note_lapses(db: DB, client, store) -> None:
     """Without Team, get the server's word if any of this account's plans in
     review needs it: one it hasn't confirmed ended, or confirmed a while ago.
@@ -875,19 +1024,30 @@ def sync_open(db: DB, *, client=None, store=None) -> int:
     """Sync every shared plan still in review, for the daemon's background
     pass (a building plan's review is closed). One plan's failure doesn't
     stop the rest. Without Team nothing is synced. With it, a plan whose Team
-    plan had ended picks its document back up. Returns how many synced."""
+    plan had ended picks its document back up. An approval held for the
+    Library is settled once it has answered. Returns how many synced."""
     client, store = ad._session(client, store)
     try:
-        _require_team(store)
-    except Exception:  # noqa: BLE001 - logged out, air-gapped or no Team plan: nothing to bring back
+        ent = _require_team(store)
+    except Exception as e:  # noqa: BLE001 - logged out, air-gapped or no Team plan: nothing to bring back
         _note_lapses(db, client, store)
+        for row in db.conn.execute("SELECT plan_id FROM plan_shares WHERE unconfirmed IS NOT NULL"
+                                   " OR approve_wanted IS NOT NULL").fetchall():
+            _note_unconfirmed(db, row["plan_id"], e, store)
         return 0
+    _send_unshares(db, ent.sub, client, store)
     done = 0
     for row in db.conn.execute("SELECT s.plan_id FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
                                " WHERE s.doc_id IS NOT NULL AND p.state IN ('open','redirected')").fetchall():
         try:
             sync(db, row["plan_id"], client=client, store=store)
             done += 1
-        except Exception:  # noqa: BLE001 - offline, another account's plan: the next pass tries again
+        except Exception as e:  # noqa: BLE001 - offline, another account's plan: the next pass tries again
             log.debug("brindle: couldn't sync shared plan %s", row["plan_id"], exc_info=True)
+            _note_unconfirmed(db, row["plan_id"], e, store)
+            continue
+        try:
+            plans.settle_held_approval(db, row["plan_id"])
+        except Exception:  # noqa: BLE001 - it stays held: the next pass looks again
+            log.warning("brindle: couldn't settle plan %s's held approval", row["plan_id"], exc_info=True)
     return done
