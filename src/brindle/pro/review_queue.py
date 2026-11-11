@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
@@ -31,30 +30,40 @@ def _items(raw: object) -> list[dict]:
     return out
 
 
-def poll(who: Callable[[], str | None], *, client=None, store=None) -> bool:
-    """Read the queue for the signed-in account (``who`` names it) and remember
-    it. The request is bound to one captured credential record: the record is
-    read, the account named, and the record read again (it must be unchanged,
-    so ``sub`` is that record's owner). The request then carries that record's
-    own token, and an expired token is refreshed only if the store still holds
-    exactly that record (``auth.refresh_captured``), so a switch of account
-    while it runs can neither change who asks nor file the answer under
-    someone else. False (nothing changed) when logged out, offline, refused or
-    switched."""
+def poll(*, client=None, store=None) -> bool:
+    """Read the signed-in account's queue and remember it under that account.
+    Everything is taken from one captured credential record: the account is
+    the ``sub`` of the entitlement signed into that record (verified, from its
+    issuer), the plan check is on that entitlement, and the request carries
+    that record's own token. An expired token is refreshed only if the store
+    still holds exactly that record (``auth.refresh_captured``), and the
+    account is read again from the refreshed record. No separate read of the
+    store or of "who is signed in" can pair one account's answer with
+    another's name. False (nothing changed) when logged out, offline, refused,
+    not entitled or switched."""
     import time
 
+    from brindle import airgap
     from brindle.pro import analysis_docs as ad
-    from brindle.pro import auth
+    from brindle.pro import auth, license
+
+    def owner(record: dict) -> str:
+        ent = license.verify(record.get("entitlement") or "", issuer=record.get("base_url"), grace=0)
+        if ad.FEATURE not in ent.features:
+            raise license.NotEntitled("no analysis doc library")
+        return ent.sub
 
     try:
-        client, store = ad._session(client, store)
-        ad.require_entitlement(store)
-        rec = store.load() or {}
-        sub = who()
-        if not sub or not rec.get("refresh_token") or (store.load() or {}) != rec:
+        if airgap.enabled():
             return False
+        client, store = ad._session(client, store)
+        rec = store.load() or {}
+        if not rec.get("refresh_token"):
+            return False
+        sub = owner(rec)
         if float(rec.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK:
             rec = auth.refresh_captured(store, rec, client.transport)
+            sub = owner(rec)
         status, body = client.call("GET", PATH, None, token=rec.get("access_token"))
     except Exception:  # noqa: BLE001 - keep the cards we have; the next pass tries again
         log.debug("brindle: couldn't read the review queue", exc_info=True)

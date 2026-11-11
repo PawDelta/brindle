@@ -896,10 +896,9 @@ def _sync_shared_docs() -> None:
 def _poll_review_queue() -> None:
     """review_queue.poll for the signed-in account; a failure is only logged."""
     from brindle.pro import review_queue
-    from brindle.service import inbox
 
     try:
-        review_queue.poll(inbox._my_sub)
+        review_queue.poll()
     except Exception:  # noqa: BLE001 - a poll must never stop the watch
         log.debug("brindle: couldn't poll the review queue", exc_info=True)
 
