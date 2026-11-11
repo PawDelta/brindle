@@ -10,10 +10,11 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.testclient import TestClient
 
-from brindle import plan_docs, plans, visual_offers
+from brindle import plan_docs, plans, tasks, visual_offers
+from brindle.daemon import holds
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
-from brindle.pro import auth, credentials
+from brindle.pro import auth, credentials, license
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
 from pro_fixtures import BASE as BASE_URL, backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401
@@ -537,6 +538,7 @@ def _signed_in(backend, store, **over):
     store.save({"access_token": t["access_token"], "refresh_token": t["refresh_token"],
                 "access_expires_at": time.time() + 900, "base_url": BASE_URL,
                 "entitlement": sign(backend.key, claims(**over))})
+    license.clear_cache()
 
 
 def _server_says(backend, key=None, **over):
@@ -566,6 +568,7 @@ def _sign_in_expired(db, pid, backend, store):
 
 def _no_sign_in(db, pid, backend, store):
     store.delete()
+    license.clear_cache()
 
 
 def _unverifiable(db, pid, backend, store):
@@ -620,9 +623,11 @@ def _bypass(arrange, why):
     _bypass(_other_org, "the same person in an org without Team says nothing about the org that shared it"),
     _bypass(_no_org_on_record, "a missing identity never matches"),
 ])
-def test_lapsed_plan_becomes_a_personal_doc(db, parts, backend, monkeypatch, arrange):
+def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeypatch, arrange):
     pid, lib, net = parts
+    boss, _ = session
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    monkeypatch.setattr(credentials, "default_store", lambda: net["store"])
     monkeypatch.setattr(ad, "on_merged", lambda *a: None)
     sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a"}, {"sub": "u_b"}], **net)
     lib.sign_offs.append({"rev": 1, "sub": "u_a", "at": 9.0})
@@ -653,6 +658,18 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, backend, monkeypatch, arr
         # A lapse on record isn't enough for an approval: the server has to confirm it now.
         backend.routes["GET /entitlement"] = [auth.AuthError("offline", code="network")]
         assert approve().json()["error"]["code"] == "gate_unverified"
+
+        # It stands only for the account it was confirmed for: with the app away, nothing else releases the work.
+        monkeypatch.setattr(holds, "app_connected", lambda: False)
+        assert plans.holding(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
+        now = int(time.time())
+        for changed in (lambda: _signed_in(backend, net["store"], **ANOTHER_ACCOUNT),
+                        lambda: _signed_in(backend, net["store"], **NO_TEAM, iat=now - 7200, exp=now - 1800),
+                        lambda: _no_sign_in(db, pid, backend, net["store"])):
+            changed()
+            sd.sync_open(db, **net)
+            assert plans.holding(db, root) and plans.gate_shut(db, root) and tasks.build_gate_refusal(db, boss.id)
+            assert plans.to_dto(db, plans.get(db, pid))["team_ended"] is False
 
         # Resubscribing picks the same document back up, with its review.
         _signed_in(backend, net["store"], features=list(TEAM_LOGIN))

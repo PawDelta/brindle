@@ -113,16 +113,36 @@ def _issued(client, store):
         return None
 
 
-def _note_ended(db: DB, p: dict, ent) -> bool:
-    """Whether ``ent`` (from :func:`_issued`, or None) says the account and org
-    that shared the plan no longer have Team, recording it if so. Anything
-    else leaves the gate as it is: another account, or the same person in
-    another org, says nothing about this one's plan, and a share with no org
-    on record can't match."""
-    share_ = link(db, p["id"])
-    if ent is None or share_ is None or TEAM_FEATURE in ent.features:
+def _ended_for(share_, ent) -> bool:
+    """Whether verified entitlement ``ent`` is the account and org that shared
+    the plan, without Team. Another account, or the same person in another
+    org, says nothing about this one's plan; a share with no org on record
+    can't match."""
+    return TEAM_FEATURE not in ent.features and (ent.sub, ent.org_id) == (share_["owner"], share_["org_id"])
+
+
+def lapse_stands(share_) -> bool:
+    """Whether a lapse on record applies to whoever is signed in now, which
+    every look at the gate asks (plans._gate). The record says the server
+    confirmed it once; this reads the signed entitlement held here, so
+    signing out, switching account or org, or the entitlement running out
+    shuts the gate again at once, whatever path wants the work released."""
+    if share_["lapsed_at"] is None:
         return False
-    if (ent.sub, ent.org_id) != (share_["owner"], share_["org_id"]):
+    from brindle.pro import license
+
+    try:
+        ent = license.current(refresh=False)
+    except Exception:  # noqa: BLE001 - nothing verified to go on: the gate stays
+        return False
+    return not ent.in_grace and _ended_for(share_, ent)
+
+
+def _note_ended(db: DB, p: dict, ent) -> bool:
+    """Whether ``ent`` (from :func:`_issued`, or None) says the plan's Team
+    plan has ended, recording it if so. Anything else leaves the gate as it is."""
+    share_ = link(db, p["id"])
+    if ent is None or share_ is None or not _ended_for(share_, ent):
         return False
     with db.tx() as c:
         noted = c.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=? AND lapsed_at IS NULL",

@@ -277,16 +277,19 @@ def _signed(review: dict) -> dict[str, float]:
 
 def _gate(c, p: dict) -> dict | None:
     """Plan ``p``'s build gate, read on connection ``c``; None if it isn't
-    shared, or its Team plan has ended and it is a personal doc for now
-    (shared_docs._note_ended). Sign-offs and rules count only while the
-    Library's head is the revision on screen: until a new revision is sent
-    they say nothing about it."""
+    shared, or its Team plan has ended and that still holds for whoever is
+    signed in (shared_docs.lapse_stands). Sign-offs and rules count only
+    while the Library's head is the revision on screen: until a new revision
+    is sent they say nothing about it."""
     from brindle.plan_docs import TEAMMATE
 
     row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
-    if row is None or row["lapsed_at"] is not None:
+    if row is None:
         return None
-    from brindle.pro import review_policies
+    from brindle.pro import review_policies, shared_docs
+
+    if shared_docs.lapse_stands(row):
+        return None
 
     review = json.loads(row["review"])
     read = _review_rows(review)
@@ -374,8 +377,10 @@ def gate(db: DB, p: dict) -> dict | None:
 
 
 def _team_ended(db: DB, p: dict) -> bool:
-    return db.conn.execute("SELECT 1 FROM plan_shares WHERE plan_id=? AND lapsed_at IS NOT NULL",
-                           (p["id"],)).fetchone() is not None
+    from brindle.pro import shared_docs
+
+    row = db.conn.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+    return row is not None and shared_docs.lapse_stands(row)
 
 
 def gate_shut(db: DB, root_id: str) -> dict | None:
