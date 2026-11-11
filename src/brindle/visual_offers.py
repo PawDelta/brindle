@@ -41,11 +41,6 @@ def current(db: DB, root: str) -> dict | None:
     visuals._unlocked(root)
     with db.tx() as c:
         _expire(c, root, time.time())
-        c.execute("DELETE FROM visual_requests WHERE root_id=? AND created_at<=?", (root, time.time() - FOLD))
-        request = c.execute("SELECT * FROM visual_requests WHERE root_id=?", (root,)).fetchone()
-        if request:
-            return {"id": request["id"], "kind": "request", "counts": {},
-                    "confirmation": request["scope"], "expires_at": request["created_at"] + FOLD}
         if config.visuals_setting() != "on":
             return None
         return _dto(c.execute("SELECT * FROM visual_offers WHERE root_id=? AND state='open'",
@@ -113,29 +108,17 @@ def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
     visuals._unlocked(root)
     with db.tx() as c:
         _expire(c, root, time.time())
-        request = c.execute("SELECT * FROM visual_requests WHERE id=? AND root_id=? AND created_at>?",
-                            (oid, root, time.time() - FOLD)).fetchone()
         row = c.execute("SELECT * FROM visual_offers WHERE id=? AND root_id=? AND state='open'",
                         (oid, root)).fetchone()
-        if request is None and (row is None or config.visuals_setting() != "on"):
+        if row is None or config.visuals_setting() != "on":
             raise ServiceError("stale", "this offer is no longer open", 409)
-        if request:
-            c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
-            # Their answer on the card is that message's one say, yes or no, however often they typed it.
-            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND words IN "
-                      "(SELECT words FROM visual_person_words WHERE root_id=? AND source='request')", (root, root))
-            scope = request["scope"]
-            message = f"The person confirmed: create the {scope} they mentioned now."
-        else:
-            c.execute("UPDATE visual_offers SET state=?, changed_at=? WHERE id=?",
-                      ("accepted" if accept else "dismissed", time.time(), oid))
-            scope = "visual"
-            message = f"The person asked for a visual of: {row['question']}"
+        c.execute("UPDATE visual_offers SET state=?, changed_at=? WHERE id=?",
+                  ("accepted" if accept else "dismissed", time.time(), oid))
         if accept:
-            _grant(c, root, scope)
+            _grant(c, root)
             # Queue in the same transaction as the grant: no double delivery on repeated clicks.
             c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at, held) VALUES (?,NULL,?,?,0)",
-                      (root, message, time.time()))
+                      (root, f"The person asked for a visual of: {row['question']}", time.time()))
     if accept:
         agents.flush(db, root)
     log.debug("visual offer %s", "accepted" if accept else "dismissed")
@@ -145,7 +128,7 @@ def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
 
 
 def _unlink(c, root: str, source: str) -> None:
-    """The grant or confirmation a typed message raised is gone; the message itself isn't spent."""
+    """The grant a typed message raised is gone; the message itself isn't spent."""
     c.execute("UPDATE visual_person_words SET source=NULL WHERE root_id=? AND source=?", (root, source))
 
 
@@ -162,23 +145,13 @@ def _grant(c, root: str, scope: str = "visual") -> None:
 
 _REQUEST = re.compile(
     r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
-    r"(?:(?P<visualize>visualize)\b|(?:(?:make|create|show|draw|build|generate|render)\s+(?:(?:me|us)\s+)?|"
+    r"(?:visualize\b|(?:(?:make|create|show|draw|build|generate|render)\s+(?:(?:me|us)\s+)?|"
     r"(?:I want|I'd like|I would like)\s+)"
     r"(?:(?:a|an|the|this|that)\s+)?(?:(?:simple|interactive|quick|small|new)\s+)*"
     r"(?P<artifact>visual(?:ization)?|diagram|chart|mockup|planning doc(?:ument)?|plan document)\b)", re.I)
-_REFERENT = re.compile(r"(?:\s+(?:(?:of|for|about|showing)\s+)?(?:this|that|these|those|it)"
-                       r"(?:\s+(?:layout|change|choices|options|flow|pipeline|decision))?)?[.!?]*", re.I)
-# "visualize the changes for 0.6.3" / "show me the flow visually": a plain object phrase,
-# no joining word that could add a second instruction.
-_OBJECT = re.compile(r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}[.!?]*", re.I)
+# "show me the flow visually": a plain object phrase, no joining word that could add a second instruction.
 _SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?show\s+(?:me|us)"
                             r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}\s+visually[.!?]*", re.I)
-# A deferral or approval clause inside an object phrase (not a subject word like "approval flow").
-_DEFERRED = re.compile(r"\b(?:once|tomorrow|tonight|soon|eventually|whenever|next\s+(?:week|month|year|day|time|sprint|quarter)|(?:I|we|you|they)\s+approve[sd]?)\b", re.I)
-_QUALIFIED = re.compile(r"\b(?:if|unless|when|after|before|later|only|maybe|perhaps|not|never|"
-                        r"don't|do not|wait|until|provided|assuming)\b|[\"`“”]", re.I)
-_CONTEXT = re.compile(r"(?:compare|consider|examine|review)\s+(?:this|that|these|those|the)\s+"
-                      r"(?:choices|options|layouts|designs|flow|pipeline|change|decision)[.!?]*", re.I)
 _CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
 _CANCEL_ARTIFACT = r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan document|request)\b"
 # Names the artifact, or says not to make it: a cancel in any clause of a message.
@@ -228,32 +201,21 @@ def _cancels(text: str) -> bool:
     return bool(bare) and not any(_ASKS_AGAIN.match(c) for c in clauses[bare[-1] + 1:])
 
 
-def request_intent(text: str) -> tuple[str | None, bool]:
-    """Recognize complete direct request sentences; uncertain intent needs a real confirmation.
+def request_intent(text: str) -> str | None:
+    """What a sentence of the person's own message asks for ("visual" or "plan"), if one does.
 
-    Surrounding context is allowed. Arbitrary trailing clauses, quotations,
-    conditions and deferrals cannot authorize anything from a matched prefix.
+    A recognized request authorizes one, whatever surrounds it: there is no
+    second confirmation. Whether they really meant it now is the agent's to
+    judge; an explicit cancel (``_cancels``) still takes it back.
     """
-    found = []
-    context_clear = True
+    scope = None
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", text.strip()):
         match = _REQUEST.match(sentence)
         if match:
             scope = "plan" if (match["artifact"] or "").lower().startswith(("planning", "plan ")) else "visual"
-            rest = sentence[match.end():]
-            clear = _REFERENT.fullmatch(rest) is not None or (
-                match["visualize"] is not None and _OBJECT.fullmatch(rest) is not None)
-            found.append((scope, clear and not _DEFERRED.search(sentence)))
         elif _SHOW_VISUALLY.fullmatch(sentence):
-            found.append(("visual", not _DEFERRED.search(sentence)))
-        elif sentence:
-            # Unknown discourse may be an example, quotation, or instruction
-            # to defer. Recognize the request but let the person confirm it.
-            context_clear = context_clear and _CONTEXT.fullmatch(sentence) is not None
-    if not found:
-        return None, False
-    scopes = {scope for scope, _ in found}
-    return found[-1][0], context_clear and len(scopes) == 1 and all(clear for _, clear in found) and not _QUALIFIED.search(text)
+            scope = "visual"
+    return scope
 
 
 def begin_input(db: DB, agent: Agent, expires_at: float | None = None) -> int:
@@ -307,7 +269,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     root, ws = visuals._session(db, agent)
     if root.id != agent.id:
         return
-    scope, clear = request_intent(text)
+    scope = request_intent(text)
     with db.tx() as c:
         if expires_at is not None and time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
@@ -327,9 +289,6 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                       (root.id, time.time()))
         c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                   (time.time(), root.id))
-        if not fold_only:
-            c.execute("DELETE FROM visual_requests WHERE root_id=?", (root.id,))
-            _unlink(c, root.id, "request")
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
@@ -345,13 +304,9 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
                       "WHERE root_id=? AND words=? AND staged=1)", (root.id, _words(text)))
         # Tie the words to what this message raises, so one spends the other.
-        if not fold_only and scope and clear:
+        if not fold_only and scope:
             _grant(c, root.id, scope)
             _link(c, root.id, text, "grant")
-        elif not fold_only and scope:
-            c.execute("INSERT INTO visual_requests VALUES (?,?,?,?)",
-                      (root.id, "r_" + secrets.token_hex(6), scope, time.time()))
-            _link(c, root.id, text, "request")
     bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
 
 
@@ -459,8 +414,6 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
             if row["source"] == "grant":
                 c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
-            elif row["source"] == "request":
-                c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
             return True
     if c.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND created_at>? AND instr(words, ?)",
                  (root, now - FOLD, quote)).fetchone():
