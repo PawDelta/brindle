@@ -413,7 +413,6 @@ function PrLine({ goal, working = false, openUrl }: { goal: GoalDTO | null | und
       onClick={() => void openUrl(url).catch(() => undefined)}
     >
       {state === "fixing" && <span aria-hidden="true" data-pr-pulse className="mr-1 inline-block size-1.5 rounded-full bg-current motion-safe:animate-pulse" />}{text}
-      {goal.drifting && <span data-state="drifting" className="ml-1 text-sap">· drifting</span>}
     </button>
   );
 }
@@ -465,9 +464,6 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
         <RowClose root={root} done={done} onClose={onClose} list={list} />
       </div>
       <PrLine goal={goal} working={working} openUrl={openUrl} />
-      {goal?.drifting && !(goal.pr_state && goal.pr_url) && (
-        <div className="pb-[5px] pl-[34px] pr-s1 text-[11.5px]"><span data-state="drifting" className="text-sap">· drifting</span></div>
-      )}
       {folded ? null : tree ? (
         <ul className="session-tree mb-1">
           {tree.children.map((child) => <AgentRow key={child.agent.id} node={child} route={route} navigate={navigate} repo={repo} root={root} cursor={cursor} setCursor={setCursor} />)}
