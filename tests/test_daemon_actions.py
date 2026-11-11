@@ -1981,6 +1981,46 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     assert code == 409 and "stress/other" in json.dumps(refused)
 
 
+def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, lead, tmp_path, monkeypatch):
+    """A merged session PR stays the session's until its branch has changes of its own beyond it (a
+    sync's clean merge from main doesn't count, a merge resolved with new content does); then the next PR opens from the same branch and the
+    merged one is kept in session_pr_history."""
+    from brindle.daemon import session_review
+
+    sess, first, second = Path(lead.path), "https://github.com/o/r/pull/7", "https://github.com/o/r/pull/8"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho {second}\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    monkeypatch.setattr(session_review, "open_pr_for_head", lambda *a, **kw: None)    # GitHub isn't under test
+    pushed = _commit(sess, "a.py", "a\n")
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, merged_at)"
+                    " VALUES ('lead', 'sess', ?, ?, 1, 2)", (first, pushed))     # as poll_merged leaves it
+
+    def readiness() -> tuple:
+        _, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
+        return reply["ready"], reply["pr"], session_review.goal_phase(db, "lead")
+
+    _commit(repo, "main.py", "m\n")
+    sh("git merge -q --no-ff main -m sync", sess)       # a sync brings main in: nothing new of its own
+    ready, pr, phase = readiness()
+    assert (ready, pr, phase) == (False, None, ("done", first))
+    # Main changes the PR's file in a squash brindle recorded (one edited on the forge, so not replayed
+    # `-s ours`); the next sync's conflict is resolved with new content in the merge alone.
+    from brindle import session_sync
+    assert session_sync.record_squash(db, lead, _commit(repo, "a.py", "z\n"), pushed)
+    sh("git merge -q main || true", sess)
+    (sess / "a.py").write_text("resolved\n")
+    sh("git add a.py && git commit -q --no-edit", sess)
+    assert readiness() == (True, None, ("ready_for_pr", None))
+    code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Next"})
+    assert code == 202, reply
+    assert readiness() == (True, {"url": second, "unpushed": 0}, ("pr_open", second))
+    assert [tuple(r) for r in db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_pr_history")] == [
+        (first, pushed, 2)]
+
+
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
     """Every CLI installed (a stub), Claude Code's and Codex's config dirs present."""
     monkeypatch.setattr(preflight, "check", REAL_PREFLIGHT)

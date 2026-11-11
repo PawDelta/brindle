@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from brindle import agents, autopilot, bus, git, identity_lock, permissions, prompt_answer, session_sync, tmux, view
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
-from brindle.db import DB, Agent, request_subagent
+from brindle.db import DB, Agent, Workspace, request_subagent
 from brindle.providers import get_provider
 from brindle.service.dto import (
     InboxActionDTO,
@@ -203,11 +203,15 @@ def opened_marker(db: DB, root_id: str, branch: str, path: str) -> str | None:
     return f"{head}|{opened['url']}" if opened else None
 
 
-def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[InboxItemDTO]:
+def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) -> list[InboxItemDTO]:
     """The session's PR as brindle prepared it (routes_actions.prepare_pr),
     until the person opens it: ready for their approval, or its checks failed.
     An open PR already holding the session's HEAD (a supervisor's own
-    ``gh pr create``, from any branch name) is a ``pr_opened`` item instead."""
+    ``gh pr create``, from any branch name) is a ``pr_opened`` item instead.
+    Nothing while its PR has merged, until the branch has commits for its next."""
+    from brindle.daemon import session_review
+
+    path = home.path
     head, opened = _opened_pr(db, root_id, branch, path)
     if opened:
         gone = db.conn.execute("SELECT 1 FROM session_pr_declined WHERE root_id = ? AND branch = ? AND sha = ?",
@@ -217,9 +221,12 @@ def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[
         return [InboxItemDTO(kind="pr_opened", reason="PR opened", detail=f"#{opened.get('number')} {opened.get('title') or ''}".strip(),
                              url=opened["url"], **link)]
     rows = db.conn.execute(
-        "SELECT state, title, check_cmd, output FROM session_pr_prep p WHERE root_id = ? AND branch = ?"
-        " AND state IN ('passed', 'failed') AND NOT EXISTS (SELECT 1 FROM session_prs s WHERE"
-        " s.root_id = p.root_id AND s.branch = p.branch AND s.url IS NOT NULL AND s.merged_at IS NOT NULL)", (root_id, branch)).fetchall()
+        "SELECT state, title, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
+        " AND state IN ('passed', 'failed')", (root_id, branch)).fetchall()
+    merged = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ? AND url IS NOT NULL"
+                             " AND merged_at IS NOT NULL", (root_id, branch)).fetchone()
+    if rows and merged and not session_review.new_since_merge(db, home,merged["pushed_sha"]):
+        return []
     declined = db.conn.execute("SELECT sha FROM session_pr_declined WHERE root_id = ? AND branch = ?",
                                (root_id, branch)).fetchone()
     if declined and any(r["state"] == "passed" for r in rows):
@@ -283,7 +290,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                                         detail="\n".join(checks)))
             home = db.get_workspace(row.workspace_id)
             if home:
-                out += _pr_items(db, row.id, ws["branch"], home.path, link)
+                out += _pr_items(db, row.id, ws["branch"], home, link)
             if home and (stuck := session_sync.needs_you(db, home)):
                 out.append(InboxItemDTO(kind="sync_conflict", reason="session branch conflicts with origin",
                                         detail=stuck, **link))
