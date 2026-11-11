@@ -649,6 +649,7 @@ CREATE TABLE IF NOT EXISTS session_prs (
 CREATE TABLE IF NOT EXISTS session_pr_merges (
     url TEXT PRIMARY KEY,
     state TEXT NOT NULL,            -- merging | submitted | failed
+    owner TEXT,                    -- unique token whose session-pr-merge marker is held while acting
     error TEXT
 );
 -- The session PRs that merged before the branch's next PR replaced them in
@@ -1489,6 +1490,9 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        merge_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(session_pr_merges)")}
+        if "owner" not in merge_cols:
+            self.conn.execute("ALTER TABLE session_pr_merges ADD COLUMN owner TEXT")
         input_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_input_state)")}
         if "observer" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN observer INTEGER NOT NULL DEFAULT 0")

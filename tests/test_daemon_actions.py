@@ -1703,7 +1703,7 @@ def session_pr_forge(db, tmp_path, monkeypatch):
     url = "https://github.com/o/r/pull/42"
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at)"
                     " VALUES ('lead', 'sess', ?, 'head', 1)", (url,))
-    forge = SimpleNamespace(ws=ws, url=url, merges=[], read_hook=None, merge_hook=None, failure=False,
+    forge = SimpleNamespace(ws=ws, url=url, local_head="head", merges=[], read_hook=None, merge_hook=None, failure=False,
                             payload={"state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "head",
                                      "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]})
 
@@ -1737,9 +1737,12 @@ def session_pr_forge(db, tmp_path, monkeypatch):
     monkeypatch.setattr(session_review, "_pr_flights", {})
     monkeypatch.setattr(session_review, "_pr_changed", set())
     monkeypatch.setattr(session_review, "_head_changed", set())
-    monkeypatch.setattr(session_review, "open_pr_for_head", lambda *args: None)
-    monkeypatch.setattr(session_review, "head_pr_known_none", lambda *args: False)
-    monkeypatch.setattr(git, "out", lambda *args, **kwargs: "head")
+    monkeypatch.setattr(session_review, "_head_cache", {
+        ("head", ws.path): (time.monotonic(), {"url": url, "number": 42}),
+    })
+    monkeypatch.setattr(session_review, "_head_flights", set())
+    monkeypatch.setattr(session_review, "_head_roots", {})
+    monkeypatch.setattr(git, "out", lambda *args, **kwargs: forge.local_head)
     forge.items = lambda: inbox._pr_items(db, "lead", "sess", ws, {"root_id": "lead"})
     return forge
 
@@ -1809,6 +1812,66 @@ def test_auto_merge_session_pr_failure_reaches_inbox_once(db, session_pr_forge):
     assert len(forge.merges) == 1
     assert [item.kind for item in forge.items()] == ["pr_failed"]
     assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+    forge.local_head = "unpushed"
+    session_review._head_cache[(forge.local_head, forge.ws.path)] = (time.monotonic(), {})
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+    forge.payload["state"] = "CLOSED"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    assert not forge.items()
+    forge.payload["state"] = "OPEN"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    db.conn.execute("UPDATE session_prs SET merged_at = 1")
+    assert not forge.items()
+    forge.local_head = "head"  # an older HEAD lookup still says this PR is open
+    assert all(item.kind != "pr_failed" for item in forge.items())
+
+
+def test_auto_merge_session_pr_interrupted_owner(db, session_pr_forge):
+    from brindle.daemon import session_review
+    from brindle.db import DB
+
+    forge = session_pr_forge
+    # Upgrading an older database must recover its ownerless claims as well.
+    db.conn.execute("DROP TABLE session_pr_merges")
+    db.conn.execute("CREATE TABLE session_pr_merges (url TEXT PRIMARY KEY, state TEXT NOT NULL, error TEXT)")
+    migrated = DB(db.path)
+    migrated.conn.close()
+    # An earlier daemon died after inserting its claim, before contacting GitHub.
+    db.conn.execute("INSERT INTO session_pr_merges (url, state) VALUES (?, 'merging')", (forge.url,))
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+
+    db.conn.execute("DELETE FROM session_pr_merges WHERE url = ?", (forge.url,))
+    other = DB(db.path)
+    try:
+        def interrupted():
+            # The owner is still live: a second daemon must leave its claim alone.
+            session_review.refresh_pr_states(other)
+            assert not session_review.pr_problem(other, "lead", forge.url)
+            raise SystemExit
+
+        forge.merge_hook = interrupted
+        with pytest.raises(SystemExit):
+            session_review.refresh_pr_states(db)
+        forge.merge_hook = None
+        assert len(forge.merges) == 1
+        payload, forge.payload = forge.payload, None  # the forge cannot confirm the interrupted submission
+        session_review.refresh_pr_states(other)
+        forge.payload = payload
+        assert len(forge.merges) == 1
+        assert [item.kind for item in forge.items()] == ["pr_failed"]
+
+        # If GitHub accepted the interrupted request, reconcile without submitting it again.
+        db.conn.execute("UPDATE session_pr_merges SET state = 'merging' WHERE url = ?", (forge.url,))
+        forge.payload["state"] = "MERGED"
+        session_review.refresh_pr_states(other)
+        assert len(forge.merges) == 1
+        assert not session_review.pr_problem(other, "lead", forge.url)
+        assert db.conn.execute("SELECT state FROM session_pr_merges").fetchone()[0] == "submitted"
+        assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+    finally:
+        other.conn.close()
 
 
 @pytest.mark.parametrize("problem", ["conflict", "ci"])
@@ -1830,6 +1893,9 @@ def test_auto_merge_session_pr_unattended_problem_reaches_inbox(db, session_pr_f
     session_review.refresh_pr_states(db)
     assert [item.kind for item in forge.items()] == ["pr_failed"]
     assert not forge.merges
+    forge.local_head = "unpushed"
+    session_review._head_cache[(forge.local_head, forge.ws.path)] = (time.monotonic(), {})
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
 
 
 @pytest.fixture

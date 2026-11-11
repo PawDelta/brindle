@@ -213,10 +213,15 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
 
     path = home.path
     head, opened = _opened_pr(db, root_id, branch, path)
-    if opened:
-        if problem := session_review.pr_problem(db, root_id, opened["url"]):
+    recorded = db.conn.execute("SELECT url FROM session_prs WHERE root_id = ? AND branch = ?"
+                               " AND url IS NOT NULL AND merged_at IS NULL", (root_id, branch)).fetchone()
+    # A local fix can move HEAD beyond the PR: its failure still needs attention.
+    urls = dict.fromkeys([r["url"] for r in (recorded, opened) if r])
+    for url in urls:
+        if problem := session_review.pr_problem(db, root_id, url):
             return [InboxItemDTO(kind="pr_failed", reason="PR needs attention", detail=problem,
-                                 url=opened["url"], **link)]
+                                 url=url, **link)]
+    if opened:
         gone = db.conn.execute("SELECT 1 FROM session_pr_declined WHERE root_id = ? AND branch = ? AND sha = ?",
                                (root_id, branch, f"{head}|{opened['url']}")).fetchone()
         if gone:

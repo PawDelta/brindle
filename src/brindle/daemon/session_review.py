@@ -36,8 +36,9 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from brindle import agents, autopilot, bus, git, knowledge, pipeline, session_sync, spawn, status_cache, tasks, workspaces
+from brindle import agents, autopilot, bus, gates, git, knowledge, pipeline, session_sync, spawn, status_cache, tasks, workspaces
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
@@ -490,9 +491,39 @@ def _pr_open_state(db: DB, root_id: str) -> bool | None:
     return True if recorded else None
 
 
+def _reconcile_pr_merge(db: DB, row, ws: Workspace) -> bool:
+    """An existing attempt excludes another submission. Reconcile a departed owner.
+
+    A unique marker token identifies ownership without PID reuse or a time limit.
+    The OS releases the marker when the owner exits. An interrupted submission's
+    outcome is uncertain, so check the forge and otherwise ask the person.
+    """
+    url = row["url"]
+    attempt = db.conn.execute("SELECT state, owner FROM session_pr_merges WHERE url = ?", (url,)).fetchone()
+    if attempt is None:
+        return False
+    if attempt["state"] != "merging" or (attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"])):
+        return True
+    owner = uuid4().hex
+    with gates.marker("session-pr-merge", owner):
+        if not db.conn.execute("UPDATE session_pr_merges SET owner = ? WHERE url = ?"
+                               " AND state = 'merging' AND owner IS ?", (owner, url, attempt["owner"])).rowcount:
+            return True
+        payload = workspaces.pull_request_checks(url, ws.repo_root)
+        _set_pr_state(url, pr_state_of(url, payload))
+        finished = payload and payload.get("state") in ("MERGED", "CLOSED")
+        error = None if finished else "The automatic PR merge was interrupted. Check the PR on GitHub before merging it."
+        db.conn.execute("UPDATE session_pr_merges SET state = ?, error = ? WHERE url = ? AND owner = ?",
+                        ("submitted" if finished else "failed", error, url, owner))
+        bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
+    return True
+
+
 def _auto_merge_session_pr(db: DB, row, ws: Workspace) -> None:
     """Claim once across daemons; recheck both the forge and our record before acting."""
     url = row["url"]
+    if _reconcile_pr_merge(db, row, ws):
+        return
     with _pr_lock:
         cached = _pr_cache.get(url)
     if not cached or not cached[1] or cached[1]["state"] != "ready":
@@ -502,42 +533,49 @@ def _auto_merge_session_pr(db: DB, row, ws: Workspace) -> None:
     current = ("SELECT 1 FROM session_prs WHERE root_id = ? AND branch = ? AND url = ?"
                " AND pushed_sha IS ? AND merged_at IS NULL")
     identity = (row["root_id"], row["branch"], url, row["pushed_sha"])
-    if not db.conn.execute(
-        f"INSERT OR IGNORE INTO session_pr_merges (url, state) SELECT ?, 'merging' WHERE EXISTS ({current})",
-        (url, *identity),
-    ).rowcount:
-        return
-    acting = False
-    try:
-        payload = workspaces.pull_request_checks(url, ws.repo_root)
-        fresh = pr_state_of(url, payload)
-        _set_pr_state(url, fresh)
-        if not payload or payload.get("state") != "OPEN" or not fresh or fresh["state"] != "ready":
+    owner = uuid4().hex
+    with gates.marker("session-pr-merge", owner):
+        if not db.conn.execute(
+            f"INSERT OR IGNORE INTO session_pr_merges (url, state, owner) SELECT ?, 'merging', ? WHERE EXISTS ({current})",
+            (url, owner, *identity),
+        ).rowcount:
             return
-        head = payload.get("headRefOid")
-        root = db.get_agent(row["root_id"])
-        if (not head or not root or db.get_workspace(root.workspace_id) != ws
-                or not load_repo_config(ws.repo_root).auto_merge_session_prs
-                or not db.conn.execute(current, identity).fetchone()):
-            return
-        acting = True
-        workspaces.merge_pull_request(url, ws.repo_root, head)
-        db.conn.execute("UPDATE session_pr_merges SET state = 'submitted' WHERE url = ?", (url,))
-    except workspaces.WorkspaceError as exc:
-        db.conn.execute("UPDATE session_pr_merges SET state = 'failed', error = ? WHERE url = ?", (str(exc), url))
-        bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
-    finally:
-        if not acting:
-            db.conn.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'merging'", (url,))
+        acting = False
+        try:
+            payload = workspaces.pull_request_checks(url, ws.repo_root)
+            fresh = pr_state_of(url, payload)
+            _set_pr_state(url, fresh)
+            if not payload or payload.get("state") != "OPEN" or not fresh or fresh["state"] != "ready":
+                return
+            head = payload.get("headRefOid")
+            root = db.get_agent(row["root_id"])
+            if (not head or not root or db.get_workspace(root.workspace_id) != ws
+                    or not load_repo_config(ws.repo_root).auto_merge_session_prs
+                    or not db.conn.execute(current, identity).fetchone()):
+                return
+            acting = True
+            workspaces.merge_pull_request(url, ws.repo_root, head)
+            db.conn.execute("UPDATE session_pr_merges SET state = 'submitted' WHERE url = ?", (url,))
+        except workspaces.WorkspaceError as exc:
+            db.conn.execute("UPDATE session_pr_merges SET state = 'failed', error = ? WHERE url = ?", (str(exc), url))
+            bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
+        finally:
+            if not acting:
+                db.conn.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'merging'", (url,))
 
 
 def pr_problem(db: DB, root_id: str, url: str) -> str | None:
     """A failed merge, or failed/conflicting PR nobody in the session is working on."""
+    with _pr_lock:
+        cached = _pr_cache.get(url)
+    if cached is not None and cached[1] is None:  # the forge knows the PR closed or merged
+        return None
+    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url = ? AND merged_at IS NOT NULL",
+                       (root_id, url)).fetchone():
+        return None
     attempt = db.conn.execute("SELECT error FROM session_pr_merges WHERE url = ? AND state = 'failed'", (url,)).fetchone()
     if attempt:
         return attempt["error"]
-    with _pr_lock:
-        cached = _pr_cache.get(url)
     state = cached[1] if cached else None
     if not state or any(a.status in ("processing", "starting") and a.dismissed_at is None
                         for a in agents.tree(db, root_id)):
