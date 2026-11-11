@@ -669,11 +669,13 @@ def pending(db: DB, p: dict) -> tuple[list[str], list[str], list[int]]:
         ids.append(t["id"])
     last = db.conn.execute("SELECT MAX(rev) FROM plan_revisions WHERE plan_id=? AND author=?",
                            (p["id"], SUPERVISOR)).fetchone()[0] or 0
-    for r in db.conn.execute("SELECT rev, source, changed FROM plan_revisions WHERE plan_id=? AND author=? AND rev>?"
-                             " ORDER BY rev", (p["id"], PERSON, last)):
+    for r in db.conn.execute("SELECT author, rev, source, changed FROM plan_revisions WHERE plan_id=?"
+                             " AND (author=? OR author LIKE ?) AND rev>? ORDER BY rev",
+                             (p["id"], PERSON, TEAMMATE + "%", last)):
         titles = [_title(p, cur, {"kind": "text", "section": s}) for s in json.loads(r["changed"])]
         how = "accepted a suggestion in" if r["source"] == "suggestion" else "edited"
-        line = f"They {how} {', '.join(titles)} (r{r['rev']}); revise from the current text."
+        who = "They" if r["author"] == PERSON else f"Teammate {r['author'][len(TEAMMATE):]}"
+        line = f"{who} {how} {', '.join(titles)} (r{r['rev']}); revise from the current text."
         message.append(line)
         record.append(line)
     return message, record, ids

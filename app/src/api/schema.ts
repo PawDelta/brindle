@@ -55,10 +55,14 @@ export interface ApiSchema {
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
   PlanGateDTO: PlanGateDTO;
+  PlanGatePolicyDTO: PlanGatePolicyDTO;
   PlanGateRowDTO: PlanGateRowDTO;
   PlanOfferDTO: PlanOfferDTO;
   PlanOfferMilestoneDTO: PlanOfferMilestoneDTO;
   PlanOptionDTO: PlanOptionDTO;
+  PlanPolicyOpenDTO: PlanPolicyOpenDTO;
+  PlanPolicyStandInDTO: PlanPolicyStandInDTO;
+  PlanPolicyWaiverDTO: PlanPolicyWaiverDTO;
   PlanReplyDTO: PlanReplyDTO;
   PlanRevisionDTO: PlanRevisionDTO;
   PlanRevisionDetailDTO: PlanRevisionDetailDTO;
@@ -919,18 +923,86 @@ export interface PlanOptionDTO {
 }
 /**
  * A shared plan's build gate (brindle.plans.gate). ``reason``: why it
- * can't build now; ``signed`` of ``required`` sign-offs are in.
+ * can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
+ * every org review rule covering it, including those a listed reviewer meets.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanGateDTO".
  */
 export interface PlanGateDTO {
+  policies?: PlanGatePolicyDTO[];
   reason?: string | null;
   required: number;
   reviewers?: PlanGateRowDTO[];
   signed: number;
-  state: "waiting" | "changes_requested" | "ready" | "closed";
+  state: "waiting" | "changes_requested" | "conflict" | "ready" | "closed";
   waiting_on?: string[];
+}
+/**
+ * An org review rule covering a shared plan, which nobody on the doc can
+ * remove. ``when``: paths, label or any; ``matched``: what in this revision
+ * set it off; ``needs_kind``: team, role or person; ``eligible``: how many
+ * people can meet it today; ``asked_at``: the last Ask again; ``opened_by``:
+ * who the rule counts has read the doc.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanGatePolicyDTO".
+ */
+export interface PlanGatePolicyDTO {
+  approvals: number;
+  asked_at?: number | null;
+  changes_by?: string[];
+  eligible?: number | null;
+  label?: string | null;
+  matched?: string[];
+  met_by?: string[];
+  name: string;
+  needs_kind?: string | null;
+  needs_name?: string | null;
+  note?: string | null;
+  opened_by?: PlanPolicyOpenDTO[];
+  org_id: string;
+  paths?: string[];
+  policy: string;
+  set_at?: number | null;
+  set_by?: string | null;
+  stand_ins?: PlanPolicyStandInDTO[];
+  status: "signed_off" | "changes_requested" | "waiting" | "waived";
+  waiver?: PlanPolicyWaiverDTO | null;
+  when?: string | null;
+}
+/**
+ * Someone a review rule counts who has read the doc, and when they last did.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyOpenDTO".
+ */
+export interface PlanPolicyOpenDTO {
+  at?: number | null;
+  sub: string;
+}
+/**
+ * Someone an org admin named to sign for a review rule until ``until``.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyStandInDTO".
+ */
+export interface PlanPolicyStandInDTO {
+  at?: number | null;
+  by?: string | null;
+  stand_in: string;
+  until: number;
+}
+/**
+ * An org admin's waiver of a review rule, for the revision on screen.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyWaiverDTO".
+ */
+export interface PlanPolicyWaiverDTO {
+  at?: number | null;
+  by: string;
+  reason: string;
 }
 /**
  * One row of a plan's build gate: a reviewer (``sub``) or an org review
@@ -952,15 +1024,16 @@ export interface PlanGateRowDTO {
   you?: boolean;
 }
 /**
- * One revision of a plan: the supervisor's proposal, or the person's
- * edit or accepted suggestion; ``changed``, the sections it changed.
+ * One revision of a plan: the supervisor's proposal, the person's edit
+ * or accepted suggestion, or a teammate's text from the Library (``author``
+ * is teammate:<sub>); ``changed``, the sections it changed.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanRevisionDTO".
  */
 export interface PlanRevisionDTO {
   at: number;
-  author: "supervisor" | "person";
+  author: string;
   changed?: string[];
   rev: number;
   source: "proposal" | "edit" | "suggestion";
@@ -1056,7 +1129,7 @@ export interface PlanVerdictDTO {
 export interface PlanRevisionDetailDTO {
   ask?: string | null;
   at: number;
-  author: "supervisor" | "person";
+  author: string;
   changed?: string[];
   decisions: PlanDecisionDTO[];
   lede: string;

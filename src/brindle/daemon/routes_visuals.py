@@ -244,12 +244,14 @@ def plan_confirm(db: DB, params: dict, body: dict) -> Any:
 
 def _library(db: DB, plan_id: str, work: Callable[[Any], Any]) -> Any:
     from brindle import redact
+    from brindle.daemon import routes_actions as actions
     from brindle.pro import auth, shared_docs
 
     try:
         work(shared_docs)
     except (RuntimeError, auth.TransportError) as e:    # unreachable or refused: not signed out
-        raise ServiceError("upstream", redact.mask(str(e)), 502) from e
+        err = actions.upstream_error(e)
+        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
     return _plan_now(db, plan_id)
 
 
@@ -270,9 +272,74 @@ def plan_sign_off(db: DB, params: dict, body: dict) -> Any:
     return _library(db, params["id"], lambda sd: sd.sign_off(db, params["id"], body.get("rev")))
 
 
+def plan_policy_override(db: DB, params: dict, body: dict) -> Any:
+    """An org admin's waiver of a review rule, or a stand-in for it. Like
+    decide, only the person reaches this; the Library checks they are an admin."""
+    from brindle.pro import review_policies
+
+    return _library(db, params["id"], lambda sd: review_policies.override(
+        db, params["id"], body.get("rev"), body.get("org_id"), body.get("policy"), body.get("action"),
+        body.get("reason"), stand_in=body.get("stand_in"), until=body.get("until")))
+
+
+def plan_policy_ask(db: DB, params: dict, body: dict) -> Any:
+    """An org admin asks a waiting rule's people again. Only the person reaches this."""
+    from brindle.pro import review_policies
+
+    return _library(db, params["id"], lambda sd: review_policies.ask_again(
+        db, params["id"], body.get("rev"), body.get("org_id"), body.get("policy")))
+
+
+def plan_policy_preview(db: DB, params: dict, body: dict) -> Any:
+    """The org rules that would cover this plan once it is shared, from the
+    files its revision on screen says it will change, for the share panel."""
+    from brindle import plan_docs
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    paths =review_policies.design_paths(plan_docs.revision(db, params["id"]))
+    got = actions.docs_org_api("POST", "review-policies/preview", {"paths": paths, "labels": []}).get("policy_reviewers")
+    return {"policies": [r for r in map(review_policies.preview_row, got if isinstance(got, list) else []) if r]}
+
+
+@_json
+def review_policies_read(db: DB, request: Request) -> Any:
+    """An org admin's settings page: the rules, the teams and roles they can
+    name, and the designs each covers now. The Library checks the permission."""
+    from brindle.daemon import routes_actions as actions
+
+    repo = request.query_params.get("repo") or None
+    rules = actions.docs_org_api("GET", "review-policies", repo=repo)
+    org = rules.get("org_id")      # the rest is of the org the rules were, even if the active one changes meanwhile
+    read = lambda tail: actions.docs_org_api("GET", tail, repo=repo, org_id=org)  # noqa: E731
+    return {**rules, "directory": read("review-policies/directory"), "in_review": read("review-policies/in-review")}
+
+
+def review_policies_save(db: DB, params: dict, body: dict) -> Any:
+    """Replace the org's rules. ``org_id`` is the org the form was loaded for;
+    who may save is the Library's to say, so a custom role with the control
+    permission is accepted."""
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    return actions.docs_org_api("PUT", "review-policies", review_policies.save_body(body), repo=body.get("repo"),
+                                org_id=body["org_id"])
+
+
+def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
+    """What saving a draft list would do to the designs in review. Writes nothing."""
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    return actions.docs_org_api("POST", "review-policies/draft-impact", review_policies.save_body(body, draft=True),
+                                repo=body.get("repo"), org_id=body["org_id"])
+
+
 @_json
 def library_people(db: DB, request: Request) -> Any:
-    """The people of the person's org, to pick reviewers from."""
+    """The people of the person's org, to pick reviewers from, leaving out
+    the person (``me``). ``admin_org``: the org whose review rules the doc
+    offers them an override of. Only what to show: the Library decides who may."""
     from urllib.parse import quote
 
     from brindle.daemon import routes_actions as actions
@@ -282,7 +349,8 @@ def library_people(db: DB, request: Request) -> Any:
         return {"people": []}
     members = actions.docs_api("GET", f"/orgs/{quote(ent.org_id, safe='')}/members").get("members")
     return {"people": [{"sub": m["sub"], "email": m.get("email") or ""} for m in members or []
-                       if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub]}
+                       if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub],
+            "me": ent.sub, "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
 
 
 @_json
@@ -328,6 +396,12 @@ ROUTES = [
     Route("/v1/plans/{id}/reviewers", _endpoint(plan_reviewers), methods=["POST"]),
     Route("/v1/plans/{id}/sync", _endpoint(plan_sync), methods=["POST"]),
     Route("/v1/plans/{id}/sign-off", _endpoint(plan_sign_off), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-override", _endpoint(plan_policy_override), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-ask", _endpoint(plan_policy_ask), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-preview", _endpoint(plan_policy_preview), methods=["POST"]),
+    Route("/v1/review-policies", review_policies_read),
+    Route("/v1/review-policies", _endpoint(review_policies_save), methods=["PUT"]),
+    Route("/v1/review-policies/draft-impact", _endpoint(review_policies_impact), methods=["POST"]),
     Route("/v1/library/people", library_people),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),

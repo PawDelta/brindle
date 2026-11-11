@@ -463,6 +463,7 @@ def test_design_doc_round_trip_comment_reply_and_next_revision(db, session):
 
 def _shared(db, pid, review, local_rev=1, remote_rev=1):
     """A plan as a sync leaves it: linked to the Library, with its last review state."""
+    review = {"policy_reviewers": [], **review} if review else review   # the Library always sends the list
     with db.tx() as c:
         c.execute("INSERT INTO plan_shares (plan_id, doc_id, owner, remote_rev, local_rev, review) VALUES (?,'doc','me',?,?,?)"
                   " ON CONFLICT(plan_id) DO UPDATE SET remote_rev=excluded.remote_rev, local_rev=excluded.local_rev,"
@@ -475,7 +476,8 @@ def _signed_off(*subs, rev=1):
 
 TWO = [{"sub": "a", "required": True}, {"sub": "b", "required": True}, {"sub": "c", "required": False}]
 ONE = [{"sub": "a", "required": True}]
-RULE = {"policy": "staff", "name": "Staff sign-off", "approvals": 1, "on_list": ["a"], "met_by": ["a"], "status": "met"}
+RULE = {"org_id": "org_1", "policy": "staff", "name": "Staff sign-off", "approvals": 1, "on_list": ["a"], "met_by": ["a"],
+        "status": "met"}
 
 
 @pytest.fixture

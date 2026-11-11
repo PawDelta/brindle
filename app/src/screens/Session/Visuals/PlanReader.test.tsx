@@ -1,6 +1,6 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import { DaemonError, type Plan, type VisualDTO } from "../../../api/client";
+import { DaemonError, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
 import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
 import { changeBetween } from "./DocText";
@@ -299,6 +299,81 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
+/* A design doc held by one org rule, "security", and a fake Library whose answers carry what was written. */
+type Override = { policy: string; reason: string; stand_in?: string; until?: number };
+const policyRow = (name: string, more = {}) => ({ org_id: "org_1", policy: name, name, approvals: 1, eligible: 6, needs_kind: "team", needs_name: "Security", when: "paths", matched: ["billing/meter.py"], status: "waiting" as "waiting" | "signed_off" | "waived", ...more });
+const policyDoc = (rev: number, security = {}, others: ReturnType<typeof policyRow>[] = []) => doc(rev, "Workers run on your machine.", { gate: { state: "waiting", reason: "Waiting on security (1 of 2 required sign-offs).", required: 2, signed: 1, waiting_on: ["security"],
+  reviewers: [{ sub: "u_b", required: true, status: "signed_off" }, { sub: null, name: "security", required: true, status: "waiting" }], policies: [policyRow("security", security), ...others] } });
+const policyReader = (now: () => Plan, library: { admin_org: string | null; me?: string; people?: LibraryPerson[] }, override: (body: Override) => Plan = now, signOff: () => Plan = now) => {
+  const client = { ...visuals, ...docWrites(now), plan: async () => now(), decidePlan: async () => now(),
+    sharePlan: async () => now(), setPlanReviewers: async () => now(), syncPlan: async () => now(), docScopes: async () => ({ scopes: [] }),
+    libraryPeople: async () => ({ people: [], ...library }), signOffPlan: async () => signOff(), overridePlanPolicy: async (_id: string, body: Override) => override(body) };
+  return (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
+};
+
+it("org policies are locked rows that show a waiver, and only an admin of that org is offered an override", async () => {
+  const waived = policyRow("staff", { status: "waived", waiver: { by: "dana", reason: "Offsite" } });
+  let plan = policyDoc(1, {}, [waived]);
+  const waive = (body: Override) => (plan = policyDoc(1, { status: "waived", waiver: { by: "you", reason: body.reason } }, [waived]));
+
+  const member = render(policyReader(() => plan, { admin_org: null, people: [{ sub: "sam", email: "sam@x" }] }, waive)(visual));
+  const row = await screen.findByTestId("plan-policy-security");
+  expect(screen.getByTestId("plan-status").dataset.held).toBe("policy");
+  expect(screen.queryByTestId("plan-reviewer-security")).toBeNull();
+  expect(screen.getByTestId("plan-policy-staff").dataset.status).toBe("waived");
+  expect(screen.getByTestId("plan-policy-staff").textContent).toContain("Offsite");
+  await act(async () => {});
+  expect(within(row).queryByRole("button", { name: "Waive once" })).toBeNull();
+  member.unmount();
+
+  render(policyReader(() => plan, { admin_org: "org_1", people: [{ sub: "sam", email: "sam@x" }] }, waive)(visual));
+  const adminRow = await screen.findByTestId("plan-policy-security");
+  await within(adminRow).findByRole("button", { name: "Waive once" });
+  expect(within(screen.getByTestId("plan-policy-staff")).queryByRole("button", { name: "Waive once" })).toBeNull();
+  fireEvent.click(within(adminRow).getByRole("button", { name: "Waive once" }));
+  fireEvent.change(within(adminRow).getByRole("textbox", { name: "Reason" }), { target: { value: "Pen test on hold" } });
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-override-security")).getByRole("button", { name: "Waive once" })));
+  expect(screen.getByTestId("plan-policy-security").dataset.status).toBe("waived");
+  expect(screen.getByTestId("plan-policy-security").textContent).toContain("Pen test on hold");
+});
+
+it("a waiver begun on one revision can't be sent over a newer one", async () => {
+  let plan = policyDoc(1);
+  let sent = 0;
+  const reader = policyReader(() => plan, { admin_org: "org_1" }, () => { sent += 1; return plan; });
+  const view = render(reader(visual));
+  const row = await screen.findByTestId("plan-policy-security");
+  fireEvent.click(await within(row).findByRole("button", { name: "Waive once" }));
+  fireEvent.change(within(row).getByRole("textbox", { name: "Reason" }), { target: { value: "Fine as it stood" } });
+
+  plan = policyDoc(2);
+  await act(async () => view.rerender(reader({ ...visual, rev: 2 })));
+  expect(screen.getByTestId("plan-rev").textContent).toBe("rev 2");
+  const draft = screen.getByTestId("plan-policy-override-security");
+  expect(draft.dataset.stale).toBe("true");
+  await act(async () => fireEvent.click(within(draft).getByRole("button", { name: "Waive once" })));
+  expect(sent).toBe(0);
+});
+
+it("an admin can name themself as the only stand-in, and the rule waits until they sign", async () => {
+  const me = "user_1";
+  let plan = policyDoc(1);
+  const reader = policyReader(() => plan, { admin_org: "org_1", me },
+    (body) => (plan = policyDoc(1, { stand_ins: [{ stand_in: body.stand_in!, until: body.until! }] })),
+    () => (plan = policyDoc(1, { status: "signed_off", met_by: [me], stand_ins: [{ stand_in: me, until: 4_000_000_000 }] })));
+  render(reader(visual));
+  const row = await screen.findByTestId("plan-policy-security");
+  fireEvent.click(await within(row).findByRole("button", { name: "Name a stand-in" }));
+  fireEvent.change(within(row).getByRole("combobox", { name: "Stand-in" }), { target: { value: me } });
+  fireEvent.change(within(row).getByLabelText("Stands in until"), { target: { value: "2096-01-01" } });
+  fireEvent.change(within(row).getByRole("textbox", { name: "Reason" }), { target: { value: "Alex is away" } });
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-override-security")).getByRole("button", { name: "Name stand-in" })));
+  expect(screen.getByTestId("plan-policy-security").dataset.status).toBe("waiting");
+
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-security")).getByRole("button", { name: "Sign off" })));
+  expect(screen.getByTestId("plan-policy-security").dataset.status).toBe("signed_off");
+});
+
 it("a design doc edit or comment begun on older text isn't sent over a newer revision's", async () => {
   let now = doc(1, "Workers run on your machine.");
   const calls: string[] = [];
@@ -339,4 +414,27 @@ it.each([
   ["two emoji alike in their second half are swapped whole", "a😀", "a🈀", { start: 1, before: "😀", after: "🈀" }],
 ])("a design doc edit sends only what changed: %s", (_case, source, next, change) => {
   expect(changeBetween(source, next)).toEqual(change);
+});
+
+it("the policies shown before a first share are those of the revision on screen, whatever answers late", async () => {
+  let now = doc(1, "Workers run on your machine.");
+  const asked: { rev: number; reply(rows: string[]): void }[] = [];
+  const row = (policy: string) => ({ org_id: "org_1", policy, name: policy, note: null, when: "paths", label: null, paths: [], matched: ["x"], needs_kind: "team", needs_name: "Security", approvals: 1, eligible: 6 });
+  const client = { ...visuals, ...docWrites(() => now), plan: async () => now, decidePlan: async () => now,
+    sharePlan: async () => now, setPlanReviewers: async () => now, syncPlan: async () => now, signOffPlan: async () => now, overridePlanPolicy: async () => now,
+    docScopes: async () => ({ scopes: [{ kind: "group", id: "g", name: "Core", can_share: true }] }), libraryPeople: async () => ({ people: [] }),
+    previewPlanPolicies: () => new Promise<{ policies: ReturnType<typeof row>[] }>((resolve) => { asked.push({ rev: now.rev, reply: (names) => resolve({ policies: names.map(row) }) }); }) };
+  const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
+  const view = render(reader(visual));
+  fireEvent.click(await screen.findByRole("button", { name: "Share for review" }));
+  await waitFor(() => expect(asked).toHaveLength(1));
+
+  now = doc(2, "Workers run on a machine the customer controls.");
+  await act(async () => view.rerender(reader({ ...visual, rev: 2 })));
+  await waitFor(() => expect(asked).toHaveLength(2));
+  await act(async () => asked[0].reply(["stale-rule"]));
+  expect(screen.queryByTestId("plan-policy-preview")).toBeNull();
+  await act(async () => asked[1].reply(["fresh-rule"]));
+  expect(screen.getByTestId("plan-policy-preview-fresh-rule")).toBeTruthy();
+  expect(screen.queryByTestId("plan-policy-preview-stale-rule")).toBeNull();
 });
