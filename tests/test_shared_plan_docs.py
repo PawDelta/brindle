@@ -462,11 +462,16 @@ def test_a_teammate_with_no_local_plan_gets_the_review_requested_card_from_the_l
 
     pid, lib, net = parts
     queue = {"status": 200, "requests": [{"doc_id": "ad_9", "title": "Cloud workers for Pro", "rev": 3}]}
-    who = {"sub": "u_me", "switch_to": None}
+    who = {"sub": "u_me"}
+    store, alice = net["store"], net["store"].load()
+    bob = {**alice, "access_token": "bob_access", "refresh_token": "bob_refresh"}
+    during = []                                              # what happens to the stored sign-in mid-request
 
     def answer(form, headers):
-        if who["switch_to"]:                                 # the account changes while the request is in flight
-            who["sub"] = who["switch_to"]
+        for record in during:
+            store.save(record)
+        if headers.get("Authorization") != f"Bearer {alice['access_token']}":
+            return 200, {"requests": [{"doc_id": "ad_bob", "title": "Bob's private design"}]}
         return queue["status"], dict(queue)
     backend.routes["GET /me/analysis-docs/review-requests"] = answer
     monkeypatch.setattr(inbox, "_my_sub", lambda: who["sub"])
@@ -492,12 +497,33 @@ def test_a_teammate_with_no_local_plan_gets_the_review_requested_card_from_the_l
     lifecycle._poll_review_queue()
     assert cards() == []
 
-    # An account switch during the request never files the answer under the account that asked.
-    queue["requests"] = [{"doc_id": "ad_other", "title": "Bob's"}]
-    who["switch_to"] = "u_bob"
+    # Alice -> Bob -> Alice while the request runs: it still carries Alice's own token, so Bob's queue never lands under her.
+    during[:] = [bob, alice]
+    queue["requests"] = [{"doc_id": "ad_alice", "title": "Alice's"}]
     lifecycle._poll_review_queue()
-    who["sub"], who["switch_to"] = "u_me", None
-    assert cards() == []
+    assert cards() == [("review_requested", "ad_alice", "Alice's")]
+    during.clear()
+
+    # The stored sign-in is another account's when the poll names its owner, or when an expired token would refresh:
+    # nothing is sent, nothing is stored.
+    store.save(alice)
+    queue["requests"] = []
+    flips = iter([bob])
+    monkeypatch.setattr(inbox, "_my_sub", lambda: (store.save(next(flips, alice)), who["sub"])[1])
+    sent_before = len(sent(backend, "GET /me/analysis-docs/review-requests"))
+    lifecycle._poll_review_queue()
+    assert len(sent(backend, "GET /me/analysis-docs/review-requests")) == sent_before
+    assert cards() == [("review_requested", "ad_alice", "Alice's")]
+    # An expired token is refreshed from the captured record itself, and the request carries the new token.
+    store.save({**alice, "access_expires_at": 0})
+    monkeypatch.setattr(inbox, "_my_sub", lambda: who["sub"])
+    queue["requests"] = [{"doc_id": "ad_fresh", "title": "After refresh"}]
+    seen_token = []
+    backend.routes["GET /me/analysis-docs/review-requests"] = lambda f, h: (
+        seen_token.append(h["Authorization"]), (200, dict(queue)))[1]
+    lifecycle._poll_review_queue()
+    assert cards() == [("review_requested", "ad_fresh", "After refresh")]
+    assert seen_token == [f"Bearer {store.load()['access_token']}"] != [f"Bearer {alice['access_token']}"]
 
 
 def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(db, parts, backend):

@@ -33,25 +33,36 @@ def _items(raw: object) -> list[dict]:
 
 def poll(who: Callable[[], str | None], *, client=None, store=None) -> bool:
     """Read the queue for the signed-in account (``who`` names it) and remember
-    it. The account is read before and after the request, and the answer is
-    dropped unless both agree: the request authenticates with whatever
-    credentials are current, so an account switch in between would otherwise
-    file another person's queue under this one. False (nothing changed) when
-    logged out, offline, refused or switched."""
-    from brindle.pro import analysis_docs as ad
+    it. The request is bound to one captured credential record: the record is
+    read, the account named, and the record read again (it must be unchanged,
+    so ``sub`` is that record's owner). The request then carries that record's
+    own token, and an expired token is refreshed only if the store still holds
+    exactly that record (``auth.refresh_captured``), so a switch of account
+    while it runs can neither change who asks nor file the answer under
+    someone else. False (nothing changed) when logged out, offline, refused or
+    switched."""
+    import time
 
-    sub = who()
-    if not sub:
-        return False
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import auth
+
     try:
-        got = _items(ad.api("GET", PATH, client=client, store=store))
+        client, store = ad._session(client, store)
+        ad.require_entitlement(store)
+        rec = store.load() or {}
+        sub = who()
+        if not sub or not rec.get("refresh_token") or (store.load() or {}) != rec:
+            return False
+        if float(rec.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK:
+            rec = auth.refresh_captured(store, rec, client.transport)
+        status, body = client.call("GET", PATH, None, token=rec.get("access_token"))
     except Exception:  # noqa: BLE001 - keep the cards we have; the next pass tries again
         log.debug("brindle: couldn't read the review queue", exc_info=True)
         return False
-    if who() != sub:
+    if status != 200:
         return False
     with _lock:
-        _seen[sub] = got
+        _seen[sub] = _items(body)
     return True
 
 

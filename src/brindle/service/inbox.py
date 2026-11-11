@@ -406,7 +406,6 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
         return []
     out = []
     links: dict[str, dict] = {}     # a doc this machine has a live plan for: what enriches its queue card
-    hidden: set[str] = set()        # docs of another identity's session: shown nowhere here
     for r in db.conn.execute("SELECT plan_id, doc_id, owner FROM plan_shares WHERE doc_id IS NOT NULL"):
         try:
             p = plans._row(db, r["plan_id"])
@@ -415,8 +414,7 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
         root = db.get_agent(p["root_id"])
         ws = db.get_workspace(root.workspace_id) if root else None
         if root and identity_lock.locked_by(root.id):
-            hidden.add(r["doc_id"])
-            continue
+            continue        # another identity's session: no local link or feedback (the queue is the person's own)
         if p["state"] not in plans.HOLDING or (repo_root and ws and ws.repo_root != repo_root):
             continue
         link = {"doc": r["doc_id"], "request_id": p["id"], "agent_id": root.id if root else None,
@@ -436,8 +434,6 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
     from brindle.pro import review_queue
 
     for q in review_queue.waiting(me):
-        if q["doc_id"] in hidden:
-            continue
         link = links.get(q["doc_id"]) or {"doc": q["doc_id"]}
         out.append(InboxItemDTO(kind="review_requested", reason="Review requested",
                                 detail=link.get("title") or q["title"], **{k: v for k, v in link.items() if k != "title"}))

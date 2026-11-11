@@ -737,7 +737,7 @@ def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, se
     assert kinds() == [("review_requested", "doc")]        # the answer was to r1: r2 needs its own review
     with monkeypatch.context() as m:
         m.setattr(inbox.identity_lock, "locked_by", lambda _id: True)
-        assert kinds() == []                               # another identity's session shows nothing
+        assert [(i.doc, i.request_id) for i in inbox._review_items(db, None)] == [("doc", None)]   # the queue's card, no session link
     asked(False)
     me["sub"] = "me"
     assert kinds() == [("changes_requested", "doc")]
