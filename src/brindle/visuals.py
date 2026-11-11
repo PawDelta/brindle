@@ -449,6 +449,14 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     return get(db, v["id"])
 
 
+def has_approved_design(db: DB, root_id: str) -> bool:
+    """Whether the person chose an option on one of session ``root_id``'s
+    visuals. A viewed visual, or one answered with only a note (a redirect),
+    isn't an approval."""
+    return db.conn.execute("SELECT 1 FROM visuals WHERE root_id=? AND kind='visual' AND answer IS NOT NULL "
+                           "AND json_extract(answer, '$.option') IS NOT NULL", (root_id,)).fetchone() is not None
+
+
 def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
     """The person doesn't want to answer the revision on their screen. It
     leaves the Inbox, stays viewable, and the agent is told so it stops

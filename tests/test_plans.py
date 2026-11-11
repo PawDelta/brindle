@@ -382,6 +382,34 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     assert started == ["build the preset schema"]
 
 
+@pytest.mark.parametrize("answer", [
+    {"option": "build"},
+    pytest.param({"note": "change the split first"}, marks=pytest.mark.variant(
+        "a redirect is not an approval: the offer must still open")),
+])
+def test_approved_design_counts_as_the_plan(answer, db, session, monkeypatch, connected_app):
+    from brindle import autopilot, visuals
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build"}, {"id": "no", "label": "No"}])
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    visuals.answer(db, shown["id"], 1, **answer)
+
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    offers = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    if "option" in answer:
+        assert offers == [] and started == ["build the preset schema"] and plans.holding(db, "boss") is None
+    else:
+        assert len(offers) == 1 and started == []
+
+
 @pytest.mark.variant("reported stall: a terminal-only session's workers held by an offer nobody can answer (review 0.6.3, finding 3)")
 def test_plan_offer_without_app(db, session, monkeypatch):
     from brindle import autopilot

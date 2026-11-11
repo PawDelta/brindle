@@ -774,7 +774,8 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
     """Open the one offer to plan this goal first if it now deserves it: large,
     by milestones, repos (an omitted repo is the root checkout) or workers, or
     design-heavy (brindle.pro.analysis_brief.offer_reasons). Never re-offers a
-    goal already offered or answered, and never while a plan is already open
+    goal already offered or answered, never when the person already approved
+    a visual in this session (it counts as the plan), and never while a plan is already open
     or plans can't be answered (visuals off or no app connected). While the
     offer is open the session's tasks queue behind it (brindle.plans.holding); the person
     answers it from the Inbox (brindle.plans.answer_offer). Run when the goal
@@ -786,7 +787,8 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
 
         ap = db.get_autopilot(root_id)
         if ap is None or not ap.goal or ap.plan_offer is not None or not visuals.enabled() \
-                or not holds.app_connected() or plans.open_plan(db, root_id) is not None:
+                or not holds.app_connected() or plans.open_plan(db, root_id) is not None \
+                or visuals.has_approved_design(db, root_id):
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
