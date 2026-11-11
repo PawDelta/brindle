@@ -111,24 +111,32 @@ it("shows what saving would do only for the draft on the form, and holds saves a
 
 it("overlapping reloads keep the newest read, and a draft for the org just loaded survives the older one finishing", async () => {
   const reads: { answer(r: Response): void }[] = [];
-  const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: async (input) => {
+  const puts: { org_id: string; version: number }[] = [];
+  const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: async (input, init) => {
+    if (init?.method === "PUT") { puts.push(JSON.parse(String(init.body))); return Response.json({ version: 9, policies: [] }); }
     if (String(input).includes("library/people")) return Response.json({ people: [] });
     return new Promise<Response>((resolve) => reads.push({ answer: resolve }));
   } });
-  const answer = (i: number, org: string) => reads[i].answer(Response.json(
-    { org_id: org, version: 1, policies: [], directory: { teams: [{ id: "t_1", name: "Security" }], roles: [] }, in_review: { policies: [] } }));
+  const answer = (i: number, org: string, version: number) => reads[i].answer(Response.json(
+    { org_id: org, version, policies: [], directory: { teams: [{ id: "t_1", name: "Security" }], roles: [] }, in_review: { policies: [] } }));
   render(<ReviewPolicies client={client} />);
   fireEvent.click(screen.getByRole("button", { name: "Review policies" }));
   await waitFor(() => expect(reads).toHaveLength(1));
-  await act(async () => answer(0, "org_a"));
+  await act(async () => answer(0, "org_a", 1));
   await screen.findByRole("form", { name: "New policy" });
 
   fireEvent.click(screen.getByRole("button", { name: "Reload policies" }));
   fireEvent.click(screen.getByRole("button", { name: "Reload policies" }));
   await waitFor(() => expect(reads).toHaveLength(3));
-  // The first reload is superseded by the second: its answer is dropped, not applied over newer state.
-  await act(async () => answer(2, "org_b"));
+  // The newer reload loads org B and the person starts a draft for it; the older one then finishes, with
+  // org B's earlier version. It is dropped: it neither erases the draft nor puts older state under it.
+  await act(async () => answer(2, "org_b", 5));
   type("Name", "B draft");
-  await act(async () => answer(1, "org_a"));
+  await act(async () => answer(1, "org_b", 4));
   expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("B draft");
+  type("Paths", "b/**");
+  type("Approvers", "team:t_1");
+  save();
+  await waitFor(() => expect(puts).toHaveLength(1));
+  expect(puts[0]).toMatchObject({ org_id: "org_b", version: 5 });
 });
