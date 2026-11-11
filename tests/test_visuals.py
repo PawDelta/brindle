@@ -1,7 +1,11 @@
+import os
+import re
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from brindle import agents, bus, git, mcp_server, visual_offers, visuals
@@ -65,6 +69,96 @@ def test_publish_refuses_each_bad_page(db, session, monkeypatch, caller, html, o
     assert (v["root_id"], v["by_agent"], v["rev"]) == ("boss", "w1", 1)
     assert visuals.page_path(ws.repo_root, "boss", v["id"], 1).read_text() == html
     assert (visuals.store_root(ws.repo_root) / ".gitignore").exists()
+
+
+def test_publish_visual_from_a_file(db, session, tmp_path, monkeypatch):
+    ws, boss, worker = session
+    worktree = tmp_path / "worker"
+    worktree.mkdir()
+    db.conn.execute("UPDATE workspaces SET path=? WHERE id=?", (str(worktree), ws.id))
+    db.conn.commit()
+    monkeypatch.setenv("BRINDLE_AGENT_ID", boss.id)
+    # Platform temp roots may be aliases, such as macOS /tmp -> /private/tmp.
+    temp_alias = tmp_path / "temp-alias"
+    temp_alias.symlink_to(tmp_path, target_is_directory=True)
+    monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(temp_alias))
+    scratchpad = (tmp_path / f"claude-{os.getuid()}" / re.sub(r"[^A-Za-z0-9]", "-", str(worktree))
+                  / "session" / "scratchpad")
+    scratchpad.mkdir(parents=True)
+    page = worktree / "page.html"
+    html = '<p>café</p><img src="data:image/png;base64,aGk=">'
+    page.write_text(html, encoding="utf-8")
+    scratch_page = scratchpad / "page.html"
+    scratch_page.write_text(html, encoding="utf-8")
+    inside_link = worktree / "inside.html"
+    inside_link.symlink_to(page)
+
+    monkeypatch.setattr(visual_offers, "consume", REAL_CONSUME)
+    for source in (page, scratch_page, inside_link.relative_to(worktree)):
+        visual_offers.person_spoke(db, boss, "show this page", typed=True)
+        mcp_server.publish_visual("Page", html_path=str(source), asked="show this page")
+        v = visuals.for_session(db, boss.id)[-1]
+        assert visuals.page_path(ws.repo_root, boss.id, v["id"], 1).read_text(encoding="utf-8") == html
+
+    outside = tmp_path / "outside.html"
+    outside.write_text("outside", encoding="utf-8")
+    repo_page = Path(ws.repo_root) / "page.html"
+    repo_page.write_text("other checkout", encoding="utf-8")
+    escaped = worktree / "escaped.html"
+    escaped.symlink_to(outside)
+    scratch_escape = scratchpad / "escaped.html"
+    scratch_escape.symlink_to(outside)
+    outside_session = tmp_path / "outside-session"
+    outside_scratchpad = outside_session / "scratchpad"
+    outside_scratchpad.mkdir(parents=True)
+    outside_scratch_page = outside_scratchpad / "page.html"
+    outside_scratch_page.write_text("outside scratchpad", encoding="utf-8")
+    linked_session = scratchpad.parent.parent / "linked-session"
+    linked_session.symlink_to(outside_session, target_is_directory=True)
+    real_read = Path.read_text
+
+    def guarded_read(path, *args, **kwargs):
+        assert path.resolve() not in (outside.resolve(), repo_page.resolve(), outside_scratch_page.resolve(),
+                                     tmp_path / "outside-project" / "session" / "scratchpad" / "page.html"), \
+            "outside file must never be read"
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read)
+    for source in (outside, escaped, scratch_escape, repo_page, linked_session / "scratchpad" / "page.html"):
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("Page", html_path=str(source), asked="show this page")
+    # The project ancestor can redirect scratchpad discovery too.
+    project = scratchpad.parent.parent
+    moved_project = tmp_path / "outside-project"
+    project.rename(moved_project)
+    project.symlink_to(moved_project, target_is_directory=True)
+    with pytest.raises(ToolError):
+        mcp_server.publish_visual("Page", html_path=str(scratch_page), asked="show this page")
+    project.unlink()
+    moved_project.rename(project)
+    for kwargs in ({}, {"html": html, "html_path": str(page)}):
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("Page", **kwargs)
+    for source in (worktree / "missing.html", worktree):
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("Page", html_path=str(source))
+    page.write_bytes(b"\xff")
+    with pytest.raises(ToolError):
+        mcp_server.publish_visual("Page", html_path=str(page))
+    for content, code in (("x" * (visuals.MAX_BYTES + 1), "too_big"), (SECRET, "secret")):
+        page.write_text(content, encoding="utf-8")
+        with pytest.raises(ToolError) as refused:
+            mcp_server.publish_visual("Page", html_path=str(page))
+        assert refused.value.__cause__.code == code
+    page.write_text(html, encoding="utf-8")
+    with pytest.raises(ToolError) as refused:
+        mcp_server.publish_visual("Page", html_path=str(page))
+    assert refused.value.__cause__.code == "visual_request_required"
+    monkeypatch.delenv("BRINDLE_AGENT_ID")
+    monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, ws))
+    with pytest.raises(ToolError):
+        mcp_server.publish_visual("Page", html_path=str(page))
+    assert len(visuals.for_session(db, boss.id)) == 3
 
 
 def test_note_only_answers_reach_the_supervisor(db, session, client):
