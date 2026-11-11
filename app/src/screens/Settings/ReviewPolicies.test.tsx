@@ -129,6 +129,16 @@ it("removes a rule only once the list-without-rule impact is shown, and a remova
   await waitFor(() => expect(lib.impacts).toHaveLength(2));
   await act(async () => lib.impacts[1].reply(2));
   await waitFor(() => expect(confirm().disabled).toBe(false));
+  // Keep, then reopen the same removal: its earlier count must not enable Confirm while the new one is pending.
+  fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove Security review" }));
+  await waitFor(() => expect(lib.impacts).toHaveLength(3));
+  expect(confirm().disabled).toBe(true);
+  fireEvent.click(confirm());
+  expect(lib.puts).toHaveLength(0);
+  await act(async () => lib.impacts[2].reply(3));
+  expect(screen.getByTestId("review-policy-remove-applies").dataset.count).toBe("3");
+  await waitFor(() => expect(confirm().disabled).toBe(false));
   fireEvent.click(confirm());
   await waitFor(() => expect(lib.puts).toHaveLength(1));
   expect(lib.puts[0]).toMatchObject({ org_id: "org_2", version: 4, policies: [{ id: "staff" }] });

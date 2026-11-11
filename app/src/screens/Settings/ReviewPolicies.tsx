@@ -92,7 +92,9 @@ function Policies({ client }: { client: DaemonClient }) {
   const [stale, setStale] = useState(false);
   /* The rule whose removal is awaiting confirmation in its row, bound to the org it was opened under, and
      what the list without it would cover (result null when that count failed). */
-  const [removing, setRemoving] = useState<{ id: string; org: string } | null>(null);
+  const [removing, setRemoving] = useState<{ id: string; org: string; opening: number } | null>(null);
+  /* Each opening of a removal gets its own number, so a count from an earlier opening never answers this one. */
+  const openings = useRef(0);
   const [removeImpact, setRemoveImpact] = useState<{ key: string; result: DraftImpact | null } | null>(null);
 
   /* Reading again keeps the draft, unless it was written for another org's rules. */
@@ -166,7 +168,7 @@ function Policies({ client }: { client: DaemonClient }) {
 
   /* Removing a rule asks for the whole list without it, of the org loaded, once per confirmation. */
   const removeKey = state && removing && removing.org === state.org_id
-    ? JSON.stringify([state.org_id, removing.id, state.policies.filter((r) => r.id !== removing.id)]) : null;
+    ? JSON.stringify([state.org_id, removing.id, removing.opening, state.policies.filter((r) => r.id !== removing.id)]) : null;
   useEffect(() => {
     if (!state || !removing || !removeKey) return;
     let live = true;
@@ -249,7 +251,7 @@ function Policies({ client }: { client: DaemonClient }) {
                 <span>{n === 0 ? "None right now" : `${n} design${n === 1 ? "" : "s"} in review`}</span>
                 <span className="flex justify-self-end gap-s1">
                   <button type="button" className={quiet} aria-label={`Edit ${rule.name}`} onClick={() => edit(rule)}>Edit</button>
-                  <button type="button" className={quiet} aria-label={`Remove ${rule.name}`} onClick={() => setRemoving({ id: rule.id, org: state.org_id })}>Remove</button>
+                  <button type="button" className={quiet} aria-label={`Remove ${rule.name}`} onClick={() => setRemoving({ id: rule.id, org: state.org_id, opening: ++openings.current })}>Remove</button>
                 </span>
               </div>
               {removing?.id === rule.id && (
