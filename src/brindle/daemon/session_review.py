@@ -318,7 +318,8 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
     total}`` with state ``ci`` (checks still running; ``done`` of ``total``
     finished), ``failed``, ``ready`` (every check passed, no conflicts) or
     ``unknown`` (no payload, no checks yet, conflicts: never a guess at
-    ready). None when the PR is no longer open."""
+    ready). ``conflicting`` flags a known conflict for the Inbox.
+    None when the PR is no longer open."""
     found = re.search(r"/pull/(\d+)", url)
     if not found:
         return None
@@ -327,6 +328,8 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
         return out
     if payload.get("state") not in (None, "OPEN"):
         return None
+    if payload.get("mergeable") == "CONFLICTING":
+        out["conflicting"] = True
     marks = []      # per check: "pass", "fail" or "wait" (a check run not completed, a status still pending)
     for check in payload.get("statusCheckRollup") or []:
         if "status" in check and check["status"] != "COMPLETED":
@@ -355,6 +358,10 @@ def _read_pr_state(url: str, cwd: str) -> None:
     except Exception:  # noqa: BLE001 - an unreadable PR is just unknown
         log.exception("brindle: couldn't read a session PR's checks")
         state = pr_state_of(url, None)
+    _set_pr_state(url, state)
+
+
+def _set_pr_state(url: str, state: dict[str, Any] | None) -> None:
     with _pr_lock:
         before = _pr_cache[url][1] if url in _pr_cache else pr_state_of(url, None)
         _pr_cache[url] = (time.monotonic(), state)
@@ -483,16 +490,76 @@ def _pr_open_state(db: DB, root_id: str) -> bool | None:
     return True if recorded else None
 
 
+def _auto_merge_session_pr(db: DB, row, ws: Workspace) -> None:
+    """Claim once across daemons; recheck both the forge and our record before acting."""
+    url = row["url"]
+    with _pr_lock:
+        cached = _pr_cache.get(url)
+    if not cached or not cached[1] or cached[1]["state"] != "ready":
+        return
+    if not load_repo_config(ws.repo_root).auto_merge_session_prs:
+        return
+    current = ("SELECT 1 FROM session_prs WHERE root_id = ? AND branch = ? AND url = ?"
+               " AND pushed_sha IS ? AND merged_at IS NULL")
+    identity = (row["root_id"], row["branch"], url, row["pushed_sha"])
+    if not db.conn.execute(
+        f"INSERT OR IGNORE INTO session_pr_merges (url, state) SELECT ?, 'merging' WHERE EXISTS ({current})",
+        (url, *identity),
+    ).rowcount:
+        return
+    acting = False
+    try:
+        payload = workspaces.pull_request_checks(url, ws.repo_root)
+        fresh = pr_state_of(url, payload)
+        _set_pr_state(url, fresh)
+        if not payload or payload.get("state") != "OPEN" or not fresh or fresh["state"] != "ready":
+            return
+        head = payload.get("headRefOid")
+        root = db.get_agent(row["root_id"])
+        if (not head or not root or db.get_workspace(root.workspace_id) != ws
+                or not load_repo_config(ws.repo_root).auto_merge_session_prs
+                or not db.conn.execute(current, identity).fetchone()):
+            return
+        acting = True
+        workspaces.merge_pull_request(url, ws.repo_root, head)
+        db.conn.execute("UPDATE session_pr_merges SET state = 'submitted' WHERE url = ?", (url,))
+    except workspaces.WorkspaceError as exc:
+        db.conn.execute("UPDATE session_pr_merges SET state = 'failed', error = ? WHERE url = ?", (str(exc), url))
+        bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
+    finally:
+        if not acting:
+            db.conn.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'merging'", (url,))
+
+
+def pr_problem(db: DB, root_id: str, url: str) -> str | None:
+    """A failed merge, or failed/conflicting PR nobody in the session is working on."""
+    attempt = db.conn.execute("SELECT error FROM session_pr_merges WHERE url = ? AND state = 'failed'", (url,)).fetchone()
+    if attempt:
+        return attempt["error"]
+    with _pr_lock:
+        cached = _pr_cache.get(url)
+    state = cached[1] if cached else None
+    if not state or any(a.status in ("processing", "starting") and a.dismissed_at is None
+                        for a in agents.tree(db, root_id)):
+        return None
+    if state.get("conflicting"):
+        return "The PR conflicts with its base branch."
+    if state["state"] == "failed":
+        return "The PR's CI checks failed."
+    return None
+
+
 def refresh_pr_states(db: DB) -> None:
     """Daemon thread, every sweep: keep each open session PR's checks fresh
-    and announce (``session.pr_checks``, which the app's goal reloads on) the
-    ones whose line changed since it was last shown."""
-    for row in db.conn.execute("SELECT root_id, url FROM session_prs WHERE url IS NOT NULL"
+    and merge ready ones when enabled. Announce (``session.pr_checks``, which
+    the app's goal reloads on) the ones whose line changed since it was shown."""
+    for row in db.conn.execute("SELECT root_id, branch, url, pushed_sha FROM session_prs WHERE url IS NOT NULL"
                                " AND merged_at IS NULL").fetchall():
         root = db.get_agent(row["root_id"])
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is not None:
             _ask_pr_state(row["url"], ws.repo_root)
+            _auto_merge_session_pr(db, row, ws)
     with _pr_lock:
         found = {_head_roots[k] for k in _head_changed if k in _head_roots}
         _head_changed.clear()

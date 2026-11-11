@@ -214,6 +214,9 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
     path = home.path
     head, opened = _opened_pr(db, root_id, branch, path)
     if opened:
+        if problem := session_review.pr_problem(db, root_id, opened["url"]):
+            return [InboxItemDTO(kind="pr_failed", reason="PR needs attention", detail=problem,
+                                 url=opened["url"], **link)]
         gone = db.conn.execute("SELECT 1 FROM session_pr_declined WHERE root_id = ? AND branch = ? AND sha = ?",
                                (root_id, branch, f"{head}|{opened['url']}")).fetchone()
         if gone:

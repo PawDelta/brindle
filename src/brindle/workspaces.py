@@ -904,12 +904,24 @@ def pull_request_checks(url: str, cwd: str) -> dict | None:
     if not shutil.which("gh"):
         return None
     try:
-        out = spawn.read(["gh", "pr", "view", url, "--json", "state,mergeable,statusCheckRollup"],
+        out = spawn.read(["gh", "pr", "view", url, "--json", "state,mergeable,statusCheckRollup,headRefOid"],
                          cwd=cwd, text=True, timeout=PR_CHECKS_SECONDS)
         payload = json.loads(out.stdout) if out.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, spawn.Busy, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def merge_pull_request(url: str, cwd: str, head: str) -> None:
+    """Merge exactly the checked head, leaving branch cleanup to session sync."""
+    try:
+        result = spawn.action(["gh", "pr", "merge", url, "--squash", "--match-head-commit", head],
+                              cwd=cwd, timeout=GH_SECONDS, no_terminal=True)
+    except (OSError, subprocess.SubprocessError, spawn.Busy) as exc:
+        raise WorkspaceError("The automatic PR merge could not complete. Check the PR on GitHub.") from exc
+    if result.returncode:
+        # Forge output can contain credential details; keep it out of the Inbox.
+        raise WorkspaceError("GitHub refused the automatic PR merge. Check the PR's merge requirements.")
 
 
 def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
