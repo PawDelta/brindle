@@ -434,6 +434,8 @@ def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str,
             if not c.execute("INSERT OR IGNORE INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
                              (key, kind, time.time())).rowcount:
                 return
+    bus.publish_agent(db, "overlap", caller_root, files=list(clash.shared_files), holder=clash.holder,
+                      holder_root=clash.holder_root, outcome=outcome)
     # The event a repo's coordinator wakes on (brindle.coordinator).
     knowledge.note(db, caller_root, knowledge.CLASH,
                    {"warning": clash.warning, "holder": clash.holder,
