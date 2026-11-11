@@ -37,6 +37,7 @@ class Library:
         self.permissions, self.reviewers, self.create_status, self.share_status = {}, [], 200, 200
         self.lose_answer, self.lose_create, self.list_status, self.plan = False, False, 200, None
         self.sign_offs, self.author, self.refuse_accept = [], "u_e", False
+        self.answer_status, self.refuse_suggest = 200, False     # once committed, answer this; refuse before committing
         remote.routes.update({
             **{f"POST {DESIGN}/threads/{n}": functools.partial(self.act, n) for n in range(1, 12)},
             f"POST {DESIGN}/comments": self.comment, f"POST {DESIGN}/suggestions": self.suggest,
@@ -63,6 +64,8 @@ class Library:
     def answer(self):
         if self.lose_answer:
             raise auth.AuthError("offline", code="network")
+        if self.answer_status != 200:
+            return self.answer_status, {"error": "server_error"}
         return 200, self.view()
 
     def next_id(self):
@@ -81,6 +84,8 @@ class Library:
         return self.answer()
 
     def suggest(self, form, headers):
+        if self.refuse_suggest:
+            return 503, {"error": "unavailable"}
         self.threads.append({"id": self.next_id(), "author": "user_1", "text": form["text"], "kind": "suggestion",
                              "rev": form["rev"], "status": "open", "replies": [], "after": form["after"], "at": 9.0,
                              "anchor": {"kind": "text", "section": form["section"], "start": form["start"],
@@ -390,6 +395,54 @@ def test_an_accept_the_library_refuses_holds_the_text_until_it_goes_through(db, 
     plan_docs.edit(db, pid, 2, "summary", 0, "Agents", "Hosts")
     sd.sync(db, pid, **net)
     assert len(sent(backend, f"POST {DESIGN}/threads/1")) == 2
+
+
+def test_acceptances_replay_in_order_on_the_text_each_was_made_on(db, parts, backend):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    plan_docs.accept(db, pid, plan_docs.suggest(db, pid, 1, "summary", 0, "Workers", "Hosts"), 1)
+    plan_docs.accept(db, pid, plan_docs.suggest(db, pid, 2, "summary", 0, "Hosts", "Agents"), 2)
+
+    # The suggestion can't be made yet: nothing goes past it, and the text waits.
+    lib.refuse_suggest = True
+    with pytest.raises(RuntimeError):
+        sd.sync(db, pid, **net)
+    assert lib.content["sections"][0]["markdown"] == SUMMARY and sd.link(db, pid)["local_rev"] == 1
+
+    # Each is made on the text it changed and closed by the Library's accept; no bulk upload needed.
+    lib.refuse_suggest = False
+    assert sd.sync(db, pid, **net)["pushed"] is True
+    assert [s["before"] for s in sent(backend, f"POST {DESIGN}/suggestions")[1:]] == ["Workers", "Hosts"]
+    assert [t["status"] for t in lib.threads] == ["accepted", "accepted"]
+    assert lib.content["sections"][0]["markdown"] == SUMMARY.replace("Workers", "Agents", 1)
+    assert not sent(backend, f"POST {DESIGN}/revisions")
+
+    # An edit the suggestion was written on goes up first, as its own revision.
+    plan_docs.edit(db, pid, 3, "summary", 0, "Agents", "Nodes")
+    plan_docs.accept(db, pid, plan_docs.suggest(db, pid, 4, "summary", 0, "Nodes", "Boxes"), 4)
+    assert sd.sync(db, pid, **net)["pushed"] is True
+    [edit] = sent(backend, f"POST {DESIGN}/revisions")
+    assert edit["rev"] == 3 and edit["sections"][0]["markdown"].startswith("Nodes")
+    assert [t["status"] for t in lib.threads] == ["accepted"] * 3
+    assert lib.content["sections"][0]["markdown"] == SUMMARY.replace("Workers", "Boxes", 1)
+    assert sd.link(db, pid)["local_rev"] == 5
+
+
+@pytest.mark.variant("from review: a write the Library committed before a 500 was pulled as a teammate's and resent")
+def test_a_comment_the_library_committed_before_a_server_error_stays_one_thread(db, parts, backend):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    mine = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Which ones?")
+    lib.answer_status = 500
+    sd.sync(db, pid, **net)
+    lib.answer_status = 200
+    sd.sync(db, pid, **net)
+    assert len(lib.threads) == 1 and len(sent(backend, f"POST {DESIGN}/comments")) == 1
+    assert [t["author"] for t in plan_docs.fields(db, plans.get(db, pid))["threads"]] == ["person"]
+
+    plan_docs.resolve(db, pid, mine)
+    sd.sync(db, pid, **net)
+    assert lib.threads[0]["status"] == "resolved"
 
 
 @pytest.mark.variant("from review: identical text on another anchor was taken for the sent comment and resolved it")

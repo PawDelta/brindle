@@ -54,7 +54,7 @@ STATUSES = ("open", "resolved", "accepted", "rejected")
 REVIEWER_GRANT = {"can_suggest": True, "can_comment": True}   # a reviewer must be able to answer
 SENDING = "sending"          # plan_share_threads.status of a write sent, its answer not yet back (remote_id: -local)
 # What the person's change to a thread is called in the Library. Not an accept:
-# that is sent only ahead of the revision holding it (_send_accepts).
+# that is sent only on the text it was made on (_send_revisions).
 THREAD_ACTIONS = {("comment", "resolved"): "resolve", ("comment", "open"): "reopen",
                   ("suggestion", "rejected"): "reject"}
 
@@ -541,46 +541,75 @@ def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict
     with db.tx() as c:
         c.execute("INSERT OR REPLACE INTO plan_share_threads (plan_id, remote_id, local_id, status) VALUES (?,?,?,?)",
                   (plan_id, -t["id"], t["id"], SENDING))
-    sent = head.send(tail, body)
+    status, resp = head.write(tail, body)
     with db.tx() as c:
-        if sent:
+        if status == 200:
             _link_own(c, plan_id, owner, _known(c, plan_id), head.view.get("threads"))
-        else:
+        elif status < 500:      # refused outright. After a server error it may have landed: the next pull will say
             c.execute("DELETE FROM plan_share_threads WHERE plan_id=? AND remote_id=?", (plan_id, -t["id"]))
+    if status != 200:
+        log.info("shared doc %s: %s refused (%s), kept for the next sync", head.doc_id, tail, resp.get("error"))
 
 
-def _send_accepts(db: DB, plan_id: str, owner: str, head: _Head, newest: int) -> bool:
-    """Send each suggestion accepted here since the head last held this plan.
-    The Library's accept makes the revision and closes the thread, and can't
-    be sent later: on a head that already holds the change it would apply it
-    again, and it refuses ``resolve`` on a suggestion. So they go ahead of
-    any revision, and one refused stops the revision too (raised): sending
-    the text anyway would strand the thread open. The person's own suggestion
-    accepted before it ever went up is made first, on the text the head holds."""
-    share_ = link(db, plan_id)
-    base = plan_docs.revision(db, plan_id, share_["local_rev"])
-    since = base["created_at"]
-    for t in _unsent(db, plan_id):
-        if t["kind"] == "suggestion" and t["status"] == "accepted" and t["updated_at"] > since:
-            _send_thread(db, plan_id, owner, head, t, base)
+def _send_revision(db: DB, plan_id: str, head: _Head, rev: int) -> bool:
+    """Put local revision ``rev`` on the Library's head. False if the head
+    moved since it was read: a conflict for now, the next sync looks again."""
+    status, resp = head.write("/revisions", _content(plan_docs.revision(db, plan_id, rev)))
+    if status == 409 and resp.get("error") == "stale":
+        head.view = {**head.view, "rev": resp.get("rev")}
+        return False
+    if status != 200:
+        raise RuntimeError(resp.get("error") or f"HTTP {status}")
+    with db.tx() as c:
+        _set_head(c, plan_id, head.rev, rev)
+    return True
+
+
+def _send_revisions(db: DB, plan_id: str, owner: str, head: _Head, newest: int) -> bool:
+    """Bring the Library's head up to revision ``newest``, in as few revisions
+    as the suggestions accepted here allow. Each acceptance is replayed on
+    the exact text it was made on: the revision before it goes up first if
+    the head doesn't hold it, the suggestion is made there if it never went
+    up, and the Library's own accept then makes the revision and closes the
+    thread. It can't be sent later (on text already holding the change it
+    would apply it again, and ``resolve`` is refused on a suggestion), so a
+    step that fails stops the rest (raised) and the text waits for it.
+    Returns whether the head holds a new revision from here."""
+    local, moved = link(db, plan_id)["local_rev"], False
     rows = db.conn.execute(
-        "SELECT s.remote_id FROM plan_threads t JOIN plan_share_threads s ON s.plan_id=t.plan_id AND s.local_id=t.id"
-        " WHERE t.plan_id=? AND t.kind='suggestion' AND t.status='accepted' AND s.status='open' AND s.remote_id>0"
-        " AND t.updated_at>? ORDER BY t.updated_at", (plan_id, since)).fetchall()
-    sent = False
-    local = share_["local_rev"]
-    for row in rows:
-        status, resp = head.write(f"/threads/{row['remote_id']}", {"action": "accept"})
+        "SELECT r.rev AS made_rev, s.remote_id, t.* FROM plan_revisions r JOIN plan_threads t ON t.plan_id=r.plan_id"
+        " AND t.updated_at=r.created_at AND t.kind='suggestion' AND t.status='accepted'"
+        " LEFT JOIN plan_share_threads s ON s.plan_id=t.plan_id AND s.local_id=t.id AND s.remote_id>0"
+        " WHERE r.plan_id=? AND r.source='suggestion' AND r.rev>? AND (s.remote_id IS NULL OR s.status='open')"
+        " AND t.id NOT IN (SELECT local_id FROM plan_share_threads WHERE plan_id=? AND remote_id<0 AND status<>?)"
+        " ORDER BY r.rev", (plan_id, local, plan_id, SENDING)).fetchall()
+    for t in rows:
+        before = t["made_rev"] - 1
+        if local != before:
+            if not _send_revision(db, plan_id, head, before):
+                return moved
+            local, moved = before, True
+        remote = t["remote_id"]
+        if remote is None:
+            _send_thread(db, plan_id, owner, head, t, plan_docs.revision(db, plan_id, before))
+            found = db.conn.execute("SELECT remote_id FROM plan_share_threads WHERE plan_id=? AND local_id=?"
+                                    " AND remote_id>0", (plan_id, t["id"])).fetchone()
+            if found is None:
+                raise RuntimeError(f"the Library didn't take a suggestion accepted here, so r{newest} wasn't sent")
+            remote = found["remote_id"]
+        status, resp = head.write(f"/threads/{remote}", {"action": "accept"})
         if status != 200:
             raise RuntimeError(f"the Library refused an accepted suggestion ({resp.get('error') or status}), "
                                f"so r{newest} wasn't sent")
-        sent = True
-        local = _landed(db, plan_id, local, newest, head.view) or local
+        moved = True
+        local = _landed(db, plan_id, before, t["made_rev"], head.view) or local
         with db.tx() as c:
             c.execute("UPDATE plan_share_threads SET status='accepted' WHERE plan_id=? AND remote_id=?",
-                      (plan_id, row["remote_id"]))
+                      (plan_id, remote))
             _set_head(c, plan_id, head.rev, local)
-    return sent
+    if local == newest:
+        return moved
+    return _send_revision(db, plan_id, head, newest) or moved
 
 
 def _send_text(db: DB, plan_id: str, head: _Head) -> bool:
@@ -599,26 +628,15 @@ def _send_text(db: DB, plan_id: str, head: _Head) -> bool:
         share_, moved = link(db, plan_id), True
     if share_["local_rev"] == cur["rev"]:
         return moved
-    moved = _send_accepts(db, plan_id, share_["owner"], head, cur["rev"]) or moved
-    if link(db, plan_id)["local_rev"] == cur["rev"]:
-        return moved
-    status, resp = head.write("/revisions", _content(cur))
-    if status == 409 and resp.get("error") == "stale":
-        head.view = {**head.view, "rev": resp.get("rev")}        # moved since it was read: a conflict for now
-        return moved
-    if status != 200:
-        raise RuntimeError(resp.get("error") or f"HTTP {status}")
-    with db.tx() as c:
-        _set_head(c, plan_id, head.rev, cur["rev"])
-    return True
+    return _send_revisions(db, plan_id, share_["owner"], head, cur["rev"]) or moved
 
 
 def _send_threads(db: DB, plan_id: str, owner: str, head: _Head) -> None:
     """Send the person's new comments, suggestions and replies, whatever has
     happened to them since: a thread closed before its first send goes up,
     then _send_actions closes it. A reply waits for its thread to be in the
-    Library (a supervisor's never will be). An accepted suggestion still here
-    was written on text the Library never had, and its change is in the text."""
+    Library (a supervisor's never will be). An accepted suggestion goes up
+    with its revision (_send_revisions), never here on text that holds it."""
     cur = plan_docs.revision(db, plan_id)
     for t in _unsent(db, plan_id):
         if t["status"] != "accepted":
