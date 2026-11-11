@@ -962,16 +962,10 @@ CREATE TABLE IF NOT EXISTS visual_input_state (
     observer INTEGER NOT NULL,
     invalidated_at REAL NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS visual_requests (
-    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
-    id TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    created_at REAL NOT NULL
-);
 -- What the person typed lately, for publish_visual's `asked` to be checked
 -- against. A row is spent by the one publication it allows; the rest go after
--- visual_offers.FOLD. source: the grant or confirmation this same message
--- raised ('grant', 'request'), which spending the row also spends. staged:
+-- visual_offers.FOLD. source: 'grant' when this same message raised the
+-- session's grant, which spending the row also spends. staged:
 -- reported by the app, waiting for the CLI's hook to report that same prompt.
 CREATE TABLE IF NOT EXISTS visual_person_words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
