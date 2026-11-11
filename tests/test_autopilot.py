@@ -351,6 +351,122 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     assert autopilot.NUDGE_HEAD in resumed["reason"]
 
 
+@pytest.fixture
+def phase_landing_session(db, tmp_path, monkeypatch):
+    from brindle.db import Workspace
+
+    ws = Workspace("landing", str(tmp_path), "landing", "root", "main", None,
+                   str(tmp_path), None, "landing", 100000.0)
+    db.add_workspace(ws)
+    add_agent(db, ws, "boss")
+    db.add_autopilot("boss")
+    passing = set()
+    monkeypatch.setattr(gates, "run_checked", lambda db, ws, cmd, *a: (cmd in passing, ""))
+    monkeypatch.setattr(git, "dirty_files", lambda *a, **k: [])
+    monkeypatch.setattr(git, "out", lambda *a: "head")
+    monkeypatch.setattr(workspaces, "workspace_env", lambda *a: {})
+    monkeypatch.setattr(agents, "_notify_supervisor", lambda *a: None)
+    monkeypatch.setattr(autopilot.time, "time", lambda: 100000.0)
+    return ws, passing
+
+
+def test_phase_landing_once_per_completed_phase(db, phase_landing_session, monkeypatch):
+    from brindle.db import DB
+
+    ws, passing = phase_landing_session
+    items = [
+        ("a", "a", None, None, None, "API"),
+        ("b", "b", None, None, None, "API"),
+        ("c", "c", None, None, None, "UI"),
+    ]
+    autopilot.set_goal(db, "boss", "g", items)
+    passing.add("a")
+    cfg = RepoConfig(goal_audit=False)
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 0
+    passing.add("b")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 1
+    # Independent DB connections must respect the same phase claim, even
+    # after a regression and another pass, or a goal edit preserving phases.
+    other = DB()
+    try:
+        passing.remove("a")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        passing.add("a")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        autopilot.set_goal(other, "boss", "g", items)
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 1
+        passing.add("c")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 2
+        autopilot.set_goal(other, "boss", "another goal", items)
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 4
+
+        def sweep_during_replacement(*a, **k):
+            autopilot.usage_sweep(db, now=100001.0)
+            assert db.pending_count("boss") == 4
+            return "head"
+
+        replace = other.set_milestones
+
+        def observe_replacement(root_id, milestones):
+            # A second connection still sees the complete old goal until
+            # the replacement fields, claims and milestones commit together.
+            assert db.get_autopilot("boss").goal == "another goal"
+            assert [m.title for m in db.milestones("boss")] == ["a", "b", "c"]
+            assert db.conn.execute("SELECT COUNT(*) FROM phase_landings WHERE root_id='boss'").fetchone()[0] == 2
+            replace(root_id, milestones)
+
+        monkeypatch.setattr(autopilot, "_commit", sweep_during_replacement)
+        monkeypatch.setattr(other, "set_milestones", observe_replacement)
+        autopilot.set_goal(other, "boss", "replacement", [("d", "d", None, None, None, "API")])
+        assert db.pending_count("boss") == 4
+        assert db.milestones("boss")[0].status == "pending"
+        passing.add("d")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 5
+    finally:
+        other.conn.close()
+
+
+def test_phase_landing_unphased_daily_requires_new_pass(db, phase_landing_session, monkeypatch):
+    from brindle.db import DB
+
+    ws, passing = phase_landing_session
+    with_goal(db, checks=("a", "b", "c"))
+    clock = [100000.0]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+    cfg = RepoConfig(goal_audit=False)
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 0
+    passing.add("a")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 1
+    clock[0] += 86400
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 1
+    passing.add("b")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 2
+    clock[0] += 86399
+    passing.add("c")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 2
+    # Progress during the cooldown survives a new connection and is sent
+    # when the day ends, even without another milestone check.
+    other = DB()
+    try:
+        autopilot.usage_sweep(other, now=clock[0] + 1)
+        assert db.pending_count("boss") == 3
+        autopilot.usage_sweep(other, now=clock[0] + 86401)
+        assert db.pending_count("boss") == 3
+    finally:
+        other.conn.close()
+
+
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     agent, ws = root
     with_goal(db)

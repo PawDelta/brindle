@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 import os
 import re
@@ -753,7 +754,8 @@ def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: s
     else:
         outcome = "allowed to start with a warning"
     if clash.cross_session:
-        tasks.notify_clash(db, autopilot.root_of(db, caller.id), clash, outcome)
+        tasks.notify_clash(db, autopilot.root_of(db, caller.id), clash, outcome,
+                           task_key=json.dumps([ws.repo_root, caller.id, task]))
     return reply, clash.warning
 
 
