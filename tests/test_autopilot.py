@@ -845,19 +845,34 @@ def test_goal_activity_stage(db, root, boss, checking, workers, expected):
         "A new repository must use other repos' measured times before fixed defaults")),
     pytest.param("review_rounds", marks=pytest.mark.variant(
         "A branch past two review rounds must not budget the full review duration again")),
-    "load",
+    pytest.param("load", marks=pytest.mark.variant(
+        "Retained merge completions must affect ETA immediately and remain counted once after pruning")),
+    pytest.param("load_open", marks=pytest.mark.variant(
+        "A merge must recover its report start after default pruning moved it into stage_open")),
+    "session_limited",
 ])
 def test_goal_eta_counts_unstarted_milestones(db, root, monkeypatch, scenario):
     from brindle import fair_share
+    from dataclasses import replace
     from brindle.db import Task
 
     _, ws = root
     now = time.time()
     monkeypatch.setattr(git, "out", lambda *args: "")
-    monkeypatch.setattr(fair_share, "limit", lambda: 1 if scenario == "limited" else 2)
+    monkeypatch.setattr(fair_share, "limit", lambda: 1 if scenario == "limited" else
+                        16 if scenario == "session_limited" else 2)
     db.update_autopilot("boss", goal="Ship both milestones")
     db.update_agent("boss", status="idle")
     db.set_milestones("boss", [("first", None, None), ("second", None, None)])
+    if scenario == "session_limited":
+        db.add_session_repo("boss", "other", "/attached-repo")
+        monkeypatch.setattr(autopilot, "load_repo_config", lambda path: RepoConfig(
+            max_agents=1 if path == ws.repo_root else 16))
+        db.set_milestones("boss", [(f"step{i}", None, None, "builder", "other" if i % 2 else None)
+                                   for i in range(6)])
+        db.add_task(Task("attached", "/attached-repo", None, "boss", ws.id, "builder", "step1",
+                         "assign", 1, "attached", None, None, None, "pending", now))
+        db.set_task_milestone("attached", "step1")
     if scenario != "no_history":
         repo_root = "/past-repo" if scenario == "global_history" else ws.repo_root
         duration = 1800 if scenario == "global_history" else 1200
@@ -865,18 +880,23 @@ def test_goal_eta_counts_unstarted_milestones(db, root, monkeypatch, scenario):
         for stage in ("build:builder", "report_to_merge"):
             db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, ?, 5, ?, ?, ?)",
                             (day, repo_root, stage, duration, duration, json.dumps([duration] * 5)))
-    if scenario in ("unstarted", "overdue", "review_rounds", "load"):
+    if scenario in ("unstarted", "overdue", "review_rounds", "load", "load_open"):
         add_agent(db, ws, "writing", mode="assign", parent="boss")
         db.set_agent_milestone("writing", "first")
         db.update_agent("writing", profile="builder", created_at=now - (2400 if scenario == "overdue" else 300))
         if scenario == "review_rounds":
             db.update_agent("writing", pipeline="reviewing", reviewing_since=now - 100,
                             pipeline_rounds=2, result="done")
-        if scenario == "load":
-            day = time.strftime("%Y-%m-%d", time.gmtime(now))
-            for stage in ("build:builder", "report_to_merge"):
-                db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, ?, 6, 2400, 2400, ?)",
-                                (day, ws.repo_root, stage, json.dumps([2400] * 6)))
+        if scenario in ("load", "load_open"):
+            for i in range(1 if scenario == "load_open" else 6):
+                past = replace(ws, id=f"history{i}")
+                end = now - 60 - i
+                with monkeypatch.context() as clock:
+                    clock.setattr(bus.time, "time", lambda: end - (90000 if scenario == "load_open" else 2400))
+                    bus.publish_ws(db, "pipeline.reported", past)
+                    clock.setattr(bus.time, "time", lambda: end)
+                    bus.publish_ws(db, "pipeline.merged", past)
+            bus.prune(db, now=now)
     if scenario in ("chain", "parallel", "limited"):
         for i, title in enumerate(("first", "second")):
             db.add_task(Task(f"queued{i}", ws.repo_root, None, "boss", ws.id, "builder", title,
@@ -902,6 +922,23 @@ def test_goal_eta_counts_unstarted_milestones(db, root, monkeypatch, scenario):
         assert 60 < autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] < 1100
     elif scenario == "load":
         assert got == 4800
+        bus.prune(db, older_than=0, now=now + 1)
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == got
+    elif scenario == "load_open":
+        assert got == 180000
+    elif scenario == "session_limited":
+        assert got == 8400
+        # Session admission still constrains work when the machine cap is off,
+        # and an attached-repo worker must reserve the same session's slot.
+        monkeypatch.setattr(fair_share, "limit", lambda: 0)
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == got
+        attached = replace(ws, id="attached-live", repo_root="/attached-repo")
+        db.add_workspace(attached)
+        add_agent(db, attached, "attached-worker", mode="assign", parent="boss")
+        db.update_agent("attached-worker", profile="builder", created_at=now - 300)
+        db.set_agent_milestone("attached-worker", "step1")
+        db.update_task("attached", state="running", agent_id="attached-worker")
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 8100
     elif scenario == "global_history":
         assert got == 3600
     elif scenario != "no_history":

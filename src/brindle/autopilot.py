@@ -1837,13 +1837,20 @@ ESTIMATE_MERGE = 1200.0
 def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float:
     """Remaining critical path through workers and queued dependencies, then goal checks/audit."""
     import statistics
-    from brindle import agents, fair_share, tasks
+    from brindle import agents, bus, fair_share, tasks
     from brindle.db import Task
 
     since = now - ESTIMATE_DAYS * 86400
     day = time.strftime("%Y-%m-%d", time.gmtime(since))
     medians: dict[tuple[str, str | None], float] = {}
-    history = list(db.conn.execute("SELECT * FROM stage_timings WHERE day>=?", (day,)))
+    with db.snapshot():
+        history = list(db.conn.execute("SELECT * FROM stage_timings WHERE day>=?", (day,)))
+        # Recent review/merge events remain on the bus for a day before pruning
+        # persists them. Read both sources in one snapshot so concurrent pruning
+        # cannot move a sample between sources while the estimate reads them.
+        pending_samples, _ = bus.stage_samples(db.conn, now)
+    history.extend({"day": ended, "repo_root": repo, "stage": stage, "samples": json.dumps(samples)}
+                   for (ended, repo, stage), samples in pending_samples.items() if ended >= day)
     legacy = list(db.conn.execute(
         "SELECT w.repo_root, a.profile, a.reviewing_since-a.created_at AS duration"
         " FROM agents a JOIN workspaces w ON w.id=a.workspace_id"
@@ -1963,58 +1970,65 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
             dependencies[task_id] = []
     if queued:
         cap = fair_share.limit()
-        releases: list[float] = []
-        if cap > 0:
-            # Match fair_share.running: all sessions' process workers and unlinked launch claims.
-            with db.snapshot():
-                occupants = [a for a in db.list_agents() if a.mode in fair_share.WORKER_MODES
-                             and a.status in ("starting", "processing") and agents.runs_process(a)]
-                claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
+        # delegate/check_capacity use the owning session's configuration even
+        # when a task or milestone targets an attached repository.
+        session_cap = load_repo_config(home.repo_root).max_agents if home else 0
+        with db.snapshot():
+            occupants = [a for a in db.list_agents() if a.mode in fair_share.WORKER_MODES
+                         and a.status in ("starting", "processing") and agents.runs_process(a)]
+            claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
 
-            def release_at(repo: str | None, profile: str, began: float) -> float:
-                return progress_remaining(typical(repo or "", profile), began)
+        def release_at(repo: str | None, profile: str, began: float) -> float:
+            return progress_remaining(typical(repo or "", profile), began)
 
-            for a in occupants:
-                ws = db.get_workspace(a.workspace_id)
-                if a.pipeline == "fixing" and a.reviewing_since:
-                    merge = typical(ws.repo_root if ws else "")
-                    # Fixing occupies a process slot until its next report;
-                    # report-to-merge history bounds that remaining work.
-                    release = report_remaining(merge, a.reviewing_since, a)
-                elif a.pipeline in ("ready", "reviewing") and a.reviewing_since:
-                    release = 0.0
-                else:
-                    release = release_at(ws.repo_root if ws else None, a.profile, a.created_at)
-                releases.append(release)
-            for t in claims:
-                release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
-                releases.append(release)
-                if t.id in queued:
-                    # A claimed task already owns its slot; don't schedule it twice.
-                    remaining[f"task:{t.id}"] = release + durations[t.id][1]
-                    del queued[t.id]
-        else:
-            cap = len(queued)
-        # If already over capacity, enough workers must report before a slot opens.
-        slots = sorted(releases, reverse=True)[:cap]
-        slots.extend([0.0] * max(0, cap - len(slots)))
+        def worker_release(a: Agent) -> float:
+            ws = db.get_workspace(a.workspace_id)
+            if a.pipeline == "fixing" and a.reviewing_since:
+                # Fixing occupies a slot until its next report.
+                return report_remaining(typical(ws.repo_root if ws else ""), a.reviewing_since, a)
+            if a.pipeline in ("ready", "reviewing") and a.reviewing_since:
+                return 0.0
+            return release_at(ws.repo_root if ws else None, a.profile, a.created_at)
+
+        releases = [worker_release(a) for a in occupants]
+        session_releases = [worker_release(a) for a in live if a.status not in ("paused", "done")]
+        for t in claims:
+            release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
+            releases.append(release)
+            if t.caller_id in ids:
+                session_releases.append(release)
+            if t.id in queued:
+                # A claimed task already owns both slots; don't schedule it twice.
+                remaining[f"task:{t.id}"] = release + durations[t.id][1]
+                del queued[t.id]
+
+        def slots_for(limit: int, occupied: list[float]) -> list[float]:
+            if limit <= 0:
+                return [0.0] * max(1, len(queued))
+            # If already over capacity, enough workers must report first.
+            slots = sorted(occupied, reverse=True)[:limit]
+            return slots + [0.0] * max(0, limit - len(slots))
+
+        slots = slots_for(cap, releases)
+        session_slots = slots_for(session_cap, session_releases)
         while queued:
             candidates = []
             for t in queued.values():
                 deps = dependencies[t.id]
                 if all(dep in remaining for dep in deps):
                     ready = max((remaining[dep] for dep in deps), default=0.0)
-                    start = max(min(slots), ready)
+                    start = max(min(slots), min(session_slots), ready)
                     candidates.append((start, t.created_at, t.id))
             if not candidates:
                 # A broken dependency graph has no launch order yet. Budget the
                 # unresolved work serially until the supervisor repairs it.
-                start = max(min(slots), max(remaining.values(), default=0.0))
+                start = max(min(slots), min(session_slots), max(remaining.values(), default=0.0))
                 candidates = [(start, t.created_at, t.id) for t in queued.values()]
             start, _, task_id = min(candidates)
             build, merge = durations[task_id]
             # Reporting releases the execution slot; merging releases dependants.
             slots[slots.index(min(slots))] = start + build
+            session_slots[session_slots.index(min(session_slots))] = start + build
             remaining[f"task:{task_id}"] = start + build + merge
             del queued[task_id]
     if not remaining:
