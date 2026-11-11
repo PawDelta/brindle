@@ -26,6 +26,11 @@ suggestions, thread actions and votes. What they wrote before stays here. A
 suggestion they accepted goes up as the Library's own ``accept``, which makes
 the revision and closes the thread together.
 
+When the Team plan the doc was shared under ends, it becomes a personal doc: no
+build gate and no sync, what teammates wrote stays readable, and resubscribing
+picks the same Library document back up. Only an entitlement the server issues
+now, for the account and org that shared it, can say so (:func:`_note_ended`).
+
 Calls raise ``RuntimeError`` with a readable reason, as ``brindle docs`` does.
 """
 
@@ -47,6 +52,7 @@ from brindle.service.errors import ServiceError
 log = logging.getLogger(__name__)
 
 TEAM_FEATURE = "analysis_docs_team"
+NO_FEATURE = "entitlement_required"     # the Library's refusal when the plan lacks a feature
 SCOPE_KINDS = ("group", "org")
 CLAIM_FOR = 60.0             # seconds a create or push in flight holds the plan; then it is presumed dead
 FIRST_REVISION = 1           # what the Library numbers a new document's head
@@ -89,6 +95,53 @@ def _shared(db: DB, plan_id: str, store) -> dict:
 def _own(share: dict, ent) -> None:
     if share["owner"] != ent.sub:
         raise RuntimeError("this plan was shared from another brindle account: log in to that one")
+
+
+def _issued(client, store):
+    """The entitlement the server issues now, verified with no grace, or None
+    however that fails. What is stored can't prove a plan ended: it may be
+    old, and going offline must not turn it into a way past a review."""
+    from brindle import airgap
+    from brindle.pro import auth
+
+    if airgap.enabled():
+        return None
+    try:
+        return auth.refresh(client, store)
+    except Exception:  # noqa: BLE001 - offline, signed out, unverifiable: it proves nothing, so the gate stays
+        log.debug("brindle: no fresh entitlement to check a shared plan against", exc_info=True)
+        return None
+
+
+def _note_ended(db: DB, p: dict, ent) -> bool:
+    """Whether ``ent`` (from :func:`_issued`, or None) says the account and org
+    that shared the plan no longer have Team, recording it if so. Anything
+    else leaves the gate as it is: another account, or the same person in
+    another org, says nothing about this one's plan, and a share with no org
+    on record can't match."""
+    share_ = link(db, p["id"])
+    if ent is None or share_ is None or TEAM_FEATURE in ent.features:
+        return False
+    if (ent.sub, ent.org_id) != (share_["owner"], share_["org_id"]):
+        return False
+    with db.tx() as c:
+        noted = c.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=? AND lapsed_at IS NULL",
+                          (time.time(), p["id"])).rowcount
+    if noted:
+        plan_docs._changed(db, p, p["rev"])
+    return True
+
+
+def _team_active(db: DB, p: dict, store) -> None:
+    """The Library answered this account about the plan: a lapse is over, and
+    the org is on record for a share made before it was kept."""
+    org_id = _require_team(store).org_id
+    with db.tx() as c:
+        c.execute("UPDATE plan_shares SET org_id=? WHERE plan_id=? AND org_id IS NULL", (org_id, p["id"]))
+        resumed = c.execute("UPDATE plan_shares SET lapsed_at=NULL WHERE plan_id=? AND lapsed_at IS NOT NULL",
+                            (p["id"],)).rowcount
+    if resumed:
+        plan_docs._changed(db, p, p["rev"])
 
 
 def _review_open(p: dict) -> None:
@@ -154,7 +207,7 @@ def _grant(db: DB, p: dict, doc_id: str, reviewers: list[dict], permissions: dic
 # -- sharing -----------------------------------------------------------------------------
 
 
-def _claim_new(db: DB, plan_id: str, owner: str, now: float) -> tuple[dict, bool]:
+def _claim_new(db: DB, plan_id: str, owner: str, org_id: str, now: float) -> tuple[dict, bool]:
     """The plan's link, claimed if the Library has no document for it yet: a
     second share while the first is creating it is refused, so one plan never
     becomes two documents. A claim older than CLAIM_FOR is taken over, and
@@ -162,8 +215,8 @@ def _claim_new(db: DB, plan_id: str, owner: str, now: float) -> tuple[dict, bool
     with db.tx() as c:
         resumed = c.execute("UPDATE plan_shares SET claimed_at=? WHERE plan_id=? AND doc_id IS NULL AND claimed_at<?",
                             (now, plan_id, now - CLAIM_FOR)).rowcount == 1
-        won = c.execute("INSERT OR IGNORE INTO plan_shares (plan_id, owner, claimed_at) VALUES (?,?,?)",
-                        (plan_id, owner, now)).rowcount == 1
+        won = c.execute("INSERT OR IGNORE INTO plan_shares (plan_id, owner, org_id, claimed_at) VALUES (?,?,?,?)",
+                        (plan_id, owner, org_id, now)).rowcount == 1
     share = link(db, plan_id)
     if share["doc_id"] is None and not (won or resumed):
         raise RuntimeError("this plan is already being shared")
@@ -228,7 +281,7 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     people = None if reviewers is None else _reviewers(reviewers)
     cur = plan_docs.revision(db, p["id"])
     content = _content(cur)          # a plan the API would refuse takes no claim
-    row, resumed = _claim_new(db, p["id"], ent.sub, time.time() if now is None else now)
+    row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
     _own(row, ent)
     doc_id = row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
     review_policies.ask(db, p, "POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
@@ -713,11 +766,20 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     """Take a teammate's new text if the plan hasn't changed here, bring back
     what teammates wrote, then send what was done here. Pulled first, so a
     refused send still leaves their comments here. Returns the link, plus
-    ``pulled`` (how many things changed here) and ``pushed``."""
+    ``pulled`` (how many things changed here) and ``pushed``. Refused for
+    want of a Team plan the server confirms has ended, it syncs nothing and
+    the plan becomes a personal doc; any other failure is raised."""
     p = plan_docs._plan(db, plan_id)
     client, store = ad._session(client, store)
-    share_ = _shared(db, p["id"], store)
-    view = review_policies.ask(db, p, "GET", _path(share_["doc_id"]), client=client, store=store)
+    try:
+        share_ = _shared(db, p["id"], store)
+        view = review_policies.ask(db, p, "GET", _path(share_["doc_id"]), client=client, store=store)
+    except RuntimeError as e:
+        no_team = not isinstance(e, ad.Refused) or e.code == NO_FEATURE     # an outage or org rule says nothing of it
+        if no_team and _note_ended(db, p, _issued(client, store)):
+            return {**link(db, p["id"]), "pulled": 0, "pushed": False}
+        raise
+    _team_active(db, p, store)
     imported = _import(db, p, share_, view)
     share_ = link(db, p["id"])
     if imported:
@@ -746,14 +808,34 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict
     return link(db, p["id"])
 
 
+def _note_lapses(db: DB, client, store) -> None:
+    """Without Team, turn this account's plans in review into personal docs
+    if the server confirms it has ended. Asked only while one is still marked
+    as shared and it is this account's, so a pass doesn't ask for nothing."""
+    from brindle.pro import license
+
+    try:
+        stored = license.current(refresh=False, store=store)
+    except Exception:  # noqa: BLE001 - logged out: no account whose plan could be said to have ended
+        return
+    rows = db.conn.execute("SELECT s.plan_id FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
+                           " WHERE s.doc_id IS NOT NULL AND s.lapsed_at IS NULL AND s.owner=? AND s.org_id=?"
+                           " AND p.state IN ('open','redirected')", (stored.sub, stored.org_id)).fetchall()
+    ent = _issued(client, store) if rows else None
+    for row in rows:
+        _note_ended(db, plan_docs._plan(db, row["plan_id"]), ent)
+
+
 def sync_open(db: DB, *, client=None, store=None) -> int:
     """Sync every shared plan still in review, for the daemon's background
     pass (a building plan's review is closed). One plan's failure doesn't
-    stop the rest. Returns how many synced."""
+    stop the rest. Without Team nothing is synced. With it, a plan whose Team
+    plan had ended picks its document back up. Returns how many synced."""
     client, store = ad._session(client, store)
     try:
         _require_team(store)
     except Exception:  # noqa: BLE001 - logged out, air-gapped or no Team plan: nothing to bring back
+        _note_lapses(db, client, store)
         return 0
     done = 0
     for row in db.conn.execute("SELECT s.plan_id FROM plan_shares s JOIN plans p ON p.id=s.plan_id"

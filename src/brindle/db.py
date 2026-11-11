@@ -1079,7 +1079,9 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     remote_rev INTEGER NOT NULL DEFAULT 0,
     local_rev INTEGER NOT NULL DEFAULT 0,
     review TEXT NOT NULL DEFAULT '{}',   -- JSON: reviewers, sign-offs, who is pending, ready
-    claimed_at REAL                -- set while a create or a push is under way
+    claimed_at REAL,               -- set while a create or a push is under way
+    org_id TEXT,                   -- the org it was shared from; NULL on a share older than this column
+    lapsed_at REAL                 -- set while that account and org are verified to have no Team plan
 );
 -- Which local thread or reply each Library thread or reply became, so a pull
 -- adds it once; status is the Library's as last seen. A negative remote_id is
@@ -1548,6 +1550,10 @@ class DB:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN consented_by TEXT")
         if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
             self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
+        share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
+        for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL")):
+            if col not in share_cols:
+                self.conn.execute(f"ALTER TABLE plan_shares ADD COLUMN {col} {kind}")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:

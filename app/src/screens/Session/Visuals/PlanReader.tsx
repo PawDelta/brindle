@@ -554,6 +554,12 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
                   <span className={`${pill} ${plan.state === "approved" || gate?.state === "ready" ? "text-pass" : "text-sap"}`}>{!open ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested") : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off"}</span>
                   <span>{!open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it") : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off"}</span>
                 </dd>
+                {plan.team_ended && (
+                  <>
+                    <dt className="text-ink-3">Sharing</dt>
+                    <dd className="m-0" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</dd>
+                  </>
+                )}
                 <dt className="text-ink-3">Authors</dt>
                 <dd className="m-0">You and the supervisor</dd>
                 <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />

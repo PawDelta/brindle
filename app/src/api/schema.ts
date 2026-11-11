@@ -885,6 +885,7 @@ export interface PlanDTO {
   session: string;
   split: PlanWorkerDTO[];
   state: "open" | "redirected" | "approved";
+  team_ended?: boolean;
   threads?: PlanThreadDTO[];
   title: string;
   verdict?: PlanVerdictDTO | null;
