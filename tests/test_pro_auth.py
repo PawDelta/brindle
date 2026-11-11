@@ -235,6 +235,7 @@ def test_two_concurrent_refreshers_spend_the_refresh_token_once(tmp_path, backen
     assert credentials.FileStore(tmp_path / "pro").load()["refresh_token"] == "cpr_2"
 
 
+@pytest.mark.variant("the reported incident: the app's engine and a CLI with different BRINDLE_HOMEs refreshing the one keychain sign-in at once")
 def test_refreshers_with_different_homes_spend_the_keychain_sign_in_once(tmp_path, backend, monkeypatch):
     """The keychain holds one sign-in per OS user, whatever BRINDLE_HOME a
     process has (the app's engine, a CLI or worker with a home of its own), so
@@ -379,7 +380,8 @@ def test_a_second_sign_in_request_joins_the_one_waiting_on_the_browser(db, store
     assert "POST /cli/token" not in backend.paths()
 
 
-@pytest.mark.parametrize("stage", ["before listening", "before the URL", "code exchange"])
+@pytest.mark.parametrize("stage", ["before listening", "before the URL",
+                                   pytest.param("code exchange", marks=pytest.mark.variant("a race: the sign-in is replaced while its code is being exchanged"))])
 def test_a_replaced_browser_sign_in_shows_and_stores_nothing(db, store, backend, monkeypatch, stage):
     """Try again replaces a browser sign-in at any stage: replaced before it
     listens, or while its first progress line is being published, it never
@@ -413,7 +415,7 @@ def test_a_replaced_browser_sign_in_shows_and_stores_nothing(db, store, backend,
     assert ("POST /token/revoke" in backend.paths()) == (stage == "code exchange")
 
 
-@pytest.mark.parametrize("approved", [False, True])
+@pytest.mark.parametrize("approved", [False, pytest.param(True, marks=pytest.mark.variant("a race: the device code is approved just as the sign-in is replaced"))])
 def test_a_replaced_device_sign_in_stops_polling_and_stores_nothing(store, backend, approved):
     """Replaced while its code is polled (the daemon's watch): a pending code
     is not polled again; one approved anyway has its tokens revoked, unsaved."""
