@@ -316,6 +316,31 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert lifecycle.resume_after_start() == [] and len(events) == 3
 
 
+@pytest.mark.parametrize("session_survives", [True, False])
+def test_update_relaunch_recovered_windows_start_at_the_size_the_app_left_them(db, root, monkeypatch, session_survives):
+    # The daemon has no terminal and no view is attached yet when it recovers, so each
+    # window came back at tmux's 80x24 (a 49-column chat beside the sidebar) and the
+    # resumed TUI drew there, to be resized under it when the app showed it.
+    add(db, root, "chat", status="idle")
+    tmux.ensure_session(root.tmux_session, root.path, {})
+    pane = tmux.new_window(root.tmux_session, "chat", root.path, ["cat"], {}, tag=(tmux.AGENT_TAG, "chat"))
+    db.update_agent("chat", tmux_window=pane, tmux_server=tmux.current_server())
+    tmux._tmux("resize-window", "-t", pane, "-x", "171", "-y", "54")
+    # Bigger, but a terminal panel's and not an agent's: it says nothing about the chat's view.
+    tmux._tmux("new-session", "-d", "-s", "brindle-app", "-x", "300", "-y", "80", "cat")
+
+    assert lifecycle.pause_for_exit() == ["chat"]
+    if not session_survives:
+        tmux._tmux("kill-session", "-t", f"={root.tmux_session}", check=False)
+    monkeypatch.setattr(agents, "_launch",
+                        lambda db_, a, ws, **kw: agents._open_window(db_, a, ws, "chat", ["cat"], False))
+
+    assert lifecycle.resume_after_start() == ["chat"]
+    size = tmux._tmux("display-message", "-p", "-t", db.get_agent("chat").tmux_window,
+                      "#{window_width}x#{window_height}").stdout.strip()
+    assert size == "171x54"
+
+
 def _recorded_sessions(db, root, monkeypatch, sessions):
     """Paused sessions on the resume record, given as (id, tmux session) most
     recently active first. All paused at the same moment and recorded in the
