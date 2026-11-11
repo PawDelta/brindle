@@ -167,7 +167,7 @@ def _note_ended(db: DB, p: dict, ent) -> bool:
                       [(now if ended else None, r["plan_id"]) for r, ended in verdicts])
     for r, ended in verdicts:
         if ended != _confirmed(r):
-            changed = plan_docs._plan(db, r["plan_id"])
+            changed = plans.get(db, r["plan_id"])       # to say it changed: no acting in that session, so no lock
             plan_docs._changed(db, changed, changed["rev"])
     return any(ended for r, ended in verdicts if r["plan_id"] == p["id"])
 
@@ -863,7 +863,7 @@ def _note_lapses(db: DB, client, store) -> None:
                           " AND s.org_id=? AND p.state IN ('open','redirected')",
                           (time.time() - LAPSE_CHECK_AFTER, stored.sub, stored.org_id)).fetchone()
     if due is not None:
-        _note_ended(db, plan_docs._plan(db, due["plan_id"]), _issued(client, store))
+        _note_ended(db, plans.get(db, due["plan_id"]), _issued(client, store))
 
 
 def sync_open(db: DB, *, client=None, store=None) -> int:

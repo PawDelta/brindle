@@ -11,7 +11,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.testclient import TestClient
 
-from brindle import mcp_server, plan_docs, plans, tasks, visual_offers
+from brindle import identity_lock, mcp_server, plan_docs, plans, tasks, visual_offers
 from brindle.daemon import holds
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
@@ -681,13 +681,15 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
 
         released()
 
-        # The same account's plan in another session: the server's answer is about the account, so it goes for both.
+        # The same account's plan in another session, locked to another provider identity: the server's
+        # answer is about the brindle account, so it goes for both, and the lock doesn't get in its way.
         boss2 = dataclasses.replace(boss, id="boss2", tmux_window="%2")
         db.add_agent(boss2)
         visual_offers.person_spoke(db, boss2, "Make a planning doc.")
         other = plans.propose(db, boss2, "# Other", DECISIONS, sections=[{"id": "s", "title": "S", "markdown": "T"}])["id"]
         db.conn.execute("INSERT INTO plan_shares (plan_id, doc_id, owner, org_id, remote_rev, local_rev)"
                         " VALUES (?, 'doc_2', 'user_1', 'org_1', 1, 1)", (other,))
+        monkeypatch.setattr(identity_lock, "locked_by", lambda a: "another identity" if a == "boss2" else None)
         confirmed_again()
         assert sd.link(db, other)["lapsed_at"] is not None
 
@@ -720,7 +722,6 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
             held()
 
         # Resubscribing picks the same document back up, with its review.
-        db.conn.execute("UPDATE plans SET state='approved' WHERE id=?", (other,))
         _signed_in(backend, net["store"], features=list(TEAM_LOGIN))
         _server_says(backend, features=list(TEAM_LOGIN))
         assert sd.sync_open(db, **net) == 1
