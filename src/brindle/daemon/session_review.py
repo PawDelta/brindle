@@ -167,22 +167,44 @@ def has_pr_target(ws: Workspace) -> bool:
         git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1])
 
 
-def new_since_merge(ws: Workspace, pushed_sha: str | None) -> bool:
+def new_since_merge(db: DB, ws: Workspace, pushed_sha: str | None) -> bool:
     """Whether the session's branch has commits of its own beyond
-    ``pushed_sha``, its merged PR's: its next PR's. A sync's merges, and
-    what they bring in from the base (a squash of that PR included), don't
-    count. An unknown or vanished ``pushed_sha`` counts as nothing new."""
+    ``pushed_sha``, its merged PR's: its next PR's. What a sync brings in
+    from the base (a squash of that PR included) doesn't count, nor does a
+    merge that only joins its parents: git's own clean merge of them, the
+    incoming side taken whole over a conflict, or the sync's ``-s ours``
+    record of a squash (``session_squashes``). A merge whose resolution adds
+    anything else does. An unknown or vanished ``pushed_sha`` counts as nothing new."""
     if not pushed_sha:
         return False
-    args = ["rev-list", "--count", "--no-merges", "HEAD", f"^{pushed_sha}"]
     try:
+        excluded = [f"^{pushed_sha}"]
         if ws.base_branch:
-            args.append(f"^{git.base_ref(ws.path, ws.base_branch)}")
+            excluded.append(f"^{git.base_ref(ws.path, ws.base_branch)}")
         if (default := session_sync.upstream(ws)) and git.remote_branch_exists(ws.path, default):
-            args.append(f"^origin/{default}")
-        return int(git.out(args, ws.path)) > 0
+            excluded.append(f"^origin/{default}")
+        if int(git.out(["rev-list", "--count", "--no-merges", "HEAD", *excluded], ws.path)) > 0:
+            return True
+        squashes = {r["squash_sha"] for r in db.conn.execute(
+            "SELECT squash_sha FROM session_squashes WHERE repo_root = ? AND branch = ?", (ws.repo_root, ws.branch))}
+        return any(_merge_adds(ws, line.split(), squashes)
+                   for line in git.out(["rev-list", "--merges", "--parents", "HEAD", *excluded], ws.path).splitlines())
     except (git.GitError, ValueError):
         return False
+
+
+def _merge_adds(ws: Workspace, shas: list[str], squashes: set[str]) -> bool:
+    """Whether the merge ``shas[0]`` (parents ``shas[1:]``) carries content of its own."""
+    merge, parents = shas[0], shas[1:]
+    if len(parents) != 2:
+        return True
+    if parents[1] in squashes:
+        return False
+    tree = git.out(["rev-parse", f"{merge}^{{tree}}"], ws.path)
+    joined = git.run(["merge-tree", "--write-tree", *parents], ws.path, check=False)
+    if joined.returncode == 0:
+        return joined.stdout.split("\n", 1)[0].strip() != tree
+    return tree != git.out(["rev-parse", f"{parents[1]}^{{tree}}"], ws.path)
 
 
 def current_pr(db: DB, root_id: str, ws: Workspace):
@@ -192,7 +214,7 @@ def current_pr(db: DB, root_id: str, ws: Workspace):
     opened, and the merged one moves to ``session_pr_history`` when it is."""
     row = db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_prs WHERE root_id = ? AND branch = ?"
                           " AND url IS NOT NULL", (root_id, ws.branch)).fetchone()
-    if row is not None and row["merged_at"] and new_since_merge(ws, row["pushed_sha"]):
+    if row is not None and row["merged_at"] and new_since_merge(db, ws, row["pushed_sha"]):
         return None
     return row
 

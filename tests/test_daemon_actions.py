@@ -1981,8 +1981,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
 
 
 def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, lead, tmp_path, monkeypatch):
-    """A merged session PR stays the session's until its branch has commits of its own beyond it (a
-    sync's merge from main doesn't count); then the next PR opens from the same branch and the
+    """A merged session PR stays the session's until its branch has changes of its own beyond it (a
+    sync's clean merge from main doesn't count, a merge resolved with new content does); then the next PR opens from the same branch and the
     merged one is kept in session_pr_history."""
     from brindle.daemon import session_review
 
@@ -2005,7 +2005,11 @@ def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, l
     sh("git merge -q --no-ff main -m sync", sess)       # a sync brings main in: nothing new of its own
     ready, pr, phase = readiness()
     assert (ready, pr, phase) == (False, None, ("done", first))
-    _commit(sess, "b.py", "b\n")
+    # Main changes the PR's file; the next sync's conflict is resolved with new content in the merge alone.
+    _commit(repo, "a.py", "z\n")
+    sh("git merge -q main || true", sess)
+    (sess / "a.py").write_text("resolved\n")
+    sh("git add a.py && git commit -q --no-edit", sess)
     assert readiness() == (True, None, ("ready_for_pr", None))
     code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Next"})
     assert code == 202, reply

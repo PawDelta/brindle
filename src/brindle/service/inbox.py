@@ -225,7 +225,7 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
         " AND state IN ('passed', 'failed')", (root_id, branch)).fetchall()
     merged = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ? AND url IS NOT NULL"
                              " AND merged_at IS NOT NULL", (root_id, branch)).fetchone()
-    if rows and merged and not session_review.new_since_merge(home, merged["pushed_sha"]):
+    if rows and merged and not session_review.new_since_merge(db, home,merged["pushed_sha"]):
         return []
     declined = db.conn.execute("SELECT sha FROM session_pr_declined WHERE root_id = ? AND branch = ?",
                                (root_id, branch)).fetchone()
