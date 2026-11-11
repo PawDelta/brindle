@@ -49,6 +49,14 @@ class Governed(Library):
         remote.routes.update({r: guarded(r) for r in (f"GET {DESIGN}", f"PUT {DESIGN}/permissions", f"PUT {DESIGN}/reviewers",
                                                       f"POST {BASE}/share", f"PUT {DESIGN}/folder")})
         remote.routes[f"POST {DESIGN}/policy-overrides"] = self.override
+        remote.routes[f"POST {DESIGN}/policy-asks"] = self.ask
+
+    def ask(self, form, headers):
+        if form["rev"] != self.rev:
+            return 409, {"error": "stale", "rev": self.rev}
+        self.rules = [{**r, "asked_at": 9, "opened_by": [{"sub": "u_s", "at": 8}]} if r["policy"] == form["policy"] else r
+                      for r in self.rules]
+        return 200, {**self.view(), "notified": ["u_s"]}
 
     def applied(self, r):
         """A stand-in's sign-off on this revision, made in time, meets their rule."""
@@ -232,3 +240,44 @@ def test_a_refused_override_changes_nothing_and_a_closed_review_takes_none(db, s
     with pytest.raises(ServiceError) as e:
         rp.override(db, pid, 1, ORG, "security", "waive", "r", **net)
     assert e.value.code == "review_closed"
+
+
+def test_an_admin_asks_a_waiting_rule_again_and_the_gate_shows_when_and_who_opened_it(db, shared):
+    pid, lib, _ = shared
+    lib.rules = [rule()]
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        got = app.post(f"/v1/plans/{pid}/policy-ask", json={"rev": 1, "org_id": ORG, "policy": "security"})
+        assert got.status_code == 200, got.json()
+        policy = got.json()["gate"]["policies"][0]
+        assert (policy["asked_at"], policy["opened_by"]) == (9, [{"sub": "u_s", "at": 8}])
+        assert app.post(f"/v1/plans/{pid}/policy-ask", json={"rev": 1, "org_id": "", "policy": "security"}).status_code == 400
+
+
+def test_the_settings_routes_read_and_save_the_orgs_rules_and_preview_a_plans(db, shared, monkeypatch):
+    from brindle.daemon import routes_actions as actions
+
+    pid, _, _ = shared
+    sent = []
+    answers = {"GET review-policies": {"org_id": ORG, "version": 2, "policies": [{"id": "security"}]},
+               "GET review-policies/directory": {"teams": [{"id": "t_9"}], "roles": []},
+               "GET review-policies/in-review": {"truncated": False, "policies": [{"policy": "security", "count": 3}]},
+               "PUT review-policies": {"version": 3, "policies": []},
+               "POST review-policies/preview": {"policy_reviewers": [rule(), {"policy": "broken"}]}}
+
+    def org_api(method, tail, body=None, *, repo=None, admin=False):
+        sent.append((method, tail, body, admin))
+        return answers[f"{method} {tail}"]
+
+    monkeypatch.setattr(actions, "docs_org_api", org_api)
+    monkeypatch.setattr(plan_docs, "revision", lambda db, plan_id: {
+        "split": [{"files": ["billing/a.py", "billing/a.py"]}], "decisions": [{"options": [{"touches": ["auth/b.py"]}]}]})
+    saved = {"version": 2, "policies": [{"id": "security", "eligible": 6, "set_by": "dana", "needs": {"kind": "team", "id": "t_9", "name": "Security"}}]}
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        read = app.get("/v1/review-policies").json()
+        assert (read["version"], read["directory"]["teams"][0]["id"], read["in_review"]["policies"][0]["count"]) == (2, "t_9", 3)
+        assert app.put("/v1/review-policies", json=saved).status_code == 200
+        assert app.put("/v1/review-policies", json={"version": "2", "policies": []}).status_code == 400
+        preview = app.post(f"/v1/plans/{pid}/policy-preview", json={}).json()["policies"]
+    assert [p["policy"] for p in preview] == ["security"] and preview[0]["needs_name"] == "Security"
+    assert ("PUT", "review-policies", {"version": 2, "policies": [{"id": "security", "needs": {"kind": "team", "id": "t_9"}}]}, True) in sent
+    assert ("POST", "review-policies/preview", {"paths": ["billing/a.py", "auth/b.py"], "labels": []}, False) in sent

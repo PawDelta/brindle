@@ -280,6 +280,45 @@ def plan_policy_override(db: DB, params: dict, body: dict) -> Any:
         body.get("reason"), stand_in=body.get("stand_in"), until=body.get("until")))
 
 
+def plan_policy_ask(db: DB, params: dict, body: dict) -> Any:
+    """An org admin asks a waiting rule's people again. Only the person reaches this."""
+    from brindle.pro import review_policies
+
+    return _library(db, params["id"], lambda sd: review_policies.ask_again(
+        db, params["id"], body.get("rev"), body.get("org_id"), body.get("policy")))
+
+
+def plan_policy_preview(db: DB, params: dict, body: dict) -> Any:
+    """The org rules that would cover this plan once it is shared, from the
+    files its revision on screen says it will change, for the share panel."""
+    from brindle import plan_docs
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    paths =review_policies.design_paths(plan_docs.revision(db, params["id"]))
+    got = actions.docs_org_api("POST", "review-policies/preview", {"paths": paths, "labels": []}).get("policy_reviewers")
+    return {"policies": [r for r in map(review_policies.preview_row, got if isinstance(got, list) else []) if r]}
+
+
+@_json
+def review_policies_read(db: DB, request: Request) -> Any:
+    """An org admin's settings page: the rules, the teams and roles they can
+    name, and the designs each covers now. The Library checks the permission."""
+    from brindle.daemon import routes_actions as actions
+
+    repo = request.query_params.get("repo") or None
+    read = lambda tail: actions.docs_org_api("GET", tail, repo=repo, admin=True)  # noqa: E731
+    return {**read("review-policies"), "directory": read("review-policies/directory"),
+            "in_review": read("review-policies/in-review")}
+
+
+def review_policies_save(db: DB, params: dict, body: dict) -> Any:
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    return actions.docs_org_api("PUT", "review-policies", review_policies.save_body(body), repo=body.get("repo"), admin=True)
+
+
 @_json
 def library_people(db: DB, request: Request) -> Any:
     """The people of the person's org, to pick reviewers from, leaving out
@@ -342,6 +381,10 @@ ROUTES = [
     Route("/v1/plans/{id}/sync", _endpoint(plan_sync), methods=["POST"]),
     Route("/v1/plans/{id}/sign-off", _endpoint(plan_sign_off), methods=["POST"]),
     Route("/v1/plans/{id}/policy-override", _endpoint(plan_policy_override), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-ask", _endpoint(plan_policy_ask), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-preview", _endpoint(plan_policy_preview), methods=["POST"]),
+    Route("/v1/review-policies", review_policies_read),
+    Route("/v1/review-policies", _endpoint(review_policies_save), methods=["PUT"]),
     Route("/v1/library/people", library_people),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),

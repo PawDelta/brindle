@@ -525,6 +525,48 @@ export interface PlanPolicyOverride {
   until?: number;
 }
 
+/* An org review rule (docs/shared-designs-api.md "Review policies"). `needs.name`, `eligible`, `set_by`
+   and `set_at` come back to an admin on a read; the daemon leaves them out of a save. */
+export interface ReviewPolicyRule {
+  id: string;
+  name: string;
+  when: { kind: "paths" | "label" | "any"; paths?: string[]; label?: string };
+  needs: { kind: "team" | "role" | "person"; id: string; name?: string };
+  approvals: number;
+  note?: string | null;
+  eligible?: number;
+  set_by?: string;
+  set_at?: number;
+  reviewer_editors?: { kind: string; id?: string }[];
+}
+
+export interface ReviewPoliciesState {
+  org_id: string;
+  version: number;
+  policies: ReviewPolicyRule[];
+  directory: {
+    teams: { id: string; name: string; path?: string; members?: number }[];
+    roles: { id: string; name: string; builtin?: boolean; members?: number }[];
+  };
+  in_review: { truncated?: boolean; policies: { policy: string; count: number; designs: { doc_id: string; title: string }[] }[] };
+}
+
+/* A rule that would cover a design, before it is shared. */
+export interface PolicyPreviewRow {
+  org_id: string;
+  policy: string;
+  name: string;
+  note: string | null;
+  when: string | null;
+  label: string | null;
+  paths: string[];
+  matched: string[];
+  needs_kind: string | null;
+  needs_name: string | null;
+  approvals: number;
+  eligible: number | null;
+}
+
 export interface DocScope {
   kind: string;
   id: string;
@@ -1797,6 +1839,26 @@ export class DaemonClient {
   /* An org admin's waiver of a review rule, or a stand-in for it. The Library checks they are an admin. */
   overridePlanPolicy(id: string, override: PlanPolicyOverride) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/policy-override`, override);
+  }
+
+  /* An org admin asks the people a waiting rule counts again, on revision `rev`. */
+  askPlanPolicyAgain(id: string, ask: { rev: number; org_id: string; policy: string }) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/policy-ask`, ask);
+  }
+
+  /* The org rules that would cover the plan once it is shared. */
+  previewPlanPolicies(id: string) {
+    return this.post<{ policies: PolicyPreviewRow[] }>(`/plans/${encodeURIComponent(id)}/policy-preview`, {});
+  }
+
+  /* An org admin's review rules, with the teams and roles they can name and the designs each covers now. */
+  reviewPolicies() {
+    return this.get<ReviewPoliciesState>("/review-policies");
+  }
+
+  /* Replaces the org's rules; `version` is the one last read (a stale one is a 409). */
+  saveReviewPolicies(version: number, policies: ReviewPolicyRule[]) {
+    return this.put<{ version: number; policies: ReviewPolicyRule[] }>("/review-policies", { version, policies });
   }
 
   /* The people of the person's org, to pick reviewers from, without the person (me); admin_org, the org whose rules they can override. */

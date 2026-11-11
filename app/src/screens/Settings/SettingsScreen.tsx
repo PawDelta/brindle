@@ -92,6 +92,7 @@ import { DocSwitches } from "./DocSwitches";
 import { Storage } from "./Storage";
 import { TeamDestination } from "./TeamDestination";
 import { OrgApprovals } from "./OrgApprovals";
+import { ReviewPolicies } from "./ReviewPolicies";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
@@ -1462,6 +1463,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
           <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
             <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
               <OrgApprovals client={client} />
+            </Row>
+            <Row label="Review policies" help="Enterprise: who must approve a design before it is built." wide>
+              <ReviewPolicies client={client} />
             </Row>
           </Section>
       </Pane>

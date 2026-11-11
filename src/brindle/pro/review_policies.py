@@ -97,6 +97,12 @@ def _stand_ins(rule: dict) -> list[dict]:
             if isinstance(s, dict) and _named(s.get("stand_in")) and _number(s.get("until")) is not None]
 
 
+def _opened(rule: dict) -> list[dict]:
+    raw = rule.get("opened_by")
+    return [{"sub": s["sub"], "at": _number(s.get("at"))} for s in (raw if isinstance(raw, list) else [])
+            if isinstance(s, dict) and _named(s.get("sub"))]
+
+
 def backed(rule: dict) -> bool:
     """Whether a row's own fields support the status it claims. One that claims
     more than it shows is unreadable, so it counts as waiting."""
@@ -123,6 +129,7 @@ def row(rule: dict, state: str, met_by: list[str], changes_by: list[str]) -> dic
             "eligible": eligible if isinstance(eligible, int) and not isinstance(eligible, bool) else None,
             "status": state, "met_by": met_by, "changes_by": changes_by,
             "waiver": _waiver(rule) if state == "waived" else None, "stand_ins": _stand_ins(rule),
+            "asked_at": _number(rule.get("asked_at")), "opened_by": _opened(rule),
             "set_by": _text(rule.get("set_by")), "set_at": _number(rule.get("set_at"))}
 
 
@@ -189,18 +196,77 @@ def override(db: DB, plan_id: str, rev: Any, org_id: Any, policy: Any, action: A
     or name a stand-in for it until ``until``. The revision is sent first if
     the Library doesn't have it, so a waiver is of what the admin read. Only
     the org's admins are accepted, by the Library. Returns the link."""
+    return _admin_post(db, plan_id, rev, "/policy-overrides", lambda: _override_body(
+        rev, org_id, policy, action, reason, stand_in, until, time.time() if now is None else now), "overridden",
+        client, store)
+
+
+def ask_again(db: DB, plan_id: str, rev: Any, org_id: Any, policy: Any, *, client=None, store=None) -> dict:
+    """Ask the people a waiting rule counts again, on the revision on screen.
+    Only the org's admins are accepted, by the Library, which answers 422
+    when the rule is already met or waived. Returns the link."""
+    def body() -> dict:
+        if not _named(org_id) or not _named(policy):
+            raise ServiceError("invalid", "org_id and policy name the rule", 400)
+        return {"rev": rev, "org_id": org_id, "policy": policy}
+
+    return _admin_post(db, plan_id, rev, "/policy-asks", body, "asked again", client, store)
+
+
+def _admin_post(db: DB, plan_id: str, rev: Any, tail: str, build, done: str, client, store) -> dict:
+    """An admin's write to the Library about the revision on screen. The
+    revision is sent first if the Library doesn't have it, so the write is of
+    what the admin read, under the Library's number for it."""
     from brindle.pro import shared_docs as sd
 
     p = plan_docs._plan(db, plan_id)
     sd._review_open(p)
     plan_docs._on_screen(p, rev)
-    body = _override_body(rev, org_id, policy, action, reason, stand_in, until, time.time() if now is None else now)
+    body = build()
     client, store = ad._session(client, store)
     share = sd.sync(db, p["id"], client=client, store=store)
     if share["local_rev"] != p["rev"]:
-        raise RuntimeError(f"r{p['rev']} hasn't reached the Library yet, so its review can't be overridden")
-    answer = ask(db, p, "POST", sd._path(share["doc_id"], "/policy-overrides"), {**body, "rev": share["remote_rev"]},
+        raise RuntimeError(f"r{p['rev']} hasn't reached the Library yet, so its review can't be {done}")
+    answer = ask(db, p, "POST", sd._path(share["doc_id"], tail), {**body, "rev": share["remote_rev"]},
                  client=client, store=store)
     if sd._remember(db, p["id"], answer):
         plan_docs._changed(db, p, p["rev"])
     return sd.link(db, p["id"])
+
+
+# -- before a doc is shared, and the admin's settings ------------------------------------
+
+
+def design_paths(rev: dict) -> list[str]:
+    """The files a revision says it will change: each worker's, and each
+    option's ``touches``. The Library matches rules on nothing else."""
+    found = [f for w in rev.get("split") or [] for f in w.get("files") or []]
+    found += [f for d in rev.get("decisions") or [] for o in d.get("options") or [] for f in o.get("touches") or []]
+    return list(dict.fromkeys(f for f in found if isinstance(f, str) and f))
+
+
+def preview_row(rule: Any) -> dict | None:
+    """A rule that would cover a design, as the share panel shows it. None for
+    a row that can't be read: it is left out, as the Library is the one to
+    hold the gate once the doc is shared."""
+    if not isinstance(rule, dict) or not _named(rule.get("policy")) or not _named(rule.get("org_id")):
+        return None
+    approvals = rule.get("approvals")
+    if not isinstance(approvals, int) or isinstance(approvals, bool) or approvals < 1:
+        return None
+    return row({**rule, "met_by": [], "on_list": []}, "waiting", [], [])
+
+
+def save_body(raw: Any) -> dict:
+    """``{version, policies}`` for the Library's PUT: what it filled in on a
+    read (``needs.name``, ``eligible``, ``set_by``, ``set_at``) is left out."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("version"), int) or isinstance(raw["version"], bool):
+        raise ServiceError("invalid", "version is the number last read", 400)
+    if not isinstance(raw.get("policies"), list) or not all(isinstance(r, dict) for r in raw["policies"]):
+        raise ServiceError("invalid", "policies is a list of rules", 400)
+    kept = []
+    for r in raw["policies"]:
+        needs = r.get("needs")
+        kept.append({**{k: v for k, v in r.items() if k not in ("eligible", "set_by", "set_at")},
+                     **({"needs": {k: v for k, v in needs.items() if k != "name"}} if isinstance(needs, dict) else {})})
+    return {"version": raw["version"], "policies": kept}
