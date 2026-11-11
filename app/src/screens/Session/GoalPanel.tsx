@@ -206,10 +206,15 @@ const isGoalPhase = (p: string | null | undefined): p is GoalPhase => !!p && p i
    it opened reads PR open, its word that the session is ready reads Ready for
    PR, every milestone passed reads In review (brindle is still judging it), or
    Done when the engine can't judge PRs at all and calls the goal done; else In
-   progress. */
+   progress. Only PR open and Done have a PR: once the session's PR merged and
+   its branch moved on to the next, the engine's phase has none, and the merged
+   one (a readiness read older than the goal's) is never shown as its PR. */
 export function goalPhase(goal: GoalDTO, readiness: Pick<Readiness, "state" | "pr">): { phase: GoalPhase; prUrl: string | null } {
   const prUrl = goal.pr_url ?? readiness.pr?.url ?? null;
-  if (isGoalPhase(goal.goal_phase)) return { phase: goal.goal_phase, prUrl };
+  if (isGoalPhase(goal.goal_phase)) {
+    const hasPr = goal.goal_phase === "pr_open" || goal.goal_phase === "done";
+    return { phase: goal.goal_phase, prUrl: hasPr ? prUrl : null };
+  }
   if (readiness.pr) return { phase: "pr_open", prUrl };
   if (readiness.state === "ready") return { phase: "ready_for_pr", prUrl };
   const { passed, total } = completion(goal.milestones);

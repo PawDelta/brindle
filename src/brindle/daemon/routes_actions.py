@@ -1020,6 +1020,7 @@ def _end_pr_work(key: tuple[str, str]) -> None:
 
 
 def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> None:
+    review.keep_merged_pr(db, *key, url)    # the branch's next PR: the merged one stays in its history
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at)"
                     " VALUES (?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
                     " url = excluded.url, pushed_sha = excluded.pushed_sha,"
@@ -1054,7 +1055,9 @@ def _preparation_pending(db: DB, root_id: str) -> bool:
             return False
     if identity_lock.locked_by(root_id):
         return False
-    if db.conn.execute(f"SELECT 1 FROM session_prs WHERE {_SESSION_PR} AND url IS NOT NULL", key).fetchone():
+    # A merged PR doesn't settle it: readiness says whether the branch has moved on to its next one.
+    if db.conn.execute(f"SELECT 1 FROM session_prs WHERE {_SESSION_PR} AND url IS NOT NULL AND merged_at IS NULL",
+                       key).fetchone():
         return False
     fp = review._fingerprint(ws, ws.base_branch) if ws.base_branch else None
     if fp is None:
