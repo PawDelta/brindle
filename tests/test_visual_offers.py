@@ -141,7 +141,8 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
 @pytest.mark.parametrize("text,scope", [
     ("Please visualize this layout.", "visual"),
     ("Show me the release flow visually.", "visual"),
-    ("can you render out what this new structure is again/", "visual"),
+    pytest.param("can you render out what this new structure is again/", "visual",
+                 marks=pytest.mark.variant("the owner's exact message from the 2026-11-11 incident")),
     pytest.param("please render possible options", "visual",
                  marks=pytest.mark.variant("render without out or a named artifact")),
     pytest.param('"can you render out what this new structure is again/"', None,
