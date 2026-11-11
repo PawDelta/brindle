@@ -475,6 +475,30 @@ def test_failed_answer_delivery_leaves_no_approval_behind(delivered, db, session
     assert started == [] and plans.holding(db, "boss") is not None      # the undelivered answer exempted nothing
 
 
+@pytest.mark.variant("review: the answer is delivered between the offer's evaluation and its insertion")
+def test_approval_delivered_while_the_offer_is_being_opened(db, session, monkeypatch):
+    from brindle import autopilot, visuals
+    from brindle.db import DB as DBClass
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+    real = DBClass.open_plan_offer
+
+    def late(self, *args):      # the approval lands after the evaluation saw none, before the offer is written
+        visuals.answer(db, shown["id"], 1, option="build")
+        return real(self, *args)
+    monkeypatch.setattr(DBClass, "open_plan_offer", late)
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    assert plans.holding(db, "boss") is None and started == ["build the preset schema"]
+
+
 @pytest.mark.variant("reported stall: a terminal-only session's workers held by an offer nobody can answer (review 0.6.3, finding 3)")
 def test_plan_offer_without_app(db, session, monkeypatch):
     from brindle import autopilot

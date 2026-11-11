@@ -454,16 +454,18 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
         # Only a kept copy of this same revision takes the answer: a copy of
         # an earlier revision keeps what it was saved with until Keep again.
         c.execute("UPDATE kept_visuals SET answer=? WHERE id=? AND rev=?", (record, v["id"], rev))
-    _settle_offer_for_approval(db, v["root_id"])
+    settle_offer_for_approval(db, v["root_id"])
     bus.publish(db, "visual.answered", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"],
                 rev=rev, option=option)
     return get(db, v["id"])
 
 
-def _settle_offer_for_approval(db: DB, root_id: str) -> None:
+def settle_offer_for_approval(db: DB, root_id: str) -> None:
     """A goal's planning offer opened while its approving answer was still
     being delivered is settled now and its queued tasks released. Only an
-    unanswered offer: an accepted one, a plan or a review hold stays."""
+    unanswered offer: an accepted one, a plan or a review hold stays. Run
+    after an answer is delivered and after an offer is opened, so whichever
+    comes second settles it."""
     from brindle import plans, tasks
 
     ap = db.get_autopilot(root_id)

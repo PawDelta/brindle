@@ -797,6 +797,7 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
                 and db.open_plan_offer(root_id, ap.goal, plans.OFFER_OPEN + secrets.token_hex(4)):
             bus.publish_agent(db, "autopilot.goal", root_id)
+            visuals.settle_offer_for_approval(db, root_id)   # an approval delivered while this was evaluated
     except Exception:  # noqa: BLE001 - an offer is never a reason to fail a goal or a spawn
         log.info("plan offer not evaluated", exc_info=True)
 
