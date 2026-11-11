@@ -222,9 +222,17 @@ worker) and would have nothing to show. `goal_phase`'s `ready_for_pr` and
 session PR.
 
 **Risks.**
-- Half-built features reach main. In this repo every push to main also ships
-  an app build (per the session notes; not re-checked here), so each one would
-  need a ship gate.
+- Half-built features reach main, one passing task at a time. In this repo
+  that reaches staff quickly: a push to main that touches the app or the
+  engine (`app/**`, `src/**` and a few project files; docs and tests alone
+  don't count) builds the staff channel once that commit's CI and App runs
+  have passed (`.github/workflows/app-release.yml:100-114` and `staff-gate`,
+  `:167-201`). Everyone else gets it only at a tagged release, which waits for
+  a reviewer's approval (`release-gate`, `:139-165`) but then carries whatever
+  main holds. Those gates check that the code passes and that someone approved
+  the release; neither checks that a feature is finished. So unfinished
+  features would need their own switch (hidden until the phase passes), which
+  is extra work this option brings and the existing gates don't cover.
 - CI time and queueing per task; one red main blocks every session.
 - The person loses the one moment per phase where they review the whole
   change.
