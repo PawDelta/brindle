@@ -89,6 +89,7 @@ def test_session_branch_visible_without_worker_and_cached_by_heads(db, session_b
     assert tasks.find_clash(db, a, ["shared.py"], caller_id="a").holder_root == "b"
 
 
+@pytest.mark.variant("the gap behind the Nov 6 conflicts: a reported branch dropped out of the forecast just before it merged")
 def test_session_branch_forecast_keeps_reported_unmerged(db, coordination, monkeypatch):
     c = coordination
     c.changed[c.a.id] = c.changed[c.w.id] = ["src/shared.py"]
