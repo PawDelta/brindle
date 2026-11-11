@@ -1,0 +1,210 @@
+Release 0.6.4 smoke test
+========================
+
+Date: 2026-11-11
+Branch: test/release-0.6.4-smoke (worktree of brindle/session-10)
+Candidate: origin/main at daa3cf0a ("App sign-in: one token refresh at a time (#413)")
+Installed engine for comparison: /Applications/brindle.app/Contents/Resources/engine/bin/brindle (0.6.3+release.136)
+Scope: investigation only. No src files changed. The live ~/.brindle DB and the running
+daemon were not touched; every run used a temp BRINDLE_HOME under
+.brindle/agents/smoke/ (gitignored). Nothing was killed that the test did not start.
+
+Summary
+-------
+1. Upgrade ............................ PASS (with a caveat: see 1c)
+2. Rollback safety .................... PASS (v0.6.3 and v0.6.2 engines)
+3. Fresh install ...................... PASS (version string not yet bumped; see 3a)
+4. MCP resilience ..................... PASS for invalid config.json and a burst of
+                                        concurrent calls. The slow-call probe was NOT
+                                        EXERCISED: no cheap slow tool without a live worker.
+5. README quick-start CLI commands .... PASS (commands that start agents were checked
+                                        with --help only; see 5b)
+
+Conventions used below
+----------------------
+- Candidate = origin/main, run from `git archive origin/main` extracted to
+  .brindle/agents/smoke/src-main and synced with `uv sync --project`. Its entry point is
+  .brindle/agents/smoke/src-main/.venv/bin/brindle.
+- v0.6.3 and v0.6.2 = `git archive v0.6.3` / `git archive v0.6.2`, extracted to
+  .brindle/agents/smoke/src-v063 and src-v062, each synced with `uv sync --project`.
+  git worktrees were not created (the worker rules forbid `git worktree add`); the trees
+  are identical to what a worktree checkout would give.
+- All commands run with `env BRINDLE_HOME=<temp home> BRINDLE_NO_UPDATE_CHECK=1 ...`.
+
+1. Upgrade
+----------
+1a. Live DB copied with `sqlite3 ~/.brindle/brindle.db ".backup <temp>"` (the .backup
+    API folds the -wal into the copy; the -wal and -shm were not copied separately).
+    Copy into .brindle/agents/smoke/home-upgrade/brindle.db: integrity_check = ok,
+    user_version = 1, 182 sqlite_master objects, 73 agents and 3 session repos in the DB.
+
+1b. Installed engine against the copy:
+      env BRINDLE_HOME=.../home-upgrade ... /Applications/brindle.app/Contents/Resources/engine/bin/brindle doctor
+    Result: every row ✓ except expected warnings (Ollama context length, no routing profile
+    for developer-haiku / developer-codex-heavy in this repo's config.local.json, merged
+    worktrees and dead branches). Last line: "brindle can run; 5 warning(s) worth a look."
+    `brindle home ... (writable, database opens)`. No traceback. The exit code was not
+    captured; success is read from the output.
+
+    Installed engine MCP handshake against the same copy:
+      ... brindle mcp < mcp_init.jsonl   (initialize, notifications/initialized, tools/list)
+    The server answers and lists the full tool set; it does not exit on stdin EOF, so it was
+    stopped after the answer. Zero "Traceback" or JSON-RPC "error" lines in the output.
+
+1c. Caveat. The installed engine's copy already contained `visuals.consented_by` and the
+    `session_pr_heads` table, and so did the candidate's copy, because the live DB already
+    has both (checked with pragma_table_info / sqlite_master). So runs 1b and 1d did not
+    exercise a schema migration from an older schema. Run 1e does.
+
+1d. Candidate against a copy of the live DB (.brindle/agents/smoke/home-main):
+      env BRINDLE_HOME=.../home-main ... src-main/.venv/bin/brindle doctor   -> same as 1b
+      env BRINDLE_HOME=.../home-main ... src-main/.venv/bin/brindle mcp < mcp_init.jsonl
+    Both answer; no tracebacks; tools/list complete.
+
+1e. Real migration: a DB written by the v0.6.3 engine, then upgraded by the candidate.
+      1. env BRINDLE_HOME=.../home-v063db ... src-v063 brindle doctor   (creates a v0.6.3 DB)
+      2. sqlite3 ... "select count(*) from pragma_table_info('visuals') where name='consented_by'"
+         -> 0 ; sqlite_master name='session_pr_heads' -> 0 ; visual_requests -> 1
+      3. env BRINDLE_HOME=.../home-v063db ... src-main/.venv/bin/brindle doctor   (candidate)
+         -> "brindle can run; 5 warning(s) worth a look.", "database opens"
+      4. sqlite3 again -> consented_by = 1 ; session_pr_heads = 1 ; user_version = 1 ;
+         PRAGMA integrity_check = ok.
+    PASS: the candidate adds `visuals.consented_by` and `session_pr_heads` in place.
+    Note: the candidate's SCHEMA no longer declares `visual_requests`; the table is left in
+    place (not dropped) and is harmless to both older engines (see 2).
+
+2. Rollback safety
+------------------
+Script: .brindle/agents/smoke/rollback_check.py, run with `python -I` under each tree's
+venv. It calls db.migration_incompatibility(), opens db.DB(), and lists agents and session
+repos.
+
+2a. Against the installed-engine copy (home-upgrade, 73 agents, 3 session repos):
+    v0.6.3 engine: SCHEMA_VERSION 1, migration_incompatibility None,
+                   user_version after open 1, list_agents 73, session_repos 3.
+    v0.6.2 engine: SCHEMA_VERSION 1, migration_incompatibility None,
+                   user_version after open 1, list_agents 73, session_repos 3.
+
+2b. Against the candidate-migrated copy from 1e (home-v063db, empty of agents):
+    v0.6.3 engine: migration_incompatibility None, user_version 1, list_agents 0,
+                   session_repos 0.
+    v0.6.2 engine: migration_incompatibility None, user_version 1, list_agents 0,
+                   session_repos 0.
+    The empty lists show the query runs; the 2a run is the one with real rows.
+
+PASS for both. Neither older engine reports an incompatibility after the candidate's
+migration, because the new column is nullable and the new table is extra.
+
+3. Fresh install
+----------------
+3a. `brindle --version`, empty home (.brindle/agents/smoke/home-fresh):
+      candidate:  brindle 0.6.3
+      installed:  brindle 0.6.3
+    The candidate's pyproject still says 0.6.3. The 0.6.4 version bump is not on
+    origin/main yet. This is a release-prep item, not a runtime failure.
+
+3b. `brindle doctor` on the empty home (candidate): creates the DB; `brindle home ...
+    (writable, database opens)`; same set of warnings as 1b; "brindle can run".
+
+3c. `brindle mcp` tools/list on the empty home:
+    Candidate: 44 tools, including request_doc_read, offer_visual, publish_visual,
+    propose_plan, list_visuals, read_analysis_doc, edit_analysis_doc, handoff,
+    wait_for_worker, assign, send_message, read_messages, submit_plan, approve_plan,
+    answer_permission, report_result, complete_subagent, list_agents, who_is_working,
+    record_decision, decisions, kb_search, list_tasks, requeue, list_repos, cancel_task,
+    start_now, list_agent_profiles, workspace_diff, merge_workspace, request_review,
+    submit_review, remove_workspace, agent_turns, rewind_agent, set_goal, add_checks,
+    handover, get_progress, check_milestone, record_audit_decision, wait_on, need_user,
+    transfer_to_repo.
+    Installed engine on the same home: the same 44 names.
+
+3d. Visuals setting. With `{"visuals_enabled": "off"}` in the home's config.json
+    (.brindle/agents/smoke/home-visoff), the candidate's tools/list drops exactly
+    offer_visual, publish_visual and list_visuals (41 tools). Default (no setting) shows
+    them (44). PASS.
+
+4. MCP resilience
+-----------------
+Driver: .brindle/agents/smoke/resilience.py (stdlib only), run with the candidate's
+python -I. It starts `brindle mcp` as a live child process with stdin/stdout pipes, so
+requests can be sent over time. The child's stdout is read on a thread, responses are keyed
+by id, and stderr is kept. Home: .brindle/agents/smoke/home-resil. config.json is the
+user config (~/.brindle/config.json equivalent), which _watch_visuals re-reads every 5 s
+(src/brindle/mcp_server.py; #414).
+
+Sequence and results (from the run output):
+  initialize                         answered in 0.91 s, no error
+  tools/call list_agents (valid)     answered in 0.07 s, "No agents."
+  config.json := invalid JSON        (written by the driver)
+  wait 7 s (past one 5 s watch tick)
+  tools/call list_agents             answered in 0.03 s, "No agents."
+  tools/call get_progress            answered in 0.03 s, "Not running as a brindle agent."
+  config.json := valid JSON          (restored)
+  wait 7 s
+  tools/call list_agents             answered in 0.04 s
+  burst: 6 concurrent list_agents    all answered, 0.12 to 0.48 s, none errored
+  tools/call wait_for_worker (bad id)answered in 0.48 s with isError true:
+                                     "Error executing tool wait_for_worker"
+Stderr (.brindle/agents/smoke/resil-stderr.log, 351 lines) shows the watch saw the bad file:
+  JSONDecodeError: Expecting ...   (the config read at the invalid JSON)
+and the bad-id call logged:
+  AgentError: no agent 'no-such-worker'
+  UnexpectedToolError: Error executing tool wait_for_worker
+The server kept answering after both. PASS for "watch survives an invalid config.json and
+still answers tools/call".
+
+NOT EXERCISED: a slow tool call run in parallel. The slow candidates all returned at once
+without a live worker: wait_on with a future `until` returned immediately ("Not running as
+a brindle agent" / no result), and wait_for_worker only blocks on a process-backed worker
+(_await_worker returns at once for a non-running agent). Making a real slow call needs a
+running worker with tmux and an agent process, which the rules here do not allow. The burst
+above shows concurrency only.
+
+Finding (minor, pre-existing as far as this run shows): wait_for_worker with an unknown
+agent id returns a tool error after logging a traceback. The server stays responsive, so
+it is not a hang, but the unknown-id path raises AgentError instead of returning a message.
+I did not check v0.6.3 for the same behaviour.
+
+5. README quick-start CLI commands (candidate, throwaway repo
+   .brindle/agents/smoke/repo-cli, home .brindle/agents/smoke/home-cli)
+---------------------------------------------------------------------------
+Commands were run as
+  uv run --project .../src-main --directory .../repo-cli brindle <cmd>
+or with the candidate binary directly for --help.
+
+5a. Commands that run without starting an agent:
+  brindle --help          PASS: full help, command list.
+  brindle init (in repo-cli): PASS: "detected: no known stack", wrote .brindle/config.json
+                          in the throwaway repo, warnings for missing checks and graph,
+                          "Ready. Run `brindle` and tell the supervisor what to build."
+  brindle doctor          PASS (see 1b, 1d, 3b).
+  brindle ls              PASS: "no workspaces".
+  brindle goal            Exit 1: "no brindle session here. Run `brindle` to start one."
+                          A clear message, but not a 0 exit. Expected for a repo with no
+                          session; counted as a clear message per the finish line.
+  brindle history         PASS: "no history".
+  brindle sessions        PASS: "no paused sessions".
+
+5b. Commands that start agents or open things, checked with --help only (not run):
+  brindle demo --help     PASS (demo would start workers; not run)
+  brindle app --help      PASS (would open the desktop app; not run)
+  brindle web --help      PASS (would start a server; not run)
+  brindle new --help      PASS (would start a supervisor; not run)
+  brindle pr --help       PASS (would push and open a PR; not run)
+  brindle continue --help PASS (would resume paused work; not run)
+  The bare `brindle` supervisor launch was not run: it starts a real agent.
+
+Notes for the release
+---------------------
+- Version string: origin/main still reports 0.6.3 (see 3a).
+- The live DB already carries the candidate's schema; the candidate's upgrade path was
+  verified from a real v0.6.3 DB (1e), not from the live DB.
+- Doctor warnings in every run are environment (Ollama context, routing profiles missing
+  from this repo's config.local.json, merged worktrees, dead branches). None is a
+  regression from the candidate.
+- wait_for_worker with an unknown id: see the finding in section 4.
+- Not covered: a truly slow tool call in parallel (section 4); a live supervisor or worker
+  run; the desktop app UI.
+- The worktree root gained a .venv from `uv run --directory` (gitignored).
+- This file lives under docs/, which .gitignore lists as docs/*; the other files in
+  docs/investigations/ were force-added, so this one is added with `git add -f`.
