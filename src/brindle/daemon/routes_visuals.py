@@ -370,7 +370,9 @@ def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
     actions._docs_entitlement(repo, analysis_docs._session()[1])   # signed out or not entitled: a 402, and the app drops the doc
     try:
         return work(shared_reader)
-    except (RuntimeError, auth.TransportError) as e:    # unreachable or refused: not signed out
+    except (RuntimeError, auth.TransportError) as e:    # unreachable or refused
+        if isinstance(e, analysis_docs.Refused) and e.status == 401:      # still refused after a token refresh; a 401 would read as the daemon's
+            raise ServiceError("signed_out", "sign in to brindle again to read this design", 402) from e
         if isinstance(e, analysis_docs.Refused) and e.code == "key_unavailable":
             raise ServiceError(e.code, redact.mask(str(e)), 503) from e   # the org's key is revoked: the doc is gone for now
         err = actions.upstream_error(e)

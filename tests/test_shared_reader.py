@@ -90,6 +90,17 @@ def test_the_librarys_refusals_reach_the_app(lib, app):
     accepted = app.post(f"{ROUTE}/threads/1", json={"rev": 1, "action": "accept"})
     assert accepted.status_code == 400 and not sent(lib.calls, f"POST {DESIGN}/threads/1")
 
+    # An outage says nothing about access. Refused even with a fresh token, the app drops the doc.
+    def offline(form, headers):
+        raise auth.TransportError("offline")
+
+    lib.calls.routes[f"GET {DESIGN}"] = offline
+    assert app.get(ROUTE).status_code == 502
+
+    lib.calls.routes[f"GET {DESIGN}"] = lambda f, h: (401, {"error": "invalid_token"})
+    signed_out = app.get(ROUTE)
+    assert (signed_out.status_code, signed_out.json()["error"]["code"]) == (402, "signed_out")
+
 
 def test_ask_the_supervisor_goes_by_doc_and_thread_after_the_reply(lib, app, monkeypatch):
     asked = []

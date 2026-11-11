@@ -96,16 +96,19 @@ export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown) {
   // while a write is out (`passed`) may already be past it, so that write's reply then only
   // counts if it is further along. And when a write comes back, every read still out is
   // dropped (it may predate the write) and the plan is read once more.
-  const write = useRef({ out: false, passed: false });
+  const write = useRef({ out: false, passed: false, access: 0 });
+  // Counts the times access to the doc was lost: the reply to a write begun before that must not
+  // bring the doc back. Only a read made since can.
+  const access = useRef(0);
   const writes = useMemo<Writes>(() => ({
     begin: () => {
       if (write.current.out) return false;
-      write.current = { out: true, passed: false };
+      write.current = { out: true, passed: false, access: access.current };
       return true;
     },
     end: (p) => {
-      if (p) place(p as P, write.current.passed);
-      write.current = { out: false, passed: false };
+      if (p && write.current.access === access.current) place(p as P, write.current.passed);
+      write.current = { out: false, passed: false, access: access.current };
       seq.current++;
       setAgain((n) => n + 1);
     },
@@ -122,6 +125,7 @@ export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown) {
         if (mine !== seq.current) return;
         setError(message(e));
         if (source.lost?.(e)) {
+          access.current++;
           latest.current = null;
           setDoc(null);
         }

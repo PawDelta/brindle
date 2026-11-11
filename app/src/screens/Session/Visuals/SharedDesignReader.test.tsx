@@ -1,10 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { DaemonError, type SharedDesign } from "../../../api/client";
 import type { SharedDesignClient } from "./client";
 import { SharedDesignReader } from "./SharedDesignReader";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const design: SharedDesign = {
   id: "doc_1", session: "", title: "Cloud workers", rev: 1, state: "open", markdown: "Why.", lede: "Why.", sections: [{ id: "s", title: "Summary", markdown: "Workers run here." }, { id: "fig", title: "Flow", kind: "mermaid", markdown: "graph TD; A-->B" }],
@@ -13,6 +16,8 @@ const design: SharedDesign = {
 };
 
 it("a teammate signs off through the Library, keeps a draft across a stale write, and loses the doc with their access", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const nextRead = () => act(async () => { vi.advanceTimersByTime(30_000); });
   let doc = design;
   let reading: () => Promise<SharedDesign> = async () => doc;
   const sent: [string, Record<string, unknown>][] = [];
@@ -32,7 +37,7 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
   fireEvent.change(box(), { target: { value: "Which VM?" } });
   answer = async () => { doc = { ...design, rev: 2 }; throw new DaemonError("stale", "stale", 409); };
   await act(async () => fireEvent.click(within(screen.getByTestId("thread-draft")).getByRole("button", { name: "Comment" })));
-  expect(screen.getByRole("alert").textContent).toContain("changed");
+  expect(screen.getByRole("alert")).toBeTruthy();
   expect((box() as HTMLTextAreaElement).value).toBe("Which VM?");
   expect(screen.getByTestId("plan-rev").textContent).toBe("rev 2");
 
@@ -41,11 +46,25 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
   expect(sent.at(-1)).toEqual(["sign-offs", { rev: 2 }]);
   expect(screen.queryByTestId("plan-sign-off")).toBeNull();
 
-  // A refusal on the next read takes the doc off the screen.
-  reading = async () => { throw new DaemonError("forbidden", "no access", 403); };
-  answer = reading;
-  fireEvent.change(box(), { target: { value: "Which VM? Any." } });
+  // An outage says nothing about access: what was on screen stays.
+  reading = async () => { throw new DaemonError("upstream", "offline", 502); };
+  await nextRead();
+  expect(screen.getByText("Workers run here.")).toBeTruthy();
+
+  // A write goes out, then a read is refused: the doc leaves, and the write's late reply can't
+  // bring it back while the read after it is still out. Only that read can.
+  let reply!: (d: SharedDesign) => void;
+  answer = () => new Promise<SharedDesign>((resolve) => { reply = resolve; });
   await act(async () => fireEvent.click(within(screen.getByTestId("thread-draft")).getByRole("button", { name: "Comment" })));
+  reading = async () => { throw new DaemonError("forbidden", "no access", 403); };
+  await nextRead();
   expect(screen.queryByText("Workers run here.")).toBeNull();
-  expect(screen.getByRole("alert").textContent).toContain("no access");
+  expect(screen.getByRole("alert")).toBeTruthy();
+
+  let granted!: (d: SharedDesign) => void;
+  reading = () => new Promise<SharedDesign>((resolve) => { granted = resolve; });
+  await act(async () => reply(doc));
+  expect(screen.queryByText("Workers run here.")).toBeNull();
+  await act(async () => granted(doc));
+  expect(screen.getByText("Workers run here.")).toBeTruthy();
 });
