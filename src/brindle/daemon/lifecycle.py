@@ -351,6 +351,7 @@ def pause_for_exit(recovery: Recovery | None = None) -> list[str]:
             entries = [recorded(root.id) for root in roots]
             if not _record_resume(left + entries) or not roots:
                 return []
+            _record_window_size()       # before the windows close; after the record, which matters more
             closings = agents.record_pauses(db, [entry["id"] for entry in entries])
         finally:
             db.conn.close()
@@ -391,6 +392,37 @@ def _read_resume() -> list[dict] | None:
     if not isinstance(entries, list):
         return []
     return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
+
+
+WINDOW_SIZE_FILE = "agent-window-size"      # the size recovered windows start at (_record_window_size)
+
+
+def _window_size_path() -> Path:
+    return brindle_home() / WINDOW_SIZE_FILE
+
+
+def _record_window_size() -> None:
+    """The size the agents' windows were last shown at, for the next start:
+    no view is attached while it brings them back and the daemon has no
+    terminal, so they would come back at tmux's 80x24 and the resumed chats
+    draw there. Kept when nothing can be read now. A hint: failing is only logged."""
+    from brindle import tmux
+
+    try:
+        size = tmux.agent_window_size()
+        if size:
+            _write_private(_window_size_path(), json.dumps(size))
+    except (tmux.TmuxError, OSError):
+        log.warning("brindle: couldn't record the agents' window size", exc_info=True)
+
+
+def _read_window_size() -> tuple[int, int] | None:
+    """What _record_window_size kept, or None when there is nothing usable."""
+    try:
+        cols, rows = json.loads(_window_size_path().read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    return (cols, rows) if isinstance(cols, int) and isinstance(rows, int) and cols > 0 and rows > 0 else None
 
 
 VIEWED_FILE = "viewed-session"      # the session the app last showed (record_viewed)
@@ -656,10 +688,11 @@ def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env
             recovery.settled(entry)
             return False
         steps: list[str] = [f"room {waited:.2f}s"]     # how long it waited for the machine to have room
+        size = _read_window_size()
         try:
             with _timed(steps, "resume"):
                 agents.resume(db, root.id, only={a.id for a in tree} - held, settle=True,
-                              gate=recovery.launching, recovery_env=env)
+                              gate=recovery.launching, recovery_env=env, **({"window_size": size} if size else {}))
         finally:
             # A warning, so it's seen: the daemon's log is its stderr (app-daemon.log), warnings only.
             debuglog.recovery_timing(log, "brindle: session %s recovery: %s", root.id, ", ".join(steps))
