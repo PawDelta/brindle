@@ -314,3 +314,70 @@ def test_broad_glob_launch_deduplicates_and_preserves_modes(db, coordination, mo
         db.update_task(pending.id, state="merged")
         refs["refs/heads/session"] = "b-next"
         assert tasks.inspected_clash(db, caller_ws, ["src/shared.py"], caller_id="a").holder == "workspace:b"
+
+
+@pytest.fixture
+def cross_session_wait(db, coordination, monkeypatch):
+    """Session a's task on src/shared.py, which session b's unlanded branch
+    holds, started through the real dispatch path (``_start_if_ready``)."""
+    from brindle import identity_lock
+
+    c = coordination
+    db.update_task("held", state="merged")
+    db.conn.execute("UPDATE workspaces SET branch='session-a' WHERE id='a'")
+    refs = {"refs/heads/main": "cw-main", "refs/heads/session-a": "cw-main", "refs/heads/session": "cw-b"}
+    monkeypatch.setattr(git, "ref_shas", lambda root: refs)
+    # After a sync b's head moves and its diff no longer has the file.
+    monkeypatch.setattr(git, "paths", lambda args, root:
+                        ["src/shared.py"] if args[0] == "diff" and args[-1].endswith("cw-b") else [])
+    monkeypatch.setattr(git, "ok", lambda args, root: False)   # a never inherits b's branch
+    monkeypatch.setattr(identity_lock, "ensure_workspace", lambda *args: None)
+    monkeypatch.setattr(config, "load_repo_config",
+                        lambda root: SimpleNamespace(overlap=None, max_weight=None, merge_into=None))
+    monkeypatch.setattr(tasks, "task_wait", lambda db, t: None)
+    monkeypatch.setattr(tasks, "_claim_fair", lambda db, t: (db.claim_task(t.id), None, None))
+    monkeypatch.setattr(tasks, "_launch_warnings", lambda *args: [])
+    monkeypatch.setattr(tasks.agents, "send_message", lambda *args, **kwargs: None)
+    told = []
+    monkeypatch.setattr(gates, "tell", lambda db, to, text: told.append(to))
+    starts = []
+
+    def delegate(db, caller, ws, *args, start=None, **kwargs):
+        starts.append(start)
+        worker = replace(db.get_agent("worker"), id=f"started-{len(starts)}", parent_id="a")
+        db.add_agent(worker)
+        return worker, c.w
+
+    monkeypatch.setattr(tasks.agents, "delegate", delegate)
+    db.add_task(replace(c.held, id="new", agent_id=None, caller_id="a", caller_ws_id="a",
+                        state="pending", task_text="new work"))
+    assert not tasks._start_if_ready(db, db.get_task("new"), "its dependencies")
+    assert tasks._loads(db.get_task("new").depends_on) == ["workspace:b"]
+    # Still held on the next look, and a second identical assign leaves it in place.
+    assert tasks.sweep(db) == 0
+    assert tasks.room_duplicate(db, "a", "/repo", "new work", c.held.branch).id == "new"
+    assert starts == [] and db.get_task("new").state == "pending"
+    told.clear()
+    return SimpleNamespace(refs=refs, starts=starts, told=told)
+
+
+@pytest.mark.parametrize("event", ["landed", "synced"])
+def test_cross_session_wait_released_when_other_session_lands(db, cross_session_wait, event):
+    w = cross_session_wait
+    if event == "landed":   # b's PR merged on main; its branch hasn't synced yet
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, merged_at)"
+                        " VALUES ('b', 'session', 'u', 'x', 0, ?)", (tasks.time.time(),))
+    else:   # b synced main back in: its branch no longer holds the file
+        w.refs["refs/heads/session"] = "cw-b-synced"
+    assert tasks.sweep(db) == 1
+    assert db.get_task("new").state == "started" and len(w.starts) == 1
+    assert w.told == []   # a release tells nobody beyond the caller's start note
+
+
+def test_cross_session_wait_falls_back_after_drift_limit(db, cross_session_wait):
+    w = cross_session_wait
+    db.conn.execute("UPDATE task_notes SET noted = noted - ? WHERE task_id = 'new'",
+                    (tasks.CROSS_SESSION_WAIT_LIMIT + 1,))
+    assert tasks.sweep(db) == 1
+    assert db.get_task("new").state == "started"
+    assert sorted(w.told) == ["a", "b"]   # both supervisors, not the Inbox
