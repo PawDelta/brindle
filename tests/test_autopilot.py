@@ -1209,6 +1209,8 @@ def test_session_pr_state_of_a_payload(payload, expected):
     from brindle.daemon import session_review
 
     got = session_review.pr_state_of("https://github.com/o/r/pull/391", payload)
+    if got is not None:
+        assert got.pop("conflicting", False) == (payload.get("mergeable") == "CONFLICTING")
     assert got == (expected and {"number": 391, "state": expected[0], "done": expected[1], "total": expected[2]})
 
 

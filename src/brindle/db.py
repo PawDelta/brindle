@@ -644,6 +644,14 @@ CREATE TABLE IF NOT EXISTS session_prs (
     merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
     PRIMARY KEY (root_id, branch)
 );
+-- A durable claim prevents overlapping daemons from merging the same PR twice.
+-- Keep failed attempts for the Inbox; only poll_merged records an actual merge.
+CREATE TABLE IF NOT EXISTS session_pr_merges (
+    url TEXT PRIMARY KEY,
+    state TEXT NOT NULL,            -- merging | submitted | failed
+    owner TEXT,                    -- unique token whose session-pr-merge marker is held while acting
+    error TEXT
+);
 -- The session PRs that merged before the branch's next PR replaced them in
 -- session_prs (session_review.keep_merged_pr): a branch can have several.
 CREATE TABLE IF NOT EXISTS session_pr_history (
@@ -1482,6 +1490,9 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        merge_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(session_pr_merges)")}
+        if "owner" not in merge_cols:
+            self.conn.execute("ALTER TABLE session_pr_merges ADD COLUMN owner TEXT")
         input_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_input_state)")}
         if "observer" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN observer INTEGER NOT NULL DEFAULT 0")

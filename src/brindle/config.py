@@ -141,6 +141,7 @@ class RepoConfig:
     fable_escalation: bool | None = None
     merge_into: str | None = None      # branch worker branches are cut from and merge into (None: the supervisor's / default branch)
     auto_merge_default_branch: bool = False  # let the pipeline merge into the repo's default branch on its own
+    auto_merge_session_prs: bool = True  # merge open session PRs once the forge reports green CI and no conflicts
     delegation: str = "balanced"      # how readily a supervisor hands work to workers: "conservative" (save tokens), "balanced" or "fast" (save time)
     max_weight: str | None = None      # ceiling for weight routing: "light", "medium", "heavy", "advanced", or None (unlimited)
     plan_first: bool = False           # workers propose a plan and wait for approval before editing
@@ -453,7 +454,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
+                "auto_merge_default_branch", "auto_merge_session_prs", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
