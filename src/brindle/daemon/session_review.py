@@ -123,6 +123,8 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
         out.append("the session's checkout has uncommitted changes")
     elif not git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1]:
         out.append(f"the session's branch has no commits ahead of {ws.base_branch}")
+    elif (pr := current_pr(db, root.id, ws)) is not None and pr["merged_at"]:
+        out.append(f"the session's PR merged and {ws.branch} has no new commits since")
     elif behind := session_sync.pr_block(ws):
         out.append(behind)
     return out
@@ -165,15 +167,58 @@ def has_pr_target(ws: Workspace) -> bool:
         git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1])
 
 
+def new_since_merge(ws: Workspace, pushed_sha: str | None) -> bool:
+    """Whether the session's branch has commits of its own beyond
+    ``pushed_sha``, its merged PR's: its next PR's. A sync's merges, and
+    what they bring in from the base (a squash of that PR included), don't
+    count. An unknown or vanished ``pushed_sha`` counts as nothing new."""
+    if not pushed_sha:
+        return False
+    args = ["rev-list", "--count", "--no-merges", "HEAD", f"^{pushed_sha}"]
+    try:
+        if ws.base_branch:
+            args.append(f"^{git.base_ref(ws.path, ws.base_branch)}")
+        if (default := session_sync.upstream(ws)) and git.remote_branch_exists(ws.path, default):
+            args.append(f"^origin/{default}")
+        return int(git.out(args, ws.path)) > 0
+    except (git.GitError, ValueError):
+        return False
+
+
+def current_pr(db: DB, root_id: str, ws: Workspace):
+    """The PR the session's branch is on (``url``, ``pushed_sha``,
+    ``merged_at``): its open PR, or the one that merged until the branch has
+    commits beyond it (``new_since_merge``); then None: its next PR is to be
+    opened, and the merged one moves to ``session_pr_history`` when it is."""
+    row = db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_prs WHERE root_id = ? AND branch = ?"
+                          " AND url IS NOT NULL", (root_id, ws.branch)).fetchone()
+    if row is not None and row["merged_at"] and new_since_merge(ws, row["pushed_sha"]):
+        return None
+    return row
+
+
+def keep_merged_pr(db: DB, root_id: str, branch: str, url: str) -> None:
+    """The branch's next PR ``url`` is about to replace its merged one in
+    ``session_prs``: keep that one in ``session_pr_history``."""
+    db.conn.execute("INSERT OR IGNORE INTO session_pr_history (root_id, branch, url, pushed_sha, opened_at, merged_at)"
+                    " SELECT root_id, branch, url, pushed_sha, opened_at, merged_at FROM session_prs"
+                    " WHERE root_id = ? AND branch = ? AND url IS NOT NULL AND url != ? AND merged_at IS NOT NULL",
+                    (root_id, branch, url))
+
+
 def adopt_head_pr(db: DB, root_id: str) -> None:
     """Record, as brindle's own Open PR does (``session_prs``), the open PR a
     supervisor made with ``gh`` when it holds the session's HEAD, so the
     sidebar's PR line, its checks and its merge are followed too. Never waits
-    on ``gh`` (``open_pr_for_head``); a session that has a PR already keeps it."""
-    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL", (root_id,)).fetchone():
+    on ``gh`` (``open_pr_for_head``); a session that has a PR already keeps it
+    (a merged one only until the branch has commits beyond it)."""
+    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL AND merged_at IS NULL",
+                       (root_id,)).fetchone():
         return
     try:
         root, ws = session(db, root_id)
+        if current_pr(db, root_id, ws) is not None:
+            return
         head = status_cache.read_head(ws.path)    # a file read: this runs on every goal read
     except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
         return
@@ -181,10 +226,12 @@ def adopt_head_pr(db: DB, root_id: str) -> None:
         return
     found = open_pr_for_head(head, ws.path, root_id)
     if found and found.get("url"):
+        keep_merged_pr(db, root_id, ws.branch, found["url"])
         # head_ref: where the PR really lives, when that isn't the session's branch: a Push must not go to ws.branch.
         db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
                         " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
-                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at",
+                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at,"
+                        " merged_at = CASE WHEN url = excluded.url THEN merged_at END",
                         (root_id, ws.branch, found["url"], head, time.time()))
         db.conn.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?", (root_id, ws.branch))
         # Every adopted PR is managed outside brindle (its head may be another branch or a fork): Push is refused.
@@ -204,8 +251,15 @@ def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     temporarily it isn't ready (dirty checkout, workers running)."""
     ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
     adopt_head_pr(db, root_id)
-    pr = db.conn.execute("SELECT url, merged_at FROM session_prs WHERE root_id = ? AND url IS NOT NULL"
-                         " ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
+    pr = db.conn.execute("SELECT url, branch, pushed_sha, merged_at FROM session_prs WHERE root_id = ?"
+                         " AND url IS NOT NULL ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
+    if pr and pr["merged_at"] and pr["pushed_sha"]:
+        try:     # a merged PR the branch has moved on from: its next one is on its way
+            _, ws = session(db, root_id)
+            if ws.branch == pr["branch"] and current_pr(db, root_id, ws) is None:
+                pr = None
+        except (ServiceError, git.GitError, workspaces.WorkspaceError):
+            pass
     # Brindle's own decision that the goal is reached (the audit approved it, or
     # goal_audit is off): passing milestones alone aren't it.
     reached = ap is not None and ap.state == "done"
@@ -531,11 +585,12 @@ def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
 
 
 def open_pr(db: DB, root: Agent, ws: Workspace) -> dict[str, Any] | None:
-    """The PR the person opened for the session's branch: its ``url`` and
+    """The open PR the person opened for the session's branch: its ``url`` and
     ``unpushed``, how many session commits aren't on it yet (brindle never
-    pushes them on its own: the person's Push does, POST .../pr/push)."""
+    pushes them on its own: the person's Push does, POST .../pr/push). A
+    merged PR is none: nothing more goes onto it (the branch's next PR does)."""
     row = db.conn.execute("SELECT url, pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?"
-                          " AND url IS NOT NULL", (root.id, ws.branch)).fetchone()
+                          " AND url IS NOT NULL AND merged_at IS NULL", (root.id, ws.branch)).fetchone()
     if row is None:
         return None
     try:
@@ -1118,7 +1173,10 @@ class ReadinessWatch:
         return (fp, working, repr(ws), repr(ap), repr(ms), repr(tree),
                 repr([db.get_workspace(a.workspace_id) for a in tree]),
                 repr(tasks.queued(db)), repr(db.get_login_state(root_id)),
-                repr(load_repo_config(ws.repo_root)))
+                repr(load_repo_config(ws.repo_root)),
+                # its PR merging (or the next one opening) changes readiness without a new commit
+                repr([tuple(r) for r in db.conn.execute("SELECT branch, url, merged_at FROM session_prs"
+                                                        " WHERE root_id = ?", (root_id,))]))
 
     def sweep(self, db: DB) -> list[str]:
         """The sessions that just became ready (each announced on the bus)."""
