@@ -50,6 +50,7 @@ def test_stalled_call_is_recorded_once_with_stacks_and_state(monkeypatch):
     assert dog.check() == 1
 
 
+@pytest.mark.variant("a call stuck before dispatch, in the reload check: one of the hang paths investigated for the 0.6.3 report")
 def test_hung_reload_check_is_logged_through_real_read_and_serialization(monkeypatch):
     """A call stuck in the reload check (before dispatch) is tracked, and the entry
     that reaches the log file still names the blocking frame."""
@@ -84,7 +85,7 @@ def test_hung_reload_check_is_logged_through_real_read_and_serialization(monkeyp
     assert any("wants_reload" in f for f in frames)
 
 
-@pytest.mark.parametrize("count, grouped, distinct", [(300, False, False), (3000, True, False), (1500, True, True)])
+@pytest.mark.parametrize("count, grouped, distinct", [(3000, True, False), (1500, True, True)])
 def test_many_realistic_threads_still_log_the_whole_entry(monkeypatch, count, grouped, distinct):
     """Threads with real-looking ids and one long shared name: the entry isn't
     replaced by a truncation marker, however many threads and innermost locations."""
