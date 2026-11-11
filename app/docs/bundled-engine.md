@@ -333,9 +333,11 @@ the app makes it more likely. Rotations are serialised by
 same refresh token. The second gets `invalid_grant` and deletes the item, even
 though the first just saved a good one.
 
-- Upstream fix (brindle, not this repo): a refresh lock that doesn't depend on
-  `BRINDLE_HOME` when the backend is the Keychain, or a re-read before
-  deleting on `invalid_grant`.
+- Fixed in the engine: with the Keychain (or Secret Service) backend the
+  refresh lock is the OS user's own (`~/.brindle/pro/refresh.lock` of the
+  account, from the password database, whatever `BRINDLE_HOME` or `HOME` a
+  process has), and an `invalid_grant` re-reads the item first: if another
+  brindle saved a newer pair meanwhile, that pair is kept, not deleted.
 - Here: the smoke test runs every daemon with `BRINDLE_PRO_CREDENTIAL_STORE=file`
   in its own home, so it never reads or rotates the owner's sign-in.
 
@@ -368,8 +370,8 @@ Non-secret evidence that would settle the cause, if it happens again:
   had that bug. `engine::tests::the_launcher_runs_the_engines_python_with_its_bin_first_and_macos_own_dirs`
   covers it.
 - The app's engine uses the same `BRINDLE_HOME` (`~/.brindle`, unless the
-  person sets one) as a uv install. It therefore shares `refresh.lock` with any
-  brindle the person also runs from a terminal.
+  person sets one) as a uv install. With the Keychain it shares `refresh.lock`
+  with any brindle of the same OS user, whatever its home.
 - Nothing in the Keychain names the app's path or version, so replacing the
   bundle on update leaves the items as they were. The service and account
   names are brindle's own constants and must not change.
