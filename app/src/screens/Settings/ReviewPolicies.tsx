@@ -5,7 +5,7 @@
    (PUT /v1/review-policies). Nothing is read until the person opens it. The Library decides who may. */
 
 import { useEffect, useState } from "react";
-import { DaemonError, type DaemonClient, type LibraryPerson, type ReviewPoliciesState, type ReviewPolicyRule } from "../../api/client";
+import { DaemonError, type DaemonClient, type DraftImpact, type LibraryPerson, type ReviewPoliciesState, type ReviewPolicyRule } from "../../api/client";
 import { LoadingButton } from "../../components/LoadingButton";
 import { alert, button, field, main, notice, quiet } from "../../components/ui";
 
@@ -26,10 +26,16 @@ const blank: Draft = { editing: null, name: "", kind: "paths", paths: "", label:
 
 const failureMessage = (failure: unknown) => (failure instanceof Error ? failure.message : String(failure));
 
+/* The Library's limit on a rule id. */
+const MAX_ID = 32;
+
 const slug = (name: string, taken: string[]) => {
-  const base = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "policy";
-  let id = base;
-  for (let n = 2; taken.includes(id); n++) id = `${base}-${n}`;
+  const base = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "policy";
+  let id = base.slice(0, MAX_ID).replace(/-+$/, "");
+  for (let n = 2; taken.includes(id); n++) {
+    const suffix = `-${n}`;
+    id = `${base.slice(0, MAX_ID - suffix.length).replace(/-+$/, "")}${suffix}`;
+  }
   return id;
 };
 
@@ -82,19 +88,62 @@ function Policies({ client }: { client: DaemonClient }) {
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(blank);
   const [busy, setBusy] = useState(false);
+  /* Another admin saved (or the org changed) since this was read: saving waits for a reload. */
+  const [stale, setStale] = useState(false);
 
+  /* Reading again keeps the draft, unless it was written for another org's rules. */
   const load = async () => {
     setError(null);
     try {
-      const [read, directory] = await Promise.all([client.reviewPolicies(), client.libraryPeople().catch(() => ({ people: [] as LibraryPerson[] }))]);
+      const [read, directory] = await Promise.all([client.reviewPolicies(), client.libraryPeople().catch(() => ({ people: [] as LibraryPerson[], me: undefined as string | undefined }))]);
+      setDraft((d) => (state && state.org_id !== read.org_id ? blank : d));
       setState(read);
-      setPeople(directory.people);
+      setPeople([...(directory.me ? [{ sub: directory.me, email: "You" }] : []), ...directory.people]);
+      setStale(false);
     } catch (failure) {
       setError(failureMessage(failure));
     }
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- read once when opened; Reload is the button
   useEffect(() => { void load(); }, [client]);
+
+  /* The whole list as saving would leave it, or null while the form isn't a complete rule. */
+  const candidate = (d: Draft): ReviewPolicyRule[] | null => {
+    if (!state) return null;
+    const rules = state.policies;
+    const list = d.paths.split(",").map((p) => p.trim()).filter(Boolean);
+    const complete = !!d.name.trim() && !!d.needs && (d.kind === "any" || (d.kind === "paths" ? list.length > 0 : !!d.label.trim()));
+    if (!complete || (d.editing && !rules.some((r) => r.id === d.editing))) return null;
+    const kind = d.needs.slice(0, d.needs.indexOf(":")) as ReviewPolicyRule["needs"]["kind"];
+    const next: ReviewPolicyRule = {
+      ...rules.find((r) => r.id === d.editing),
+      id: d.editing ?? slug(d.name, rules.map((r) => r.id)),
+      name: d.name.trim(),
+      when: d.kind === "paths" ? { kind: "paths", paths: list } : d.kind === "label" ? { kind: "label", label: d.label.trim() } : { kind: "any" },
+      needs: { kind, id: d.needs.slice(d.needs.indexOf(":") + 1) },
+      approvals: kind === "person" ? 1 : d.approvals,
+      note: d.note.trim() || null,
+    };
+    return d.editing ? rules.map((r) => (r.id === d.editing ? next : r)) : [...rules, next];
+  };
+
+  /* What saving would do to the designs in review, asked of the Library once the person leaves a field
+     (not on every key). The answer is of one org's rules and one draft: it is shown only while both are
+     still what's on the form, so a slow reply never describes a draft since changed. */
+  const [settled, setSettled] = useState<Draft>(blank);
+  useEffect(() => setSettled(draft), [draft.kind, draft.needs, draft.approvals, draft.editing]); // eslint-disable-line react-hooks/exhaustive-deps
+  const asking = candidate(settled);
+  const askKey = state && asking ? JSON.stringify([state.org_id, asking]) : null;
+  const [impact, setImpact] = useState<{ key: string; result: DraftImpact } | null>(null);
+  useEffect(() => {
+    if (!state || !asking || !askKey) return;
+    let live = true;
+    client.reviewPolicyImpact(state.org_id, asking).then((result) => { if (live) setImpact({ key: askKey, result }); }, () => { if (live) setImpact(null); });
+    return () => { live = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- askKey is the whole of asking and state.org_id
+  }, [client, askKey]);
+  const shownKey = state && candidate(draft) ? JSON.stringify([state.org_id, candidate(draft)]) : null;
+  const shown = impact && impact.key === shownKey ? impact.result : null;
 
   if (!state) {
     return (
@@ -109,10 +158,7 @@ function Policies({ client }: { client: DaemonClient }) {
   const rules = state.policies;
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
   const person = draft.needs.startsWith("person:");
-  const paths = draft.paths.split(",").map((p) => p.trim()).filter(Boolean);
-  const valid = !!draft.name.trim() && !!draft.needs && (draft.kind === "any" || (draft.kind === "paths" ? paths.length > 0 : !!draft.label.trim()));
-  // What saving would apply to: only a rule already saved has a count to show.
-  const applies = draft.editing ? covered(draft.editing) : undefined;
+  const valid = candidate(draft) !== null;
 
   const edit = (rule: ReviewPolicyRule) => setDraft({
     editing: rule.id, name: rule.name, kind: rule.when.kind, paths: (rule.when.paths ?? []).join(", "), label: rule.when.label ?? "",
@@ -120,27 +166,19 @@ function Policies({ client }: { client: DaemonClient }) {
   });
 
   const save = async () => {
-    if (!valid || busy) return;
-    const [kind, id] = [draft.needs.slice(0, draft.needs.indexOf(":")), draft.needs.slice(draft.needs.indexOf(":") + 1)] as [ReviewPolicyRule["needs"]["kind"], string];
-    const next: ReviewPolicyRule = {
-      ...rules.find((r) => r.id === draft.editing),
-      id: draft.editing ?? slug(draft.name, rules.map((r) => r.id)),
-      name: draft.name.trim(),
-      when: draft.kind === "paths" ? { kind: "paths", paths } : draft.kind === "label" ? { kind: "label", label: draft.label.trim() } : { kind: "any" },
-      needs: { kind, id },
-      approvals: kind === "person" ? 1 : draft.approvals,
-      note: draft.note.trim() || null,
-    };
+    const list = candidate(draft);
+    if (!list || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await client.saveReviewPolicies(state.version, draft.editing ? rules.map((r) => (r.id === draft.editing ? next : r)) : [...rules, next]);
+      await client.saveReviewPolicies(state.org_id, state.version, list);
       setDraft(blank);
       await load();
     } catch (failure) {
-      // A stale version means someone saved first: read again before offering another save.
+      // A 409 is another admin's save, or another active org: nothing was written, and the draft stays
+      // until the person reads what changed and saves again.
       setError(failureMessage(failure));
-      if (failure instanceof DaemonError && failure.status === 409) await load();
+      if (failure instanceof DaemonError && failure.status === 409) setStale(true);
     } finally {
       setBusy(false);
     }
@@ -171,7 +209,7 @@ function Policies({ client }: { client: DaemonClient }) {
       </div>
       {state.in_review.truncated && <p className="text-xs text-ink-3">Counts cover the newest designs you can open.</p>}
 
-      <form className="grid gap-s2 border-t border-branch pt-s2 text-sm text-ink-2" aria-label={draft.editing ? "Edit policy" : "New policy"} onSubmit={(e) => { e.preventDefault(); void save(); }}>
+      <form className="grid gap-s2 border-t border-branch pt-s2 text-sm text-ink-2" aria-label={draft.editing ? "Edit policy" : "New policy"} onBlur={() => setSettled(draft)} onSubmit={(e) => { e.preventDefault(); void save(); }}>
         <span className="text-xs font-medium uppercase tracking-wider text-branch">{draft.editing ? "Edit policy" : "New policy"}</span>
         <label className="grid gap-1 sm:grid-cols-[118px_minmax(0,1fr)] sm:items-center"><span className="text-ink-3">Name</span>
           <input className={field} value={draft.name} onChange={(e) => set("name", e.target.value)} />
@@ -200,17 +238,20 @@ function Policies({ client }: { client: DaemonClient }) {
         <label className="grid gap-1 sm:grid-cols-[118px_minmax(0,1fr)] sm:items-center"><span className="text-ink-3">Members see</span>
           <input className={field} value={draft.note} onChange={(e) => set("note", e.target.value)} />
         </label>
-        {applies && applies.count > 0 && (
-          <p className={notice} data-testid="review-policy-applies" data-count={applies.count}>
-            <b className="font-medium">{`Saving applies it to ${applies.count} design${applies.count === 1 ? "" : "s"} in review now`}</b>
-            {` (${applies.designs.map((d) => d.title).join(", ")}${applies.count > applies.designs.length ? ", …" : ""}). Designs already building aren't stopped.`}
+        {shown && (
+          <p className={notice} data-testid="review-policy-applies" data-count={shown.count} data-truncated={shown.truncated || undefined}>
+            <b className="font-medium">{`Saving applies it to ${shown.truncated ? "at least " : ""}${shown.count} design${shown.count === 1 ? "" : "s"} in review now`}</b>
+            {shown.designs.length > 0 && ` (${shown.designs.map((d) => d.title).join(", ")}${shown.count > shown.designs.length ? ", …" : ""})`}
+            {shown.reopened > 0 && `. ${shown.reopened} that ${shown.reopened === 1 ? "is" : "are"} ready now would stop being ready until the new reviewers sign off`}
+            {". Only designs you can open are counted; designs already building aren't stopped."}
           </p>
         )}
         {error && <p role="alert" className={alert}>{error}</p>}
         <div className="flex items-center justify-end gap-s1">
           <span className="mr-auto text-xs text-ink-3">Every policy change is recorded with who made it and when.</span>
+          <button type="button" className={quiet} disabled={busy} onClick={() => void load()}>{stale ? "Reload policies and keep my draft" : "Reload policies"}</button>
           <button type="button" className={quiet} onClick={() => { setDraft(blank); setError(null); }}>Cancel</button>
-          <LoadingButton type="submit" className={main} disabled={!valid || busy}>Save policy</LoadingButton>
+          <LoadingButton type="submit" className={main} disabled={!valid || busy || stale}>Save policy</LoadingButton>
         </div>
       </form>
     </section>

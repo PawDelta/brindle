@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import { DaemonClient } from "../../api/client";
 import { BASE_URL, TOKEN } from "../../test/fakeDaemon";
@@ -6,41 +6,103 @@ import { ReviewPolicies } from "./ReviewPolicies";
 
 afterEach(cleanup);
 
-it("lists the org's rules with who they need and what they cover now, and saves an edit and a new rule as one list", async () => {
-  const security = { id: "security", name: "Security review", when: { kind: "paths", paths: ["billing/**", "auth/**"] },
-    needs: { kind: "team", id: "t_1", name: "Security" }, approvals: 1, eligible: 6, note: "Security reviews money.", set_by: "dana", set_at: 7 };
-  const staff = { id: "staff", name: "Staff sign-off", when: { kind: "any" }, needs: { kind: "role", id: "staff", name: "Staff" }, approvals: 1, eligible: 4 };
-  const read = { org_id: "org_1", version: 4, policies: [security, staff],
+const security = { id: "security", name: "Security review", when: { kind: "paths", paths: ["billing/**", "auth/**"] },
+  needs: { kind: "team", id: "t_1", name: "Security" }, approvals: 1, eligible: 6, note: "Security reviews money.", set_by: "dana", set_at: 7 };
+const staff = { id: "staff", name: "Staff sign-off", when: { kind: "any" }, needs: { kind: "role", id: "staff", name: "Staff" }, approvals: 1, eligible: 4 };
+
+/* The Library as the daemon relays it: a version that moves on every save, and draft-impact replies held until released. */
+function library() {
+  const lib = {
+    version: 4, org: "org_1", saveStatus: 200, stored: null as unknown[] | null, puts: [] as { org_id: string; version: number; policies: { id: string }[] }[],
+    impacts: [] as { names: string[]; reply(count: number, truncated?: boolean): void }[],
+  };
+  const read = () => ({ org_id: lib.org, version: lib.version, policies: lib.stored ?? [security, staff],
     directory: { teams: [{ id: "t_1", name: "Security" }, { id: "t_2", name: "Finance" }], roles: [{ id: "staff", name: "Staff" }] },
-    in_review: { policies: [{ policy: "security", count: 3, designs: [{ doc_id: "a", title: "Billing meter" }] }, { policy: "staff", count: 0, designs: [] }] } };
-  const puts: unknown[] = [];
+    in_review: { policies: [{ policy: "security", count: 3, designs: [] }, { policy: "staff", count: 0, designs: [] }] } });
   const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: async (input, init) => {
-    if (init?.method === "PUT") { puts.push(JSON.parse(String(init.body))); return Response.json({ version: 5, policies: [] }); }
-    return Response.json(String(input).includes("library/people") ? { people: [] } : read);
+    const url = String(input);
+    if (init?.method === "PUT") {
+      lib.puts.push(JSON.parse(String(init.body)));
+      if (lib.saveStatus === 200) lib.stored = lib.puts.at(-1)!.policies;
+      return lib.saveStatus === 200 ? Response.json({ version: ++lib.version, policies: [] })
+        : Response.json({ error: { code: "conflict", message: "the rules changed" } }, { status: lib.saveStatus });
+    }
+    if (url.includes("draft-impact")) {
+      const names = (JSON.parse(String(init?.body)).policies as { name: string }[]).map((p) => p.name);
+      return new Promise<Response>((resolve) => lib.impacts.push({ names, reply: (count, truncated = false) =>
+        resolve(Response.json({ org_id: lib.org, truncated, count, designs: [{ doc_id: "a", title: "Billing meter" }], reopens_gates: false, reopened: 0 })) }));
+    }
+    return Response.json(url.includes("library/people") ? { people: [{ sub: "u_sam", email: "sam@x" }], me: "u_me" } : read());
   } });
+  return { lib, client };
+}
+
+const open = async (client: DaemonClient) => {
   render(<ReviewPolicies client={client} />);
   fireEvent.click(screen.getByRole("button", { name: "Review policies" }));
+  return screen.findByTestId("review-policy-security");
+};
+const type = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+const save = () => fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
 
-  const row = await screen.findByTestId("review-policy-security");
+it("lists the rules with who they need and what they cover, and saves edits and new rules for the org it loaded", async () => {
+  const { lib, client } = library();
+  const row = await open(client);
   expect(row.dataset.count).toBe("3");
   expect(within(row).getByText(/any of 6 people/)).toBeTruthy();
   expect(screen.getByTestId("review-policy-staff").dataset.count).toBe("0");
-  expect(screen.queryByTestId("review-policy-applies")).toBeNull();
 
   fireEvent.click(screen.getByRole("button", { name: "Edit Security review" }));
-  expect(screen.getByTestId("review-policy-applies").dataset.count).toBe("3");
-  fireEvent.change(screen.getByLabelText("Approvals"), { target: { value: "2" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
-  await waitFor(() => expect(puts).toHaveLength(1));
-  expect(puts[0]).toMatchObject({ version: 4, policies: [{ id: "security", approvals: 2, needs: { kind: "team", id: "t_1" } }, { id: "staff" }] });
+  type("Approvals", "2");
+  save();
+  await waitFor(() => expect(lib.puts).toHaveLength(1));
+  expect(lib.puts[0]).toMatchObject({ org_id: "org_1", version: 4, policies: [{ id: "security", approvals: 2 }, { id: "staff" }] });
 
+  // A name past the Library's 32-character id limit, twice: the id is capped, with the suffix inside the cap.
+  const long = "Payments and ledger review for every billing change";
   await screen.findByRole("form", { name: "New policy" });
-  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Payments review" } });
-  fireEvent.change(screen.getByLabelText("Paths"), { target: { value: "payments/**, billing/ledger/**" } });
-  fireEvent.change(screen.getByLabelText("Approvers"), { target: { value: "team:t_2" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
-  await waitFor(() => expect(puts).toHaveLength(2));
-  expect((puts[1] as { policies: unknown[] }).policies).toHaveLength(3);
-  expect(puts[1]).toMatchObject({ policies: [{ id: "security" }, { id: "staff" },
-    { id: "payments-review", when: { kind: "paths", paths: ["payments/**", "billing/ledger/**"] }, needs: { kind: "team", id: "t_2" }, approvals: 1 }] });
+  for (const _ of [1, 2]) {
+    type("Name", long);
+    type("Paths", "payments/**, billing/ledger/**");
+    type("Approvers", "person:u_me"); // the signed-in admin can name themself
+    save();
+    await waitFor(() => expect(lib.puts.length).toBeGreaterThan(1));
+    await screen.findByRole("form", { name: "New policy" });
+  }
+  const ids = lib.puts.slice(1).map((p) => p.policies.at(-1)!.id);
+  expect(ids[0]).toHaveLength(32);
+  expect(ids[1]).toHaveLength(32);
+  expect(ids[1]).not.toBe(ids[0]);
+  expect(lib.puts[1].policies.at(-1)).toMatchObject({ needs: { kind: "person", id: "u_me" }, approvals: 1 });
+});
+
+it("shows what saving would do only for the draft on the form, and holds saves after a conflict until the person reloads", async () => {
+  const { lib, client } = library();
+  await open(client);
+  type("Name", "Finance");
+  type("Paths", "payments/**");
+  type("Approvers", "team:t_2");
+  await waitFor(() => expect(lib.impacts).toHaveLength(1));
+  // The draft changes before the first answer arrives: that answer is of a draft no longer on the form.
+  type("Name", "Finance 2");
+  fireEvent.blur(screen.getByLabelText("Name"));
+  await waitFor(() => expect(lib.impacts).toHaveLength(2));
+  await act(async () => lib.impacts[0].reply(9));
+  expect(screen.queryByTestId("review-policy-applies")).toBeNull();
+  await act(async () => lib.impacts[1].reply(5, true));
+  const note = screen.getByTestId("review-policy-applies");
+  expect([note.dataset.count, note.dataset.truncated]).toEqual(["5", "true"]);
+
+  // Another admin saved first: the 409 is shown, the draft stays, and saving waits for a reload.
+  lib.saveStatus = 409;
+  save();
+  await screen.findByRole("alert");
+  expect((screen.getByRole("button", { name: "Save policy" }) as HTMLButtonElement).disabled).toBe(true);
+  lib.saveStatus = 200;
+  lib.version = 5;
+  fireEvent.click(screen.getByRole("button", { name: "Reload policies and keep my draft" }));
+  await waitFor(() => expect((screen.getByRole("button", { name: "Save policy" }) as HTMLButtonElement).disabled).toBe(false));
+  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Finance 2");
+  save();
+  await waitFor(() => expect(lib.puts.at(-1)).toMatchObject({ version: 5 }));
 });

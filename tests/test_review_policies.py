@@ -50,6 +50,24 @@ class Governed(Library):
                                                       f"POST {BASE}/share", f"PUT {DESIGN}/folder")})
         remote.routes[f"POST {DESIGN}/policy-overrides"] = self.override
         remote.routes[f"POST {DESIGN}/policy-asks"] = self.ask
+        # The org's list, as the Library keeps it: a save at an old version is a 409.
+        self.version, self.saved, self.org_rules = 2, [], [{"id": "security"}]
+        org = f"/orgs/{ORG}/analysis-docs/review-policies"
+        remote.routes.update({
+            f"GET {org}": lambda f, h: (200, {"org_id": ORG, "version": self.version, "policies": self.org_rules}),
+            f"GET {org}/directory": lambda f, h: (200, {"teams": [{"id": "t_9"}], "roles": []}),
+            f"GET {org}/in-review": lambda f, h: (200, {"truncated": False, "policies": [{"policy": "security", "count": 3}]}),
+            f"PUT {org}": self.save,
+            f"POST {org}/draft-impact": lambda f, h: (200, {"org_id": ORG, "truncated": False, "count": len(f["policies"]),
+                                                            "designs": [], "reopens_gates": False, "reopened": 0}),
+            f"POST {org}/preview": lambda f, h: (200, {"policy_reviewers": [rule(), {"policy": "broken"}]}),
+        })
+
+    def save(self, form, headers):
+        if form["version"] != self.version:
+            return 409, {"error": "conflict"}
+        self.version, self.saved = self.version + 1, form["policies"]
+        return 200, {"version": self.version, "policies": form["policies"]}
 
     def ask(self, form, headers):
         if form["rev"] != self.rev:
@@ -254,30 +272,28 @@ def test_an_admin_asks_a_waiting_rule_again_and_the_gate_shows_when_and_who_open
 
 
 def test_the_settings_routes_read_and_save_the_orgs_rules_and_preview_a_plans(db, shared, monkeypatch):
-    from brindle.daemon import routes_actions as actions
-
-    pid, _, _ = shared
-    sent = []
-    answers = {"GET review-policies": {"org_id": ORG, "version": 2, "policies": [{"id": "security"}]},
-               "GET review-policies/directory": {"teams": [{"id": "t_9"}], "roles": []},
-               "GET review-policies/in-review": {"truncated": False, "policies": [{"policy": "security", "count": 3}]},
-               "PUT review-policies": {"version": 3, "policies": []},
-               "POST review-policies/preview": {"policy_reviewers": [rule(), {"policy": "broken"}]}}
-
-    def org_api(method, tail, body=None, *, repo=None, admin=False):
-        sent.append((method, tail, body, admin))
-        return answers[f"{method} {tail}"]
-
-    monkeypatch.setattr(actions, "docs_org_api", org_api)
+    """Through the real Library calls, for a login with no owner/admin role (a custom role with
+    the control permission): the Library, not the daemon, decides who may."""
+    pid, lib, net = shared
+    entitled = ad.require_entitlement
+    monkeypatch.setattr(ad, "require_entitlement", lambda store=None: entitled(store or net["store"]))
     monkeypatch.setattr(plan_docs, "revision", lambda db, plan_id: {
         "split": [{"files": ["billing/a.py", "billing/a.py"]}], "decisions": [{"options": [{"touches": ["auth/b.py"]}]}]})
-    saved = {"version": 2, "policies": [{"id": "security", "eligible": 6, "set_by": "dana", "needs": {"kind": "team", "id": "t_9", "name": "Security"}}]}
+    rules = [{"id": "security", "eligible": 6, "set_by": "dana", "needs": {"kind": "team", "id": "t_9", "name": "Security"}}]
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
         read = app.get("/v1/review-policies").json()
+        assert "error" not in read, read
         assert (read["version"], read["directory"]["teams"][0]["id"], read["in_review"]["policies"][0]["count"]) == (2, "t_9", 3)
-        assert app.put("/v1/review-policies", json=saved).status_code == 200
-        assert app.put("/v1/review-policies", json={"version": "2", "policies": []}).status_code == 400
+        assert app.put("/v1/review-policies", json={"org_id": ORG, "version": 2, "policies": rules}).status_code == 200
+        assert lib.saved == [{"id": "security", "needs": {"kind": "team", "id": "t_9"}}]
+        # Another admin saved first: the 409 reaches the app as a 409, and nothing is written.
+        stale = app.put("/v1/review-policies", json={"org_id": ORG, "version": 2, "policies": []})
+        assert (stale.status_code, lib.version) == (409, 3)
+        # The active org changed since the form loaded: refused before anything is sent.
+        other = app.put("/v1/review-policies", json={"org_id": "org_2", "version": 3, "policies": []})
+        assert (other.status_code, other.json()["error"]["code"], lib.version) == (409, "org_changed", 3)
+        assert app.put("/v1/review-policies", json={"org_id": ORG, "version": "2", "policies": []}).status_code == 400
+        impact = app.post("/v1/review-policies/draft-impact", json={"org_id": ORG, "policies": rules}).json()
+        assert impact["count"] == 1
         preview = app.post(f"/v1/plans/{pid}/policy-preview", json={}).json()["policies"]
     assert [p["policy"] for p in preview] == ["security"] and preview[0]["needs_name"] == "Security"
-    assert ("PUT", "review-policies", {"version": 2, "policies": [{"id": "security", "needs": {"kind": "team", "id": "t_9"}}]}, True) in sent
-    assert ("POST", "review-policies/preview", {"paths": ["billing/a.py", "auth/b.py"], "labels": []}, False) in sent

@@ -244,12 +244,14 @@ def plan_confirm(db: DB, params: dict, body: dict) -> Any:
 
 def _library(db: DB, plan_id: str, work: Callable[[Any], Any]) -> Any:
     from brindle import redact
+    from brindle.daemon import routes_actions as actions
     from brindle.pro import auth, shared_docs
 
     try:
         work(shared_docs)
     except (RuntimeError, auth.TransportError) as e:    # unreachable or refused: not signed out
-        raise ServiceError("upstream", redact.mask(str(e)), 502) from e
+        err = actions.upstream_error(e)
+        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
     return _plan_now(db, plan_id)
 
 
@@ -307,16 +309,30 @@ def review_policies_read(db: DB, request: Request) -> Any:
     from brindle.daemon import routes_actions as actions
 
     repo = request.query_params.get("repo") or None
-    read = lambda tail: actions.docs_org_api("GET", tail, repo=repo, admin=True)  # noqa: E731
-    return {**read("review-policies"), "directory": read("review-policies/directory"),
-            "in_review": read("review-policies/in-review")}
+    rules = actions.docs_org_api("GET", "review-policies", repo=repo)
+    org = rules.get("org_id")      # the rest is of the org the rules were, even if the active one changes meanwhile
+    read = lambda tail: actions.docs_org_api("GET", tail, repo=repo, org_id=org)  # noqa: E731
+    return {**rules, "directory": read("review-policies/directory"), "in_review": read("review-policies/in-review")}
 
 
 def review_policies_save(db: DB, params: dict, body: dict) -> Any:
+    """Replace the org's rules. ``org_id`` is the org the form was loaded for;
+    who may save is the Library's to say, so a custom role with the control
+    permission is accepted."""
     from brindle.daemon import routes_actions as actions
     from brindle.pro import review_policies
 
-    return actions.docs_org_api("PUT", "review-policies", review_policies.save_body(body), repo=body.get("repo"), admin=True)
+    return actions.docs_org_api("PUT", "review-policies", review_policies.save_body(body), repo=body.get("repo"),
+                                org_id=body["org_id"])
+
+
+def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
+    """What saving a draft list would do to the designs in review. Writes nothing."""
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    return actions.docs_org_api("POST", "review-policies/draft-impact", review_policies.save_body(body, draft=True),
+                                repo=body.get("repo"), org_id=body["org_id"])
 
 
 @_json
@@ -385,6 +401,7 @@ ROUTES = [
     Route("/v1/plans/{id}/policy-preview", _endpoint(plan_policy_preview), methods=["POST"]),
     Route("/v1/review-policies", review_policies_read),
     Route("/v1/review-policies", _endpoint(review_policies_save), methods=["PUT"]),
+    Route("/v1/review-policies/draft-impact", _endpoint(review_policies_impact), methods=["POST"]),
     Route("/v1/library/people", library_people),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),

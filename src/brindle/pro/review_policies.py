@@ -165,7 +165,8 @@ def ask(db: DB, p: dict, method: str, path: str, body: dict | None = None, *, cl
     status, resp = ad._call(method, path, body, client=client, store=store)
     if status != 200:
         refused(db, p, resp)
-        raise RuntimeError(resp.get("error_description") or resp.get("error") or f"HTTP {status}")
+        code = resp.get("error") if isinstance(resp.get("error"), str) else None
+        raise ad.Refused(resp.get("error_description") or code or f"HTTP {status}", status, code)
     return resp
 
 
@@ -257,11 +258,16 @@ def preview_row(rule: Any) -> dict | None:
     return row({**rule, "met_by": [], "on_list": []}, "waiting", [], [])
 
 
-def save_body(raw: Any) -> dict:
-    """``{version, policies}`` for the Library's PUT: what it filled in on a
-    read (``needs.name``, ``eligible``, ``set_by``, ``set_at``) is left out."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("version"), int) or isinstance(raw["version"], bool):
+def save_body(raw: Any, *, draft: bool = False) -> dict:
+    """``{version, policies}`` for the Library's PUT (``{policies}`` for a
+    ``draft`` impact check): what it filled in on a read (``needs.name``,
+    ``eligible``, ``set_by``, ``set_at``) is left out."""
+    if not isinstance(raw, dict):
+        raise ServiceError("invalid", "the body must be an object", 400)
+    if not draft and (not isinstance(raw.get("version"), int) or isinstance(raw["version"], bool)):
         raise ServiceError("invalid", "version is the number last read", 400)
+    if not _named(raw.get("org_id")):
+        raise ServiceError("invalid", "org_id is the organization the rules were read for", 400)
     if not isinstance(raw.get("policies"), list) or not all(isinstance(r, dict) for r in raw["policies"]):
         raise ServiceError("invalid", "policies is a list of rules", 400)
     kept = []
@@ -269,4 +275,4 @@ def save_body(raw: Any) -> dict:
         needs = r.get("needs")
         kept.append({**{k: v for k, v in r.items() if k not in ("eligible", "set_by", "set_at")},
                      **({"needs": {k: v for k, v in needs.items() if k != "name"}} if isinstance(needs, dict) else {})})
-    return {"version": raw["version"], "policies": kept}
+    return {"policies": kept} if draft else {"version": raw["version"], "policies": kept}

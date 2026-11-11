@@ -4,7 +4,7 @@
    reviewers hold the build (the gate, brindle/plans.py), optional ones never do. Once the plan is
    building the review is closed and the list is only read. */
 
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { DocScope, LibraryPerson, Plan, PlanReviewerChoice, PolicyPreviewRow } from "../../../api/client";
 import type { PlanGateRowDTO } from "../../../api/schema";
 import { button, field, main, quiet } from "../../../components/ui";
@@ -40,24 +40,25 @@ export function Reviewers({ plan, client, directory, adminOrg, me, scopes, busy,
   const [draft, setDraft] = useState<{ rows: PlanReviewerChoice[]; source: string } | null>(null);
   const [scope, setScope] = useState("");
   const [typed, setTyped] = useState("");
-  const [preview, setPreview] = useState<PolicyPreviewRow[]>([]);
-  const asked = useRef(0);
+  // The rules a first share will meet, shown before anyone is added. A result belongs to the plan and
+  // revision it was asked for: it is shown only while both still are the ones on screen, and the form
+  // asks again when a revision changes the files. The Library applies the rules whether or not this loads.
+  const [preview, setPreview] = useState<{ plan: string; rev: number; rows: PolicyPreviewRow[] } | null>(null);
+  const previewing = !!draft && !gate && !!client?.previewPlanPolicies;
+  useEffect(() => {
+    if (!previewing) return;
+    let live = true;
+    const [id, rev] = [plan.id, plan.rev];
+    void client!.previewPlanPolicies!(id).then((r) => { if (live) setPreview({ plan: id, rev, rows: r.policies }); }, () => undefined);
+    return () => { live = false; };
+  }, [previewing, client, plan.id, plan.rev]);
   const current = JSON.stringify(people(plan));
   const stale = !!draft && draft.source !== current;
   const shareable = scopes.filter((s) => s.kind !== "user" && s.can_share !== false);
   if (!gate && (!client || closed || shareable.length === 0)) return null;
 
-  const open = () => {
-    setDraft({ rows: people(plan), source: current });
-    // The rules a first share will meet, shown before anyone is added. A reply for a form since closed
-    // or reopened is dropped; the Library applies the rules whether or not this loaded.
-    const ask = ++asked.current;
-    setPreview([]);
-    if (!gate && client?.previewPlanPolicies) {
-      void client.previewPlanPolicies(plan.id).then((r) => { if (asked.current === ask) setPreview(r.policies); }, () => undefined);
-    }
-  };
-  const close = () => { asked.current++; setDraft(null); };
+  const open = () => { setPreview(null); setDraft({ rows: people(plan), source: current }); };
+  const close = () => setDraft(null);
   const add = (sub: string) => {
     if (draft && sub && !draft.rows.some((r) => r.sub === sub)) setDraft({ ...draft, rows: [...draft.rows, { sub, required: true }] });
   };
@@ -105,7 +106,7 @@ export function Reviewers({ plan, client, directory, adminOrg, me, scopes, busy,
                 {shareable.map((s) => <option key={`${s.kind}:${s.id}`} value={`${s.kind}:${s.id}`}>{s.name ?? s.id}</option>)}
               </select>
             )}
-            {!gate && <PolicyPreview rows={preview} />}
+            {!gate && preview?.plan === plan.id && preview.rev === plan.rev && <PolicyPreview rows={preview.rows} />}
             {draft.rows.map((r) => (
               <div key={r.sub} className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 truncate text-ink">{nameOf(r.sub)}</span>

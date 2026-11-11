@@ -551,6 +551,16 @@ export interface ReviewPoliciesState {
   in_review: { truncated?: boolean; policies: { policy: string; count: number; designs: { doc_id: string; title: string }[] }[] };
 }
 
+/* What saving a draft list would do to the designs in review (`truncated`: count is a lower bound). */
+export interface DraftImpact {
+  org_id: string;
+  truncated: boolean;
+  count: number;
+  designs: { doc_id: string; title: string }[];
+  reopens_gates: boolean;
+  reopened: number;
+}
+
 /* A rule that would cover a design, before it is shared. */
 export interface PolicyPreviewRow {
   org_id: string;
@@ -1856,9 +1866,15 @@ export class DaemonClient {
     return this.get<ReviewPoliciesState>("/review-policies");
   }
 
-  /* Replaces the org's rules; `version` is the one last read (a stale one is a 409). */
-  saveReviewPolicies(version: number, policies: ReviewPolicyRule[]) {
-    return this.put<{ version: number; policies: ReviewPolicyRule[] }>("/review-policies", { version, policies });
+  /* What saving `policies` as `org_id`'s list would do to the designs in review; writes nothing. */
+  reviewPolicyImpact(org_id: string, policies: ReviewPolicyRule[]) {
+    return this.post<DraftImpact>("/review-policies/draft-impact", { org_id, policies });
+  }
+
+  /* Replaces the rules of `org_id`, the org they were read for (another active org is a 409, nothing written);
+     `version` is the one last read (a stale one is a 409). */
+  saveReviewPolicies(org_id: string, version: number, policies: ReviewPolicyRule[]) {
+    return this.put<{ version: number; policies: ReviewPolicyRule[] }>("/review-policies", { org_id, version, policies });
   }
 
   /* The people of the person's org, to pick reviewers from, without the person (me); admin_org, the org whose rules they can override. */
