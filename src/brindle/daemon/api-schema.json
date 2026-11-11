@@ -6850,6 +6850,11 @@
           "title": "State",
           "type": "string"
         },
+        "team_ended": {
+          "default": false,
+          "title": "Team Ended",
+          "type": "boolean"
+        },
         "threads": {
           "default": [],
           "items": {

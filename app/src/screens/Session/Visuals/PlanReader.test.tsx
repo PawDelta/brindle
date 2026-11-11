@@ -328,6 +328,16 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
+it("a design doc whose Team plan ended says so, once, and only then", async () => {
+  const open = (plan: Plan) => render(<PlanReader client={{ ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan }} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const shared = open(doc(1, "Workers run on your machine."));
+  await screen.findByTestId("plan-build");
+  expect(screen.queryByTestId("plan-team-ended")).toBeNull();
+  shared.unmount();
+  open(doc(1, "Workers run on your machine.", { team_ended: true }));
+  expect(await screen.findAllByTestId("plan-team-ended")).toHaveLength(1);
+});
+
 /* A design doc held by one org rule, "security", and a fake Library whose answers carry what was written. */
 type Override = { policy: string; reason: string; stand_in?: string; until?: number };
 const policyRow = (name: string, more = {}) => ({ org_id: "org_1", policy: name, name, approvals: 1, eligible: 6, needs_kind: "team", needs_name: "Security", when: "paths", matched: ["billing/meter.py"], status: "waiting" as "waiting" | "signed_off" | "waived", ...more });

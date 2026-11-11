@@ -277,14 +277,19 @@ def _signed(review: dict) -> dict[str, float]:
 
 def _gate(c, p: dict) -> dict | None:
     """Plan ``p``'s build gate, read on connection ``c``; None if it isn't
-    shared. Sign-offs and rules count only while the Library's head is the
-    revision on screen: until a new revision is sent they say nothing about it."""
+    shared, or its Team plan has ended and that still holds for whoever is
+    signed in (shared_docs.lapse_stands). Sign-offs and rules count only
+    while the Library's head is the revision on screen: until a new revision
+    is sent they say nothing about it."""
     from brindle.plan_docs import TEAMMATE
 
     row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
     if row is None:
         return None
-    from brindle.pro import review_policies
+    from brindle.pro import review_policies, shared_docs
+
+    if shared_docs.lapse_stands(row, p):
+        return None
 
     review = json.loads(row["review"])
     read = _review_rows(review)
@@ -371,6 +376,13 @@ def gate(db: DB, p: dict) -> dict | None:
     return _gate(db.conn, p)
 
 
+def _team_ended(db: DB, p: dict) -> bool:
+    from brindle.pro import shared_docs
+
+    row = db.conn.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+    return row is not None and shared_docs.lapse_stands(row, p)
+
+
 def gate_shut(db: DB, root_id: str) -> dict | None:
     """Session ``root_id``'s plan (with its ``gate``) while required reviewers
     keep it from building, whether or not the app is connected."""
@@ -421,7 +433,8 @@ def to_dto(db: DB, p: dict) -> dict:
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
                    state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=_board(db, p),
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
-                   created_at=p["created_at"], gate=gate(db, p), **plan_docs.fields(db, p)).to_json()
+                   created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
+                   **plan_docs.fields(db, p)).to_json()
 
 
 def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
@@ -671,8 +684,10 @@ def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: s
 def _check_with_library(db: DB, p: dict) -> None:
     """Before an approval of a shared plan: bring the Library's review state
     up to date. If it can't be asked the approval is refused, even with no
-    required reviewers on record: the last answer can't say nobody was added since."""
-    if gate(db, p) is None:
+    required reviewers on record: the last answer can't say nobody was added
+    since. A share whose Team plan has ended comes here too: only a lapse the
+    server confirms now lets it through, not the one on record."""
+    if db.conn.execute("SELECT 1 FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone() is None:
         return
     from brindle.pro import shared_docs
 
