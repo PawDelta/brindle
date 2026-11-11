@@ -451,7 +451,6 @@ export interface GoalDTO {
   checking?: boolean;
   commits_last_hour?: number;
   detail?: string | null;
-  drifting?: boolean;
   enabled: boolean;
   eta_seconds?: number | null;
   goal?: string | null;
