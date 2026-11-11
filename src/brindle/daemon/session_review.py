@@ -731,6 +731,10 @@ def poll_merged(db: DB) -> None:
             ).rowcount:
                 bus.publish_agent(db, "session.pr_merged", root_id, url=url)
                 _sync_after_merge(db, root_id, branch, url)
+                try:   # tasks queued behind this session's work start now it has landed
+                    tasks.sweep(db)
+                except Exception:  # noqa: BLE001 - a queue sweep never stops the round
+                    log.exception("brindle: couldn't start tasks waiting on %s", branch)
     finally:
         _merge_lock.release()
 
