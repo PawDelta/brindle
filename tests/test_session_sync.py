@@ -5,6 +5,7 @@ a branch behind origin/main gets no PR."""
 
 import shutil
 import time
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ import pytest
 from conftest import sh
 from brindle import agents, autopilot, bus, config, gates, git, pipeline, session_sync, workspaces
 from brindle.daemon import session_review
-from brindle.db import Agent
+from brindle.db import Agent, Workspace
 from brindle.service import inbox
 from brindle.service import sessions as svc
 from test_merge_order import _repo_template, quiet_removal, repo, worktree  # noqa: F401 - fixture
@@ -62,6 +63,97 @@ def worker(db, repo, name: str):
 
 def contains(path, sha: str) -> bool:
     return git.ok(["merge-base", "--is-ancestor", sha, "HEAD"], path)
+
+
+def test_idle_sync_quiet_session(db, repo, sess, other, told, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(session_sync.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(session_review.spawn, "room", lambda: 0)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.status != "done")
+    db.conn.execute("UPDATE workspaces SET base_branch = 'main' WHERE id = ?", (sess.id,))
+    main = commit(other, "hot.py", "fix\n", push=True)
+    feat = worker(db, repo, "feat")
+    db.add_agent(Agent("worker", feat.id, "developer", "claude", "lead", "assign", "working", "%10", None, 0))
+    sibling = worktree(db, repo, "another", base="main")
+    db.add_agent(Agent("other-lead", sibling.id, "supervisor", "claude", None, "interactive", "processing",
+                       "%11", None, 0))
+    watch = session_review.ReadinessWatch()
+    fetched = []
+    fetch = session_sync.fetch
+
+    def fetching(root, default):
+        fetched.append(clock[0])
+        return fetch(root, default)
+
+    monkeypatch.setattr(session_sync, "fetch", fetching)
+    watch.sweep(db)                         # a live worker holds the session
+    assert not contains(sess.path, main)
+    db.set_status("worker", "done")
+    db.update_agent("worker", pipeline="ready")
+    watch.sweep(db)                         # even a finished worker can have a queued merge
+    assert not contains(sess.path, main)
+    db.update_agent("worker", pipeline=None)
+    db.set_status("lead", "processing")
+    watch.sweep(db)
+    assert not contains(sess.path, main)
+    db.set_status("lead", "idle")
+    dirty = Path(sess.path) / "unsaved.txt"
+    dirty.write_text("unsaved\n")
+    watch.sweep(db)
+    assert not contains(sess.path, main)
+    dirty.unlink()
+    base_lock = pipeline.base_lock
+
+    @contextmanager
+    def busy(*args, **kwargs):
+        raise BlockingIOError
+        yield
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pipeline, "base_lock", busy)
+        watch.sweep(db)
+    assert not contains(sess.path, main)
+    assert pipeline.base_lock is base_lock
+    watch.sweep(db)
+    assert contains(sess.path, main)
+    assert len([m for m in told if m[0] == "lead"]) == 1
+    assert len([m for m in told if m[0] == "detached"]) == 1
+    watch.sweep(db)
+    assert len(fetched) == 1
+    clock[0] += 301
+    watch.sweep(db)
+    assert len(fetched) == 2
+    assert len([m for m in told if m[0] == "lead"]) == 1
+
+
+def test_idle_sync_worker_goes_live_before_merge(db, told, monkeypatch):
+    sess = Workspace("session", "/repo", "session", "worktree", "sess", "main", "/repo/session", None, "", 0)
+    db.add_workspace(sess)
+    db.add_agent(Agent("lead", sess.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, 0))
+    db.add_agent(Agent("worker", sess.id, "developer", "claude", "lead", "assign", "done", "%10", None, 0))
+    monkeypatch.setattr(session_sync.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.status != "done")
+    monkeypatch.setattr(session_sync, "upstream", lambda ws: "main")
+    monkeypatch.setattr(session_sync, "fetch", lambda *args: True)
+    monkeypatch.setattr(session_sync, "drift", lambda *args: session_sync.Drift("origin/main", "main-sha", 1, []))
+    monkeypatch.setattr(git, "dirty_files", lambda *args, **kwargs: [])
+    monkeypatch.setattr(git, "out", lambda *args: "head-sha")
+    monkeypatch.setattr(pipeline, "base_lock", lambda *args, **kwargs: nullcontext())
+    merged = []
+    monkeypatch.setattr(git, "merge_local_base", lambda *args, **kwargs: merged.append(args) or ("new-sha", []))
+    entered = []
+
+    @contextmanager
+    def starting_worker(path, **kwargs):
+        entered.append(path)
+        db.set_status("worker", "processing")
+        yield
+
+    monkeypatch.setattr(git, "checkout_lock", starting_worker)
+    session_sync.refresh_idle_sessions(db, {})
+    assert entered == [sess.path]
+    assert merged == []
+    assert not told
 
 
 def test_a_merge_into_the_session_tells_the_supervisor_how_far_behind_main_it_is(db, repo, sess, other, told):

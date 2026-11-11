@@ -1243,6 +1243,7 @@ class ReadinessWatch:
     def __init__(self) -> None:
         self.ready: dict[str, bool] | None = None
         self.fingerprints: dict[str, tuple] = {}
+        self.idle_fetched_at: dict[str, float] = {}
         self._tracked: dict[str, tuple[tuple[str, int], list[str] | None]] = {}
         self.announce: set[str] = set()    # became ready while GitHub's first look at its PR was pending
 
@@ -1309,6 +1310,10 @@ class ReadinessWatch:
 
     def sweep(self, db: DB) -> list[str]:
         """The sessions that just became ready (each announced on the bus)."""
+        try:
+            session_sync.refresh_idle_sessions(db, self.idle_fetched_at)
+        except Exception:  # noqa: BLE001 - one missed sync never stops the sweep
+            log.exception("brindle: couldn't sync idle sessions")
         try:
             session_sync.refresh_drift_flags(db)
         except Exception:  # noqa: BLE001 - one missed measurement never stops the sweep
