@@ -864,7 +864,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
         </button>
       </div>
       {railOpen && <SettingsRail tab={tab} page={railPage(route)} onBack={back} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} onPage={(page) => navigate({ screen: page })} />}
-      {route.screen === "knowledge" && <LibraryRail route={route} counts={{ ...libraryCounts, stages: { ...docStageCounts, "needs-you": plansWaiting + (docStageCounts["needs-you"] ?? 0) } }} recent={recentDocs} folders={folders} onCreateFolder={folderClient ? createFolder : undefined} onMoveDoc={folderClient ? moveDoc : undefined} navigate={navigate} onBack={back} />}
+      {route.screen === "knowledge" && <LibraryRail route={route} counts={{ ...libraryCounts, stages: docStageCounts }} recent={recentDocs} folders={folders} onCreateFolder={folderClient ? createFolder : undefined} onMoveDoc={folderClient ? moveDoc : undefined} navigate={navigate} onBack={back} />}
       <div hidden={railOpen || libraryOpen} className={railOpen || libraryOpen ? "hidden" : "contents"}>
       <InboxEntry route={route} navigate={navigate} />
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />

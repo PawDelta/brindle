@@ -375,7 +375,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
             </section>}
             {signOffRows(doc.design).length > 0 && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Sign-offs">
               <h3 className={label}>Sign-offs</h3>
-              {signOffRows(doc.design).map((r) => <div key={r.sub} data-signoff={r.sub} data-signed={r.signed ? "yes" : "no"}><b>{r.sub}</b><span className="text-ink-3"> · {r.role}{r.rev !== undefined && ` · signed rev ${r.rev}${r.signed ? "" : " (earlier)"}`}{!r.signed && " · waiting"}</span></div>)}
+              {signOffRows(doc.design).map((r) => <div key={`${r.sub}@${r.rev ?? "waiting"}`} data-signoff={r.sub} data-signed={r.signed ? "yes" : "no"} data-rev={r.rev ?? ""}><b>{r.sub}</b><span className="text-ink-3"> · {r.role}{r.rev !== undefined ? ` · signed rev ${r.rev}${r.signed ? "" : " (earlier)"}` : " · waiting"}</span></div>)}
             </section>}
             {!!doc.threads?.length && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Comments">
               <h3 className={label}>Comments</h3>
@@ -571,7 +571,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   }, [listing.state, category, picked]);
   const shown = docs.filter((d) => (type === "all" || type === "designs") && (!author || d.created_by === author) && (!stage || stageOfDoc(d.id, queue, designs.get(d.id)) === stage) && (!reviewer || !!designs.get(d.id)?.reviewers?.some((r) => r.sub === reviewer)) && recent(d.updated_at ?? d.created_at) && (!picked || (d.category ?? UNCATEGORISED) === picked) && docMatch(d, search.details?.get(d.id), q) !== null)
     .sort((a, b) => (b.updated_at ?? b.created_at ?? 0) - (a.updated_at ?? a.created_at ?? 0));
-  const sourceHits = search.hits.filter((d) => (type === "all" || type === d.type) && !stage && (!author || author === d.author) && recent(d.changed));
+  const sourceHits = search.hits.filter((d) => (type === "all" || type === d.type) && !stage && !reviewer && (!author || author === d.author) && recent(d.changed));
   const docRow = (d: AnalysisDoc) => (
     <DocRow key={d.id} d={d} match={docMatch(d, search.details?.get(d.id), q)} scope={d.scope && (scopes.find((s) => scopeSpec(s) === scopeSpec(d.scope!)) ?? d.scope)} onOpen={() => setOpen(d.id)} />
   );
