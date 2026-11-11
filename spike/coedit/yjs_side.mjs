@@ -62,10 +62,13 @@ function author(c1, c2) {
   tB.insert(tB.length, ' — café 𝄞')
   Y.applyUpdate(A, log[1], 'sync')
   Y.applyUpdate(A, log[2], 'sync')
+  // a later A edit, so a batch of B's second edit + A's follow-up has clocks > 0 for both
+  tA.insert(tA.length, ' !')
   const old = tA.toString()
   const posLive = Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(tA, old.indexOf('here')))
   const posDead = Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(tA, old.indexOf(MARKER) + 3))
   const batch = Y.mergeUpdates([log[0], log[1]])
+  const batchLate = Y.mergeUpdates([log[2], log[3]])
   tA.delete(old.indexOf(MARKER), MARKER.length + 1)
   const final = tA.toString()
   return {
@@ -78,7 +81,10 @@ function author(c1, c2) {
     posDead: b64(posDead),
     clientsBefore: perLetter(tA),
     batch: b64(batch),
-    batchClients: updateClients(batch),
+    // the numbers each batch should carry are known from who typed it, not read back
+    batchClients: [c1, c2].sort((a, b) => a - b),
+    batchLate: b64(batchLate),
+    batchLateClients: [c1, c2].sort((a, b) => a - b),
   }
 }
 
@@ -87,7 +93,7 @@ function resolve(t, doc, posB64) {
   return abs ? abs.index : null
 }
 
-function verify(tag, d) {
+function verify(tag, d, foreign) {
   const log = d.log.map(unb64)
   const doc = new Y.Doc()
   for (const u of log) Y.applyUpdate(doc, u)
@@ -96,22 +102,32 @@ function verify(tag, d) {
   const live = resolve(t, doc, d.posLive)
   check(`${tag}:position-live`, live === d.expectLive, `travelling position resolves to ${live}, expected ${d.expectLive} (UTF-16 units)`)
   const c = compact(log)
-  const ct = c.doc.getText('t')
   const rawHas = log.some((u) => has(u, d.marker))
-  const cHas = has(c.update, d.marker)
-  check(`${tag}:deleted-text-gone`, rawHas && !cHas, `deleted text in raw log: ${rawHas}; in compacted state: ${cHas} (raw ${log.reduce((n, u) => n + u.length, 0)} B, compacted ${c.update.length} B)`)
-  check(`${tag}:compacted-text`, ct.toString() === d.finalText, 'compacted state reads back the same text')
-  const l2 = resolve(ct, c.doc, d.posLive)
-  const l3 = resolve(ct, c.doc, d.posDead)
-  check(`${tag}:old-position-after-compaction`, l2 === d.expectLive, `position made before the delete resolves to ${l2} after compaction, expected ${d.expectLive}`)
-  check(`${tag}:position-inside-deleted-text`, l3 === d.expectDead, `position inside the later-deleted words resolves to ${l3} after compaction, expected ${d.expectDead}`)
+  check(`${tag}:deleted-text-gone`, rawHas && !has(c.update, d.marker), `deleted text in raw log: ${rawHas}; in Yjs-compacted bytes: ${has(c.update, d.marker)} (raw ${log.reduce((n, u) => n + u.length, 0)} B, compacted ${c.update.length} B)`)
   const before = perLetter(t)
-  const after = perLetter(ct)
   check(`${tag}:replica-per-letter-before`, same(before, d.clientsBefore), `Yjs reads the same replica number per letter as the author did: ${runs(before)}`)
-  check(`${tag}:replica-per-letter-after-compaction`, same(before, after), `unchanged by compaction: ${runs(after)}`)
-  const bc = updateClients(unb64(d.batch))
-  check(`${tag}:replica-numbers-in-batch`, same(bc, d.batchClients), `Yjs lists the numbers inside one batch as [${bc}], author said [${d.batchClients}]`)
+  // every check below runs on a FRESH doc loaded only from the encoded snapshot
+  snapChecks(tag, d, 'own-compaction', c.update)
+  for (const f of foreign || []) snapChecks(tag, d, f.label, f.bytes)
+  for (const k of ['batch', 'batchLate']) {
+    const bc = updateClients(unb64(d[k]))
+    check(`${tag}:replica-numbers-in-${k === 'batch' ? 'initial' : 'incremental'}-batch`, same(bc, d[k + 'Clients']), `Yjs lists the numbers inside the ${k === 'batch' ? 'first' : 'later (clocks > 0)'} batch as [${bc}], author said [${d[k + 'Clients']}]`)
+  }
   return { compacted: c.update }
+}
+
+function snapChecks(tag, d, label, bytes) {
+  const doc = new Y.Doc()
+  Y.applyUpdate(doc, bytes)
+  const t = doc.getText('t')
+  const p = `${tag}:snapshot[${label}]`
+  check(`${p}:text`, t.toString() === d.finalText && !has(bytes, d.marker), `fresh Yjs doc loaded only from ${bytes.length} snapshot bytes reads the same text, deleted words absent from the bytes: ${!has(bytes, d.marker)}`)
+  const l2 = resolve(t, doc, d.posLive)
+  const l3 = resolve(t, doc, d.posDead)
+  check(`${p}:old-position`, l2 === d.expectLive, `position made before the delete resolves to ${l2}, expected ${d.expectLive}`)
+  check(`${p}:position-inside-deleted-text`, l3 === d.expectDead, `position inside the later-deleted words resolves to ${l3}, expected ${d.expectDead}`)
+  const after = perLetter(t)
+  check(`${p}:replica-per-letter`, same(after, d.clientsBefore), `letters keep their replica numbers: ${runs(after)}`)
 }
 
 // ---- replicas -----------------------------------------------------------
@@ -343,7 +359,8 @@ if (phase === '1') {
   const d = author(101, 102)
   writeJson('js_a.json', d)
   console.log('final text:', JSON.stringify(d.finalText), 'letters:', runs(d.clientsBefore))
-  verify('yjs-reads-yjs', d)
+  const v = verify('yjs-reads-yjs', d)
+  fs.writeFileSync(OUT + 'snap_yjs_of_js.b64', b64(v.compacted))
   replicasPhase1()
   fuzz()
   if (process.argv[3] !== 'noweigh') weigh()
@@ -351,7 +368,9 @@ if (phase === '1') {
 } else if (phase === '2') {
   const d = readJson('py_a.json')
   console.log('pycrdt-authored text:', JSON.stringify(d.finalText))
-  verify('yjs-reads-pycrdt', d)
+  const pySnap = unb64(fs.readFileSync(OUT + 'snap_pycrdt_of_py.b64', 'utf8'))
+  const v = verify('yjs-reads-pycrdt', d, [{ label: 'pycrdt-compaction', bytes: pySnap }])
+  fs.writeFileSync(OUT + 'snap_yjs_of_py.b64', b64(v.compacted))
   // pycrdt-written replica numbers
   const pr = readJson('py_r.json')
   for (const e of pr.written) {

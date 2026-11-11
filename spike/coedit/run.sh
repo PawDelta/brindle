@@ -24,5 +24,6 @@ done
 node yjs_side.mjs 1
 uv run --no-project --with "pycrdt==$PYCRDT" python py_side.py
 node yjs_side.mjs 2
+uv run --no-project --with "pycrdt==$PYCRDT" python py_side.py late
 uv run --no-project python platforms.py
 uv run --no-project python report.py

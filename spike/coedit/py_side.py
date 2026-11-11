@@ -7,6 +7,7 @@ Reads what Yjs wrote (out/js_*.json), checks it, writes what pycrdt wrote
 import base64
 import hashlib
 import json
+import sys
 import time
 import zlib
 from pathlib import Path
@@ -68,8 +69,59 @@ def read_varuint(b: bytes, i: int) -> tuple[int, int]:
             return n, i
 
 
+def read_varstring(b: bytes, i: int) -> tuple[bytes, int]:
+    n, i = read_varuint(b, i)
+    return b[i : i + n], i + n
+
+
+def update_clients(u: bytes) -> list[int]:
+    """Replica numbers of the inserted structs in a v1 update, decoded by hand.
+
+    pycrdt has no API that lists them (state_clients below is what it offers and
+    it is wrong for a batch that does not start at clock 0). Handles text docs:
+    string, deleted, GC and skip structs; anything else raises.
+    """
+    i = 0
+    ncl, i = read_varuint(u, i)
+    out: set[int] = set()
+    for _ in range(ncl):
+        ns, i = read_varuint(u, i)
+        client, i = read_varuint(u, i)
+        _, i = read_varuint(u, i)
+        for _ in range(ns):
+            info = u[i]
+            i += 1
+            ref = info & 31
+            if ref in (0, 10):
+                _, i = read_varuint(u, i)
+                continue
+            out.add(client)
+            if info & 0x80:
+                _, i = read_varuint(u, i)
+                _, i = read_varuint(u, i)
+            if info & 0x40:
+                _, i = read_varuint(u, i)
+                _, i = read_varuint(u, i)
+            if not info & 0xC0:
+                isk, i = read_varuint(u, i)
+                if isk == 1:
+                    _, i = read_varstring(u, i)
+                else:
+                    _, i = read_varuint(u, i)
+                    _, i = read_varuint(u, i)
+            if info & 0x20:
+                _, i = read_varstring(u, i)
+            if ref == 4:
+                _, i = read_varstring(u, i)
+            elif ref == 1:
+                _, i = read_varuint(u, i)
+            else:
+                raise NotImplementedError(f"content ref {ref}")
+    return sorted(out)
+
+
 def state_clients(update: bytes) -> list[int]:
-    """Replica numbers that have letters in an update, via pycrdt.get_state (a state vector)."""
+    """Replica numbers pycrdt.get_state reports for an update (a state vector)."""
     sv = pycrdt.get_state(update)
     n, i = read_varuint(sv, 0)
     out = []
@@ -132,37 +184,53 @@ def resolve(t: Text, pos_b64: str):
         return f"{type(e).__name__}"
 
 
-def compact(updates: list[bytes]) -> tuple[Doc, Text, bytes]:
-    d, t = load(updates)
-    return d, t, d.get_update()
+def compact(updates: list[bytes]) -> bytes:
+    d, _ = load(updates)
+    return d.get_update()
+
+
+def snap_checks(tag: str, d: dict, label: str, snap: bytes) -> None:
+    """Checks on a FRESH doc loaded only from the encoded snapshot bytes."""
+    doc = Doc(skip_gc=False)
+    doc.apply_update(snap)
+    t = doc.get("t", type=Text)
+    p = f"{tag}:snapshot[{label}]"
+    gone = not has(snap, d["marker"])
+    check(f"{p}:text", str(t) == d["finalText"] and gone, f"fresh pycrdt doc loaded only from {len(snap)} snapshot bytes reads the same text, deleted words absent from the bytes: {gone}")
+    l2 = resolve(t, d["posLive"])
+    l3 = resolve(t, d["posDead"])
+    check(f"{p}:old-position", l2 == d["expectLive"], f"position made before the delete resolves to {l2}, expected {d['expectLive']}")
+    check(f"{p}:position-inside-deleted-text", l3 == d["expectDead"], f"position inside the later-deleted words resolves to {l3}, expected {d['expectDead']}")
+    after = per_letter(t)
+    check(f"{p}:replica-per-letter", after == d["clientsBefore"], f"letters keep their replica numbers: {runs(after)}")
 
 
 def has(b: bytes, s: str) -> bool:
     return s.encode() in b
 
 
-def verify(tag: str, d: dict) -> None:
+def verify(tag: str, d: dict, foreign=None) -> None:
     log = [unb64(x) for x in d["log"]]
     doc, t = load(log)
     text = str(t)
     check(f"{tag}:read-text", text == d["finalText"], f"text read back by pycrdt {'matches' if text == d['finalText'] else 'DIFFERS'} ({u16len(text)} UTF-16 units)")
     live = resolve(t, d["posLive"])
     check(f"{tag}:position-live", live == d["expectLive"], f"travelling position resolves to {live}, expected {d['expectLive']} (UTF-16 units)")
-    cdoc, ct, cupd = compact(log)
+    cupd = compact(log)
     raw_has = any(has(u, d["marker"]) for u in log)
-    c_has = has(cupd, d["marker"])
-    check(f"{tag}:deleted-text-gone", raw_has and not c_has, f"deleted text in raw log: {raw_has}; in compacted state: {c_has} (raw {sum(map(len, log))} B, compacted {len(cupd)} B)")
-    check(f"{tag}:compacted-text", str(ct) == d["finalText"], "compacted state reads back the same text")
-    l2 = resolve(ct, d["posLive"])
-    l3 = resolve(ct, d["posDead"])
-    check(f"{tag}:old-position-after-compaction", l2 == d["expectLive"], f"position made before the delete resolves to {l2} after compaction, expected {d['expectLive']}")
-    check(f"{tag}:position-inside-deleted-text", l3 == d["expectDead"], f"position inside the later-deleted words resolves to {l3} after compaction, expected {d['expectDead']}")
+    check(f"{tag}:deleted-text-gone", raw_has and not has(cupd, d["marker"]), f"deleted text in raw log: {raw_has}; in pycrdt-compacted bytes: {has(cupd, d['marker'])} (raw {sum(map(len, log))} B, compacted {len(cupd)} B)")
     before = per_letter(t)
-    after = per_letter(ct)
     check(f"{tag}:replica-per-letter-before", before == d["clientsBefore"], f"pycrdt reads the same replica number per letter as the author did: {runs(before)}")
-    check(f"{tag}:replica-per-letter-after-compaction", before == after, f"unchanged by compaction: {runs(after)}")
-    bc = state_clients(unb64(d["batch"]))
-    check(f"{tag}:replica-numbers-in-batch", bc == d["batchClients"], f"pycrdt lists the numbers inside one batch as {bc}, author said {d['batchClients']}")
+    snap_checks(tag, d, "own-compaction", cupd)
+    for label, snap in foreign or []:
+        snap_checks(tag, d, label, snap)
+    for k, what in (("batch", "first batch (starts at clock 0)"), ("batchLate", "later batch (clocks > 0)")):
+        u = unb64(d[k])
+        want = d[k + "Clients"]
+        got = state_clients(u)
+        check(f"{tag}:replica-numbers-in-{k}:pycrdt.get_state", got == want, f"pycrdt.get_state lists the numbers in the {what} as {got}; known writers {want}")
+        hand = update_clients(u)
+        check(f"{tag}:replica-numbers-in-{k}:hand-decoder", hand == want, f"a hand-written v1 decoder lists them as {hand}; known writers {want}")
 
 
 def author(c1: int, c2: int) -> dict:
@@ -190,10 +258,12 @@ def author(c1: int, c2: int) -> dict:
     A.apply_update(log[1])
     A.apply_update(log[2])
     quiet[0] = False
+    tA.insert(len(str(tA).encode()), " !")
     old = str(tA)
     pos_live = tA.sticky_index(old.encode().index(b"here"), Assoc.AFTER).encode()
     pos_dead = tA.sticky_index(old.encode().index(MARKER.encode()) + 3, Assoc.AFTER).encode()
     batch = pycrdt.merge_updates(log[0], log[1])
+    batch_late = pycrdt.merge_updates(log[2], log[3])
     start = u16_to_byte(old, u16_find(old, MARKER))
     del tA[start : start + len((MARKER + " ").encode())]
     final = str(tA)
@@ -207,7 +277,10 @@ def author(c1: int, c2: int) -> dict:
         "posDead": b64(pos_dead),
         "clientsBefore": per_letter(tA),
         "batch": b64(batch),
-        "batchClients": state_clients(batch),
+        # the numbers each batch should carry are known from who typed it, not read back
+        "batchClients": sorted([c1, c2]),
+        "batchLate": b64(batch_late),
+        "batchLateClients": sorted([c1, c2]),
     }
 
 
@@ -383,13 +456,26 @@ def weigh() -> None:
         )
 
 
+def late() -> None:
+    """After node phase 2: pycrdt loads the snapshot Yjs compacted from pycrdt's own log."""
+    pd = json.loads((OUT / "py_a.json").read_text())
+    snap = unb64((OUT / "snap_yjs_of_py.b64").read_text())
+    snap_checks("pycrdt-reads-pycrdt", pd, "yjs-compaction", snap)
+    (OUT / "results_py_late.json").write_text(json.dumps(results))
+
+
 def main() -> None:
+    if sys.argv[1:] == ["late"]:
+        late()
+        return
     print("pycrdt", pycrdt.__version__)
     units()
     jd = json.loads((OUT / "js_a.json").read_text())
-    verify("pycrdt-reads-yjs", jd)
+    ysnap = unb64((OUT / "snap_yjs_of_js.b64").read_text())
+    verify("pycrdt-reads-yjs", jd, [("yjs-compaction", ysnap)])
     pd = author(201, 202)
     (OUT / "py_a.json").write_text(json.dumps(pd))
+    (OUT / "snap_pycrdt_of_py.b64").write_text(b64(compact([unb64(x) for x in pd["log"]])))
     print("final text:", json.dumps(pd["finalText"], ensure_ascii=False), "letters:", runs(pd["clientsBefore"]))
     verify("pycrdt-reads-pycrdt", pd)
     replicas()

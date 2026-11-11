@@ -6,7 +6,7 @@ from pathlib import Path
 
 OUT = Path(__file__).with_name("out")
 rows = []
-for name in ("results_node1.json", "results_py.json", "results_node2.json", "results_platforms.json"):
+for name in ("results_node1.json", "results_py.json", "results_node2.json", "results_py_late.json", "results_platforms.json"):
     p = OUT / name
     if p.exists():
         rows += json.loads(p.read_text())
