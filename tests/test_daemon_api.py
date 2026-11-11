@@ -249,12 +249,19 @@ def _heavy_lane(db, monkeypatch):
     import anyio.to_thread
     from brindle.daemon import routes_read
 
+    db.add_workspace(Workspace("draft", "/repo", "draft", "worktree", "draft", "main", "/repo", None, "draft", 1))
+    db.add_agent(Agent("draft", "draft", "supervisor", "claude", None, "interactive", "idle", "@1", None, 1))
+    db.add_autopilot("draft")
+    db.update_autopilot("draft", goal="Small draft")
+
     async def exercise():
         entered = asyncio.Queue()
         release = threading.Event()
         loop = asyncio.get_running_loop()
 
         def blocked(*args):
+            if args[1] == "draft":
+                return args[0].get_agent("draft"), args[0].get_workspace("draft")
             loop.call_soon_threadsafe(entered.put_nowait, None)
             release.wait()
             raise ValueError("blocked handler finished")
@@ -262,7 +269,7 @@ def _heavy_lane(db, monkeypatch):
         monkeypatch.setattr(routes_read.session_review, "session", blocked)
         app = build_app(TOKEN, port=8123)
         paths = [f"/v1/sessions/r1/{suffix}" for suffix in
-                 ("diff", "pr/readiness", "tree", "pr/draft")]
+                 ("diff", "pr/readiness", "tree")]
         normal = anyio.to_thread.current_default_thread_limiter()
         previous = normal.total_tokens
         normal.total_tokens = 1
@@ -275,6 +282,8 @@ def _heavy_lane(db, monkeypatch):
             for path in paths:
                 code, body = await asyncio.wait_for(_read_request(app, path, AUTH), 1)
                 assert code == 503 and body["error"]["code"] == "busy"
+            code, body = await _read_request(app, "/v1/sessions/draft/pr/draft", AUTH)
+            assert code == 200 and body["title"] == "Small draft"
         finally:
             release.set()
             responses = await asyncio.gather(*pending)

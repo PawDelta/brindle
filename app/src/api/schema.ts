@@ -498,9 +498,11 @@ export interface MilestoneDTO {
  */
 export interface PrStateDTO {
   done?: number;
+  failed_checks?: string[];
   number: number;
   state: string;
   total?: number;
+  unpushed?: number;
 }
 /**
  * A route the app can call to act on the item itself.

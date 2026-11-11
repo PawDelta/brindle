@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
 import { ONBOARDED_KEY } from "../../api/providers";
@@ -70,6 +70,65 @@ const hunk = () => within(sheet()).getAllByTestId("hunk")[0];
 const gets = (daemon: FakeDaemon, path: string) => daemon.requests.filter((r) => r.method === "GET" && r.path === path).length;
 
 describe("review", () => {
+  it("keeps a busy PR draft pending until sync refresh and preserves the resulting fields", async () => {
+    let calls = 0;
+    let busy = true;
+    let finish: ((response: Response) => void) | undefined;
+    mount({ sessionReview: { sup1: READY } }, { ...onSession, sheet: { kind: "review" } }, (daemon) => (input, init) => {
+      if (String(input).endsWith("/sessions/sup1/pr/draft")) {
+        calls++;
+        if (busy) return Promise.resolve(new Response(JSON.stringify({ error: { code: "busy", message: "Heavy read capacity is full" } }), { status: 503 }));
+        return new Promise<Response>((resolve) => { finish = resolve; });
+      }
+      return daemon.fetch(input, init);
+    });
+    await screen.findByRole("dialog", { name: "Review & open PR" });
+    await act(async () => { await sync!.idle(); });
+    const title = within(sheet()).getByLabelText("PR title") as HTMLInputElement;
+    const body = within(sheet()).getByLabelText("PR description") as HTMLTextAreaElement;
+    expect(title.disabled).toBe(true);
+    expect(body.disabled).toBe(true);
+    expect(within(sheet()).queryByTestId("pr-draft-error")).toBeNull();
+    const initialCalls = calls;
+    busy = false;
+    await act(async () => { await sync!.refresh(); });
+    expect(calls).toBe(initialCalls + 1);
+    await act(async () => { await sync!.refresh(); });
+    expect(calls).toBe(initialCalls + 1);
+    await act(async () => { finish!(new Response(JSON.stringify({ title: "Generated title", body: "Generated body" }))); });
+    expect(title.disabled).toBe(false);
+    expect(title.value).toBe("Generated title");
+    expect(body.value).toBe("Generated body");
+    fireEvent.change(title, { target: { value: "My title" } });
+    await act(async () => { await sync!.refresh(); });
+    expect(calls).toBe(initialCalls + 1);
+    expect(title.value).toBe("My title");
+
+    sync!.stop();
+    cleanup();
+    const failed = mount({ sessionReview: { sup1: { ...READY } } }, { ...onSession, sheet: { kind: "review" } }, (daemon) => (input, init) => {
+      if (String(input).endsWith("/sessions/sup1/pr/draft")) return Promise.resolve(new Response(JSON.stringify({ error: { code: "internal", message: "unavailable" } }), { status: 500 }));
+      return daemon.fetch(input, init);
+    });
+    await screen.findByRole("dialog", { name: "Review & open PR" });
+    await within(sheet()).findByTestId("pr-draft-error");
+    const manualTitle = within(sheet()).getByLabelText("PR title") as HTMLInputElement;
+    const manualBody = within(sheet()).getByLabelText("PR description") as HTMLTextAreaElement;
+    expect(manualTitle.disabled).toBe(false);
+    expect(manualBody.disabled).toBe(false);
+    expect(manualTitle.value).toBe("");
+    expect(manualBody.value).toBe("");
+    fireEvent.change(manualTitle, { target: { value: "Manual title" } });
+    fireEvent.change(manualBody, { target: { value: "Manual description" } });
+    await act(async () => { await sync!.refresh(); });
+    expect(manualTitle.value).toBe("Manual title");
+    expect(manualBody.value).toBe("Manual description");
+    expect(within(sheet()).getAllByTestId("pr-draft-error")).toHaveLength(1);
+    fireEvent.click(within(sheet()).getByTestId("open-pr"));
+    await waitFor(() => expect(failed.daemon.prs).toHaveLength(1));
+    expect(failed.daemon.prs[0]).toMatchObject({ title: "Manual title", body: "Manual description" });
+  });
+
   it("shows review only once ready and opens the sheet on the pre-filled PR step", async () => {
     let readinessFails = true;
     let refused = 0;

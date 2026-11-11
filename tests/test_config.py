@@ -20,6 +20,7 @@ def _count_shows(monkeypatch) -> list[list[str]]:
     return shows
 
 
+@pytest.mark.variant("a race: a reader during forget_user's write, which ended MCP connections in 0.6.3")
 def test_forget_user_never_shows_a_reader_half_a_config(monkeypatch):
     """Every MCP server reads ~/.brindle/config.json every few seconds. A
     truncate-then-write in forget_user let one read an empty file, which

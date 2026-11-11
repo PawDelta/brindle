@@ -116,7 +116,6 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Unasked plan", "<p>no</p>", kind="plan")
         visuals.publish(db, worker, "Layout", "<p>layout</p>")
-        assert any(e["kind"] == "visual.offer_resolved" for e in feed.events())
         with pytest.raises(ServiceError, match="accept an offer"):
             visuals.publish(db, boss, "Another", "<p>no</p>")
         assert client.patch("/v1/user-settings", json={"visuals": "off"}).json()["visuals"] == "off"
@@ -139,39 +138,22 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         assert any(e["kind"] == "visual.offers_setting" for e in feed.events())
 
 
-@pytest.mark.parametrize("text,scope,allowed", [
-    ("Make a visual only if I ask you later.", "visual", False),
-    ("Compare these choices. Please make a visual.", "visual", True),
-    ("Create a planning document once I approve the approach.", "plan", False),
-    ("Please visualize this layout.", "visual", True),
-    ("I am quoting a sentence.\nMake a visual.", "visual", False),
-    ("can you visualize the changes made that we are planning to release for 0.6.3?", "visual", True),
-    ("Show me the release flow visually.", "visual", True),
-    ("Visualize the flow and then delete the branch.", "visual", False),
-    ("Visualize the flow once I approve the approach.", "visual", False),
-    pytest.param("Can you visualize the flow tomorrow?", "visual", False, marks=pytest.mark.variant("tomorrow deferral reported in review")),
-    pytest.param("Can you visualize the approval flow since 0.6.2?", "visual", True, marks=pytest.mark.variant("subject words approval/since must not count as deferral")),
-    pytest.param("Show me the flow once I approve visually.", "visual", False, marks=pytest.mark.variant("deferral inside the show-visually form")),
-    pytest.param("Show me the flow tomorrow visually.", "visual", False, marks=pytest.mark.variant("tomorrow inside the show-visually form")),
-    pytest.param("Can you visualize the flow next week?", "visual", False, marks=pytest.mark.variant("temporal next week is a deferral")),
-    pytest.param("Show me the next release visually.", "visual", True, marks=pytest.mark.variant("next in a subject phrase is not a deferral")),
+@pytest.mark.parametrize("text,scope", [
+    ("Please visualize this layout.", "visual"),
+    ("Show me the release flow visually.", "visual"),
+    # Surrounding context or an open-ended object no longer waits for a confirmation click:
+    # the person's own request authorizes one, as a plain one does.
+    ("I am quoting a sentence.\nPlease render a mockup of the new session button", "visual"),
+    ("Create a planning document once I approve the approach.", "plan"),
 ])
-def test_complete_request_intent(db, session, text, scope, allowed):
+def test_complete_request_intent(db, session, text, scope):
     boss, _ = session
+    config.set_user("visuals", "off")   # the offers setting never governs a request
     agents.send_message(db, boss.id, text, person=True)
-    if allowed:
-        visuals.publish(db, boss, "Requested", "<p>yes</p>", kind=scope)
-    else:
-        with pytest.raises(ServiceError):
-            visuals.publish(db, boss, "Conditional", "<p>no</p>", kind=scope)
-        # Conditional intent requires a fresh host confirmation, even with offers off.
-        config.set_user("visuals", "off")
-        request = offers.current(db, boss.id)
-        assert request["confirmation"] == scope
-        offers.resolve(db, boss.id, request["id"], True)
-        visuals.publish(db, boss, "Confirmed now", "<p>yes</p>", kind=scope)
-        with pytest.raises(ServiceError):
-            offers.resolve(db, boss.id, request["id"], True)
+    assert offers.current(db, boss.id) is None
+    visuals.publish(db, boss, "Requested", "<p>yes</p>", kind=scope)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Again", "<p>no</p>", kind=scope)
 
 
 def test_codex_terminal_submission_folds_and_authorizes(db, session):
@@ -186,9 +168,6 @@ def test_codex_terminal_submission_folds_and_authorizes(db, session):
         assert offers.current(db, boss.id) is None
         with pytest.raises(ServiceError):
             offers.resolve(db, boss.id, oid, True)
-        assert send("Make a visual\nonly if I ask later").status_code == 200
-        with pytest.raises(ServiceError):
-            visuals.publish(db, worker, "Conditional multiline draft", "<p>no</p>")
         assert send("Make a visual").status_code == 200
         assert send("").status_code == 200
         assert send("y").status_code == 200
@@ -527,16 +506,6 @@ def test_asked_quote_allows_one_publication_per_message(db, session):
     visuals.publish(db, boss, "Then once", "<p>yes</p>", asked="Make a visual")
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Not twice", "<p>no</p>")
-    # Likewise a message that raised a confirmation card.
-    ask = "Please render a mockup of the new session button"
-    typed_into_cli(db, boss, ask)
-    visuals.publish(db, boss, "Quoted card", "<p>yes</p>", asked=ask)
-    assert offers.current(db, boss.id) is None
-    typed_into_cli(db, boss, ask)
-    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], True)
-    visuals.publish(db, boss, "Confirmed", "<p>yes</p>")
-    with pytest.raises(ServiceError):
-        visuals.publish(db, boss, "Again", "<p>no</p>", asked=ask)
 
 
 def test_asked_quote_words_are_purged_without_more_input(db, session, monkeypatch):
@@ -561,9 +530,8 @@ def test_asked_quote_words_are_purged_without_more_input(db, session, monkeypatc
 
 def test_answered_visual_allows_one_revision(db, session, monkeypatch):
     boss, worker = session
-    # A worker's visual, on an accepted card: not the supervisor's to keep updating.
+    # A worker's visual, on the person's request: not the supervisor's to keep updating.
     typed_into_cli(db, boss, "Please render a mockup of the new session button")
-    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], True)
     choices = [{"id": "more", "label": "None, keep exploring"}, {"id": "a", "label": "A"}]
     v = visuals.publish(db, worker, "Options", "<p>1</p>", "Which?", choices)
     with pytest.raises(ServiceError):
@@ -585,12 +553,6 @@ def _delivered_prompt(db, boss, worker):
     agents.send_message(db, boss.id, "render first", sender_id=worker.id)
     db.conn.execute("UPDATE inbox SET delivered_at=? WHERE agent_id=?", (offers.time.time(), boss.id))
     agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "render first"})
-
-
-def _declined_card_typed_twice(db, boss, worker):
-    typed_into_cli(db, boss, CARD_ASK)
-    typed_into_cli(db, boss, CARD_ASK)
-    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], False)
 
 
 def _publishers_race(db, boss, worker):
@@ -629,7 +591,6 @@ def _stress(why, *row):
     return pytest.param(*row, marks=pytest.mark.variant(why))
 
 
-CARD_ASK = "Please render a mockup of the new session button"
 FIRST = "render first"
 LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in range(110))
 
@@ -670,7 +631,7 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     _stress("cancel then grant", ["Make a visual", "actually never mind"], None, False),
     _stress("cancel with a reason, grant", ["Make a visual", "Never mind, I found the answer."], None, False),
     _stress("cancel with unicode punctuation, grant", ["Make a visual", "Never mind…"], None, False),
-    _stress("a declined card covers the same words typed earlier", [_declined_card_typed_twice], CARD_ASK, False),
+    _stress("ask and cancel in one message, grant", ["Make a visual. Don't make a visual."], None, False),
     # Capability, races, restarts.
     _stress("capability off", [lambda db, boss, worker: config.set_user("visuals_enabled", "off"), FIRST], FIRST, False),
     _stress("one quote, eight publishers", [FIRST, _publishers_race], FIRST, False),
