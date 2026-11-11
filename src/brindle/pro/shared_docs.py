@@ -233,9 +233,10 @@ def _remember(db: DB, plan_id: str, view: dict) -> bool:
     """Keep the review state the Library answered with. True if it changed."""
     kept = {k: view.get(k) for k in REVIEW}
     review = json.dumps(kept, sort_keys=True)
+    whole = plans._review_rows(kept) is not None        # only a whole answer takes back an access refusal
     with db.tx() as c:
-        c.execute("UPDATE plan_shares SET unconfirmed=NULL, review_asked=MAX(review_asked, ?) WHERE plan_id=?",
-                  (int(plans.demands_review(kept)), plan_id))
+        c.execute("UPDATE plan_shares SET unconfirmed=NULL, access_refused=CASE WHEN ? THEN NULL ELSE access_refused"
+                  " END WHERE plan_id=?", (int(whole), plan_id))
         return c.execute("UPDATE plan_shares SET review=? WHERE plan_id=? AND review<>?",
                          (review, plan_id, review)).rowcount == 1
 
@@ -597,9 +598,11 @@ class _Head:
                                 client=self.client, store=self.store)
         if status == 200:
             self.view, self.refused = resp, False
+            review_policies.seen(self.db, self.p, resp)
         else:
-            review_policies.refused(self.db, self.p, resp)
-            self.refused = self.refused or resp.get("error") in review_policies.REFUSALS
+            review_policies.refused(self.db, self.p, resp, status)
+            self.refused = (self.refused or resp.get("error") in review_policies.REFUSALS
+                            or status in review_policies.ACCESS_REFUSED)
         return status, resp
 
     def send(self, tail: str, body: dict) -> bool:
@@ -934,10 +937,12 @@ def may_stop(row, who: str | None) -> bool:
     """Whether ``who`` may stop sharing a plan the Library can't confirm: the
     account that shared it, and only if no review state seen here ever had
     required reviewers or org rules, and the last answer was neither a
-    refusal nor unreadable. No answer yet can't show there are no rules."""
+    refusal (of access or by a rule) nor unreadable. No answer yet can't show
+    there are no rules."""
     review = json.loads(row["review"])
     return (row["unconfirmed"] is not None and who == row["owner"] and not row["review_asked"]
-            and not review.get(review_policies.REFUSED) and not plans.demands_review(review))
+            and row["access_refused"] is None and not review.get(review_policies.REFUSED)
+            and not plans.demands_review(review))
 
 
 def stop_sharing(db: DB, plan_id: str, rev: Any, *, store=None) -> None:

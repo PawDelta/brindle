@@ -735,11 +735,12 @@ def _hold_approval(db: DB, p: dict, why: str, was_ready: bool, wanted: dict) -> 
     from brindle.pro import review_policies
 
     with db.tx() as c:
-        row = c.execute("SELECT review FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+        row = c.execute("SELECT review, access_refused FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         if row is None:
             return False
         refusal = json.loads(row["review"]).get(review_policies.REFUSED)
-        held = was_ready and why != OTHER_ACCOUNT and (not refusal or refusal.get("code") == "key_unavailable")
+        held = (was_ready and why != OTHER_ACCOUNT and row["access_refused"] is None
+                and (not refusal or refusal.get("code") == "key_unavailable"))
         c.execute("UPDATE plan_shares SET unconfirmed=?, approve_refused=NULL,"
                   " approve_wanted=COALESCE(?, approve_wanted) WHERE plan_id=?",
                   (why, json.dumps(wanted) if held else None, p["id"]))

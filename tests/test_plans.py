@@ -717,7 +717,8 @@ def outage(db, session, monkeypatch):
     _shared(db, pid, NO_REVIEW)
     shared_docs._remember(db, pid, NO_REVIEW)
     asyncio.run(mcp_server.assign("developer", "build it"))
-    line = SimpleNamespace(pid=pid, view=NO_REVIEW, signed_in="me", calls=[], down=auth.TransportError("no route to 10.0.0.1"))
+    line = SimpleNamespace(pid=pid, view=NO_REVIEW, signed_in="me", calls=[], down=auth.TransportError("no route to 10.0.0.1"),
+                           patch=monkeypatch, real_sync=shared_docs.sync)
 
     def sync(db_, plan_id, **kw):
         if line.down:
@@ -747,7 +748,8 @@ def _approve(app, line):
 def _refused_approval(app, line, reason):
     """Approve while the Library is down: refused in plain words, and nothing starts."""
     error = _approve(app, line).json()["error"]
-    assert (error["code"], error["reason"]) == ("gate_unverified", reason) and error["message"] == plans.UNCONFIRMED[reason]
+    assert (error["code"], error["reason"]) == ("gate_unverified", reason)
+    assert error["message"] and str(line.down) not in error["message"]      # the failure's own words stay out
     return app.get(f"/v1/plans/{line.pid}").json()
 
 
@@ -804,19 +806,42 @@ def _stops_sharing_and_builds(db, app, line, started):
     assert _unshares(db) == []
 
 
-def _reviewers_once_existed(db, line):
+def _access_refusal_stands_until_the_library_answers(db, app, line, started):
+    from brindle.pro import analysis_docs as ad
     from brindle.pro import shared_docs
 
-    shared_docs._remember(db, line.pid, {**NO_REVIEW, "reviewers": ONE, "sign_offs": _signed_off("a")})
-    shared_docs._remember(db, line.pid, NO_REVIEW)
+    answers = [(403, {"error": "forbidden"})]
+    line.patch.setattr(shared_docs, "sync", line.real_sync)
+    line.patch.setattr(ad, "_call", lambda *a, **kw: answers[-1])
+    refused = _refused_approval(app, line, "library_error")["gate"]["unconfirmed"]
+    assert not refused["can_stop_sharing"] and not refused["approval_held"]
+    assert app.post(f"/v1/plans/{line.pid}/stop-sharing", json={"rev": 1}).status_code == 409 and _unshares(db) == []
+
+    answers.append((200, NO_REVIEW))
+    assert shared_docs.sync_open(db) == 1 and started == []
+    answers.append((503, {"error": "unavailable"}))             # an outage now: nothing has refused them
+    assert _refused_approval(app, line, "library_error")["gate"]["unconfirmed"]["can_stop_sharing"]
+
+
+def _reviewers_once_existed(db, line):
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import shared_docs
+
+    # Only the read inside set_reviewers shows the reviewer: the answer that gets stored no longer lists them.
+    line.patch.setattr(ad, "_call", lambda method, path, body=None, **kw: (
+        200, {**NO_REVIEW, "reviewers": ONE} if method == "GET" else NO_REVIEW))
+    shared_docs.set_reviewers(db, line.pid, [])
 
 
 def _another_account(db, line):
     line.signed_in = "someone-else"
 
 
-@pytest.mark.parametrize("scenario", [_approves_by_itself, _not_approved_when_a_reviewer_appeared,
-                                      _stops_sharing_and_builds])
+@pytest.mark.parametrize("scenario", [
+    _approves_by_itself, _not_approved_when_a_reviewer_appeared, _stops_sharing_and_builds,
+    pytest.param(_access_refusal_stands_until_the_library_answers, marks=pytest.mark.variant(
+        "bypass attempt: a 403 from the Library is a refusal, not an outage, so it can't open the way around the review")),
+])
 def test_held_plan_when_the_library_is_down(db, session, outage, scenario):
     _, started = session
     with TestClient(build_app(TOKEN), headers=AUTH) as app:

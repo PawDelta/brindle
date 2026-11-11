@@ -23,7 +23,7 @@ import json
 import time
 from typing import Any
 
-from brindle import plan_docs, visuals
+from brindle import plan_docs, plans, visuals
 from brindle.db import DB
 from brindle.pro import analysis_docs as ad
 from brindle.redact import mask
@@ -35,6 +35,8 @@ REFUSALS = {
     "policy_denied": "An org review policy refused that change, so the build stays closed until the Library "
                      "confirms the review again.",
 }
+ACCESS_REFUSED = (401, 402, 403, 404)   # the Library's answer that this account may not have this: not an outage
+REVIEW_FIELDS = ("reviewers", "policy_reviewers", "pending_policies")
 ACTIONS = ("waive", "stand_in")
 MAX_REASON = 2000
 
@@ -141,10 +143,28 @@ def refusal_reason(refusal: Any) -> str:
 # -- the Library's refusals --------------------------------------------------------------
 
 
-def refused(db: DB, p: dict, resp: dict) -> None:
-    """Keep a rule's refusal on the plan, so its gate is shut and says why.
-    Any other failure says nothing about the rules and changes nothing here."""
+def seen(db: DB, p: dict, resp: dict) -> None:
+    """Keep for good that an answer about this plan's review had required
+    reviewers or org rules, or couldn't be read well enough to say it hadn't,
+    whichever answer ends up the stored one: a read or write in between can
+    show a reviewer the next answer no longer lists."""
+    if not any(k in resp for k in REVIEW_FIELDS):
+        return
+    if plans.demands_review({k: resp.get(k) for k in REVIEW_FIELDS}):
+        with db.tx() as c:
+            c.execute("UPDATE plan_shares SET review_asked=1 WHERE plan_id=? AND review_asked=0", (p["id"],))
+
+
+def refused(db: DB, p: dict, resp: dict, status: int) -> None:
+    """Keep the Library's refusal on the plan. An access refusal stands until
+    it next gives a whole answer (shared_docs._remember), and bars the ways
+    around the review; a rule's refusal also shuts the gate and says why.
+    Any other failure says nothing about either and changes nothing here."""
     code = resp.get("error")
+    if status in ACCESS_REFUSED:
+        with db.tx() as c:
+            c.execute("UPDATE plan_shares SET access_refused=? WHERE plan_id=?",
+                      (code if isinstance(code, str) and code else str(status), p["id"]))
     if code not in REFUSALS:
         return
     refusal = {"code": code, "org_id": resp.get("org_id"), "policy": resp.get("policy")}
@@ -164,9 +184,10 @@ def ask(db: DB, p: dict, method: str, path: str, body: dict | None = None, *, cl
     with a readable reason, after recording a refusal by an org rule."""
     status, resp = ad._call(method, path, body, client=client, store=store)
     if status != 200:
-        refused(db, p, resp)
+        refused(db, p, resp, status)
         code = resp.get("error") if isinstance(resp.get("error"), str) else None
         raise ad.Refused(resp.get("error_description") or code or f"HTTP {status}", status, code)
+    seen(db, p, resp)
     return resp
 
 
