@@ -138,16 +138,21 @@ describe("Sidebar", () => {
     }
   });
 
-  it("pr line: a paused session keeps it, and clicking it doesn't open the session", async () => {
-    const openUrl = vi.fn(async () => undefined);
-    const url = "https://github.com/o/r/pull/390";
-    const { sync, navigate } = mount({ workspaces: [root, worker], sessions: [paused], goal: { ...goal, root_id: "sup0", goal_phase: "pr_open", pr_url: url, pr_state: { number: 390, state: "ready", done: 2, total: 2 } } }, undefined, undefined, openUrl);
+  it("no drift mark: a drifting session has none with or without a PR", async () => {
+    const { sync } = mount({ workspaces: [root, worker], sessions: [live], goal: { ...goal, drifting: true } as typeof goal });
     onTestFinished(() => sync.stop());
-    const line = await screen.findByTestId("session-pr");
-    expect(line.textContent).toBe("PR #390 · Ready to merge");
-    fireEvent.click(line);
-    expect(openUrl).toHaveBeenCalledWith(url);
-    expect(navigate).not.toHaveBeenCalled();
+    const row = await screen.findByTestId("tree-session-sup1");
+    await waitFor(() => expect(row.querySelector("[data-testid='session-status']")).toBeTruthy());
+    expect(row.querySelector('[data-state="drifting"]')).toBeNull();
+    expect(screen.queryByTestId("session-pr")).toBeNull();
+
+    sync.stop();
+    cleanup();
+    const withPr = mount({ workspaces: [root, worker], sessions: [live], goal: { ...goal, drifting: true, pr_url: "https://github.com/o/r/pull/390", pr_state: { number: 390, state: "ready", done: 2, total: 2 } } as typeof goal });
+    onTestFinished(() => withPr.sync.stop());
+    const prRow = await screen.findByTestId("tree-session-sup1");
+    await screen.findByTestId("session-pr");
+    expect(prRow.querySelector('[data-state="drifting"]')).toBeNull();
   });
 
   it.each([

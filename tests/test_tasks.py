@@ -314,3 +314,112 @@ def test_broad_glob_launch_deduplicates_and_preserves_modes(db, coordination, mo
         db.update_task(pending.id, state="merged")
         refs["refs/heads/session"] = "b-next"
         assert tasks.inspected_clash(db, caller_ws, ["src/shared.py"], caller_id="a").holder == "workspace:b"
+
+
+@pytest.fixture
+def cross_session_wait(db, coordination, monkeypatch):
+    """Session a's task on src/shared.py, which session b's unlanded branch
+    holds, started through the real dispatch path (``_start_if_ready``)."""
+    from brindle import identity_lock
+
+    c = coordination
+    db.update_task("held", state="merged")
+    db.conn.execute("UPDATE workspaces SET branch='session-a' WHERE id='a'")
+    refs = {"refs/heads/main": "cw-main", "refs/heads/session-a": "cw-main", "refs/heads/session": "cw-b"}
+    monkeypatch.setattr(git, "ref_shas", lambda root: refs)
+    # What each head's diff touches: b synced off the file, then edited it again.
+    diffs = {"cw-b": ["src/shared.py"], "cw-b-synced": [], "cw-b-new": ["src/shared.py"], "cw-c": ["src/shared.py"]}
+    monkeypatch.setattr(git, "paths", lambda args, root:
+                        diffs.get(args[-1].split("...")[-1], []) if args[0] == "diff" else [])
+    monkeypatch.setattr(git, "ok", lambda args, root: False)   # a never inherits b's branch
+    monkeypatch.setattr(identity_lock, "ensure_workspace", lambda *args: None)
+    monkeypatch.setattr(config, "load_repo_config",
+                        lambda root: SimpleNamespace(overlap=None, max_weight=None, merge_into=None))
+    room = {"why": None}
+    monkeypatch.setattr(tasks, "task_wait", lambda db, t: room["why"])
+    monkeypatch.setattr(tasks, "_wait_in_background", lambda task_id: None)
+    monkeypatch.setattr(tasks, "_note_long_wait", lambda *args: None)
+    monkeypatch.setattr(tasks, "_claim_fair", lambda db, t: (db.claim_task(t.id), None, None))
+    monkeypatch.setattr(tasks, "_launch_warnings", lambda *args: [])
+    monkeypatch.setattr(tasks.agents, "send_message", lambda *args, **kwargs: None)
+    told = []
+    monkeypatch.setattr(gates, "tell", lambda db, to, text: told.append(to))
+    starts = []
+
+    def delegate(db, caller, ws, *args, start=None, **kwargs):
+        starts.append(start)
+        worker = replace(db.get_agent("worker"), id=f"started-{len(starts)}", parent_id="a")
+        db.add_agent(worker)
+        return worker, c.w
+
+    monkeypatch.setattr(tasks.agents, "delegate", delegate)
+    db.add_task(replace(c.held, id="new", agent_id=None, caller_id="a", caller_ws_id="a",
+                        state="pending", task_text="new work"))
+    assert not tasks._start_if_ready(db, db.get_task("new"), "its dependencies")
+    assert tasks._loads(db.get_task("new").depends_on) == ["workspace:b"]
+    # Still held on the next look, and a second identical assign leaves it in place.
+    assert tasks.sweep(db) == 0
+    assert tasks.room_duplicate(db, "a", "/repo", "new work", c.held.branch).id == "new"
+    assert starts == [] and db.get_task("new").state == "pending"
+    told.clear()
+    return SimpleNamespace(refs=refs, starts=starts, told=told, room=room, coordination=c)
+
+
+def _land(db, branch="session"):
+    """b's PR from ``branch`` merged, at the commit b's branch had when queued."""
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, merged_at)"
+                    " VALUES ('b', ?, ?, 'cw-b', 0, ?)", (branch, f"u-{branch}", tasks.time.time()))
+
+
+@pytest.mark.parametrize("event", [
+    "landed",
+    pytest.param("synced", marks=pytest.mark.variant(
+        "b's own sync moves its head off the files while a never inherits it: the landing seen "
+        "from git when gh's merge record is missing; the queue row above reaches it only via a's inheritance")),
+])
+def test_cross_session_wait_released_when_other_session_lands(db, cross_session_wait, event):
+    w = cross_session_wait
+    if event == "landed":   # b's PR merged on main; its branch hasn't synced yet
+        _land(db, "unrelated")   # a PR from another of b's branches releases nothing
+        assert tasks.sweep(db) == 0
+        # Session c, which never landed, holds the file too: b's landing doesn't hide it.
+        w.coordination.workspace("c", "session-c")
+        db.add_agent(Agent("c", "c", "developer", "claude", None, "interactive", "processing", "", None, 0))
+        w.refs["refs/heads/session-c"] = "cw-c"
+        _land(db)
+        assert tasks.sweep(db) == 0
+        assert tasks._loads(db.get_task("new").depends_on) == ["workspace:c"] and w.starts == []
+        assert sorted(w.told) == ["a", "c"]   # the new wait's supervisors
+        w.told.clear()
+        w.refs["refs/heads/session-c"] = "cw-c-synced"
+    else:   # b synced main back in: its branch no longer holds the file
+        w.refs["refs/heads/session"] = "cw-b-synced"
+    assert tasks.sweep(db) == 1
+    assert db.get_task("new").state == "started" and len(w.starts) == 1
+    assert w.told == []   # a release tells nobody beyond the caller's start note
+
+
+@pytest.mark.parametrize("event", ["landed", "synced"])
+def test_cross_session_wait_requeues_on_new_work_after_release(db, cross_session_wait, event):
+    w = cross_session_wait
+    if event == "landed":
+        _land(db)
+        w.refs["refs/heads/session"] = "cw-b-new"   # b edits the file again before the queue sees the landing
+    else:
+        w.refs["refs/heads/session"] = "cw-b-synced"
+    w.room["why"] = "machine busy"   # released, but no room to start yet
+    assert tasks.sweep(db) == 0
+    assert tasks._loads(db.get_task("new").depends_on) == []
+    w.refs["refs/heads/session"] = "cw-b-new"   # b edits the file again before there's room
+    w.room["why"] = None
+    assert tasks.sweep(db) == 0
+    assert tasks._loads(db.get_task("new").depends_on) == ["workspace:b"] and w.starts == []
+
+
+def test_cross_session_wait_falls_back_after_drift_limit(db, cross_session_wait):
+    w = cross_session_wait
+    db.conn.execute("UPDATE task_notes SET noted = noted - ? WHERE task_id = 'new'",
+                    (tasks.CROSS_SESSION_WAIT_LIMIT + 1,))
+    assert tasks.sweep(db) == 1
+    assert db.get_task("new").state == "started"
+    assert sorted(w.told) == ["a", "b"]   # both supervisors, not the Inbox

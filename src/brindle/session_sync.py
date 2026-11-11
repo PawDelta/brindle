@@ -10,12 +10,14 @@ a force):
 - a session PR merging on the forge (session_review.poll_merged);
 - a PR opening or being pushed from the checkout (gates.pr_checked);
 - the session starting or resuming (service.sessions).
+- the daemon's periodic sweep, while the session is quiet.
 
 A clean merge is reported to the supervisor, and the checks run on the files
 it brought in (a detached helper, ``brindle _session-sync-checks``). A
 checkout with uncommitted changes is left alone and the supervisor told. A
 conflicting merge is aborted, leaving the checkout as it was: the files go to the
-supervisor and the person's inbox, and merges into the session branch are
+supervisor and a queued resolver task. The person's inbox is involved only
+if resolution cannot proceed. Merges into the session branch are
 refused (``merge_block``) until the branch contains that origin commit, but
 for a branch that already does (a worker resolving the conflict).
 
@@ -29,18 +31,21 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 
-from brindle import agents, git, spawn
+from brindle import agents, bus, git, spawn
 from brindle.config import load_repo_config
-from brindle.db import DB, Workspace
+from brindle.db import DB, Agent, Task, Workspace
 
 log = logging.getLogger(__name__)
 
 FETCH_SECONDS = 30.0
 MAX_LANDING_LOOKUPS = 5      # failed lookups of how a merged PR landed before a sync stops waiting on it
+IDLE_FETCH_SECONDS = 300.0
 
 
 @dataclass
@@ -138,10 +143,123 @@ def _both(d: Drift) -> str:
     return f"; files both changed: {', '.join(d.overlap)}" if d.overlap else ""
 
 
+def refresh_drift_flags(db: DB) -> None:
+    """Measure live sessions against origin as last fetched, once per sweep.
+
+    A notice is armed again only after the branch falls below both limits.
+    Commit timestamps come from unlanded work, excluding integration merges
+    and history carried by verified squash/rebase landings on origin.
+    """
+    rows = db.conn.execute(
+        "SELECT DISTINCT w.id FROM workspaces w JOIN agents a ON a.workspace_id = w.id"
+        " WHERE a.parent_id IS NULL AND a.status != 'done' AND a.dismissed_at IS NULL").fetchall()
+    for row in rows:
+        ws = db.get_workspace(row["id"])
+        try:
+            if (default := upstream(ws)) is None or not git.remote_branch_exists(ws.path, default):
+                continue
+            _record_drift(db, ws, default)
+        except git.GitError:
+            log.debug("brindle: couldn't measure drift for %s", ws.branch, exc_info=True)
+
+
+def refresh_idle_sessions(db: DB, fetched_at: dict[str, float]) -> None:
+    """Refresh origin once per repo every few minutes, then sync quiet sessions.
+
+    The daemon watch owns the fetch clock; a busy checkout can become quiet
+    on the next sweep without waiting for another fetch.
+    """
+    rows = db.conn.execute(
+        "SELECT DISTINCT w.id FROM workspaces w JOIN agents a ON a.workspace_id = w.id"
+        " WHERE w.base_branch IS NOT NULL AND a.parent_id IS NULL"
+        " AND a.status != 'done' AND a.dismissed_at IS NULL"
+        " UNION SELECT w.id FROM workspaces w JOIN session_repos r ON r.repo_root = w.repo_root"
+        " JOIN session_repo_branches b ON b.root_id = r.root_id AND b.alias = r.alias AND b.branch = w.branch"
+        " JOIN agents a ON a.id = r.root_id"
+        " WHERE w.base_branch IS NOT NULL AND a.parent_id IS NULL"
+        " AND a.status != 'done' AND a.dismissed_at IS NULL").fetchall()
+    for row in rows:
+        ws = db.get_workspace(row["id"])
+        try:
+            if (default := upstream(ws)) is None:
+                continue
+            now = time.monotonic()
+            last = fetched_at.get(ws.repo_root)
+            if last is None or now - last >= IDLE_FETCH_SECONDS:
+                fetched_at[ws.repo_root] = now
+                fetch(ws.repo_root, default)
+            if _quiet(db, ws):
+                sync(db, ws, idle=True)
+        except git.GitError:
+            log.debug("brindle: couldn't sync idle session %s", ws.branch, exc_info=True)
+
+
+def _quiet(db: DB, ws: Workspace) -> bool:
+    """Read current activity, merge queue and checkout state, never a snapshot."""
+    from brindle import autopilot, pipeline
+
+    current = db.get_workspace(ws.id)
+    if current is None or current != ws or not current.base_branch:
+        return False
+    roots = _supervisors(db, ws)
+    if not roots or any(a.status in autopilot.BUSY for a in roots):
+        return False
+    if pipeline.ready_branches(db, ws.repo_root, ws.branch):
+        return False
+    for root in roots:
+        if any(a.dismissed_at is None and a.status not in ("paused", "done") and agents.is_alive(a)
+               for a in agents.tree(db, root.id)[1:]):
+            return False
+    return not git.dirty_files(ws.path)
+
+
+def _record_drift(db: DB, ws: Workspace, default: str) -> None:
+    ref = f"origin/{default}"
+    covered = [f"^{covers}" for _squash, covers in _verified_squashes(db, ws, ref)]
+    stamps = git.out(["log", "--no-merges", "--format=%ct", f"{ref}..HEAD", *covered], ws.path).splitlines()
+    oldest = min(map(int, stamps)) if stamps else None
+    count = len(git.paths(["diff", "--name-only", "--no-renames", ref, "HEAD"], ws.path))
+    drifting = (oldest is not None and time.time() - oldest > 48 * 3600) or count > 60
+    row = db.conn.execute("SELECT drifting FROM session_drift WHERE repo_root = ? AND branch = ?",
+                          (ws.repo_root, ws.branch)).fetchone()
+    db.conn.execute(
+        "INSERT INTO session_drift (repo_root, branch, oldest_at, file_count, drifting) VALUES (?, ?, ?, ?, ?)"
+        " ON CONFLICT (repo_root, branch) DO UPDATE SET oldest_at = excluded.oldest_at,"
+        " file_count = excluded.file_count, drifting = excluded.drifting",
+        (ws.repo_root, ws.branch, oldest, count, drifting))
+    if bool(row and row["drifting"]) != drifting:
+        for root in db.list_agents(ws.id):
+            if root.parent_id is None:
+                bus.publish_agent(db, "session.pr_drift", root.id, drifting=drifting)
+    if drifting and not (row and row["drifting"]):
+        age = (max(0, time.time() - oldest) / 3600) if oldest is not None else 0
+        _tell(db, ws, f"{ws.branch} is drifting from {ref}: its oldest unlanded commit is "
+              f"{age:.1f} hours old and {count} files differ. Land its PR to keep the session close to main.")
+
+
+def drifting(db: DB, root_id: str) -> bool:
+    """The persisted drift flag for this session's current branch."""
+    return db.conn.execute(
+        "SELECT 1 FROM agents a JOIN workspaces w ON w.id = a.workspace_id"
+        " JOIN session_drift d ON d.repo_root = w.repo_root AND d.branch = w.branch"
+        " WHERE a.id = ? AND d.drifting = 1", (root_id,)).fetchone() is not None
+
+
+def _supervisors(db: DB, ws: Workspace) -> list[Agent]:
+    """Live session owners, including supervisors in another attached repo."""
+    roots = {a.id: a for a in db.list_agents(ws.id) if a.parent_id is None}
+    for attached in db.session_repos():
+        if attached.repo_root == ws.repo_root and attached.branch == ws.branch:
+            if root := db.get_agent(attached.root_id):
+                roots[root.id] = root
+    return sorted((a for a in roots.values()
+                   if a.parent_id is None and a.status != "done" and a.dismissed_at is None),
+                  key=lambda a: a.created_at)
+
+
 def _tell(db: DB, ws: Workspace, text: str) -> None:
-    """The session's supervisor in ``ws`` (the newest, with several), if one is there yet."""
-    roots = [a for a in db.list_agents(ws.id)
-             if a.parent_id is None and a.status != "done" and a.dismissed_at is None]
+    """Tell the session's newest supervisor, including an attached checkout's owner."""
+    roots = _supervisors(db, ws)
     if roots:
         try:
             agents.send_message(db, roots[-1].id, text)
@@ -213,15 +331,17 @@ def session_checkout(db: DB, ws: Workspace) -> Workspace | None:
     return None
 
 
-def sync(db: DB, ws: Workspace, *, checks: bool = True) -> Outcome | None:
+def sync(db: DB, ws: Workspace, *, checks: bool = True, idle: bool = False) -> Outcome | None:
     """Fetch ``origin/<default>`` and merge it into the session checkout
     ``ws`` (see the module doc). None when ``ws`` keeps up with nothing or
     git failed; ``busy`` while another merge into the branch holds it. With
-    ``checks``, a clean merge starts the checks on the files it brought in."""
+    ``checks``, a clean merge starts the checks on the files it brought in.
+    ``idle`` uses the sweep's fetched ref and rechecks quietness under the locks."""
     default = upstream(ws)
     if default is None:
         return None
-    fetch(ws.repo_root, default)
+    if not idle:
+        fetch(ws.repo_root, default)
     _land_merged_prs(db, ws)
     if _awaiting_landing(db, ws):
         # A merged PR's landing commit isn't known yet: merging now could
@@ -233,7 +353,7 @@ def sync(db: DB, ws: Workspace, *, checks: bool = True) -> Outcome | None:
         with ExitStack() as held:
             held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
             held.enter_context(git.checkout_lock(ws.path))
-            out = _sync_locked(db, ws, default)
+            out = _sync_locked(db, ws, default, idle=True) if idle else _sync_locked(db, ws, default)
     except BlockingIOError:
         return Outcome("busy", f"a merge into {ws.branch} is under way; brindle syncs it with "
                                f"origin/{default} at the next merge")
@@ -245,13 +365,15 @@ def sync(db: DB, ws: Workspace, *, checks: bool = True) -> Outcome | None:
     return out
 
 
-def _sync_locked(db: DB, ws: Workspace, default: str) -> Outcome:
+def _sync_locked(db: DB, ws: Workspace, default: str, *, idle: bool = False) -> Outcome:
     d = drift(ws, default)
     if d is None:
         return Outcome("up_to_date")
     if not d.behind:
         _record(db, ws, d.sha, "synced")
         return Outcome("up_to_date")
+    if idle and not _quiet(db, ws):
+        return Outcome("busy")
     if git.dirty_files(ws.path, tracked_only=True):
         text = (f"origin/{default} has {d.behind} commit(s) {ws.branch} lacks{_both(d)}. Its checkout has "
                 "uncommitted changes, so brindle didn't merge it in: commit them, and brindle syncs "
@@ -264,16 +386,18 @@ def _sync_locked(db: DB, ws: Workspace, default: str) -> Outcome:
         _new, files = git.merge_local_base(ws.path, d.ref, no_ff=True)
     if files:
         text = (f"origin/{default} has {d.behind} commit(s) {ws.branch} lacks, and merging it conflicts in: "
-                f"{', '.join(files)}. Merges into {ws.branch} are refused until it is synced: have a worker "
-                f"merge origin/{default} into its branch and resolve them (a branch that contains "
+                f"{', '.join(files)}. Brindle will try to queue a resolver for when the session is quiet. "
+                f"Merges into {ws.branch} are refused until it is synced (a branch that contains "
                 f"{d.sha[:8]} still merges), or resolve it in {ws.path}.")
         _record(db, ws, d.sha, "conflict", files, tell=text)
+        _queue_resolver(db, ws, d, files)
+        bus.publish_ws(db, "conflict", ws, files=files, source="session_sync", branch=ws.branch)
         return Outcome("conflict", text, before, files=files)
     new = git.out(["rev-parse", "HEAD"], ws.path)
     text = (f"brindle merged origin/{default} into {ws.branch} ({d.behind} new commit(s), "
             f"now at {new[:8]}){_both(d)}. The checks run on the files it brought in; "
             "their result arrives as a message.")
-    _record(db, ws, d.sha, "synced", tell=text, always=True)
+    _record(db, ws, d.sha, "synced", tell=text, always=not idle)
     return Outcome("synced", text, before, new)
 
 
@@ -293,22 +417,30 @@ def record_squash(db: DB, ws: Workspace, squash_sha: str, covers_sha: str) -> bo
     return True
 
 
-def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
-    """Merge each recorded squash on ``ref`` the branch lacks as already
-    merged: its parent the usual way, then the squash itself with ``-s ours``,
-    but only when the squash is exactly the covered commit's changes (anything
-    else, e.g. edits made on the forge, is left to the plain merge). The
-    conflicting files of a parent's merge, else []."""
+def _verified_squashes(db: DB, ws: Workspace, ref: str) -> Iterator[tuple[str, str]]:
+    """Landings on ``ref`` proven to carry the recorded session history.
+
+    A record alone isn't proof: edits on the forge may differ from the
+    session's changes. Replay and drift must agree on which history landed.
+    """
     rows = db.conn.execute("SELECT squash_sha, covers_sha FROM session_squashes WHERE repo_root = ?"
                            " AND branch = ? ORDER BY recorded_at", (ws.repo_root, ws.branch)).fetchall()
     for row in rows:
         squash, covers = row["squash_sha"], row["covers_sha"]
         if (not git.ok(["merge-base", "--is-ancestor", squash, ref], ws.path)
-                or git.ok(["merge-base", "--is-ancestor", squash, "HEAD"], ws.path)
                 or not git.ok(["merge-base", "--is-ancestor", covers, "HEAD"], ws.path)):
             continue
         merged = git.run(["merge-tree", "--write-tree", f"{squash}^1", covers], ws.path, check=False)
         if merged.returncode != 0 or merged.stdout.split()[:1] != [git.out(["rev-parse", f"{squash}^{{tree}}"], ws.path)]:
+            continue
+        yield squash, covers
+
+
+def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
+    """Merge each verified landing the branch lacks: its parent normally,
+    then the squash with ``-s ours``. Return conflicting files, else []."""
+    for squash, covers in _verified_squashes(db, ws, ref):
+        if git.ok(["merge-base", "--is-ancestor", squash, "HEAD"], ws.path):
             continue
         _new, files = git.merge_local_base(ws.path, f"{squash}^1", no_ff=True)
         if files:
@@ -319,6 +451,97 @@ def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
 
 
 # -- what it blocks ----------------------------------------------------------------
+
+
+def _queue_resolver(db: DB, ws: Workspace, d: Drift, files: list[str]) -> None:
+    """Queue one normal, isolated task; retain failed attempts across syncs.
+
+    Called under the session base lock. A supervisor's explicit merge task
+    takes precedence over an automatic one for the same conflict.
+    """
+    from brindle import autopilot, tasks
+
+    key = (ws.repo_root, ws.branch, d.sha)
+    if db.conn.execute("SELECT 1 FROM session_sync_resolvers WHERE repo_root=? AND branch=?"
+                       " AND upstream_sha=?", key).fetchone():
+        return
+    roots = _supervisors(db, ws)
+    if not roots:
+        return
+    owners = {a.id for a in roots}
+    previous = {r["task_id"] for r in db.conn.execute(
+        "SELECT task_id FROM session_sync_resolvers WHERE repo_root=? AND branch=?",
+        (ws.repo_root, ws.branch))}
+    existing = next((t for t in reversed(db.list_tasks(ws.repo_root))
+                     if t.caller_id in owners and t.caller_ws_id == ws.id
+                     and t.id not in previous
+                     and _current_resolver(db, t, d.sha)
+                     and d.ref.lower() in t.task_text.lower()
+                     and "merg" in t.task_text.lower()
+                     and "resolv" in t.task_text.lower()
+                     and (d.sha in t.task_text or all(f in t.task_text for f in files)
+                          or set(files).issubset(json.loads(t.files or "[]")))), None)
+    task_id = existing.id if existing else None
+    # Record even a refused attempt: it needs the person, not another sweep.
+    db.conn.execute("INSERT INTO session_sync_resolvers (repo_root, branch, upstream_sha, task_id)"
+                    " VALUES (?, ?, ?, ?)", (*key, task_id))
+    if existing:
+        return
+    brief = f"merge {d.ref} into the session branch and resolve the conflict in {', '.join(files)}"
+    try:
+        profile, _ = autopilot.choose_profile(db, roots[-1].id, ws.repo_root, task=brief, files=files)
+        task = tasks.enqueue(db, roots[-1], ws, profile, f"{brief}\n\nConflicting origin commit: {d.sha}.",
+                             "assign", isolate=True, branch=None, done_when=None, files=files,
+                             depends_on=None, plan_first=False, unanswered=True)
+    except (agents.AgentError, autopilot.AutopilotError) as e:
+        log.warning("brindle: couldn't queue sync resolver for %s: %s", ws.branch, e)
+        return
+    db.conn.execute("UPDATE session_sync_resolvers SET task_id=? WHERE repo_root=? AND branch=?"
+                    " AND upstream_sha=?", (task.id, *key))
+    # Publish its quietness constraint before any sweep may dispatch it.
+    tasks.answered(db, [task.id], start=set())
+
+
+def _current_resolver(db: DB, task: Task, sha: str) -> bool:
+    """Prefer explicit commit identity; filenames alone require active work."""
+    if sha in task.task_text:
+        return True
+    if re.search(r"\b[0-9a-fA-F]{40}\b", task.task_text):
+        return False
+    if task.state in ("pending", "held", "unanswered", "starting"):
+        return True
+    if task.state != "started" or not task.agent_id:
+        return False
+    worker = db.get_agent(task.agent_id)
+    return bool(worker and worker.dismissed_at is None and worker.status != "failed"
+                and not worker.merge_failed and not db.mark(worker.id, "pipeline-escalated")
+                and (worker.pipeline or worker.status != "done"))
+
+
+def resolver_wait(db: DB, task_id: str) -> bool:
+    """A sync resolver must wait for the same quiet session as idle sync."""
+    row = db.conn.execute("SELECT 1 FROM session_sync_resolvers WHERE task_id=?", (task_id,)).fetchone()
+    if not row:
+        return False
+    task = db.get_task(task_id)
+    ws = db.get_workspace(task.caller_ws_id) if task else None
+    return ws is None or not _quiet(db, ws)
+
+
+def _resolving(db: DB, ws: Workspace, sha: str) -> bool:
+    row = db.conn.execute("SELECT task_id FROM session_sync_resolvers WHERE repo_root=? AND branch=?"
+                          " AND upstream_sha=?", (ws.repo_root, ws.branch, sha)).fetchone()
+    task = db.get_task(row["task_id"]) if row and row["task_id"] else None
+    if task is None or task.state in ("cancelled", "failed", "merged"):
+        return False
+    if task.agent_id:
+        worker = db.get_agent(task.agent_id)
+        if (worker is None or worker.dismissed_at is not None or worker.status == "failed" or worker.merge_failed
+                or db.mark(worker.id, "pipeline-escalated")):
+            return False
+        if worker.status == "done" and not worker.result and not worker.pipeline:
+            return False
+    return True
 
 
 def conflict(db: DB, repo_root: str, branch: str) -> tuple[str, list[str]] | None:
@@ -353,6 +576,8 @@ def merge_block(db: DB, ws: Workspace) -> str | None:
 def needs_you(db: DB, ws: Workspace) -> str | None:
     """The session checkout ``ws``'s unresolved sync conflict, for the inbox."""
     if not ws.branch or (got := conflict(db, ws.repo_root, ws.branch)) is None:
+        return None
+    if _resolving(db, ws, got[0]):
         return None
     return (f"{ws.branch} conflicts with origin/{default_branch(ws.repo_root)} in: {', '.join(got[1]) or '?'}; "
             "merges into it are blocked until it's synced")

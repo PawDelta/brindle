@@ -12,5 +12,6 @@
   ],
   "setup": [
     "cd app && npm ci --no-audit --no-fund"
-  ]
+  ],
+  "auto_merge_session_prs": false
 }
