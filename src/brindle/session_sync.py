@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -38,7 +39,7 @@ from dataclasses import dataclass, field
 
 from brindle import agents, bus, git, spawn
 from brindle.config import load_repo_config
-from brindle.db import DB, Agent, Workspace
+from brindle.db import DB, Agent, Task, Workspace
 
 log = logging.getLogger(__name__)
 
@@ -474,6 +475,7 @@ def _queue_resolver(db: DB, ws: Workspace, d: Drift, files: list[str]) -> None:
     existing = next((t for t in reversed(db.list_tasks(ws.repo_root))
                      if t.caller_id in owners and t.caller_ws_id == ws.id
                      and t.id not in previous
+                     and _current_resolver(db, t, d.sha)
                      and d.ref.lower() in t.task_text.lower()
                      and "merg" in t.task_text.lower()
                      and "resolv" in t.task_text.lower()
@@ -500,6 +502,22 @@ def _queue_resolver(db: DB, ws: Workspace, d: Drift, files: list[str]) -> None:
     tasks.answered(db, [task.id], start=set())
 
 
+def _current_resolver(db: DB, task: Task, sha: str) -> bool:
+    """Prefer explicit commit identity; filenames alone require active work."""
+    if sha in task.task_text:
+        return True
+    if re.search(r"\b[0-9a-fA-F]{40}\b", task.task_text):
+        return False
+    if task.state in ("pending", "held", "unanswered", "starting"):
+        return True
+    if task.state != "started" or not task.agent_id:
+        return False
+    worker = db.get_agent(task.agent_id)
+    return bool(worker and worker.dismissed_at is None and worker.status != "failed"
+                and not worker.merge_failed and not db.mark(worker.id, "pipeline-escalated")
+                and (worker.pipeline or worker.status != "done"))
+
+
 def resolver_wait(db: DB, task_id: str) -> bool:
     """A sync resolver must wait for the same quiet session as idle sync."""
     row = db.conn.execute("SELECT 1 FROM session_sync_resolvers WHERE task_id=?", (task_id,)).fetchone()
@@ -518,7 +536,8 @@ def _resolving(db: DB, ws: Workspace, sha: str) -> bool:
         return False
     if task.agent_id:
         worker = db.get_agent(task.agent_id)
-        if worker is None or worker.status == "failed" or worker.merge_failed:
+        if (worker is None or worker.dismissed_at is not None or worker.status == "failed" or worker.merge_failed
+                or db.mark(worker.id, "pipeline-escalated")):
             return False
         if worker.status == "done" and not worker.result and not worker.pipeline:
             return False

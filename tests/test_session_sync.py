@@ -225,8 +225,13 @@ def test_drift_flag_sync_resolver_once_only(db, repo, sess, other, told, monkeyp
     commit(Path(sess.path), "app.py", "session\n")
     main = commit(other, "app.py", "main\n", push=True)
     feat = worker(db, repo, "feat")
+    approved = Agent("approved", feat.id, "developer", "claude", "lead", "assign", "done", "%12",
+                     "Ready for merge", time.time())
+    db.add_agent(approved)
+    db.update_agent(approved.id, pipeline="ready")
+    db.add_review(feat.id, gates.head(feat), "reviewer", True, "Approved")
 
-    out = pipeline.merge(db, None, feat)
+    out = pipeline._finish_locked(db, db.get_agent(approved.id), feat, None)
 
     assert out.startswith("Not merged: sess must be synced with origin/main") and "app.py" in out
     assert not contains(sess.path, main) and sh("git status --porcelain", Path(sess.path)) == ""
@@ -235,9 +240,16 @@ def test_drift_flag_sync_resolver_once_only(db, repo, sess, other, told, monkeyp
     [resolver] = db.list_tasks()
     assert resolver.caller_id == "lead" and resolver.caller_ws_id == sess.id
     assert resolver.isolate and resolver.state == "pending"
-    assert not [i for i in inbox.items(db, str(repo), panes={}) if i.kind == "sync_conflict"]
+    assert not inbox.items(db, str(repo), panes={})
+    assert session_sync._quiet(db, sess)       # the blocked merge must not hold its resolver off
     session_sync.sync(db, sess)
     assert [t.id for t in db.list_tasks()] == [resolver.id]
+    # Only the refusal caused by session sync waits; unrelated failures still surface.
+    waiting = db.get_agent(approved.id).pipeline
+    db.update_agent(approved.id, pipeline=None, merge_failed="Unrelated merge failure")
+    assert any(i.agent_id == approved.id and i.kind == "merge_failed"
+               for i in inbox.items(db, str(repo), panes={}))
+    db.update_agent(approved.id, pipeline=waiting, merge_failed=None)
     fix = workspaces.create(db, str(repo), "fix", base="sess", fetch=False).workspace   # sess isn't on origin
     sh("git merge -q origin/main || true", Path(fix.path))
     commit(Path(fix.path), "app.py", "both\n")
@@ -248,6 +260,10 @@ def test_drift_flag_sync_resolver_once_only(db, repo, sess, other, told, monkeyp
     assert contains(sess.path, main) and session_sync.merge_block(db, feat) is None
     assert db.get_task(resolver.id).state == "merged"
     assert session_sync.needs_you(db, sess) is None
+    assert any(a.id == approved.id for a, _ws in pipeline.ready_branches(db, str(repo), "sess"))
+    monkeypatch.setattr(pipeline, "_still_in_use", lambda *args: "fixture")
+    assert pipeline._finish(db, db.get_agent(approved.id), feat, None).startswith("Merged")
+    assert db.merged_sha(feat.id)
 
 
 @pytest.fixture
@@ -273,6 +289,14 @@ def sync_resolver_session(db, monkeypatch, told):
 def test_sync_resolver_no_inbox_while_resolving(db, sync_resolver_session, monkeypatch):
     ws = sync_resolver_session
     db.add_agent(Agent("busy", ws.id, "developer", "claude", "lead", "assign", "working", "%10", None, 0))
+    historical = tasks.enqueue(db, db.get_agent("lead"), ws, "developer",
+                               "Merge origin/main and resolve app.py", "assign", isolate=True,
+                               branch=None, done_when=None, files=["app.py"], depends_on=None)
+    db.update_task(historical.id, state="merged")
+    older = tasks.enqueue(db, db.get_agent("lead"), ws, "developer",
+                          f"Merge origin/main and resolve app.py at {'a' * 40}", "assign", isolate=True,
+                          branch=None, done_when=None, files=["app.py"], depends_on=None)
+    db.update_task(older.id, state="held")
     enqueue = tasks.enqueue
 
     def enqueue_during_sweep(*args, **kwargs):
@@ -282,7 +306,7 @@ def test_sync_resolver_no_inbox_while_resolving(db, sync_resolver_session, monke
 
     monkeypatch.setattr(tasks, "enqueue", enqueue_during_sweep)
     session_sync.sync(db, ws)
-    [resolver] = db.list_tasks()
+    [resolver] = [t for t in db.list_tasks() if t.id not in (historical.id, older.id)]
     monkeypatch.setattr(tasks, "task_wait", lambda *a: None)
     monkeypatch.setattr(tasks, "_launch_overlap", lambda *a: (True, None))
     monkeypatch.setattr(tasks, "_claim_fair", lambda db, t: (tasks.move(db, t.id, "pending", "starting"), None, None))
@@ -308,9 +332,9 @@ def test_sync_resolver_no_inbox_while_resolving(db, sync_resolver_session, monke
     assert tasks.sweep(db) == 1
     assert launched == [("lead", "sess", True)]
     assert db.get_task(resolver.id).state == "started"
-    assert not [i for i in inbox.items(db, ws.repo_root, panes={}) if i.kind == "sync_conflict"]
+    assert not inbox.items(db, ws.repo_root, panes={})
     session_sync.sync(db, ws)
-    assert len(db.list_tasks()) == 1
+    assert len(db.list_tasks()) == 3
 
 
 def test_sync_resolver_inbox_after_failure(db, sync_resolver_session, monkeypatch):
@@ -326,6 +350,13 @@ def test_sync_resolver_inbox_after_failure(db, sync_resolver_session, monkeypatc
     assert session_sync.needs_you(db, ws) is None
     db.update_agent("resolver", status="done", result="Resolved; awaiting review")
     assert session_sync.needs_you(db, ws) is None
+    db.update_agent("resolver", pipeline="reviewing")
+    pipeline._send_back(db, ws, db.get_agent("resolver"), config.RepoConfig(), "Unresolved conflict",
+                        True, subject="Review", verb="requested changes", what="review", sender_id=None)
+    assert any(i.kind == "sync_conflict" and i.root_id == "lead"
+               for i in inbox.items(db, ws.repo_root, panes={}))
+    pipeline.note_reported(db, ws, db.get_agent("resolver"))
+    assert session_sync.needs_you(db, ws) is None       # a fresh report can enter review again
     db.set_status("resolver", "failed")
     [item] = [i for i in inbox.items(db, ws.repo_root, panes={}) if i.kind == "sync_conflict"]
     assert item.root_id == "lead"
