@@ -661,7 +661,7 @@ CREATE TABLE IF NOT EXISTS session_prs (
 -- Keep failed attempts for the Inbox; only poll_merged records an actual merge.
 CREATE TABLE IF NOT EXISTS session_pr_merges (
     url TEXT PRIMARY KEY,
-    state TEXT NOT NULL,            -- merging | submitted | failed
+    state TEXT NOT NULL,            -- merging | submitted | failed | pushing (a phase landing's push)
     owner TEXT,                    -- unique token whose session-pr-merge marker is held while acting
     error TEXT
 );

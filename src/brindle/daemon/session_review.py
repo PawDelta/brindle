@@ -512,6 +512,13 @@ def _reconcile_pr_merge(db: DB, row, ws: Workspace) -> bool:
     attempt = db.conn.execute("SELECT state, owner FROM session_pr_merges WHERE url = ?", (url,)).fetchone()
     if attempt is None:
         return False
+    if attempt["state"] == "pushing":     # a phase landing's push (routes_actions._land_phase)
+        if attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"]):
+            return True
+        # Its owner is gone: the push's outcome is the PR's head, which the merge reads afresh.
+        db.conn.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'pushing' AND owner IS ?",
+                        (url, attempt["owner"]))
+        return False
     if attempt["state"] != "merging" or (attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"])):
         return True
     owner = uuid4().hex
