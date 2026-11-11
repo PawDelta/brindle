@@ -169,7 +169,8 @@ def _options(raw: Any) -> list[dict] | None:
                                "_ or -", 400)
         seen.add(oid)
         out.append({"id": oid, "label": _text(o.get("label"), "an option's label", MAX_LABEL, True),
-                    "detail": _text(o.get("detail"), "an option's detail", MAX_DETAIL)})
+                    "detail": _text(o.get("detail"), "an option's detail", MAX_DETAIL),
+                    **({"approves": True} if o.get("approves") is True else {})})
     return out
 
 
@@ -414,6 +415,11 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     data = {"option": option, "note": note, "at": at, "rev": rev}
     if names:
         data["attachments"] = names
+    if not note and any(o["id"] == option and o.get("approves") for o in v["options"]):
+        # An approval belongs to the goal the session has now (None: the next goal claims it).
+        ap = db.get_autopilot(v["root_id"])
+        data["approves"] = True
+        data["goal"] = ap.goal if ap and ap.goal else None
     record = json.dumps(data)
     with db.tx() as c:
         cur = c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) "
@@ -449,24 +455,24 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     return get(db, v["id"])
 
 
-_APPROVES = re.compile(r"^\s*(?:approve[ds]?|yes|ok(?:ay)?|build|go|ship|proceed|accept(?:ed)?|looks good)\b", re.I)
+def claim_approvals(db: DB, root_id: str, goal: str) -> None:
+    """Bind the design approvals the person gave before the session had a
+    goal (``answer()`` leaves their goal unset) to ``goal``, the work that
+    follows them. An approval already bound to another goal stays there."""
+    with db.tx() as c:
+        c.execute("UPDATE visuals SET answer=json_set(answer, '$.goal', ?) WHERE root_id=? "
+                  "AND kind='visual' AND answer IS NOT NULL AND json_extract(answer, '$.approves')=1 "
+                  "AND json_extract(answer, '$.goal') IS NULL", (goal, root_id))
 
 
-def has_approved_design(db: DB, root_id: str, since: float = 0) -> bool:
-    """Whether, after ``since``, the person approved one of session
-    ``root_id``'s visuals: chose an option that says to go ahead (its id or
-    label) with no note. A viewed visual, a redirect (a note, or no option),
-    and any other choice, such as "No", aren't approvals."""
-    for row in db.conn.execute("SELECT options, answer FROM visuals WHERE root_id=? AND kind='visual' "
-                               "AND answer IS NOT NULL", (root_id,)):
-        answer = json.loads(row["answer"])
-        if answer.get("note") or not isinstance(answer.get("at"), (int, float)) or answer["at"] <= since:
-            continue
-        labels = {o["id"]: o.get("label", "") for o in json.loads(row["options"] or "[]")}
-        chosen = answer.get("option")
-        if chosen in labels and (_APPROVES.match(str(chosen)) or _APPROVES.match(labels[chosen])):
-            return True
-    return False
+def has_approved_design(db: DB, root_id: str, goal: str) -> bool:
+    """Whether the person approved a design for ``goal``: chose, on one of
+    session ``root_id``'s visuals, the option its publisher marked
+    ``approves``, with no note. A viewed visual, a redirect, any other
+    choice, and an approval bound to another goal aren't."""
+    return db.conn.execute("SELECT 1 FROM visuals WHERE root_id=? AND kind='visual' AND answer IS NOT NULL "
+                           "AND json_extract(answer, '$.approves')=1 AND json_extract(answer, '$.goal')=?",
+                           (root_id, goal)).fetchone() is not None
 
 
 def dismiss(db: DB, visual_id: str, rev: Any) -> dict:

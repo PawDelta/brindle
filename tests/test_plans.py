@@ -382,14 +382,16 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     assert started == ["build the preset schema"]
 
 
-@pytest.mark.parametrize("answer", [
-    {"option": "build"},
-    pytest.param({"option": "no"}, marks=pytest.mark.variant(
-        "choosing the visual's 'No' is a rejection, not an approval: the offer must still open")),
-    pytest.param({"option": "build", "note": "change the split first"}, marks=pytest.mark.variant(
-        "an option with a redirect note is not an approval: the offer must still open")),
+@pytest.mark.parametrize("answer, goal_first", [
+    ({"option": "build"}, True),
+    pytest.param({"option": "build"}, False, marks=pytest.mark.variant(
+        "the design is approved before the session has a goal: the goal that follows claims it")),
+    pytest.param({"option": "back"}, True, marks=pytest.mark.variant(
+        "a redirect option ('Go back and revise') is not an approval, whatever its words: the offer must still open")),
+    pytest.param({"option": "build", "note": "change the split first"}, True, marks=pytest.mark.variant(
+        "an approving option with a redirect note is not an approval: the offer must still open")),
 ])
-def test_approved_design_counts_as_the_plan(answer, db, session, monkeypatch):
+def test_approved_design_counts_as_the_plan(answer, goal_first, db, session, monkeypatch):
     from brindle import autopilot, visuals
     from brindle.service import inbox
 
@@ -398,8 +400,11 @@ def test_approved_design_counts_as_the_plan(answer, db, session, monkeypatch):
     db.add_autopilot("boss")
     with db.tx() as c:
         visual_offers._grant(c, "boss")
+    if goal_first:      # goal A starts small, so it has no offer yet; its design is approved while it runs
+        mcp_server.set_goal("Org presets", [{"title": "M0", "check": "true"}])
     shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
-                            [{"id": "build", "label": "Build"}, {"id": "no", "label": "No"}])
+                            [{"id": "build", "label": "Build", "approves": True},
+                             {"id": "back", "label": "Go back and revise"}])
     monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
     visuals.answer(db, shown["id"], 1, **answer)
 
