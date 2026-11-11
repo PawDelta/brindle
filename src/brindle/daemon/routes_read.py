@@ -34,6 +34,7 @@ from brindle import (
     knowledge,
     profiles,
     quota,
+    session_sync,
     sessions,
     spawn,
     tmux,
@@ -188,7 +189,8 @@ def goal(db: DB, request: Request) -> Any:
                                   milestone_phases(db, ap.root_id), phase,
                                   goal_activity(db, ap.root_id),
                                   session_review.session_pr_state(
-                                      db, ap.root_id, phase[1] if phase[0] == "pr_open" else None)).to_json()
+                                      db, ap.root_id, phase[1] if phase[0] == "pr_open" else None),
+                                  drifting=session_sync.drifting(db, ap.root_id)).to_json()
 
 
 @_json

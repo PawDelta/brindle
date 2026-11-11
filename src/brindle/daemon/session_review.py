@@ -1204,6 +1204,10 @@ class ReadinessWatch:
 
     def sweep(self, db: DB) -> list[str]:
         """The sessions that just became ready (each announced on the bus)."""
+        try:
+            session_sync.refresh_drift_flags(db)
+        except Exception:  # noqa: BLE001 - one missed measurement never stops the sweep
+            log.exception("brindle: couldn't refresh session drift flags")
         if spawn.room() < 1:
             return []
         poll_merged(db)

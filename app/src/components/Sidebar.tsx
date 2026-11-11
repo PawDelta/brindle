@@ -413,6 +413,7 @@ function PrLine({ goal, working = false, openUrl }: { goal: GoalDTO | null | und
       onClick={() => void openUrl(url).catch(() => undefined)}
     >
       {state === "fixing" && <span aria-hidden="true" data-pr-pulse className="mr-1 inline-block size-1.5 rounded-full bg-current motion-safe:animate-pulse" />}{text}
+      {goal.drifting && <span data-state="drifting" className="ml-1 text-sap">· drifting</span>}
     </button>
   );
 }

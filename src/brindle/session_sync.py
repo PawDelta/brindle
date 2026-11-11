@@ -30,10 +30,11 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 
-from brindle import agents, git, spawn
+from brindle import agents, bus, git, spawn
 from brindle.config import load_repo_config
 from brindle.db import DB, Workspace
 
@@ -136,6 +137,58 @@ def drift(ws: Workspace, default: str) -> Drift | None:
 
 def _both(d: Drift) -> str:
     return f"; files both changed: {', '.join(d.overlap)}" if d.overlap else ""
+
+
+def refresh_drift_flags(db: DB) -> None:
+    """Measure live sessions against origin as last fetched, once per sweep.
+
+    A notice is armed again only after the branch falls below both limits.
+    Commit timestamps come from unlanded work, excluding integration merges
+    and history carried by verified squash/rebase landings on origin.
+    """
+    rows = db.conn.execute(
+        "SELECT DISTINCT w.id FROM workspaces w JOIN agents a ON a.workspace_id = w.id"
+        " WHERE a.parent_id IS NULL AND a.status != 'done' AND a.dismissed_at IS NULL").fetchall()
+    for row in rows:
+        ws = db.get_workspace(row["id"])
+        try:
+            if (default := upstream(ws)) is None or not git.remote_branch_exists(ws.path, default):
+                continue
+            _record_drift(db, ws, default)
+        except git.GitError:
+            log.debug("brindle: couldn't measure drift for %s", ws.branch, exc_info=True)
+
+
+def _record_drift(db: DB, ws: Workspace, default: str) -> None:
+    ref = f"origin/{default}"
+    covered = [f"^{covers}" for _squash, covers in _verified_squashes(db, ws, ref)]
+    stamps = git.out(["log", "--no-merges", "--format=%ct", f"{ref}..HEAD", *covered], ws.path).splitlines()
+    oldest = min(map(int, stamps)) if stamps else None
+    count = len(git.paths(["diff", "--name-only", "--no-renames", ref, "HEAD"], ws.path))
+    drifting = (oldest is not None and time.time() - oldest > 48 * 3600) or count > 60
+    row = db.conn.execute("SELECT drifting FROM session_drift WHERE repo_root = ? AND branch = ?",
+                          (ws.repo_root, ws.branch)).fetchone()
+    db.conn.execute(
+        "INSERT INTO session_drift (repo_root, branch, oldest_at, file_count, drifting) VALUES (?, ?, ?, ?, ?)"
+        " ON CONFLICT (repo_root, branch) DO UPDATE SET oldest_at = excluded.oldest_at,"
+        " file_count = excluded.file_count, drifting = excluded.drifting",
+        (ws.repo_root, ws.branch, oldest, count, drifting))
+    if bool(row and row["drifting"]) != drifting:
+        for root in db.list_agents(ws.id):
+            if root.parent_id is None:
+                bus.publish_agent(db, "session.pr_drift", root.id, drifting=drifting)
+    if drifting and not (row and row["drifting"]):
+        age = (max(0, time.time() - oldest) / 3600) if oldest is not None else 0
+        _tell(db, ws, f"{ws.branch} is drifting from {ref}: its oldest unlanded commit is "
+              f"{age:.1f} hours old and {count} files differ. Land its PR to keep the session close to main.")
+
+
+def drifting(db: DB, root_id: str) -> bool:
+    """The persisted drift flag for this session's current branch."""
+    return db.conn.execute(
+        "SELECT 1 FROM agents a JOIN workspaces w ON w.id = a.workspace_id"
+        " JOIN session_drift d ON d.repo_root = w.repo_root AND d.branch = w.branch"
+        " WHERE a.id = ? AND d.drifting = 1", (root_id,)).fetchone() is not None
 
 
 def _tell(db: DB, ws: Workspace, text: str) -> None:
@@ -268,6 +321,7 @@ def _sync_locked(db: DB, ws: Workspace, default: str) -> Outcome:
                 f"merge origin/{default} into its branch and resolve them (a branch that contains "
                 f"{d.sha[:8]} still merges), or resolve it in {ws.path}.")
         _record(db, ws, d.sha, "conflict", files, tell=text)
+        bus.publish_ws(db, "conflict", ws, files=files, source="session_sync", branch=ws.branch)
         return Outcome("conflict", text, before, files=files)
     new = git.out(["rev-parse", "HEAD"], ws.path)
     text = (f"brindle merged origin/{default} into {ws.branch} ({d.behind} new commit(s), "
@@ -293,22 +347,30 @@ def record_squash(db: DB, ws: Workspace, squash_sha: str, covers_sha: str) -> bo
     return True
 
 
-def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
-    """Merge each recorded squash on ``ref`` the branch lacks as already
-    merged: its parent the usual way, then the squash itself with ``-s ours``,
-    but only when the squash is exactly the covered commit's changes (anything
-    else, e.g. edits made on the forge, is left to the plain merge). The
-    conflicting files of a parent's merge, else []."""
+def _verified_squashes(db: DB, ws: Workspace, ref: str) -> Iterator[tuple[str, str]]:
+    """Landings on ``ref`` proven to carry the recorded session history.
+
+    A record alone isn't proof: edits on the forge may differ from the
+    session's changes. Replay and drift must agree on which history landed.
+    """
     rows = db.conn.execute("SELECT squash_sha, covers_sha FROM session_squashes WHERE repo_root = ?"
                            " AND branch = ? ORDER BY recorded_at", (ws.repo_root, ws.branch)).fetchall()
     for row in rows:
         squash, covers = row["squash_sha"], row["covers_sha"]
         if (not git.ok(["merge-base", "--is-ancestor", squash, ref], ws.path)
-                or git.ok(["merge-base", "--is-ancestor", squash, "HEAD"], ws.path)
                 or not git.ok(["merge-base", "--is-ancestor", covers, "HEAD"], ws.path)):
             continue
         merged = git.run(["merge-tree", "--write-tree", f"{squash}^1", covers], ws.path, check=False)
         if merged.returncode != 0 or merged.stdout.split()[:1] != [git.out(["rev-parse", f"{squash}^{{tree}}"], ws.path)]:
+            continue
+        yield squash, covers
+
+
+def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
+    """Merge each verified landing the branch lacks: its parent normally,
+    then the squash with ``-s ours``. Return conflicting files, else []."""
+    for squash, covers in _verified_squashes(db, ws, ref):
+        if git.ok(["merge-base", "--is-ancestor", squash, "HEAD"], ws.path):
             continue
         _new, files = git.merge_local_base(ws.path, f"{squash}^1", no_ff=True)
         if files:
