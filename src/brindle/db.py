@@ -2207,6 +2207,11 @@ class DB:
                 c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*agent_fields.values(), row["agent_id"]))
                 if agent_fields.get("reviewing_since") is not None:
                     ids.append(f"review {agent_fields['reviewing_since']}")
+                    if agent_fields.get("pipeline") == "reviewing":
+                        # A new accepted review attempt replaces the previous
+                        # escalation before its reviewer can escalate again.
+                        c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pipeline-escalated'",
+                                  (row["agent_id"],))
             c.execute("UPDATE report_outbox SET delivery=? WHERE id=?",
                       (", ".join(ids) or "nothing to tell", row_id))
             c.execute("UPDATE report_outbox SET state='superseded', updated_at=? WHERE agent_id=? AND id<?"

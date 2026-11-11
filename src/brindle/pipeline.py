@@ -389,8 +389,6 @@ def _publish(db: DB, ws: Workspace, worker: Agent | None, actor: Agent | str | N
 
 
 def note_reported(db: DB, ws: Workspace, worker: Agent | None = None) -> None:
-    if worker:
-        db.set_mark(worker.id, "pipeline-escalated", None)
     _note(db, ws, worker, reported=True)
 
 

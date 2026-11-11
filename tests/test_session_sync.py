@@ -355,8 +355,21 @@ def test_sync_resolver_inbox_after_failure(db, sync_resolver_session, monkeypatc
                         True, subject="Review", verb="requested changes", what="review", sender_id=None)
     assert any(i.kind == "sync_conflict" and i.root_id == "lead"
                for i in inbox.items(db, ws.repo_root, panes={}))
-    pipeline.note_reported(db, ws, db.get_agent("resolver"))
-    assert session_sync.needs_you(db, ws) is None       # a fresh report can enter review again
+    monkeypatch.setattr(git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(pipeline, "_start_review", lambda *a: None)
+    agents.report_result(db, "resolver", "New resolution ready for review")
+    assert db.get_agent("resolver").pipeline == "reviewing"
+    assert not [i for i in inbox.items(db, ws.repo_root, panes={}) if i.kind == "sync_conflict"]
+
+    def failed_review(db, cfg, parent, worker, workspace, result, report):
+        pipeline._send_back(db, workspace, worker, cfg, "Unresolved conflict", True,
+                            subject="Review", verb="requested changes", what="review", sender_id=None)
+
+    monkeypatch.setattr(pipeline, "_start_review", failed_review)
+    agents.report_result(db, "resolver", "Another resolution ready for review")
+    assert session_sync.needs_you(db, ws)
+    agents.report_result(db, "resolver", "Another resolution ready for review")
+    assert session_sync.needs_you(db, ws)      # replaying an accepted report cannot undo its escalation
     db.set_status("resolver", "failed")
     [item] = [i for i in inbox.items(db, ws.repo_root, panes={}) if i.kind == "sync_conflict"]
     assert item.root_id == "lead"
