@@ -505,9 +505,14 @@ def test_unchanged_branch_is_not_reviewed_again(db, tmp_path, monkeypatch):
     db.update_agent("w1", pipeline_rounds=1)
     findings = "The changed handler must validate the incoming request."
     reason = "This handler predates my task and is out of scope."
-    db.add_review(ws.id, "head", None, False, findings)
+    add(db, ws, "rejecting-reviewer", "review", "reviewer", parent="boss")
+    db.update_agent("rejecting-reviewer", review_slot="")
+    db.add_review(ws.id, "head", "rejecting-reviewer", False, findings)
     other_finding = "The new endpoint also needs an authorization check."
     db.add_review(ws.id, "head", "second-reviewer", False, other_finding)
+    add(db, ws, "approving-reviewer", "review", "reviewer", parent="boss")
+    db.update_agent("approving-reviewer", review_slot="independent")
+    db.add_review(ws.id, "head", "approving-reviewer", True, "approved")
     head = "head"
     monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: RepoConfig(checks=["true"], review_profile="reviewer"))
     monkeypatch.setattr(agents, "_branch_head", lambda *a: head)

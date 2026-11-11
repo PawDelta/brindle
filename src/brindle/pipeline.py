@@ -538,8 +538,8 @@ def _on_report(db: DB, worker: Agent, ws: Workspace, result: str, outbox_id: int
         return False
     if _report_only(worker, ws):
         return False   # nothing to review or merge: the report goes straight to the supervisor
-    review = db.last_review(ws.id)
-    if review is not None and not review.approved and review.sha == gates.head(ws):
+    review = gates.verdict(db, ws.id, gates.head(ws))
+    if review is not None and not review.approved:
         # A report without a new commit cannot resolve the review. A delivered
         # supervisor message since that verdict is already its handoff, even
         # when the worker reports again with a different explanation.
