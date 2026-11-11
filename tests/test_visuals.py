@@ -78,7 +78,10 @@ def test_publish_visual_from_a_file(db, session, tmp_path, monkeypatch):
     db.conn.execute("UPDATE workspaces SET path=? WHERE id=?", (str(worktree), ws.id))
     db.conn.commit()
     monkeypatch.setenv("BRINDLE_AGENT_ID", boss.id)
-    monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(tmp_path))
+    # Platform temp roots may be aliases, such as macOS /tmp -> /private/tmp.
+    temp_alias = tmp_path / "temp-alias"
+    temp_alias.symlink_to(tmp_path, target_is_directory=True)
+    monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(temp_alias))
     scratchpad = (tmp_path / f"claude-{os.getuid()}" / re.sub(r"[^A-Za-z0-9]", "-", str(worktree))
                   / "session" / "scratchpad")
     scratchpad.mkdir(parents=True)
@@ -105,16 +108,34 @@ def test_publish_visual_from_a_file(db, session, tmp_path, monkeypatch):
     escaped.symlink_to(outside)
     scratch_escape = scratchpad / "escaped.html"
     scratch_escape.symlink_to(outside)
+    outside_session = tmp_path / "outside-session"
+    outside_scratchpad = outside_session / "scratchpad"
+    outside_scratchpad.mkdir(parents=True)
+    outside_scratch_page = outside_scratchpad / "page.html"
+    outside_scratch_page.write_text("outside scratchpad", encoding="utf-8")
+    linked_session = scratchpad.parent.parent / "linked-session"
+    linked_session.symlink_to(outside_session, target_is_directory=True)
     real_read = Path.read_text
 
     def guarded_read(path, *args, **kwargs):
-        assert path.resolve() not in (outside.resolve(), repo_page.resolve()), "outside file must never be read"
+        assert path.resolve() not in (outside.resolve(), repo_page.resolve(), outside_scratch_page.resolve(),
+                                     tmp_path / "outside-project" / "session" / "scratchpad" / "page.html"), \
+            "outside file must never be read"
         return real_read(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", guarded_read)
-    for source in (outside, escaped, scratch_escape, repo_page):
+    for source in (outside, escaped, scratch_escape, repo_page, linked_session / "scratchpad" / "page.html"):
         with pytest.raises(ToolError):
             mcp_server.publish_visual("Page", html_path=str(source), asked="show this page")
+    # The project ancestor can redirect scratchpad discovery too.
+    project = scratchpad.parent.parent
+    moved_project = tmp_path / "outside-project"
+    project.rename(moved_project)
+    project.symlink_to(moved_project, target_is_directory=True)
+    with pytest.raises(ToolError):
+        mcp_server.publish_visual("Page", html_path=str(scratch_page), asked="show this page")
+    project.unlink()
+    moved_project.rename(project)
     for kwargs in ({}, {"html": html, "html_path": str(page)}):
         with pytest.raises(ToolError):
             mcp_server.publish_visual("Page", **kwargs)

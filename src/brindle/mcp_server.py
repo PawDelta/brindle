@@ -243,7 +243,15 @@ def publish_visual(title: str, html: str | None = None, question: str | None = N
         req = permissions.Request(caller.provider, "file", "publish_visual", worktree=ws.path)
         try:
             path = (Path(ws.path) / html_path).resolve(strict=True)
-            roots = [Path(ws.path), *(Path(p) for p in permission_grants.scratchpads(req))]
+            roots = [Path(ws.path)]
+            scratch_tmp = Path(os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp")
+            for discovered in permission_grants.scratchpads(req):
+                root = Path(discovered)
+                # Canonicalize the platform temp root (e.g. /tmp -> /private/tmp),
+                # but never let project/session symlinks redefine an allowed root.
+                expected = scratch_tmp.resolve() / root.relative_to(scratch_tmp)
+                if root.resolve(strict=True) == expected:
+                    roots.append(root)
             if not any(path.is_relative_to(root.resolve(strict=True)) for root in roots):
                 raise ToolError("html_path must be inside your own worktree or session scratchpad.")
             html = path.read_text(encoding="utf-8")
