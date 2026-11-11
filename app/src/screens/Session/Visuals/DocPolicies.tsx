@@ -3,18 +3,37 @@
    org admin has recorded. The Library decides who may override a rule; adminOrg only says whom to offer it to. */
 
 import { useState } from "react";
-import type { LibraryPerson, Plan, PlanPolicyOverride } from "../../../api/client";
+import type { LibraryPerson, Plan, PlanPolicyOverride, PolicyPreviewRow } from "../../../api/client";
 import type { PlanGatePolicyDTO } from "../../../api/schema";
 import { field, main, quiet } from "../../../components/ui";
 import type { PlanSharingClient } from "./client";
 
-const who = (p: PlanGatePolicyDTO) => {
+type Covered = Pick<PlanGatePolicyDTO, "name" | "needs_kind" | "needs_name" | "approvals" | "eligible" | "when" | "label" | "matched">;
+
+/* Before the doc is shared: the rules that will cover it, already there when the person adds reviewers. */
+export function PolicyPreview({ rows }: { rows: PolicyPreviewRow[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="grid gap-1" data-testid="plan-policy-preview">
+      <span className="text-[11px] text-ink-3">Required by org policy · can't remove</span>
+      {rows.map((p) => (
+        <div key={`${p.org_id}:${p.policy}`} className="flex flex-wrap items-center gap-x-2" data-testid={`plan-policy-preview-${p.policy}`}>
+          <span className="text-ink">{who(p)}</span>
+          <span className="text-[11px] text-ink-3">{`${p.name} · ${why(p)}`}</span>
+        </div>
+      ))}
+      <span className="text-[11px] text-ink-3">Policy reviewers are notified when you share.</span>
+    </div>
+  );
+}
+
+const who = (p: Covered) => {
   const needs = p.needs_name ?? p.name;
   if (p.needs_kind === "person") return needs;
   return p.eligible == null ? `${needs} · any ${p.approvals}` : `${needs} · any ${p.approvals} of ${p.eligible}`;
 };
 
-const why = (p: PlanGatePolicyDTO) => {
+const why = (p: Covered) => {
   if (p.when === "label") return `Has the label ${p.label}`;
   if (p.when === "paths") return `Touches ${(p.matched ?? []).join(", ")}`;
   return "Every design";
@@ -114,10 +133,20 @@ export function Policies({ plan, client, directory, adminOrg, me, busy, nameOf, 
                 <>
                   <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={() => setOpen({ policy: p.policy, action: "waive", rev: plan.rev })}>Waive once</button>
                   {candidates.length > 0 && <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={() => setOpen({ policy: p.policy, action: "stand_in", rev: plan.rev })}>Name a stand-in</button>}
+                  {client.askPlanPolicyAgain && (
+                    <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} onClick={() => void write(() => client.askPlanPolicyAgain!(plan.id, { rev: plan.rev, org_id: p.org_id, policy: p.policy }))}>
+                      {`Ask ${p.needs_name ?? p.name} again`}
+                    </button>
+                  )}
                 </>
               )}
             </span>
             {p.note && <span className="text-[11px] text-ink-3">{p.note}</span>}
+            {unmet && (p.asked_at != null || !!p.opened_by?.length) && (
+              <span className="text-[11px] text-ink-3" data-testid={`plan-policy-asked-${p.policy}`}>
+                {[p.asked_at != null && `Asked ${day(p.asked_at)}`, p.opened_by?.length && `Opened by ${p.opened_by.map((o) => label(o.sub)).join(", ")}`].filter(Boolean).join(". ")}
+              </span>
+            )}
             {standing.map((s) => <span key={s.stand_in} className="text-[11px] text-ink-3">{`${label(s.stand_in)} can stand in until ${day(s.until)}`}</span>)}
             {canOverride && open?.policy === p.policy && (
               <Override key={`${open.action}:${open.rev}`} plan={plan} rev={open.rev} policy={p} action={open.action} client={client} candidates={candidates} label={label} busy={busy} write={write} close={() => setOpen(null)} />

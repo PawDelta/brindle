@@ -1933,16 +1933,33 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
     try:
         return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
     except (RuntimeError, auth.TransportError) as e:    # unreachable, or an answer it can't read: not signed out
-        raise ServiceError("upstream", str(e), 502) from e
+        raise upstream_error(e) from e
+
+
+def upstream_error(e: Exception) -> ServiceError:
+    """The Library's refusal as the daemon's answer: its own 4xx (a stale
+    version stays a 409, a missing permission a 403) so the app can act on it;
+    anything else, unreachable or unreadable, is a 502. A 401 is never passed
+    on: it would read as the daemon's own token being refused."""
+    from brindle.pro.analysis_docs import Refused
+
+    if isinstance(e, Refused) and 400 <= e.status < 500 and e.status != 401:
+        return ServiceError(e.code if e.code and e.code.isidentifier() else "upstream", str(e), e.status)
+    return ServiceError("upstream", str(e), 502)
 
 
 def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str | None = None,
-                 admin: bool = False) -> dict:
+                 admin: bool = False, org_id: str | None = None) -> dict:
     """``/orgs/<org>/analysis-docs/<tail>`` for the verified entitlement's org;
-    ``admin`` refuses (403, nothing sent) unless its role is owner or admin."""
+    ``admin`` refuses (403, nothing sent) unless its role is owner or admin.
+    ``org_id``: the org the caller read, refused (409, nothing sent) if the
+    active one is another, so a form loaded for one org never writes to a second.
+    Permissions beyond that are the Library's to check."""
     from urllib.parse import quote
 
     ent = _docs_entitlement(repo)
+    if org_id is not None and org_id != ent.org_id:
+        raise ServiceError("org_changed", "your active organization changed since this was loaded; reload it", 409)
     if admin and ent.role not in ("owner", "admin"):
         raise ServiceError("forbidden", "only an organisation owner or admin can do this", 403)
     return docs_api(method, f"/orgs/{quote(ent.org_id, safe='')}/analysis-docs/{tail}", body, repo=repo)

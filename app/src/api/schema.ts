@@ -60,6 +60,7 @@ export interface ApiSchema {
   PlanOfferDTO: PlanOfferDTO;
   PlanOfferMilestoneDTO: PlanOfferMilestoneDTO;
   PlanOptionDTO: PlanOptionDTO;
+  PlanPolicyOpenDTO: PlanPolicyOpenDTO;
   PlanPolicyStandInDTO: PlanPolicyStandInDTO;
   PlanPolicyWaiverDTO: PlanPolicyWaiverDTO;
   PlanReplyDTO: PlanReplyDTO;
@@ -941,13 +942,15 @@ export interface PlanGateDTO {
  * An org review rule covering a shared plan, which nobody on the doc can
  * remove. ``when``: paths, label or any; ``matched``: what in this revision
  * set it off; ``needs_kind``: team, role or person; ``eligible``: how many
- * people can meet it today.
+ * people can meet it today; ``asked_at``: the last Ask again; ``opened_by``:
+ * who the rule counts has read the doc.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanGatePolicyDTO".
  */
 export interface PlanGatePolicyDTO {
   approvals: number;
+  asked_at?: number | null;
   changes_by?: string[];
   eligible?: number | null;
   label?: string | null;
@@ -957,6 +960,7 @@ export interface PlanGatePolicyDTO {
   needs_kind?: string | null;
   needs_name?: string | null;
   note?: string | null;
+  opened_by?: PlanPolicyOpenDTO[];
   org_id: string;
   paths?: string[];
   policy: string;
@@ -966,6 +970,16 @@ export interface PlanGatePolicyDTO {
   status: "signed_off" | "changes_requested" | "waiting" | "waived";
   waiver?: PlanPolicyWaiverDTO | null;
   when?: string | null;
+}
+/**
+ * Someone a review rule counts who has read the doc, and when they last did.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyOpenDTO".
+ */
+export interface PlanPolicyOpenDTO {
+  at?: number | null;
+  sub: string;
 }
 /**
  * Someone an org admin named to sign for a review rule until ``until``.

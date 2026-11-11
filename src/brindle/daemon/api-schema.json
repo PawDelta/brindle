@@ -5920,11 +5920,23 @@
           "type": "object"
         },
         "PlanGatePolicyDTO": {
-          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today.",
+          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today; ``asked_at``: the last Ask again; ``opened_by``:\nwho the rule counts has read the doc.",
           "properties": {
             "approvals": {
               "title": "Approvals",
               "type": "integer"
+            },
+            "asked_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Asked At"
             },
             "changes_by": {
               "default": [],
@@ -6013,6 +6025,14 @@
               ],
               "default": null,
               "title": "Note"
+            },
+            "opened_by": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyOpenDTO"
+              },
+              "title": "Opened By",
+              "type": "array"
             },
             "org_id": {
               "title": "Org Id",
@@ -6237,6 +6257,32 @@
             "label"
           ],
           "title": "PlanOptionDTO",
+          "type": "object"
+        },
+        "PlanPolicyOpenDTO": {
+          "description": "Someone a review rule counts who has read the doc, and when they last did.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PlanPolicyOpenDTO",
           "type": "object"
         },
         "PlanPolicyStandInDTO": {
@@ -6969,11 +7015,23 @@
     "PlanGateDTO": {
       "$defs": {
         "PlanGatePolicyDTO": {
-          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today.",
+          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today; ``asked_at``: the last Ask again; ``opened_by``:\nwho the rule counts has read the doc.",
           "properties": {
             "approvals": {
               "title": "Approvals",
               "type": "integer"
+            },
+            "asked_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Asked At"
             },
             "changes_by": {
               "default": [],
@@ -7062,6 +7120,14 @@
               ],
               "default": null,
               "title": "Note"
+            },
+            "opened_by": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyOpenDTO"
+              },
+              "title": "Opened By",
+              "type": "array"
             },
             "org_id": {
               "title": "Org Id",
@@ -7233,6 +7299,32 @@
           "title": "PlanGateRowDTO",
           "type": "object"
         },
+        "PlanPolicyOpenDTO": {
+          "description": "Someone a review rule counts who has read the doc, and when they last did.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PlanPolicyOpenDTO",
+          "type": "object"
+        },
         "PlanPolicyStandInDTO": {
           "description": "Someone an org admin named to sign for a review rule until ``until``.",
           "properties": {
@@ -7376,6 +7468,32 @@
     },
     "PlanGatePolicyDTO": {
       "$defs": {
+        "PlanPolicyOpenDTO": {
+          "description": "Someone a review rule counts who has read the doc, and when they last did.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PlanPolicyOpenDTO",
+          "type": "object"
+        },
         "PlanPolicyStandInDTO": {
           "description": "Someone an org admin named to sign for a review rule until ``until``.",
           "properties": {
@@ -7451,11 +7569,23 @@
           "type": "object"
         }
       },
-      "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today.",
+      "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today; ``asked_at``: the last Ask again; ``opened_by``:\nwho the rule counts has read the doc.",
       "properties": {
         "approvals": {
           "title": "Approvals",
           "type": "integer"
+        },
+        "asked_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asked At"
         },
         "changes_by": {
           "default": [],
@@ -7544,6 +7674,14 @@
           ],
           "default": null,
           "title": "Note"
+        },
+        "opened_by": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanPolicyOpenDTO"
+          },
+          "title": "Opened By",
+          "type": "array"
         },
         "org_id": {
           "title": "Org Id",
@@ -7863,6 +8001,32 @@
         "label"
       ],
       "title": "PlanOptionDTO",
+      "type": "object"
+    },
+    "PlanPolicyOpenDTO": {
+      "description": "Someone a review rule counts who has read the doc, and when they last did.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sub"
+      ],
+      "title": "PlanPolicyOpenDTO",
       "type": "object"
     },
     "PlanPolicyStandInDTO": {
@@ -11660,7 +11824,15 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/policy-ask"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/policy-override"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/policy-preview"
     },
     {
       "method": "POST",
@@ -11797,6 +11969,18 @@
     {
       "method": "POST",
       "path": "/v1/repos/open"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/review-policies"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/review-policies"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/review-policies/draft-impact"
     },
     {
       "method": "GET",

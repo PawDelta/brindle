@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import { DaemonError, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
 import { createAppStore } from "../../../store/store";
@@ -414,4 +414,27 @@ it.each([
   ["two emoji alike in their second half are swapped whole", "a😀", "a🈀", { start: 1, before: "😀", after: "🈀" }],
 ])("a design doc edit sends only what changed: %s", (_case, source, next, change) => {
   expect(changeBetween(source, next)).toEqual(change);
+});
+
+it("the policies shown before a first share are those of the revision on screen, whatever answers late", async () => {
+  let now = doc(1, "Workers run on your machine.");
+  const asked: { rev: number; reply(rows: string[]): void }[] = [];
+  const row = (policy: string) => ({ org_id: "org_1", policy, name: policy, note: null, when: "paths", label: null, paths: [], matched: ["x"], needs_kind: "team", needs_name: "Security", approvals: 1, eligible: 6 });
+  const client = { ...visuals, ...docWrites(() => now), plan: async () => now, decidePlan: async () => now,
+    sharePlan: async () => now, setPlanReviewers: async () => now, syncPlan: async () => now, signOffPlan: async () => now, overridePlanPolicy: async () => now,
+    docScopes: async () => ({ scopes: [{ kind: "group", id: "g", name: "Core", can_share: true }] }), libraryPeople: async () => ({ people: [] }),
+    previewPlanPolicies: () => new Promise<{ policies: ReturnType<typeof row>[] }>((resolve) => { asked.push({ rev: now.rev, reply: (names) => resolve({ policies: names.map(row) }) }); }) };
+  const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
+  const view = render(reader(visual));
+  fireEvent.click(await screen.findByRole("button", { name: "Share for review" }));
+  await waitFor(() => expect(asked).toHaveLength(1));
+
+  now = doc(2, "Workers run on a machine the customer controls.");
+  await act(async () => view.rerender(reader({ ...visual, rev: 2 })));
+  await waitFor(() => expect(asked).toHaveLength(2));
+  await act(async () => asked[0].reply(["stale-rule"]));
+  expect(screen.queryByTestId("plan-policy-preview")).toBeNull();
+  await act(async () => asked[1].reply(["fresh-rule"]));
+  expect(screen.getByTestId("plan-policy-preview-fresh-rule")).toBeTruthy();
+  expect(screen.queryByTestId("plan-policy-preview-stale-rule")).toBeNull();
 });

@@ -458,11 +458,19 @@ class PlanPolicyStandInDTO(_DTO):
     at: float | None = None
 
 
+class PlanPolicyOpenDTO(_DTO):
+    """Someone a review rule counts who has read the doc, and when they last did."""
+
+    sub: str
+    at: float | None = None
+
+
 class PlanGatePolicyDTO(_DTO):
     """An org review rule covering a shared plan, which nobody on the doc can
     remove. ``when``: paths, label or any; ``matched``: what in this revision
     set it off; ``needs_kind``: team, role or person; ``eligible``: how many
-    people can meet it today."""
+    people can meet it today; ``asked_at``: the last Ask again; ``opened_by``:
+    who the rule counts has read the doc."""
 
     org_id: str
     policy: str
@@ -481,6 +489,8 @@ class PlanGatePolicyDTO(_DTO):
     changes_by: list[str] = []
     waiver: PlanPolicyWaiverDTO | None = None
     stand_ins: list[PlanPolicyStandInDTO] = []
+    asked_at: float | None = None
+    opened_by: list[PlanPolicyOpenDTO] = []
     set_by: str | None = None
     set_at: float | None = None
 
