@@ -1187,15 +1187,18 @@ def checkout_lock(path: str | Path, timeout: float | None = None):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def push(path: str | Path, branch: str, sha: str | None = None) -> None:
-    """Push ``branch``; with ``sha``, exactly that commit to it. Signed in to
-    github.com through brindle's connection when the person made one."""
+def push(path: str | Path, branch: str, sha: str | None = None, track: bool = True) -> None:
+    """Push ``branch``; with ``sha``, exactly that commit to it (the local
+    branch never moves; ``track``: the local ``branch`` follows the pushed
+    one). Signed in to github.com through brindle's connection when the
+    person made one."""
     signed_in = connected_github_config()
     if sha is None:
         run([*signed_in, "push", "--set-upstream", "origin", branch], path)
         return
     run([*signed_in, "push", "origin", f"{sha}:refs/heads/{branch}"], path)
-    run(["branch", "--set-upstream-to", f"origin/{branch}", branch], path, check=False)
+    if track:
+        run(["branch", "--set-upstream-to", f"origin/{branch}", branch], path, check=False)
 
 
 def remote_web_url(root: str | Path) -> str | None:

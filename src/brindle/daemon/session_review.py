@@ -131,6 +131,26 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
     return out
 
 
+def phase_reasons(db: DB, root: Agent, ws: Workspace, phase: str, sha: str) -> list[str]:
+    """What keeps brindle from landing goal phase ``phase`` at ``sha``, the
+    commit its milestone checks passed on (autopilot.phase_landing); none when
+    it can. Unlike ``reasons``, later phases' milestones, running workers and
+    queued tasks don't count: the PR carries ``sha``, not the branch's tip."""
+    ms = [m for m in db.milestones(root.id) if m.phase_name == phase]
+    out = [f"milestone {m.position} ({m.title}) hasn't passed its check" for m in ms if m.status != "passed"]
+    if not ms:
+        out.append(f"the goal has no phase {phase!r} any more")
+    if not ws.base_branch or ws.branch in ("", "HEAD"):
+        out.append("the session isn't on a branch with a base to open a PR against")
+    elif git.dirty_files(ws.path, tracked_only=True):
+        out.append("the session's checkout has uncommitted changes")
+    elif not git.ok(["merge-base", "--is-ancestor", sha, "HEAD"], ws.path):
+        out.append(f"{sha[:12]}, the commit phase {phase!r} passed on, isn't on {ws.branch} any more")
+    elif not int(git.out(["rev-list", "--count", f"{git.base_ref(ws.path, ws.base_branch)}..{sha}"], ws.path)):
+        out.append(f"{sha[:12]} has no commits ahead of {ws.base_branch}")
+    return out
+
+
 def needs_you(db: DB, root: Agent, ap) -> list[str]:
     """What in the session waits on the person: the inbox's items (see
     service.inbox), for this session's agents only."""
@@ -214,21 +234,12 @@ def current_pr(db: DB, root_id: str, ws: Workspace):
     """The PR the session's branch is on (``url``, ``pushed_sha``,
     ``merged_at``): its open PR, or the one that merged until the branch has
     commits beyond it (``new_since_merge``); then None: its next PR is to be
-    opened, and the merged one moves to ``session_pr_history`` when it is."""
+    opened, and replaces the merged one's row when it is."""
     row = db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_prs WHERE root_id = ? AND branch = ?"
                           " AND url IS NOT NULL", (root_id, ws.branch)).fetchone()
     if row is not None and row["merged_at"] and new_since_merge(db, ws, row["pushed_sha"]):
         return None
     return row
-
-
-def keep_merged_pr(db: DB, root_id: str, branch: str, url: str) -> None:
-    """The branch's next PR ``url`` is about to replace its merged one in
-    ``session_prs``: keep that one in ``session_pr_history``."""
-    db.conn.execute("INSERT OR IGNORE INTO session_pr_history (root_id, branch, url, pushed_sha, opened_at, merged_at)"
-                    " SELECT root_id, branch, url, pushed_sha, opened_at, merged_at FROM session_prs"
-                    " WHERE root_id = ? AND branch = ? AND url IS NOT NULL AND url != ? AND merged_at IS NOT NULL",
-                    (root_id, branch, url))
 
 
 def adopt_head_pr(db: DB, root_id: str) -> None:
@@ -251,7 +262,6 @@ def adopt_head_pr(db: DB, root_id: str) -> None:
         return
     found = open_pr_for_head(head, ws.path, root_id)
     if found and found.get("url"):
-        keep_merged_pr(db, root_id, ws.branch, found["url"])
         # head_ref: where the PR really lives, when that isn't the session's branch: a Push must not go to ws.branch.
         db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
                         " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
@@ -502,6 +512,10 @@ def _reconcile_pr_merge(db: DB, row, ws: Workspace) -> bool:
     attempt = db.conn.execute("SELECT state, owner FROM session_pr_merges WHERE url = ?", (url,)).fetchone()
     if attempt is None:
         return False
+    if attempt["state"] == "pushing":     # a phase landing's push (routes_actions._land_phase)
+        if not (attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"])):
+            _reconcile_push(db, row, ws, attempt["owner"])
+        return True
     if attempt["state"] != "merging" or (attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"])):
         return True
     owner = uuid4().hex
@@ -517,6 +531,42 @@ def _reconcile_pr_merge(db: DB, row, ws: Workspace) -> bool:
                         ("submitted" if finished else "failed", error, url, owner))
         bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
     return True
+
+
+INTERRUPTED_PUSH = ("A push to the PR was interrupted and its head isn't a commit brindle recorded."
+                    " Check the PR on GitHub before merging it.")
+
+
+def _reconcile_push(db: DB, row, ws: Workspace, departed: str | None) -> None:
+    """A phase landing's push to the PR ``row`` whose owner went away: the
+    merge stays blocked until the PR's head says how the push ended. Its
+    intended commit (``session_pr_pushes``) on the PR: that is what the PR
+    carries now (``pushed_sha``, which its merge's landing is judged by). The
+    commit recorded before: it never got there. Anything else, or no head:
+    the person checks the PR (a failed attempt, in the Inbox); no answer from
+    GitHub: asked again next round."""
+    url = row["url"]
+    owner = uuid4().hex
+    with gates.marker("session-pr-merge", owner):
+        if not db.conn.execute("UPDATE session_pr_merges SET owner = ? WHERE url = ? AND state = 'pushing'"
+                               " AND owner IS ?", (owner, url, departed)).rowcount:
+            return
+        intent = db.conn.execute("SELECT sha FROM session_pr_pushes WHERE url = ?", (url,)).fetchone()
+        payload = workspaces.pull_request_checks(url, ws.repo_root)
+        if payload is None:
+            db.conn.execute("UPDATE session_pr_merges SET owner = NULL WHERE url = ? AND owner = ?", (url, owner))
+            return
+        head = payload.get("headRefOid")
+        with db.tx() as c:
+            if head and intent and head == intent["sha"]:
+                c.execute("UPDATE session_prs SET pushed_sha = ? WHERE url = ? AND merged_at IS NULL", (head, url))
+            if head and (intent and head == intent["sha"] or head == row["pushed_sha"]):
+                c.execute("DELETE FROM session_pr_merges WHERE url = ? AND owner = ?", (url, owner))
+            else:
+                c.execute("UPDATE session_pr_merges SET state = 'failed', error = ? WHERE url = ? AND owner = ?",
+                          (INTERRUPTED_PUSH, url, owner))
+            c.execute("DELETE FROM session_pr_pushes WHERE url = ?", (url,))
+    bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
 
 
 def _auto_merge_session_pr(db: DB, row, ws: Workspace) -> None:
@@ -715,8 +765,9 @@ def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
 
 def open_pr(db: DB, root: Agent, ws: Workspace) -> dict[str, Any] | None:
     """The open PR the person opened for the session's branch: its ``url`` and
-    ``unpushed``, how many session commits aren't on it yet (brindle never
-    pushes them on its own: the person's Push does, POST .../pr/push). A
+    ``unpushed``, how many session commits aren't on it yet (the person's
+    Push sends them, POST .../pr/push; brindle pushes on its own only a
+    completed phase's commit, routes_actions.land_phase_prs). A
     merged PR is none: nothing more goes onto it (the branch's next PR does)."""
     row = db.conn.execute("SELECT url, pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?"
                           " AND url IS NOT NULL AND merged_at IS NULL", (root.id, ws.branch)).fetchone()
@@ -1237,8 +1288,10 @@ class ReadinessWatch:
     """Remembers which sessions are ready for a PR and publishes
     ``session.pr_ready`` when one becomes ready; prepares a ready session's
     PR for the person's approval (routes_actions.prepare_pr: its checks, no
-    push), and forgets what it prepared for one no longer ready. brindle
-    never opens or pushes a PR itself. The first sweep only looks."""
+    push), and forgets what it prepared for one no longer ready. The only PR
+    brindle opens or pushes itself is a completed goal phase's, pinned to the
+    commit its checks passed on (routes_actions.land_phase_prs, every sweep).
+    The first sweep only looks."""
 
     def __init__(self) -> None:
         self.ready: dict[str, bool] | None = None
@@ -1329,6 +1382,12 @@ class ReadinessWatch:
             session_sync.tell_refused_fetches(db)
         except Exception:  # noqa: BLE001 - a missed notice never stops the sweep
             log.exception("brindle: couldn't tell a supervisor about a refused fetch")
+        from brindle.daemon import routes_actions
+
+        try:
+            routes_actions.land_phase_prs(db)
+        except Exception:  # noqa: BLE001 - a missed landing is tried again next sweep
+            log.exception("brindle: couldn't land a goal phase's PR")
         now: dict[str, bool] = {}
         fingerprints: dict[str, tuple] = {}
         for (root_id,) in db.conn.execute("SELECT root_id FROM autopilot").fetchall():
@@ -1361,8 +1420,6 @@ class ReadinessWatch:
             self.announce.discard(r)
             if not opened:
                 bus.publish_agent(db, "session.pr_ready", r)
-        from brindle.daemon import routes_actions
-
         for r, ok in now.items():
             if not ok:      # its Inbox item goes: what was checked may no longer be what a PR would carry
                 db.conn.execute("DELETE FROM session_pr_prep WHERE root_id = ?", (r,))
