@@ -591,12 +591,40 @@ def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
         "-t", target, "-c", cwd, *env_args, "--", *in_dir(cwd, command),
     )
     pane = proc.stdout.strip()
-    # tmux grows every pane proportionally when a client attaches at a bigger
-    # size; keep the sidebar at its size whenever the window is resized.
     size = min(columns, SIDEBAR_BOTTOM_LINES) if position == "bottom" else columns
-    _tmux("set-hook", "-w", "-t", target, "window-resized",
-          f"resize-pane -t {pane} {axis} {size}", check=False)
+    _pin_sidebar(target, pane, axis, size)
     return pane
+
+
+# The window hooks that can hold the sidebar at its size, best first, each with
+# the command that wraps the resize. ``window-resized`` is the one made for it,
+# but tmux 3.2 (Ubuntu 22.04's) doesn't have it and rejects it as an invalid
+# option. There a window's resize fires ``window-layout-changed`` instead. So
+# does zooming a pane, and resize-pane unzooms the window, so under that hook
+# the sidebar is left alone while the window is zoomed (toggle_sidebar hides it
+# that way) and pinned again by the unzoom.
+SIDEBAR_PIN_HOOKS = (
+    ("window-resized", "{resize}"),
+    ("window-layout-changed", "if-shell -F '#{{?window_zoomed_flag,0,1}}' '{resize}'"),
+)
+
+
+def _pin_sidebar(target: str, pane: str, axis: str, size: int) -> None:
+    """tmux grows every pane proportionally when a client attaches at a bigger
+    size; keep the sidebar ``pane`` at its size whenever ``target``'s window
+    is resized, with the first hook this tmux server accepts."""
+    resize = f"resize-pane -t {pane} {axis} {size}"
+    for hook, command in SIDEBAR_PIN_HOOKS:
+        if _tmux("set-hook", "-w", "-t", target, hook, command.format(resize=resize),
+                 check=False).returncode == 0:
+            return
+
+
+def _unpin_sidebar(window: str) -> None:
+    """Clear the pin from ``window``: the hook _pin_sidebar set there."""
+    for hook, _ in SIDEBAR_PIN_HOOKS:
+        if _tmux("set-hook", "-w", "-t", window, "-u", hook, check=False).returncode == 0:
+            return
 
 
 # Pane options counting a sidebar's crash restarts (see keep_sidebar_alive).
@@ -956,10 +984,9 @@ def move_pane(pane: str, target: str, columns: int = 30, position: str = "left")
     geometry, axis = _sidebar_geometry(position, columns)
     _tmux("join-pane", "-d", *geometry, "-s", pane, "-t", target, check=False)
     if old_window and old_window != pane_window(pane):
-        _tmux("set-hook", "-w", "-t", old_window, "-u", "window-resized", check=False)
+        _unpin_sidebar(old_window)
     size = min(columns, SIDEBAR_BOTTOM_LINES) if position == "bottom" else columns
-    _tmux("set-hook", "-w", "-t", target, "window-resized",
-          f"resize-pane -t {pane} {axis} {size}", check=False)
+    _pin_sidebar(target, pane, axis, size)
 
 
 def window_zoomed(window: str) -> bool:
