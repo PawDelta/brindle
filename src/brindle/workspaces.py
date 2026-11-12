@@ -805,8 +805,14 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 pass  # checked out in another worktree, or it moved on since
         note = f"branch {ws.branch} kept"
     elif delete_branch:
+        # ``git branch -d`` judges against the checkout's HEAD, not the base the
+        # branch was cut from: an ancestor of its base is merged, whatever HEAD is.
+        # ``git branch -d`` judges against the checkout's HEAD, not the base the
+        # branch was cut from: an ancestor of its base is merged, whatever HEAD is.
+        base = ws.base_branch or git.default_branch(ws.repo_root)
+        merged_into_base = git.is_ancestor(ws.repo_root, ws.branch, base)
         try:
-            git.delete_branch(ws.repo_root, ws.branch, force=force)
+            git.delete_branch(ws.repo_root, ws.branch, force=force or merged_into_base)
             deleted = True
         except git.GitError as e:
             note = f"kept branch {ws.branch}: {e} (use --force to delete anyway)"

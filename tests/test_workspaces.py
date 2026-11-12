@@ -94,6 +94,16 @@ def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
     assert load_repo_config(repo, branch="bare").scoped_checks == "infer"
 
 
+def test_remove_deletes_branch_merged_into_non_main_base(db, repo):
+    # A session branch with its own commit, not in the checkout's HEAD (main); the
+    # worker branch is cut from it and has no commits of its own.
+    sh("git checkout -q -b session && git commit -q --allow-empty -m session && git checkout -q main", repo)
+    ws = workspaces.create(db, str(repo), "worker", base="session").workspace
+    removed = workspaces.remove(db, ws, delete_branch=True)
+    assert removed.branch_deleted
+    assert not git.branch_exists(str(repo), "worker")
+
+
 def test_remove_refuses_dirty_and_keeps_branch(db, repo, feature):
     ws = feature
     open(os.path.join(ws.path, "wip.txt"), "w").write("wip")
