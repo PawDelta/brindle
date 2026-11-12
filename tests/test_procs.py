@@ -3,6 +3,7 @@ outlives it."""
 
 import json
 import os
+import signal
 import time
 
 import pytest
@@ -15,28 +16,31 @@ class _World:
     """A process table that a window's close changes the way the real one
     does: the CLI in the pane ends on the hangup, and the Bash tool's shell
     it started in a session of its own (with the test run under it) is left
-    with launchd as its parent."""
+    with launchd as its parent. Each process has a birth, as lineage reads it."""
 
     def __init__(self, agent_id: str):
         config = json.dumps({"mcpServers": {"brindle": {"env": {
             "BRINDLE_AGENT_ID": agent_id, "BRINDLE_HOME": os.environ.get("BRINDLE_HOME", "")}}}})
-        cli = f"/usr/local/bin/claude --mcp-config {config}"
-        shell = "/bin/zsh -c source snapshot.sh && eval 'uv run pytest'"
-        self.rows = {5001: procs.Proc(5001, 900, cli, cli),
-                     5002: procs.Proc(5002, 5001, shell, shell),
-                     5003: procs.Proc(5003, 5002, "python -m pytest", "python -m pytest")}
+        self.rows: dict[int, procs.Proc] = {}
         self.stopped: set[int] = set()
-        self.born = {pid: f"born {pid}" for pid in self.rows}
+        self.after_read = None     # what happens just after the next lineage read
+        self.start(5001, 900, f"/usr/local/bin/claude --mcp-config {config}")
+        self.start(5002, 5001, "/bin/zsh -c source snapshot.sh && eval 'uv run pytest'")
+        self.start(5003, 5002, "python -m pytest")
 
     def table(self) -> dict[int, procs.Proc]:
         return dict(self.rows)
 
-    def births(self, pids) -> dict[int, str]:
-        return {pid: self.born[pid] for pid in pids if pid in self.rows}
+    def lineage(self) -> dict[int, procs.Proc]:
+        read = {pid: procs.Proc(p.pid, p.ppid, p.text, p.cmd, p.birth) for pid, p in self.rows.items()}
+        if self.after_read:
+            happen, self.after_read = self.after_read, None
+            happen()
+        return read
 
     def start(self, pid: int, ppid: int, cmd: str) -> None:
-        self.rows[pid] = procs.Proc(pid, ppid, cmd, cmd)
-        self.born[pid] = f"born {pid} again" if pid in self.born else f"born {pid}"
+        again = pid in self.rows or any(p.birth.startswith(f"born {pid}") for p in self.rows.values())
+        self.rows[pid] = procs.Proc(pid, ppid, cmd, cmd, f"born {pid} again" if again else f"born {pid}")
 
     def close_window(self, *targets, **batch) -> None:
         if targets or batch.get("windows") or batch.get("sessions"):
@@ -44,7 +48,7 @@ class _World:
             if 5002 in self.rows:
                 self.rows[5002].ppid = 1
 
-    def terminate(self, pids, grace: float = 3.0) -> int:
+    def terminate(self, pids, grace: float = 3.0, owned=None) -> int:
         for pid in pids:
             self.rows.pop(pid, None)
         self.stopped.update(pids)
@@ -72,7 +76,7 @@ def test_a_stop_leaves_nothing_the_agents_cli_started(db, monkeypatch, how):
     db.add_agent(Agent("a1", "w", "developer", "claude", None, "interactive", "idle", "%7", None, time.time()))
     world = _World("a1")
     monkeypatch.setattr(procs, "table", world.table)
-    monkeypatch.setattr(procs, "births", world.births)
+    monkeypatch.setattr(procs, "lineage", world.lineage)
     monkeypatch.setattr(procs, "terminate", world.terminate)
     monkeypatch.setattr(tmux, "kill_window", world.close_window)
     monkeypatch.setattr(tmux, "close", world.close_window)
@@ -95,8 +99,12 @@ def test_a_stop_leaves_nothing_the_agents_cli_started(db, monkeypatch, how):
     assert set(world.rows) <= {5001}
 
 
-def _not_closed(world):
-    """The pane's CLI still runs: what it started still has its parent."""
+def _nothing(world):
+    pass
+
+
+def _closed(world):
+    world.close_window("%7")
 
 
 def _pid_reused(world):
@@ -104,6 +112,11 @@ def _pid_reused(world):
     to a process of the person's own that launchd adopted."""
     world.close_window("%7")
     world.start(5003, 1, "python -m pytest")
+
+
+def _replaced_as_noted(world):
+    """The test run's pid came round again just after the note's read."""
+    world.after_read = lambda: world.start(5003, 1, "python -m pytest")
 
 
 def _execed(world):
@@ -125,32 +138,64 @@ def _daemon_under_the_pane(world):
     world.start(5006, 5005, "/usr/local/bin/claude --resume other-session")
 
 
-NOTED = {
-    "its parent still runs": (_not_closed, None, set()),
-    "its pid came round again": (_pid_reused, None, {5002}),
-    "it exec'd another program": (_execed, "a process keeps its birth across exec", {5002, 5003}),
-    "it started a child since the note": (_child_since, None, {5002, 5003, 5004}),
-    "the pane had started Claude's daemon": (_daemon_under_the_pane, None, {5002, 5003}),
+def _daemon_adopted(world):
+    world.close_window("%7")
+    world.rows[5005].ppid = 1
+
+
+NOTED = {   # (before the note, after it, why it's a variant, what is ended)
+    "its parent still runs": (_nothing, _nothing, None, set()),
+    "its pid came round again": (_nothing, _pid_reused, None, {5002}),
+    "its pid came round again as the note was taken": (
+        _replaced_as_noted, _closed, "a race: a pid reused between reading the tree and the births", {5002}),
+    "it exec'd another program": (_nothing, _execed, "a process keeps its birth across exec", {5002, 5003}),
+    "it started a child since the note": (_nothing, _child_since, None, {5002, 5003, 5004}),
+    "the pane had started Claude's daemon": (_daemon_under_the_pane, _daemon_adopted, None, {5002, 5003}),
 }
 
 
 @pytest.mark.parametrize("case", [
     pytest.param(case, marks=pytest.mark.variant(why)) if why else case
-    for case, (_, why, _) in NOTED.items()])
+    for case, (_, _, why, _) in NOTED.items()])
 def test_what_a_close_left_behind_is_ended_and_nothing_else(monkeypatch, case):
     """Only what a close left without its CLI is ended (procs.hand_off,
     handed_orphans): told by its birth, not its pid or command, with what it
     started since, and never Claude Code's daemon or what it hosts."""
-    happen, _, ended = NOTED[case]
+    before, after, _, ended = NOTED[case]
     world = _World("a1")
-    monkeypatch.setattr(procs, "table", world.table)
-    monkeypatch.setattr(procs, "births", world.births)
-    if case == "the pane had started Claude's daemon":
-        happen(world)
-        procs.hand_off([5001])
-        world.close_window("%7")
-        world.rows[5005].ppid = 1
-    else:
-        procs.hand_off([5001])
-        happen(world)
-    assert procs.handed_orphans() == ended
+    monkeypatch.setattr(procs, "lineage", world.lineage)
+    before(world)
+    procs.hand_off([5001])
+    after(world)
+    assert set(procs.handed_orphans()) == ended
+
+
+def _reused_before_any_signal(world, sig):
+    pass
+
+
+def _reused_after_sigterm(world, sig):
+    if sig == signal.SIGTERM:      # it ends at once; its pid comes round again before the SIGKILL
+        world.start(5002, 1, world.rows[5002].cmd)
+
+
+@pytest.mark.parametrize("when", [_reused_before_any_signal, _reused_after_sigterm])
+def test_a_pid_that_came_round_again_is_never_signalled(monkeypatch, when):
+    """terminate with the births it was given looks again before each
+    signal: another's process on the pid gets neither SIGTERM nor SIGKILL."""
+    world = _World("a1")
+    owned = {5002: world.rows[5002].birth}
+    if when is _reused_before_any_signal:
+        world.start(5002, 1, world.rows[5002].cmd)
+    sent = []
+
+    def kill(pid, sig):
+        if sig:
+            sent.append((pid, sig))
+            when(world, sig)
+
+    monkeypatch.setattr(procs, "lineage", world.lineage)
+    monkeypatch.setattr(procs, "alive", lambda pid: pid in world.rows)
+    monkeypatch.setattr(procs.os, "kill", kill)
+    procs.terminate([5002], grace=0, owned=owned)
+    assert sent == ([] if when is _reused_before_any_signal else [(5002, signal.SIGTERM)])

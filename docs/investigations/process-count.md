@@ -79,8 +79,13 @@ ancestors, so a pause running in the chat's own pane (`_ended`) is still safe.
 Fix, closes left to a cull: just before the close, `procs.hand_off` notes
 every process under the panes about to close in
 `<brindle home>/closing-procs.json`. Each process is noted by its pid and its
-birth (`procs.births`: the kernel's start time, with the boot id on Linux,
-and `ps`'s start time on macOS). Claude Code's daemon and everything under it
+birth: the kernel's start time, with the boot id on Linux, and `ps`'s start
+time on macOS. `procs.lineage` reads each process's parent, command line and
+birth together (one `ps -axo pid,ppid,lstart,command` row on macOS; one read
+of `/proc/<pid>/stat` on Linux, with the command line kept only if a second
+read finds the same birth). So the tree a note is taken from and the births
+it records are the same processes', even if a pid is reused right after the
+read. Claude Code's daemon and everything under it
 are never noted: the sessions it hosts may be other agents'. The record is
 written under a lock to a temporary file of its own and then moved into
 place.
@@ -91,6 +96,13 @@ with. It ends each noted process that is still the one noted (same pid, same
 birth) and whose chain of noted parents now leads to launchd, i.e. one the
 close left without its CLI. It also ends whatever that process has started
 since the note, again leaving out the daemon and what it hosts.
+
+The cull ends them with `procs.terminate(..., owned=births)`, which reads
+the lineage again just before SIGTERM and again just before SIGKILL. It
+signals only pids that are still the process their birth names, so a pid
+that came round again during the grace period is spared. (No pidfd on macOS:
+the window between that read and the signal is the few milliseconds the two
+calls take.)
 
 What it ends stays noted until a later sweep finds it gone. A process that
 exec'd another program keeps its birth, so it is still found. A noted pid
@@ -107,11 +119,18 @@ shell (and the test run under it) to launchd; the last three rows run a real
 cull sweep after the close. On the unmodified code nothing is stopped
 (`set() >= {5002, 5003}` fails) in every row; with the cull's new step set
 aside, the three deferred rows still fail.
-`test_what_a_close_left_behind_is_ended_and_nothing_else` covers five
-cases: a live parent (nothing ended), a pid that came round again for the
-same command (the new process is spared), an exec (still ended), a child
-started after the note (ended too) and a Claude daemon started from the pane
-(neither it nor the session it hosts is ended).
+`test_what_a_close_left_behind_is_ended_and_nothing_else` covers six
+cases:
+- a live parent: nothing is ended;
+- a pid that came round again for the same command: the new process is spared;
+- the same, just after the note's read;
+- an exec: still ended;
+- a child started after the note: ended too;
+- a Claude daemon started from the pane: neither it nor the session it hosts is ended.
+
+`test_a_pid_that_came_round_again_is_never_signalled` covers a pid reused
+before the first signal (no signal at all) and one reused between SIGTERM and
+SIGKILL (no SIGKILL).
 
 What is left: a child started during the few seconds between SIGTERM and
 SIGKILL, by a process that then dies, is noted by no one.

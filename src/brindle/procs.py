@@ -48,6 +48,7 @@ class Proc:
     ppid: int
     text: str    # command line, plus the process's environment
     cmd: str | None = None   # the command line alone (None: a hand-made table's ``text`` is one)
+    birth: str | None = None   # when it was started (lineage); None in a plain table
 
 
 def command_line(p: Proc) -> str:
@@ -478,11 +479,21 @@ def alive(pid: int) -> bool:
     return stat.rpartition(")")[2].split()[:1] != ["Z"]
 
 
-def terminate(pids: set[int] | list[int], grace: float = 3.0) -> int:
+def terminate(pids: set[int] | list[int], grace: float = 3.0, owned: dict[int, str] | None = None) -> int:
     """SIGTERM, then SIGKILL whatever is left after ``grace`` seconds.
-    Returns how many processes were signalled."""
+    Returns how many processes were signalled. ``owned`` (pid -> birth, from
+    lineage): each signal goes only to a pid that is still the process its
+    birth names, read just before the signal is sent, so a pid that came
+    round again meanwhile (another's process) is spared."""
+    def still(candidates) -> list[int]:
+        candidates = list(candidates)
+        if owned is None or not candidates:
+            return candidates
+        now = lineage()
+        return [p for p in candidates if p in now and now[p].birth == owned.get(p)]
+
     sent = []
-    for pid in pids:
+    for pid in still(pids):
         try:
             os.kill(pid, signal.SIGTERM)
             sent.append(pid)
@@ -491,7 +502,7 @@ def terminate(pids: set[int] | list[int], grace: float = 3.0) -> int:
     deadline = time.time() + grace
     while sent and time.time() < deadline and any(alive(p) for p in sent):
         time.sleep(0.1)
-    for pid in sent:
+    for pid in still(p for p in sent if alive(p)):
         if alive(pid):
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -527,36 +538,40 @@ def _handed_path() -> Path:
     return brindle_home() / HANDED
 
 
-def births(pids: set[int] | list[int]) -> dict[int, str]:
-    """When each of ``pids`` that runs now was started, as the kernel tells
-    it: with the pid, who a process is. A pid that comes round again has a
-    later birth; a process that execs another program keeps its own.
-    Linux: the start time in clock ticks since boot, with the boot's id;
-    macOS: ``ps``'s start time (to the second, a wall-clock date)."""
-    pids = sorted(set(pids))
-    if not pids:
-        return {}
-    out: dict[int, str] = {}
+def lineage() -> dict[int, Proc]:
+    """Every process with its parent, its command line and its birth (when
+    the kernel started it: with the pid, who a process is), each process's
+    three read together, so a parent and a command are never another
+    process's that took the pid between two reads. A pid that comes round
+    again has a later birth; a process that execs another program keeps its
+    own. Linux: the start time in clock ticks since boot, with the boot's id,
+    from one read of its stat (its command line is kept only if a second read
+    finds the same birth); macOS: one ``ps`` listing, its start time to the
+    second, a wall-clock date."""
+    out: dict[int, Proc] = {}
     if (PROC / "self" / "stat").exists():
         try:
             boot = (PROC / "sys" / "kernel" / "random" / "boot_id").read_text().strip()
         except OSError:
             boot = "?"
-        for pid in pids:
+        for d in PROC.iterdir():
+            if not d.name.isdigit():
+                continue
             try:
-                after = (PROC / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+                first = (d / "stat").read_text().rsplit(")", 1)[1].split()
+                cmd = (d / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+                again = (d / "stat").read_text().rsplit(")", 1)[1].split()
             except (OSError, IndexError):
                 continue
-            out[pid] = f"{boot}:{after[19]}"      # field 22: starttime
+            if len(first) > 19 and len(again) > 19 and first[19] == again[19]:   # field 22: starttime
+                out[int(d.name)] = Proc(int(d.name), int(first[1]), cmd, cmd, f"{boot}:{first[19]}")
         return out
-    # One listing of every process, not ``-p`` with the list: ps refuses that
-    # whole when one entry isn't a valid pid, and a record can hold anything.
-    wanted = set(pids)
-    listing = spawn.read(["ps", "-axo", "pid=,lstart="], timeout=PS_LIMIT).stdout
+    listing = spawn.read(["ps", "-axww", "-o", "pid=,ppid=,lstart=,command="], timeout=PS_LIMIT).stdout
     for line in listing.splitlines():
-        pid, _, started = line.strip().partition(" ")
-        if pid.isdigit() and int(pid) in wanted and started.strip():
-            out[int(pid)] = " ".join(started.split())
+        parts = line.split(None, 7)     # pid, ppid, then lstart's five words, then the command
+        if len(parts) >= 7 and parts[0].isdigit() and parts[1].isdigit():
+            cmd = parts[7] if len(parts) == 8 else ""
+            out[int(parts[0])] = Proc(int(parts[0]), int(parts[1]), cmd, cmd, " ".join(parts[2:7]))
     return out
 
 
@@ -602,15 +617,15 @@ def _update_handed(change) -> object:
     return result
 
 
-def hand_off(roots: list[int], procs: dict[int, Proc] | None = None, now: float | None = None) -> int:
+def hand_off(roots: list[int], now: float | None = None) -> int:
     """Note ``roots`` (the programs of panes about to close) and everything
     under them, for the cull to end what the close leaves behind. Returns how
     many processes were noted."""
     if not roots:
         return 0
-    procs = table() if procs is None else procs
+    seen = lineage()     # parent and birth from the same read: the tree is the noted processes'
     now = time.time() if now is None else now
-    found = {pid: [born, now] for pid, born in births(_tree(roots, procs)).items()}
+    found = {pid: [seen[pid].birth, now] for pid in _tree(roots, seen) if seen[pid].birth}
 
     def add(records: dict) -> None:
         records.update(found)
@@ -620,23 +635,23 @@ def hand_off(roots: list[int], procs: dict[int, Proc] | None = None, now: float 
     return len(found)
 
 
-def handed_orphans(procs: dict[int, Proc] | None = None, now: float | None = None) -> set[int]:
-    """What closed panes left running (hand_off), to be ended at once: each
-    noted process that is still the one noted (its birth, see births) and
-    whose noted parents lead to launchd (they lost the CLI that started
-    them), with whatever it has started since (never Claude Code's daemon or
-    what it hosts). Read from the process table as it is now (``procs``:
-    a table just read). What is returned is noted too, until a later look
-    finds it gone; records of processes gone, or grown too old, are dropped."""
+def handed_orphans(now: float | None = None) -> dict[int, str]:
+    """What closed panes left running (hand_off), to be ended at once
+    (terminate with ``owned``), by pid with its birth: each noted process that is
+    still the one noted (its birth) and whose noted parents lead to launchd
+    (they lost the CLI that started them), with whatever it has started
+    since (never Claude Code's daemon or what it hosts). Read as things are
+    now, in one lineage read. What is returned is noted too, until a later
+    look finds it gone; records of processes gone, or grown too old, are
+    dropped."""
     if not _handed_path().exists():
-        return set()
+        return {}
     now = time.time() if now is None else now
 
-    def take(records: dict) -> set[int]:
-        current = table() if procs is None else procs
-        born = births([pid for pid in records if pid in current])
+    def take(records: dict) -> dict[int, str]:
+        current = lineage()
         for pid in [pid for pid, (birth, at) in records.items()
-                    if born.get(pid) != birth or now - at > HANDED_MAX_AGE]:
+                    if pid not in current or current[pid].birth != birth or now - at > HANDED_MAX_AGE]:
             del records[pid]
 
         def orphaned(pid: int) -> bool:
@@ -646,9 +661,10 @@ def handed_orphans(procs: dict[int, Proc] | None = None, now: float | None = Non
                 pid = current[pid].ppid
             return pid == 1
 
-        out = _tree([pid for pid in records if orphaned(pid)], current)
-        for pid, birth in births(out - set(records)).items():   # started since the note
-            records[pid] = [birth, now]
-        return out & set(records)
+        out = {pid: current[pid].birth for pid in _tree([pid for pid in records if orphaned(pid)], current)
+               if current[pid].birth}
+        for pid, birth in out.items():
+            records.setdefault(pid, [birth, now])   # started since the note: noted from here on
+        return out
 
     return _update_handed(take)  # type: ignore[return-value]
