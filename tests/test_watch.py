@@ -7,9 +7,14 @@ from brindle.db import DB
 
 
 def test_background_cull_keeps_one_sweep_in_flight(monkeypatch):
+    """One sweep at a time in a sidebar, and one a minute between all the
+    sidebars: each used to sweep on its own clock."""
     import threading
+    from types import SimpleNamespace
     from unittest.mock import Mock
 
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(watch, "time", SimpleNamespace(time=lambda: clock[0]))
     thread = Mock()
     thread.is_alive.return_value = True
     monkeypatch.setattr(threading, "Thread", lambda **kwargs: thread)
@@ -18,8 +23,95 @@ def test_background_cull_keeps_one_sweep_in_flight(monkeypatch):
     watch._cull_in_background()
     assert thread.start.call_count == 1
     thread.is_alive.return_value = False
+    clock[0] += 30                        # another sidebar's minute is up: this one's sweep counts
+    monkeypatch.setattr(watch, "_cull_thread", None)
+    watch._cull_in_background()
+    assert thread.start.call_count == 1
+    clock[0] += watch.CULL_SECONDS - 30
     watch._cull_in_background()
     assert thread.start.call_count == 2
+
+
+@pytest.fixture(scope="module")
+def four_sessions(tmp_path_factory):
+    """A repo's main checkout and three session worktrees, each with a
+    tracked file below its root; built once, with its own git identity."""
+    from brindle import git
+
+    base = tmp_path_factory.mktemp("sessions")
+    with pytest.MonkeyPatch.context() as mp:
+        for role in ("AUTHOR", "COMMITTER"):
+            mp.setenv(f"GIT_{role}_NAME", "t")
+            mp.setenv(f"GIT_{role}_EMAIL", "t@example.com")
+        for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            mp.delenv(k, raising=False)
+        main = base / "proj"
+        (main / "src").mkdir(parents=True)
+        (main / "src" / "mod.py").write_text("x = 1\n")
+        git.run(["init", "-q", "-b", "main"], main)
+        git.run(["add", "-A"], main)
+        git.run(["commit", "-qm", "init"], main)
+        for i in (1, 2, 3):
+            git.run(["worktree", "add", "-q", "-b", f"brindle/session-{i}", str(base / f"s{i}")], main)
+    return [main, *(base / f"s{i}" for i in (1, 2, 3))]
+
+
+def _sidebar(db, paths, monkeypatch):
+    """The sessions in ``db``, a fake clock for the view, and a list every
+    process brindle starts is recorded in."""
+    from types import SimpleNamespace
+
+    from brindle import agents, spawn, status_cache, tmux, view
+    from brindle.db import Agent, Workspace
+
+    root = str(paths[0])
+    for i, path in enumerate(paths):
+        kind, base = ("main", None) if i == 0 else ("worktree", "main")
+        db.add_workspace(Workspace(f"w{i}", root, f"w{i}", kind, f"b{i}", base, str(path), None, "", 0))
+        db.add_agent(Agent(f"lead{i}", f"w{i}", "supervisor", "claude", None, "interactive", "idle",
+                           f"%{i}", None, 0))
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    panes.update({f"%{i}": True for i in range(len(paths))})
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "reconcile", lambda db, a, samples=1: a)
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(view, "time", SimpleNamespace(time=lambda: clock[0]))
+    status_cache.clear()
+    started: list = []
+    guard = spawn._guard
+    monkeypatch.setattr(spawn, "_guard", lambda argv: (started.append(argv), guard(argv))[1])
+
+    def refresh():
+        clock[0] += watch.IDLE_SECONDS
+        return {ws["id"]: ws for ws in view.snapshot(db, root, panes=panes)}
+    return refresh, started
+
+
+def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions, monkeypatch):
+    """Ten idle minutes of refreshes (two safety looks) of four quiet
+    sessions start no process: the safety look used to run git status and
+    rev-list in every worktree, in every sidebar. An edit below a root (in a
+    worktree whose index is v4, which compresses its paths) still shows at
+    the next safety look."""
+    from brindle import git, status_cache
+
+    path = four_sessions[3]
+    git.run(["update-index", "--index-version", "4"], path)
+    refresh, started = _sidebar(db, four_sessions, monkeypatch)
+    first = refresh()
+    started.clear()
+    for _ in range(int(600 / watch.IDLE_SECONDS)):
+        shown = refresh()
+    assert started == []
+    assert shown == first
+    edited = path / "src" / "mod.py"
+    edited.write_text("x = 2\n")                     # the root and its entries are untouched
+    try:
+        for _ in range(int(status_cache.TTL / watch.IDLE_SECONDS)):
+            shown = refresh()
+        assert [shown[f"w{i}"]["dirty"] for i in (1, 2, 3)] == [0, 0, 1]
+    finally:
+        edited.write_text("x = 1\n")
 
 
 @pytest.mark.parametrize("newer_schema", [False, True], ids=["older", "newer"])
