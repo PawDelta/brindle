@@ -226,21 +226,14 @@ def new_since_merge(db: DB, ws: Workspace, pushed_sha: str | None) -> bool:
         return False
 
 
-_merges: dict[tuple[str, bool], bool] = {}      # a merge commit never changes, nor what it adds
-
-
 def _merge_adds(ws: Workspace, shas: list[str], squashes: set[str]) -> bool:
     """Whether the merge ``shas[0]`` (parents ``shas[1:]``) carries content of
-    its own: worked out once per merge commit."""
+    its own: worked out once per merge commit, which never changes (``git.once``)."""
     merge, parents = shas[0], shas[1:]
     if len(parents) != 2:
         return True
-    key = (merge, parents[1] in squashes)
-    if key not in _merges:
-        if len(_merges) >= 4096:
-            _merges.clear()
-        _merges[key] = _merge_content(ws, merge, parents, key[1])
-    return _merges[key]
+    squash = parents[1] in squashes
+    return git.once(ws.path, ["merge adds", merge, str(squash)], lambda: _merge_content(ws, merge, parents, squash))
 
 
 def _merge_content(ws: Workspace, merge: str, parents: list[str], squash: bool) -> bool:

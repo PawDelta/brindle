@@ -9,12 +9,13 @@ checkout, every 5 seconds, and an antivirus inspects every process
 reached while its workers are at work: each sweep judged its readiness again,
 asking git about commits and files that hadn't moved."""
 
+import os
 import shutil
 import subprocess
 from collections import Counter
 
 from conftest import sh
-from brindle import agents, autopilot, session_sync, tmux
+from brindle import agents, autopilot, git, session_sync, status_cache, tmux
 from brindle.daemon import events, session_review
 from brindle.db import Agent
 from brindle.service import inbox
@@ -36,6 +37,28 @@ def _repo_question(argv: list[str], names: dict[str, str]) -> str | None:
     if words[0] in REPO_QUESTIONS and all(w in REPO_NAMES for w in words[1:]):
         return " ".join(words)
     return None
+
+
+def test_a_kept_answer_is_asked_again_when_a_file_git_reads_for_it_changes(repo):
+    """What is kept must go when anything git reads for it moves, wherever
+    that is: a remote named in a file the repo's config includes, and an
+    untracked ``.gitattributes`` that changes how a tracked file reads (no
+    ref, index or tracked file moves in either)."""
+    included = repo.parent / "extra.gitconfig"
+    included.write_text('[remote "mirror"]\n\turl = https://example.test/mirror.git\n')
+    sh(f"git config include.path {included}", repo)
+    assert git.has_remote(repo, "mirror")
+    included.write_text("")
+    assert not git.has_remote(repo, "mirror")
+
+    (repo / "crlf.txt").write_bytes(b"a\r\nb\r\n")
+    sh("git -c core.autocrlf=false add crlf.txt && git commit -qm crlf", repo)
+    # Its stat no longer matches the index, so git compares its content on every look
+    # (it would anyway only while the file is as new as the index).
+    os.utime(repo / "crlf.txt", (1_000_000_000, 1_000_000_000))
+    assert status_cache.tracked_dirty(repo) == []
+    (repo / ".gitattributes").write_text("*.txt text\n")
+    assert status_cache.tracked_dirty(repo) == ["crlf.txt"]
 
 
 def test_a_repo_question_is_asked_once_however_many_sessions_are_at_work(db, repo, tmp_path, _repo_template,

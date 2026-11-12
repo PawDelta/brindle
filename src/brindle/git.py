@@ -444,7 +444,8 @@ def _stamp(file: Path) -> tuple[int, int, int, int] | None:
     return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
 
 
-_PACKED: dict[str, tuple[tuple[int, int, int, int], dict[str, str]]] = {}
+# Per packed-refs file: (its stamp, its refs, whether any is a replace ref).
+_PACKED: dict[str, tuple[tuple[int, int, int, int], dict[str, str], bool]] = {}
 
 
 def _packed_refs(common: Path) -> dict[str, str]:
@@ -466,7 +467,8 @@ def _packed_refs(common: Path) -> dict[str, str]:
     refs = {name: sha for sha, _, name in (line.partition(" ") for line in lines) if name and _SHA.fullmatch(sha)}
     if len(_PACKED) >= _BRANCHES_MAX and key not in _PACKED:
         _PACKED.clear()
-    _PACKED[key] = (stamp, refs)     # under the stamp taken before the read: a later version is read again
+    # Under the stamp taken before the read: a later version is read again.
+    _PACKED[key] = (stamp, refs, any(name.startswith("refs/replace/") for name in refs))
     return refs
 
 
@@ -538,36 +540,44 @@ def head(path: str | Path) -> str:
 
 
 # Answers about commits named by sha: a commit never changes, so neither does
-# the answer, in any checkout of the repo. Kept per repo and per version of its
-# ``shallow`` file (a deepened clone has more history to count).
-_ONCE: dict[tuple, str | bool] = {}
+# the answer, in any checkout of the repo. Kept per repo, and per version of
+# the two files that change what history a commit has (``shallow``: a deepened
+# clone has more to count; ``info/grafts``). A repo with replace refs, which
+# put another object in a commit's place, keeps nothing: git is asked.
+_ONCE: dict[tuple, object] = {}
 
 
-def _once_key(path: str | Path, args: list[str]) -> tuple:
+def _once_key(path: str | Path, question: list[str]) -> tuple:
     common = _git_dirs(path)[1]
-    return (str(common.resolve()), _stamp(common / "shallow"), *args)
+    replace = common / "refs" / "replace"
+    _packed_refs(common)
+    packed = _PACKED.get(str(common / "packed-refs"))
+    if (packed is not None and packed[2]) or (replace.is_dir() and any(replace.iterdir())):
+        raise _Unreadable(replace)
+    return (str(common.resolve()), _stamp(common / "shallow"), _stamp(common / "info" / "grafts"), *question)
 
 
-def _keep(key: tuple, answer: str | bool) -> None:
-    if len(_ONCE) >= _REMEMBERED_MAX:
-        _ONCE.clear()
-    _ONCE[key] = answer
+def once(path: str | Path, question: list[str], ask):
+    """``ask()``'s answer to ``question``, which names every commit it is
+    about by its sha (see ``resolve``): asked once per repo, then answered
+    from memory. An ``ask`` that raises is not remembered."""
+    try:
+        key = _once_key(path, question)
+    except (_Unreadable, OSError):
+        return ask()
+    if key not in _ONCE:
+        answer = ask()
+        if len(_ONCE) >= _REMEMBERED_MAX:
+            _ONCE.clear()
+        _ONCE[key] = answer
+    return _ONCE[key]
 
 
 def out_once(args: list[str], cwd: str | Path, raw: bool = False) -> str:
-    """``out`` for a question whose ``args`` name every commit by its sha
-    (see ``resolve``): asked of git once, then answered from memory.
-    ``raw``: git's output as it is (``-z`` lists), not stripped."""
-    try:
-        key = _once_key(cwd, args)
-    except (_Unreadable, OSError):
-        key = None
-    if key is None or key not in _ONCE:
-        text = run(args, cwd).stdout
-        if key is not None:
-            _keep(key, text)
-    else:
-        text = str(_ONCE[key])
+    """``out`` for a question whose ``args`` name every commit by its sha:
+    asked of git once (``once``). ``raw``: git's output as it is (``-z``
+    lists), not stripped."""
+    text = once(cwd, args, lambda: run(args, cwd).stdout)
     return text if raw else text.strip()
 
 
@@ -581,16 +591,17 @@ def is_ancestor(path: str | Path, older: str, newer: str) -> bool:
     if shas[0] == shas[1]:
         return True
     args = ["merge-base", "--is-ancestor", *shas]
-    try:
-        key = _once_key(path, args)
-    except (_Unreadable, OSError):
-        return ok(args, path)
-    if key not in _ONCE:
+
+    def ask() -> bool:
         code = run(args, path, check=False).returncode
         if code not in (0, 1):
-            return False        # git couldn't say (a commit that isn't here): not remembered
-        _keep(key, code == 0)
-    return bool(_ONCE[key])
+            raise _Unreadable(args)     # git couldn't say (a commit that isn't here): not remembered
+        return code == 0
+
+    try:
+        return once(path, args, ask)
+    except _Unreadable:
+        return False
 
 
 def current_branch(path: str | Path) -> str | None:
@@ -850,36 +861,19 @@ def list_branches(root: str | Path, pattern: str = "*") -> list[str]:
     return [b for b in proc.splitlines() if b]
 
 
-_REMOTES: dict[str, tuple[tuple, frozenset[str]]] = {}
-
-
 def has_remote(root: str | Path, remote: str = "origin") -> bool:
-    return remote in _remotes(root)
+    """Whether ``git remote`` lists ``remote``: asked of git once per repo and
+    again only when the config it reads there changed, any file it includes
+    among them (``status_cache.remotes``, which knows every file git's config
+    depends on); every time where that can't be known."""
+    from brindle import status_cache    # it builds on this module
 
-
-def _remotes(root: str | Path) -> frozenset[str]:
-    """The repo's remotes, as ``git remote`` lists them: asked once per repo,
-    whichever checkout asks, and again only when a file that can name a
-    remote changed (the repo's config, a worktree's own, the person's, and
-    the ``remotes`` and ``branches`` folders of long ago)."""
     try:
-        own, common = _git_dirs(root)
-        key = str(common.resolve())
-        home = Path.home()
-        mine = [Path(os.environ["GIT_CONFIG_GLOBAL"])] if os.environ.get("GIT_CONFIG_GLOBAL") else [
-            home / ".gitconfig", Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config") / "git" / "config"]
-        stamps = tuple(_stamp(f) for f in (common / "config", own / "config.worktree", common / "remotes",
-                                           common / "branches", *mine))
-    except (_Unreadable, OSError, RuntimeError):
-        return frozenset(out(["remote"], root).split())
-    hit = _REMOTES.get(key)
-    if hit is not None and hit[0] == stamps:
-        return hit[1]
-    names = frozenset(out(["remote"], root).split())
-    if len(_REMOTES) >= _BRANCHES_MAX and key not in _REMOTES:
-        _REMOTES.clear()
-    _REMOTES[key] = (stamps, names)      # under the stamps taken before git looked: a later change asks again
-    return names
+        _git_dirs(root)
+    except _Unreadable:
+        return remote in out(["remote"], root).split()
+    known = status_cache.remotes(root)
+    return remote in (out(["remote"], root).split() if known is None else known)
 
 
 # -- branch naming ---------------------------------------------------------

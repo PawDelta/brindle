@@ -538,12 +538,17 @@ Fix, in `git.py` so every caller has it (`conflicts`, `gates`,
   the file) themselves: no process. `base_ref` asks git only which of two
   different commits is ahead: one `merge-base --is-ancestor`, by sha, once
   per pair of commits.
-- `has_remote` asks `git remote` once per repo, whichever checkout asks,
-  and again only when a file that can name a remote changed (the repo's
-  config, a worktree's own, the person's).
-- `resolve` reads what names point at; `out_once` and `is_ancestor` keep
-  git's answer to a question that names its commits by sha (it never
-  changes; kept per repo and per version of its `shallow` file).
+- `has_remote` asks `git remote` once per repo and per config as git reads
+  it in that checkout (`status_cache.remotes`): checkouts whose settings
+  list the same share the answer, and it is asked again when any file the
+  config depends on changes. Those files are S3's (`_outside_sources`, from
+  git's own `config --list --show-origin --includes`): every file git read,
+  every include and includeIf target, there or not yet, the system's and
+  the person's, and the branch for `onbranch:` conditions.
+- `resolve` reads what names point at; `once`, `out_once` and `is_ancestor`
+  keep git's answer to a question that names its commits by sha (it never
+  changes; kept per repo and per version of its `shallow` and `info/grafts`
+  files, and not at all in a repo with replace refs).
   `ahead_behind` and `merge_base` use them, and so do
   `session_sync.drift`, `session_review.new_since_merge` and the audit
   commit's check.
@@ -553,11 +558,14 @@ Fix, in `git.py` so every caller has it (`conflicts`, `gates`,
 - `reasons` and `phase_reasons` take a checkout's uncommitted tracked files
   from `status_cache.tracked_dirty`: `git status --untracked-files=no` runs
   only when something it reads moved since it last looked. That is HEAD's
-  commit, the index, the repo's config and attributes, and every tracked
-  file, each one stat'ed wherever it is (names from the index, read without
-  git), so it is as exact as git's own stat check; the stamps are taken
-  before git looks. An index that can't be read that way (a submodule, a
-  split or sparse index) asks git every time.
+  commit, the index, every tracked file, each one stat'ed wherever it is
+  (names from the index, read without git), a `.gitattributes` in any
+  folder holding a tracked file (there or not yet, tracked or not), and
+  every config and attributes file outside the worktree
+  (`_outside_sources`, now with `info/attributes`, `core.attributesFile`
+  and the global and system attributes files). The stamps are taken before
+  git looks. An index that can't be read that way (a submodule, a split or
+  sparse index), or a config git couldn't list, asks git every time.
 
 - The Inbox reads each session's HEAD from the git files (`git.head`).
 
@@ -595,7 +603,11 @@ Test: `tests/test_busy_spawns_daemon.py` (that scenario: each repo question
 at most once on the round that sees the move and nothing asked about the
 sync's merge again; on the next round no repo question, no git at all in the
 checkouts of the sessions whose workers are at work, and `git status` only
-in the two worktrees whose files changed).
+in the two worktrees whose files changed), and
+`test_a_kept_answer_is_asked_again_when_a_file_git_reads_for_it_changes`
+(a remote in a file the config includes goes away; an untracked
+`.gitattributes` makes a tracked file read as modified: neither moves a
+ref, the index or a tracked file, and both kept answers are asked again).
 
 What is left: a worktree an agent is editing still costs one `git status`
 per sweep that sees its files change (the app's feed). Other requests the

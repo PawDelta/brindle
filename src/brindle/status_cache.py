@@ -79,6 +79,7 @@ def clear() -> None:
     _sources.clear()
     _tracked_names.clear()
     _tracked_dirty.clear()
+    _remotes.clear()
 
 
 def _worktree_gitdir(path: Path) -> Path:
@@ -328,17 +329,31 @@ def _stat(path: str | bytes | Path) -> tuple | None:
 
 
 # What ``git status`` of tracked files alone reads, and what it said: per worktree.
-_tracked_names: dict[str, tuple[tuple, list[bytes] | None]] = {}    # the index's paths, per version of the index
+# The index's paths and the folders they are in, per version of the index.
+_tracked_names: dict[str, tuple[tuple, tuple[list[bytes], list[bytes]] | None]] = {}
 _tracked_dirty: dict[str, tuple[tuple, list[str]]] = {}
 _TRACKED_MAX = 256
 
 
+def _tracked_folders(names: list[bytes]) -> list[bytes]:
+    """Every folder a tracked path is in or under, the worktree's root (``b""``) first."""
+    folders = {b""}
+    for name in names:
+        while (name := os.path.dirname(name)) and name not in folders:
+            folders.add(name)
+    return sorted(folders)
+
+
 def _tracked_stamps(path: Path) -> tuple | None:
     """Everything the tracked files' status depends on: HEAD's commit, the
-    index, the repo's config and attributes, and every tracked file, each one
-    stat'ed wherever it is (exact, unlike the shallow fingerprint: git itself
-    judges a file modified by its stat). None when that can't be read without
-    git (no commit yet, an index ``index_paths`` doesn't read)."""
+    index, every tracked file, each one stat'ed wherever it is (exact, unlike
+    the shallow fingerprint: git itself judges a file modified by its stat),
+    and what decides how git reads those files: a ``.gitattributes`` in any
+    folder that holds one, there or not yet, tracked or not, and every config
+    and attributes file outside the worktree (``_outside_sources``: includes,
+    the person's and the system's among them). None when that can't be known
+    without git (no commit yet, an index ``index_paths`` doesn't read, a
+    config git couldn't list): then git is asked every time."""
     try:
         wt_gitdir = _worktree_gitdir(path)
         common = _common_gitdir(wt_gitdir)
@@ -353,12 +368,15 @@ def _tracked_stamps(path: Path) -> tuple | None:
     if names is None or names[0] != index:
         if len(_tracked_names) >= _TRACKED_MAX:
             _tracked_names.clear()
-        names = _tracked_names[key] = (index, index_paths(wt_gitdir / "index", _hash_len(common)))
-    if names[1] is None:
+        listed = index_paths(wt_gitdir / "index", _hash_len(common))
+        names = _tracked_names[key] = (index, None if listed is None else (listed, _tracked_folders(listed)))
+    sources = None if names[1] is None else _outside_sources(path, wt_gitdir, common)
+    if names[1] is None or sources is None:
         return None
     root = os.fsencode(path)
-    return (head, index, _stat(common / "config"), _stat(common / "info" / "attributes"),
-            tuple(_stat(os.path.join(root, name)) for name in names[1]))
+    return (head, index, tuple(_watched(p) for p in sources),
+            tuple(_stat(os.path.join(root, folder, b".gitattributes")) for folder in names[1][1]),
+            tuple(_stat(os.path.join(root, name)) for name in names[1][0]))
 
 
 def tracked_dirty(path: str | Path) -> list[str]:
@@ -427,22 +445,24 @@ def _settled_since(stats: tuple, before_ns: int) -> bool:
     return all(s is None or max(s[0], s[1]) < before_ns for pair in stats for s in pair)
 
 
-# Per worktree: (what the list was read against, the list) for _ignore_sources.
-_sources: dict[str, tuple[tuple, list[Path]]] = {}
+# Per worktree: (what the list was read against, the list, git's config listing) for _outside_sources.
+_sources: dict[str, tuple[tuple, list[Path], str]] = {}
 _UNSETTLED = object()       # a list read while one of its files changed: never matches
 
 
-def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | None:
-    """Every file outside the worktree that can change what git ignores
-    there: info/exclude, the default global ignore file, the config files
-    git may read even when they don't exist yet (system, global, the repo's,
-    the worktree's), and, as git itself reads the config (``git config
-    --list --show-origin --includes``: its own parsing, escapes and includes
-    included), every file it read, every include.path or includeIf path
-    whatever its condition, and every core.excludesFile. git is asked again
-    only when one of those files (or the branch, for onbranch: includes)
-    changed: an idle sidebar asks nothing. None when git couldn't say (busy,
-    or the command failed)."""
+def _outside_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | None:
+    """Every file outside the worktree that can change how git reads it:
+    what it ignores (info/exclude, the default global ignore file), how it
+    reads a tracked file (info/attributes, the global and system attributes
+    files), the config files git may read even when they don't exist yet
+    (system, global, the repo's, the worktree's), and, as git itself reads
+    the config (``git config --list --show-origin --includes``: its own
+    parsing, escapes and includes included), every file it read, every
+    include.path or includeIf path whatever its condition, and every
+    core.excludesFile and core.attributesFile. git is asked again only when
+    one of those files (or the branch, for onbranch: includes) changed: an
+    idle sidebar asks nothing. None when git couldn't say (busy, or the
+    command failed)."""
     key = str(path)
     try:
         head = (wt_gitdir / "HEAD").read_text()
@@ -452,7 +472,10 @@ def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | N
     if hit is not None and hit[0] == (head, tuple(_watched(p) for p in hit[1])):
         return hit[1]
     xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "git"
-    found = [common / "info" / "exclude", xdg / "ignore", common / "config", wt_gitdir / "config.worktree"]
+    found = [common / "info" / "exclude", xdg / "ignore", common / "info" / "attributes", xdg / "attributes",
+             common / "config", wt_gitdir / "config.worktree"]
+    if not os.environ.get("GIT_ATTR_NOSYSTEM"):
+        found += [p.with_name("gitattributes") for p in _system_configs()]
     if not os.environ.get("GIT_CONFIG_NOSYSTEM"):
         system = os.environ.get("GIT_CONFIG_SYSTEM")
         found += [Path(system)] if system else _system_configs()
@@ -479,19 +502,56 @@ def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | N
         name = name.lower()
         if not value:
             continue
-        if name == "core.excludesfile":
+        if name in ("core.excludesfile", "core.attributesfile"):
             found.append(path / os.path.expanduser(value))       # an absolute value stays as it is
         elif name.endswith(".path") and name.startswith(("include.", "includeif.")):
             found.append((source.parent if source else path) / os.path.expanduser(value))
     found = list(dict.fromkeys(found))
     stats = tuple(_watched(p) for p in found)
-    _sources[key] = ((head if _settled_since(stats, before_ns) else _UNSETTLED, stats), found)
+    # The settings alone, without where each was read from: the same in every checkout that reads the same config.
+    _sources[key] = ((head if _settled_since(stats, before_ns) else _UNSETTLED, stats), found,
+                     "\0".join(fields[1::2]))
     return found
+
+
+_remotes: dict[tuple, frozenset[str]] = {}
+
+
+def remotes(path: str | Path) -> frozenset[str] | None:
+    """The remotes ``git remote`` lists in the checkout at ``path``, asked of
+    git once per repo and per config as git reads it there, includes and
+    conditions resolved (``_outside_sources``: checkouts whose listing is the
+    same share the answer), and again when any file that config depends on,
+    or the ``remotes`` and ``branches`` folders of long ago, changed. None
+    when that can't be known without asking: the caller asks git."""
+    path = Path(path)
+    try:
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+    except (OSError, ValueError, IndexError):
+        return None
+
+    def look() -> tuple | None:
+        if _outside_sources(path, wt_gitdir, common) is None:
+            return None
+        return (str(common), _sources[str(path)][2], _stat(common / "remotes"), _stat(common / "branches"))
+
+    key = look()
+    if key is None:
+        return None
+    if key not in _remotes:
+        names = frozenset(git.out(["remote"], path).split())
+        if look() != key:
+            return names        # the config moved while git read it: this answer is for neither
+        if len(_remotes) >= _TRACKED_MAX:
+            _remotes.clear()
+        _remotes[key] = names
+    return _remotes[key]
 
 
 def _deep_entries(path: Path, wt_gitdir: Path, common: Path, ignored: list[str] | None) -> list | None:
     """What ``git status`` would look at, stat'ed without git: the
-    ``_ignore_sources``, every tracked file (from the index), and every
+    ``_outside_sources``, every tracked file (from the index), and every
     directory (each ``.gitignore`` in it too) but nested repositories, which
     git doesn't enter, and the directories in ``ignored`` (git's last report;
     None: leave none out). A file new anywhere git looks changes its
@@ -499,7 +559,7 @@ def _deep_entries(path: Path, wt_gitdir: Path, common: Path, ignored: list[str] 
     git couldn't say which files decide what is ignored: the safety look is
     a git look then, until it can."""
     paths = index_paths(wt_gitdir / "index", _hash_len(common))
-    sources = None if paths is None else _ignore_sources(path, wt_gitdir, common)
+    sources = None if paths is None else _outside_sources(path, wt_gitdir, common)
     if paths is None or sources is None:
         return None
     root = os.fsencode(path)
