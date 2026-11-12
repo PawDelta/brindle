@@ -465,7 +465,7 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         return {"read": status.mark_read([item])}
     a = _agent(db, item)
     if action == "pr-not-now":
-        identity_lock.ensure(a)
+        # Dismissing is the person's own Inbox marker, not acting as the session's sign-in.
         ws = _workspace(db, a.workspace_id)
         sha = inbox.dismiss_marker(db, a.id, ws.branch, ws.path)
         if not sha:

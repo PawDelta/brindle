@@ -235,6 +235,10 @@ def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypat
     assert len(asked) == 1   # cached: the second read didn't ask gh again
     from brindle.daemon.routes_actions import inbox_action
 
+    from brindle import identity_lock
+
+    # A session locked to another sign-in can still have its card dismissed: that acts as no one.
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "another@example.com")
     inbox_action(db, {"id": "r1", "action": "pr-not-now"}, {})   # Dismiss on the opened card
     assert cards() == []
     # A push to the same PR moves HEAD: the dismissed card stays gone.
