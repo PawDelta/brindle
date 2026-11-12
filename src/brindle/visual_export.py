@@ -17,39 +17,82 @@ from brindle.service.errors import ServiceError
 
 TAGS = set(("main section article header footer nav div span p br hr h1 h2 h3 h4 h5 h6 "
             "ul ol li dl dt dd table thead tbody tfoot tr th td caption colgroup col pre code blockquote "
-            "strong em b i u s small sub sup figure figcaption img svg g path rect circle ellipse line "
-            "polyline polygon text tspan defs lineargradient radialgradient stop").split())
+            "strong em b i u s small sub sup mark abbr kbd samp time a details summary figure figcaption img "
+            "svg g path rect circle ellipse line polyline polygon text tspan defs marker "
+            "lineargradient radialgradient stop").split())
 VOID = {"br", "hr", "img", "col"}
 DROP = {"script", "title", "iframe", "object", "embed", "template", "math", "foreignobject"}
-ATTRS = set(("title alt width height colspan rowspan viewbox d x y x1 x2 y1 y2 cx cy r rx ry points "
-             "fill stroke stroke-width opacity transform offset stop-color font-size text-anchor").split())
-CSS = set(("color background background-color font-size font-weight font-family text-align display margin padding "
-           "border border-radius width height max-width min-width gap grid-template-columns "
-           "flex-direction align-items justify-content fill stroke stroke-width opacity").split())
+ATTRS = set(("title alt width height colspan rowspan role aria-label viewbox d x y x1 x2 y1 y2 cx cy r rx ry "
+             "points dx dy fill stroke stroke-width stroke-dasharray stroke-dashoffset stroke-linecap "
+             "stroke-linejoin stroke-opacity fill-opacity opacity transform offset stop-color stop-opacity "
+             "font-size font-weight font-family font-style letter-spacing text-anchor dominant-baseline "
+             "refx refy markerwidth markerheight markerunits orient preserveaspectratio gradientunits").split())
+# Attributes that may point at an element of the export itself, as url(#id) and nothing else.
+REFS = {"fill", "stroke", "marker-start", "marker-mid", "marker-end"}
+# SVG names are case sensitive in standalone HTML.
+SVG_CASE = {name.lower(): name for name in ("viewBox", "refX", "refY", "markerWidth", "markerHeight", "markerUnits",
+                                            "preserveAspectRatio", "gradientUnits")}
+SIDES = ("top", "right", "bottom", "left")
+CSS = set(("color background background-color background-image background-size background-position background-repeat "
+           "font font-size font-weight font-family font-style font-variant-numeric line-height letter-spacing "
+           "text-transform text-align text-decoration text-decoration-line text-decoration-color "
+           "text-decoration-style text-overflow white-space word-break overflow-wrap vertical-align "
+           "display box-sizing visibility margin padding border border-color border-style border-width "
+           "border-radius border-collapse border-spacing width height max-width min-width max-height min-height "
+           "aspect-ratio overflow overflow-x overflow-y gap row-gap column-gap grid grid-template "
+           "grid-template-columns grid-template-rows grid-template-areas grid-auto-flow grid-auto-columns "
+           "grid-auto-rows grid-column grid-row grid-column-start grid-column-end grid-row-start grid-row-end "
+           "grid-area place-items place-content place-self flex flex-direction flex-wrap flex-flow flex-grow "
+           "flex-shrink flex-basis order align-items align-content align-self justify-content justify-items "
+           "justify-self position top right bottom left inset z-index box-shadow opacity list-style "
+           "list-style-type list-style-position table-layout caption-side fill fill-opacity stroke stroke-width "
+           "stroke-dasharray stroke-dashoffset stroke-linecap stroke-linejoin stroke-opacity stop-color "
+           "stop-opacity text-anchor dominant-baseline").split()) | {
+    f"{box}-{side}" for box in ("margin", "padding", "border") for side in SIDES} | {
+    f"border-{side}-{part}" for side in SIDES for part in ("width", "style", "color")} | {
+    f"border-{corner}-radius" for corner in ("top-left", "top-right", "bottom-right", "bottom-left")}
+# Functions that compute a colour, a length or a gradient from their arguments and fetch nothing.
+FUNCTIONS = ("repeat|minmax|rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch|color|color-mix|calc|min|max|clamp|"
+             "fit-content|linear-gradient|radial-gradient|conic-gradient|repeating-linear-gradient|"
+             "repeating-radial-gradient")
+# A quoted string (a font name, a pseudo-element's text) that can't escape, close the stylesheet or
+# hold an at-rule. A value with "url(" anywhere, even inside a string, is refused outright.
+STRING = r""""[^"'\\<>@;{}\r\n]*"|'[^"'\\<>@;{}\r\n]*'"""
+SCHEME = re.compile(r"@media\s*\(\s*prefers-color-scheme\s*:\s*(light|dark)\s*\)\s*", re.I)
 CSP = ("default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; "
        "base-uri 'none'; form-action 'none'")
 
 
-def _declarations(css: str) -> str:
+def _value(prop: str, value: str) -> bool:
+    if prop == "content":
+        # Only a pseudo-element's literal text: no counters, attributes or images.
+        return re.fullmatch(STRING, value) is not None
+    if re.search(r"url\s*\(", value, re.I):
+        return False
+    value = re.sub(STRING, "_", value)
+    if not re.fullmatch(r"[\w\s#.,%+\-/*()]+", value, re.ASCII):
+        return False
+    # Permit layout/color functions (including nested ones), never url(),
+    # image-set(), expression(), var(), or future functions outside this list.
+    functions = re.sub(rf"(?<![\w-])(?:{FUNCTIONS})\s*\(", "(", value, flags=re.I)
+    return not re.search(r"[\w-]\s*\(", functions, re.ASCII)
+
+
+def _declarations(css: str, pseudo: bool = False) -> str:
     """Presentation values only: no escapes, URLs, variables or fetching functions."""
     css = re.sub(r"/\*.*?(?:\*/|\Z)", "", css, flags=re.S)
     safe = []
     for declaration in css.split(";"):
         prop, _, value = declaration.partition(":")
         prop, value = prop.strip().lower(), value.strip()
-        if prop not in CSS or not re.fullmatch(r"[\w\s#.,%+\-/*()]+", value, re.ASCII):
-            continue
-        # Permit layout/color functions (including nested ones), never url(),
-        # image-set(), expression(), or future functions outside this list.
-        functions = re.sub(r"\b(?:repeat|minmax|rgb|rgba|hsl|hsla|calc|fit-content)\s*\(", "(", value, flags=re.I)
-        if re.search(r"[\w-]\s*\(", functions, re.ASCII):
-            continue
-        safe.append(f"{prop}:{value}")
+        if (prop in CSS or (pseudo and prop == "content")) and _value(prop, value):
+            safe.append(f"{prop}:{value}")
     return ";".join(safe)
 
 
-def _stylesheet(css: str) -> str:
-    """Only flat type/class/id rules; discard at-rules and complex selectors."""
+def _stylesheet(css: str, media: bool = True) -> str:
+    """Flat type/class/id rules (and ::before/::after), and those behind a colour-scheme
+    @media; discard other at-rules and complex selectors."""
     rules = []
     start = opening = depth = 0
     quote = ""
@@ -88,17 +131,25 @@ def _stylesheet(css: str) -> str:
         elif char == "}":
             if depth:
                 depth -= 1
-                if depth == 0 and not nested:
-                    rules.append((css[start:opening], css[opening + 1:index]))
+                if depth == 0:
+                    rules.append((css[start:opening], css[opening + 1:index], nested))
             if depth == 0:
                 start = index + 1
         elif char == ";" and depth == 0:
             start = index + 1
     safe = []
-    for selector, declarations in rules:
+    for selector, body, nested in rules:
         selector = re.sub(r"/\*.*?(?:\*/|\Z)", "", selector, flags=re.S).strip()
-        declarations = _declarations(declarations)
-        if declarations and re.fullmatch(r"[A-Za-z0-9_#., >+~*\-]+", selector):
+        if nested:
+            # One level of light/dark rules, which hold flat rules only.
+            scheme = SCHEME.fullmatch(selector)
+            inner = _stylesheet(body, media=False) if media and scheme else ""
+            if inner:
+                safe.append(f"@media (prefers-color-scheme:{scheme.group(1).lower()}){{{inner}}}")
+            continue
+        plain = re.sub(r"::?(?:before|after)(?=$|[\s,>+~])", "", selector)
+        declarations = _declarations(body, pseudo=plain != selector)
+        if declarations and re.fullmatch(r"[A-Za-z0-9_#., >+~*\-]+", plain):
             safe.append(f"{selector}{{{declarations}}}")
     return "".join(safe)
 
@@ -135,10 +186,11 @@ class _Snapshot(HTMLParser):
             elif key == "src" and tag == "img":
                 if not re.fullmatch(r"data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\s]+", value):
                     continue
+            elif key in REFS and re.fullmatch(r"url\(#[A-Za-z_][\w-]*\)", value, re.ASCII):
+                pass
             elif key not in ATTRS or re.search(r"url|[\\(@]", value, re.I):
                 continue
-            # SVG names are case sensitive in standalone HTML.
-            key = "viewBox" if key == "viewbox" else key
+            key = SVG_CASE.get(key, key)
             safe.append(f' {key}="{escape(value, quote=True)}"')
         if tag in {"html", "body"}:
             self.root_attrs.setdefault(tag, "".join(safe))

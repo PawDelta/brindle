@@ -1,12 +1,16 @@
 import base64
 import json
+import re
 from html.parser import HTMLParser
+from pathlib import Path
 
 import pytest
 
-from brindle import visuals
+from brindle import visual_export, visuals
 from brindle.daemon import routes_actions
 from test_visuals import SECRET, client, session  # noqa: F401 - shared visuals fixtures
+
+FIXTURES = Path(__file__).parent / "fixtures" / "visuals"
 
 
 @pytest.mark.parametrize("hostile", [
@@ -32,6 +36,16 @@ from test_visuals import SECRET, client, session  # noqa: F401 - shared visuals 
     pytest.param('<style>@media screen {.selected{color:red}}</style>',
                  marks=pytest.mark.variant("unsupported nested stylesheet")),
     '<!--bad--><object><p>bad</p></object>',
+    pytest.param('<svg><path marker-end="url(https://evil.test/#a)" fill="url(#a) url(https://evil.test)" d="M0 0"></path></svg>',
+                 marks=pytest.mark.variant("SVG reference to another document")),
+    pytest.param('<style>@media (prefers-color-scheme:dark){.x{background:url(https://evil.test)}'
+                 '@media (prefers-color-scheme:dark){.y{background-image:url(https://evil.test)}}}</style>',
+                 marks=pytest.mark.variant("fetch inside a colour-scheme block, and a nested one")),
+    pytest.param('<style>.x::before{content:url(https://evil.test)}.y::after{content:"a" url(https://evil.test)}'
+                 '.z{font-family:"url(https://evil.test)"}</style>',
+                 marks=pytest.mark.variant("pseudo-element content and quoted strings that fetch")),
+    pytest.param('<style>.x{color:color-mix(in srgb, red 40%, image-set("https://evil.test"))}</style>',
+                 marks=pytest.mark.variant("fetching function inside an allowed colour function")),
 ])
 def test_snapshot_strips_active_content(db, session, client, hostile):
     _, boss, _ = session
@@ -96,6 +110,49 @@ def test_snapshot_preserves_safe_class_styling(db, session, client, layout):
     parser.feed(html)
     assert tags.count("html") == tags.count("body") == 1
     assert html.index("Content-Security-Policy") < html.index("<style>") < html.index("<body")
+
+
+def test_export_keeps_how_the_visual_looked():
+    """Two of the owner's visuals (tests/fixtures/visuals): *.page.html is the published page, and
+    *.snapshot.html what the app's frame (app/src/screens/Session/Visuals/frame.tsx, computedSnapshot)
+    made of it in a real browser: computed light values, dark differences behind @media."""
+    def export(name):
+        return visual_export.sanitise((FIXTURES / name).read_text())
+
+    def rule(html, element, pseudo="", dark=False):
+        name = re.search(element + r'[^>]*?\b(brindle-s\d+)', html).group(1)
+        split = html.index("@media (prefers-color-scheme:dark){")
+        return re.search(rf"\.{name}{pseudo}\{{([^}}]*)\}}", html[split:] if dark else html[:split]).group(1)
+
+    leaks = export("process-leaks.snapshot.html")
+    pill = r'<span class="pill fixed'
+    for value in ("color:rgb(4, 110, 80)", "background-color:rgba(4, 110, 80, 0.1)",
+                  "border-top-left-radius:999px", "font-size:10.5px", "white-space:nowrap"):
+        assert value in rule(leaks, pill)
+    assert rule(leaks, pill, dark=True) == "color:rgb(52, 211, 153);background-color:rgba(52, 211, 153, 0.12)"
+    assert ".pill{padding:2px 8px}" in leaks
+    assert '-apple-system, "system-ui", "SF Pro Text"' in rule(leaks, "<h1")
+    assert "text-transform:uppercase;text-align:start" in rule(leaks, "<h2")
+    # The arrows and the dashed box: an internal marker and its reference, dashes and colours.
+    assert '<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"' in leaks
+    assert 'marker-end="url(#a)"' in leaks
+    dashed = r'<rect x="600"[^>]*stroke-dasharray="4 3"'
+    assert "stroke:rgb(180, 35, 24)" in rule(leaks, dashed)
+    assert "stroke:rgb(248, 113, 113)" in rule(leaks, dashed, dark=True)
+
+    table = export("now-vs-063.snapshot.html")
+    old = r'<td class="old'
+    for value in ("border-bottom-style:solid", "border-bottom-width:1px", "border-bottom-color:rgba(20, 40, 36, 0.11)"):
+        assert value in rule(table, old)
+    assert "border-bottom-color:rgba(120, 150, 135, 0.16)" in rule(table, old, dark=True)
+    assert rule(table, old, "::before").startswith('content:"0.6.3  ";color:rgb(180, 35, 24)')
+    assert rule(table, old, "::before", dark=True) == "color:rgb(248, 113, 113)"
+    assert "table{width:100%;border-collapse:collapse;overflow:hidden;min-width:760px}" in table
+
+    # A snapshot without computed values (an older app) still keeps its var-free shapes.
+    page = export("process-leaks.page.html")
+    assert ".pill{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}" in page
+    assert 'stroke-dasharray="4 3"' in page and 'marker-end="url(#a)"' in page
 
 
 @pytest.mark.parametrize("case,status", [
