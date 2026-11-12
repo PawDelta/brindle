@@ -166,7 +166,22 @@ def list_sessions(db: DB, request: Request) -> Any:
     live = [SessionDTO.from_agent(s.root, s.goal).to_json() for s in sessions.live(db, repo)]
     paused = [SessionDTO.from_agent(s.root, sessions.goal_line(db, s.root)).to_json()
               for s in sessions.paused(db, repo) if s.root.dismissed_at is None]
-    return live + paused
+    listed = {row["id"]: row for row in live + paused}
+    live_ids = {row["id"] for row in live}
+    recovery = getattr(request.app.state, "recovery", None)
+    for root_id in recovery.resuming() if recovery else ():
+        root = db.get_agent(root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if not root or not ws or ws.repo_root != repo or root.dismissed_at is not None or root.status == "done":
+            continue
+        # A launch's starting root may not have a live pane yet, so neither list includes it.
+        row = listed.setdefault(root_id, SessionDTO.from_agent(root, sessions.goal_line(db, root)).to_json())
+        row["status"] = "resuming"
+        live_ids.add(root_id)
+    # Recovering roots keep the normal live-session order even without a pane.
+    current = sorted((row for root_id, row in listed.items() if root_id in live_ids),
+                     key=lambda row: row["created_at"], reverse=True)
+    return current + [row for row in paused if row["id"] not in live_ids]
 
 
 @_json

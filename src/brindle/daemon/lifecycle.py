@@ -466,6 +466,7 @@ class Recovery:
         self.idle.set()
         self.record: list[dict] = []    # what is on disk: sessions not confirmed back yet
         self.pending: list[dict] = []   # those whose turn in this start isn't over
+        self.returning: set[str] = set()  # eligible sessions queued or launching in this start
         self.lanes: deque[list[dict]] = deque()     # those whose turn hasn't begun, under lock
         self.total = 0                  # how many entries the record had
         self.handed_over = False        # stop has returned: the record is the way out's now
@@ -499,6 +500,12 @@ class Recovery:
         """``entry``'s turn in this start is over, back or not."""
         with self.lock:
             self.pending.remove(entry)
+            self.returning.discard(entry["id"])
+
+    def resuming(self) -> set[str]:
+        """Sessions this start is bringing back, until their attempt ends."""
+        with self.lock:
+            return set() if self.idle.is_set() or self.stopping.is_set() else set(self.returning)
 
     def next_lane(self) -> list[dict] | None:
         with self.lock:
@@ -707,7 +714,7 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
 
     ``recovery``: the daemon's (serve), which may be stopped meanwhile: then
     nothing more is launched, and what is left stays on the record."""
-    from brindle import agents, secrets, tmux
+    from brindle import agents, bus, secrets, signin_pause, tmux
     from brindle.db import DB
 
     recovery = recovery or Recovery()
@@ -730,7 +737,17 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
         env = {k: v for k, v in os.environ.items() if v and not secrets.is_job_secret(k)}
         db = DB()
         try:
+            held = set(signin_pause.paused_for_signin())
+            with recovery.lock:
+                recovery.returning = {
+                    entry["id"] for entry in entries
+                    if entry.get("tries", 0) < RESUME_TRIES and entry.get("server") == server
+                    and (root := db.get_agent(entry["id"])) is not None
+                    and root.status != "done" and agents.same_server(root) and root.id not in held
+                }
             lanes = _lanes(db, _most_recent_first(db, entries))
+            for root_id in recovery.resuming():
+                bus.publish_agent(db, "session.changed", root_id)
         finally:
             db.conn.close()
         # The session the app showed last comes back first, before its lane's others, and alone.
@@ -769,6 +786,7 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                         except Exception:  # noqa: BLE001 - the others still come back
                             log.warning("brindle: couldn't resume session %s", entry["id"], exc_info=True)
                         recovery.finished(entry)
+                        bus.publish_agent(db, "session.changed", entry["id"])
                         if entry["id"] == viewed:
                             alone.set()
             finally:
