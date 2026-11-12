@@ -288,24 +288,27 @@ Each sidebar (`brindle watch`) re-reads its view every 10 s while idle
 
 Measured with `subprocess.Popen.__init__` wrapped, as for S1: 4 sessions in
 one repo (the main checkout and 3 session worktrees, each with an idle
-supervisor), 60 idle refreshes on a fake clock (10 minutes at the idle pace:
-`view.snapshot`, `view.autopilot_entry`, `watch_costs.local`), and two
+supervisor), 240 idle refreshes on a fake clock (40 minutes at the idle
+pace: `view.snapshot`, `view.autopilot_entry`, `watch_costs.local`), and two
 sidebars whose own minutes fall 30 s apart, each calling
 `_cull_in_background` when its minute is up. The warm-up look before the
 count (18 git: one status per worktree) is the same before and after.
 
-| 10 idle minutes | refreshes (one sidebar) | cull sweeps (two sidebars) | cull processes (git) |
-|---|---|---|---|
-| before | 12 git | 20 | 329 (169) |
-| after | 0 | 10 | 179 (99) |
+| 40 idle minutes | refreshes (one sidebar) | of which in minutes 10–40 | cull sweeps (two sidebars) | cull processes (git) |
+|---|---|---|---|---|
+| before | 48 git | 36 | 80 | 1229 (589) |
+| after | 3 git | 0 | 40 | 629 (309) |
 
-Before, the refreshes' 12 are `git status` and `rev-list` in each of the 3
-worktrees at each of the two safety refreshes; the main checkout has no base
-branch, so no status. A sweep with 4 idle sessions is about 8 git (two per
-running agent, see What is left) and 8 other processes (`ps` twice, `tmux`).
-In general, before: per sidebar, 2 git per shown or checked worktree every 5
-minutes plus a sweep a minute; after: no git from an idle sidebar's view, and
-one sweep a minute between all sidebars, however many there are.
+Before, the refreshes' 48 are `git status` and `rev-list` in each of the 3
+worktrees at each of the eight safety refreshes; the main checkout has no
+base branch, so no status. After, the 3 are one `git status` per worktree at
+its first safety look, which takes the baseline (see Fix); none after that.
+A sweep with 4 idle sessions is about 8 git (two per running agent, see What
+is left) and 8 other processes (`ps` twice, `tmux`). In general, before: per
+sidebar, 2 git per shown or checked worktree every 5 minutes, plus a sweep a
+minute; after: one `git status` per worktree when a sidebar opens and once
+more 5 minutes later, then none from an idle sidebar's view, and one sweep a
+minute between all sidebars, however many there are.
 
 Fix:
 
@@ -316,27 +319,39 @@ Fix:
   sweep less than a minute old skips it. An unusable stamp claims nothing
   (that sidebar sweeps, as before).
 - The safety look runs without git: `status_cache._deep_fingerprint` stats
-  what `git status` looks at below the root, each tracked file (read from
-  the index by `status_cache.index_paths`, versions 2 to 4), each directory
-  holding one or a file git last reported, and the directories directly
-  inside those. git runs only when that moved. It is taken before git looks,
-  so an edit made while git looks shows at the next safety look. An index
-  this doesn't read (none, a split or sparse index, a submodule) gets
-  `git status` at each safety look, as before, and every 30 minutes
-  (`BACKSTOP`) git looks regardless.
+  what `git status` looks at below the root: each tracked file (read from
+  the index by `status_cache.index_paths`, versions 2 to 4), every directory
+  except those git reported ignored (`git status --ignored=matching` names an
+  ignored directory as `dir/` without listing it) and nested repositories,
+  each `.gitignore`, and the ignore files outside the worktree
+  (`info/exclude`, the global one, a configured `core.excludesFile`). A file
+  new anywhere git looks, an empty folder deep down included, changes its
+  directory. git runs only when that moved. The baseline is taken just
+  before a git look, leaving out the ignored directories the previous look
+  reported, so a worktree's first safety look is a git look; an edit made
+  while git looks shows at the next one. An index this doesn't read (none, a
+  split or sparse index, a submodule) gets `git status` at each safety look,
+  as before.
 - ahead/behind is kept while HEAD and the base ref (read from the git files,
   `status_cache._refs_key`) are the very commits it was counted for: a busy
-  worktree's edits re-run `git status`, no longer `rev-list`.
-- Freshness is as before: a change to the index, HEAD, the refs or the root's
-  entries shows on the next refresh; an edit below the root at the next
-  safety look (within 5 minutes), now found by stat instead of git.
+  worktree's edits re-run `git status`, no longer `rev-list`. The upstream
+  git's status line names (any remote, any branch name, already mapped
+  through the remote's refspec, or a local branch) is watched as a ref
+  too, so its moving re-runs git at the next refresh; a new upstream is
+  watched from the look that reported it, and the next safety look asks git.
+- Freshness is as before or better: a change to the index, HEAD, the base
+  ref, the upstream or the root's entries shows on the next refresh; any
+  other change git would report, at the next safety look (within 5
+  minutes), now found by stat instead of git.
 
 Tests in `tests/test_watch.py`:
 `test_an_idle_sidebar_starts_no_git_until_something_changes` (four quiet
-sessions, ten minutes of idle refreshes start no process, where the
-unmodified code started `git status` and `rev-list` at each safety look;
-then an edit in a subdirectory of a worktree with a v4 index shows at the
-next safety look) and `test_background_cull_keeps_one_sweep_in_flight` (a
+sessions, forty minutes of idle refreshes after the first safety look start
+no process, where the unmodified code started `git status` and `rev-list`
+at each safety look; then an upstream on another remote moving shows on the
+next refresh, and a file new in an old empty folder three levels down and
+an edit in a subdirectory of a worktree with a v4 index show at the next
+safety look) and `test_background_cull_keeps_one_sweep_in_flight` (a
 second sidebar due 30 s after the first's sweep doesn't sweep; the
 unmodified code did).
 
@@ -401,7 +416,8 @@ safety refresh (S3). With S3 an idle sidebar's view starts no git, and the
   once per machine rather than per sidebar (S3). Next: decide the route
   without building the whole environment.
 - A sidebar's first look (opening it) still runs git for every worktree it
-  shows, and a worktree an agent is editing re-runs `git status` on each
+  shows, and its first safety look a `git status` each, to take the
+  baseline; a worktree an agent is editing re-runs `git status` on each
   refresh that sees a change, as before.
 - Orphans that already exist (from before this fix) are not reaped: a shell
   reparented to launchd names no agent, and its environment can't be trusted

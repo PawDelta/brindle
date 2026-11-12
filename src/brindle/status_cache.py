@@ -16,12 +16,15 @@ workspaces, that adds up. This module:
 
 In-place edits below the root may leave all these timestamps untouched.
 Every five minutes a safety look stats what ``git status`` would look at
-there (each tracked file, from the index, and the directories holding them),
-still without git, and git runs only when that moved: an idle sidebar starts
-no git at all. ahead/behind is kept for as long as HEAD and the base ref are
-the very commits it was counted for. Where the index can't be read that way
-(see ``index_paths``) the safety look is a ``git status``, as before; and
-every half hour (``BACKSTOP``) git looks regardless.
+there (each tracked file, from the index, every directory but those git
+reported ignored, and the ignore files), still without git, and git runs
+only when that moved: an idle sidebar starts no git at all. Its baseline is
+taken just before a git look, from the ignored directories the previous one
+reported, so a worktree's first safety look is a git look. ahead/behind is
+kept for as long as HEAD and the base ref are the very commits it was
+counted for, and the upstream git reported is watched as a ref. Where the
+index can't be read that way (see ``index_paths``) the safety look is a
+``git status``, as before.
 
 The cache is process-lifetime, module-level state: correct for one
 long-lived ``brindle watch``/``brindle ls`` process, not meant to be shared
@@ -30,6 +33,7 @@ across processes.
 
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import struct
@@ -41,28 +45,31 @@ from typing import NamedTuple
 from brindle import git, spawn
 
 TTL = 300.0  # how often the safety look below the shallow worktree fingerprint runs
-BACKSTOP = 1800.0  # how long a status the safety look keeps finding unchanged is believed
 WARM_WORKERS = 8
 
 
 class _Entry(NamedTuple):
     fp: tuple                 # _fingerprint after the status was computed
-    refs: tuple               # _refs_key before it was
+    refs: tuple               # _refs_key before it was (or, the upstream new, just after)
     checked_at: float         # the last look (git's or the safety look's)
-    computed_at: float        # git's last look
     status: git.Status
     deep: int | None          # _deep_fingerprint taken before git's look, None if not taken
-    hint: list[str]           # the dirty files that fingerprint watched the folders of
+    hint: list[str]           # the ignored paths that fingerprint left out
+    upstream: str | None      # the upstream git reported
+    ignored: list[str]        # the ignored paths git reported: the next baseline's hint
 
 
 _base_ref_cache: dict[tuple[str, str], tuple[tuple, str]] = {}
 _status_cache: dict[str, _Entry] = {}
+# What _compute_status's git status said besides the Status: (upstream, ignored paths).
+_reported: dict[str, tuple[str | None, list[str]]] = {}
 
 
 def clear() -> None:
     """Drop all cached state. Mainly for tests."""
     _base_ref_cache.clear()
     _status_cache.clear()
+    _reported.clear()
 
 
 def _worktree_gitdir(path: Path) -> Path:
@@ -199,19 +206,30 @@ def _fingerprint(path: Path, wt_gitdir: Path, common: Path,
     return (index_mtime, head_mtime, logs_head_mtime, ref_mtime, root_mtime, entries)
 
 
-def _refs_key(wt_gitdir: Path, common: Path, ref: str) -> tuple:
-    """The commits HEAD, the base ``ref`` and ``origin/<branch>`` (the
-    usual upstream) name, read from the git files, and the mtimes of the
-    config files that say which upstream a branch has. ahead/behind is a
+def _short_ref(wt_gitdir: Path, common: Path, short: str) -> tuple[str, str] | None:
+    """(full ref, commit) of a ref name git printed in its short form (the
+    upstream in ``git status``'s branch line: already mapped through the
+    remote's refspec), tried in git's own order; None when none exists."""
+    for full in (f"refs/{short}", f"refs/tags/{short}", f"refs/heads/{short}",
+                 f"refs/remotes/{short}", f"refs/remotes/{short}/HEAD"):
+        sha = _resolve(wt_gitdir, common, f"ref: {full}")
+        if sha:
+            return full, sha
+    return None
+
+
+def _refs_key(wt_gitdir: Path, common: Path, ref: str, upstream: str | None) -> tuple:
+    """The commits HEAD, the base ``ref`` and the branch's ``upstream`` (as
+    git last reported it) name, read from the git files, and the mtimes of
+    the config files that say which upstream a branch has. ahead/behind is a
     function of the first two alone; the rest decides ``unpushed``."""
     try:
         head_value = (wt_gitdir / "HEAD").read_text().strip()
     except OSError:
         head_value = ""
-    branch = head_value[len("ref: refs/heads/"):] if head_value.startswith("ref: refs/heads/") else None
     base = _resolve(wt_gitdir, common, "ref: " + str(_ref_file(Path(""), ref)))
-    upstream = _resolve(wt_gitdir, common, f"ref: refs/remotes/origin/{branch}") if branch else None
-    return (_resolve(wt_gitdir, common, head_value), base, upstream,
+    tracked = (upstream, _short_ref(wt_gitdir, common, upstream)) if upstream else None
+    return (_resolve(wt_gitdir, common, head_value), base, tracked,
             _mtime(common / "config"), _mtime(wt_gitdir / "config.worktree"))
 
 
@@ -282,83 +300,108 @@ def index_paths(index: Path, hash_len: int = 20) -> list[bytes] | None:
     return paths
 
 
-def _deep_fingerprint(path: Path, wt_gitdir: Path, common: Path, dirty: list[str]) -> int | None:
+def _unquote(name: str) -> bytes:
+    """A path as git status prints it (C-quoted when it has to be) as bytes."""
+    if len(name) >= 2 and name[0] == name[-1] == '"':
+        try:
+            return codecs.escape_decode(name[1:-1].encode())[0]
+        except ValueError:
+            pass
+    return os.fsencode(name)
+
+
+def _exclude_files(common: Path) -> list[Path]:
+    """The ignore files outside the worktree git reads: the repo's
+    info/exclude, the default global one, and any core.excludesFile the repo
+    or global config names."""
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "git"
+    configs = [common / "config", Path.home() / ".gitconfig", xdg / "config"]
+    out = [common / "info" / "exclude", xdg / "ignore", *configs]
+    for config in configs:
+        try:
+            text = config.read_text(errors="replace")
+        except OSError:
+            continue
+        for named in re.findall(r"(?im)^\s*excludesfile\s*=\s*(.+?)\s*$", text):
+            out.append(Path(os.path.expanduser(named.strip('"'))))
+    return out
+
+
+def _deep_fingerprint(path: Path, wt_gitdir: Path, common: Path, ignored: list[str]) -> int | None:
     """What ``git status`` would look at below the root, stat'ed without
-    git: every tracked file, each directory holding one or a file git last
-    reported, and the directories directly inside those (a file new in a
-    directory git hasn't seen yet changes that directory). None when the
-    index can't be read (see ``index_paths``)."""
+    git: every tracked file, every directory but the ``ignored`` ones git
+    reported (and nested repositories, which it doesn't enter), and the
+    ignore files. A file new anywhere git looks changes its directory. None
+    when the index can't be read (see ``index_paths``)."""
     paths = index_paths(wt_gitdir / "index", _hash_len(common))
     if paths is None:
         return None
     root = os.fsencode(path)
-    seen: list = []
-    dirs = {b""}
-
-    def holding(p: bytes) -> None:
-        d = os.path.dirname(p)
-        while d not in dirs:
-            dirs.add(d)
-            d = os.path.dirname(d)
-
+    seen: list = [(str(p), _mtime(p)) for p in _exclude_files(common)]
     for p in paths:
         try:
             s = os.lstat(os.path.join(root, p))
             seen.append((s.st_mtime_ns, s.st_ctime_ns, s.st_size, s.st_ino))
         except OSError:
             seen.append(None)
-        holding(p)
-    for f in dirty:
-        holding(os.fsencode(f.rpartition(" -> ")[2].strip('"')))
-    for d in sorted(dirs):
-        here = os.path.join(root, d) if d else root
+    skip = {os.path.join(root, _unquote(name).rstrip(b"/")) for name in ignored if name.endswith("/")}
+    for here, dirs, files in os.walk(root):
         try:
-            seen.append((d, os.stat(here).st_mtime_ns))
-            with os.scandir(here) as children:
-                seen.extend(sorted((c.name, c.stat(follow_symlinks=False).st_mtime_ns)
-                                   for c in children if c.is_dir(follow_symlinks=False) and c.name != b".git"))
+            seen.append((here, os.stat(here).st_mtime_ns))
         except OSError:
-            seen.append((d, None))
+            seen.append((here, None))
+        if here != root and (b".git" in dirs or b".git" in files):
+            dirs[:] = []            # a repository of its own: git shows it whole, never what's inside
+            continue
+        dirs[:] = sorted(d for d in dirs if d != b".git" and os.path.join(here, d) not in skip)
+        for f in files:
+            if f == b".gitignore":
+                seen.append((here, _mtime(Path(os.fsdecode(os.path.join(here, f))))))
     return hash(tuple(seen))
 
 
-def _parse_branch_header(line: str) -> tuple[str | None, bool, int]:
+def _parse_branch_header(line: str) -> tuple[str | None, bool, int, str | None]:
     """Parses ``git status --porcelain=v1 --branch``'s first line.
-    Returns ``(branch, has_upstream, ahead_of_upstream)``."""
+    Returns ``(branch, has_upstream, ahead_of_upstream, upstream)``."""
     body = line[3:]  # strip "## "
     if body.startswith("No commits yet on "):
-        return body[len("No commits yet on "):], False, 0
+        return body[len("No commits yet on "):], False, 0, None
     if body == "HEAD (no branch)":
-        return None, False, 0
+        return None, False, 0, None
     branch, sep, rest = body.partition("...")
     if not sep:
-        return branch, False, 0
-    _upstream, _, bracket = rest.partition(" [")
+        return branch, False, 0, None
+    upstream, _, bracket = rest.partition(" [")
     bracket = bracket.rstrip("]")
     if not bracket or bracket == "gone":
-        return branch, bracket != "gone", 0
+        return branch, bracket != "gone", 0, upstream
     ahead = 0
     for part in bracket.split(", "):
         if part.startswith("ahead"):
             ahead = int(part.split()[1])
-    return branch, True, ahead
+    return branch, True, ahead, upstream
 
 
 def _compute_status(path: Path, base: str, ref: str,
                     ahead_behind: tuple[int, int] | None = None) -> git.Status:
     """``ahead_behind``: (behind, ahead) already counted for these very
-    commits, so no ``rev-list`` runs."""
-    proc = git.run(["status", "--porcelain=v1", "--branch", "--untracked-files=all"], path)
+    commits, so no ``rev-list`` runs. The upstream and the ignored paths git
+    reported (an ignored directory as ``dir/``, never what's in it) go to
+    ``_reported``, for the safety look."""
+    proc = git.run(["status", "--porcelain=v1", "--branch", "--untracked-files=all",
+                    "--ignored=matching"], path)
     lines = proc.stdout.splitlines()
-    branch = None
+    branch = upstream = None
     unpushed: int | None = None
     file_lines = lines
     if lines and lines[0].startswith("## "):
-        branch, has_upstream, ahead_of_upstream = _parse_branch_header(lines[0])
+        branch, has_upstream, ahead_of_upstream, upstream = _parse_branch_header(lines[0])
         unpushed = ahead_of_upstream if has_upstream else None
         file_lines = lines[1:]
-    dirty = [line[3:] for line in file_lines if line]
+    dirty = [line[3:] for line in file_lines if line and not line.startswith("!! ")]
+    ignored = [line[3:] for line in file_lines if line.startswith("!! ")]
     behind, ahead = git.ahead_behind(path, ref) if ahead_behind is None else ahead_behind
+    _reported[str(path)] = (upstream, ignored)
     return git.Status(branch, base, ahead, behind, dirty, unpushed)
 
 
@@ -378,30 +421,35 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
         fp = _fingerprint(path, wt_gitdir, common, ref)
     except OSError:
         return _compute_status(path, base, ref)
-    refs = _refs_key(wt_gitdir, common, ref)
     key = str(path)
     hit = _status_cache.get(key)
+    used = hit.upstream if hit is not None else None
+    refs = _refs_key(wt_gitdir, common, ref, used)
     hint: list[str] | None = None
     if hit is not None and hit.fp == fp and hit.refs == refs:
         if now - hit.checked_at < TTL:
             return hit.status
         # The safety look is due: below the root, by stat, before any git.
-        if (hit.deep is not None and now - hit.computed_at < BACKSTOP
-                and _deep_fingerprint(path, wt_gitdir, common, hit.hint) == hit.deep):
+        if hit.deep is not None and _deep_fingerprint(path, wt_gitdir, common, hit.hint) == hit.deep:
             _status_cache[key] = hit._replace(checked_at=now)
             return hit.status
-        hint = hit.status.dirty_files
-    elif hit is None:
-        hint = []
-    # A quiet worktree (a first look, or a safety look that found a change)
-    # gets the deep baseline, taken before git looks so that a change made
-    # while it looks shows next time; a busy one's waits until it is quiet.
+        hint = hit.ignored
+    # A quiet worktree (its safety look is due) gets the deep baseline,
+    # taken before git looks so that a change made while it looks shows next
+    # time; a first look has no ignored directories to leave out yet, and a
+    # busy worktree's baseline waits until it is quiet.
     deep = None if hint is None else _deep_fingerprint(path, wt_gitdir, common, hint)
     if hit is not None and refs[0] and refs[1] and hit.refs[:2] == refs[:2]:
         # HEAD and the base are the very commits counted before: no rev-list.
         st = _compute_status(path, base, ref, ahead_behind=(hit.status.behind, hit.status.ahead))
     else:
         st = _compute_status(path, base, ref)
+    upstream, ignored = _reported.pop(key, (None, []))
+    if upstream != used:
+        # A new upstream (or the first look's): watched from now on, read just
+        # after git's look; the next safety look asks git again in case it
+        # moved in between.
+        refs, deep = _refs_key(wt_gitdir, common, ref, upstream), None
     # `git status` can rewrite the index (refreshing racily-clean stat data)
     # even when nothing changed, so re-fingerprint *after* computing: caching
     # the pre-call fingerprint would make every call look stale.
@@ -409,7 +457,7 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
         fp = _fingerprint(path, wt_gitdir, common, ref)
     except OSError:
         return st
-    _status_cache[key] = _Entry(fp, refs, now, now, st, deep, hint or [])
+    _status_cache[key] = _Entry(fp, refs, now, st, deep, hint or [], upstream, ignored)
     return st
 
 

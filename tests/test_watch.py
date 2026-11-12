@@ -35,7 +35,9 @@ def test_background_cull_keeps_one_sweep_in_flight(monkeypatch):
 @pytest.fixture(scope="module")
 def four_sessions(tmp_path_factory):
     """A repo's main checkout and three session worktrees, each with a
-    tracked file below its root; built once, with its own git identity."""
+    tracked file below its root; built once, with its own git identity.
+    s1 has an ignored build tree and empty nested folders, s2 a commit its
+    upstream (``upstream/review``, on another remote) lacks, s3 a v4 index."""
     from brindle import git
 
     base = tmp_path_factory.mktemp("sessions")
@@ -48,11 +50,26 @@ def four_sessions(tmp_path_factory):
         main = base / "proj"
         (main / "src").mkdir(parents=True)
         (main / "src" / "mod.py").write_text("x = 1\n")
+        (main / ".gitignore").write_text("build/\n")
         git.run(["init", "-q", "-b", "main"], main)
         git.run(["add", "-A"], main)
         git.run(["commit", "-qm", "init"], main)
         for i in (1, 2, 3):
             git.run(["worktree", "add", "-q", "-b", f"brindle/session-{i}", str(base / f"s{i}")], main)
+        (base / "s1" / "build" / "out").mkdir(parents=True)
+        (base / "s1" / "build" / "out" / "app.bin").write_text("built\n")
+        (base / "s1" / "empty" / "nested" / "deep").mkdir(parents=True)
+        s2 = base / "s2"
+        (s2 / "src" / "two.py").write_text("y = 1\n")
+        git.run(["add", "-A"], s2)
+        git.run(["commit", "-qm", "two"], s2)
+        for key, value in (("remote.upstream.url", str(base / "elsewhere.git")),
+                           ("remote.upstream.fetch", "+refs/heads/*:refs/remotes/upstream/*"),
+                           ("branch.brindle/session-2.remote", "upstream"),
+                           ("branch.brindle/session-2.merge", "refs/heads/review")):
+            git.run(["config", key, value], s2)
+        git.run(["update-ref", "refs/remotes/upstream/review", "HEAD~1"], s2)
+        git.run(["update-index", "--index-version", "4"], base / "s3")
     return [main, *(base / f"s{i}" for i in (1, 2, 3))]
 
 
@@ -88,30 +105,39 @@ def _sidebar(db, paths, monkeypatch):
 
 
 def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions, monkeypatch):
-    """Ten idle minutes of refreshes (two safety looks) of four quiet
+    """Forty idle minutes of refreshes (eight safety looks) of four quiet
     sessions start no process: the safety look used to run git status and
-    rev-list in every worktree, in every sidebar. An edit below a root (in a
-    worktree whose index is v4, which compresses its paths) still shows at
-    the next safety look."""
+    rev-list in every worktree, in every sidebar. What git would see still
+    shows: an upstream on another remote moving at once; a file new in an
+    old empty folder deep down, and an edit below the root in a v4 index
+    (which compresses its paths), at the next safety look."""
     from brindle import git, status_cache
 
-    path = four_sessions[3]
-    git.run(["update-index", "--index-version", "4"], path)
+    s1, s2, s3 = four_sessions[1:]
     refresh, started = _sidebar(db, four_sessions, monkeypatch)
     first = refresh()
+    for _ in range(int(status_cache.TTL / watch.IDLE_SECONDS)):
+        refresh()                                    # the first safety look takes the baseline
     started.clear()
-    for _ in range(int(600 / watch.IDLE_SECONDS)):
+    for _ in range(int(2400 / watch.IDLE_SECONDS)):
         shown = refresh()
     assert started == []
     assert shown == first
-    edited = path / "src" / "mod.py"
-    edited.write_text("x = 2\n")                     # the root and its entries are untouched
+    assert status_cache.cached_status(s2, "main", now=0).unpushed == 1
+    new, edited = s1 / "empty" / "nested" / "deep" / "new.txt", s3 / "src" / "mod.py"
     try:
+        git.run(["update-ref", "refs/remotes/upstream/review", "HEAD"], s2)   # a fetch, say
+        refresh()
+        assert status_cache.cached_status(s2, "main", now=0).unpushed == 0
+        new.write_text("new\n")
+        edited.write_text("x = 2\n")                 # the roots and their entries are untouched
         for _ in range(int(status_cache.TTL / watch.IDLE_SECONDS)):
             shown = refresh()
-        assert [shown[f"w{i}"]["dirty"] for i in (1, 2, 3)] == [0, 0, 1]
+        assert [shown[f"w{i}"]["dirty"] for i in (1, 2, 3)] == [1, 0, 1]
     finally:
+        new.unlink(missing_ok=True)
         edited.write_text("x = 1\n")
+        git.run(["update-ref", "refs/remotes/upstream/review", "HEAD~1"], s2)
 
 
 @pytest.mark.parametrize("newer_schema", [False, True], ids=["older", "newer"])
