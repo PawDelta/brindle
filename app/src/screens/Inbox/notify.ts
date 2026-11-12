@@ -50,8 +50,9 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
       last = inbox;
       const keys = new Set(inbox.map(itemKey));
       for (const item of inbox) {
+        // A failure is remembered with what failed, so a new failure still notifies.
         const prKey = (item.kind === "pr_opened" || item.kind === "pr_failed") && item.url
-          ? `${item.kind}:${item.url}` : null;
+          ? JSON.stringify([item.kind, item.url, item.kind === "pr_failed" ? item.detail ?? "" : ""]) : null;
         if (seen && (prKey ? !seenPrs.has(prKey) : !seen.has(itemKey(item)))) {
           sink.notify(kindLabel(item), describe(item), item.kind === "pr_opened" ? (item.url ?? undefined) : undefined);
         }

@@ -25,7 +25,7 @@ it("announces each PR once per kind across push gaps and CI reruns", () => {
   snapshot({ ...next });
   expect(notify).toHaveBeenCalledTimes(1);
 
-  const failed = { ...next, kind: "pr_failed" };
+  const failed = { ...next, kind: "pr_failed", detail: "test failed" };
   snapshot(failed);
   expect(notify).toHaveBeenCalledTimes(2);
   snapshot(next);
@@ -33,5 +33,8 @@ it("announces each PR once per kind across push gaps and CI reruns", () => {
   snapshot({ ...failed });
   snapshot(next);
   expect(notify).toHaveBeenCalledTimes(2);
+  // A different failure on the same PR is news.
+  snapshot({ ...failed, detail: "lint failed" });
+  expect(notify).toHaveBeenCalledTimes(3);
   stop();
 });
