@@ -5,6 +5,7 @@ directory themselves, so an agent still runs in its worktree on that server;
 `brindle doctor` says the server should be restarted."""
 
 import os
+import shlex
 import shutil
 from types import SimpleNamespace
 
@@ -50,3 +51,18 @@ def test_a_pane_runs_in_its_worktree_on_a_server_whose_directory_was_deleted(tmp
     assert tmux.has_session("persons")
     [check] = doctor.tmux_cwd_checks()
     assert check.level == doctor.WARN
+
+
+def test_sidebar_hook_stays_silent_when_its_respawn_fails(tmp_path, monkeypatch):
+    """A failed restart (the pane already gone) once exited 1, and tmux showed
+    "'...' returned 1" over whatever pane the person was looking at."""
+    from conftest import sh
+
+    fake = tmp_path / "tmux"
+    fake.write_text('#!/bin/sh\ncase "$*" in *respawn-pane*) echo "no pane" >&2; exit 1;; esac\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("BRINDLE_TMUX_BIN", str(fake))
+    log = tmp_path / "sidebar.log"
+    script = tmux.sidebar_respawn_script("%8", str(tmp_path), {}, log)
+    assert sh(f"/bin/sh -c {shlex.quote(script)} brindle-sidebar 143", tmp_path) == ""
+    assert "no pane" in log.read_text() and "restarting it failed" in log.read_text()
