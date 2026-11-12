@@ -4,8 +4,9 @@ from brindle import permission_groups, permissions
 
 
 @pytest.mark.parametrize("command, expected", [
-    ("git stash apply -q abc123 && git stash drop -q "
-     '"$(git stash list --format=\'%gd %gs\' | grep tag | cut -d\' \' -f1)"', "allow"),
+    pytest.param("git stash apply -q abc123 && git stash drop -q "
+                 '"$(git stash list --format=\'%gd %gs\' | grep tag | cut -d\' \' -f1)"', "allow",
+                 marks=pytest.mark.variant("real incident 2026-11-12: the reported prompt, a read pipeline in $(...)")),
     pytest.param("S=$(git stash list --format='%H %gs' | grep tag | cut -d' ' -f1); git stash apply -q $S", "allow",
                  marks=pytest.mark.variant("reported assignment reuses substitution output in a later command")),
     pytest.param('git stash drop -q "$(git stash list --format=\'%gd %gs\' | tee out | cut -d\' \' -f1)"',
@@ -35,6 +36,7 @@ def test_stash_substitution_parts(tmp_path, command, expected):
         assert decision.rule == rules[-1]
 
 
+@pytest.mark.variant("bypass from review: a substituted filename reaching a user-denied file under a permissive baseline")
 @pytest.mark.parametrize("unchecked", ["inherit", "allow"])
 def test_permissive_baseline_keeps_a_deny_on_substituted_output(tmp_path, unchecked):
     # Written out, the path is denied; supplied by $(...) under a baseline that
@@ -49,7 +51,8 @@ def test_permissive_baseline_keeps_a_deny_on_substituted_output(tmp_path, unchec
 
 
 @pytest.mark.parametrize("command, expected, match, match_type", [
-    ("git stash $(printf clear)", "ask", "git stash clear", "prefix"),
+    pytest.param("git stash $(printf clear)", "ask", "git stash clear", "prefix",
+                 marks=pytest.mark.variant("bypass: substitution output supplying an excluded subcommand")),
     ("git stash drop $(printf name)", "allow", "git stash clear", "prefix"),
     pytest.param("printf name; git stash clear 'name with spaces'", "ask", "git stash clear", "prefix",
                  marks=pytest.mark.variant("bypass: exclusions must see the quoted later part, not its enclosing script")),
