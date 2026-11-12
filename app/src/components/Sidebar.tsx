@@ -370,6 +370,7 @@ function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined
 
 function sessionStageClass(word: string) {
   switch (word) {
+    case "Resuming": return "st-resuming";
     case "Working": return "st-working";
     case "Reviewing": return "st-review";
     case "Merging": return "st-merging";
@@ -426,6 +427,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   const { hidden } = useSessions();
   const goal = useRowGoal(repo, root);
   const word = sessionStatusWord(session, goal);
+  const resuming = session.status === "resuming";
   const tree = useMemo(() => sessionTree(workspaces, root, hidden), [workspaces, root, hidden]);
   const members = useMemo(() => agentIds(tree), [tree]);
   const open = route.screen === "session" && route.root === root;
@@ -440,7 +442,8 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
       <div className={`session-root-row group flex items-center rounded-md ${open ? "bg-branch-soft" : "hover:bg-surface/60"}`} data-connected={!folded && !!tree?.children.length}>
         <button
           type="button"
-          className={`session-root-dot ${sessionStageClass(word)}`}
+          className={`session-root-dot ${sessionStageClass(word)}${resuming ? " motion-safe:animate-pulse" : ""}`}
+          data-tone={resuming ? "work" : undefined}
           aria-label={folded ? `Show ${root}'s agents` : `Hide ${root}'s agents`}
           aria-expanded={!folded}
           onClick={toggle}
@@ -462,7 +465,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
           <span className="shrink-0 text-[11px] text-ink-3" data-testid="session-model">{tree ? modelOf(tree.agent) : modelOf({ profile: session.profile, provider: "", model: null })}</span>
           <SessionStatus word={word} />
         </SessionGoal>
-        <RowClose root={root} done={done} onClose={onClose} list={list} />
+        {!resuming && <RowClose root={root} done={done} onClose={onClose} list={list} />}
       </div>
       <PrLine goal={goal} working={working} openUrl={openUrl} />
       {folded ? null : tree ? (

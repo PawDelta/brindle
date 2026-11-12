@@ -70,6 +70,11 @@ describe("App", () => {
       daemon.data.workspaces = [root, worker];
       daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "starting" } });
       await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
+      const row = screen.getByTestId("tree-session-sup1");
+      expect(screen.queryByTestId("paused-toggle-proj")).toBeNull();
+      expect(row.querySelector('.session-root-dot[data-tone="work"]')).toBeTruthy();
+      expect(row.querySelector('[data-testid="session-close-sup1"], [data-testid="session-done-sup1"]')).toBeNull();
+      expect(screen.getByTestId("session-bar").querySelector('[data-state="resuming"][data-tone="work"]')).toBeTruthy();
       expect(screen.getByTestId("state-card").getAttribute("data-kind")).toBe("returning");
       expect(startControls()).toHaveLength(0);
       expect(screen.queryByTestId("agent-menu")).toBeNull();

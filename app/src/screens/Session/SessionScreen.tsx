@@ -342,7 +342,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
     }
   };
   const resuming = sessionStatus === "resuming";
-  const status = resuming ? { glyph: "◌", label: "resuming", style: "dim" as const, needs: false }
+  const status = resuming ? { glyph: "◌", label: "Resuming", style: "dim" as const, needs: false }
     : node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
   const named = useContext(SessionsContext)?.find(root)?.name;
   const who = node ? (node.agent.id === root ? (named || "supervisor") : agentName(workspaces, node.agent.id)) : named || "supervisor";
@@ -359,7 +359,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         <span className={`${mono} hidden text-xs text-ink-3 sm:inline`} data-testid={node ? "agent-id" : "session-id"} title={node?.workspace.branch}>
           {node?.agent.id ?? root}
         </span>
-        <span className={`flex items-center gap-1 text-xs ${status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status" data-state={resuming ? "resuming" : node?.agent.status ?? sessionStatus ?? "paused"}>
+        <span className={`flex items-center gap-1 text-xs ${resuming ? "rounded-full bg-branch-soft px-2 py-0.5 text-branch" : status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status" data-state={resuming ? "resuming" : node?.agent.status ?? sessionStatus ?? "paused"} data-tone={resuming ? "work" : undefined}>
           <span className={`font-mono ${CLI_INK[status.style]}`} aria-hidden>
             {status.glyph}
           </span>
@@ -389,7 +389,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         <AgentMenu client={client} agent={menuNode.agent} workspace={menuNode.workspace} gone={!node} root={root} repo={repo} refresh={refresh} onAgent={onAgent} onSession={onOpen} closeSession={closeSession} />
       )}
       {/* No agent shown (a paused session's root is in no snapshot): the session's own ⋯, so it can still be closed. */}
-      {!node && closeSession && <SessionMenu closeSession={closeSession} />}
+      {!resuming && !node && closeSession && <SessionMenu closeSession={closeSession} />}
       {notice && <p className={`w-full text-xs ${notice.failed ? "text-sap" : "text-ink-2"}`}>{notice.text}</p>}
     </header>
   );
