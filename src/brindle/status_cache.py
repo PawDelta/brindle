@@ -64,6 +64,10 @@ _base_ref_cache: dict[tuple[str, str], tuple[tuple, str]] = {}
 _status_cache: dict[str, _Entry] = {}
 # What _compute_status's git status said besides the Status: (upstream, ignored paths).
 _reported: dict[str, tuple[str | None, list[str]]] = {}
+# A worktree whose base ref names no commit (its base branch was deleted, say):
+# the fingerprint and refs git failed under, and git's message. The failure is
+# a function of the refs alone, so it stands until one of them moves.
+_failed: dict[str, tuple[tuple, tuple, str]] = {}
 
 
 def clear() -> None:
@@ -71,6 +75,7 @@ def clear() -> None:
     _base_ref_cache.clear()
     _status_cache.clear()
     _reported.clear()
+    _failed.clear()
     _sources.clear()
 
 
@@ -539,7 +544,7 @@ def _compute_status(path: Path, base: str, ref: str,
     return git.Status(branch, base, ahead, behind, dirty, unpushed)
 
 
-def cached_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
+def _cached_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
     """Like ``git.status``, but backed by the module-level cache above."""
     if not base:
         return git.status(path, base)
@@ -598,6 +603,45 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
     return st
 
 
+def _failure_key(path: Path, base: str) -> tuple[str, tuple, tuple] | None:
+    """(key, fingerprint, refs) of ``path`` as ``_cached_status`` sees them,
+    or None when its git files can't be read. Starts no git while the base
+    ref is cached."""
+    try:
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+        ref = _cached_base_ref(path, base, common)
+        fp = _fingerprint(path, wt_gitdir, common, ref)
+    except OSError:
+        return None
+    hit = _status_cache.get(str(path))
+    return str(path), fp, _refs_key(wt_gitdir, common, ref, hit.upstream if hit is not None else None)
+
+
+def cached_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
+    """``_cached_status``, and a worktree whose base ref names no commit (its
+    base branch deleted, say) fails again without git: git can't count
+    against that base until a ref moves, and asking it on every refresh ran
+    git status and a failing rev-list each time."""
+    if not base:
+        return _cached_status(path, base, now)
+    path = Path(path)
+    failed = _failed.get(str(path))
+    if failed is not None and (seen := _failure_key(path, base)) is not None and failed[:2] == seen[1:]:
+        raise git.GitError(failed[2])
+    try:
+        st = _cached_status(path, base, now)
+    except git.GitError as e:
+        _failed.pop(str(path), None)
+        after = _failure_key(path, base)       # git status may have rewritten the index
+        if after is not None and after[2][0] and not after[2][1]:
+            # HEAD reads from the files and the base names nothing there.
+            _failed[after[0]] = (after[1], after[2], str(e))
+        raise
+    _failed.pop(str(path), None)
+    return st
+
+
 def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
     """Bring the cached status of each (path, base) up to date at once, in
     parallel: a cold first look (the app opening) runs one `git status` per
@@ -614,3 +658,22 @@ def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
 
     with ThreadPoolExecutor(max_workers=min(WARM_WORKERS, len(pairs))) as pool:
         list(pool.map(spawn.carry(one), pairs))   # under the request's deadline, if any
+
+
+def cached_any_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
+    """``cached_status`` for a checkout with no ``base`` too (the repo's own,
+    where its coordinators run), which ``git.status`` would ask git about on
+    every look: the daemon's events feed looks every 5 s. It is cached against
+    its own branch (read from HEAD, no git) and reported, as ``git.status``
+    does, with no base and nothing counted ahead or behind. A detached HEAD
+    is asked of git."""
+    if base:
+        return cached_status(path, base, now=now)
+    try:
+        head = (_worktree_gitdir(Path(path)) / "HEAD").read_text().strip()
+    except (OSError, ValueError, IndexError):
+        head = ""
+    if not head.startswith("ref: refs/heads/"):
+        return git.status(path, base)
+    st = cached_status(path, head[len("ref: refs/heads/"):], now=now)
+    return git.Status(st.branch, None, 0, 0, st.dirty_files, st.unpushed)

@@ -226,7 +226,10 @@ _KEYCHAIN_HELPER_PLATFORM = sys.platform == "darwin"     # where git's default c
 
 
 def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
-              m=_UNREAD) -> dict[str, str]:
+              m=_UNREAD, *, identity: bool = True) -> dict[str, str]:
+    """``identity``: fill a missing git identity (``git.identity_env``, a git
+    run); off for a reader that only looks at the login and route (the cull's
+    login_pause, once a minute per running agent), never for a launch."""
     env = {**workspaces.workspace_env(ws), "BRINDLE_AGENT_ID": agent_id}
     if agent is not None:
         # The profile's ``env.NAME: value`` lines: how a Claude Code profile
@@ -333,7 +336,7 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
     # whose dialog nobody in a pane can answer (see git.pane_git_config).
     if config := git.pane_git_config(gh=_KEYCHAIN_HELPER_PLATFORM):
         env.setdefault("GIT_CONFIG_PARAMETERS", config)
-    if os.path.isdir(ws.path):
+    if identity and os.path.isdir(ws.path):
         # An account with no git identity: fill only what is still missing once
         # the whole environment (a profile's GIT_* lines included) is assembled.
         env.update(git.identity_env(ws.path, env))
@@ -517,8 +520,6 @@ def spawn(
                                unfinished[0] if unfinished else None)
             if current:
                 db.set_agent_milestone(agent_id, current)
-    if session_root and mode in ("handoff", "assign"):
-        pilot.consider_plan_offer(db, session_root)   # another worker may make the goal large
     if person_prompt and raw_task and parent_id is None and mode == "interactive":
         from brindle import visual_offers
 

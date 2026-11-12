@@ -1401,6 +1401,13 @@ class ReadinessWatch:
             if ap is None or not (ap.state == "done" or (ms and all(m.status == "passed" for m in ms))):
                 now[root_id] = False
                 continue
+            # Nor can a session with no branch and base to open a PR from (one on the repo's own
+            # checkout): ``reasons`` would run its git checks every sweep only to say so again.
+            root = db.get_agent(root_id)
+            ws = db.get_workspace(root.workspace_id) if root else None
+            if ws is None or not ws.base_branch or ws.branch in ("", "HEAD"):
+                now[root_id] = False
+                continue
             try:
                 state = self._state(db, root_id, ap, ms)
                 if state is not None:

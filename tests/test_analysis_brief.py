@@ -76,7 +76,10 @@ def goal_env(db, boss, monkeypatch):
 @pytest.mark.parametrize("milestones, goal, offered", [
     (_plan(3), "Redesign the sync architecture", True),
     # An omitted repo is the root checkout: with one attached repo that is two repos.
-    (_plan(1) + _plan(1, "web"), "Fix the typo", True), (_plan(2, "web"), "Fix the typo", False)])
+    (_plan(1) + _plan(1, "web"), "Update the docs", True), (_plan(2, "web"), "Update the docs", False),
+    (_plan(5), "Ship the storage page", True),
+    # A bug fix is never offered, however many milestones or repos, or design words.
+    (_plan(5) + _plan(1, "web"), "Fix the crash by refactoring sync", False)])
 def test_large_goal_is_offered_planning_first_once(milestones, goal, offered, db, goal_env):
     from brindle.daemon import routes_actions
 
@@ -107,10 +110,10 @@ def test_large_goal_is_offered_planning_first_once(milestones, goal, offered, db
 def test_an_answer_belongs_to_the_offer_it_saw_and_a_grown_plan_is_offered(db, goal_env):
     autopilot.set_goal(db, "boss", "Goal A", _plan(2))
     assert _offer(db) is None
-    autopilot.set_goal(db, "boss", "Goal A", _plan(4))        # the plan grew: now it deserves one
+    autopilot.set_goal(db, "boss", "Goal A", _plan(5))        # the plan grew: now it deserves one
     a = _offer(db)
     assert a
-    autopilot.set_goal(db, "boss", "Goal B", _plan(4), replace=True)        # replaced before A's answer arrived
+    autopilot.set_goal(db, "boss", "Goal B", _plan(5), replace=True)        # replaced before A's answer arrived
     b = _offer(db)
     assert b and b != a
     with pytest.raises(ServiceError):
@@ -120,18 +123,25 @@ def test_an_answer_belongs_to_the_offer_it_saw_and_a_grown_plan_is_offered(db, g
     assert (_offer(db), db.get_autopilot("boss").plan_offer) == (None, plans.OFFER_DISMISSED)
 
 
-@pytest.mark.variant("input variant: a goal with few milestones that grows through its workers")
-def test_several_workers_make_a_small_goal_deserve_an_offer(db, boss, goal_env):
+@pytest.mark.variant("real incident: a 3rd parallel worker opened the offer and held urgent work; "
+                      "the audit then found a queued assignment did the same")
+@pytest.mark.parametrize("assigned", ["started", "queued"])
+def test_assigned_work_never_makes_a_goal_deserve_an_offer(assigned, db, boss, goal_env):
+    """The reported bug: a 3rd parallel worker opened the offer and held urgent work.
+    Neither workers nor queued assignments open one, even when the goal then grows."""
     autopilot.set_goal(db, "boss", "Small goal", _plan(1))
-    for i in range(3):
-        assert _offer(db) is None
-        db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "working", "", None, time.time()))
+    for i in range(4):
+        if assigned == "started":
+            db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "working", "",
+                               None, time.time()))
+        else:
+            db.conn.execute("INSERT INTO tasks (id, repo_root, caller_id, caller_ws_id, profile, task_text, "
+                            "mode, isolate, state, created_at) VALUES (?, '/r', 'boss', 'ws', 'developer', "
+                            "'t', 'assign', 1, 'pending', ?)", (f"t{i}", time.time()))
         autopilot.consider_plan_offer(db, "boss")
-    offer = _offer(db)
-    assert offer
-    db.add_agent(Agent("w3", boss.id, "developer", "claude", "boss", "assign", "working", "", None, time.time()))
-    autopilot.consider_plan_offer(db, "boss")
-    assert _offer(db) == offer
+    assert _offer(db) is None
+    autopilot.set_goal(db, "boss", "Small goal", _plan(6))     # grown after work was assigned: still not held
+    assert _offer(db) is None
 
 
 @pytest.mark.parametrize("why", ["on", "own", "group", "airgap"])
@@ -164,19 +174,8 @@ def test_alias_and_path_of_one_attached_repo_are_one_repository(db, boss, goal_e
 
 
 @pytest.mark.variant("identity boundary: workers of a replaced goal must not count for the new one")
-def test_workers_of_an_earlier_goal_do_not_count_for_a_new_goal(db, boss, goal_env):
-    autopilot.set_goal(db, "boss", "Big goal", _plan(1))
-    for i in range(3):
-        db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "done", "", None,
-                           time.time()))
-    autopilot.consider_plan_offer(db, "boss")
-    assert _offer(db)
-    autopilot.set_goal(db, "boss", "Fix a typo", _plan(1), replace=True)
-    assert _offer(db) is None
-
-
 def test_a_stale_evaluation_cannot_reopen_a_dismissed_offer(db, goal_env):
-    autopilot.set_goal(db, "boss", "Goal A", _plan(4))
+    autopilot.set_goal(db, "boss", "Goal A", _plan(5))
     first = _offer(db)
     plans.answer_offer(db, "boss", first, False)
     assert db.open_plan_offer("boss", "Goal A", "open:late") is False    # a delayed second evaluation

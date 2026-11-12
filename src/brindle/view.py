@@ -96,10 +96,12 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
                     now: float | None = None,
                     panes: dict[str, bool] | None = None,
                     agent_list: list[Agent] | None = None,
-                    alive: set[str] | None = None) -> dict:
+                    alive: set[str] | None = None,
+                    read_screens: bool = True) -> dict:
     """``agent_list`` limits the agents shown (default: all of ``ws``'s);
     ``alive`` is the ids of the ones known to be running, when the caller
-    has already worked that out (see ``snapshot``)."""
+    has already worked that out (see ``snapshot``). ``read_screens``: as
+    for ``agent_entry``."""
     ahead = behind = dirty = None
     if ws.base_branch and os.path.isdir(ws.path):
         try:
@@ -119,7 +121,8 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
         "agents": [
             agent_entry(db, a, detail=detail,
                        native_subagents=None if native_subagents is None else native_subagents.get(a.id, []),
-                       now=now, panes=panes, alive=None if alive is None else a.id in alive)
+                       now=now, panes=panes, alive=None if alive is None else a.id in alive,
+                       read_screen=read_screens)
             for a in (db.list_agents(ws.id) if agent_list is None else agent_list)
         ],
     }
@@ -142,7 +145,9 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
                 native_subagents: list[NativeSubagent] | None = None,
                 now: float | None = None,
                 panes: dict[str, bool] | None = None,
-                alive: bool | None = None) -> dict:
+                alive: bool | None = None, read_screen: bool = True) -> dict:
+    """``read_screen``: correct a running agent's status from its screen
+    (agents.reconcile, a tmux capture); False takes the status as recorded."""
     who = identity_lock.locked_by(a.id)
     if who:
         # Another identity's session: structure only, nothing read from its
@@ -165,7 +170,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     elif a.status == "failed":
         status = "failed"
     elif agents.is_alive(a, panes) if alive is None else alive:
-        a = agents.reconcile(db, a, samples=1)
+        if read_screen:
+            a = agents.reconcile(db, a, samples=1)
         status = a.status
     else:
         status = "exited"
@@ -332,11 +338,13 @@ def session_workspaces(db: DB, repo_root: str | None) -> list[Workspace]:
     return rows
 
 
-def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[dict]:
+def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+             read_screens: bool = True) -> list[dict]:
     """What the sidebar shows: agents closed with `brindle close`, and stopped
     sessions with nothing left running, are left out, as is a worktree
     whose agents are all left out that way, and a finished worktree whose
-    branch is already merged (see ``retired``)."""
+    branch is already merged (see ``retired``). ``read_screens`` False
+    reads no agent's screen (see ``agent_entry``)."""
     now = time.time()
     by_parent = db.all_native_subagents()
     if panes is None:
@@ -379,7 +387,7 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
     out = []
     for ws, shown in listed:
         entry = workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
-                                panes=panes, agent_list=shown, alive=alive)
+                                panes=panes, agent_list=shown, alive=alive, read_screens=read_screens)
         review = db.last_review(ws.id)
         # The latest reviewer verdict, so the sidebar can flag rows that need you.
         entry["review"] = None if review is None else ("approved" if review.approved else "changes")
@@ -437,7 +445,7 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
     ap = db.get_autopilot(root.id)
     assert ap is not None
     ms = db.milestones(root.id)
-    w = autopilot.work_state(db, root.id) if any(m.status == "failed" for m in ms) else None
+    w = autopilot.work_state(db, root.id, panes) if any(m.status == "failed" for m in ms) else None
     return {
         "root_id": root.id,
         "enabled": bool(ap.enabled),
@@ -452,5 +460,5 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
                         "check": m.check_cmd} for m in ms],
         "usage": autopilot.usage(),
         "quota": quota.notes(repo_root, native=False),
-        "workers": len(autopilot.working_workers(db, root.id)),
+        "workers": len(autopilot.working_workers(db, root.id, panes)),
     }
