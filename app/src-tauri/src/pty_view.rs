@@ -225,6 +225,9 @@ pub fn prepare_args(view: &str, target: &str, cols: u16, rows: u16) -> Vec<Strin
         vec!["set-option", "-t", &session, "prefix2", "None"],
         vec!["set-option", "-t", &session, "mouse", "on"],
         vec!["set-option", "-t", &session, "key-table", KEY_TABLE],
+        // The client's title is the window's layout: tmux sends it as it changes, and the crop is looked at then.
+        vec!["set-option", "-t", &session, "set-titles", "on"],
+        vec!["set-option", "-t", &session, "set-titles-string", LAYOUT_TITLE],
         vec!["source-file", "-"],
     ]
     .into_iter()
@@ -395,6 +398,44 @@ pub struct Crop {
 
 /// What `crop_of` reads, a line a pane (`list-panes -F`).
 pub const LAYOUT_FORMAT: &str = "#{@brindle_sidebar}\t#{pane_left}\t#{pane_right}\t#{pane_top}\t#{pane_bottom}\t#{window_width}\t#{window_height}\t#{window_zoomed_flag}\t#{pane_active}\t#{cursor_x}";
+
+/// The view client's title (its session's `set-titles-string`): all that
+/// moves the crop (`crop_of`), the window shown, its panes' places (zoomed
+/// or not), which are brindle's sidebars, the client's width, how far tmux
+/// has panned the window in it, and the agent's cursor where it moves the
+/// crop (a sidebar there, the window wider than the client, the agent's pane
+/// the active one). tmux works the title out again on each full redraw (a
+/// layout change, a resize, a pan, an option set, any redraw of a window
+/// wider than the client) and sends it (`TITLE_START`) only when it
+/// changed, so the view's idle redraws (a spinner, an age) send none.
+pub const LAYOUT_TITLE: &str = concat!(
+    "#{window_id} #{window_visible_layout} #{P:#{@brindle_sidebar},} #{client_width} #{window_offset_x} ",
+    "#{?#{P:#{@brindle_sidebar}},#{?#{@brindle_sidebar},,#{?#{!=:#{window_width},#{client_width}},#{pane_left}+#{cursor_x},}},}",
+);
+
+/// How tmux sets the title of a client with the "title" feature (`TSL`).
+const TITLE_START: &[u8] = b"\x1b]0;";
+
+/// Which of the client's redraws ask for a look at the crop (`crop_now`: a
+/// tmux list-panes and list-clients each): one that sets its title
+/// (`LAYOUT_TITLE`), however it is split between reads.
+#[derive(Default)]
+struct Relayouts {
+    /// The stream's last bytes: a title split between redraws is seen once.
+    tail: Vec<u8>,
+}
+
+impl Relayouts {
+    fn ask(&mut self, bytes: &[u8]) -> bool {
+        let keep = TITLE_START.len() - 1;
+        let seam: Vec<u8> = self.tail.iter().chain(&bytes[..bytes.len().min(keep)]).copied().collect();
+        let titled = |b: &[u8]| b.windows(TITLE_START.len()).any(|w| w == TITLE_START);
+        let retitled = titled(&seam) || titled(bytes);
+        let last = if bytes.len() >= keep { bytes } else { &seam[..] };
+        self.tail = last[last.len().saturating_sub(keep)..].to_vec();
+        retitled
+    }
+}
 
 /// What `crop_now` reads of the view's client, a line a client (`list-clients -F`): its pid, its
 /// width, and how far into a window wider than it tmux has panned.
@@ -816,13 +857,13 @@ impl PtyView {
         let size = Arc::new(Mutex::new(((cols, rows), crop)));
         on_crop(crop);
         let client = child.id();
-        // The crop looked at again after the client draws: a layout change (a sidebar
-        // split, moved, closed, a pane zoomed) is redrawn, and so is the window panned
-        // on the client, so each is followed by bytes. One look at a time, a little
-        // after the bytes that asked for it. Idle ticks must not probe tmux: each
-        // probe starts list-panes and list-clients. Brindle marks a new sidebar
-        // before starting it (sidebar_follow::_create_sidebar), so its first draw
-        // also reveals its tag. The watcher ends with the client's output.
+        // The crop looked at again after the client draws a new title: a layout change
+        // (a sidebar split, moved, closed, tagged, a pane zoomed), a resize or the window
+        // panned on the client, or the agent's cursor in a window panned on it, changes it
+        // (`LAYOUT_TITLE`). One look at a time, a little after the bytes that asked for it.
+        // Neither idle ticks nor the redraws of an idle view (a spinner, the sidebar's ages)
+        // probe tmux: each probe starts list-panes and list-clients. The watcher ends with
+        // the client's output.
         let (redrawn, looks) = mpsc::sync_channel::<()>(1);
         {
             let (tmux_bin, server, view, master, size) = (tmux_bin.to_path_buf(), server.clone(), view.clone(), master.clone(), size.clone());
@@ -882,9 +923,12 @@ impl PtyView {
             let _ = read.send(Out::Exit(child.wait().ok().and_then(|s| s.code()).unwrap_or(-1)));
         });
         std::thread::spawn(move || {
+            let mut relayouts = Relayouts::default();
             forward(gathered, |bytes| {
                 on_data(bytes);
-                let _ = redrawn.try_send(());
+                if relayouts.ask(bytes) {
+                    let _ = redrawn.try_send(());
+                }
             }, on_exit)
         });
         Ok(PtyView { tmux: tmux_bin.to_path_buf(), server, view, master, size, input, input_lost, client, client_tty: Arc::default() })
@@ -2015,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_desktop_does_not_probe_crops_without_a_redraw() {
+    fn idle_desktop_probes_crops_only_on_a_layout_change() {
         use mpsc::RecvTimeoutError::{Disconnected, Timeout};
 
         // The real watcher's dispatch, with ticks instead of wall-clock waits.
@@ -2031,6 +2075,24 @@ mod tests {
 
         assert_eq!(probes, [3, 6], "only redraws may start crop probes");
         assert_eq!(event.get(), 8, "disconnect stops the watcher");
+
+        // An idle view's redraws (a spinner, an age ticking, a copy) probe nothing; a new
+        // title (the layout changed), split between two redraws, probes once.
+        let spinner = |frame: &str| format!("\x1b[?2026h\x1b[3;5H{frame} working · 12s\x1b[?2026l");
+        let mut redraws: Vec<Vec<u8>> = ["⠋", "⠙", "⠹", "⠸"].iter().map(|f| spinner(f).into_bytes()).collect();
+        redraws.push(b"\x1b]52;c;aGk=\x07".to_vec());
+        redraws.push(b"\x1b[?2026h\x1b[H\x1b".to_vec());
+        redraws.push(b"]0;@3 a1b2,121x25,0,0{30x25,0,0,1,90x25,31,0,0} e6af0dc0, 121 0\x07\x1b[?2026l".to_vec());
+        redraws.extend(["⠼", "⠴"].iter().map(|f| spinner(f).into_bytes()));
+        let probes_for = |redraws: &[Vec<u8>]| {
+            let mut relayouts = Relayouts::default();
+            let mut events = redraws.iter().map(|bytes| if relayouts.ask(bytes) { Ok(()) } else { Err(Timeout) }).chain([Err(Disconnected)]);
+            let mut probes = 0;
+            watch_crops(|| events.next().unwrap(), || probes += 1);
+            probes
+        };
+        assert_eq!(probes_for(&redraws[..4]), 0, "content-only redraws must not probe crops");
+        assert_eq!(probes_for(&redraws), 1, "a layout change probes once");
     }
 
     #[test]
@@ -2093,13 +2155,21 @@ mod tests {
         let told = Arc::new(Mutex::new(Vec::<(Crop, bool)>::new()));
         let drawn = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (crops, seen) = (told.clone(), drawn.clone());
+        // The client's reads, and of them those that asked for a crop probe (a new title).
+        let asked = Arc::new(Mutex::new((Relayouts::default(), 0usize, 0usize)));
+        let asks = asked.clone();
         let view = PtyView::open(
             Path::new("tmux"),
             Some(&server.name),
             "agents:a1",
             90,
             25,
-            move |_| seen.store(true, Ordering::SeqCst),
+            move |bytes| {
+                seen.store(true, Ordering::SeqCst);
+                let mut asks = asks.lock().unwrap();
+                asks.1 += 1;
+                asks.2 += usize::from(asks.0.ask(bytes));
+            },
             move |crop| crops.lock().unwrap().push((crop, drawn.load(Ordering::SeqCst))),
             |_| {},
         )
@@ -2160,6 +2230,23 @@ mod tests {
             let at = cursor().saturating_sub(panned());
             cursor() == 170 && at >= 90 && last() == Some(Crop { cols: 31, left: at + 1 - 90, width: None })
         });
+        // The wider window redrawn whole, its layout, pan and cursor as they were: no probe asked for.
+        let (reads, probes) = { let asked = asked.lock().unwrap(); (asked.1, asked.2) };
+        let tty = server.run(&["list-clients", "-t", &format!("={}", view.name()), "-F", "#{client_tty}"]);
+        server.run(&["refresh-client", "-t", &tty]);
+        server.wait("the view redrawn", |_| asked.lock().unwrap().1 > reads);
+        assert_eq!(asked.lock().unwrap().2, probes, "a redraw of the panned window, nothing moved, asks for no probe");
+        // Two more panes of the agent's, at the window's 125th and 150th columns, their cursors at their first
+        // column: either active, tmux pans the window to its end (59), and only the one at 150 is past the view.
+        let split = |target: &str, width: &str| server.run(&["split-window", "-d", "-h", "-l", width, "-P", "-F", "#{pane_id}", "-t", target, "cat"]);
+        let middle = split(&agent, "55");
+        let right = split(&middle, "30");
+        for (pane, left) in [(&middle, 0), (&right, 2), (&middle, 0)] {
+            server.run(&["select-pane", "-t", pane]);
+            server.wait(&format!("{pane} active: told {:?}, panned {}", last(), panned()), |_| panned() == 59 && last() == Some(Crop { cols: 31, left, width: None }));
+        }
+        server.run(&["kill-pane", "-t", &right]);
+        server.run(&["kill-pane", "-t", &middle]);
         view.take_window().unwrap();
         settled(at_left, "the view took the wider window back");
         terminal.kill().unwrap();
