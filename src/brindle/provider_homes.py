@@ -27,12 +27,14 @@ once, the person's user-scope MCP server list (top-level ``mcpServers`` of
 their ``.claude.json``: ``$CLAUDE_CONFIG_DIR/.claude.json``, else
 ``~/.claude.json``, its folder resolved once, the file itself a regular file
 and never a link) into brindle's home ``.claude.json``. Each server keeps its
-name, type, url, command, args and other plain settings; a setting named like
-a credential (OAuth state, tokens) is dropped, and so is each ``headers`` or
-``env`` entry whose name looks secret (secrets.secret_looking), the server
-itself kept. A server of the same name already in brindle's home is never
-overwritten. The merge holds brindle's Claude config lock and re-reads
-brindle's file right before an atomic replace. Nothing else of that file
+name, type, url, command, args and other plain settings; at any depth, a
+setting or ``headers``/``env`` entry named like a credential (OAuth state,
+tokens; SECRET_NAME or secrets.secret_looking) is dropped, the server itself
+kept. A server of the same name already in brindle's home is never
+overwritten. The merge holds brindle's Claude config lock, checks inside it
+that the copy hasn't happened yet, and re-reads brindle's file right before
+an atomic replace; brindle's file is only read and replaced when it is a
+regular file, never through a link. Nothing else of the person's file
 (sign-ins, projects, OAuth state) is copied."""
 
 from __future__ import annotations
@@ -344,53 +346,59 @@ MCP_MARKER = ".brindle-mcp-copied"
 CLAUDE_JSON = ".claude.json"
 
 
-def _plain_server(conf: object) -> dict | None:
-    """An MCP server's settings without anything secret: settings named like
-    a credential are dropped, and so are secret-named ``headers``/``env`` entries."""
+def _scrub(value: object) -> object:
+    """``value`` without any entry, at any depth, named like a credential."""
     from brindle.secrets import secret_looking
 
-    if not isinstance(conf, dict):
-        return None
-    out = {}
-    for key, value in conf.items():
-        if key in ("headers", "env"):
-            if not isinstance(value, dict):
-                continue
-            value = {k: v for k, v in value.items() if not secret_looking(str(k).replace("-", "_"))}
-        elif SECRET_NAME.search(key):
-            continue
-        out[key] = value
-    return out
+    if isinstance(value, dict):
+        return {k: _scrub(v) for k, v in value.items()
+                if not SECRET_NAME.search(str(k)) and not secret_looking(str(k).replace("-", "_"))}
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    return value
 
 
-def copy_mcp_servers(where: Path) -> bool:
-    """Copy the person's user-scope MCP servers into brindle's Claude home
-    ``where``, once (see the module docstring). Whether it merged any now."""
-    if (where / MCP_MARKER).exists():
-        return False
-    # The person's folder, resolved once; the file below it is never a link.
+def _person_servers() -> dict:
+    """The person's user-scope MCP servers, scrubbed; their folder resolved
+    once, the file a regular file and never a link."""
     folder = Path(os.path.realpath(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home()))
-    dest = os.path.realpath(where / CLAUDE_JSON)
-    if os.path.realpath(folder / CLAUDE_JSON) == dest:
-        return False            # one and the same file: nothing to copy
     raw = _read(folder, CLAUDE_JSON)
     try:
         servers = json.loads(raw).get("mcpServers") if raw is not None else None
     except (ValueError, AttributeError):
         servers = None
-    plain = {name: s for name, conf in (servers.items() if isinstance(servers, dict) else ())
-             if (s := _plain_server(conf)) is not None}
+    if not isinstance(servers, dict):
+        return {}
+    return {name: _scrub(conf) for name, conf in servers.items() if isinstance(conf, dict)}
+
+
+def copy_mcp_servers(where: Path) -> bool:
+    """Copy the person's user-scope MCP servers into brindle's Claude home
+    ``where``, once (see the module docstring). Whether it merged any now."""
     from brindle import providers
 
-    merged = False
+    if (where / MCP_MARKER).exists():
+        return False
     with providers._config_lock():
+        if (where / MCP_MARKER).exists():   # another launch copied while this one waited
+            return False
+        where.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ours = Path(os.path.realpath(where))
+        same = ours == Path(os.path.realpath(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home()))
+        plain = {} if same else _person_servers()
+        merged = False
         if plain:
-            where.mkdir(parents=True, exist_ok=True, mode=0o700)
+            dest = ours / CLAUDE_JSON
             try:        # re-read as late as possible: Claude Code may have just written it
-                data = providers._read_json(dest)
-                mode = stat.S_IMODE(os.stat(dest).st_mode)
+                st = os.lstat(dest)
             except FileNotFoundError:
-                data, mode = {}, 0o600
+                st = None
+            if st is not None and not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"{dest} is a link or not a regular file")
+            raw = _read(ours, CLAUDE_JSON) if st is not None else b"{}"
+            if raw is None:
+                raise ValueError(f"{dest} is a link or not a regular file")
+            data = json.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError(f"{dest} doesn't hold a JSON object")
             have = data.get("mcpServers")
@@ -399,8 +407,7 @@ def copy_mcp_servers(where: Path) -> bool:
             new = {name: s for name, s in plain.items() if name not in have}
             if new:
                 have.update(new)
-                providers._replace_json(dest, data, mode)
+                providers._replace_json(str(dest), data, stat.S_IMODE(st.st_mode) if st else 0o600)
                 merged = True
-        where.mkdir(parents=True, exist_ok=True, mode=0o700)
         (where / MCP_MARKER).write_text(f"{time.time()}\n")
     return merged
