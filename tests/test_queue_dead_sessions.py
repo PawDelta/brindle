@@ -25,7 +25,10 @@ def sessions(db, monkeypatch):
     db.add_agent(Agent("bw", "bw", "developer", "claude", "b", "assign", "done", "", "done", 0))
     db.add_task(Task("bw-task", "/repo", "bw", "b", "b", "developer", "b's work", "assign", 1,
                      "b-feature", None, None, None, "merged", 0))
-    refs = {"refs/heads/main": "m", "refs/heads/session-a": "m", "refs/heads/session": "b-head"}
+    # An old in-place worker of b's, closed long ago: b's own state decides.
+    db.add_agent(Agent("old", "b", "developer", "claude", "b", "assign", "done", "", "done", 0))
+    db.update_agent("old", dismissed_at=1.0)
+    refs ={"refs/heads/main": "m", "refs/heads/session-a": "m", "refs/heads/session": "b-head"}
     monkeypatch.setattr(git, "ref_shas", lambda root: refs)
     monkeypatch.setattr(git, "default_branch", lambda root: "main")
     monkeypatch.setattr(git, "merged_into", lambda *args, **kwargs: False)
@@ -57,21 +60,27 @@ def sessions(db, monkeypatch):
                          tasks._dumps(["src/shared.py"]), tasks._dumps(list(depends_on)), "pending", 1))
         return lambda: tasks._start_if_ready(db, db.get_task("new"), "its dependencies", check_room=False)
 
-    return SimpleNamespace(locked=locked, told=told, pending=pending, session=session)
+    return SimpleNamespace(locked=locked, told=told, pending=pending, session=session, refs=refs)
 
 
-# The incident: paused and locked to another account; then each stall alone.
-@pytest.mark.parametrize("stall", ["paused-locked", "locked", "closed", "idle-no-process"])
+# The incident: paused and locked to another account; then each stall alone,
+# and a session holding the files on the branch it attached this repo with.
+@pytest.mark.parametrize("stall", ["paused-locked", "locked", "closed", "idle-no-process", "attached-paused"])
 def test_overlap_with_stalled_session_starts_with_warning(db, sessions, stall):
+    holder = "workspace:b"
+    if stall.startswith("attached"):
+        db.conn.execute("UPDATE workspaces SET repo_root='/elsewhere' WHERE id='b'")
+        db.add_session_repo("b", "attached", "/repo", "session")
+        holder = "session"
     start = sessions.pending(depends_on=["bw"])
     # b is live: the task waits for b's branch to land.
     assert not start()
-    assert tasks._loads(db.get_task("new").depends_on) == ["bw", "workspace:b"]
+    assert tasks._loads(db.get_task("new").depends_on) == ["bw", holder]
     # b stalls: it neither holds a's task nor cancels it with its sign-in
     # (nor does its merged worker bw's), and the task starts while both
     # supervisors hear of the overlap.
     sessions.locked.add("bw")
-    if stall.startswith("paused"):
+    if "paused" in stall:
         db.set_status("b", "paused")
     if "locked" in stall:
         sessions.locked.add("b")
@@ -98,3 +107,19 @@ def test_stalled_session_never_hides_a_live_holder(db, sessions):
     start = sessions.pending(text)
     assert not start()
     assert tasks._loads(db.get_task("new").depends_on) == ["cw"]
+
+
+def test_worker_stalling_after_its_hold_releases_the_task(db, sessions):
+    # b's branch is off the file; its running worker bw2 holds it instead.
+    sessions.refs["refs/heads/session"] = "b-clean"
+    db.add_workspace(Workspace("bw2", "/repo", "bw2", "worktree", "b-next", "session", "/repo/bw2", None, "", 0))
+    db.add_agent(Agent("bw2", "bw2", "developer", "claude", "b", "assign", "processing", "", None, 0))
+    db.add_task(Task("bw2-task", "/repo", "bw2", "b", "b", "developer", "b's next", "assign", 1,
+                     "b-next", None, tasks._dumps(["src/shared.py"]), None, "started", 0))
+    start = sessions.pending()
+    assert not start()
+    assert tasks._loads(db.get_task("new").depends_on) == ["bw2"]
+    # The worker pauses while b stays live: it won't merge, so a's task starts.
+    db.set_status("bw2", "paused")
+    assert start()
+    assert db.get_task("new").state == "started"
