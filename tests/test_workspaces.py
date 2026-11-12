@@ -104,6 +104,36 @@ def test_remove_deletes_branch_merged_into_non_main_base(db, repo):
     assert not git.branch_exists(str(repo), "worker")
 
 
+def _worker_from_session(db, repo):
+    sh("git checkout -q -b session && git commit -q --allow-empty -m session && git checkout -q main", repo)
+    return workspaces.create(db, str(repo), "worker", base="session").workspace
+
+
+def test_remove_keeps_branch_not_merged_into_base_even_if_merged_into_head(db, repo):
+    # The worker's own commit is in main (the checkout's HEAD), not in its session base.
+    ws = _worker_from_session(db, repo)
+    open(os.path.join(ws.path, "w.txt"), "w").write("w")
+    git.commit_all(ws.path, "worker work")
+    sh("git merge -q --ff-only worker", repo)
+    removed = workspaces.remove(db, ws, delete_branch=True)
+    assert not removed.branch_deleted
+    assert git.branch_exists(str(repo), "worker")
+
+
+def test_remove_keeps_branch_that_moved_after_it_was_judged(db, repo, monkeypatch):
+    ws = _worker_from_session(db, repo)
+    real_is_ancestor = git.is_ancestor
+
+    def judged_then_moved(path, older, newer):
+        merged = real_is_ancestor(path, older, newer)
+        sh("git update-ref refs/heads/worker main", repo)   # the branch moves on
+        return merged
+    monkeypatch.setattr(git, "is_ancestor", judged_then_moved)
+    removed = workspaces.remove(db, ws, delete_branch=True)
+    assert not removed.branch_deleted
+    assert git.branch_exists(str(repo), "worker")
+
+
 def test_remove_refuses_dirty_and_keeps_branch(db, repo, feature):
     ws = feature
     open(os.path.join(ws.path, "wip.txt"), "w").write("wip")
