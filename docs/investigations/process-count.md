@@ -28,24 +28,36 @@ didn't start.
   bounds. (macOS hands out pids at random, so the pid counter can't give a
   machine-wide total.)
 - **Per-sweep count** (deterministic): a throwaway test ran the daemon's
-  `ReadinessWatch.sweep` against real git checkouts (4 session checkouts: 3
-  idle, 1 paused; origin a local bare repo, so no network) with
-  `subprocess.Popen.__init__` wrapped to count every process started, after
-  one warm-up sweep. The `v0.6.3` column is the same sweep with the two
-  functions v0.6.3 doesn't have (`refresh_idle_sessions`,
-  `refresh_drift_flags`) turned off; the rest of the sweep is the same in both.
-  The harness was not committed; the committed regression test
+  `ReadinessWatch.sweep` against real git checkouts (4 session checkouts in
+  one repo: 3 idle, 1 paused; origin a local bare repo, so no network) with
+  `subprocess.Popen.__init__` wrapped to count every process brindle started
+  (not the helpers git itself starts, such as a fetch's transport). "Before"
+  counted steady sweeps after one warm-up. "After" ran a full fetch interval:
+  60 sweeps on a fake clock, one every 5 s, so the fetch and the 5-minute
+  renewal of each session's upstream both fall inside it. The `v0.6.3` column
+  is the same sweep with the two functions v0.6.3 doesn't have
+  (`refresh_idle_sessions`, `refresh_drift_flags`) turned off; the rest of the
+  sweep is the same in both. The harness was not committed; the committed
+  regression test
   (`test_a_sweep_starts_no_git_for_a_session_whose_refs_have_not_moved`) checks
-  the same thing for one session.
+  the unchanged-sweep case for one session.
 
 ## Leaks
 
 ### L1. Closing an agent's window before stopping its processes (fixed)
 
-`agents.pause` (a session's pause, `stop_procs=True`), `agents._stop` (used by
-`kill`, `close`, `pause_worker`, the reviewer's and auditor's `close_later`) and
-the kill path of `resume` closed the agent's tmux window first and only then
-read the process table to find the agent's processes (`procs.stop`).
+Every path that closes an agent's tmux window closed it before its processes
+were found:
+
+- synchronous stops: `agents.pause` (a session's pause, `stop_procs=True`),
+  `agents._stop` (used by `kill`, `close`, `pause_worker`, the reviewer's and
+  auditor's `close_later`) and the kill path of `resume`, which read the
+  process table (`procs.stop`) only after the close;
+- closes that leave the processes to a later cull: `pause(stop_procs=False)`
+  (the cull's own pause of a session whose chat is gone, and
+  `service.sessions.place` pausing a running session for a new one),
+  `close_paused` (the daemon pausing every session on its way out, followed by
+  a detached cull) and `settle_panes` (stale panes closed as a session resumes).
 
 Closing the window hangs up the CLI in it, and the CLI exits. What it started
 in a session of its own (Claude Code's Bash-tool shells and background jobs,
@@ -60,22 +72,36 @@ starts from `procs.all_agent_ids`, which reads agent ids off the CLIs that are
 now gone). Nothing ever reaped them; a shell that had stopped (state `T`)
 stays stopped forever, since only SIGKILL or SIGCONT reaches it.
 
-Fix: stop the processes first, while the tree is whole, then close the window.
-`procs.stop` already skips the caller and its ancestors, so a pause running in
-the chat's own pane (`_ended`) is still safe. The cull's own pause of a session
-whose chat is gone (`stop_procs=False`) was already safe: it stops the
-processes from the table it read before anything closed.
+Fix, synchronous stops: stop the processes first, while the tree is whole,
+then close the window. `procs.stop` already skips the caller and its
+ancestors, so a pause running in the chat's own pane (`_ended`) is still safe.
 
-Test: `tests/test_procs.py::test_a_stop_leaves_nothing_the_agents_cli_started`
-(rows: session pause, worker stop). A fake process table in which closing the
-window ends the CLI and reparents its Bash shell (and the test run under it) to
-launchd. On the unmodified code nothing is stopped (`set() >= {5002, 5003}`
-fails); with the fix both are.
+Fix, closes left to a cull: just before the close, `procs.hand_off` notes
+every process under the panes about to close (pid and command line) in
+`<brindle home>/closing-procs.json`. The record is written under a lock to a
+temporary file of its own and then moved into place. Each cull sweep then
+ends, through `procs.handed_orphans`, each noted process that is still running
+the same command line and whose chain of noted parents now leads to launchd,
+i.e. one the close left without its CLI. A noted process whose parent still
+runs, or whose pid now runs another command, is left alone. Records go once
+their process has gone, or after a day. This uses one `tmux list-panes` and
+one process-table read per close, and no waiting.
 
-The resume path's kill (`agents.resume`, for a failed or settling agent) had the
-same order and is reordered the same way; it has no test of its own (it is the
-same `procs.stop` call, and the resume tests in `test_sessions.py` and
-`test_auth_failure_handling.py` pass).
+Test: `tests/test_procs.py::test_a_stop_leaves_nothing_the_agents_cli_started`,
+one row per path: session pause, worker stop, session pause left to a cull,
+the daemon's batched pause on its way out, a stale pane settled. A fake
+process table in which closing the window ends the CLI and reparents its Bash
+shell (and the test run under it) to launchd; the last three rows run a real
+cull sweep after the close. On the unmodified code nothing is stopped
+(`set() >= {5002, 5003}` fails) in every row; with the cull's new step set
+aside, the three deferred rows still fail. A second test checks that a noted
+process with a live parent, or whose pid came round to another command, is
+not ended.
+
+The resume path's kill (`agents.resume`, for a failed or settling agent) is
+reordered like the other synchronous stops. It has no test row of its own:
+it is the same `procs.stop` call, and the resume tests in `test_sessions.py`
+and `test_auth_failure_handling.py` pass.
 
 ### L2. The learned-rules `claude -p` call left its helpers on a timeout (fixed)
 
@@ -136,32 +162,49 @@ every session that isn't done (paused ones included) ran, each sweep:
 `sync`), and `git show-ref`, `git log`, `git diff --name-only` (drift flags):
 14 git processes per session per sweep, whether anything had changed or not.
 
-| per-sweep count (4 sessions: 3 idle, 1 paused) | warm-up sweep | each later sweep | per minute |
+| 4 sessions in one repo (3 idle, 1 paused) | warm-up sweep | an unchanged sweep | per minute, over a full 5-minute interval |
 |---|---|---|---|
 | v0.6.3 | 0 | 0 | 0 |
-| main, before | 58 | 56 | 672 |
-| main, after | 46 | 0 | 0 (+1 fetch per repo per 5 minutes) |
+| main, before | 58 | 56 | about 672 |
+| main, after | 46 | 0 | 2 |
 
-That is 168 processes a minute for every open session, on top of what agents
-do, each one inspected by an antivirus.
+Before, that is 168 processes a minute for every open session, on top of what
+agents do, and an antivirus inspects each one. After, over a full 5-minute
+interval (60 sweeps), brindle started 10 processes: each session's upstream
+renewed once (`git remote` and `git symbolic-ref`, 4 sessions × 2), one
+`git config` and the repo's one `git fetch`. The fetch starts git's own
+helpers besides (a transport such as `git-remote-https`, maybe a credential
+helper), which the count doesn't include. In general: 2 processes per session
+plus one fetch per repo every 5 minutes, while nothing moves. A session whose
+HEAD or `origin/<default>` moves pays the old cost once, on the sweep that
+sees it; one that isn't quiet pays `_quiet`'s checks every sweep, as before.
 
 Fix (`session_sync.Seen`, kept by the `ReadinessWatch` between sweeps):
 
-- a session that an idle sync found synced (`up_to_date` or `synced`) is left
-  alone while its HEAD and `origin/<default>` are as they were, read from the
-  checkout's git files (`session_review._fingerprint`, no git run);
+- a session that an idle sync found up to date is left alone while its HEAD
+  and `origin/<default>` (read from the checkout's git files with
+  `session_review._fingerprint`, no git run) are the very shas the sync
+  checked. `drift` now resolves both in one `rev-parse` and measures from
+  those shas, and the outcome carries them. It is never a look taken after the
+  sync: another fetch or commit may have moved past what was checked. A merge
+  the sync made is found up to date, and remembered, on the next sweep;
+- a session with no `origin/<default>` has nothing to sync from and is skipped;
 - drift measurements (oldest unlanded commit, files that differ) are reused
   while HEAD, `origin/<default>` and the session's recorded squash landings are
   unchanged; whether the oldest commit is past 48 hours is still judged every
   sweep, and the row is written only when it changes;
-- `upstream()` (the repo's remote and default branch) is believed for 60 s;
+- `upstream()` (the repo's remote and default branch) is believed for 5
+  minutes, as long as the sweep waits between fetches;
 - a session that isn't quiet, or is behind, conflicting or busy, is checked
   every sweep as before; a checkout whose refs can't be read from its files
   (reftable, say) is asked of git every time, as before.
 
 Test: `tests/test_session_sync.py::test_a_sweep_starts_no_git_for_a_session_whose_refs_have_not_moved`
-(14 git processes on the second sweep on the unmodified code, none with the
-fix; a commit pushed to origin is still merged in after the next fetch).
+checks three things. A commit that reaches `origin/main` just as a sync
+finishes is merged on the next sweep (the first version of this fix stored a
+look taken after the sync, and skipped it). An unchanged sweep then starts no
+process (the unmodified code started 14). A commit pushed later is merged
+after the next fetch.
 
 ### S2. `claude -p /usage`: one CLI per sidebar every 5 minutes (fixed)
 
@@ -172,12 +215,18 @@ Each CLI start also starts every MCP server the person has configured and
 Claude Code's login-shell snapshot (`zsh -l`, which sources the person's
 `.zprofile` and `.zshrc`).
 
-Fix: the clock is shared across processes (the mtime of
-`<brindle home>/claude-usage.stamp`; the answer was already shared, in
-`quota.json`), and the probe runs with `--strict-mcp-config` (no MCP servers)
-and `reap=True`. Test:
-`tests/test_quota.py::test_sidebars_share_one_claude_usage_run_per_refresh`
-(three fresh sidebar processes: three runs before, one after).
+Fix: the clock is shared across processes. It is the mtime of
+`<brindle home>/claude-usage.stamp`, and the answer was already shared, in
+`quota.json`. A refresh is claimed under an exclusive lock (`flock` on
+`claude-usage.stamp.lock`): the stamp is read and, when a refresh is due, set
+to now before the lock is let go, so two sidebars looking at once can't both
+find it due. The probe also runs with `--strict-mcp-config` (no MCP servers)
+and `reap=True`. Tests in `tests/test_quota.py`:
+`test_sidebars_share_one_claude_usage_run_per_refresh` (three fresh sidebar
+processes one after another: three runs before, one after) and
+`test_two_sidebars_looking_at_once_start_one_claude_usage_run` (the second
+looks while the first is reading the stamp: two runs without the lock, one
+with it).
 
 ### Other sources, measured and left as they are
 
@@ -221,8 +270,9 @@ chats, 5 workers at work; lower bounds, see above):
 | agent CLI trees | 96 | mostly this investigation's own `ps` sampling (167) and test runs |
 | nothing of brindle's | 11 | |
 
-The daemon's share is S1: with this branch the per-sweep count goes from 14
-per session to 0 at idle (table above). The live "after" can't be sampled
+The daemon's share is S1. With this branch an idle session goes from 14 git
+processes per 5-second sweep (168 a minute) to 2 per 5 minutes, plus one
+fetch per repo every 5 minutes (table above). The live "after" can't be sampled
 here: the installed app runs main, not this branch.
 
 The sidebars' git (about 60 a minute that the sample caught, so more in

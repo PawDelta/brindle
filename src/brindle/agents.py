@@ -1651,6 +1651,8 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
         from brindle import procs
 
         procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
+    else:   # left to a cull: it ends what the close orphans from this note
+        _hand_off_panes(windows)
     # The sidebar follows the person around, so it may not be sitting in any
     # of the windows about to close: find it wherever it is and stop it too,
     # rather than leaving it running with nothing left to show it. Status was
@@ -1784,6 +1786,9 @@ def close_paused(db: DB, closings: list[Closing]) -> None:
             # Ours, as _valid_sidebar tells (dead or alive), from the same look.
             if pane in where and (panes.tags.get(pane) or {}).get(SIDEBAR_TAG) == c.root_id:
                 sidebars.append((c.root_id, pane))
+        # Their processes are left to a cull (the detached one after this): it ends
+        # what the closes orphan from this note.
+        _hand_off_panes([w for c in closings for w in c.windows(db, owners)])
         # What a session or window closing takes along isn't closed again (tmux would refuse it).
         tmux.close(panes=[p for _, p in sidebars if where[p].window not in windows
                           and where[p].session not in sessions],
@@ -1894,6 +1899,21 @@ def _gate_check() -> None:
             pass
 
 
+def _hand_off_panes(panes: list[str]) -> None:
+    """Note what runs under ``panes``, about to close with their processes
+    left for a cull, so the cull can end what the close leaves without a
+    parent (see procs.hand_off). Never stands in the way of the close."""
+    if not panes:
+        return
+    from brindle import procs
+
+    try:
+        pids = tmux.pane_pids()
+        procs.hand_off([pids[p] for p in panes if p in pids])
+    except (tmux.TmuxError, OSError, subprocess.SubprocessError, processes.Busy):
+        log.warning("brindle: couldn't note what runs in panes %s before closing them", panes, exc_info=True)
+
+
 def settle_panes(db: DB, agents: list[Agent], *, keep: bool = True) -> set[str]:
     """Make tmux's panes of ``agents`` what should be: for each, its one
     launched pane if there is one (``keep``; not a failed agent's), and no
@@ -1912,6 +1932,7 @@ def settle_panes(db: DB, agents: list[Agent], *, keep: bool = True) -> set[str]:
                 kept[p.agent] = p.pane
             else:
                 stale.append(p.pane)
+        _hand_off_panes(stale)
         for pane in stale:
             tmux.kill_window(pane)
         if stale and (left := {p.pane for p in tmux.agent_panes()} & set(stale)):

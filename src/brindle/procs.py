@@ -505,3 +505,95 @@ def stop(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] | None
     """Stop every process belonging to these agents. Returns how many."""
     found = agent_pids(agent_ids, pane_pids)
     return terminate({p for pids in found.values() for p in pids}, grace)
+
+
+# -- panes closed with their processes left for later --------------------------------
+#
+# Closing a pane ends the CLI in it, and what that CLI started in a session of
+# its own (a Bash tool's shell, a background job) is left with launchd as its
+# parent: no agent's process tree reaches it any more, and its command line
+# names no agent. A close that doesn't stop the processes first (a pause that
+# leaves them to a cull, a batch of pauses on the daemon's way out, stale panes
+# settled) notes here what ran under the panes, and the cull ends whatever of
+# it was left that way (handed_orphans).
+
+HANDED = "closing-procs.json"
+HANDED_MAX_AGE = 24 * 3600.0     # a record this old is dropped: its pid may be anyone's by now
+
+
+def _handed_path() -> Path:
+    from brindle.config import brindle_home
+
+    return brindle_home() / HANDED
+
+
+def _update_handed(change) -> object:
+    """Apply ``change`` to the records ({pid: [command line, noted at]}) under
+    an exclusive lock, written to a temporary file of its own and moved into
+    place; returns what ``change`` returned."""
+    import fcntl
+    import json
+
+    path = _handed_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(path.name + ".lock"), "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            records = {int(k): v for k, v in json.loads(path.read_text()).items()}
+        except (OSError, ValueError, AttributeError):
+            records = {}
+        result = change(records)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}")
+        try:
+            tmp.write_text(json.dumps({str(k): v for k, v in records.items()}))
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return result
+
+
+def hand_off(roots: list[int], procs: dict[int, Proc] | None = None, now: float | None = None) -> int:
+    """Note ``roots`` (the programs of panes about to close) and everything
+    under them, for the cull to end what the close leaves behind. Returns how
+    many processes were noted."""
+    if not roots:
+        return 0
+    procs = table() if procs is None else procs
+    now = time.time() if now is None else now
+    found = {pid: [command_line(procs[pid]), now] for pid in descendants(roots, procs) if pid in procs}
+
+    def add(records: dict) -> None:
+        records.update(found)
+
+    if found:
+        _update_handed(add)
+    return len(found)
+
+
+def handed_orphans(procs: dict[int, Proc], now: float | None = None) -> set[int]:
+    """What closed panes left running (hand_off): each noted process that is
+    still there with the same command line and whose noted parents lead to
+    launchd (they lost the CLI that started them). Those are forgotten here, as are the
+    noted ones that have gone or grown too old; the rest wait for a later look."""
+    now = time.time() if now is None else now
+    skip = _ancestors(procs)
+
+    def take(records: dict) -> set[int]:
+        for pid in [pid for pid, (cmd, at) in records.items()
+                    if pid not in procs or command_line(procs[pid]) != cmd or now - at > HANDED_MAX_AGE]:
+            del records[pid]
+        def orphaned(pid: int) -> bool:
+            seen = set()
+            while pid in records and pid not in seen:
+                seen.add(pid)
+                pid = procs[pid].ppid
+            return pid == 1
+
+        out = {pid for pid in records if pid not in skip and orphaned(pid)}
+        for pid in out:
+            del records[pid]
+        return out
+
+    if not _handed_path().exists():
+        return set()
+    return _update_handed(take)  # type: ignore[return-value]

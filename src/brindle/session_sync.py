@@ -46,7 +46,9 @@ log = logging.getLogger(__name__)
 FETCH_SECONDS = 30.0
 MAX_LANDING_LOOKUPS = 5      # failed lookups of how a merged PR landed before a sync stops waiting on it
 IDLE_FETCH_SECONDS = 300.0
-UPSTREAM_SECONDS = 60.0      # how long a sweep believes a repo's remote and default branch
+# How long a sweep believes a session's upstream (its repo's remote and default
+# branch: two git runs to learn): as long as it waits between fetches.
+UPSTREAM_SECONDS = IDLE_FETCH_SECONDS
 
 
 @dataclass
@@ -83,6 +85,7 @@ class Drift:
     sha: str                 # what it points at
     behind: int              # its commits the session lacks
     overlap: list[str]       # files both sides changed since they parted
+    head: str | None = None  # the session's HEAD it was measured from
 
 
 @dataclass
@@ -91,6 +94,7 @@ class Outcome:
     text: str | None = None
     old_sha: str | None = None
     new_sha: str | None = None
+    checked: tuple[str, str] | None = None   # up_to_date: the (HEAD, origin/<default>) found synced
     files: list[str] = field(default_factory=list)
 
 
@@ -158,14 +162,14 @@ def drift(ws: Workspace, default: str) -> Drift | None:
     if not git.remote_branch_exists(ws.path, default):
         return None
     ref = f"origin/{default}"
-    sha = git.out(["rev-parse", ref], ws.path)
-    behind = int(git.out(["rev-list", "--count", f"HEAD..{ref}"], ws.path))
+    head, sha = git.out(["rev-parse", "HEAD", ref], ws.path).split()
+    behind = int(git.out(["rev-list", "--count", f"{head}..{sha}"], ws.path))
     if not behind:
-        return Drift(ref, sha, 0, [])
-    mb = git.out(["merge-base", "HEAD", ref], ws.path)
-    theirs = set(git.paths(["diff", "--name-only", "--no-renames", mb, ref], ws.path))
-    mine = set(git.paths(["diff", "--name-only", "--no-renames", mb, "HEAD"], ws.path))
-    return Drift(ref, sha, behind, sorted(theirs & mine))
+        return Drift(ref, sha, 0, [], head)
+    mb = git.out(["merge-base", head, sha], ws.path)
+    theirs = set(git.paths(["diff", "--name-only", "--no-renames", mb, sha], ws.path))
+    mine = set(git.paths(["diff", "--name-only", "--no-renames", mb, head], ws.path))
+    return Drift(ref, sha, behind, sorted(theirs & mine), head)
 
 
 def _both(d: Drift) -> str:
@@ -237,12 +241,14 @@ def refresh_idle_sessions(db: DB, fetched_at: dict[str, float], seen: Seen | Non
                 fetched_at[ws.repo_root] = now
                 fetch(ws.repo_root, default)
             refs = _refs(ws, default)
-            if refs is not None and seen.settled.get(ws.id) == refs:
-                continue
+            if refs is not None and (refs[1] is None or seen.settled.get(ws.id) == refs):
+                continue    # no origin/<default> to sync from, or synced with it as it is
             seen.settled.pop(ws.id, None)
-            if _quiet(db, ws) and (out := sync(db, ws, idle=True)) is not None \
-                    and out.state in ("up_to_date", "synced") and refs is not None:
-                seen.settled[ws.id] = _refs(ws, default)
+            # Only the refs the sync itself found synced are remembered (a merge it made
+            # is found synced on the next sweep): never a later look, which another
+            # fetch or commit may have moved past what was checked.
+            if _quiet(db, ws) and (out := sync(db, ws, idle=True)) is not None and out.checked:
+                seen.settled[ws.id] = out.checked
         except git.GitError:
             log.debug("brindle: couldn't sync idle session %s", ws.branch, exc_info=True)
     for gone in set(seen.settled) - {row["id"] for row in rows}:
@@ -435,7 +441,7 @@ def _sync_locked(db: DB, ws: Workspace, default: str, *, idle: bool = False) -> 
         return Outcome("up_to_date")
     if not d.behind:
         _record(db, ws, d.sha, "synced")
-        return Outcome("up_to_date")
+        return Outcome("up_to_date", checked=(d.head, d.sha) if d.head else None)
     if idle and not _quiet(db, ws):
         return Outcome("busy")
     if git.dirty_files(ws.path, tracked_only=True):
