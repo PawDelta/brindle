@@ -810,7 +810,7 @@ function body() {
   if (ms.length > 15 && (F !== "all" || Q.trim())) {
     const q = Q.trim().toLowerCase();
     const hit = ms.filter((m) => (F === "all" || m.s === F) && (!q || m.title.toLowerCase().includes(q) || String(m.n) === q));
-    return hit.length ? hit.map((m) => row(m, m.s === "failed" || m.s === "running")).join("") : `<p class="empty">No milestone matches${q ? ` “${Q.trim()}”` : ""}.</p>`;
+    return hit.length ? hit.map((m) => row(m, m.s === "failed" || m.s === "running")).join("") : `<p class="empty"></p>`;
   }
   if (phased()) return phases(ms);
   if (V === 2) return focus(ms);
@@ -843,7 +843,7 @@ function toolbar() {
   const c = counts();
   const chip = (k, l, n) => `<button class="chipf" type="button" data-f="${k}" aria-pressed="${F === k}">${l}<span>${n}</span></button>`;
   return `<div class="mtool" role="toolbar" aria-label="Filter milestones">${chip("all", "All", c.all)}${chip("failed", "Failing", c.failed)}${chip("running", "Running", c.running)}${chip("todo", "Upcoming", c.todo)}
-    <label class="msq">${SEARCH}<input type="search" placeholder="Search milestones" aria-label="Search milestones" value="${Q}"><kbd>/</kbd></label></div>`;
+    <label class="msq">${SEARCH}<input type="search" placeholder="Search milestones" aria-label="Search milestones"><kbd>/</kbd></label></div>`;
 }
 function panel() {
   const c = counts(), pi = curPhase();
@@ -881,10 +881,18 @@ function render(animate = true) {
   $$("pre[data-size]").forEach((p) => (p.hidden = p.dataset.size !== String(SIZE)));
   $("#sb-goal").innerHTML = `<div class="opt">${side()}</div>`;
   $("#panel-goal").innerHTML = `<div class="opt">${panel()}</div>`;
+  const si = $(".msq input");
+  if (si) si.value = Q;
+  fillEmpty();
   if (!animate) $$(".opt").forEach((e) => (e.style.animation = "none"));
   tickLive(false);
 }
-function renderList() { $(".js-list").innerHTML = body(); tickLive(false); }
+/* The no-results message is text, set after the markup is in place. */
+function fillEmpty() {
+  const em = $(".js-list .empty");
+  if (em) em.textContent = `No milestone matches${Q.trim() ? ` “${Q.trim()}”` : ""}.`;
+}
+function renderList() { $(".js-list").innerHTML = body(); fillEmpty(); tickLive(false); }
 function select(i) { V = i; OPEN = defaults(); F = "all"; Q = ""; renderTabs(); render(); }
 
 /* A segment, the running title or the failing chip: show that milestone in the panel. */
