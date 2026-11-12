@@ -97,10 +97,11 @@ birth) and whose chain of noted parents now leads to launchd, i.e. one the
 close left without its CLI. It also ends whatever that process has started
 since the note, again leaving out the daemon and what it hosts.
 
-The cull ends them with `procs.terminate(..., owned=births)`, which reads
-the lineage again just before SIGTERM and again just before SIGKILL. It
-signals only pids that are still the process their birth names, so a pid
-that came round again during the grace period is spared. (No pidfd on macOS:
+The cull ends them with `procs.terminate(..., owned=births)`. Just before
+each pid's own SIGTERM, and again before its SIGKILL, it reads that pid's
+birth on its own (`procs.birth_of`). It signals the pid only if it is still
+the process the birth names, so a pid that came round again is spared, even
+when an earlier signal in the same batch is what freed it. (No pidfd on macOS:
 the window between that read and the signal is the few milliseconds the two
 calls take.)
 
@@ -128,9 +129,12 @@ cases:
 - a child started after the note: ended too;
 - a Claude daemon started from the pane: neither it nor the session it hosts is ended.
 
-`test_a_pid_that_came_round_again_is_never_signalled` covers a pid reused
-before the first signal (no signal at all) and one reused between SIGTERM and
-SIGKILL (no SIGKILL).
+`test_a_pid_that_came_round_again_is_never_signalled` signals two pids. It
+covers four cases:
+- one reused before any signal: it gets no signal;
+- one reused between its SIGTERM and SIGKILL: it gets no SIGKILL;
+- the second freed by the first's SIGTERM and reused: it gets no SIGTERM;
+- the second freed by the first's SIGKILL and reused: it gets no SIGKILL.
 
 What is left: a child started during the few seconds between SIGTERM and
 SIGKILL, by a process that then dies, is noted by no one.

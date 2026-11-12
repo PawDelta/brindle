@@ -170,32 +170,43 @@ def test_what_a_close_left_behind_is_ended_and_nothing_else(monkeypatch, case):
     assert set(procs.handed_orphans()) == ended
 
 
-def _reused_before_any_signal(world, sig):
-    pass
+TERM, KILL = signal.SIGTERM, signal.SIGKILL
+SIGNALS = {   # (what happens as a signal reaches a pid, the signals then sent)
+    # Its pid came round again before anything was sent.
+    "replaced before any signal": ("before", [(5003, TERM), (5003, KILL)]),
+    # It ended on SIGTERM and its pid came round again before the SIGKILL.
+    "replaced after its SIGTERM": ({(5002, TERM): 5002}, [(5002, TERM), (5003, TERM), (5003, KILL)]),
+    # The first one's SIGTERM ended the second (its child, say), whose pid came round again.
+    "the next replaced by the first's SIGTERM": ({(5002, TERM): 5003}, [(5002, TERM), (5002, KILL)]),
+    # And the same at the SIGKILL.
+    "the next replaced by the first's SIGKILL": ({(5002, KILL): 5003},
+                                                 [(5002, TERM), (5003, TERM), (5002, KILL)]),
+}
 
 
-def _reused_after_sigterm(world, sig):
-    if sig == signal.SIGTERM:      # it ends at once; its pid comes round again before the SIGKILL
-        world.start(5002, 1, world.rows[5002].cmd)
-
-
-@pytest.mark.parametrize("when", [_reused_before_any_signal, _reused_after_sigterm])
-def test_a_pid_that_came_round_again_is_never_signalled(monkeypatch, when):
-    """terminate with the births it was given looks again before each
-    signal: another's process on the pid gets neither SIGTERM nor SIGKILL."""
+@pytest.mark.parametrize("case", [
+    pytest.param(c, marks=pytest.mark.variant("a race: an earlier signal of the batch frees a later pid"))
+    if c.startswith("the next") else c for c in SIGNALS])
+def test_a_pid_that_came_round_again_is_never_signalled(monkeypatch, case):
+    """terminate with the births it was given reads each pid's birth again
+    just before each of its signals: another's process on the pid gets
+    neither SIGTERM nor SIGKILL, however the batch went before it."""
+    replaces, expected = SIGNALS[case]
     world = _World("a1")
-    owned = {5002: world.rows[5002].birth}
-    if when is _reused_before_any_signal:
+    owned = {pid: world.rows[pid].birth for pid in (5002, 5003)}
+    if replaces == "before":
         world.start(5002, 1, world.rows[5002].cmd)
+        replaces = {}
     sent = []
 
     def kill(pid, sig):
         if sig:
             sent.append((pid, sig))
-            when(world, sig)
+            if (pid, sig) in replaces:
+                world.start(replaces[pid, sig], 1, "another's process")
 
-    monkeypatch.setattr(procs, "lineage", world.lineage)
+    monkeypatch.setattr(procs, "birth_of", lambda pid: world.rows[pid].birth if pid in world.rows else None)
     monkeypatch.setattr(procs, "alive", lambda pid: pid in world.rows)
     monkeypatch.setattr(procs.os, "kill", kill)
-    procs.terminate([5002], grace=0, owned=owned)
-    assert sent == ([] if when is _reused_before_any_signal else [(5002, signal.SIGTERM)])
+    procs.terminate([5002, 5003], grace=0, owned=owned)
+    assert sent == expected

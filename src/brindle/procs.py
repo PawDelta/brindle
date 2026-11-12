@@ -483,17 +483,17 @@ def terminate(pids: set[int] | list[int], grace: float = 3.0, owned: dict[int, s
     """SIGTERM, then SIGKILL whatever is left after ``grace`` seconds.
     Returns how many processes were signalled. ``owned`` (pid -> birth, from
     lineage): each signal goes only to a pid that is still the process its
-    birth names, read just before the signal is sent, so a pid that came
-    round again meanwhile (another's process) is spared."""
-    def still(candidates) -> list[int]:
-        candidates = list(candidates)
-        if owned is None or not candidates:
-            return candidates
-        now = lineage()
-        return [p for p in candidates if p in now and now[p].birth == owned.get(p)]
+    birth names, read for that pid alone just before its own signal is sent
+    (birth_of), so a pid that came round again meanwhile (another's process,
+    perhaps after an earlier signal of this batch ended the one it was) is
+    spared."""
+    def still(pid: int) -> bool:
+        return owned is None or birth_of(pid) == owned.get(pid)
 
     sent = []
-    for pid in still(pids):
+    for pid in pids:
+        if not still(pid):
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
             sent.append(pid)
@@ -502,8 +502,8 @@ def terminate(pids: set[int] | list[int], grace: float = 3.0, owned: dict[int, s
     deadline = time.time() + grace
     while sent and time.time() < deadline and any(alive(p) for p in sent):
         time.sleep(0.1)
-    for pid in still(p for p in sent if alive(p)):
-        if alive(pid):
+    for pid in sent:
+        if alive(pid) and still(pid):
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
@@ -536,6 +536,23 @@ def _handed_path() -> Path:
     from brindle.config import brindle_home
 
     return brindle_home() / HANDED
+
+
+def birth_of(pid: int) -> str | None:
+    """The birth of the process ``pid`` is now (as lineage gives it), read
+    for it alone; None when no process has that pid."""
+    if (PROC / "self" / "stat").exists():
+        try:
+            boot = (PROC / "sys" / "kernel" / "random" / "boot_id").read_text().strip()
+        except OSError:
+            boot = "?"
+        try:
+            after = (PROC / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            return None
+        return f"{boot}:{after[19]}" if len(after) > 19 else None
+    started = spawn.read(["ps", "-o", "lstart=", "-p", str(int(pid))], timeout=PS_LIMIT).stdout.split()
+    return " ".join(started) if len(started) == 5 else None
 
 
 def lineage() -> dict[int, Proc]:
