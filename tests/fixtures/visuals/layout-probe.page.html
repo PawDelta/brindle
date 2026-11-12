@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Layout probe</title>
+<style>
+:root{--space:5vw;--ink:#111;--cols:1fr 2fr}
+body{margin:0;color:var(--ink);background:#888;font-family:sans-serif}
+.half{display:grid;grid-template-columns:25% 25%;gap:8px}
+div[data-grid]{display:grid;grid-template-columns:var(--cols);gap:16px;padding-left:var(--space);margin:0 auto;max-width:600px}
+div[data-grid] > div,.half > div{background:#fff3;padding:8px}
+.shape{fill:url(#g);stroke:#000}
+.arrow{stroke:#000;marker-end:none}
+@media (prefers-color-scheme:dark){:root{--ink:#eee;--cols:2fr 1fr}.tag::before{content:"dark ";color:#f0f}.arrow{marker-end:url(#a)}.shape{fill:url(#h)}}
+</style></head><body>
+<div class="half"><div>quarter</div><div>quarter</div></div>
+<div data-grid=""><div>one</div><div>two</div></div>
+<p class="tag">tag</p>
+<svg width="300" height="80"><defs>
+<linearGradient id="g"><stop offset="0" stop-color="red"></stop><stop offset="1" stop-color="blue"></stop></linearGradient>
+<linearGradient id="h"><stop offset="0" stop-color="green"></stop><stop offset="1" stop-color="yellow"></stop></linearGradient>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 10 5 0 10z" fill="black"></path></marker></defs>
+<rect class="shape" x="10" y="10" width="100" height="40"></rect><path class="arrow" d="M140 30 H260"></path></svg>
+</body></html>

@@ -12,7 +12,7 @@ import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
 import type { PlansClient, VisualsClient } from "./client";
-import { VisualFrame, type VisualFrameProps, type VisualSource } from "./frame";
+import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
@@ -1211,5 +1211,153 @@ describe("visuals", () => {
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Redirect" })));
     expect(sent).toEqual([{ rev: 1, approved: false, picks: { where: "hosted" }, note: "",
       comments: [{ section: "ask", text: "Teams too." }, { section: "decision:where", text: "Ask legal first." }] }]);
+  });
+});
+
+describe("export snapshot", () => {
+  it("writes computed light values and dark differences as shared literal classes, replacing the page's own", () => {
+    // A frame's document, as in computedSnapshot (jsdom only parses stylesheets in a browsing context).
+    const frame = document.body.appendChild(document.createElement("iframe"));
+    const doc = frame.contentDocument!;
+    doc.documentElement.innerHTML = `<head><style>.pill{color:var(--ink);padding:2px 8px;border-radius:999px}
+      @media (prefers-color-scheme:light){:root{--ink:#222}}
+      div[data-grid]{display:grid;gap:var(--space);padding-left:var(--side);grid-template-columns:var(--cols)}
+      .half{grid-template-columns:25% 25%}.shape{fill:url(#g);marker-end:url(#a)}</style></head>
+      <body><p><span class="pill" style="background:var(--soft);width:5%">fixed</span><span class="pill">open</span></p>
+      <div data-grid=""><div>A</div></div><div class="half"><div>B</div></div>
+      <table><tr><td>cell</td></tr></table><svg><path d="M0 0" class="shape" stroke="var(--ink)" style="fill:red"></path>
+      <g class="group"><path class="leaf" d="M1 1"></path></g></svg></body>`;
+    const media = (doc.styleSheets[0].cssRules[1] as CSSMediaRule).media;
+    let width: "narrow" | "wide" | "viewed" = "viewed";
+    // While the export is rehearsed only what the sanitiser keeps is in the page: not div[data-grid].
+    const rehearsing = () => !Array.from(doc.querySelectorAll("style")).some((style) => style.textContent?.includes("data-grid"));
+    // The page's colour-scheme rule is what decides the scheme here, as it does in a browser.
+    const values = (element: Element, pseudo?: string): Record<string, string> => {
+      const dark = !media.mediaText.includes("min-width");
+      const tag = element.localName;
+      if (pseudo === "::before" && tag === "p") return { content: '"0.6.3"', color: dark ? "rgb(9, 9, 9)" : "rgb(8, 8, 8)" };
+      // A pseudo-element only one scheme has: dark's "new" after the pill, light's "old" before the cell.
+      if (pseudo === "::after" && tag === "span" && dark) return { content: '"new"', color: "rgb(7, 7, 7)" };
+      if (pseudo === "::before" && tag === "td" && !dark) return { content: '"old"' };
+      if (pseudo) return { content: "none" };
+      if (tag === "span") return { color: dark ? "rgb(2, 2, 2)" : "rgb(1, 1, 1)", "background-color": dark ? "rgb(3, 3, 3)" : "rgba(0, 0, 0, 0)",
+        "border-top-style": "none", "border-top-width": "3px", "border-top-left-radius": "999px" };
+      // Layout from a selector and variables the sanitiser can't keep: a padding of 5vw (it moves
+      // with the window) and columns that differ by scheme. Rehearsed, neither is there.
+      if (element.hasAttribute("data-grid")) return { display: "grid", "row-gap": "16px", "padding-top": "16px",
+        "padding-left": rehearsing() ? "0px" : { narrow: "30px", viewed: "50px", wide: "120px" }[width],
+        "grid-template-columns": rehearsing() ? "none" : dark ? "400px 600px" : { narrow: "200px 200px", viewed: "500px 500px", wide: "1150px 1150px" }[width] };
+      // Percentage columns from a rule the sanitiser keeps: rehearsed, they come out the same.
+      if (element.classList.contains("half")) return { "grid-template-columns": { narrow: "100px 100px", viewed: "250px 250px", wide: "600px 600px" }[width] };
+      if (tag === "td") return { "border-bottom-style": "solid", "border-bottom-width": "1px", "border-bottom-color": dark ? "rgb(6, 6, 6)" : "rgb(5, 5, 5)" };
+      // A group and a shape inside it, each with a gradient that differs by scheme.
+      if (tag === "g") return { fill: dark ? 'url("#gd")' : 'url("#gl")' };
+      if (element.classList.contains("leaf")) return { fill: dark ? 'url("#cd")' : 'url("#cl")' };
+      // A gradient that differs by scheme, an arrowhead only dark has, and another document's marker;
+      // the page's inline fill is what dark's own stylesheet overrode.
+      if (tag === "path") return { fill: dark ? 'url("#h")' : 'url("about:blank#g")', "marker-end": dark ? 'url("#a")' : "none",
+        "marker-start": 'url("https://evil.test/s.svg#a")', stroke: "rgb(4, 4, 4)", "stroke-dasharray": "4 3" };
+      return {};
+    };
+    const html = inlineStyles(doc, (element, pseudo) => ({ getPropertyValue: (name) => values(element, pseudo)[name] ?? "" }), (to) => { width = to; });
+    const named = (tag: string, prefix = "brindle-s") => {
+      const found = [...html.matchAll(new RegExp(`<${tag}[^>]*?(${prefix}\\d+)`, "g"))].map((m) => m[1]);
+      return { all: found, rule: (pseudo = "", dark = false) => {
+        const split = html.indexOf("@media (prefers-color-scheme: dark){");
+        return new RegExp(`\\.${found[0]}${pseudo}\\{([^}]*)\\}`).exec(dark ? html.slice(split) : html.slice(0, split))?.[1];
+      } };
+    };
+    const span = named("span");
+    expect(new Set(span.all).size).toBe(1);
+    expect(span.all).toHaveLength(2);
+    expect(span.rule()).toBe("color:rgb(1, 1, 1);background-color:rgba(0, 0, 0, 0);border-top-left-radius:999px");
+    expect(span.rule("", true)).toBe("color:rgb(2, 2, 2);background-color:rgb(3, 3, 3)");
+    expect(named("p").rule("::before")).toBe('content:"0.6.3";color:rgb(8, 8, 8)');
+    expect(named("p").rule("::before", true)).toBe("color:rgb(9, 9, 9)");
+    expect(named("td").rule()).toBe("border-bottom-style:solid;border-bottom-width:1px;border-bottom-color:rgb(5, 5, 5)");
+    expect(span.rule("::after")).toBe("content:none");
+    expect(span.rule("::after", true)).toBe('content:"new";color:rgb(7, 7, 7)');
+    expect(named("td").rule("::before")).toBe('content:"old"');
+    expect(named("td").rule("::before", true)).toBe("content:none");
+    // Sized values the export would lose are written as the viewed literals, per scheme, above the
+    // page; fixed ones (the padding-top) and ones a kept rule reproduces (25% columns) aren't.
+    const grid = named('div data-grid=""');
+    expect(grid.rule()).toBe("display:grid;row-gap:16px");
+    expect(named('div data-grid=""', "brindle-z").rule()).toBe("padding-left:50px !important;grid-template-columns:500px 500px !important");
+    expect(named('div data-grid=""', "brindle-z").rule("", true)).toBe("grid-template-columns:400px 600px !important");
+    expect(html).not.toMatch(/<div class="half[^"]*brindle-z/);
+    expect(html).toMatch(/\.half \{\s*grid-template-columns: 25% 25%;?\s*\}/);
+    expect(named("path").rule()).toBe("stroke:rgb(4, 4, 4);stroke-dasharray:4 3");
+    // References go back as attributes to the page's own ids, one copy of the path per scheme where
+    // they differ; another document's marker doesn't.
+    const [lit, dim] = [...html.matchAll(/<path [^>]*>/g)].map((m) => m[0]);
+    expect(lit).toMatch(/brindle-light/);
+    expect(lit).toContain('fill="url(#g)"');
+    expect(lit).toContain('marker-end="none"');
+    expect(dim).toMatch(/brindle-dark/);
+    expect(dim).toContain('fill="url(#h)"');
+    expect(dim).toContain('marker-end="url(#a)"');
+    // Neither copy keeps the page's inline fill, which would override the captured values.
+    expect(lit).not.toContain("style=");
+    expect(dim).not.toContain("style=");
+    // The dark copy of a group is dark all the way down: its shape carries the shape's own dark gradient.
+    expect(html).toMatch(new RegExp('<g [^>]*brindle-light[^>]*fill="url\\(#gl\\)"><path class="leaf[^"]*" d="M1 1" fill="url\\(#cl\\)"></path></g>'
+      + '<g [^>]*brindle-dark[^>]*fill="url\\(#gd\\)"><path class="leaf[^"]*" d="M1 1" fill="url\\(#cd\\)"></path></g>'));
+    expect(html).toContain(".brindle-dark{display:none}");
+    expect(html).toContain(".brindle-light{display:none}.brindle-dark{display:inline}");
+    expect(html).not.toContain("marker-start");
+    // The page keeps what the captured values don't replace; its own colours, radii, layout values
+    // and references are gone, and its scheme switch is restored.
+    expect(html).toMatch(/\.pill \{\s*padding: 2px 8px;?\s*\}/);
+    expect(html).not.toContain("color: var(--ink)");
+    expect(html).not.toContain("var(--soft)");
+    expect(html).not.toContain("var(--space)");
+    expect(html).not.toMatch(/marker-end: url|fill: url/);
+    expect(html).toContain('style="width: 5%;"');
+    expect(media.mediaText).toMatch(/prefers-color-scheme: ?light/);
+    expect(doc.documentElement.getAttribute("style")).toBeNull();
+    frame.remove();
+  });
+
+  it("renders the snapshot inert: nothing active, no outside reference, a refusing policy first", () => {
+    const { source, empty } = inertSource(`<html><head><meta http-equiv="refresh" content="0;url=https://evil.test"><link rel="stylesheet" href="https://evil.test/a.css"></head>
+      <body onload="alert(1)"><script>alert(1)</script><iframe srcdoc="x"></iframe><p onclick="alert(1)">kept</p>
+      <img src="https://evil.test/t.png"><img src="data:image/png;base64,AAAA"><svg><use href="#a" xlink:href="https://evil.test/s.svg#a"></use></svg>
+      <a href="javascript:alert(1)">link</a></body></html>`);
+    const doc = new DOMParser().parseFromString(source, "text/html");
+    expect(source.startsWith("<!doctype html>")).toBe(true);
+    expect(doc.head.firstElementChild?.getAttribute("http-equiv")).toBe("Content-Security-Policy");
+    expect(doc.head.firstElementChild?.getAttribute("content")).toMatch(/^default-src 'none';/);
+    expect(doc.querySelectorAll("meta")).toHaveLength(1);
+    expect(source).not.toMatch(/<script|<iframe|<link|onload|onclick|evil\.test|javascript:/);
+    expect(source).toContain('src="data:image/png;base64,AAAA"');
+    expect(source).toContain('href="#a"');
+    expect(doc.querySelector("p")?.textContent).toBe("kept");
+    expect(empty).toBe(false);
+  });
+
+  it("relays a snapshot once the frame has rendered it, and drops one the reader moved on from", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    native.invoke.mockImplementation(async (command, args) => command === "visual_open" ? `visual:${(args as { id: string }).id}:r1` : undefined);
+    const got: [unknown, VisualSource][] = [];
+    const first: VisualSource = { kind: "session", id: "v_1", rev: 1 };
+    const second: VisualSource = { kind: "session", id: "v_2", rev: 1 };
+    const view = render(<VisualFrame source={first} title="One" onMessage={(m, from) => got.push([m, from])} />);
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.objectContaining({ id: "v_1" })));
+    const snapshot = (id: string, html: string) => ({ payload: { label: `visual:${id}:r1`, visual: { kind: "revision", id, rev: 1 }, message: { type: "brindle.snapshot", html } } });
+    await act(async () => native.events.get("visual:message")!(snapshot("v_1", "<p>one</p>")));
+    await waitFor(() => expect(got).toEqual([[{ type: "brindle.snapshot", html: "<p>one</p>" }, first]]));
+    // Asked for, then the reader moved to another visual while the frame was still rendering it.
+    act(() => {
+      native.events.get("visual:message")!(snapshot("v_1", "<p>stale</p>"));
+      view.rerender(<VisualFrame source={second} title="Two" onMessage={(m, from) => got.push([m, from])} />);
+    });
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.objectContaining({ id: "v_2" })));
+    await act(async () => native.events.get("visual:message")!(snapshot("v_2", "<p>two</p>")));
+    await waitFor(() => expect(got).toHaveLength(2));
+    expect(got[1]).toEqual([{ type: "brindle.snapshot", html: "<p>two</p>" }, second]);
+    expect(document.querySelectorAll("iframe")).toHaveLength(0);
   });
 });
