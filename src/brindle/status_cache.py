@@ -41,6 +41,7 @@ import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from stat import S_ISBLK, S_ISCHR
 from typing import NamedTuple
 
 from brindle import git, spawn
@@ -340,15 +341,26 @@ def _system_configs() -> list[Path]:
     return _SYSTEM_CONFIGS
 
 
+def _as_watched(s: os.stat_result) -> tuple:
+    """A device (``/dev/null`` named as the global config or an excludes
+    file, say) reads the same whatever its times, which every process
+    writing to it moves: only which device it is counts."""
+    if S_ISCHR(s.st_mode) or S_ISBLK(s.st_mode):
+        return (0, 0, 0, s.st_rdev)
+    return (s.st_mtime_ns, s.st_ctime_ns, s.st_size, s.st_ino)
+
+
 def _watched(path: Path) -> tuple:
     """A file outside the worktree as git reads it: the link itself and,
     through it, what it points at."""
     try:
-        s = os.stat(path)
-        followed = (s.st_mtime_ns, s.st_ctime_ns, s.st_size, s.st_ino)
+        link = _as_watched(os.lstat(path))
     except OSError:
-        followed = None
-    return (_stat(path), followed)
+        return (None, None)
+    try:
+        return (link, _as_watched(os.stat(path)))
+    except OSError:
+        return (link, None)
 
 
 def _settled_since(stats: tuple, before_ns: int) -> bool:
