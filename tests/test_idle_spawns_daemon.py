@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from conftest import sh
-from brindle import agents, autopilot, config, cull, session_sync, tmux, workspaces
+from brindle import agents, autopilot, cull, session_sync, tmux, workspaces
 from brindle.daemon import events, session_review
 from brindle.db import Agent
 from test_merge_order import _repo_template, quiet_removal, repo, worktree  # noqa: F401 - fixture
@@ -59,28 +59,30 @@ def test_an_unchanged_sweep_starts_no_process(db, repo, tmp_path, _repo_template
     sh("git commit -qam main && git push -q origin HEAD:main", other)
     feat = worktree(db, repo, "feat", base="live", files={"feat.txt": "feat"})
     db.add_agent(Agent("worker", feat.id, "developer", "claude", "lead", "assign", "idle", "%worker", None, 1.0))
+    still = worktree(db, repo, "still", base="live")        # idle, nothing committed: nothing to tell
+    db.add_agent(Agent("idler", still.id, "developer", "claude", "lead", "assign", "idle", "%idler", None, 1.0))
     panes = tmux.PaneSnapshot(tmux.current_server())
-    panes.update({"%lead": True, "%clash-lead": True, "%messy-lead": True, "%worker": True})
-    told = []
+    panes.update({"%lead": True, "%clash-lead": True, "%messy-lead": True, "%worker": True, "%idler": True})
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
     monkeypatch.setattr(agents, "is_alive", lambda a, p=None: panes.get(a.tmux_window, False))
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
-    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: told.append(to))
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: None)
     monkeypatch.setattr(session_review, "open_pr_for_head", lambda sha, cwd, root_id=None: None)
     watch, feed = session_review.ReadinessWatch(), events.Feed(db)
 
-    def round_() -> None:
+    def daemon() -> None:
         watch.sweep(db)
         clock[0] += events.GIT_SECONDS
         feed.tick(clock[0])
-        cull.note_unreported_commits(db, time.time(), panes)
-        config.load_repo_config(str(repo), branch="main")     # the cull's agent_env, per running agent
 
-    round_()
-    round_()                          # the first sync's merge is found synced, the clash settled
+    for _ in range(2):                # the first sync's merge is found synced, the clash settled
+        daemon()
+        cull.sweep(db)
     assert db.mark("worker", f"commits:{sh('git rev-parse HEAD', Path(feat.path))}") == "told"
     started, real = [], subprocess.Popen.__init__
     monkeypatch.setattr(subprocess.Popen, "__init__", lambda self, args, *a, **k: (
         started.append(args), real(self, args, *a, **k))[1])
-    round_()
+    daemon()
     assert started == []
+    cull.sweep(db)                    # its process table and pane reads are its job; git isn't
+    assert [args for args in started if args[0] == "git"] == []

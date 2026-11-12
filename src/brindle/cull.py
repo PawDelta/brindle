@@ -51,7 +51,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from brindle import agents, git, procs, status_cache, tmux
+from brindle import agents, config, git, procs, status_cache, tmux
 from brindle.config import CONFIG_DIR, WORKTREES_DIR, brindle_home, load_repo_config, worktrees_dir
 from brindle.db import DB, Agent, Workspace
 from brindle.pro import route_health
@@ -692,8 +692,13 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
         # HEAD from the git files, and the notice's de-dupe, before any git (the idle
         # look's status, the count): a worker already told about stays idle for its
         # whole stale_after, and the cull looks once a minute.
+        # A count of none is remembered by what it was counted from (HEAD, the base,
+        # the reported head): the same commits count none again.
         head = status_cache.read_head(ws.path)
-        if head is not None and (head == reported or db.mark(a.id, f"commits:{head}") == "told"):
+        base = config._branch_sha(Path(ws.path), ws.base_branch)
+        counted = f"{head} {base} {reported}" if head and base else None
+        if head is not None and (head == reported or db.mark(a.id, f"commits:{head}") == "told"
+                                 or (counted and db.mark(a.id, "commits-none") == counted)):
             continue
         since = _idle_since(db, a)
         if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
@@ -707,6 +712,8 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
             covered = len(git.run(["rev-list", span], ws.path).stdout.split())
         except git.GitError:
             continue
+        if not covered and counted:
+            db.set_mark(a.id, "commits-none", counted)
         if covered and _tell_once(db, a, f"commits:{head}", (
                 f"{ws.branch} has {covered} unreported commits; the worker may have failed to "
                 f"report (worker {a.id}, workspace {ws.id}). Ask it to call report_result again, "
@@ -716,27 +723,27 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
 
 
 def _last_edit(ws: Workspace | None) -> float:
-    """When a file with uncommitted changes in ``ws`` was last written; 0 if none."""
+    """When a file with uncommitted changes in ``ws`` was last written; 0 if none.
+    Which files are uncommitted comes from ``status_cache`` (git only when the
+    checkout moved; the cull asks once a minute for every idle worker); each
+    one's time is stat'ed now."""
     newest = 0.0
     if ws is None or not os.path.isdir(ws.path):
         return newest
     try:
-        # -z: paths unquoted (git.dirty_files' would be C-quoted past ASCII),
-        # and a rename's source after its destination, as an entry of its own.
-        entries = git.run(["status", "--porcelain", "-z", "--untracked-files=all"],
-                          ws.path).stdout.split("\0")
+        entries = status_cache.cached_any_status(ws.path, ws.base_branch).dirty_files
     except git.GitError:
         return newest
-    source = False
+    root = os.fsencode(ws.path)
     for entry in entries:
-        if source or len(entry) < 4:
-            source = False
-            continue
-        source = entry[0] in "RC"
-        try:
-            newest = max(newest, os.stat(os.path.join(ws.path, entry[3:])).st_mtime)
-        except OSError:
-            pass   # deleted
+        # As porcelain v1 prints them: C-quoted past ASCII, a rename as "old -> new".
+        names = [entry, *(entry.rsplit(" -> ", 1)[1:])]
+        for name in names:
+            try:
+                newest = max(newest, os.stat(os.path.join(root, status_cache._unquote(name))).st_mtime)
+                break
+            except OSError:
+                pass   # deleted, or the rename's destination is the name to look at
     return newest
 
 
