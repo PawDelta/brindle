@@ -694,7 +694,7 @@ def _rescue_sidebar(db: DB, ws: Workspace) -> None:
 
 
 def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | None = None,
-           keep_session: bool = False, stop=()) -> Removed:
+           keep_session: bool = False, stop=None) -> Removed:
     """``delete_branch``: True deletes the branch (only if merged, unless
     ``force``), False keeps it, and None (the default) follows the repo's
     ``delete_merged_branches``: the branch goes once it is fully merged into
@@ -702,11 +702,16 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
     ``keep_session`` leaves the workspace's tmux session running: for a
     caller that itself runs in it (the pipeline's reviewer), which killing
     the session would take down mid-cleanup. ``stop``: agents of it to stop
-    first, once the worktree is known to go: kept, it keeps them."""
-    def stop_them():
-        from brindle import agents
+    first, once the worktree is known to go: kept, it keeps them. None (the
+    default, for a removal someone asked for): every live agent of a
+    worktree's, read just before the check (none with ``keep_session``),
+    whose own CLI and plumbing in the worktree then don't keep it. A sweep
+    that chose the workspace from an earlier look passes ``()``: a worker
+    back at work since then keeps it."""
+    from brindle import agents
 
-        for a in stop:
+    def stop_them():
+        for a in stop or ():
             agents._stop(db, a)
 
     if ws.kind == "main":
@@ -742,6 +747,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             return _forget(db, ws, Removed(
                 False, f"worktree kept (shared with {sharing[0].id})", None))
 
+    if stop is None:   # its agents as they are now, right before the check and the stop
+        stop = [] if keep_session else [a for a in db.list_agents(ws.id) if agents.is_alive(a)]
     exists = os.path.isdir(ws.path)
     if exists and not force:
         dirty = git.dirty_files(ws.path)
