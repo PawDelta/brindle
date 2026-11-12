@@ -833,6 +833,8 @@ def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: s
             plan_first=plan_first, weight=weight, milestone=milestone,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
+        if clash.cross_session:   # ends on its landing, or after the drift limit (tasks._release_cross_waits)
+            tasks.note_cross_wait(db, t.id, clash.holder)
         outcome = f"queued as task {t.id} until {clash.holder} merges"
         reply = _remind_goal(db, caller, f"Queued task {t.id} until {clash.holder} merges: this task "
                              f"{clash.warning}." + "".join(f"\nprofile: {w}" for w in why))

@@ -13,7 +13,7 @@ import re
 import signal
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from typing import Callable, Iterator
 
@@ -167,6 +167,26 @@ CREATE TABLE IF NOT EXISTS milestones (
 CREATE TABLE IF NOT EXISTS milestone_phases (
     milestone_id INTEGER PRIMARY KEY REFERENCES milestones(id) ON DELETE CASCADE,
     phase TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS phase_landings (
+    root_id TEXT NOT NULL REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    phase TEXT NOT NULL,           -- empty for a goal without phases
+    notified_at REAL,
+    pending INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (root_id, phase)
+);
+-- A completed goal phase brindle lands itself while later milestones remain
+-- (autopilot.phase_landing; routes_actions.land_phase_prs opens the session PR
+-- or pushes to the open one). sha: the commit the phase's milestone checks
+-- passed on, the one pushed (never the branch's tip). state: pending | pushed |
+-- refused | failed; why: what refused or failed it.
+CREATE TABLE IF NOT EXISTS phase_prs (
+    root_id TEXT NOT NULL REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    phase TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    why TEXT,
+    PRIMARY KEY (root_id, phase)
 );
 -- Short goal labels live outside the released autopilot table.
 CREATE TABLE IF NOT EXISTS goal_summaries (
@@ -637,16 +657,19 @@ CREATE TABLE IF NOT EXISTS session_prs (
     merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
     PRIMARY KEY (root_id, branch)
 );
--- The session PRs that merged before the branch's next PR replaced them in
--- session_prs (session_review.keep_merged_pr): a branch can have several.
-CREATE TABLE IF NOT EXISTS session_pr_history (
-    root_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    url TEXT NOT NULL,
-    pushed_sha TEXT,
-    opened_at REAL NOT NULL,
-    merged_at REAL NOT NULL,
-    PRIMARY KEY (root_id, branch, url)
+-- A durable claim prevents overlapping daemons from merging the same PR twice.
+-- Keep failed attempts for the Inbox; only poll_merged records an actual merge.
+CREATE TABLE IF NOT EXISTS session_pr_merges (
+    url TEXT PRIMARY KEY,
+    state TEXT NOT NULL,            -- merging | submitted | failed | pushing (a phase landing's push)
+    owner TEXT,                    -- unique token whose session-pr-merge marker is held while acting
+    error TEXT
+);
+-- What a phase landing's push (session_pr_merges state 'pushing') sends to the PR at url: kept with
+-- the claim, so a push whose owner went away is reconciled against the PR's head before any merge.
+CREATE TABLE IF NOT EXISTS session_pr_pushes (
+    url TEXT PRIMARY KEY,
+    sha TEXT NOT NULL
 );
 -- A session PR adopted from one opened with gh on another branch name: where it really lives,
 -- so a Push of the session branch is refused instead of missing it.
@@ -692,6 +715,24 @@ CREATE TABLE IF NOT EXISTS session_sync (
     files TEXT,
     told_sha TEXT,
     updated_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, branch)
+);
+-- One automatic resolution attempt per conflicting origin commit, retained
+-- after failure so repeated syncs do not start another worker.
+CREATE TABLE IF NOT EXISTS session_sync_resolvers (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    upstream_sha TEXT NOT NULL,
+    task_id TEXT,
+    PRIMARY KEY (repo_root, branch, upstream_sha)
+);
+-- Unlanded session work, independent of whether origin has been merged in.
+CREATE TABLE IF NOT EXISTS session_drift (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    oldest_at REAL,
+    file_count INTEGER NOT NULL,
+    drifting INTEGER NOT NULL,
     PRIMARY KEY (repo_root, branch)
 );
 -- The supervisors told that a repo no longer refreshes on its own: origin wants
@@ -1568,6 +1609,9 @@ class DB:
         for flag in ("question", "from_supervisor"):
             if flag not in thread_cols:
                 self.conn.execute(f"ALTER TABLE plan_threads ADD COLUMN {flag} INTEGER NOT NULL DEFAULT 0")
+        merge_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(session_pr_merges)")}
+        if "owner" not in merge_cols:
+            self.conn.execute("ALTER TABLE session_pr_merges ADD COLUMN owner TEXT")
         input_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_input_state)")}
         if "observer" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN observer INTEGER NOT NULL DEFAULT 0")
@@ -2282,6 +2326,11 @@ class DB:
                 c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*agent_fields.values(), row["agent_id"]))
                 if agent_fields.get("reviewing_since") is not None:
                     ids.append(f"review {agent_fields['reviewing_since']}")
+                    if agent_fields.get("pipeline") == "reviewing":
+                        # A new accepted review attempt replaces the previous
+                        # escalation before its reviewer can escalate again.
+                        c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pipeline-escalated'",
+                                  (row["agent_id"],))
             c.execute("UPDATE report_outbox SET delivery=? WHERE id=?",
                       (", ".join(ids) or "nothing to tell", row_id))
             c.execute("UPDATE report_outbox SET state='superseded', updated_at=? WHERE agent_id=? AND id<?"
@@ -3054,12 +3103,13 @@ class DB:
             )
 
     def update_autopilot(self, root_id: str, **fields: object) -> None:
+        """Update goal fields, joining a caller's goal-replacement transaction."""
         has_summary = "summary" in fields
         summary = fields.pop("summary", None)
         offer = fields.pop("plan_offer", "keep")
         goal_at = fields.pop("offer_goal_at", None)
         cols = ", ".join(f"{k}=?" for k in fields)
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             if has_summary:
                 if summary is None:
                     c.execute("DELETE FROM goal_summaries WHERE root_id=?", (root_id,))
@@ -3109,12 +3159,12 @@ class DB:
             return bool(changed)
 
     def bump_progress(self, root_id: str) -> None:
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
 
     def set_milestones(self, root_id: str, items: list[tuple]) -> None:
         """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo[, phase]]])`` items."""
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
             for i, (title, check, detail, *rest) in enumerate(items, start=1):
                 cur = c.execute(
@@ -3145,7 +3195,7 @@ class DB:
         the milestone is done."""
         if state is None:
             state, state_why = check_state(passed, output, False)
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute(
                 "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=?, "
                 "passed_sha=COALESCE(?, passed_sha), state=?, state_why=?, "

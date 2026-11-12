@@ -449,6 +449,8 @@ def note_removed_merged(db: DB, ws: Workspace, actor: Agent | None = None,
 
 
 def _escalate(db: DB, ws: Workspace, worker: Agent | None) -> None:
+    if worker:
+        db.set_mark(worker.id, "pipeline-escalated", "1")
     _note(db, ws, worker, escalated=True, actor="brindle")
 
 
@@ -618,6 +620,8 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
         if a.review_sha == sha:
             return "needs you: " + a.failed_why.removeprefix("review: ")
     checks = gates.checks_state(ws)
+    if worker.pipeline == "sync_wait":
+        return "approved, waiting for session sync"
     if worker.pipeline == "ready":
         merging = f"merging, {checks}" if gates.marked("merge-run", ws.id) else "waiting to merge"
         return f"approved, {merging}"
@@ -1482,7 +1486,7 @@ def on_resumed(db: DB, root_id: str) -> None:
             continue
         if a.pipeline == "reviewing":
             db.update_agent(a.id, review_restarted=None)
-        elif a.pipeline == "ready":
+        elif a.pipeline in ("ready", "sync_wait"):
             ws = db.get_workspace(a.workspace_id)
             if ws is not None:
                 bases.add((ws.repo_root, ws.base_branch))
@@ -1501,7 +1505,8 @@ def ready_branches(db: DB, repo_root: str, base: str | None) -> list[tuple[Agent
         if ws.kind != "worktree" or ws.base_branch != base:
             continue
         worker = piped_worker(db, ws)
-        if worker is not None and worker.pipeline == "ready":
+        if worker is not None and (worker.pipeline == "ready" or (
+                worker.pipeline == "sync_wait" and session_sync.merge_block(db, ws) is None)):
             found.append((worker, ws))
     found.sort(key=lambda pair: pair[1].created_at)
     return found
@@ -1547,7 +1552,7 @@ def _finish(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None) -> str
     reported new commits, a supervisor merged it by hand) is left alone."""
     with merge_lock(ws.id), gates.marker("merge-run", ws.id):
         current = db.get_agent(worker.id)
-        if current is None or current.pipeline != "ready":
+        if current is None or current.pipeline not in ("ready", "sync_wait"):
             return f"Skipped {ws.branch}: no longer ready."
         return _finish_locked(db, current, ws, reviewer)
 
@@ -1620,8 +1625,14 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
         _resolve_conflict(db, worker, ws, cfg, conflicting, report)
     else:
         latest = db.get_agent(worker.id)
-        if latest is not None and latest.pipeline not in (None, "ready"):
+        if latest is not None and latest.pipeline not in (None, "ready", "sync_wait"):
             return text   # the worker moved on meanwhile (a new report): its new state stands
+        block = session_sync.merge_block(db, ws)
+        if block and text == f"Not merged: {block}":
+            # An approved branch waits behind origin's conflict. It becomes
+            # ready again when the resolver merges; this is no failed merge.
+            db.update_agent(worker.id, pipeline="sync_wait", merge_failed=None)
+            return text
         if text.startswith("Not merged. ") and _retry_on_heavy(db, worker, ws, cfg, text, report):
             return text   # the checks failed: a stronger model gets one go at it
         db.update_agent(worker.id, pipeline=None, merge_failed=text)
@@ -2031,6 +2042,8 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     except (git.GitError, workspaces.WorkspaceError) as e:
         return _settled(db, ws) or f"Not merged: {e}"
     if sync_result.status == "conflict":
+        bus.publish_ws(db, "conflict", ws, files=sync_result.conflicts or [], source="pipeline",
+                       branch=ws.branch, base_branch=ws.base_branch)
         if conflicts_out is not None:
             conflicts_out.extend(sync_result.conflicts or [])
         files = ", ".join(sync_result.conflicts) or "?"

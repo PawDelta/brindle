@@ -172,8 +172,8 @@ def _session_changes(db: DB, ws: Workspace, own: set[str],
         return
 
 
-def _session_overlap(db: DB, ws: Workspace, files: list[str], own: set[str],
-                     task_id: str | None = None, caller_id: str | None = None) -> Clash | None:
+def _session_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str],
+                      task_id: str | None = None, caller_id: str | None = None) -> Iterator[Clash]:
     pending = db.get_task(task_id) if task_id else None
     isolate = bool(pending.isolate) if pending else True
     # A satisfied cross-session dependency can supply the new branch's
@@ -183,9 +183,8 @@ def _session_overlap(db: DB, ws: Workspace, files: list[str], own: set[str],
     for root, holder, branch, changed in _session_changes(db, ws, own, start, caller, isolate):
         shared = _overlap_files(files, [], list(changed))
         if shared:
-            return Clash(f"overlaps with session {root} ({branch}) on {', '.join(shared)}; "
-                         "consider depends_on or merging first", holder, root, True, shared)
-    return None
+            yield Clash(f"overlaps with session {root} ({branch}) on {', '.join(shared)}; "
+                        "consider depends_on or merging first", holder, root, True, shared)
 
 
 def active_tasks(db: DB, repo_root: str) -> list[Task]:
@@ -282,7 +281,7 @@ def _held(db: DB, own: set[str], warning: str, holder: str | None,
     return Clash(warning, holder, root, root is not None and root not in own, shared_files)
 
 
-def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Clash | None:
+def _intent_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Iterator[Clash]:
     """A clash if ``files`` matches a live intent another session announced
     for this repo, naming that session and its goal line."""
     from brindle import knowledge
@@ -292,15 +291,19 @@ def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> C
         shared = _overlap_files(files, intent["paths"], [], ws)
         if shared:
             goal = intent["summary"].strip().splitlines()[0] if intent["summary"].strip() else ""
-            return Clash(f"overlaps with session {intent['session_root']}'s intent on {', '.join(shared)}"
-                         + (f" ({goal})" if goal else "")
-                         + "; consider depends_on or merging first",
-                         None, intent["session_root"], True, shared)
-    return None
+            yield Clash(f"overlaps with session {intent['session_root']}'s intent on {', '.join(shared)}"
+                        + (f" ({goal})" if goal else "")
+                        + "; consider depends_on or merging first",
+                        None, intent["session_root"], True, shared)
 
 
 def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], *,
                     inspect: bool = False, task_id: str | None = None) -> Clash | None:
+    return next(_queued_overlaps(db, ws, files, own, inspect=inspect, task_id=task_id), None)
+
+
+def _queued_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str], *,
+                     inspect: bool = False, task_id: str | None = None) -> Iterator[Clash]:
     """A clash if ``files`` matches the declared files of a task queued in
     ``ws``'s repo that hasn't started its worker yet (its request still
     replying, waiting, or starting in the background): assign/handoff start
@@ -317,10 +320,9 @@ def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], *,
         shared = _overlap_files(files, _loads(t.files), [], ws if inspect else None)
         if shared:
             root = autopilot.root_of(db, t.caller_id) if t.caller_id else None
-            return Clash(f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
-                         f"{', '.join(shared)}; consider depends_on or merging first",
-                         f"task:{t.id}", root, root is not None and root not in own, shared)
-    return None
+            yield Clash(f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
+                        f"{', '.join(shared)}; consider depends_on or merging first",
+                        f"task:{t.id}", root, root is not None and root not in own, shared)
 
 
 def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
@@ -337,16 +339,19 @@ def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | 
 
 
 def _running_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], changed: bool) -> Clash | None:
-    """A clash with a running task's declared files, or (``changed``) with
-    the files its branch has actually changed, which takes git to tell."""
+    return next(_running_overlaps(db, ws, files, own, changed), None)
+
+
+def _running_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str], changed: bool) -> Iterator[Clash]:
+    """Clashes with running tasks' declared files, or (``changed``) with
+    the files their branches have actually changed, which takes git to tell."""
     for t, _agent, other_ws in running_tasks(db, ws.repo_root):
         actual = _changed_files(other_ws) if changed and other_ws else []
         shared = _overlap_files(files, _loads(t.files), actual, ws if changed else None)
         if shared:
             branch = other_ws.branch if other_ws else "?"
-            return _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {', '.join(shared)}; "
-                         "consider depends_on or merging first", t.agent_id, shared)
-    return None
+            yield _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {', '.join(shared)}; "
+                        "consider depends_on or merging first", t.agent_id, shared)
 
 
 def declared_clash(db: DB, ws: Workspace, files: list[str] | None,
@@ -366,27 +371,34 @@ def inspected_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: s
     loaded machine: running tasks' changed files, other sessions' intents
     and reported but unmerged work. A queued task's start checks it just
     before launching (``_start_if_ready``)."""
+    return next(inspected_clashes(db, ws, files, task_text, caller_id, task_id=task_id), None)
+
+
+def inspected_clashes(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
+                      caller_id: str | None = None, *, task_id: str | None = None) -> Iterator[Clash]:
+    """Every clash ``inspected_clash`` would consider, first one first and
+    each read only when asked for: a launch passes over the holders its
+    task no longer waits on (``_launch_overlap``) without missing the rest."""
     own = _own_roots(db, ws, caller_id)
     if files:
-        clash = (_running_overlap(db, ws, files, own, changed=True)
-                 or _queued_overlap(db, ws, files, own, inspect=True, task_id=task_id)
-                 or _session_overlap(db, ws, files, own, task_id, caller_id) or _intent_overlap(db, ws, files, own))
-        if clash:
-            return clash
+        yield from _running_overlaps(db, ws, files, own, changed=True)
+        yield from _queued_overlaps(db, ws, files, own, inspect=True, task_id=task_id)
+        yield from _session_overlaps(db, ws, files, own, task_id, caller_id)
+        yield from _intent_overlaps(db, ws, files, own)
     mine_issues = _issue_numbers(task_text)
     if not files and not mine_issues:
-        return None
+        return
     for t, _agent, other_ws in _reported_unmerged(db, ws.repo_root):
         where = f"{t.agent_id} ({_where(other_ws)})"
         shared_files = _overlap_files(files, _loads(t.files), _changed_files(other_ws), ws) if files else ()
         if shared_files:
-            return _held(db, own, f"overlaps with {where}, reported but not yet merged, on "
-                         f"{', '.join(shared_files)}; consider depends_on or merging first", t.agent_id, shared_files)
+            yield _held(db, own, f"overlaps with {where}, reported but not yet merged, on "
+                        f"{', '.join(shared_files)}; consider depends_on or merging first", t.agent_id, shared_files)
+            continue
         shared = mine_issues & _issue_numbers(t.task_text)
         if shared:
-            return _held(db, own, f"names issue #{min(shared, key=int)} like {where}, reported but not yet "
-                         "merged; check it isn't already fixed there", t.agent_id)
-    return None
+            yield _held(db, own, f"names issue #{min(shared, key=int)} like {where}, reported but not yet "
+                        "merged; check it isn't already fixed there", t.agent_id)
 
 
 def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
@@ -434,6 +446,8 @@ def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str,
             if not c.execute("INSERT OR IGNORE INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
                              (key, kind, time.time())).rowcount:
                 return
+    bus.publish_agent(db, "overlap", caller_root, files=list(clash.shared_files), holder=clash.holder,
+                      holder_root=clash.holder_root, outcome=outcome)
     # The event a repo's coordinator wakes on (brindle.coordinator).
     knowledge.note(db, caller_root, knowledge.CLASH,
                    {"warning": clash.warning, "holder": clash.holder,
@@ -449,6 +463,186 @@ def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str,
                     f"{outcome}. Your work is not changed.")
         if db.get_agent(to):
             gates.tell(db, to, text)
+
+
+# -- waiting on another session's work -------------------------------------------
+
+# As long as a session branch may go unlanded before it counts as drifting
+# (session_sync): a task queued behind another session's work starts anyway
+# after this, with a warning, rather than wait for good.
+CROSS_SESSION_WAIT_LIMIT = 48 * 3600
+
+
+def _released_prefix(holder: str) -> str:
+    # A release note's kind: "cross-released:<holder>\n<why>\n<holder's head then>".
+    return f"cross-released:{holder}\n"
+
+
+def note_cross_wait(db: DB, task_id: str, holder: str) -> None:
+    """Record that task ``task_id`` waits for another session's ``holder``
+    to land, from the first time it did; a repeat keeps that time. A wait
+    that had ended and is held again by new work starts over."""
+    prefix = _released_prefix(holder)
+    with db.tx() as c:
+        if c.execute("DELETE FROM task_notes WHERE task_id=? AND substr(kind, 1, ?) = ?",
+                     (task_id, len(prefix), prefix)).rowcount:
+            c.execute("DELETE FROM task_notes WHERE task_id=? AND kind=?", (task_id, f"cross-wait:{holder}"))
+        c.execute("INSERT OR IGNORE INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
+                  (task_id, f"cross-wait:{holder}", time.time()))
+
+
+def _cross_note(db: DB, task_id: str, kind: str) -> float | None:
+    row = db.conn.execute("SELECT noted FROM task_notes WHERE task_id=? AND kind=?",
+                          (task_id, kind)).fetchone()
+    return row["noted"] if row else None
+
+
+def _cross_release(db: DB, task_id: str, holder: str) -> tuple[str, str] | None:
+    """How ``task_id``'s wait for ``holder`` ended: (why, the holder's head then)."""
+    prefix = _released_prefix(holder)
+    row = db.conn.execute("SELECT kind FROM task_notes WHERE task_id=? AND substr(kind, 1, ?) = ?",
+                          (task_id, len(prefix), prefix)).fetchone()
+    if row is None:
+        return None
+    why, _, head = row["kind"][len(prefix):].partition("\n")
+    return why, head
+
+
+def _holder_session(db: DB, dep: str, repo_root: str) -> tuple[list[str], str | None]:
+    """The session roots whose landing ends a wait on ``dep``, and the
+    branch that landing must come from: a ``workspace:<id>`` holder's
+    supervisors and branch, or the sessions an attached branch belongs to."""
+    if dep.startswith("workspace:"):
+        ws = db.get_workspace(dep.removeprefix("workspace:"))
+        roots = [a.id for a in db.list_agents(dep.removeprefix("workspace:"))
+                 if a.parent_id is None and a.mode == "interactive"]
+        return (roots, ws.branch) if ws else ([], None)
+    return [r.root_id for r in db.session_repos() if r.repo_root == repo_root and r.branch == dep], dep
+
+
+def _holder_head(repo_root: str, branch: str | None) -> str:
+    """``branch``'s commit now, or "" when git can't tell."""
+    if not branch:
+        return ""
+    try:
+        return git.ref_shas(repo_root).get(git._full_ref(branch), "")
+    except git.GitError:
+        return ""
+
+
+def _holder_root(db: DB, dep: str, repo_root: str) -> str | None:
+    from brindle import autopilot
+
+    roots, _branch = _holder_session(db, dep, repo_root)
+    if roots:
+        return roots[0]
+    task = db.get_task(dep.removeprefix("task:"))
+    who = task.caller_id if task and dep.startswith("task:") else dep
+    return autopilot.root_of(db, who) if who and db.get_agent(who) else None
+
+
+def cross_wait_excused(db: DB, t: Task, clash: Clash, repo_root: str) -> bool:
+    """Whether the clash read again at ``t``'s launch is work ``t`` already
+    stopped waiting for, so it warns instead of queueing ``t`` behind it
+    again: any of the holder's work once the wait ran out, or, after a
+    landing, the holder's branch as it landed (new commits on its files
+    hold ``t`` again). A branch that synced off the files has no excuse:
+    holding them again is new work."""
+    if not (clash.cross_session and clash.holder):
+        return False
+    release = _cross_release(db, t.id, clash.holder)
+    if release is None:
+        return False
+    why, landed = release
+    if why == "expired":
+        return True
+    if why != "landed" or not landed:
+        return False
+    head = _holder_head(repo_root, _holder_session(db, clash.holder, repo_root)[1])
+    if not head:
+        return False
+    if head == landed:
+        return True
+    try:
+        since_landing = _branch_files(repo_root, landed, head)
+    except git.GitError:
+        return False
+    return not _overlap_files(_loads(t.files), [], list(since_landing))
+
+
+def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: float,
+                     now: float) -> tuple[str, str] | None:
+    """Why ``t``'s wait for another session's ``dep`` is over, or None:
+    "expired" after CROSS_SESSION_WAIT_LIMIT, "landed" once that session's
+    PR from the holding branch merged after the wait began, "synced" once
+    that branch no longer holds the task's files. With it, for a landing,
+    the commit that landed (the PR's pushed head; "" when unknown, which
+    excuses nothing later). A worker or task holder ends its wait by
+    merging, as any dependency does."""
+    if now - since >= CROSS_SESSION_WAIT_LIMIT:
+        return "expired", ""
+    roots, branch = _holder_session(db, dep, caller_ws.repo_root)
+    if not roots or not branch:
+        return None
+    marks = ",".join("?" * len(roots))
+    landing = db.conn.execute(f"SELECT pushed_sha FROM session_prs WHERE root_id IN ({marks}) AND branch = ?"
+                              " AND merged_at >= ? ORDER BY merged_at DESC LIMIT 1",
+                              (*roots, branch, since)).fetchone()
+    if landing:
+        # Never the branch's head now: work committed after the landing is still unlanded.
+        return "landed", landing["pushed_sha"] or ""
+    files = _loads(t.files)
+    deps = _loads(t.depends_on)
+    isolate = bool(t.isolate)
+    start = _holder_start(db, caller_ws, deps) if isolate else None
+    caller = db.get_agent(t.caller_id) if t.caller_id else None
+    own = _own_roots(db, caller_ws, t.caller_id)
+    for _root, holder, _branch, changed in _session_changes(db, caller_ws, own, start, caller, isolate):
+        if holder != dep:
+            continue
+        if _overlap_files(files, [], list(changed)):
+            return None
+        return "synced", ""
+    return None   # only a branch actually read releases it: one git couldn't read keeps waiting
+
+
+def _release_cross_waits(db: DB, t: Task, caller_ws: Workspace) -> Task:
+    """End queued task ``t``'s waits on other sessions' work that has landed,
+    no longer holds its files, or has been waited on for the drift limit
+    (both supervisors are told of that one; nothing goes to the Inbox), and
+    return it as it is now. The other session's work is never changed. The
+    clash is read again at launch (``_launch_overlap``)."""
+    deps = _loads(t.depends_on)
+    waits = {d: since for d in deps
+             if (since := _cross_note(db, t.id, f"cross-wait:{d}")) is not None}
+    if not waits:
+        return t
+    now = time.time()
+    over = {d: why for d, since in waits.items() if (why := _cross_wait_over(db, t, caller_ws, d, since, now))}
+    if not over or not set_dependencies(db, t.id, [d for d in deps if d not in over], deps):
+        return db.get_task(t.id) or t
+    with db.tx() as c:
+        for dep, (why, landed) in over.items():
+            prefix = _released_prefix(dep)
+            c.execute("DELETE FROM task_notes WHERE task_id=? AND substr(kind, 1, ?) = ?",
+                      (t.id, len(prefix), prefix))
+            c.execute("INSERT INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
+                      (t.id, f"{prefix}{why}\n{landed}", now))
+    expired = [d for d, (why, _landed) in over.items() if why == "expired"]
+    if expired and t.caller_id:
+        from brindle import autopilot, gates
+
+        caller_root = autopilot.root_of(db, t.caller_id)
+        hours = CROSS_SESSION_WAIT_LIMIT // 3600
+        for dep in expired:
+            other = _holder_root(db, dep, caller_ws.repo_root)
+            gates.tell(db, caller_root, f"[brindle] Task {t.id} waited {hours} h for {dep} to land; "
+                       "it starts now on the same files, with a warning.")
+            if other and other != caller_root and db.get_agent(other):
+                gates.tell(db, other, f"[brindle] A task from session {caller_root} waited {hours} h "
+                           f"for your session's work ({dep}) to land and starts now on the same "
+                           "files. Your work is not changed.")
+    return db.get_task(t.id) or t
 
 
 # -- predicted conflicts between unmerged branches ------------------------------
@@ -946,7 +1140,7 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
     behalf of ``caller`` (its caller or session root). Only a worker start can
     be forced, and only one forced start may be in flight (a forced worker
     still starting): else ``ValueError`` says why."""
-    from brindle import autopilot
+    from brindle import autopilot, session_sync
 
     t = db.get_task(task_id)
     if t is None:
@@ -958,6 +1152,8 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
         raise ValueError(f"Task {task_id} isn't yours to start: only its caller or its session root can.")
     if t.state != "pending" or t.waiting is None:
         raise ValueError(f"Task {task_id} is {t.state}, not waiting for room: nothing to force.")
+    if session_sync.resolver_wait(db, t.id):
+        raise ValueError(f"Task {task_id} waits for its session to be quiet.")
     caller_ws = db.get_workspace(t.caller_ws_id)
     if not caller_ws or session_paused(db, t):
         raise ValueError(f"Task {task_id} can't start now (its session is paused or gone).")
@@ -1403,16 +1599,25 @@ def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | 
     from brindle import autopilot
     from brindle.config import load_repo_config
 
-    clash = inspected_clash(db, caller_ws, _loads(t.files), t.task_text, t.caller_id, task_id=t.id)
-    if clash is None:
-        return True, None
-    how = overlap_mode(load_repo_config(t.repo_root).overlap, clash.cross_session)
-    if how == "queue" and not clash.holder:   # an intent has no worker to wait for
-        how = "warn"
+    setting = load_repo_config(t.repo_root).overlap
+    excused: Clash | None = None
+    for clash in inspected_clashes(db, caller_ws, _loads(t.files), t.task_text, t.caller_id, task_id=t.id):
+        how = overlap_mode(setting, clash.cross_session)
+        if how == "queue" and not clash.holder:   # an intent has no worker to wait for
+            how = "warn"
+        # Work it already stopped waiting for never hides another holder's.
+        if how == "queue" and cross_wait_excused(db, t, clash, caller_ws.repo_root):
+            excused = excused or clash
+            continue
+        break
+    else:
+        return True, excused.warning if excused else None
     deps = _loads(t.depends_on)
     proceed = False
     if how == "queue":
         outcome = f"queued as task {t.id} until {clash.holder} merges"
+        if clash.cross_session:
+            note_cross_wait(db, t.id, str(clash.holder))
         # False: it was claimed, cancelled or changed meanwhile, and isn't this start's to launch.
         if (str(clash.holder) not in deps
                 and set_dependencies(db, t.id, [*deps, str(clash.holder)], deps) and t.caller_id):
@@ -1441,11 +1646,16 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     merge) finds it taken. A dependency that can never merge cancels it; a
     start that fails cancels it too, with the reason sent to its caller
     (``requeue`` makes a new one). Returns whether it started."""
+    from brindle import session_sync
+
+    if session_sync.resolver_wait(db, t.id):
+        return False
     caller_ws = db.get_workspace(t.caller_ws_id)
     if not caller_ws or held(db, t):
         # A paused session's tasks stay queued, and so do those behind its
         # open plan: resuming it, or the person's approval, starts them (on_resumed).
         return False
+    t = _release_cross_waits(db, t, caller_ws)
     try:
         if unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
                               dependent_task_id=t.id):

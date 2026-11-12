@@ -1020,7 +1020,6 @@ def _end_pr_work(key: tuple[str, str]) -> None:
 
 
 def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> None:
-    review.keep_merged_pr(db, *key, url)    # the branch's next PR: the merged one stays in its history
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at)"
                     " VALUES (?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
                     " url = excluded.url, pushed_sha = excluded.pushed_sha,"
@@ -1139,6 +1138,165 @@ def _prepare_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str]) -> Job
         return {"passed": True, "commit": sha}
 
     return start_job("session.pr_prepare", work, root_id=root.id, repo_root=ws.repo_root)
+
+
+def land_phase_prs(db: DB) -> list[Job]:
+    """Land each completed goal phase autopilot queued (``phase_prs``):
+    brindle opens the session PR, or pushes to the open one, at the commit the
+    phase's milestone checks passed on. One landing per session at a time, the
+    earliest phase first, so a later phase's commit never goes before an
+    earlier one's."""
+    started = []
+    seen: set[str] = set()
+    for row in db.conn.execute("SELECT root_id, phase, sha FROM phase_prs WHERE state = 'pending'"
+                               " ORDER BY rowid").fetchall():
+        if row["root_id"] in seen:
+            continue
+        seen.add(row["root_id"])
+        try:
+            if job := land_phase_pr(db, row["root_id"], row["phase"], row["sha"]):
+                started.append(job)
+        except Exception:  # noqa: BLE001 - one session's landing never stops the others'
+            log.exception("brindle: couldn't land %s's phase %r", row["root_id"], row["phase"])
+    return started
+
+
+def _settle_phase_pr(db: DB, root_id: str, phase: str, state: str, why: str | None = None) -> None:
+    db.conn.execute("UPDATE phase_prs SET state = ?, why = ? WHERE root_id = ? AND phase = ? AND state = 'pending'",
+                    (state, why, root_id, phase))
+    if why:
+        gates.tell(db, root_id, f"[brindle PR] brindle couldn't land phase {phase!r}'s PR: {why}.\n"
+                   "Open or push the session PR yourself once that's resolved.")
+
+
+# The session branches whose phase landing waits (its PR merging or closing on the forge, or
+# the checkout busy) and since when: looked at again after PREPARE_AGAIN_SECONDS, not every sweep.
+_PHASE_WAITING: dict[tuple[str, str], tuple[str, float]] = {}
+
+
+def land_phase_pr(db: DB, root_id: str, phase: str, sha: str) -> Job | None:
+    """Land phase ``phase`` at ``sha`` (see land_phase_prs). Nothing yet while
+    the session belongs to another identity, its PR work is under way, or the
+    landing waits (``_PHASE_WAITING``): it is tried again on a later sweep.
+    Everything the landing depends on is judged in the job, just before the
+    push (``_land_phase_now``)."""
+    root, ws = review.session(db, root_id)
+    key = (root.id, ws.branch)
+    if identity_lock.locked_by(root.id):
+        return None
+    waited, since = _PHASE_WAITING.get(key, (None, 0.0))
+    if waited == sha and time.monotonic() - since < PREPARE_AGAIN_SECONDS:
+        return None
+    if not _start_pr_work(key):
+        return None
+
+    def work(db: DB, job: Job) -> Any:
+        try:
+            return _land_phase_now(db, root_id, key, phase, sha)
+        finally:
+            _end_pr_work(key)
+
+    try:
+        return start_job("session.phase_pr", work, root_id=root.id, repo_root=ws.repo_root)
+    except BaseException:
+        _end_pr_work(key)
+        raise
+
+
+def _land_phase_now(db: DB, root_id: str, key: tuple[str, str], phase: str, sha: str) -> dict[str, Any]:
+    """The landing job: the session, its pending phase and the phase's guards
+    (session_review.phase_reasons) read again now, then the push, all while
+    holding the branch (the locks a merge into it or an edit of it takes):
+    refused, and the supervisor told why, for what phase_reasons names."""
+    root, ws = review.session(db, root_id)
+    identity_lock.ensure(root)
+    if ws.branch != key[1] or not db.conn.execute(
+            "SELECT 1 FROM phase_prs WHERE root_id = ? AND phase = ? AND sha = ? AND state = 'pending'",
+            (root.id, phase, sha)).fetchone():
+        return {"landed": False}     # the session moved on (another branch, or a new goal) meanwhile
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
+            held.enter_context(git.checkout_lock(ws.path, timeout=gates.LOCK_WAIT_S))
+        except (BlockingIOError, git.GitError):
+            _PHASE_WAITING[key] = (sha, time.monotonic())
+            return {"landed": False, "waiting": "the session's branch is busy"}
+        if why := review.phase_reasons(db, root, ws, phase, sha):
+            _settle_phase_pr(db, root.id, phase, "refused", "; ".join(why))
+            return {"landed": False, "refused": why}
+        try:
+            url = _land_phase(db, root, ws, key, phase, sha)
+        except (agents.AgentError, workspaces.WorkspaceError, git.GitError) as e:
+            _settle_phase_pr(db, root.id, phase, "failed", str(e).strip() or type(e).__name__)
+            return {"landed": False, "error": str(e)}
+    if url is None:
+        _PHASE_WAITING[key] = (sha, time.monotonic())
+        return {"landed": False, "waiting": "the session's PR is merging or closed"}
+    _PHASE_WAITING.pop(key, None)
+    _settle_phase_pr(db, root.id, phase, "pushed")
+    return {"landed": True, "url": url, "commit": sha}
+
+
+def _land_phase(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], phase: str, sha: str) -> str | None:
+    """Push ``sha`` (never the branch's tip, never moving the local branch) to
+    the session's open PR's head branch, or open the session PR on it. None
+    when the open PR can't take it now: a merge of it is under way, or the
+    forge doesn't say it is open (merged or closed before brindle saw it):
+    once that merge is recorded the phase opens the branch's next PR."""
+    if (pr := review.open_pr(db, root, ws)) is not None:
+        url = pr["url"]
+        row = db.conn.execute(f"SELECT pushed_sha FROM session_prs WHERE {_SESSION_PR}", key).fetchone()
+        if row["pushed_sha"] and git.ok(["merge-base", "--is-ancestor", sha, row["pushed_sha"]], ws.path):
+            return url    # the PR already carries it
+        elsewhere = db.conn.execute(f"SELECT head_ref FROM session_pr_heads WHERE {_SESSION_PR}", key).fetchone()
+        head = elsewhere["head_ref"] if elsewhere and elsewhere["head_ref"] else ws.branch
+        if head != ws.branch and not git.remote_branch_exists(ws.path, head):
+            raise workspaces.WorkspaceError(f"its PR is on {head}, which isn't a branch on origin")
+        # A claim on the PR's merge slot (session_pr_merges, as the automatic merge takes it): no merge
+        # is submitted while the push is under way, and none under way is pushed over.
+        # The commit it pushes is kept with the claim: should this process go before the record below is
+        # written, the merge reconciles the PR's head with it first (session_review._reconcile_push).
+        owner = secrets.token_hex(16)
+        with gates.marker("session-pr-merge", owner):
+            with db.tx() as c:
+                claimed = c.execute("INSERT OR IGNORE INTO session_pr_merges (url, state, owner)"
+                                    " VALUES (?, 'pushing', ?)", (url, owner)).rowcount
+                if claimed:
+                    c.execute("INSERT OR REPLACE INTO session_pr_pushes (url, sha) VALUES (?, ?)", (url, sha))
+            # A failed merge's row keeps the automatic merge away too: the PR is still open.
+            attempt = None if claimed else db.conn.execute(
+                "SELECT state FROM session_pr_merges WHERE url = ?", (url,)).fetchone()
+            if attempt is not None and attempt["state"] != "failed":
+                return None
+            try:
+                payload = workspaces.pull_request_checks(url, ws.repo_root)
+                if not payload or payload.get("state") != "OPEN":
+                    return None
+                git.push(ws.path, head, sha=sha, track=head == ws.branch)
+                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR} AND url = ?",
+                                (sha, *key, url))
+            finally:
+                if claimed:
+                    with db.tx() as c:
+                        c.execute("DELETE FROM session_pr_pushes WHERE url = ?", (url,))
+                        c.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'pushing' AND owner = ?",
+                                  (url, owner))
+        bus.publish_agent(db, "session.pr_pushed", root.id, url=url, commit=sha)
+        return url
+    ap = db.get_autopilot(root.id)
+    goal = (ap.summary or (ap.goal or "").split("\n", 1)[0]) if ap else ""
+    done = [m for m in db.milestones(root.id) if m.phase_name == phase]
+    body = "\n".join([f"Phase {phase!r} of the session's goal, at {sha[:12]}, the commit its checks passed on.",
+                      "", *(f"- [x] {m.title}" for m in done)])
+    title = f"{goal}: {phase}" if goal else f"Phase {phase}"
+    url = workspaces.open_pull_request(ws, title, body=body, sha=sha)
+    if url is None:
+        raise workspaces.WorkspaceError(f"pushed {sha[:12]}, but gh couldn't open the PR: {workspaces.compare_url(ws)}")
+    _record_pr(db, key, url, sha)
+    number = re.search(r"/pull/(\d+)", url)
+    review.note_head_pr(sha, ws.path, {"number": int(number.group(1)) if number else None,
+                                       "title": title, "url": url, "headRefName": ws.branch})
+    return url
 
 
 # -- goal ------------------------------------------------------------------------

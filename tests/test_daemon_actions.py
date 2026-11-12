@@ -1689,6 +1689,216 @@ def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, a
 
 
 @pytest.fixture
+def session_pr_forge(db, tmp_path, monkeypatch):
+    from concurrent.futures import Future
+
+    from brindle import git, spawn
+    from brindle.daemon import session_review
+    from brindle.service import inbox
+
+    ws = Workspace("session", str(tmp_path), "session", "worktree", "sess", "main",
+                   str(tmp_path), None, "session", 0)
+    db.add_workspace(ws)
+    db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, 0))
+    url = "https://github.com/o/r/pull/42"
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at)"
+                    " VALUES ('lead', 'sess', ?, 'head', 1)", (url,))
+    forge = SimpleNamespace(ws=ws, url=url, local_head="head", merges=[], read_hook=None, merge_hook=None, failure=False,
+                            payload={"state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "head",
+                                     "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]})
+
+    class Inline:
+        def submit(self, fn, *args):
+            result = Future()
+            result.set_result(fn(*args))
+            return result
+
+    def read(argv, **kwargs):
+        if forge.read_hook:
+            hook, forge.read_hook = forge.read_hook, None
+            hook()
+        value = forge.payload["state"] if argv[-1] == ".state" else json.dumps(forge.payload)
+        return SimpleNamespace(returncode=0, stdout=value, stderr="")
+
+    def action(argv, **kwargs):
+        forge.merges.append(argv)
+        if forge.merge_hook:
+            forge.merge_hook()
+        if forge.failure:
+            return SimpleNamespace(returncode=1, stdout="", stderr="merge refused")
+        forge.payload["state"] = "MERGED"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/fake/gh")
+    monkeypatch.setattr(spawn, "read", read)
+    monkeypatch.setattr(spawn, "action", action)
+    monkeypatch.setattr(session_review, "_pr_pool", Inline())
+    monkeypatch.setattr(session_review, "_pr_cache", {})
+    monkeypatch.setattr(session_review, "_pr_flights", {})
+    monkeypatch.setattr(session_review, "_pr_changed", set())
+    monkeypatch.setattr(session_review, "_head_changed", set())
+    monkeypatch.setattr(session_review, "_head_cache", {
+        ("head", ws.path): (time.monotonic(), {"url": url, "number": 42}),
+    })
+    monkeypatch.setattr(session_review, "_head_flights", set())
+    monkeypatch.setattr(session_review, "_head_roots", {})
+    monkeypatch.setattr(git, "out", lambda *args, **kwargs: forge.local_head)
+    forge.items = lambda: inbox._pr_items(db, "lead", "sess", ws, {"root_id": "lead"})
+    return forge
+
+
+def test_auto_merge_session_pr_once_across_daemons_and_opt_out(db, session_pr_forge, monkeypatch):
+    from brindle.daemon import session_review
+    from brindle.db import DB
+
+    forge = session_pr_forge
+    settings = Path(forge.ws.repo_root) / ".brindle" / "config.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"auto_merge_session_prs": False}))
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    settings.write_text("{}")
+    other = DB(db.path)
+    try:
+        forge.merge_hook = lambda: session_review.refresh_pr_states(other)
+        session_review.refresh_pr_states(db)
+        session_review.refresh_pr_states(other)
+        assert len(forge.merges) == 1
+        assert forge.merges[0][:3] == ["gh", "pr", "merge"]
+        assert forge.merges[0][forge.merges[0].index("--match-head-commit") + 1] == "head"
+        assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+        # Only the existing merge observer records the merge and starts session sync.
+        landed = []
+        monkeypatch.setattr(session_review, "_merge_polled", 0.0)
+        monkeypatch.setattr(session_review, "_merge_checks", {})
+        monkeypatch.setattr(session_review, "_sync_after_merge", lambda *args: landed.append(args[1:]))
+        session_review.poll_merged(db)
+        assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is not None
+        assert landed == [("lead", "sess", forge.url)]
+    finally:
+        other.conn.close()
+
+
+def test_auto_merge_session_pr_rechecks_forge_and_record(db, session_pr_forge):
+    from brindle.daemon import session_review
+
+    forge = session_pr_forge
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    forge.payload["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    forge.payload["statusCheckRollup"][0]["conclusion"] = "SUCCESS"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    forge.read_hook = lambda: db.conn.execute("UPDATE session_prs SET url = NULL")
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    db.conn.execute("UPDATE session_prs SET url = ?", (forge.url,))
+    session_review.refresh_pr_states(db)
+    assert len(forge.merges) == 1
+
+
+def test_auto_merge_session_pr_failure_reaches_inbox_once(db, session_pr_forge):
+    from brindle.daemon import session_review
+    from brindle.db import DB
+
+    forge = session_pr_forge
+    forge.failure = True
+    session_review.refresh_pr_states(db)
+    other = DB(db.path)
+    try:
+        session_review.refresh_pr_states(other)
+    finally:
+        other.conn.close()
+    assert len(forge.merges) == 1
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+    assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+    forge.local_head = "unpushed"
+    session_review._head_cache[(forge.local_head, forge.ws.path)] = (time.monotonic(), {})
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+    forge.payload["state"] = "CLOSED"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    assert not forge.items()
+    forge.payload["state"] = "OPEN"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    db.conn.execute("UPDATE session_prs SET merged_at = 1")
+    assert not forge.items()
+    forge.local_head = "head"  # an older HEAD lookup still says this PR is open
+    assert all(item.kind != "pr_failed" for item in forge.items())
+
+
+def test_auto_merge_session_pr_interrupted_owner(db, session_pr_forge):
+    from brindle.daemon import session_review
+    from brindle.db import DB
+
+    forge = session_pr_forge
+    # Upgrading an older database must recover its ownerless claims as well.
+    db.conn.execute("DROP TABLE session_pr_merges")
+    db.conn.execute("CREATE TABLE session_pr_merges (url TEXT PRIMARY KEY, state TEXT NOT NULL, error TEXT)")
+    migrated = DB(db.path)
+    migrated.conn.close()
+    # An earlier daemon died after inserting its claim, before contacting GitHub.
+    db.conn.execute("INSERT INTO session_pr_merges (url, state) VALUES (?, 'merging')", (forge.url,))
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+
+    db.conn.execute("DELETE FROM session_pr_merges WHERE url = ?", (forge.url,))
+    other = DB(db.path)
+    try:
+        def interrupted():
+            # The owner is still live: a second daemon must leave its claim alone.
+            session_review.refresh_pr_states(other)
+            assert not session_review.pr_problem(other, "lead", forge.url)
+            raise SystemExit
+
+        forge.merge_hook = interrupted
+        with pytest.raises(SystemExit):
+            session_review.refresh_pr_states(db)
+        forge.merge_hook = None
+        assert len(forge.merges) == 1
+        payload, forge.payload = forge.payload, None  # the forge cannot confirm the interrupted submission
+        session_review.refresh_pr_states(other)
+        forge.payload = payload
+        assert len(forge.merges) == 1
+        assert [item.kind for item in forge.items()] == ["pr_failed"]
+
+        # If GitHub accepted the interrupted request, reconcile without submitting it again.
+        db.conn.execute("UPDATE session_pr_merges SET state = 'merging' WHERE url = ?", (forge.url,))
+        forge.payload["state"] = "MERGED"
+        session_review.refresh_pr_states(other)
+        assert len(forge.merges) == 1
+        assert not session_review.pr_problem(other, "lead", forge.url)
+        assert db.conn.execute("SELECT state FROM session_pr_merges").fetchone()[0] == "submitted"
+        assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+    finally:
+        other.conn.close()
+
+
+@pytest.mark.parametrize("problem", ["conflict", "ci"])
+def test_auto_merge_session_pr_unattended_problem_reaches_inbox(db, session_pr_forge, problem):
+    from brindle.daemon import session_review
+
+    forge = session_pr_forge
+    if problem == "conflict":
+        forge.payload["mergeable"] = "CONFLICTING"
+    else:
+        forge.payload["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+    # A dismissed opened-PR card must not hide a later failure.
+    db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES ('lead', 'sess', ?)",
+                    (f"head|{forge.url}",))
+    db.add_agent(Agent("worker", forge.ws.id, "developer", "claude", "lead", "assign", "processing", "", None, 0))
+    session_review.refresh_pr_states(db)
+    assert not forge.items()
+    db.set_status("worker", "done")
+    session_review.refresh_pr_states(db)
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+    assert not forge.merges
+    forge.local_head = "unpushed"
+    session_review._head_cache[(forge.local_head, forge.ws.path)] = (time.monotonic(), {})
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+
+
+@pytest.fixture
 def lead(db, repo, tmp_path, monkeypatch):
     """A session ``lead`` on branch ``sess`` (base main) in its own checkout, its goal reached; jobs run inline."""
     from brindle import spawn
@@ -1771,6 +1981,8 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
 def _readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, obstacle):
     from brindle import gates, git, identity_lock
     from brindle.daemon import session_review
+    monkeypatch.setattr(session_review.session_sync, "refresh_drift_flags", lambda db: None)
+    monkeypatch.setattr(session_review.session_sync, "refresh_idle_sessions", lambda db, fetched_at: None)
     head = _commit(Path(lead.path), "a.py", "a\n")
     config.set_local(lead.repo_root, "checks", ["validate"])
     held = []
@@ -1982,8 +2194,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
 
 def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, lead, tmp_path, monkeypatch):
     """A merged session PR stays the session's until its branch has changes of its own beyond it (a
-    sync's clean merge from main doesn't count, a merge resolved with new content does); then the next PR opens from the same branch and the
-    merged one is kept in session_pr_history."""
+    sync's clean merge from main doesn't count, a merge resolved with new content does); then the next PR opens
+    from the same branch, replacing the merged one's row."""
     from brindle.daemon import session_review
 
     sess, first, second = Path(lead.path), "https://github.com/o/r/pull/7", "https://github.com/o/r/pull/8"
@@ -2016,8 +2228,165 @@ def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, l
     code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Next"})
     assert code == 202, reply
     assert readiness() == (True, {"url": second, "unpushed": 0}, ("pr_open", second))
-    assert [tuple(r) for r in db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_pr_history")] == [
-        (first, pushed, 2)]
+
+
+@pytest.fixture
+def phase_pr_forge(db, lead, monkeypatch):
+    """``lead``'s goal in four phases (each milestone's check passes once ``land`` names it), with
+    GitHub and git pushes faked in process: ``remote`` is what origin's branches hold, ``opened`` the
+    PRs created; ``before_job`` runs between a landing's dispatch and its job."""
+    from concurrent.futures import Future
+
+    from brindle import gates, git, spawn
+    from brindle.config import RepoConfig
+    from brindle.daemon import session_review
+
+    forge = SimpleNamespace(remote={}, opened=[], merged=[], state="OPEN", before_job=lambda: None,
+                            sess=Path(lead.path))
+    passing: set[str] = set()
+    real_read, real_action = spawn.read, spawn.action
+
+    def payload() -> dict:
+        return {"state": forge.state, "mergeable": "MERGEABLE", "headRefOid": forge.remote.get("sess"),
+                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]}
+
+    def read(argv, **kwargs):
+        if argv[:3] != ["gh", "pr", "view"]:
+            return real_read(argv, **kwargs)
+        return SimpleNamespace(returncode=0, stdout=forge.state if argv[-1] == ".state" else json.dumps(payload()),
+                               stderr="")
+
+    def action(argv, **kwargs):
+        if argv[:3] == ["gh", "pr", "create"]:
+            forge.opened.append(argv)
+            forge.state = "OPEN"
+            return SimpleNamespace(returncode=0, stdout=f"https://github.com/o/r/pull/{len(forge.opened)}", stderr="")
+        if argv[:3] == ["gh", "pr", "merge"]:
+            forge.merged.append(argv[-1])       # --match-head-commit's
+            forge.state = "MERGED"
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return real_action(argv, **kwargs)
+
+    class Inline:
+        def submit(self, fn, *args):
+            done = Future()
+            done.set_result(fn(*args))
+            return done
+
+    def spawn_job(target):
+        forge.before_job()
+        target()
+
+    monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/fake/gh")
+    monkeypatch.setattr(spawn, "read", read)
+    monkeypatch.setattr(spawn, "action", action)
+    monkeypatch.setattr(git, "push", lambda path, branch, sha=None, track=True: forge.remote.__setitem__(branch, sha))
+    monkeypatch.setattr(routes_actions, "_spawn", spawn_job)
+    monkeypatch.setattr(routes_actions, "_PHASE_WAITING", {})
+    monkeypatch.setattr(session_review, "open_pr_for_head", lambda *a, **kw: None)    # GitHub's PR search isn't under test
+    monkeypatch.setattr(session_review, "_pr_pool", Inline())
+    monkeypatch.setattr(session_review, "_pr_cache", {})
+    monkeypatch.setattr(session_review, "_pr_flights", {})
+    monkeypatch.setattr(session_review, "_pr_changed", set())
+    monkeypatch.setattr(session_review, "_head_changed", set())
+    monkeypatch.setattr(agents, "_notify_supervisor", lambda *a: None)
+    monkeypatch.setattr(gates, "run_checked", lambda db, ws, cmd, *a, **kw: (cmd in passing, ""))
+    autopilot.set_goal(db, "lead", "Ship it", [(p, p, None, None, None, p) for p in ("api", "db", "docs", "ui")])
+
+    def land(phase: str) -> str:
+        """``phase``'s milestone passes on HEAD; the next phase's work is committed; the sweep lands."""
+        passing.add(phase)
+        autopilot.check_milestones(db, "lead", lead, cfg=RepoConfig(goal_audit=False))
+        tip = _commit(forge.sess, f"after-{phase}.py", "next\n")
+        routes_actions.land_phase_prs(db)
+        assert sh("git rev-parse HEAD", forge.sess) == tip      # the local branch never moves
+        return tip
+
+    forge.land = land
+    forge.pr = lambda: tuple(db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_prs").fetchone())
+    forge.states = lambda: [tuple(r) for r in db.conn.execute("SELECT phase, state FROM phase_prs ORDER BY rowid")]
+    return forge
+
+
+def test_phase_pr_lands_each_phase_at_its_passed_commit_mid_goal(db, phase_pr_forge):
+    """While a later phase's milestone still fails, brindle lands a completed phase itself: it opens the
+    session PR at the commit the phase passed on, then pushes the next phase's commit to that PR, never
+    the branch's tip. A checkout dirtied between the landing's dispatch and its job refuses it."""
+    from brindle.daemon import session_review
+
+    forge, url = phase_pr_forge, "https://github.com/o/r/pull/1"
+    first = _commit(forge.sess, "a.py", "a\n")
+    assert session_review.reasons(db, *session_review.session(db, "lead"))    # brindle's own Open PR is refused
+    tip = forge.land("api")
+    assert (forge.remote, forge.pr()) == ({"sess": first}, (url, first, None))
+    forge.land("db")
+    assert (forge.remote, forge.pr(), len(forge.opened)) == ({"sess": tip}, (url, tip, None), 1)
+    forge.before_job = lambda: (forge.sess / "a.py").write_text("uncommitted\n")
+    forge.land("docs")
+    assert forge.remote == {"sess": tip}
+    assert forge.states() == [("api", "pushed"), ("db", "pushed"), ("docs", "refused")]
+
+
+@pytest.mark.parametrize("merged_by", ["brindle", "github"])
+def test_phase_pr_waits_out_a_merge_of_its_pr_then_opens_the_next(db, phase_pr_forge, merged_by):
+    """The session's green PR merges (brindle's automatic merge earlier in the same sweep, or on
+    GitHub before brindle saw it) while the next phase waits to land: nothing is pushed to the merged
+    PR and its record keeps what it merged; once the merge is recorded the phase opens the next PR."""
+    from brindle.daemon import session_review
+
+    forge = phase_pr_forge
+    first = _commit(forge.sess, "a.py", "a\n")
+    pin = forge.land("api")
+    if merged_by == "brindle":
+        forge.before_job = lambda: session_review.refresh_pr_states(db)
+    else:
+        forge.before_job = lambda: setattr(forge, "state", "MERGED")
+    forge.land("db")
+    assert (forge.state, forge.remote, forge.pr()) == ("MERGED", {"sess": first},
+                                                        ("https://github.com/o/r/pull/1", first, None))
+    assert forge.states() == [("api", "pushed"), ("db", "pending")]
+    db.conn.execute("UPDATE session_prs SET merged_at = 2")       # as poll_merged records it
+    forge.before_job = lambda: None
+    routes_actions._PHASE_WAITING.clear()
+    routes_actions.land_phase_prs(db)
+    assert (forge.remote, forge.pr()) == ({"sess": pin}, ("https://github.com/o/r/pull/2", pin, None))
+    assert forge.states() == [("api", "pushed"), ("db", "pushed")]
+
+
+@pytest.mark.parametrize("outcome", ["reached", pytest.param("lost", marks=pytest.mark.variant("a race: the push was cut short and never reached the forge")), "unknown"])
+def test_phase_pr_push_cut_short_is_reconciled_before_its_pr_merges(db, phase_pr_forge, monkeypatch, outcome):
+    """A phase landing's process goes away mid push, before it records the commit pushed: the automatic
+    merge first reads the PR's head. The push's commit there (reached) becomes what the PR carries, so
+    the merge covers it; the commit recorded before (lost) merges as recorded; anything else (unknown)
+    is left for the person, unmerged."""
+    from brindle import git
+    from brindle.daemon import session_review
+
+    class Gone(BaseException):
+        """The daemon's process ending: nothing after the push runs."""
+
+    forge, left = phase_pr_forge, []
+    first = _commit(forge.sess, "a.py", "a\n")
+    pin = forge.land("api")
+
+    def push(path, branch, sha=None, track=True):
+        forge.remote[branch] = {"reached": sha, "lost": first, "unknown": "f" * 40}[outcome]
+        left.extend(tuple(r) for r in db.conn.execute("SELECT url, state, owner FROM session_pr_merges"))
+        left.extend(tuple(r) for r in db.conn.execute("SELECT url, sha FROM session_pr_pushes"))
+        raise Gone
+
+    monkeypatch.setattr(git, "push", push)
+    with pytest.raises(Gone):
+        forge.land("db")
+    # What the process left in the database: its finally never ran.
+    db.conn.execute("INSERT OR REPLACE INTO session_pr_merges (url, state, owner) VALUES (?, ?, ?)", left[0])
+    db.conn.execute("INSERT OR REPLACE INTO session_pr_pushes (url, sha) VALUES (?, ?)", left[1])
+    session_review.refresh_pr_states(db)
+    session_review.refresh_pr_states(db)
+    merge = db.conn.execute("SELECT state FROM session_pr_merges").fetchone()
+    expected = {"reached": ([pin], pin, "submitted"), "lost": ([first], first, "submitted"),
+                "unknown": ([], first, "failed")}[outcome]
+    assert (forge.merged, forge.pr()[1], merge["state"]) == expected
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:

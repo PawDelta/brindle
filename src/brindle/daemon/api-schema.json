@@ -2409,6 +2409,11 @@
           "default": null,
           "title": "Detail"
         },
+        "drifting": {
+          "default": false,
+          "title": "Drifting",
+          "type": "boolean"
+        },
         "enabled": {
           "title": "Enabled",
           "type": "boolean"
