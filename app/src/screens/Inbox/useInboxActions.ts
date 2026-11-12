@@ -58,6 +58,8 @@ const decision = (item: InboxItemDTO) => JSON.stringify([
 export function useInboxActions(client: DaemonClient, refresh: () => Promise<void>, _undoMs: number, inbox: InboxItemDTO[]): InboxActions {
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const inFlight = useRef(new Set<string>());
+  /* PR dismissals stay hidden through snapshots received before the ack. */
+  const [dismissing, setDismissing] = useState<Map<string, string>>(new Map());
   /* Acknowledged, waiting for the next inbox to say what became of the item. */
   const [settled, setSettled] = useState<Map<string, string>>(new Map());
   const [notes, setNotes] = useState<Record<string, Note>>({});
@@ -87,6 +89,9 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
       }
       inFlight.current.add(key);
       setBusy((b) => new Set(b).add(key));
+      if (action === "pr-not-now") {
+        setDismissing((s) => new Map(s).set(key, chosen));
+      }
       void client
         .inboxAction(actionId(item), action, body)
         .then(() => {
@@ -105,6 +110,13 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
         .finally(() => {
           inFlight.current.delete(key);
           setBusy((b) => without(b, key));
+          if (action === "pr-not-now") {
+            setDismissing((s) => {
+              const next = new Map(s);
+              next.delete(key);
+              return next;
+            });
+          }
         });
     },
     [client, refresh],
@@ -135,9 +147,10 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
     const keys = new Set<string>();
     for (const item of inbox) {
       const key = itemKey(item);
-      if (settled.get(key) === decision(item)) keys.add(key);
+      const shown = decision(item);
+      if (settled.get(key) === shown || dismissing.get(key) === shown) keys.add(key);
     }
     return keys;
-  }, [inbox, settled]);
+  }, [inbox, settled, dismissing]);
   return { run, now: run, hidden, busy, notes, dismiss, settle, report };
 }
