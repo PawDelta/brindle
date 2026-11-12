@@ -14,9 +14,10 @@ import subprocess
 from collections import Counter
 
 from conftest import sh
-from brindle import agents, session_sync, tmux
+from brindle import agents, autopilot, session_sync, tmux
 from brindle.daemon import events, session_review
 from brindle.db import Agent
+from brindle.service import inbox
 from test_idle_spawns_daemon import _done_goal, _root
 from test_merge_order import _repo_template, quiet_removal, repo, worktree  # noqa: F401 - fixture
 
@@ -42,9 +43,11 @@ def test_a_repo_question_is_asked_once_however_many_sessions_are_at_work(db, rep
     """Three sessions in one repo: two whose goal is reached with a worker at
     work (their readiness is judged again whenever a worker's row changes),
     one of them with a merged PR and a sync's merge on top, and one that is
-    quiet (the idle sync merges origin/main into it). origin/main moves once;
-    the sweep that sees it asks each repo question at most once, and the next
-    sweep, with the workers still at work, asks none."""
+    quiet (the idle sync merges origin/main into it). A round is the daemon's
+    sweep, the app's feed, and the open app reading its Inbox and each
+    session's goal (which judged the session, and its merged PR, with git on
+    every read). origin/main moves once; the round that sees it asks each repo
+    question at most once, and the next, the workers still at work, asks none."""
     quiet_removal(monkeypatch)
     clock = [1000.0]
     monkeypatch.setattr(session_sync.time, "monotonic", lambda: clock[0])
@@ -68,6 +71,8 @@ def test_a_repo_question_is_asked_once_however_many_sessions_are_at_work(db, rep
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, merged_at)"
                     " VALUES ('lead-one', 'one', 'https://example.test/pr/1', ?, 1.0, 2.0)",
                     (sh("git rev-parse HEAD", sessions["one"].path),))
+    db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, title, prepared_at)"
+                    " VALUES ('lead-one', 'one', 'old', 'passed', 'One', 1.0)")     # the Inbox asks it too
     main_moves("landed.txt")
     sh("git merge -q --no-ff --no-edit origin/main", sessions["one"].path)
     _done_goal(db, "lead-two")
@@ -93,6 +98,10 @@ def test_a_repo_question_is_asked_once_however_many_sessions_are_at_work(db, rep
         watch.sweep(db)
         clock[0] += events.GIT_SECONDS
         feed.tick(clock[0])
+        inbox.items(db, str(repo), panes=panes)     # the open app reads its Inbox and each session's goal
+        for branch in sessions:
+            session_review.goal_phase(db, f"lead-{branch}")
+            autopilot.goal_activity(db, f"lead-{branch}")
 
     def at_work() -> None:
         for branch in ("one", "two"):       # a worker's turn: its row and its files change
@@ -103,7 +112,7 @@ def test_a_repo_question_is_asked_once_however_many_sessions_are_at_work(db, rep
         daemon()
         at_work()
     main_moves("new.txt")                       # once
-    names ={sh("git rev-parse main", repo): "main", sh("git rev-parse origin/main", repo): "origin/main"}
+    names = {sh("git rev-parse main", repo): "main", sh("git rev-parse origin/main", repo): "origin/main"}
     started, real = [], subprocess.Popen.__init__
     monkeypatch.setattr(subprocess.Popen, "__init__", lambda self, args, *a, **k: (
         started.append((args, str(k.get("cwd")))), real(self, args, *a, **k))[1])
