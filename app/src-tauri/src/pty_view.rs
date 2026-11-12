@@ -46,7 +46,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -416,24 +416,39 @@ pub const LAYOUT_TITLE: &str = concat!(
 /// How tmux sets the title of a client with the "title" feature (`TSL`).
 const TITLE_START: &[u8] = b"\x1b]0;";
 
+/// The first tmux that works the client's title out again as the agent's
+/// cursor moves. An older one (3.2a) does only on a full redraw, so the
+/// cursor moving in a window panned as it was sends no title.
+const CURSOR_TITLED: (u32, u32) = (3, 7);
+
 /// Which of the client's redraws ask for a look at the crop (`crop_now`: a
 /// tmux list-panes and list-clients each): one that sets its title
-/// (`LAYOUT_TITLE`), however it is split between reads.
+/// (`LAYOUT_TITLE`), however it is split between reads. On a server older
+/// than `CURSOR_TITLED`, every one while the crop follows the agent's cursor.
 #[derive(Default)]
 struct Relayouts {
     /// The stream's last bytes: a title split between redraws is seen once.
     tail: Vec<u8>,
+    /// Whether the crop follows the agent's cursor, as the last look at it
+    /// found (`crop_now`), where no title says the cursor moved.
+    follows: Option<Arc<AtomicBool>>,
 }
 
 impl Relayouts {
+    /// Those of a client of a server of `version`, its crop following the cursor as `follows` says.
+    fn on(version: (u32, u32), follows: Arc<AtomicBool>) -> Self {
+        Relayouts { tail: Vec::new(), follows: (version < CURSOR_TITLED).then_some(follows) }
+    }
+
     fn ask(&mut self, bytes: &[u8]) -> bool {
+        let followed = self.follows.as_ref().is_some_and(|follows| follows.load(Ordering::Relaxed));
         let keep = TITLE_START.len() - 1;
         let seam: Vec<u8> = self.tail.iter().chain(&bytes[..bytes.len().min(keep)]).copied().collect();
         let titled = |b: &[u8]| b.windows(TITLE_START.len()).any(|w| w == TITLE_START);
         let retitled = titled(&seam) || titled(bytes);
         let last = if bytes.len() >= keep { bytes } else { &seam[..] };
         self.tail = last[last.len().saturating_sub(keep)..].to_vec();
-        retitled
+        retitled || followed
     }
 }
 
@@ -448,6 +463,12 @@ const CLIENT_FORMAT: &str = "#{client_pid}\t#{client_width}\t#{window_offset_x}"
 /// pane, is cropped with its border. None while a pane is zoomed (the
 /// sidebar isn't drawn), for a sidebar along the bottom, or one alone.
 pub fn crop_of(panes: &str, visible: u16, client: Option<(u16, u16)>) -> Crop {
+    crop_and_follows(panes, visible, client).0
+}
+
+/// `crop_of`, and whether the crop follows the agent's cursor: the window
+/// panned on the client, the agent's pane the active one.
+fn crop_and_follows(panes: &str, visible: u16, client: Option<(u16, u16)>) -> (Crop, bool) {
     let num = |s: &str| s.parse::<u16>().ok();
     let panes: Vec<Vec<&str>> = panes.lines().map(|line| line.split('\t').collect()).filter(|fields: &Vec<&str>| fields.len() == 10).collect();
     for fields in &panes {
@@ -472,23 +493,25 @@ pub fn crop_of(panes: &str, visible: u16, client: Option<(u16, u16)>) -> Crop {
         let (from, to) = (agent.0.saturating_sub(panned).min(client_width), agent.1.saturating_sub(panned).min(client_width));
         let shown = to - from;
         let mut start = from;
+        let mut follows = false;
         if shown > visible {
             // Panned: more of the agent's columns are on the client than the view shows. Its cursor kept in view, as
             // tmux keeps it on the client.
             let cursor = panes.iter().find(|f| f[8] == "1" && f[0].is_empty()).and_then(|f| Some(num(f[1])? + num(f[9])?));
+            follows = cursor.is_some();
             if let Some(at) = cursor.and_then(|at| at.checked_sub(panned)).filter(|&at| at >= from + visible) {
                 start = (at + 1 - visible).min(to - visible);
             }
         }
-        return Crop { cols, left: start, width: (shown < visible).then_some(shown) };
+        return (Crop { cols, left: start, width: (shown < visible).then_some(shown) }, follows);
     }
-    Crop::default()
+    (Crop::default(), false)
 }
 
 /// The crop of the view session `view`'s window for a view `visible` columns wide (its client
-/// that and the crop's columns), as it is now, if tmux can say (the session is there). `client`:
-/// the pid of the view's client, once it is attached.
-fn crop_now(tmux_bin: &Path, server: &[String], view: &str, visible: u16, client: Option<u32>) -> Option<Crop> {
+/// that and the crop's columns), as it is now, and whether it follows the agent's cursor, if tmux
+/// can say (the session is there). `client`: the pid of the view's client, once it is attached.
+fn crop_now(tmux_bin: &Path, server: &[String], view: &str, visible: u16, client: Option<u32>) -> Option<(Crop, bool)> {
     let out = tmux(tmux_bin).args(server).args(["list-panes", "-t", &format!("={view}:"), "-F", LAYOUT_FORMAT]).output().ok().filter(|out| out.status.success())?;
     let panes = String::from_utf8_lossy(&out.stdout);
     let on = client.and_then(|pid| {
@@ -500,7 +523,7 @@ fn crop_now(tmux_bin: &Path, server: &[String], view: &str, visible: u16, client
             (at.parse::<u32>().ok()? == pid).then_some((width.parse().ok()?, panned.parse().unwrap_or(0)))
         })
     });
-    Some(crop_of(&panes, visible, on))
+    Some(crop_and_follows(&panes, visible, on))
 }
 
 /// Dispatch crop reads from the redraw channel. Keeping the receive separate
@@ -848,7 +871,7 @@ impl PtyView {
             return Err(format!("tmux couldn't make the view: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
         // The client attaches at the view's size and the sidebar's columns, from its first frame.
-        let crop = crop_now(tmux_bin, &server, &view, cols, None).unwrap_or_default();
+        let crop = crop_now(tmux_bin, &server, &view, cols, None).unwrap_or_default().0;
         let mut cmd = Command::new(tmux_bin);
         cmd.args(&server).args(attach_args(&view)).env("TERM", "xterm-256color").env_remove("TMUX");
         let crate::setup::Term { output: mut reader, input: writer, master, mut child } =
@@ -862,17 +885,21 @@ impl PtyView {
         // panned on the client, or the agent's cursor in a window panned on it, changes it
         // (`LAYOUT_TITLE`). One look at a time, a little after the bytes that asked for it.
         // Neither idle ticks nor the redraws of an idle view (a spinner, the sidebar's ages)
-        // probe tmux: each probe starts list-panes and list-clients. The watcher ends with
+        // probe tmux: each probe starts list-panes and list-clients. A tmux older than
+        // `CURSOR_TITLED` draws no title as the cursor moves: there, while a look finds the
+        // crop following the cursor, every redraw asks for the next. The watcher ends with
         // the client's output.
         let (redrawn, looks) = mpsc::sync_channel::<()>(1);
+        let follows = Arc::new(AtomicBool::new(false));
         {
-            let (tmux_bin, server, view, master, size) = (tmux_bin.to_path_buf(), server.clone(), view.clone(), master.clone(), size.clone());
+            let (tmux_bin, server, view, master, size, follows) = (tmux_bin.to_path_buf(), server.clone(), view.clone(), master.clone(), size.clone(), follows.clone());
             std::thread::spawn(move || {
                 watch_crops(|| looks.recv_timeout(std::time::Duration::from_secs(1)), || {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     while looks.try_recv().is_ok() {}
                     let visible = size.lock().unwrap_or_else(|e| e.into_inner()).0 .0;
-                    let Some(crop) = crop_now(&tmux_bin, &server, &view, visible, Some(client)) else { return };
+                    let Some((crop, following)) = crop_now(&tmux_bin, &server, &view, visible, Some(client)) else { return };
+                    follows.store(following, Ordering::Relaxed);
                     let mut size = size.lock().unwrap_or_else(|e| e.into_inner());
                     if size.1 != crop {
                         let resized = size.1.cols != crop.cols;
@@ -923,7 +950,7 @@ impl PtyView {
             let _ = read.send(Out::Exit(child.wait().ok().and_then(|s| s.code()).unwrap_or(-1)));
         });
         std::thread::spawn(move || {
-            let mut relayouts = Relayouts::default();
+            let mut relayouts = Relayouts::on(version, follows);
             forward(gathered, |bytes| {
                 on_data(bytes);
                 if relayouts.ask(bytes) {
@@ -2084,15 +2111,19 @@ mod tests {
         redraws.push(b"\x1b[?2026h\x1b[H\x1b".to_vec());
         redraws.push(b"]0;@3 a1b2,121x25,0,0{30x25,0,0,1,90x25,31,0,0} e6af0dc0, 121 0\x07\x1b[?2026l".to_vec());
         redraws.extend(["⠼", "⠴"].iter().map(|f| spinner(f).into_bytes()));
-        let probes_for = |redraws: &[Vec<u8>]| {
-            let mut relayouts = Relayouts::default();
+        let probes_for = |version, follows, redraws: &[Vec<u8>]| {
+            let mut relayouts = Relayouts::on(version, Arc::new(AtomicBool::new(follows)));
             let mut events = redraws.iter().map(|bytes| if relayouts.ask(bytes) { Ok(()) } else { Err(Timeout) }).chain([Err(Disconnected)]);
             let mut probes = 0;
             watch_crops(|| events.next().unwrap(), || probes += 1);
             probes
         };
-        assert_eq!(probes_for(&redraws[..4]), 0, "content-only redraws must not probe crops");
-        assert_eq!(probes_for(&redraws), 1, "a layout change probes once");
+        assert_eq!(probes_for((3, 2), false, &redraws[..4]), 0, "content-only redraws must not probe crops");
+        assert_eq!(probes_for((3, 2), false, &redraws), 1, "a layout change probes once");
+        // The crop following the agent's cursor: tmux from 3.7 draws a new title as it moves; of an
+        // older one, which draws none, every redraw probes.
+        assert_eq!(probes_for((3, 7), true, &redraws[..4]), 0, "a title says the cursor moved");
+        assert_eq!(probes_for((3, 6), true, &redraws[..4]), 4, "no title says the cursor moved");
     }
 
     #[test]
@@ -2127,7 +2158,11 @@ mod tests {
         assert_eq!(crop_of(&wide(119), 90, Some((121, 39))), Crop { cols: 31, left: 22, width: None });
         assert_eq!(crop_of(&wide(128), 90, Some((121, 39))), Crop { cols: 31, left: 31, width: None });
         // The sidebar's own cursor (it is the active pane) is no matter.
-        assert_eq!(crop_of(&[pane("s1", 0, 29, 160, 1, 29), pane("", 31, 159, 160, 0, 128)].join("\n"), 90, Some((121, 0))), at_left);
+        let sidebar_active = [pane("s1", 0, 29, 160, 1, 29), pane("", 31, 159, 160, 0, 128)].join("\n");
+        assert_eq!(crop_of(&sidebar_active, 90, Some((121, 0))), at_left);
+        // The crop follows the cursor only where it moves it: the window panned, the agent's pane the active one.
+        let follows = |panes: &str, panned| crop_and_follows(panes, 90, Some((121, panned))).1;
+        assert_eq!((follows(&wide(5), 40), follows(&wide(5), 0), follows(&sidebar_active, 40)), (true, false, false));
         assert!(LAYOUT_FORMAT.starts_with(&format!("#{{{SIDEBAR_OPTION}}}\t")));
     }
 
