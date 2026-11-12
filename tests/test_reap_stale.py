@@ -16,12 +16,13 @@ from brindle.service import inbox
 
 NOW = time.time()
 OLD = NOW - 30 * 24 * 3600
+SESSION_INFOS = tmux.session_infos      # the real listing, for a test that fakes tmux under it
 
 
 @pytest.fixture
 def fake_tmux(monkeypatch):
     t = SimpleNamespace(sessions=[], panes=tmux.PaneSnapshot(tmux.current_server()), killed=[], stopped=[])
-    monkeypatch.setattr(tmux, "session_infos", lambda prefix="brindle_": t.sessions)
+    monkeypatch.setattr(tmux, "session_infos", lambda prefix="brindle_", fresh=False: t.sessions)
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: t.panes)
     monkeypatch.setattr(tmux, "kill_session", t.killed.append)
     monkeypatch.setattr(tmux, "kill_window", lambda *a, **k: None)
@@ -242,11 +243,20 @@ def test_leftover_reviewers_and_coordinator_rows(db, repo, fake_tmux, case, gone
 
 
 @pytest.mark.variant("race: a client, uncommitted work or input arriving between planning and the stop keeps the session")
-@pytest.mark.parametrize("change", ["a client attaches", "uncommitted work appears", "input arrives"])
+@pytest.mark.parametrize("change", ["a client attaches", "uncommitted work appears", "input arrives",
+                                    "another home takes it"])
 def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux, monkeypatch, change):
     """Planning (git probes and all) takes a while: a stop acts on the state
-    just before it, not on the plan's snapshot."""
-    if change == "input arrives":
+    just before it, not on the plan's snapshot (a session's home included,
+    which session_infos otherwise reads once per session)."""
+    home = [str(brindle_home())]
+    if change == "another home takes it":
+        row = f"brindle_proj_old\t0\t{OLD:.0f}\t{OLD:.0f}\t%7\t4242\t0\t{OLD:.0f}\tzsh\t{repo}\t"
+        monkeypatch.setattr(tmux, "_tmux", lambda *args, **k: SimpleNamespace(
+            returncode=0, stdout=row + "\n" if args[0] == "list-panes" else f"BRINDLE_HOME={home[0]}\n"))
+        monkeypatch.setattr(tmux, "_SESSION_HOMES", {})
+        monkeypatch.setattr(tmux, "session_infos", SESSION_INFOS)
+    elif change == "input arrives":
         ws = workspaces.adopt_root(db, str(repo))
         add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1")
         live(fake_tmux, "%1")
@@ -257,6 +267,9 @@ def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux
 
     def then_changed(*a, **k):
         out = planned(*a, **k)
+        if change == "another home takes it":     # another brindle's ensure_session, in its own process
+            home[0] = "/another/home"
+            return out
         [s] = fake_tmux.sessions
         if change == "a client attaches":
             s.attached = True

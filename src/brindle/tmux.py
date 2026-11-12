@@ -1277,9 +1277,11 @@ _INFO_FORMAT = "\t".join([
     "#{pane_current_path}", "#{pane_start_command}"])
 
 
-def session_infos(prefix: str = "brindle_") -> list[SessionInfo]:
+def session_infos(prefix: str = "brindle_", fresh: bool = False) -> list[SessionInfo]:
     """Every session on brindle's server whose name starts with ``prefix``,
-    with its panes, in one listing (plus one environment read each). Empty
+    with its panes, in one listing (plus one environment read each, then
+    remembered: ``fresh`` reads them again, for a check just before a session
+    is stopped, as another process may have given it to another home). Empty
     with no server; a hung one raises TmuxTimeout."""
     try:
         proc = _tmux("list-panes", "-a", "-F", _INFO_FORMAT, check=False)
@@ -1309,7 +1311,7 @@ def session_infos(prefix: str = "brindle_") -> list[SessionInfo]:
     server = current_server()
     for s in found.values():
         key = (server, s.name, s.created)
-        if key in _SESSION_HOMES:
+        if key in _SESSION_HOMES and not fresh:
             s.home = _SESSION_HOMES[key]
             continue
         env = _tmux("show-environment", "-t", f"={s.name}", "BRINDLE_HOME", check=False).stdout.strip()

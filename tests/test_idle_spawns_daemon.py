@@ -61,8 +61,11 @@ def test_an_unchanged_sweep_starts_no_process(db, repo, tmp_path, _repo_template
     db.add_agent(Agent("worker", feat.id, "developer", "claude", "lead", "assign", "idle", "%worker", None, 1.0))
     still = worktree(db, repo, "still", base="live")        # idle, nothing committed: nothing to tell
     db.add_agent(Agent("idler", still.id, "developer", "claude", "lead", "assign", "idle", "%idler", None, 1.0))
+    quiet = worktree(db, repo, "quiet", base="live")         # Codex: idle is judged by its pane's last output
+    db.add_agent(Agent("codex", quiet.id, "developer", "codex", "lead", "assign", "idle", "%codex", None, 1.0))
     panes = tmux.PaneSnapshot(tmux.current_server())
-    panes.update({"%lead": True, "%clash-lead": True, "%messy-lead": True, "%worker": True, "%idler": True})
+    panes.update({"%lead": True, "%clash-lead": True, "%messy-lead": True, "%worker": True, "%idler": True,
+                  "%codex": True})
     panes.activity.update({pane: time.time() - 600 for pane in panes})     # nothing printed for 10 minutes
     read = []
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)

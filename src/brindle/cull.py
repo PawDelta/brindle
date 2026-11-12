@@ -629,7 +629,7 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = _idle_since(db, a, fix_round or 0)
+        since = _idle_since(db, a, fix_round or 0, panes)
         if since is None:
             continue  # no telling whether a later turn is running
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
@@ -649,10 +649,11 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
     return done
 
 
-def _idle_since(db: DB, a: Agent, floor: float = 0) -> float | None:
+def _idle_since(db: DB, a: Agent, floor: float = 0, panes=None) -> float | None:
     """When ``a``, which its hooks report idle, last showed any sign of work, or
     None when there's no telling. A provider with no hook for a turn starting
-    (Codex) stays 'idle' through later turns, so its pane's last output counts;
+    (Codex) stays 'idle' through later turns, so its pane's last output counts
+    (from the sweep's ``panes`` listing, asked of tmux only when it lacks it);
     files changing in its worktree (a script or a background command) count
     too. Commits don't: see _fix_round_since."""
     from brindle.providers import get_provider
@@ -660,7 +661,9 @@ def _idle_since(db: DB, a: Agent, floor: float = 0) -> float | None:
     since = max(a.status_since or a.created_at, floor)
     provider = get_provider(a.provider)
     if not (provider.uses_hooks and provider.announces_turns):
-        last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        last = getattr(panes, "activity", {}).get(a.tmux_window)
+        if last is None:
+            last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
         if last is None:
             return None
         since = max(since, last)
@@ -734,7 +737,7 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
         if head is not None and (head == reported or db.mark(a.id, f"commits:{head}") == "told"
                                  or (counted and db.mark(a.id, "commits-none") == counted)):
             continue
-        since = _idle_since(db, a)
+        since = _idle_since(db, a, panes=panes)
         if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
             continue
         try:
