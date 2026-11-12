@@ -32,9 +32,8 @@ def shell(found: dict[str, str], *, status: int = 0, hangs: bool = False):
 
 
 @pytest.mark.parametrize("extra,status,hangs,kept", [
-    # Every kind of allowed setting, valid: all of it is read.
-    ({}, 0, False, True),
-    # Guard (a): a name off the fixed list never leaves the shell's answer, whatever it holds.
+    # Guard (a): every kind of allowed setting is read; a name off the fixed list never is,
+    # whatever it holds.
     ({"PATH": "/opt/evil/bin", "NODE_OPTIONS": "--require /opt/evil.js",
       "DYLD_INSERT_LIBRARIES": "/opt/evil.dylib", "LD_PRELOAD": "/opt/evil.so"}, 0, False, True),
     # Guard (b): a proxy that is no URL (its port is no port).
@@ -86,14 +85,14 @@ def test_turned_off_nothing_is_read_or_added():
     assert login_shell_env.for_launch("claude", environ={}) == {} and not login_shell_env.kept("claude")
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex"])
-def test_a_launched_cli_gets_the_settings_its_pane_would_start_without(db, repo, tmp_path, monkeypatch, provider):
+def test_a_launched_cli_gets_the_settings_its_pane_would_start_without(db, repo, tmp_path, monkeypatch):
     """The real launch environment (what the pane's scrub leaves): the login
     shell's settings, never over what the daemon or the pane has already."""
     root = workspaces.adopt_root(db, str(repo))
     db.add_workspace(Workspace("w-1", root.repo_root, "feat", "worktree", "feat", "main", str(repo),
                                None, "brindle-x", time.time()))
-    db.add_agent(Agent("wk", "w-1", "developer", provider, None, "assign", "idle", "%2", None, time.time()))
+    for provider in ("claude", "codex"):
+        db.add_agent(Agent(provider, "w-1", "developer", provider, None, "assign", "idle", "", None, time.time()))
     for name in login_shell_env.ALLOWED:
         monkeypatch.delenv(name, raising=False)
     key = tmp_path / "client.key"
@@ -105,11 +104,13 @@ def test_a_launched_cli_gets_the_settings_its_pane_would_start_without(db, repo,
     monkeypatch.setenv("ALL_PROXY", "socks5://daemon.example:1080")
     monkeypatch.setattr(tmux, "inherited_env", lambda *a: {"HTTP_PROXY": "http://tmux.example:3128"})
 
-    env = agents._effective_window_env(db.get_agent("wk"), db.get_workspace("w-1"))
+    envs = {p: agents._effective_window_env(db.get_agent(p), db.get_workspace("w-1")) for p in ("claude", "codex")}
 
-    assert (env["HTTPS_PROXY"], env["HTTP_PROXY"], env.get("ALL_PROXY")) == (
-        PROXY, "http://tmux.example:3128", None)
+    for env in envs.values():
+        assert (env["HTTPS_PROXY"], env["HTTP_PROXY"], env.get("ALL_PROXY")) == (
+            PROXY, "http://tmux.example:3128", None)
     # Claude Code's client key and passphrase look like secrets: a Claude pane keeps them
     # past the scrub (secrets.pane_unset), and no other provider's CLI is handed them.
     claude_only = {"CLAUDE_CODE_CLIENT_KEY": str(key), "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE": PASSPHRASE}
-    assert {k: env.get(k) for k in claude_only} == (claude_only if provider == "claude" else dict.fromkeys(claude_only))
+    assert {k: envs["claude"].get(k) for k in claude_only} == claude_only
+    assert not any(envs["codex"].get(k) for k in claude_only)
