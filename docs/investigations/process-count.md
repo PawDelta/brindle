@@ -486,6 +486,134 @@ Still per cull sweep (once a minute), whatever the number of agents: two `ps`
 (the process table), `tmux list-clients` (`login_pause`'s last input) and
 `reap`'s `tmux list-panes`.
 
+### S6. Sessions at work: goal and Inbox reads, and the same repo questions for every checkout (fixed)
+
+Live on the owner's machine (release.148, main 0c07614f) the daemon still
+started about 500 processes a minute while sessions were at work. A 30 s
+sample of git command lines by parent pid (`ps` every 20 ms, a lower bound)
+caught 187 from the daemon: `show-ref --verify --quiet
+refs/remotes/origin/main` (22), `rev-parse HEAD` (19), `merge-base
+--is-ancestor main origin/main` and the reverse (27), `status --porcelain
+--untracked-files=no` (14), `symbolic-ref … refs/remotes/origin/HEAD` (10),
+`for-each-ref refs/heads` (8), `merge-base --is-ancestor <sha> HEAD` (8),
+`rev-list --left-right --count origin/main...HEAD` (7), `git remote` (7),
+`rev-list <sha>..HEAD` (7).
+
+Where it came from: code added after v0.6.3 (the session-PR and landing
+work). v0.6.3 has none of `new_since_merge`, `current_pr`, `_opened_pr`,
+`refresh_idle_sessions`, `refresh_drift_flags` or `land_phase_prs` (checked
+with `git grep` at the tag; v0.6.3 itself was not run here). The largest
+share is not a sweep at all: the open app reads each session's goal
+(`routes_read.goal` → `goal_phase` → `reasons`, `current_pr` →
+`new_since_merge`, `has_pr_target`, `pr_block` → `drift`) and its Inbox
+(`_opened_pr`: `rev-parse HEAD` per session), and the daemon serves those
+reads, so their git shows under the daemon's pid. None of it was cached, so
+it never settled, and it grew with every session and every merged PR.
+
+Three classes:
+
+- **Every read of a goal or the Inbox judged the session with git.** About
+  15 processes per goal read of a session whose goal is reached (table
+  below), the same ones again on the next read.
+- **Questions about the repo, asked per checkout.** Whether `origin/<base>`
+  exists, which of `<base>` and `origin/<base>` is ahead (`git.base_ref`),
+  origin's default branch (`git.default_branch`) and whether there is an
+  origin (`git.has_remote`) are the same in every checkout and change only
+  when a ref or the config does. S1 and S5 cached their callers per session,
+  behind each session's own refs; a session whose row or files change misses
+  that cache every sweep, and when main moves every session does at once.
+- **A reached goal with workers at work.** `ReadinessWatch` reuses a
+  session's readiness while its whole state is unchanged, and that state
+  holds its workers' rows. A worker changing status re-ran `reasons` each
+  sweep: `git status` twice, `rev-parse HEAD`, the audit commit's
+  `merge-base` and `rev-list`, ahead/behind, the merged PR's `rev-list`
+  (and `rev-parse <merge>^{tree}`, `merge-tree` per sync merge), and, for a
+  session behind origin, `session_sync.drift`'s five.
+
+Fix, in `git.py` so every caller has it (`conflicts`, `gates`,
+`rule_checks`, `agents.liveness`, the pipeline, the sidebars):
+
+- `remote_branch_exists`, `default_branch`, `current_branch` and `base_ref`
+  read HEAD, the loose refs and `packed-refs` (parsed once per version of
+  the file) themselves: no process. `base_ref` asks git only which of two
+  different commits is ahead: one `merge-base --is-ancestor`, by sha, once
+  per pair of commits.
+- `has_remote` asks `git remote` once per repo and per config as git reads
+  it in that checkout (`status_cache.remotes`): checkouts whose settings
+  list the same share the answer, and it is asked again when any file the
+  config depends on changes. Those files are S3's (`_outside_sources`, from
+  git's own `config --list --show-origin --includes`): every file git read,
+  every include and includeIf target, there or not yet, the system's and
+  the person's, and the branch for `onbranch:` conditions.
+- `resolve` reads what names point at; `once`, `out_once` and `is_ancestor`
+  keep git's answer to a question that names its commits by sha (it never
+  changes; kept per repo and per version of its `shallow` and `info/grafts`
+  files, and not at all in a repo with replace refs).
+  `ahead_behind` and `merge_base` use them, and so do
+  `session_sync.drift`, `session_review.new_since_merge` and the audit
+  commit's check.
+- Whatever the files can't say (a reftable repo, `GIT_DIR` in the
+  environment, a path that isn't a checkout's root, a name like `main~2`) is
+  asked of git every time, as before.
+- `reasons` and `phase_reasons` take a checkout's uncommitted tracked files
+  from `status_cache.tracked_dirty`: `git status --untracked-files=no` runs
+  only when something it reads moved since it last looked. That is HEAD's
+  commit, the index, every tracked file, each one stat'ed wherever it is
+  (names from the index, read without git), a `.gitattributes` in any
+  folder holding a tracked file (there or not yet, tracked or not), and
+  every config and attributes file outside the worktree
+  (`_outside_sources`, now with `info/attributes`, `core.attributesFile`
+  and the global and system attributes files). The stamps are taken before
+  git looks. An index that can't be read that way (a submodule, a split or
+  sparse index), or a config git couldn't list, asks git every time.
+
+- The Inbox reads each session's HEAD from the git files (`git.head`).
+
+There is one mechanism: names are read from the git files, and git's answer
+about commits is kept per sha. `new_since_merge`, `current_pr`, `reasons` and
+`goal_phase` keep no result of their own; with the same HEAD, pushed commit,
+base and origin commits and squash rows, every question they ask is already
+answered. The repo-level reads are that same mechanism, not an extra one:
+knowing that the inputs haven't moved means reading the refs.
+
+Measured with `subprocess.Popen.__init__` wrapped: three sessions in one
+repo (two with a reached goal and a worker at work, one of them with a
+merged PR and a sync's merge on top; one quiet), `origin/main` moved once.
+A round is the sweep, the app's feed, one Inbox read and one goal read per
+session.
+
+| processes started | sweep | feed | Inbox read | 3 goal reads | round |
+|---|---|---|---|---|---|
+| before, the round that sees main move | 65 | 16 | 3 | 45 | 129 |
+| before, the next round, workers still at work | 40 | 2 | 3 | 46 | 91 |
+| after, the round that sees main move | 29 | 6 | 0 | 1 | 36 |
+| after, the next round, workers still at work | 2 | 2 | 0 | 0 | 4 |
+
+Before, the round that saw main move started, by command, `show-ref` 16,
+`merge-base --is-ancestor` 20, `symbolic-ref` 13, `remote` 6 and
+`for-each-ref` 5 (the `--is-ancestor` and `symbolic-ref` counts include the
+few about a checkout's own HEAD), and the next round much the same; after,
+one repo question (which of main and origin/main is ahead), then none. The
+4 left: the quiet session's sync finding its merge
+synced (2, once), and `git status` for each of the two worktrees a worker
+edited. The 36 are what main moving really changes: one merge, each
+session's drift and status measured once for its new commits.
+
+Test: `tests/test_busy_spawns_daemon.py` (that scenario: each repo question
+at most once on the round that sees the move and nothing asked about the
+sync's merge again; on the next round no repo question, no git at all in the
+checkouts of the sessions whose workers are at work, and `git status` only
+in the two worktrees whose files changed), and
+`test_a_kept_answer_is_asked_again_when_a_file_git_reads_for_it_changes`
+(a remote in a file the config includes goes away; an untracked
+`.gitattributes` makes a tracked file read as modified: neither moves a
+ref, the index or a tracked file, and both kept answers are asked again).
+
+What is left: a worktree an agent is editing still costs one `git status`
+per sweep that sees its files change (the app's feed). Other requests the
+app makes (a session's diff, its PR) were not measured here; they go through
+the same `git.py` functions.
+
 ### Other sources, measured and left as they are
 
 - **gh**: an open session PR costs one `gh pr view` per 90 s
