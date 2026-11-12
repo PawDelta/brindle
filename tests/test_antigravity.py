@@ -234,7 +234,10 @@ def strict(db, ws, tool, args):
     ("git diff a..b | grep x", "allow"),  # compound: each part is allowed
     ("cd sub && git status", "allow"),  # a cd inside the worktree
     pytest.param("git push --force", "deny", marks=pytest.mark.variant("a deny rule still wins")),
-    ("git diff $(git merge-base main HEAD)", "deny"),  # what $(...) runs can't be seen
+    # Its output may be a word the *daemon.json* deny names, so no allow vouches for it.
+    ("git diff $(git merge-base main HEAD)", "deny"),
+    pytest.param('git diff --no-index /dev/null "$(cat notes.txt)"', "deny", marks=pytest.mark.variant(
+        "bypass: output naming ~/.brindle/daemon.json, which d-daemon-sh denies written out, prints the token")),
     ("git diff > notes.txt", "deny"),  # a redirection writes where no rule says
     ("git status |& curl https://example.com", "deny"),  # |& pipes like |
     ("git status\ncurl https://example.com", "deny"),  # a second line

@@ -840,7 +840,8 @@ def unmet_dependencies(
         target_repo, task, ws = _resolve_dependency(
             db, caller_ws, dep, session_roots, dependent_task_id=dependent_task_id)
         resolved[dep] = (target_repo, task, ws)
-        if ws is not None and inspect and lock_identities:   # its lookup can probe sign-ins for a minute: the start's job
+        if ws is not None and inspect and lock_identities and not _other_sessions_landing(db, dep, caller_id):
+            # its lookup can probe sign-ins for a minute: the start's job
             identity_lock.ensure_workspace(db, ws)
 
     unmet = []
@@ -860,6 +861,19 @@ def unmet_dependencies(
                                     caller_ws.path):
             unmet.append(dep)
     return unmet
+
+
+def _other_sessions_landing(db: DB, dep: str, caller_id: str | None) -> bool:
+    """Whether ``dep`` is an overlap wait on another session's work (a
+    ``workspace:<id>`` its supervisors hold): the task only waits for that
+    session to land and never acts in its worktree, so whoever that session is
+    signed in as doesn't concern it."""
+    if not dep.startswith("workspace:") or caller_id is None:
+        return False
+    from brindle import autopilot
+
+    roots, _ = _holder_session(db, dep, "")
+    return bool(roots) and autopilot.root_of(db, caller_id) not in roots
 
 
 def _dep_matches(dep: str, ws: Workspace, worker_id: str | None) -> bool:

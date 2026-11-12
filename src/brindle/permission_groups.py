@@ -454,7 +454,8 @@ def parts_decision(req: Request, parts: list[permissions.ShellPart], found: perm
     for part in parts:
         at = replace(req, cwd=part.cwd or req.cwd)
         (group, sub), *files = part_classes(req, part, rules, checks)
-        ruled = None if part.unknown or part.expanded else permissions._part_decision(at, part.words, checks, rules)
+        ruled = None if part.expanded else permissions._part_decision(at, part.words, checks, rules,
+                                                                    unresolved=part.unresolved)
         answers.append(ruled if ruled is not None and ruled.rule is not None else fallback(group, sub))
         for (kind, path), (group, sub) in zip([*(("write", p) for p in part.writes),
                                                *(("read", p) for p in part.reads)], files):

@@ -196,6 +196,13 @@ def _say(notes) -> None:
 # -- workspaces --------------------------------------------------------------
 
 
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def baseline(ctx: typer.Context, base: Optional[str] = typer.Option(None, "--base")) -> None:
+    """Check that a test fails on base source: brindle baseline [--base REF] -- COMMAND."""
+    from brindle.baseline import main
+    raise typer.Exit(main(list(ctx.args), base))
+
+
 @app.command()
 def init(
     yes: bool = typer.Option(False, "--yes", "-y", help="Write the config without asking."),
