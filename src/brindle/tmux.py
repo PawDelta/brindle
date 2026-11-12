@@ -612,7 +612,8 @@ def sidebar_respawn_script(pane: str, cwd: str, env: dict[str, str], log: Path) 
     so both are given again) and logs that to ``log``, unless the pane has
     already been restarted SIDEBAR_MAX_RESTARTS times within
     SIDEBAR_RESTART_WINDOW seconds: then it logs that it gives up and leaves
-    the dead pane showing its error. Plain sh and tmux, so it still works
+    the dead pane showing its error. It prints nothing and always exits 0,
+    whatever fails (the pane already gone, say). Plain sh and tmux, so it still works
     when the engine itself is what fails to start."""
     t = shlex.join([shutil.which(_bin()) or _bin(), *_base()[1:]])
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
@@ -620,7 +621,11 @@ def sidebar_respawn_script(pane: str, cwd: str, env: dict[str, str], log: Path) 
     show = f"{t} show-options -p -q -v -t {shlex.quote(pane)}"
     log_q = shlex.quote(str(log))
     stamp = "$(date '+%Y-%m-%d %H:%M:%S') sidebar exited with status $1"
-    return f"""now=$(date +%s)
+    # The hook's output and a nonzero exit are shown by tmux in view mode
+    # over whatever pane the person is looking at (another session's agent,
+    # say), so everything goes to the log and the script always exits 0.
+    return f"""exec >>{log_q} 2>&1
+now=$(date +%s)
 n=$({show} {SIDEBAR_RESTARTS}); since=$({show} {SIDEBAR_RESTARTS_SINCE})
 if [ -z "$since" ] || [ $((now - since)) -ge {SIDEBAR_RESTART_WINDOW} ]; then n=0; since=$now; fi
 n=${{n:-0}}
@@ -632,7 +637,8 @@ fi
 {t} set-option -p -t {shlex.quote(pane)} {SIDEBAR_RESTARTS} $((n + 1))
 {t} set-option -p -t {shlex.quote(pane)} {SIDEBAR_RESTARTS_SINCE} "$since"
 echo "{stamp}; restarting it ($((n + 1))/{SIDEBAR_MAX_RESTARTS})" >> {log_q}
-{t} {respawn}
+{t} {respawn} || echo "{stamp}; restarting it failed"
+exit 0
 """
 
 

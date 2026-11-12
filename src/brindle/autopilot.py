@@ -2143,10 +2143,11 @@ def counts(db: DB, root_id: str) -> tuple[int, int]:
     return sum(m.status == "passed" for m in ms), len(ms)
 
 
-def work_state(db: DB, root_id: str) -> str | None:
+def work_state(db: DB, root_id: str, panes: dict[str, bool] | None = None) -> str | None:
     """Display-only: "checking", "working" or "waiting" while the session has work in
     flight, else None. A failed milestone's last check is stale then, so it
     shouldn't read as a plain failure. Never stored on the milestone.
+    ``panes``: as for ``active_workers``.
 
     shortcut: work isn't tied to a milestone, so any in-flight work marks every
     failed milestone; upgrade if tasks get a milestone link."""
@@ -2157,7 +2158,7 @@ def work_state(db: DB, root_id: str) -> str | None:
         return "checking"
     if (ap is not None and (ap.state == "usage_paused" or ap.external_wait)) or login_pause.paused(db, root_id):
         return "waiting"
-    live = active_workers(db, root_id)
+    live = active_workers(db, root_id) if panes is None else active_workers(db, root_id, panes=panes)
     if any(a.status != "waiting" for a in live):
         return "working"
     if live or any(root_of(db, t.caller_id) == root_id
@@ -2246,21 +2247,25 @@ BUSY = ("starting", "processing", "waiting")
 IDLE_GRACE_SECONDS = 60  # how long a worker may sit idle and unreported before it's called out
 
 
-def active_workers(db: DB, root_id: str, *, reviewers: bool = True) -> list[Agent]:
+def active_workers(db: DB, root_id: str, *, reviewers: bool = True,
+                   panes: dict[str, bool] | None = None) -> list[Agent]:
     """Agents in the session still working: not yet reported, or back at work
     after reporting (e.g. on review feedback). Includes workers stalled idle
     and unreported past the grace period; see ``stalled_workers`` and
-    ``working_workers`` to tell those apart."""
+    ``working_workers`` to tell those apart. ``panes``: a tmux.list_panes()
+    snapshot to judge liveness by (agents.is_alive), when the caller has one."""
     from brindle import agents
 
     return [a for a in agents.tree(db, root_id)[1:]
             if a.mode in agents.REPORTING_MODES and (reviewers or a.mode != "review")
             and (a.result is None or a.status in BUSY or a.pipeline)
-            and a.status not in ("paused", "done") and agents.is_alive(a)
+            and a.status not in ("paused", "done")
+            and (agents.is_alive(a) if panes is None else agents.is_alive(a, panes))
             and not agents.review_moot(db, a)]
 
 
-def split_workers(db: DB, root_id: str, *, screen: bool = False) -> tuple[list[Agent], list[Agent]]:
+def split_workers(db: DB, root_id: str, *, screen: bool = False,
+                  panes: dict[str, bool] | None = None) -> tuple[list[Agent], list[Agent]]:
     """``active_workers`` split into (working, stalled). Stalled: idle without
     reporting a result for more than ``IDLE_GRACE_SECONDS``. Claude Code
     already reminded them once to call report_result (see agents.handle_hook's
@@ -2280,7 +2285,8 @@ def split_workers(db: DB, root_id: str, *, screen: bool = False) -> tuple[list[A
 
     now = time.time()
     working, stalled = [], []
-    for a in active_workers(db, root_id):
+    for a in (active_workers(db, root_id) if panes is None
+              else active_workers(db, root_id, panes=panes)):
         maybe = (a.result is None and a.status == "idle" and a.plan_state != "proposed"
                  and get_provider(a.provider).uses_hooks
                  and now - (a.status_since or a.created_at) >= IDLE_GRACE_SECONDS)
@@ -2296,9 +2302,9 @@ def stalled_workers(db: DB, root_id: str) -> list[Agent]:
     return split_workers(db, root_id)[1]
 
 
-def working_workers(db: DB, root_id: str) -> list[Agent]:
+def working_workers(db: DB, root_id: str, panes: dict[str, bool] | None = None) -> list[Agent]:
     """Active workers still expected to report on their own; see ``split_workers``."""
-    return split_workers(db, root_id)[0]
+    return (split_workers(db, root_id) if panes is None else split_workers(db, root_id, panes=panes))[0]
 
 
 def check_capacity(db: DB, caller_id: str | None, cfg: RepoConfig) -> None:
