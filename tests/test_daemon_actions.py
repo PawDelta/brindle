@@ -2516,10 +2516,12 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     agents_dir = Path(world.repo_root) / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     # (Declaring it as the profile's key name doesn't get it through either.)
-    # The "key" setup: the profile's own key, with a different one in brindle's environment.
+    # The "key" setup: the profile's own value, with a different one in brindle's environment.
+    # A fixed placeholder, not brindle's SECRET: the profile file is plain text on disk.
+    profile_value = "placeholder-profile-value-0000wxyz"
     (agents_dir / "supervisor.md").write_text(
         f"---\nname: supervisor\nprovider: {provider}\napi_key_env: NODE_OPTIONS\n"
-        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + SECRET + chr(10) if setup == 'key' else ''}"
+        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + profile_value + chr(10) if setup == 'key' else ''}"
         "---\nYou supervise.\n")
     if setup == "missing":
         monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(tmp_path / "nowhere" / "claude"))
@@ -2537,7 +2539,8 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     code, items = _send("GET", query)
     assert code == 200, items
     found = next(i for i in items if i["id"] == item)
-    assert SECRET not in json.dumps(items) and configs() == before     # asking changes nothing
+    assert SECRET not in json.dumps(items) and profile_value not in json.dumps(items)
+    assert configs() == before     # asking changes nothing
     assert all("NODE_OPTIONS" not in env for env in probed)
     action = found["action"]
     if action is None or action["name"] == "set_key":
@@ -2555,7 +2558,7 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     assert code == 200, reply
     assert item not in [i["id"] for i in _send("GET", query)[1]]
     if setup == "key":
-        assert providers.api_key_approved(SECRET) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
+        assert providers.api_key_approved(profile_value) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
     if setup == "untrusted":
         assert codex.read_text().startswith('model = "x"\n')
 
