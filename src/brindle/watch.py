@@ -34,9 +34,43 @@ REPAINT = 12  # Ctrl-L: redraw everything; the follow hook sends it after a sess
 CULL_SECONDS = 60.0
 CULL_STAMP = "cull.stamp"
 HOME_SECONDS = 3.0       # how often a sidebar checks it isn't stranded (agents.sidebar_come_home)
-# While nothing changes (no key, no database commit) a tick does no work; the tmux
-# side (pane liveness, who is attached, "ago" ages) is re-read this often instead.
+# While nothing changes (no key, no database commit) a tick does no work; the view
+# ("ago" ages, git status from status_cache) is re-read this often instead.
 IDLE_SECONDS = 10.0
+# The tmux side of an idle refresh (TmuxLook) is kept while nothing changes, and
+# taken again this often anyway, for what changes in tmux alone: a CLI that died
+# without a word, a terminal switching sessions with its follow hook missed, an
+# agent's status its hooks left stale (agents.reconcile reads its screen).
+TMUX_LOOK_SECONDS = 60.0
+
+
+class TmuxLook:
+    """What a sidebar refresh reads from tmux: the pane snapshot, and whether
+    this is a fresh look (so screens, the viewer and the sidebar's home may be
+    read too). Kept between refreshes until something says tmux may have
+    changed (``invalidate``: a key, a database commit, a failed pass) or
+    TMUX_LOOK_SECONDS pass: an idle sidebar's refresh starts no process."""
+
+    def __init__(self) -> None:
+        self.panes: tmux.PaneSnapshot | None = None
+        self.at = 0.0          # when the panes were read
+        self.taken = 0         # fresh looks so far
+        self.fresh = False     # whether the last take() read tmux
+
+    def invalidate(self) -> None:
+        self.panes = None
+
+    def take(self, now: float) -> tmux.PaneSnapshot:
+        """The panes, read again when due. Raises tmux.TmuxTimeout as
+        list_panes does (and keeps nothing then)."""
+        if self.panes is not None and 0 <= now - self.at < TMUX_LOOK_SECONDS:
+            self.fresh = False
+            return self.panes
+        self.panes = None
+        panes = tmux.list_panes()
+        self.panes, self.at, self.fresh = panes, now, True
+        self.taken += 1
+        return panes
 
 _cull_lock = threading.Lock()
 _cull_thread: threading.Thread | None = None
@@ -904,6 +938,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
     seen_by: str | None = None  # the tty of the terminal showing this pane
     notice, notice_until = "", 0.0
     culled_at = homed_at = viewed_at = 0.0
+    look = TmuxLook()
+    homed_look = viewed_look = -1   # the look (TmuxLook.taken) each last went with
     feed = watch_costs.Feed(repo_root)
     spend = watch_costs.Local()
     spend_at = 0.0
@@ -948,8 +984,11 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         if time.time() - culled_at >= CULL_SECONDS:
             culled_at = time.time()
             _cull_in_background()
-        if own_root and time.time() - homed_at >= (IDLE_SECONDS if quiet else HOME_SECONDS):
-            homed_at = time.time()
+        # While quiet, the two tmux looks below go with a fresh TmuxLook (at most
+        # one each per look), not with every idle refresh.
+        if (own_root and time.time() - homed_at >= (IDLE_SECONDS if quiet else HOME_SECONDS)
+                and not (quiet and homed_look == look.taken)):
+            homed_at, homed_look = time.time(), look.taken
             try:
                 agents.sidebar_come_home(db, own_root, os.environ.get("TMUX_PANE"))
             except Exception:  # noqa: BLE001 - never let a move take the sidebar down
@@ -958,8 +997,10 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         # first attach) gets a blank pane from iTerm2 until it's all redrawn.
         # Once per refresh, not per key: each look is a tmux call, and a mouse
         # wheel sends a burst of keys.
-        if time.time() - viewed_at >= (IDLE_SECONDS if quiet else REFRESH_SECONDS):
-            viewed_at = time.time()
+        viewed = False
+        if (time.time() - viewed_at >= (IDLE_SECONDS if quiet else REFRESH_SECONDS)
+                and not (quiet and viewed_look == look.taken)):
+            viewed_at, viewed_look, viewed = time.time(), look.taken, True
             if (viewer := sidebar_logo.viewer()) != seen_by:
                 seen_by = viewer
                 stdscr.clear()
@@ -968,18 +1009,19 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                     logo.recheck()
         h, w = stdscr.getmaxyx()
         # The braid image's sixel and width in cells, when the terminal shows it.
-        braid = (logo.image() if logo is not None and h >= 18 else None) or ("", 0)
+        braid = (logo.image(ask=viewed or not quiet) if logo is not None and h >= 18 else None) \
+            or ("", 0)
         width = max(1, w - 2)  # text starts at column 1, after the selection bar
         snap_changed = stale
         if stale:
             try:
-                panes = tmux.list_panes()
+                panes = look.take(time.time())
             except tmux.TmuxTimeout as e:
                 # A hung server: keep the last snapshot on screen (an empty
                 # pane list would show every agent as stopped) and say so.
                 state.notice = f"{str(e).partition(':')[0]}; showing the last snapshot"
             else:
-                snap = view.snapshot(db, repo_root, panes=panes)
+                snap = view.snapshot(db, repo_root, panes=panes, read_screens=look.fresh)
                 pilot = view.autopilot_entry(db, repo_root, panes=panes, root_id=own_root)
             stale = False
             seen_version, refreshed_at = db.data_version(), time.time()
@@ -1078,6 +1120,11 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         action = handle_key(state, key, lines, visible, sidebar)
         if action == "refresh":
             stale = True
+            # Only the idle clock (or a notice, or the minute, running out) with
+            # nothing committed keeps the tmux look: a key or a commit may mean
+            # a pane came or went.
+            if key != -1 or db.data_version() != seen_version:
+                look.invalidate()
         elif action == "quit":
             if not own_root:
                 return
@@ -1094,9 +1141,11 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
             _attach(lines[selected].agent, lines[selected].workspace, db)
             stdscr.clear()
             stale, shown, last_frame = True, None, None
+            look.invalidate()
         elif action == "peek" and selected is not None:
             _peek(stdscr, lines[selected].agent, styles)
             stale, shown, last_frame = True, None, None
+            look.invalidate()
         elif action == "close" and selected is not None:
             agent = lines[selected].agent
             now = time.time()
@@ -1116,9 +1165,11 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                 except agents.AgentError as e:
                     notice = str(e)
                 stale = True
+                look.invalidate()
       except Exception:  # noqa: BLE001 - one bad pass never ends the sidebar
         _log_error("sidebar pass failed")
         stale, shown, last_frame = True, None, None
+        look.invalidate()
         # Wait out the refresh (a pass that fails every time mustn't spin), still
         # honouring a quit typed meanwhile.
         if stdscr.getch() in quit_keys(sidebar):
