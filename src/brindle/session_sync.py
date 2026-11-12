@@ -46,6 +46,37 @@ log = logging.getLogger(__name__)
 FETCH_SECONDS = 30.0
 MAX_LANDING_LOOKUPS = 5      # failed lookups of how a merged PR landed before a sync stops waiting on it
 IDLE_FETCH_SECONDS = 300.0
+# How long a sweep believes a session's upstream (its repo's remote and default
+# branch: two git runs to learn): as long as it waits between fetches.
+UPSTREAM_SECONDS = IDLE_FETCH_SECONDS
+
+
+@dataclass
+class Seen:
+    """What the daemon's sweeps (every few seconds) remember between rounds,
+    so a session whose refs haven't moved starts no git at all: each git run
+    is a process the machine starts, and an antivirus inspects, every round."""
+    upstreams: dict[tuple[str, str], tuple[float, str | None]] = field(default_factory=dict)
+    settled: dict[str, tuple[str, str | None]] = field(default_factory=dict)   # ws id -> refs an idle sync left synced
+    drift: dict[str, tuple[tuple, int | None, int]] = field(default_factory=dict)   # ws id -> (refs, oldest, count)
+
+    def upstream(self, ws: Workspace) -> str | None:
+        """``upstream(ws)``, believed for UPSTREAM_SECONDS."""
+        key, now = (ws.repo_root, ws.branch), time.monotonic()
+        hit = self.upstreams.get(key)
+        if hit is None or now - hit[0] >= UPSTREAM_SECONDS:
+            hit = self.upstreams[key] = (now, upstream(ws))
+        return hit[1]
+
+
+def _refs(ws: Workspace, default: str) -> tuple[str, str | None] | None:
+    """The checkout's HEAD and ``origin/<default>``, read from its git files
+    without running git; None when they can't be read that way (then the
+    caller asks git, every time)."""
+    from brindle.daemon.session_review import _fingerprint
+
+    fp = _fingerprint(ws, default)
+    return None if fp is None else (fp.head, fp.origin)
 
 
 @dataclass
@@ -54,6 +85,7 @@ class Drift:
     sha: str                 # what it points at
     behind: int              # its commits the session lacks
     overlap: list[str]       # files both sides changed since they parted
+    head: str | None = None  # the session's HEAD it was measured from
 
 
 @dataclass
@@ -62,6 +94,7 @@ class Outcome:
     text: str | None = None
     old_sha: str | None = None
     new_sha: str | None = None
+    checked: tuple[str, str] | None = None   # up_to_date: the (HEAD, origin/<default>) found synced
     files: list[str] = field(default_factory=list)
 
 
@@ -129,46 +162,65 @@ def drift(ws: Workspace, default: str) -> Drift | None:
     if not git.remote_branch_exists(ws.path, default):
         return None
     ref = f"origin/{default}"
-    sha = git.out(["rev-parse", ref], ws.path)
-    behind = int(git.out(["rev-list", "--count", f"HEAD..{ref}"], ws.path))
+    head, sha = git.out(["rev-parse", "HEAD", ref], ws.path).split()
+    behind = int(git.out(["rev-list", "--count", f"{head}..{sha}"], ws.path))
     if not behind:
-        return Drift(ref, sha, 0, [])
-    mb = git.out(["merge-base", "HEAD", ref], ws.path)
-    theirs = set(git.paths(["diff", "--name-only", "--no-renames", mb, ref], ws.path))
-    mine = set(git.paths(["diff", "--name-only", "--no-renames", mb, "HEAD"], ws.path))
-    return Drift(ref, sha, behind, sorted(theirs & mine))
+        return Drift(ref, sha, 0, [], head)
+    mb = git.out(["merge-base", head, sha], ws.path)
+    theirs = set(git.paths(["diff", "--name-only", "--no-renames", mb, sha], ws.path))
+    mine = set(git.paths(["diff", "--name-only", "--no-renames", mb, head], ws.path))
+    return Drift(ref, sha, behind, sorted(theirs & mine), head)
 
 
 def _both(d: Drift) -> str:
     return f"; files both changed: {', '.join(d.overlap)}" if d.overlap else ""
 
 
-def refresh_drift_flags(db: DB) -> None:
+def refresh_drift_flags(db: DB, seen: Seen | None = None) -> None:
     """Measure live sessions against origin as last fetched, once per sweep.
 
     A notice is armed again only after the branch falls below both limits.
     Commit timestamps come from unlanded work, excluding integration merges
     and history carried by verified squash/rebase landings on origin.
+    ``seen``: the measurements of earlier sweeps, reused while the session's
+    HEAD, origin's branch and its recorded landings are as they were.
     """
+    seen = Seen() if seen is None else seen
     rows = db.conn.execute(
         "SELECT DISTINCT w.id FROM workspaces w JOIN agents a ON a.workspace_id = w.id"
         " WHERE a.parent_id IS NULL AND a.status != 'done' AND a.dismissed_at IS NULL").fetchall()
     for row in rows:
         ws = db.get_workspace(row["id"])
         try:
-            if (default := upstream(ws)) is None or not git.remote_branch_exists(ws.path, default):
+            if (default := seen.upstream(ws)) is None:
                 continue
-            _record_drift(db, ws, default)
+            refs = _refs(ws, default)
+            if refs is not None:
+                if refs[1] is None:      # no origin/<default>
+                    continue
+                key = (refs, tuple(tuple(r) for r in db.conn.execute(
+                    "SELECT squash_sha, covers_sha FROM session_squashes WHERE repo_root = ? AND branch = ?"
+                    " ORDER BY recorded_at", (ws.repo_root, ws.branch))))
+                last = seen.drift.get(ws.id)
+                measured = _record_drift(db, ws, default, last[1:] if last and last[0] == key else None)
+                seen.drift[ws.id] = (key, *measured)
+            elif git.remote_branch_exists(ws.path, default):
+                _record_drift(db, ws, default)
         except git.GitError:
             log.debug("brindle: couldn't measure drift for %s", ws.branch, exc_info=True)
+    for gone in set(seen.drift) - {row["id"] for row in rows}:
+        del seen.drift[gone]
 
 
-def refresh_idle_sessions(db: DB, fetched_at: dict[str, float]) -> None:
+def refresh_idle_sessions(db: DB, fetched_at: dict[str, float], seen: Seen | None = None) -> None:
     """Refresh origin once per repo every few minutes, then sync quiet sessions.
 
     The daemon watch owns the fetch clock; a busy checkout can become quiet
-    on the next sweep without waiting for another fetch.
+    on the next sweep without waiting for another fetch. ``seen``: a session
+    an earlier sweep found synced is left alone, with no git run, while
+    neither its HEAD nor ``origin/<default>`` has moved.
     """
+    seen = Seen() if seen is None else seen
     rows = db.conn.execute(
         "SELECT DISTINCT w.id FROM workspaces w JOIN agents a ON a.workspace_id = w.id"
         " WHERE w.base_branch IS NOT NULL AND a.parent_id IS NULL"
@@ -181,17 +233,26 @@ def refresh_idle_sessions(db: DB, fetched_at: dict[str, float]) -> None:
     for row in rows:
         ws = db.get_workspace(row["id"])
         try:
-            if (default := upstream(ws)) is None:
+            if (default := seen.upstream(ws)) is None:
                 continue
             now = time.monotonic()
             last = fetched_at.get(ws.repo_root)
             if last is None or now - last >= IDLE_FETCH_SECONDS:
                 fetched_at[ws.repo_root] = now
                 fetch(ws.repo_root, default)
-            if _quiet(db, ws):
-                sync(db, ws, idle=True)
+            refs = _refs(ws, default)
+            if refs is not None and (refs[1] is None or seen.settled.get(ws.id) == refs):
+                continue    # no origin/<default> to sync from, or synced with it as it is
+            seen.settled.pop(ws.id, None)
+            # Only the refs the sync itself found synced are remembered (a merge it made
+            # is found synced on the next sweep): never a later look, which another
+            # fetch or commit may have moved past what was checked.
+            if _quiet(db, ws) and (out := sync(db, ws, idle=True)) is not None and out.checked:
+                seen.settled[ws.id] = out.checked
         except git.GitError:
             log.debug("brindle: couldn't sync idle session %s", ws.branch, exc_info=True)
+    for gone in set(seen.settled) - {row["id"] for row in rows}:
+        del seen.settled[gone]
 
 
 def _quiet(db: DB, ws: Workspace) -> bool:
@@ -213,20 +274,28 @@ def _quiet(db: DB, ws: Workspace) -> bool:
     return not git.dirty_files(ws.path)
 
 
-def _record_drift(db: DB, ws: Workspace, default: str) -> None:
+def _record_drift(db: DB, ws: Workspace, default: str,
+                  measured: tuple[int | None, int] | None = None) -> tuple[int | None, int]:
+    """Record whether ``ws`` drifts from ``origin/<default>``: its oldest
+    unlanded commit's time and how many files differ, measured with git
+    unless ``measured`` (an earlier sweep's, for the same refs) is given.
+    Whether that age is too old is judged now, every time. Returns them."""
     ref = f"origin/{default}"
-    covered = [f"^{covers}" for _squash, covers in _verified_squashes(db, ws, ref)]
-    stamps = git.out(["log", "--no-merges", "--format=%ct", f"{ref}..HEAD", *covered], ws.path).splitlines()
-    oldest = min(map(int, stamps)) if stamps else None
-    count = len(git.paths(["diff", "--name-only", "--no-renames", ref, "HEAD"], ws.path))
+    if measured is None:
+        covered = [f"^{covers}" for _squash, covers in _verified_squashes(db, ws, ref)]
+        stamps = git.out(["log", "--no-merges", "--format=%ct", f"{ref}..HEAD", *covered], ws.path).splitlines()
+        measured = (min(map(int, stamps)) if stamps else None,
+                    len(git.paths(["diff", "--name-only", "--no-renames", ref, "HEAD"], ws.path)))
+    oldest, count = measured
     drifting = (oldest is not None and time.time() - oldest > 48 * 3600) or count > 60
-    row = db.conn.execute("SELECT drifting FROM session_drift WHERE repo_root = ? AND branch = ?",
-                          (ws.repo_root, ws.branch)).fetchone()
-    db.conn.execute(
-        "INSERT INTO session_drift (repo_root, branch, oldest_at, file_count, drifting) VALUES (?, ?, ?, ?, ?)"
-        " ON CONFLICT (repo_root, branch) DO UPDATE SET oldest_at = excluded.oldest_at,"
-        " file_count = excluded.file_count, drifting = excluded.drifting",
-        (ws.repo_root, ws.branch, oldest, count, drifting))
+    row = db.conn.execute("SELECT oldest_at, file_count, drifting FROM session_drift"
+                          " WHERE repo_root = ? AND branch = ?", (ws.repo_root, ws.branch)).fetchone()
+    if row is None or (row["oldest_at"], row["file_count"], bool(row["drifting"])) != (oldest, count, drifting):
+        db.conn.execute(
+            "INSERT INTO session_drift (repo_root, branch, oldest_at, file_count, drifting) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT (repo_root, branch) DO UPDATE SET oldest_at = excluded.oldest_at,"
+            " file_count = excluded.file_count, drifting = excluded.drifting",
+            (ws.repo_root, ws.branch, oldest, count, drifting))
     if bool(row and row["drifting"]) != drifting:
         for root in db.list_agents(ws.id):
             if root.parent_id is None:
@@ -235,6 +304,7 @@ def _record_drift(db: DB, ws: Workspace, default: str) -> None:
         age = (max(0, time.time() - oldest) / 3600) if oldest is not None else 0
         _tell(db, ws, f"{ws.branch} is drifting from {ref}: its oldest unlanded commit is "
               f"{age:.1f} hours old and {count} files differ. Land its PR to keep the session close to main.")
+    return measured
 
 
 def drifting(db: DB, root_id: str) -> bool:
@@ -371,7 +441,7 @@ def _sync_locked(db: DB, ws: Workspace, default: str, *, idle: bool = False) -> 
         return Outcome("up_to_date")
     if not d.behind:
         _record(db, ws, d.sha, "synced")
-        return Outcome("up_to_date")
+        return Outcome("up_to_date", checked=(d.head, d.sha) if d.head else None)
     if idle and not _quiet(db, ws):
         return Outcome("busy")
     if git.dirty_files(ws.path, tracked_only=True):
