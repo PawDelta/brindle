@@ -781,6 +781,18 @@ def window_pids(target: str, server: object = _THIS_SERVER) -> list[int]:
     return [int(p) for p in out.split() if p.isdigit()]
 
 
+def pane_pids() -> dict[str, int]:
+    """The process id of the program in every pane on this server, by pane
+    id, in one call (empty when no server runs)."""
+    out = _tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}", check=False).stdout
+    pids: dict[str, int] = {}
+    for line in out.splitlines():
+        pane, _, pid = line.partition("\t")
+        if pid.isdigit():
+            pids[pane] = int(pid)
+    return pids
+
+
 def window_activity(target: str, server: object = _THIS_SERVER) -> float | None:
     """When ``target``'s window last printed anything (epoch seconds), or
     None if tmux can't say."""

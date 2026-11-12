@@ -159,6 +159,11 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         stopped = procs.terminate({p for pids in found.values() for p in pids})
         if stopped:
             done.append(f"stopped {stopped} leftover process(es) of {len(found)} agent(s)")
+    # What closed panes left with launchd as its parent, its CLI gone (procs.hand_off):
+    # judged from the process table as it is now, not as the sweep began.
+    orphans = procs.handed_orphans(now=now)
+    if orphans and (stopped := procs.terminate(set(orphans), owned=orphans)):
+        done.append(f"stopped {stopped} process(es) a closed pane left behind")
 
     # 1b. Autopilot sessions at the Claude usage limit: stop their workers,
     # or bring them back once the window has reset.

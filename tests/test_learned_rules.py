@@ -254,6 +254,34 @@ def test_a_lookalike_local_profile_is_not_picked(tmp_path, monkeypatch):
     assert "https://localhost.evil.example/v1" not in probed
 
 
+def test_a_claude_call_that_times_out_leaves_nothing_it_started_running(tmp_path, monkeypatch):
+    """The grouping step's claude CLI starts helpers of its own (MCP
+    servers, a shell); one that hangs past the limit takes them with it."""
+    import subprocess
+    import sys
+
+    from brindle import providers
+    from brindle.native import runner
+
+    pidfile = tmp_path / "helper.pid"
+    cli = tmp_path / "claude"
+    cli.write_text(f"#!{sys.executable}\nimport os, signal\nhelper = os.fork()\nif helper == 0:\n"
+                   "    signal.pause()\n"
+                   f"open({str(pidfile)!r}, 'w').write(str(helper))\nsignal.pause()\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(providers, "claude_binary", lambda *a, **k: str(cli))
+    monkeypatch.setattr(runner, "probe", lambda ep, **k: (False, ""))
+    monkeypatch.setattr(learned_rules, "CALL_TIMEOUT", 0.5)
+    call = learned_rules.default_call(str(tmp_path))
+    with pytest.raises(learned_rules.LearnedRulesError):
+        call("group these")
+    helper = int(pidfile.read_text())
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(helper)], capture_output=True, text=True).stdout.strip()
+    if state and not state.startswith("Z"):
+        subprocess.run(["kill", "-9", str(helper)])     # this test's own helper: not left behind either way
+    assert not state or state.startswith("Z")
+
+
 # -- entitlement: fails closed -------------------------------------------------------------
 
 
