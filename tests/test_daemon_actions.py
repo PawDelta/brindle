@@ -2539,7 +2539,8 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     code, items = _send("GET", query)
     assert code == 200, items
     found = next(i for i in items if i["id"] == item)
-    assert SECRET not in json.dumps(items) and configs() == before     # asking changes nothing
+    assert SECRET not in json.dumps(items) and profile_value not in json.dumps(items)
+    assert configs() == before     # asking changes nothing
     assert all("NODE_OPTIONS" not in env for env in probed)
     action = found["action"]
     if action is None or action["name"] == "set_key":

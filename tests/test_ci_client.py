@@ -1306,9 +1306,9 @@ def test_init_federation_sets_the_variables(init_run):
     secrets = [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]]
     assert secrets == ["BRINDLE_PRO_TOKEN"], "no ANTHROPIC_API_KEY secret with federation"
     text = "\n".join(said)
-    # Compare the parsed host of each URL the output names, not a substring of the text.
-    hosts = {urlparse(u).hostname for u in re.findall(r"https?://[^\s/]+", text)}
-    assert "api.anthropic.com" in hosts
+    # Compare the parsed scheme and host of each URL the output names, not a substring of the text.
+    origins = {(urlparse(u).scheme, urlparse(u).hostname) for u in re.findall(r"https?://[^\s/]+", text)}
+    assert ("https", "api.anthropic.com") in origins
     assert f"subject prefix repo:{REPO}:*" in text and "600 s" in text
     assert (f'condition claims.repository == "{REPO}" && '
             f'claims.workflow_ref.startsWith("{REPO}/.github/workflows/brindle-ci-")') in text
