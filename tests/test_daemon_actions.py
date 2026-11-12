@@ -2177,8 +2177,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     config.set_local(lead.repo_root, "checks", ["validate", "lint"])
     assert _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})[0] == 202
     # The sha brindle checked; the Inbox item goes.
-    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1,
-                                                                                  [("pr_opened", "PR opened")])
+    # The person opened it: no "PR opened" card tells them so.
+    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1, [])
     newer = _commit(sess, "a.py", "b\n")
     watch.sweep(db)
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")

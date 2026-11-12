@@ -953,6 +953,9 @@ def open_session_pr(db: DB, params: dict, body: Body) -> Any:
             url = workspaces.compare_url(ws)
         else:
             _record_pr(db, key, url, head)
+            # The person opened it themselves: no "PR opened" card to tell them so.
+            db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES (?, ?, ?)"
+                            " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha", (*key, f"{head}|{url}"))
             # The Inbox's next read already knows it (its look at GitHub may be older than the PR).
             number = re.search(r"/pull/(\d+)", url)
             review.note_head_pr(head, ws.path, {"number": int(number.group(1)) if number else None,
