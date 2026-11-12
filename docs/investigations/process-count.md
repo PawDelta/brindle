@@ -292,7 +292,9 @@ supervisor), 240 idle refreshes on a fake clock (40 minutes at the idle
 pace: `view.snapshot`, `view.autopilot_entry`, `watch_costs.local`), and two
 sidebars whose own minutes fall 30 s apart, each calling
 `_cull_in_background` when its minute is up. The warm-up look before the
-count (18 git: one status per worktree) is the same before and after.
+count (the sidebar's first) is 18 git before (a status, a rev-list and the
+base ref's look per worktree) and 21 after: one `git config --list` per
+worktree besides (see Fix).
 
 | 40 idle minutes, from just after the first look | refreshes (one sidebar) | cull sweeps (two sidebars) | cull processes (git) |
 |---|---|---|---|
@@ -322,12 +324,16 @@ Fix:
   except those git reported ignored (`git status --ignored=matching` names an
   ignored directory as `dir/` without listing it) and nested repositories,
   each `.gitignore`, and every file outside the worktree that decides what is
-  ignored (`status_cache._ignore_sources`: `info/exclude`, the default
-  global ignore file, every config file git may read, system, global, the
-  repo's and the worktree's, with every file they include through
-  `include.path` or any `includeIf`, whatever its condition, and each
-  `core.excludesFile` any of them names; more files than git reads, never
-  fewer). A file new anywhere git looks, an empty folder deep down included,
+  ignored (`status_cache._ignore_sources`), both the link and what it points
+  at: `info/exclude`, the default global ignore file, the config files git
+  may read even before they exist (system, global, the repo's, the
+  worktree's), and, from git's own reading of the config
+  (`git config --list --show-origin --includes`, so its parsing, escapes and
+  includes are git's), every file it read, every `include.path` and
+  `includeIf` path whatever its condition, and every `core.excludesFile`.
+  That `git config` runs on a sidebar's first look at a worktree and again
+  only when one of those files, or the branch (for `onbranch:` includes),
+  changed; a list read while one of them changed is asked for again. A file new anywhere git looks, an empty folder deep down included,
   changes its directory. git runs only when that moved.
 - The baseline is stat'ed just before each git look (the first look's
   included), leaving out only what the previous look reported ignored (the
@@ -360,8 +366,9 @@ start no process, where the unmodified code started `git status` and
 shows on the next refresh, and at the next safety look: a file new in an old
 empty folder three levels down, an edit in a subdirectory of a worktree
 with a v4 index, a folder a tracked `src/.gitignore` stops ignoring and a
-file new in it afterwards, and a file an included config's
-`core.excludesFile` stops ignoring) and
+file new in it afterwards, and a file no longer ignored once the
+`core.excludesFile` (a symlink, named by a config included through a path
+git writes escaped) is edited through its link) and
 `test_background_cull_keeps_one_sweep_in_flight` (a
 second sidebar due 30 s after the first's sweep doesn't sweep; the
 unmodified code did).
@@ -427,7 +434,8 @@ safety refresh (S3). With S3 an idle sidebar's view starts no git, and the
   once per machine rather than per sidebar (S3). Next: decide the route
   without building the whole environment.
 - A sidebar's first look (opening it) still runs git for every worktree it
-  shows, and stats each worktree whole once, ignored folders included
+  shows (now with a `git config --list` each), and stats each worktree whole
+  once, ignored folders included
   (`node_modules`, `.venv`): it doesn't know yet what is ignored. A worktree
   an agent is editing re-runs `git status` on each refresh that sees a
   change, as before, now with a stat of what git is about to look at before

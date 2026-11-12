@@ -70,6 +70,7 @@ def clear() -> None:
     _base_ref_cache.clear()
     _status_cache.clear()
     _reported.clear()
+    _sources.clear()
 
 
 def _worktree_gitdir(path: Path) -> Path:
@@ -339,65 +340,75 @@ def _system_configs() -> list[Path]:
     return _SYSTEM_CONFIGS
 
 
-def _config_value(raw: str) -> str:
-    """A config value as git reads it: an unquoted ``#``/``;`` starts a
-    comment, quotes are dropped."""
-    out, quoted = [], False
-    for ch in raw.strip():
-        if ch == '"':
-            quoted = not quoted
-        elif ch in "#;" and not quoted:
-            break
-        else:
-            out.append(ch)
-    return "".join(out).strip()
+def _watched(path: Path) -> tuple:
+    """A file outside the worktree as git reads it: the link itself and,
+    through it, what it points at."""
+    try:
+        s = os.stat(path)
+        followed = (s.st_mtime_ns, s.st_ctime_ns, s.st_size, s.st_ino)
+    except OSError:
+        followed = None
+    return (_stat(path), followed)
+
+
+def _settled_since(stats: tuple, before_ns: int) -> bool:
+    return all(s is None or max(s[0], s[1]) < before_ns for pair in stats for s in pair)
+
+
+# Per worktree: (what the list was read against, the list) for _ignore_sources.
+_sources: dict[str, tuple[tuple, list[Path]]] = {}
+_UNSETTLED = object()       # a list read while one of its files changed: never matches
 
 
 def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path]:
     """Every file outside the worktree that can change what git ignores
-    there: each config file git may read (system, global, the repo's, the
-    worktree's, and every file they include, include.path and each
-    includeIf's path alike, whatever its condition), each core.excludesFile
-    any of them names, the default global ignore file and info/exclude. A
-    superset: watching one git doesn't read only costs a stat."""
+    there: info/exclude, the default global ignore file, the config files
+    git may read even when they don't exist yet (system, global, the repo's,
+    the worktree's), and, as git itself reads the config (``git config
+    --list --show-origin --includes``: its own parsing, escapes and includes
+    included), every file it read, every include.path or includeIf path
+    whatever its condition, and every core.excludesFile. git is asked again
+    only when one of those files (or the branch, for onbranch: includes)
+    changed: an idle sidebar asks nothing."""
+    key = str(path)
+    try:
+        head = (wt_gitdir / "HEAD").read_text()
+    except OSError:
+        head = ""
+    hit = _sources.get(key)
+    if hit is not None and hit[0] == (head, tuple(_watched(p) for p in hit[1])):
+        return hit[1]
     xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "git"
-    configs: list[Path] = []
+    found = [common / "info" / "exclude", xdg / "ignore", common / "config", wt_gitdir / "config.worktree"]
     if not os.environ.get("GIT_CONFIG_NOSYSTEM"):
         system = os.environ.get("GIT_CONFIG_SYSTEM")
-        configs += [Path(system)] if system else _system_configs()
+        found += [Path(system)] if system else _system_configs()
     glob = os.environ.get("GIT_CONFIG_GLOBAL")
-    configs += [Path(glob)] if glob else [Path.home() / ".gitconfig", xdg / "config"]
-    configs += [common / "config", wt_gitdir / "config.worktree"]
-    out = [common / "info" / "exclude", xdg / "ignore"]
-    seen: set[Path] = set()
-    while configs:
-        config = configs.pop(0)
-        if config in seen or len(seen) > 64:
+    found += [Path(glob)] if glob else [Path.home() / ".gitconfig", xdg / "config"]
+    before_ns = time.time_ns()
+    try:
+        listed = git.run(["config", "--list", "--show-origin", "--includes", "-z"], path, check=False).stdout
+    except git.GitError:
+        listed = ""
+    fields = listed.split("\0")
+    for origin, entry in zip(fields[0::2], fields[1::2]):
+        source = None
+        if origin.startswith("file:"):
+            source = Path(origin[len("file:"):])
+            source = source if source.is_absolute() else path / source
+            found.append(source)
+        name, _, value = entry.partition("\n")
+        name = name.lower()
+        if not value:
             continue
-        seen.add(config)
-        out.append(config)
-        try:
-            text = config.read_text(errors="replace")
-        except OSError:
-            continue
-        section = ""
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("["):
-                section, _, line = line[1:].partition("]")
-                section = section.strip().lower()
-                line = line.strip()
-            key, sep, value = line.partition("=")
-            if not sep or key.strip().startswith(("#", ";")):
-                continue
-            key, value = key.strip().lower(), os.path.expanduser(_config_value(value))
-            if not value:
-                continue
-            if key == "path" and (section == "include" or section.startswith("includeif")):
-                configs.append(config.parent / value)       # relative to the including file
-            elif key == "excludesfile":
-                out.append(path / value)                    # an absolute value stays as it is
-    return out
+        if name == "core.excludesfile":
+            found.append(path / os.path.expanduser(value))       # an absolute value stays as it is
+        elif name.endswith(".path") and name.startswith(("include.", "includeif.")):
+            found.append((source.parent if source else path) / os.path.expanduser(value))
+    found = list(dict.fromkeys(found))
+    stats = tuple(_watched(p) for p in found)
+    _sources[key] = ((head if _settled_since(stats, before_ns) else _UNSETTLED, stats), found)
+    return found
 
 
 def _deep_entries(path: Path, wt_gitdir: Path, common: Path, ignored: list[str] | None) -> list | None:
@@ -411,7 +422,7 @@ def _deep_entries(path: Path, wt_gitdir: Path, common: Path, ignored: list[str] 
     if paths is None:
         return None
     root = os.fsencode(path)
-    out: list = [(0, str(p), _stat(p)) for p in _ignore_sources(path, wt_gitdir, common)]
+    out: list = [(0, str(p), _watched(p)) for p in _ignore_sources(path, wt_gitdir, common)]
     out += [(1, p, _stat(os.path.join(root, p))) for p in paths]
     skip = _ignored_dirs(root, ignored or [])
     for here, dirs, files in os.walk(root):

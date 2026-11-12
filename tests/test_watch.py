@@ -38,8 +38,8 @@ def four_sessions(tmp_path_factory):
     tracked file below its root; built once, with its own git identity.
     s1 has a build tree a tracked src/.gitignore ignores and empty nested
     folders, s2 a commit its upstream (``upstream/review``, on another
-    remote) lacks and a log file the excludes file an included config names
-    ignores, s3 a v4 index."""
+    remote) lacks and a log file ignored by the excludes file (a symlink)
+    that a config included by an escaped path names, s3 a v4 index."""
     from brindle import git
 
     base = tmp_path_factory.mktemp("sessions")
@@ -56,9 +56,11 @@ def four_sessions(tmp_path_factory):
         git.run(["init", "-q", "-b", "main"], main)
         git.run(["add", "-A"], main)
         git.run(["commit", "-qm", "init"], main)
-        (base / "excludes").write_text("*.log\n")
-        (base / "extra.gitconfig").write_text(f"[core]\n\texcludesFile = {base / 'excludes'}\n")
-        git.run(["config", "include.path", str(base / "extra.gitconfig")], main)
+        (base / "excludes.target").write_text("*.log\n")
+        (base / "excludes").symlink_to(base / "excludes.target")
+        included = base / 'extra "q".gitconfig'       # git writes its path escaped
+        included.write_text(f"[core]\n\texcludesFile = {base / 'excludes'}\n")
+        git.run(["config", "include.path", str(included)], main)
         for i in (1, 2, 3):
             git.run(["worktree", "add", "-q", "-b", f"brindle/session-{i}", str(base / f"s{i}")], main)
         (base / "s1" / "src" / "build" / "out").mkdir(parents=True)
@@ -119,8 +121,8 @@ def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions
     on another remote moving at once; at the next safety look, a file new in
     an old empty folder deep down, an edit below the root in a v4 index
     (which compresses its paths), a folder no longer ignored and a file new
-    in it afterwards, and a file an included config's excludes file no
-    longer ignores."""
+    in it afterwards, and a file no longer ignored once the excludes file is
+    edited through its symlink."""
     from brindle import git, status_cache
 
     s1, s2, s3 = four_sessions[1:]
