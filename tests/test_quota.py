@@ -1,8 +1,74 @@
+import fcntl
 import json
 import os
+import subprocess
+import threading
 import time
+from pathlib import Path
 
-from brindle import quota
+import pytest
+
+from brindle import providers, quota, spawn
+
+
+def test_sidebars_share_one_claude_usage_run_per_refresh(monkeypatch):
+    """Each sidebar is a process of its own with its own refresh clock; the
+    claude CLI that answers /usage starts once per refresh for all of them."""
+    runs = []
+    answer = "Current session: 36% used · resets Oct 12 at 6:10pm (America/New_York)\n"
+    monkeypatch.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or
+                        subprocess.CompletedProcess(argv, 0, answer, ""))
+    monkeypatch.setattr(providers, "claude_binary", lambda *a, **k: "claude")
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    for _sidebar in range(3):
+        monkeypatch.setattr(quota, "_claude_usage_at", 0.0)    # a new process: it never asked
+        quota.refresh_claude_usage()
+    assert len(runs) == 1
+
+
+@pytest.mark.variant("a race: two sidebars find the refresh due at the same moment")
+def test_two_sidebars_looking_at_once_start_one_claude_usage_run(monkeypatch):
+    """The second sidebar looks while the first is reading the shared stamp,
+    before it has set it: the first goes on only once the second has finished
+    or is waiting its turn at the lock."""
+    runs = []
+    answer = "Current session: 36% used · resets Oct 12 at 6:10pm (America/New_York)\n"
+    monkeypatch.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or
+                        subprocess.CompletedProcess(argv, 0, answer, ""))
+    monkeypatch.setattr(providers, "claude_binary", lambda *a, **k: "claude")
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    monkeypatch.setattr(quota, "_claude_usage_at", 0.0)
+    second_looked = threading.Event()
+    flock = fcntl.flock
+
+    def lock(fd, how):
+        if threading.current_thread().name == "second sidebar":
+            second_looked.set()      # about to wait for the first one's lock
+        return flock(fd, how)
+
+    monkeypatch.setattr(fcntl, "flock", lock)
+    second = threading.Thread(target=lambda: (quota.refresh_claude_usage(), second_looked.set()),
+                              name="second sidebar")
+    stat, looked = Path.stat, []
+
+    def first_looks_then_waits(self, *a, **kw):
+        if self.name != quota.CLAUDE_USAGE_STAMP or looked:
+            return stat(self, *a, **kw)
+        looked.append(self)
+        try:
+            seen = stat(self, *a, **kw)     # what the first one finds, before the second looks
+        except FileNotFoundError:
+            seen = None
+        second.start()
+        second_looked.wait()
+        if seen is None:
+            raise FileNotFoundError(self)
+        return seen
+
+    monkeypatch.setattr(Path, "stat", first_looks_then_waits)
+    quota.refresh_claude_usage()
+    second.join()
+    assert len(runs) == 1
 
 
 def test_auth_and_token_files_are_never_read(tmp_path, monkeypatch):
