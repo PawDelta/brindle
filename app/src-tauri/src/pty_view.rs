@@ -2159,7 +2159,7 @@ mod tests {
         let drawn = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (crops, seen) = (told.clone(), drawn.clone());
         // The client's reads, and of them those that asked for a crop probe (a new title).
-        let asked = Arc::new(Mutex::new((Relayouts::default(), 0usize, 0usize)));
+        let asked = Arc::new(Mutex::new((Relayouts::default(), 0usize, 0usize, Vec::<u8>::new())));
         let asks = asked.clone();
         let view = PtyView::open(
             Path::new("tmux"),
@@ -2172,6 +2172,7 @@ mod tests {
                 let mut asks = asks.lock().unwrap();
                 asks.1 += 1;
                 asks.2 += usize::from(asks.0.ask(bytes));
+                asks.3.extend_from_slice(bytes);
             },
             move |crop| crops.lock().unwrap().push((crop, drawn.load(Ordering::SeqCst))),
             |_| {},
@@ -2233,9 +2234,15 @@ mod tests {
             let at = cursor().saturating_sub(panned());
             cursor() == 170 && at >= 90 && last() == Some(Crop { cols: 31, left: at + 1 - 90, width: None })
         });
+        let tty = server.run(&["list-clients", "-t", &format!("={}", view.name()), "-F", "#{client_tty}"]);
+        let title = server.run(&["display-message", "-p", "-c", &tty, "-t", &format!("={}:", view.name()), LAYOUT_TITLE]);
+        let title = format!("\x1b]0;{title}\x07");
+        // A probe triggered by an earlier title can already see the final cursor position.
+        // Its crop callback does not mean that the final title reached on_data yet. Wait
+        // for that complete title (even across reads) before counting unchanged redraws.
+        server.wait("the final cursor title reached the view", |_| asked.lock().unwrap().3.windows(title.len()).any(|w| w == title.as_bytes()));
         // The wider window redrawn whole, its layout, pan and cursor as they were: no probe asked for.
         let (reads, probes) = { let asked = asked.lock().unwrap(); (asked.1, asked.2) };
-        let tty = server.run(&["list-clients", "-t", &format!("={}", view.name()), "-F", "#{client_tty}"]);
         server.run(&["refresh-client", "-t", &tty]);
         server.wait("the view redrawn", |_| asked.lock().unwrap().1 > reads);
         assert_eq!(asked.lock().unwrap().2, probes, "a redraw of the panned window, nothing moved, asks for no probe");
