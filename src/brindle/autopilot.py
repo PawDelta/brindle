@@ -685,15 +685,16 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
 
 def _same_goal(old_goal: str, new_goal: str) -> bool:
     """Whether ``new_goal`` is the session's goal reworded or grown rather than
-    an unrelated replacement: one title contains the other, or at least half
-    of their combined words are shared. A grown goal must not be offered the
+    an unrelated replacement: one title contains the other, or more than half
+    of the shorter title's words appear in the other. A grown goal must not be offered the
     plan question again."""
     a, b = (re.findall(r"[a-z0-9]+", s.lower()) for s in (old_goal, new_goal))
     if not a or not b:
         return False
     if " ".join(a) in " ".join(b) or " ".join(b) in " ".join(a):
         return True
-    return len(set(a) & set(b)) * 2 >= len(set(a) | set(b))
+    sa, sb = set(a), set(b)
+    return len(sa & sb) * 2 > min(len(sa), len(sb))     # most of the shorter title's words survive
 
 
 def set_goal(db: DB, root_id: str, goal: str,
