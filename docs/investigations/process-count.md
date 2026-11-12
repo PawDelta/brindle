@@ -401,20 +401,32 @@ while idle (a 45 s `ps` sample, a lower bound): `status --porcelain
 - **The app's events feed** ran `git.status` (uncached) every 5 s for each
   checkout with no base branch; `status_cache.cached_any_status` caches it
   against its own branch.
-- **The cull** (once a minute): `note_unreported_commits` reads HEAD from the
-  git files and checks its "told" mark before the idle look's `git status`
-  and the count; `config._committed_text` reads the branch's sha from the git
-  files instead of `git rev-parse` on every `load_repo_config(branch=…)`.
+- **The cull** (once a minute) now starts no git while nothing moved:
+  `_last_edit` (an idle worker's latest uncommitted write, for
+  `note_idle_unreported` and `note_unreported_commits`) takes the dirty files
+  from `status_cache` and stats them; `note_unreported_commits` reads HEAD
+  from the git files and checks its "told" mark, or a count of none remembered
+  for the same HEAD, base and reported head, before any git;
+  `login_pause` builds the agent's env without the git identity
+  (`agent_env(identity=False)`: the login and route don't depend on it); and
+  `config._committed_text` reads the branch's sha from the git files instead
+  of `git rev-parse` on every `load_repo_config(branch=…)`.
 
 Test: `tests/test_idle_spawns_daemon.py::test_an_unchanged_sweep_starts_no_process`
-(one round of the daemon sweep, the feed, the cull's notice and a config read
-over sessions in each of those states: 32 processes on the unmodified code,
-none now; each fix reverted alone fails it).
+(a round of the daemon sweep and the feed over sessions in each of those
+states, then a whole cull sweep: on the unmodified code the daemon's part
+started 32 processes and the cull git for each live agent; now the daemon's
+none and the cull no git; each fix reverted alone fails it).
 
-Still per cull sweep (once a minute): two `ps`, `tmux list-panes` and
-`list-clients`, a `tmux capture-pane` per live agent
-(`decline_environment_setups`), and `login_pause`'s `agents.agent_env` per
-running agent, whose `git config --get-regexp` for the identity remains.
+Still per cull sweep (once a minute), all tmux or `ps`: two `ps` and `tmux
+list-clients`; `reap`'s `tmux list-panes` plus a `show-environment` per
+brindle session (`tmux.session_infos`); and screen reads per live Claude
+agent, a `capture-pane` each for `decline_environment_setups` and
+`note_model_refused` and a `display-message #{window_activity}` (then a
+capture once it is old enough) for `note_api_errors`. Skipping a screen read
+while the pane hasn't changed needs each pane's `#{window_activity}` in
+`tmux.list_panes`'s one listing, and the session's `BRINDLE_HOME` needs
+caching in `session_infos`: both changes are in `tmux.py`.
 
 ### Other sources, measured and left as they are
 
