@@ -588,6 +588,13 @@ def visuals_enabled_setting() -> bool:
     return user_settings().get("visuals_enabled") != "off"
 
 
+def login_shell_env_setting() -> bool:
+    """Whether the provider CLIs the daemon launches get the proxy and certificate
+    settings of the person's login shell (brindle.login_shell_env): on unless
+    ``login_shell_env`` is "off"."""
+    return user_settings().get("login_shell_env") != "off"
+
+
 def supervisor_pick() -> str | None:
     """The supervisor CLI this person last picked (in the picker or with
     ``-s``), or None before the first pick."""

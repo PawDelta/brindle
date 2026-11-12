@@ -849,6 +849,9 @@ export interface UserSettings {
   claude_permission_mode: ClaudePermissionMode;
   /* Absent from an engine older than this setting. */
   opencode_permission_mode?: OpenCodePermissionMode;
+  /* Whether launched CLIs get the login shell's proxy and certificate settings
+     (on unless turned off). Absent from an engine older than this setting. */
+  login_shell_env?: "on" | "off";
 }
 
 /* GET and PUT /debug (staff-only debug logging, owner decision): whether

@@ -968,6 +968,10 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     from brindle import spawn
 
     spawn.enable()      # every process the daemon starts waits for room (brindle.spawn)
+    from brindle import login_shell_env
+
+    # The person's proxy and certificate settings, read once, for the CLIs this daemon launches.
+    login_shell_env.load_in_background()
     from brindle.daemon.events import start_poller
 
     poller = start_poller()
