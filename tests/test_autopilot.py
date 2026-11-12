@@ -767,6 +767,9 @@ def test_auditor_grace_keeps_an_auditor_whose_window_is_not_up_yet(db, root, rep
 
 
 def test_usage_limit_pauses_autopilot(db, root, monkeypatch):
+    from brindle import subscription_usage
+
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])

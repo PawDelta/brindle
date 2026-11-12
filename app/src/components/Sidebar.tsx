@@ -74,13 +74,13 @@ function UsageReading({ provider, warning, failed }: { provider?: ProviderUsage;
     <span
       className={`min-w-0 truncate font-mono text-[11.5px] ${warning ? "text-sap" : "text-ink-3"}`}
       data-testid="profile-usage"
-      data-provider={provider?.provider}
-      data-state={provider ? "reading" : failed ? "failed" : "none"}
+      data-provider={window ? provider?.provider : undefined}
+      data-state={window ? "reading" : failed ? "failed" : "none"}
     >
-      {provider ? (
+      {provider && window ? (
         <>
           <span>{providerName(provider.provider)}</span>
-          {" "}{window ? `${Math.round(window.used)}%` : "—"}
+          {" "}{Math.round(window.used)}%
           {window?.resets_at != null && window.used >= RESET_SHOWN_FROM && <> · {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</>}
         </>
       ) : failed ? "Usage unavailable" : "Usage"}
@@ -689,10 +689,8 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
     !isPastWorker(a) && !["paused", "done", "failed"].includes(a.status) && alive[a.id] !== false,
   ).length, [workspaces, alive]);
   const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
-  // Follow the selected session's provider when it has a model; otherwise show the fullest week.
-  const model = agent?.model;
-  const own = agent && model ? (usage?.providers.find((p) => p.provider === agent.provider) ?? { provider: agent.provider, known: false, limited: false, limited_until: null, updated_at: null, windows: [] }) : undefined;
-  const shown = own ?? mostUsed;
+  // An open session follows its supervisor's provider, even before its model is known.
+  const shown = route.screen === "session" ? usage?.providers.find((p) => p.provider === agent?.provider) : mostUsed;
   const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
 
   // An open session's agents show, on each navigation to it; a sheet opening or closing over the
