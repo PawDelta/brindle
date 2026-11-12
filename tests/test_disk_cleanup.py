@@ -526,6 +526,37 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipp
     assert stopped == (["w1"] if removed and cleanup != "retired" else [])
 
 
+def test_pipeline_cleanup_keeps_worker_messaged_after_initial_check(db, shipped, monkeypatch):
+    ws = shipped
+    worker = Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
+                   "@998", "Ready", 1)
+    db.add_agent(worker)
+    stopped = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, *args, **kw: a.id not in stopped)
+    monkeypatch.setattr(agents, "reconcile", lambda db, a, **kw: a)
+    monkeypatch.setattr(agents, "_stop", lambda db, a: stopped.append(a.id))
+    monkeypatch.setattr(disk, "live_in", lambda *args, **kw: False)
+    monkeypatch.setattr(pipeline, "_try_merge", lambda *args: "Merged shipped")
+    notices = []
+
+    def tell(db, parent_id, text, sender_id):
+        notices.append(text)
+        if len(notices) == 1:
+            assert db.pending_count(worker.id) == 0
+            db.enqueue(worker.id, "Please handle the follow-up", None)
+
+    monkeypatch.setattr(pipeline, "_tell", tell)
+
+    pipeline._finish_locked(db, worker, ws, None)
+
+    assert Path(ws.path).is_dir()
+    assert db.get_workspace(ws.id) is not None
+    assert db.get_agent(worker.id) is not None
+    assert stopped == []
+    assert db.pending_count(worker.id) == 1
+    assert len(notices) == 2
+
+
 def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, old_worktree, monkeypatch):
     wt = old_worktree("stalled")
     tip = sh("git rev-parse stalled", repo).strip()
