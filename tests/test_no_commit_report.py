@@ -1,9 +1,12 @@
 """A report with nothing to merge leaves the close/keep decision to its supervisor."""
+import pytest
+
 from brindle import agents, history, pipeline, usage
 from brindle.config import RepoConfig
 from brindle.db import Agent, Workspace
 
 
+@pytest.mark.variant("real incident: 10 no-commit stress workers sat idle with no notice to their supervisor")
 def test_no_commit_report_leaves_close_decision_to_supervisor(db, monkeypatch):
     ws = Workspace("proj/feat", "/fake/proj", "feat", "worktree", "feat", "main",
                    "/fake/feat", None, "fake-session", 1)

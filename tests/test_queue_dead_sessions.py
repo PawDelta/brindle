@@ -65,7 +65,11 @@ def sessions(db, monkeypatch):
 
 # The incident: paused and locked to another account; then each stall alone,
 # and a session holding the files on the branch it attached this repo with.
-@pytest.mark.parametrize("stall", ["paused-locked", "locked", "closed", "idle-no-process", "attached-paused"])
+@pytest.mark.parametrize("stall", [
+    pytest.param("paused-locked", marks=pytest.mark.variant("real incident: held 4 times behind a paused session locked to another account")),
+    "locked", "closed", "idle-no-process",
+    pytest.param("attached-paused", marks=pytest.mark.variant("input variant: a paused session someone is still attached to")),
+])
 def test_overlap_with_stalled_session_starts_with_warning(db, sessions, stall):
     holder = "workspace:b"
     if stall.startswith("attached"):
