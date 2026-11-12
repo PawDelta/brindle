@@ -65,8 +65,8 @@ CSP = ("default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-sr
 
 def _value(prop: str, value: str) -> bool:
     if prop == "content":
-        # Only a pseudo-element's literal text: no counters, attributes or images.
-        return re.fullmatch(STRING, value) is not None
+        # Only a pseudo-element's literal text, or none: no counters, attributes or images.
+        return value == "none" or re.fullmatch(STRING, value) is not None
     if re.search(r"url\s*\(", value, re.I):
         return False
     value = re.sub(STRING, "_", value)

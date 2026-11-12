@@ -50,20 +50,44 @@ const TEXT = ["color", "font-family", "font-size", "font-weight", "font-style", 
 /* Box values, written only when they aren't the initial value in either scheme. */
 const BOX = ["background-color", "background-image", ...SIDES.flatMap((side) => ["style", "width", "color"].map((part) => `border-${side}-${part}`)),
   ...CORNERS.map((corner) => `border-${corner}-radius`), "box-shadow", "opacity", "text-decoration-line"];
+/* SVG references (a gradient, an arrowhead) go back as attributes, and only to the page's own #id. */
+const REFERENCES = ["fill", "stroke", "marker-start", "marker-mid", "marker-end"];
 const PAINT = ["fill", "fill-opacity", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin",
-  "stroke-opacity", "text-anchor"];
+  "stroke-opacity", "text-anchor", "marker-start", "marker-mid", "marker-end"];
 const STOP = ["stop-color", "stop-opacity"];
+/* Layout values the browser answers as declared (variables resolved), whatever the window's size. */
+const LAYOUT = ["display", "position", "box-sizing", "overflow-x", "overflow-y", "flex-direction", "flex-wrap", "flex-grow",
+  "flex-shrink", "flex-basis", "order", "align-items", "align-content", "align-self", "justify-content", "justify-items",
+  "justify-self", "row-gap", "column-gap", "grid-auto-flow", "grid-column-start", "grid-column-end", "grid-row-start",
+  "grid-row-end", "min-width", "max-width", "min-height", "max-height", "z-index", "vertical-align", "table-layout",
+  "border-collapse", "border-spacing", "list-style-type", "text-overflow", "word-break", "overflow-wrap", "visibility", "aspect-ratio"];
+/* Layout values the browser answers in pixels for this window. Written only where they don't move
+   when the window widens (a fixed length); otherwise the page's own declaration stays in charge. */
+const SIZED = [...SIDES.flatMap((side) => [`margin-${side}`, `padding-${side}`]), ...SIDES, "grid-template-columns"];
 const INITIAL: Record<string, string[]> = {
   "background-color": ["rgba(0, 0, 0, 0)", "transparent"], "background-image": ["none"], "box-shadow": ["none"],
   opacity: ["1"], "text-decoration-line": ["none"], ...Object.fromEntries(CORNERS.map((corner) => [`border-${corner}-radius`, ["0px"]])),
+  content: ["none"], "marker-start": ["none"], "marker-mid": ["none"], "marker-end": ["none"],
+  position: ["static"], "box-sizing": ["content-box"], "flex-direction": ["row"], "flex-wrap": ["nowrap"], "flex-grow": ["0"],
+  "flex-shrink": ["1"], "flex-basis": ["auto"], order: ["0"], "align-items": ["normal"], "align-content": ["normal"],
+  "align-self": ["auto"], "justify-content": ["normal"], "justify-items": ["normal", "legacy"], "justify-self": ["auto"],
+  "row-gap": ["normal"], "column-gap": ["normal"], "grid-auto-flow": ["row"], "grid-column-start": ["auto"],
+  "grid-column-end": ["auto"], "grid-row-start": ["auto"], "grid-row-end": ["auto"], "min-width": ["auto", "0px"],
+  "max-width": ["none"], "min-height": ["auto", "0px"], "max-height": ["none"], "z-index": ["auto"], "table-layout": ["auto"],
+  "text-overflow": ["clip"], "word-break": ["normal"], "overflow-wrap": ["normal"], visibility: ["visible"],
+  "aspect-ratio": ["auto"], top: ["auto"], right: ["auto"], bottom: ["auto"], left: ["auto"], "grid-template-columns": ["none"],
 };
 /* The user agent styles these itself, so their box values are always written. */
 const UA_BOXED = new Set(["a", "u", "s", "ins", "del", "hr", "mark", "abbr"]);
-/* The page's own declarations that the captured values replace (shorthands included). */
-const REPLACED = new Set([...TEXT, ...BOX, ...PAINT, ...STOP, "content", "background", "border", "border-color", "border-style", "border-width",
-  "border-radius", ...SIDES.map((side) => `border-${side}`), "font", "text-decoration", "text-decoration-color", "text-decoration-style"]);
+/* The page's own declarations that the captured values replace (shorthands included). Sized values
+   aren't: where they depend on the window, the page's declaration is what's kept. */
+const REPLACED = new Set([...TEXT, ...BOX, ...PAINT, ...STOP, ...LAYOUT, "content", "background", "border", "border-color", "border-style",
+  "border-width", "border-radius", ...SIDES.map((side) => `border-${side}`), "font", "text-decoration", "text-decoration-color",
+  "text-decoration-style", "marker", "overflow", "flex", "flex-flow", "gap", "place-items", "place-content", "place-self",
+  "grid-column", "grid-row", "grid-area"]);
 const NOT_STYLED = new Set(["head", "style", "script", "template", "noscript"]);
 const FETCHES = /url\s*\(|image-set|image\(|\\|</i;
+const QUOTED = /^"[^"\\]*"$/;
 
 export type ColorScheme = "light" | "dark";
 /* What getComputedStyle answers, for one element (or one of its pseudo-elements). */
@@ -97,20 +121,50 @@ export function forceScheme(doc: Document, scheme: ColorScheme): () => void {
   return () => { for (const step of undo.reverse()) step(); };
 }
 
+const values = (style: ReturnType<StyleReader>, list: string[]): Captured =>
+  Object.fromEntries(list.map((name) => [name, style.getPropertyValue(name).trim()]));
+
+/* Whether an element takes part in the page's layout (an SVG shape inside a drawing doesn't). */
+const laidOut = (element: Element) => element.namespaceURI !== SVG || element.localName === "svg";
+
+/* An element and its ::before and ::after. A pseudo-element that isn't there is `content: none`,
+   so a scheme that has one and a scheme that doesn't can be told apart. */
 function capture(element: Element, read: StyleReader): Captured[] {
   const paint = element.namespaceURI !== SVG ? [] : element.localName === "stop" ? STOP : PAINT;
-  const names = [...TEXT, ...BOX, ...paint];
-  const values = (style: ReturnType<StyleReader>, list: string[]) => Object.fromEntries(list.map((name) => [name, style.getPropertyValue(name).trim()]));
-  const parts = [values(read(element), names)];
+  const parts = [values(read(element), [...TEXT, ...BOX, ...paint, ...(laidOut(element) ? [...LAYOUT, ...SIZED] : [])])];
   for (const pseudo of ["::before", "::after"]) {
     const style = read(element, pseudo);
     const content = style.getPropertyValue("content").trim();
-    parts.push(/^"[^"\\]*"$/.test(content) ? { content, ...values(style, [...TEXT, "background-color"]) } : {});
+    parts.push(QUOTED.test(content) ? { content, ...values(style, [...TEXT, "background-color"]) } : { content: "none" });
   }
   return parts;
 }
 
-/* The declarations to write for one element part: every value in light, the differences in dark. */
+/* Grid columns measured at two widths, as the tracks that were declared: a track that stays put is
+   a length, one that grows is a share (fr) of what the extra width added. Null when it can't say. */
+export function gridTracks(narrow: string, wide: string): string | null {
+  const [a, b] = [narrow.split(/\s+/), wide.split(/\s+/)];
+  if (a.length !== b.length || ![...a, ...b].every((track) => /^\d+(?:\.\d+)?px$/.test(track))) return null;
+  const grew = a.map((track, i) => parseFloat(b[i]) - parseFloat(track));
+  if (grew.some((g) => g < -0.5)) return null;
+  const unit = Math.min(...grew.filter((g) => g >= 0.5));
+  if (!Number.isFinite(unit)) return narrow;
+  return a.map((track, i) => grew[i] < 0.5 ? track : `${Math.round((grew[i] / unit) * 100) / 100}fr`).join(" ");
+}
+
+/* What `value` names if it is a reference to an element of `doc` itself (url(#id)), else null. */
+export function localReference(value: string | undefined, doc: Document): string | null {
+  const target = /^url\(\s*(["']?)([^"'()\s]*)\1\s*\)$/.exec(value ?? "")?.[2];
+  if (!target) return null;
+  const hash = target.indexOf("#");
+  const before = target.slice(0, hash);
+  const id = target.slice(hash + 1);
+  if (hash < 0 || (before && before !== doc.URL && before !== doc.baseURI) || !/^[A-Za-z_][\w-]*$/.test(id)) return null;
+  return id;
+}
+
+/* The declarations to write for one element part: every light value, then what differs in dark
+   (including a value only one scheme has). */
 function declarations(tag: string, light: Captured, dark: Captured): [string, string] {
   const omitted = new Set<string>();
   for (const side of SIDES) {
@@ -121,13 +175,15 @@ function declarations(tag: string, light: Captured, dark: Captured): [string, st
   }
   const lit: string[] = [];
   const dim: string[] = [];
-  for (const name of Object.keys(light)) {
-    const [l, d] = [light[name], dark[name] ?? light[name]];
-    if (omitted.has(name) || !l || !d || FETCHES.test(l) || FETCHES.test(d)) continue;
-    if (name === "background-image" && !/gradient\(/.test(l + d)) continue;
-    if (!UA_BOXED.has(tag) && INITIAL[name]?.includes(l) && INITIAL[name]?.includes(d)) continue;
-    lit.push(`${name}:${l}`);
-    if (d !== l) dim.push(`${name}:${d}`);
+  for (const name of new Set([...Object.keys(light), ...Object.keys(dark)])) {
+    if (omitted.has(name)) continue;
+    const usable = (value?: string) => !!value && !FETCHES.test(value)
+      && (name !== "background-image" || /gradient\(/.test(value)) && (name !== "content" || value === "none" || QUOTED.test(value));
+    const [l, d] = [light[name], dark[name]].map((value) => usable(value) ? value : "");
+    const initial = UA_BOXED.has(tag) && name !== "content" ? undefined : INITIAL[name];
+    if (initial && [l, d].every((value) => !value || initial.includes(value))) continue;
+    if (l) lit.push(`${name}:${l}`);
+    if (d && d !== l) dim.push(`${name}:${d}`);
   }
   return [lit.join(";"), dim.join(";")];
 }
@@ -146,20 +202,62 @@ function stripRules(rules: CSSRuleList) {
   }
 }
 
-/* Write each element's computed presentation as literal classes (light, then the dark differences),
-   remove the page's own declarations of those properties, and return the document's HTML. */
-export function inlineStyles(doc: Document, read: StyleReader = (element, pseudo) => doc.defaultView!.getComputedStyle(element, pseudo)): string {
+/* Sized values that move with the window (measured narrower and wider: a max-width can hide the
+   change on one side) go to the page's own declarations; grid columns that do are written as the
+   tracks they were declared as, when that can be told. */
+function settleSized(light: Captured, dark: Captured, narrow: Captured | null, wide: Captured | null) {
+  for (const name of SIZED) {
+    if (!(name in light)) continue;
+    const viewed = light[name];
+    if (narrow && wide && narrow[name] === viewed && wide[name] === viewed) continue;
+    const tracks = name !== "grid-template-columns" || !narrow || !wide ? null
+      : narrow[name] !== viewed ? gridTracks(narrow[name], viewed) : gridTracks(viewed, wide[name]);
+    if (tracks) light[name] = dark[name] = tracks;
+    else { delete light[name]; delete dark[name]; }
+  }
+}
+
+/* SVG paint and markers that point at the page's own #id become attributes (CSS can't carry them
+   through the sanitiser); any other url() is dropped. */
+function settleReferences(element: Element, light: Captured, dark: Captured) {
+  for (const name of REFERENCES) {
+    const [lit, dim] = [localReference(light[name], element.ownerDocument), localReference(dark[name], element.ownerDocument)];
+    if (lit) {
+      element.setAttribute(name, `url(#${lit})`);
+      delete light[name];
+      if (dim === lit || !dark[name]) delete dark[name];
+    }
+    if (dim && dim !== lit) delete dark[name];
+  }
+}
+
+/* Write each element's computed presentation and layout as literal classes (light, then the dark
+   differences), remove the page's own declarations of those properties, and return the document's
+   HTML. `resize` sets the frame narrower, wider, or back to the viewed width, to tell fixed lengths
+   from window-relative ones; without it no sized value is written. */
+export function inlineStyles(doc: Document, read: StyleReader = (element, pseudo) => doc.defaultView!.getComputedStyle(element, pseudo),
+  resize?: (width: "narrow" | "wide" | "viewed") => void): string {
   const elements = [doc.documentElement, ...(doc.body ? [doc.body, ...Array.from(doc.body.querySelectorAll("*"))] : [])]
     .filter((element) => !NOT_STYLED.has(element.localName));
   const seen = {} as Record<ColorScheme, Captured[][]>;
+  const sized: Record<"narrow" | "wide", (Captured | null)[]> = { narrow: elements.map(() => null), wide: elements.map(() => null) };
   for (const scheme of ["light", "dark"] as const) {
     const undo = forceScheme(doc, scheme);
-    try { seen[scheme] = elements.map((element) => capture(element, read)); } finally { undo(); }
+    try {
+      seen[scheme] = elements.map((element) => capture(element, read));
+      for (const width of scheme === "light" && resize ? (["narrow", "wide"] as const) : []) {
+        resize!(width);
+        try { sized[width] = elements.map((element) => laidOut(element) ? values(read(element), SIZED) : null); } finally { resize!("viewed"); }
+      }
+    } finally { undo(); }
   }
   const classes = new Map<string, string>();
   const light: string[] = [];
   const dark: string[] = [];
   elements.forEach((element, index) => {
+    const [lit, dim] = [seen.light[index][0], seen.dark[index][0]];
+    settleSized(lit, dim, sized.narrow[index], sized.wide[index]);
+    if (element.namespaceURI === SVG) settleReferences(element, lit, dim);
     const parts = seen.light[index].map((part, i) => declarations(element.localName, part, seen.dark[index][i]));
     const key = JSON.stringify(parts);
     let name = classes.get(key);
@@ -233,7 +331,9 @@ export async function computedSnapshot(html: string, size: { width: number; heig
     await loaded;
     const doc = frame.contentDocument;
     if (!doc?.body || (doc.body.childNodes.length === 0 && !empty)) return html;
-    return inlineStyles(doc);
+    // Far enough either side that a centred column's auto margins or a share of the width can't stay put.
+    const widths = { narrow: Math.min(Math.round(0.6 * width), 640), wide: Math.max(2 * width, 2400), viewed: width };
+    return inlineStyles(doc, undefined, (to) => { frame.style.width = `${widths[to]}px`; });
   } catch {
     return html;
   } finally {

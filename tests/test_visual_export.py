@@ -147,12 +147,17 @@ def test_export_keeps_how_the_visual_looked():
     assert "border-bottom-color:rgba(120, 150, 135, 0.16)" in rule(table, old, dark=True)
     assert rule(table, old, "::before").startswith('content:"0.6.3  ";color:rgb(180, 35, 24)')
     assert rule(table, old, "::before", dark=True) == "color:rgb(248, 113, 113)"
-    assert "table{width:100%;border-collapse:collapse;overflow:hidden;min-width:760px}" in table
+    for value in ("display:table", "overflow-x:hidden", "border-collapse:collapse", "min-width:760px"):
+        assert value in rule(table, "<table")
+    assert "table{width:100%}" in table
 
     # A snapshot without computed values (an older app) still keeps its var-free shapes.
     page = export("process-leaks.page.html")
     assert ".pill{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}" in page
     assert 'stroke-dasharray="4 3"' in page and 'marker-end="url(#a)"' in page
+    # A pseudo-element only the light scheme has is switched off in dark.
+    light_only = '.s::before{content:"old"}@media (prefers-color-scheme:dark){.s::before{content:none}}'
+    assert light_only in visual_export.sanitise(f"<style>{light_only}</style>")
 
 
 @pytest.mark.parametrize("case,status", [

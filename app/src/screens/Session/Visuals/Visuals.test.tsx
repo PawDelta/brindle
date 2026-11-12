@@ -1220,21 +1220,35 @@ describe("export snapshot", () => {
     const frame = document.body.appendChild(document.createElement("iframe"));
     const doc = frame.contentDocument!;
     doc.documentElement.innerHTML = `<head><style>.pill{color:var(--ink);padding:2px 8px;border-radius:999px}
-      @media (prefers-color-scheme:light){:root{--ink:#222}}</style></head>
+      @media (prefers-color-scheme:light){:root{--ink:#222}}
+      div[data-grid]{display:grid;gap:var(--space);grid-template-columns:1fr 1fr}.shape{fill:url(#g);marker-end:url(#a)}</style></head>
       <body><p><span class="pill" style="background:var(--soft);width:5%">fixed</span><span class="pill">open</span></p>
-      <table><tr><td>cell</td></tr></table><svg><path d="M0 0" fill="url(#g)" stroke="var(--ink)"></path></svg></body>`;
+      <div data-grid=""><div>A</div></div>
+      <table><tr><td>cell</td></tr></table><svg><path d="M0 0" class="shape" stroke="var(--ink)"></path></svg></body>`;
     const media = (doc.styleSheets[0].cssRules[1] as CSSMediaRule).media;
+    let width: "narrow" | "wide" | "viewed" = "viewed";
     // The page's colour-scheme rule is what decides the scheme here, as it does in a browser.
     const values = (element: Element, pseudo?: string): Record<string, string> => {
       const dark = !media.mediaText.includes("min-width");
-      if (pseudo) return element.localName === "p" && pseudo === "::before" ? { content: '"0.6.3"', color: dark ? "rgb(9, 9, 9)" : "rgb(8, 8, 8)" } : { content: "none" };
-      if (element.localName === "span") return { color: dark ? "rgb(2, 2, 2)" : "rgb(1, 1, 1)", "background-color": dark ? "rgb(3, 3, 3)" : "rgba(0, 0, 0, 0)",
+      const tag = element.localName;
+      if (pseudo === "::before" && tag === "p") return { content: '"0.6.3"', color: dark ? "rgb(9, 9, 9)" : "rgb(8, 8, 8)" };
+      // A pseudo-element only one scheme has: dark's "new" after the pill, light's "old" before the cell.
+      if (pseudo === "::after" && tag === "span" && dark) return { content: '"new"', color: "rgb(7, 7, 7)" };
+      if (pseudo === "::before" && tag === "td" && !dark) return { content: '"old"' };
+      if (pseudo) return { content: "none" };
+      if (tag === "span") return { color: dark ? "rgb(2, 2, 2)" : "rgb(1, 1, 1)", "background-color": dark ? "rgb(3, 3, 3)" : "rgba(0, 0, 0, 0)",
         "border-top-style": "none", "border-top-width": "3px", "border-top-left-radius": "999px" };
-      if (element.localName === "td") return { "border-bottom-style": "solid", "border-bottom-width": "1px", "border-bottom-color": dark ? "rgb(6, 6, 6)" : "rgb(5, 5, 5)" };
-      if (element.localName === "path") return { fill: 'url("#g")', stroke: "rgb(4, 4, 4)", "stroke-dasharray": "4 3" };
+      // Layout from a selector and a variable the sanitiser can't keep: the grid's columns grow with
+      // the window, its padding doesn't, and its auto margin moves.
+      if (element.hasAttribute("data-grid")) return { display: "grid", "row-gap": "16px", "padding-top": "16px",
+        "margin-left": { narrow: "0px", viewed: "50px", wide: "700px" }[width],
+        "grid-template-columns": { narrow: "200px 200px", viewed: "500px 500px", wide: "1150px 1150px" }[width] };
+      if (tag === "td") return { "border-bottom-style": "solid", "border-bottom-width": "1px", "border-bottom-color": dark ? "rgb(6, 6, 6)" : "rgb(5, 5, 5)" };
+      if (tag === "path") return { fill: 'url("about:blank#g")', "marker-end": 'url("#a")', "marker-start": 'url("https://evil.test/s.svg#a")',
+        stroke: "rgb(4, 4, 4)", "stroke-dasharray": "4 3" };
       return {};
     };
-    const html = inlineStyles(doc, (element, pseudo) => ({ getPropertyValue: (name) => values(element, pseudo)[name] ?? "" }));
+    const html = inlineStyles(doc, (element, pseudo) => ({ getPropertyValue: (name) => values(element, pseudo)[name] ?? "" }), (to) => { width = to; });
     const named = (tag: string) => {
       const found = [...html.matchAll(new RegExp(`<${tag}[^>]*?(brindle-s\\d+)`, "g"))].map((m) => m[1]);
       return { all: found, rule: (pseudo = "", dark = false) => {
@@ -1250,11 +1264,23 @@ describe("export snapshot", () => {
     expect(named("p").rule("::before")).toBe('content:"0.6.3";color:rgb(8, 8, 8)');
     expect(named("p").rule("::before", true)).toBe("color:rgb(9, 9, 9)");
     expect(named("td").rule()).toBe("border-bottom-style:solid;border-bottom-width:1px;border-bottom-color:rgb(5, 5, 5)");
+    expect(span.rule("::after")).toBe("content:none");
+    expect(span.rule("::after", true)).toBe('content:"new";color:rgb(7, 7, 7)');
+    expect(named("td").rule("::before")).toBe('content:"old"');
+    expect(named("td").rule("::before", true)).toBe("content:none");
+    expect(named('div data-grid=""').rule()).toBe("display:grid;row-gap:16px;padding-top:16px;grid-template-columns:1fr 1fr");
     expect(named("path").rule()).toBe("stroke:rgb(4, 4, 4);stroke-dasharray:4 3");
-    // The page keeps its layout; its own colours, radii and scheme switch are gone or restored.
+    // The gradient and the arrowhead go back as references to the page's own ids; another document's doesn't.
+    expect(html).toMatch(/<path [^>]*fill="url\(#g\)" marker-end="url\(#a\)"/);
+    expect(html).not.toContain("marker-start");
+    // The page keeps what the captured values don't replace; its own colours, radii, layout values
+    // and references are gone, and its scheme switch is restored.
     expect(html).toMatch(/\.pill \{\s*padding: 2px 8px;?\s*\}/);
+    expect(html).toMatch(/div\[data-grid\] \{\s*grid-template-columns: 1fr 1fr;?\s*\}/);
     expect(html).not.toContain("color: var(--ink)");
     expect(html).not.toContain("var(--soft)");
+    expect(html).not.toContain("var(--space)");
+    expect(html).not.toMatch(/marker-end: url|fill: url/);
     expect(html).toContain('style="width: 5%;"');
     expect(media.mediaText).toMatch(/prefers-color-scheme: ?light/);
     expect(doc.documentElement.getAttribute("style")).toBeNull();
