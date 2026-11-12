@@ -36,8 +36,10 @@ def test_background_cull_keeps_one_sweep_in_flight(monkeypatch):
 def four_sessions(tmp_path_factory):
     """A repo's main checkout and three session worktrees, each with a
     tracked file below its root; built once, with its own git identity.
-    s1 has an ignored build tree and empty nested folders, s2 a commit its
-    upstream (``upstream/review``, on another remote) lacks, s3 a v4 index."""
+    s1 has a build tree a tracked src/.gitignore ignores and empty nested
+    folders, s2 a commit its upstream (``upstream/review``, on another
+    remote) lacks and a log file the excludes file an included config names
+    ignores, s3 a v4 index."""
     from brindle import git
 
     base = tmp_path_factory.mktemp("sessions")
@@ -50,17 +52,22 @@ def four_sessions(tmp_path_factory):
         main = base / "proj"
         (main / "src").mkdir(parents=True)
         (main / "src" / "mod.py").write_text("x = 1\n")
-        (main / ".gitignore").write_text("build/\n")
+        (main / "src" / ".gitignore").write_text("build/\n")
         git.run(["init", "-q", "-b", "main"], main)
         git.run(["add", "-A"], main)
         git.run(["commit", "-qm", "init"], main)
+        (base / "excludes").write_text("*.log\n")
+        (base / "extra.gitconfig").write_text(f"[core]\n\texcludesFile = {base / 'excludes'}\n")
+        git.run(["config", "include.path", str(base / "extra.gitconfig")], main)
         for i in (1, 2, 3):
             git.run(["worktree", "add", "-q", "-b", f"brindle/session-{i}", str(base / f"s{i}")], main)
-        (base / "s1" / "build" / "out").mkdir(parents=True)
-        (base / "s1" / "build" / "out" / "app.bin").write_text("built\n")
+        (base / "s1" / "src" / "build" / "out").mkdir(parents=True)
+        (base / "s1" / "src" / "build" / "out" / "app.bin").write_text("built\n")
         (base / "s1" / "empty" / "nested" / "deep").mkdir(parents=True)
         s2 = base / "s2"
         (s2 / "src" / "two.py").write_text("y = 1\n")
+        (s2 / "src" / "logs").mkdir()
+        (s2 / "src" / "logs" / "debug.log").write_text("log\n")
         git.run(["add", "-A"], s2)
         git.run(["commit", "-qm", "two"], s2)
         for key, value in (("remote.upstream.url", str(base / "elsewhere.git")),
@@ -106,37 +113,53 @@ def _sidebar(db, paths, monkeypatch):
 
 def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions, monkeypatch):
     """Forty idle minutes of refreshes (eight safety looks) of four quiet
-    sessions start no process: the safety look used to run git status and
-    rev-list in every worktree, in every sidebar. What git would see still
-    shows: an upstream on another remote moving at once; a file new in an
-    old empty folder deep down, and an edit below the root in a v4 index
-    (which compresses its paths), at the next safety look."""
+    sessions, counted from just after the sidebar's first look, start no
+    process: the safety look used to run git status and rev-list in every
+    worktree, in every sidebar. What git would see still shows: an upstream
+    on another remote moving at once; at the next safety look, a file new in
+    an old empty folder deep down, an edit below the root in a v4 index
+    (which compresses its paths), a folder no longer ignored and a file new
+    in it afterwards, and a file an included config's excludes file no
+    longer ignores."""
     from brindle import git, status_cache
 
     s1, s2, s3 = four_sessions[1:]
     refresh, started = _sidebar(db, four_sessions, monkeypatch)
     first = refresh()
-    for _ in range(int(status_cache.TTL / watch.IDLE_SECONDS)):
-        refresh()                                    # the first safety look takes the baseline
     started.clear()
     for _ in range(int(2400 / watch.IDLE_SECONDS)):
         shown = refresh()
     assert started == []
     assert shown == first
     assert status_cache.cached_status(s2, "main", now=0).unpushed == 1
+
+    def safety_look():
+        for _ in range(int(status_cache.TTL / watch.IDLE_SECONDS)):
+            shown = refresh()
+        return [shown[f"w{i}"]["dirty"] for i in (1, 2, 3)]
+
     new, edited = s1 / "empty" / "nested" / "deep" / "new.txt", s3 / "src" / "mod.py"
+    rules, built = s1 / "src" / ".gitignore", s1 / "src" / "build" / "out" / "two.bin"
+    excludes = s1.parent / "excludes"
     try:
         git.run(["update-ref", "refs/remotes/upstream/review", "HEAD"], s2)   # a fetch, say
         refresh()
         assert status_cache.cached_status(s2, "main", now=0).unpushed == 0
         new.write_text("new\n")
         edited.write_text("x = 2\n")                 # the roots and their entries are untouched
-        for _ in range(int(status_cache.TTL / watch.IDLE_SECONDS)):
-            shown = refresh()
-        assert [shown[f"w{i}"]["dirty"] for i in (1, 2, 3)] == [1, 0, 1]
+        assert safety_look() == [1, 0, 1]
+        rules.write_text("")                         # src/build/ is no longer ignored ...
+        assert safety_look()[0] == 3                 # ... (.gitignore, build/out/app.bin)
+        built.write_text("built\n")                  # ... and a file new in it shows too
+        assert safety_look()[0] == 4
+        excludes.write_text("")
+        assert safety_look()[1] == 1                 # src/logs/debug.log
     finally:
-        new.unlink(missing_ok=True)
+        for gone in (new, built):
+            gone.unlink(missing_ok=True)
         edited.write_text("x = 1\n")
+        rules.write_text("build/\n")
+        excludes.write_text("*.log\n")
         git.run(["update-ref", "refs/remotes/upstream/review", "HEAD~1"], s2)
 
 
