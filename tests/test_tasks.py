@@ -299,6 +299,11 @@ def test_broad_glob_launch_deduplicates_and_preserves_modes(db, coordination, mo
         assert not tasks._start_if_ready(db, queued, "workspace:b", check_room=False)
         assert starts == []
 
+        # The holding session is locked to another sign-in: the wait goes on, never cancelled.
+        monkeypatch.setattr(identity_lock, "ensure_workspace", lambda db, ws: (_ for _ in ()).throw(
+            tasks.agents.AgentError("locked to another sign-in")))
+        assert not tasks._start_if_ready(db, queued, "workspace:b", check_room=False)
+        assert db.get_task(pending.id).state == "pending"
         refs["refs/heads/session-a"] = "a-merged"
         db.set_merged("b", "b-head")
         assert tasks.unmet_dependencies(db, caller_ws, tasks._loads(queued.depends_on), caller_id="a") == []
