@@ -51,7 +51,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from brindle import agents, git, procs, tmux
+from brindle import agents, git, procs, status_cache, tmux
 from brindle.config import CONFIG_DIR, WORKTREES_DIR, brindle_home, load_repo_config, worktrees_dir
 from brindle.db import DB, Agent, Workspace
 from brindle.pro import route_health
@@ -685,16 +685,22 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = _idle_since(db, a)
-        if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
-            continue
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path) or not ws.base_branch:
             continue
         reported = db.outbox_last_delivered_head(a.id)
+        # HEAD from the git files, and the notice's de-dupe, before any git (the idle
+        # look's status, the count): a worker already told about stays idle for its
+        # whole stale_after, and the cull looks once a minute.
+        head = status_cache.read_head(ws.path)
+        if head is not None and (head == reported or db.mark(a.id, f"commits:{head}") == "told"):
+            continue
+        since = _idle_since(db, a)
+        if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
+            continue
         try:
-            head = gates.head(ws)
-            if head == reported:
+            head = head or gates.head(ws)
+            if head == reported or db.mark(a.id, f"commits:{head}") == "told":
                 continue
             span = f"{reported}..HEAD" if reported and git.ok(["merge-base", "--is-ancestor", reported, "HEAD"], ws.path) \
                 else f"{ws.base_branch}..HEAD"

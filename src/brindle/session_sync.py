@@ -56,17 +56,20 @@ class Seen:
     """What the daemon's sweeps (every few seconds) remember between rounds,
     so a session whose refs haven't moved starts no git at all: each git run
     is a process the machine starts, and an antivirus inspects, every round."""
-    upstreams: dict[tuple[str, str], tuple[float, str | None]] = field(default_factory=dict)
+    upstreams: dict[str, tuple[float, str | None]] = field(default_factory=dict)   # repo root -> its default
     settled: dict[str, tuple[str, str | None]] = field(default_factory=dict)   # ws id -> refs an idle sync left synced
     drift: dict[str, tuple[tuple, int | None, int]] = field(default_factory=dict)   # ws id -> (refs, oldest, count)
 
     def upstream(self, ws: Workspace) -> str | None:
-        """``upstream(ws)``, believed for UPSTREAM_SECONDS."""
-        key, now = (ws.repo_root, ws.branch), time.monotonic()
+        """``upstream(ws)``, its repo's remote and default branch believed for
+        UPSTREAM_SECONDS: learned once per repo, however many sessions it has."""
+        if not ws.branch or ws.branch == "HEAD":
+            return None
+        key, now = ws.repo_root, time.monotonic()
         hit = self.upstreams.get(key)
         if hit is None or now - hit[0] >= UPSTREAM_SECONDS:
-            hit = self.upstreams[key] = (now, upstream(ws))
-        return hit[1]
+            hit = self.upstreams[key] = (now, _remote_default(ws.repo_root))
+        return None if hit[1] is None or ws.branch == hit[1] else hit[1]
 
 
 def _refs(ws: Workspace, default: str) -> tuple[str, str | None] | None:
@@ -94,7 +97,8 @@ class Outcome:
     text: str | None = None
     old_sha: str | None = None
     new_sha: str | None = None
-    checked: tuple[str, str] | None = None   # up_to_date: the (HEAD, origin/<default>) found synced
+    # up_to_date: the (HEAD, origin/<default>) found synced; conflict: the ones the merge conflicted at
+    checked: tuple[str, str] | None = None
     files: list[str] = field(default_factory=list)
 
 
@@ -109,13 +113,18 @@ def upstream(ws: Workspace) -> str | None:
     checkout (``keeps_up``)."""
     if not ws.branch or ws.branch == "HEAD":
         return None
+    default = _remote_default(ws.repo_root)
+    return None if default is None or ws.branch == default else default
+
+
+def _remote_default(repo_root: str) -> str | None:
+    """The default branch of ``repo_root``, which has a remote; None without one."""
     try:
-        if not git.has_remote(ws.repo_root):
+        if not git.has_remote(repo_root):
             return None
-        default = default_branch(ws.repo_root)
+        return default_branch(repo_root)
     except git.GitError:
         return None
-    return None if ws.branch == default else default
 
 
 def keeps_up(db: DB, ws: Workspace) -> bool:
@@ -244,10 +253,13 @@ def refresh_idle_sessions(db: DB, fetched_at: dict[str, float], seen: Seen | Non
             if refs is not None and (refs[1] is None or seen.settled.get(ws.id) == refs):
                 continue    # no origin/<default> to sync from, or synced with it as it is
             seen.settled.pop(ws.id, None)
-            # Only the refs the sync itself found synced are remembered (a merge it made
-            # is found synced on the next sweep): never a later look, which another
-            # fetch or commit may have moved past what was checked.
-            if _quiet(db, ws) and (out := sync(db, ws, idle=True)) is not None and out.checked:
+            # Only the refs the sync itself found synced, or found conflicting (a merge
+            # tried again at the same refs conflicts again), are remembered (a merge it
+            # made is found synced on the next sweep): never a later look, which another
+            # fetch or commit may have moved past what was checked. Quietness is judged
+            # from the cached status (no git while the checkout is unchanged); the sync
+            # judges it again with git, under its locks, before it merges anything.
+            if _quiet(db, ws, cached=True) and (out := sync(db, ws, idle=True)) is not None and out.checked:
                 seen.settled[ws.id] = out.checked
         except git.GitError:
             log.debug("brindle: couldn't sync idle session %s", ws.branch, exc_info=True)
@@ -255,9 +267,11 @@ def refresh_idle_sessions(db: DB, fetched_at: dict[str, float], seen: Seen | Non
         del seen.settled[gone]
 
 
-def _quiet(db: DB, ws: Workspace) -> bool:
-    """Read current activity, merge queue and checkout state, never a snapshot."""
-    from brindle import autopilot, pipeline
+def _quiet(db: DB, ws: Workspace, *, cached: bool = False) -> bool:
+    """Read current activity, merge queue and checkout state, never a snapshot.
+    ``cached``: the checkout's state from ``status_cache`` (git only when its
+    files moved), for the sweep's look before a sync; without it, git's."""
+    from brindle import autopilot, pipeline, status_cache
 
     current = db.get_workspace(ws.id)
     if current is None or current != ws or not current.base_branch:
@@ -271,6 +285,9 @@ def _quiet(db: DB, ws: Workspace) -> bool:
         if any(a.dismissed_at is None and a.status not in ("paused", "done") and agents.is_alive(a)
                for a in agents.tree(db, root.id)[1:]):
             return False
+    if cached:      # brindle's own claimed goals.md isn't the person's work (git.CLAIMED_SEED)
+        return not [p for p in status_cache.cached_status(ws.path, ws.base_branch).dirty_files
+                    if p != git.CLAIMED_SEED]
     return not git.dirty_files(ws.path)
 
 
@@ -462,7 +479,7 @@ def _sync_locked(db: DB, ws: Workspace, default: str, *, idle: bool = False) -> 
         _record(db, ws, d.sha, "conflict", files, tell=text)
         _queue_resolver(db, ws, d, files)
         bus.publish_ws(db, "conflict", ws, files=files, source="session_sync", branch=ws.branch)
-        return Outcome("conflict", text, before, files=files)
+        return Outcome("conflict", text, before, files=files, checked=(d.head, d.sha) if d.head else None)
     new = git.out(["rev-parse", "HEAD"], ws.path)
     text = (f"brindle merged origin/{default} into {ws.branch} ({d.behind} new commit(s), "
             f"now at {new[:8]}){_both(d)}. The checks run on the files it brought in; "
