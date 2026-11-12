@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useContext, useEffect, useRef, useState } from "react";
 import { AppCovered } from "../../../components/ReconnectOverlay";
-import { sameSource, type VisualFrameProps, type VisualSource } from "./frame";
+import { computedSnapshot, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
 
 type Delivery = {
   label: string;
@@ -77,7 +77,15 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
       return !disposed && !failed && delivery.label === expected && sameSource(actual, from);
     };
     const listeners = [
-      listen<Delivery>("visual:message", ({ payload }) => { if (matches(payload)) posted.current(payload.message, from); }),
+      listen<Delivery>("visual:message", ({ payload }) => {
+        if (!matches(payload)) return;
+        const message = frameMessage(payload.message);
+        if (message?.type !== "brindle.snapshot") return posted.current(payload.message, from);
+        // Variables, @media and complex selectors resolve to literal values before export. The
+        // reader may have moved on while the frame rendered: a stale snapshot is dropped.
+        void computedSnapshot(message.html, element.getBoundingClientRect())
+          .then((html) => { if (matches(payload)) posted.current({ ...message, html }, from); });
+      }),
       listen<Delivery>("visual:loaded", ({ payload }) => { if (matches(payload)) theme(); }),
       listen<Delivery>("visual:failed", ({ payload }) => { if (matches(payload)) fail(payload.why); }),
     ];
