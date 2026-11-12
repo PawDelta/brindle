@@ -486,6 +486,81 @@ Still per cull sweep (once a minute), whatever the number of agents: two `ps`
 (the process table), `tmux list-clients` (`login_pause`'s last input) and
 `reap`'s `tmux list-panes`.
 
+### S6. Sessions at work: the same repo questions for every checkout, every sweep (fixed)
+
+Live on the owner's machine (release.148, main 0c07614f) the daemon still
+started about 500 processes a minute while sessions were at work. A 30 s
+sample of git command lines by parent pid (`ps` every 20 ms, a lower bound)
+caught 187 from the daemon: `show-ref --verify --quiet
+refs/remotes/origin/main` (22), `rev-parse HEAD` (19), `merge-base
+--is-ancestor main origin/main` and the reverse (27), `status --porcelain
+--untracked-files=no` (14), `symbolic-ref … refs/remotes/origin/HEAD` (10),
+`for-each-ref refs/heads` (8), `merge-base --is-ancestor <sha> HEAD` (8),
+`rev-list --left-right --count origin/main...HEAD` (7), `git remote` (7),
+`rev-list <sha>..HEAD` (7).
+
+Two classes:
+
+- **Questions about the repo, asked per checkout.** Whether `origin/<base>`
+  exists, which of `<base>` and `origin/<base>` is ahead (`git.base_ref`),
+  origin's default branch (`git.default_branch`) and whether there is an
+  origin (`git.has_remote`) are the same in every checkout and change only
+  when a ref or the config does. S1 and S5 cached their callers per session,
+  behind each session's own refs; a session whose row or files change misses
+  that cache every sweep, and when main moves every session does at once.
+- **A reached goal with workers at work.** `ReadinessWatch` reuses a
+  session's readiness while its whole state is unchanged, and that state
+  holds its workers' rows. A worker changing status re-ran `reasons` each
+  sweep: `git status` twice, `rev-parse HEAD`, the audit commit's
+  `merge-base` and `rev-list`, ahead/behind, the merged PR's `rev-list`
+  (and `rev-parse <merge>^{tree}`, `merge-tree` per sync merge), and, for a
+  session behind origin, `session_sync.drift`'s five.
+
+Fix, in `git.py` so every caller has it (`conflicts`, `gates`,
+`rule_checks`, `agents.liveness`, the pipeline, the sidebars):
+
+- `remote_branch_exists`, `default_branch`, `current_branch` and `base_ref`
+  read HEAD, the loose refs and `packed-refs` (parsed once per version of
+  the file) themselves: no process. `base_ref` asks git only which of two
+  different commits is ahead: one `merge-base --is-ancestor`, by sha, once
+  per pair of commits.
+- `has_remote` asks `git remote` once per repo, whichever checkout asks,
+  and again only when a file that can name a remote changed (the repo's
+  config, a worktree's own, the person's).
+- `resolve` reads what names point at; `out_once` and `is_ancestor` keep
+  git's answer to a question that names its commits by sha (it never
+  changes; kept per repo and per version of its `shallow` file).
+  `ahead_behind` and `merge_base` use them, and so do
+  `session_sync.drift`, `session_review.new_since_merge` and the audit
+  commit's check.
+- Whatever the files can't say (a reftable repo, `GIT_DIR` in the
+  environment, a path that isn't a checkout's root, a name like `main~2`) is
+  asked of git every time, as before.
+- `ReadinessWatch` keeps a session's uncommitted tracked files while its
+  checkout's stamps (taken before git looked) are unchanged, and `reasons`
+  asks `git status` once, not twice.
+
+Measured with `subprocess.Popen.__init__` wrapped: three sessions in one
+repo (two with a reached goal and a worker at work, one quiet), `origin/main`
+moved once.
+
+| processes the daemon's round starts | the sweep that sees main move | the next sweep, workers still at work |
+|---|---|---|
+| before | 86 (35 of them repo questions: `show-ref` 10, `merge-base` 12, `for-each-ref` 5, `remote` 4, `symbolic-ref` 4) | 24 |
+| after | 39 (one repo question: which of main and origin/main is ahead) | 4 |
+
+The 4 left: the quiet session's sync finding its merge synced (2, once),
+and `git status` for each of the two worktrees a worker edited.
+
+Test: `tests/test_busy_spawns_daemon.py` (that scenario: each repo question
+at most once on the sweep that sees the move, none on the next, and no git
+at all in the checkouts of the sessions whose workers are at work).
+
+What is left: a worktree an agent is editing still costs one `git status`
+per sweep that sees its files change (the app's feed), and requests the app
+makes (a goal read runs `reasons`, with one `git status`) are not sweeps and
+were not measured here.
+
 ### Other sources, measured and left as they are
 
 - **gh**: an open session PR costs one `gh pr view` per 90 s

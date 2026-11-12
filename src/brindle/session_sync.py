@@ -167,18 +167,29 @@ def fresh_start(repo_root: str) -> str:
 
 
 def drift(ws: Workspace, default: str) -> Drift | None:
-    """How far ``ws``'s HEAD is behind ``origin/<default>`` as last fetched."""
+    """How far ``ws``'s HEAD is behind ``origin/<default>`` as last fetched.
+    Both commits are read from the git files where they can say, and what git
+    works out for a pair of commits (which never changes) is asked once: a
+    session behind origin while its workers are at work is measured on every
+    sweep that judges its readiness."""
     if not git.remote_branch_exists(ws.path, default):
         return None
     ref = f"origin/{default}"
-    head, sha = git.out(["rev-parse", "HEAD", ref], ws.path).split()
-    behind = int(git.out(["rev-list", "--count", f"{head}..{sha}"], ws.path))
+    head, sha = git.resolve(ws.path, "HEAD", f"refs/remotes/{ref}") or git.out(
+        ["rev-parse", "HEAD", ref], ws.path).split()
+    behind = int(git.out_once(["rev-list", "--count", f"{head}..{sha}"], ws.path))
     if not behind:
         return Drift(ref, sha, 0, [], head)
-    mb = git.out(["merge-base", head, sha], ws.path)
-    theirs = set(git.paths(["diff", "--name-only", "--no-renames", mb, sha], ws.path))
-    mine = set(git.paths(["diff", "--name-only", "--no-renames", mb, head], ws.path))
+    mb = git.out_once(["merge-base", head, sha], ws.path)
+    theirs = set(_changed(ws, mb, sha))
+    mine = set(_changed(ws, mb, head))
     return Drift(ref, sha, behind, sorted(theirs & mine), head)
+
+
+def _changed(ws: Workspace, old: str, new: str) -> list[str]:
+    """The files that differ between commits ``old`` and ``new`` (shas)."""
+    listed = git.out_once(["diff", "--name-only", "--no-renames", "-z", old, new], ws.path, raw=True)
+    return [p for p in listed.split("\0") if p]
 
 
 def _both(d: Drift) -> str:

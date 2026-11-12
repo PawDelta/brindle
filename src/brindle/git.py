@@ -388,19 +388,245 @@ def toplevel(path: str | Path) -> str:
     return out(["rev-parse", "--show-toplevel"], path)
 
 
+# -- what the git files say, with no git process ---------------------------
+#
+# Whether a ref exists, what it points at, what origin's default branch is and
+# which of two commits is ahead are the same in every checkout of a repo, and
+# change only when a ref does. The daemon's sweeps ask them for every checkout
+# every few seconds, and each git run is a process an antivirus inspects
+# (docs/investigations/process-count.md). So they are read from the repo's own
+# files (HEAD, loose refs, packed-refs), and what only git can work out (which
+# commit is ahead, the remotes) is asked once and kept: per pair of commits,
+# which never goes stale, or until the config files change. Whatever the files
+# can't say (a reftable repo, GIT_DIR in the environment, a path that isn't a
+# checkout's root) is asked of git every time, as before.
+
+
+class _Unreadable(Exception):
+    """The git files can't answer this: ask git."""
+
+
+_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_PER_WORKTREE = ("refs/worktree/", "refs/bisect/", "refs/rewritten/")
+_GIT_ENV = ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_NAMESPACE")   # git would look somewhere else
+_REMEMBERED_MAX = 4096
+
+
+def _git_dirs(path: str | Path) -> tuple[Path, Path]:
+    """The checkout at ``path``'s own git dir and its repo's common one (the
+    same for a main checkout; a linked worktree's ``.git`` file and
+    ``commondir`` name them)."""
+    if any(os.environ.get(name) for name in _GIT_ENV):
+        raise _Unreadable(path)
+    try:
+        own = Path(path) / ".git"
+        if not own.is_dir():
+            text = own.read_text().strip()
+            if not text.startswith("gitdir:"):
+                raise _Unreadable(path)
+            own = Path(path) / text.removeprefix("gitdir:").strip()
+        common = own
+        if (own / "commondir").is_file():
+            common = own / (own / "commondir").read_text().strip()
+        if (common / "reftable").exists() or not (common / "refs").is_dir():
+            raise _Unreadable(path)
+    except (OSError, UnicodeDecodeError) as e:
+        raise _Unreadable(path) from e
+    return own, common
+
+
+def _stamp(file: Path) -> tuple[int, int, int, int] | None:
+    """What changes when ``file`` does (git replaces its files whole); None without one."""
+    try:
+        st = file.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+
+
+_PACKED: dict[str, tuple[tuple[int, int, int, int], dict[str, str]]] = {}
+
+
+def _packed_refs(common: Path) -> dict[str, str]:
+    """``packed-refs`` by ref name, parsed once per version of the file."""
+    file = common / "packed-refs"
+    stamp = _stamp(file)
+    if stamp is None:
+        return {}
+    key = str(file)
+    hit = _PACKED.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    try:
+        lines = file.read_text().splitlines()
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError) as e:
+        raise _Unreadable(file) from e
+    refs = {name: sha for sha, _, name in (line.partition(" ") for line in lines) if name and _SHA.fullmatch(sha)}
+    if len(_PACKED) >= _BRANCHES_MAX and key not in _PACKED:
+        _PACKED.clear()
+    _PACKED[key] = (stamp, refs)     # under the stamp taken before the read: a later version is read again
+    return refs
+
+
+def _symref(file: Path) -> str | None:
+    """The ref a symbolic ref's ``file`` names; None when it names a commit or isn't there."""
+    try:
+        if file.is_symlink():       # how git once wrote a symbolic ref
+            raise _Unreadable(file)
+        text = file.read_text().strip()
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+        return None
+    except (OSError, UnicodeDecodeError) as e:
+        raise _Unreadable(file) from e
+    return text.removeprefix("ref:").strip() if text.startswith("ref:") else None
+
+
+def _ref(own: Path, common: Path, name: str, depth: int = 0) -> str | None:
+    """What the ref ``name`` (``HEAD``, ``refs/...``) points at, from the
+    loose or packed refs; None when there is no such ref."""
+    parts = Path(name).parts
+    if depth > 5 or not parts or ".." in parts or name.startswith("/") or not (
+            name == "HEAD" or name.startswith("refs/")):
+        raise _Unreadable(name)
+    where = own if name == "HEAD" or name.startswith(_PER_WORKTREE) else common
+    try:
+        text = (where / name).read_text().strip()
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+        return _packed_refs(common).get(name)
+    except (OSError, UnicodeDecodeError) as e:
+        raise _Unreadable(name) from e
+    if text.startswith("ref:"):
+        return _ref(own, common, text.removeprefix("ref:").strip(), depth + 1)
+    if not _SHA.fullmatch(text):
+        raise _Unreadable(name)
+    return text
+
+
+def _rev(own: Path, common: Path, name: str) -> str:
+    """The object git resolves the plain name ``name`` to (a sha, ``HEAD``, a
+    branch, ``origin/<branch>``, a tag: its rev-parse order)."""
+    if _SHA.fullmatch(name):
+        return name
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", name) or ".." in name:
+        raise _Unreadable(name)      # ``main~2``, ``@{upstream}``, ``a..b``: git's to work out
+    names = [name] if name == "HEAD" or name.startswith("refs/") else []
+    names += [f"refs/{name}", f"refs/tags/{name}", f"refs/heads/{name}", f"refs/remotes/{name}",
+              f"refs/remotes/{name}/HEAD"]
+    for full in names:
+        if (sha := _ref(own, common, full)) is not None:
+            return sha
+    raise _Unreadable(name)
+
+
+def resolve(path: str | Path, *names: str) -> list[str] | None:
+    """What each of ``names`` (``HEAD``, a branch, ``origin/<branch>``, a sha)
+    points at in the checkout at ``path``, read from the git files; None when
+    they can't say (then the caller asks git, by name)."""
+    try:
+        own, common = _git_dirs(path)
+        return [_rev(own, common, name) for name in names]
+    except _Unreadable:
+        return None
+
+
+def head(path: str | Path) -> str:
+    """The commit ``path`` is on: read from the git files, else git's own answer."""
+    found = resolve(path, "HEAD")
+    return found[0] if found else out(["rev-parse", "HEAD"], path)
+
+
+# Answers about commits named by sha: a commit never changes, so neither does
+# the answer, in any checkout of the repo. Kept per repo and per version of its
+# ``shallow`` file (a deepened clone has more history to count).
+_ONCE: dict[tuple, str | bool] = {}
+
+
+def _once_key(path: str | Path, args: list[str]) -> tuple:
+    common = _git_dirs(path)[1]
+    return (str(common.resolve()), _stamp(common / "shallow"), *args)
+
+
+def _keep(key: tuple, answer: str | bool) -> None:
+    if len(_ONCE) >= _REMEMBERED_MAX:
+        _ONCE.clear()
+    _ONCE[key] = answer
+
+
+def out_once(args: list[str], cwd: str | Path, raw: bool = False) -> str:
+    """``out`` for a question whose ``args`` name every commit by its sha
+    (see ``resolve``): asked of git once, then answered from memory.
+    ``raw``: git's output as it is (``-z`` lists), not stripped."""
+    try:
+        key = _once_key(cwd, args)
+    except (_Unreadable, OSError):
+        key = None
+    if key is None or key not in _ONCE:
+        text = run(args, cwd).stdout
+        if key is not None:
+            _keep(key, text)
+    else:
+        text = str(_ONCE[key])
+    return text if raw else text.strip()
+
+
+def is_ancestor(path: str | Path, older: str, newer: str) -> bool:
+    """Whether ``older`` is an ancestor of ``newer`` (or the same commit), as
+    ``merge-base --is-ancestor`` says: asked of git once per pair of commits
+    when the git files say which commits the names are."""
+    shas = resolve(path, older, newer)
+    if shas is None:
+        return ok(["merge-base", "--is-ancestor", older, newer], path)
+    if shas[0] == shas[1]:
+        return True
+    args = ["merge-base", "--is-ancestor", *shas]
+    try:
+        key = _once_key(path, args)
+    except (_Unreadable, OSError):
+        return ok(args, path)
+    if key not in _ONCE:
+        code = run(args, path, check=False).returncode
+        if code not in (0, 1):
+            return False        # git couldn't say (a commit that isn't here): not remembered
+        _keep(key, code == 0)
+    return bool(_ONCE[key])
+
+
 def current_branch(path: str | Path) -> str | None:
+    try:
+        target = _symref(_git_dirs(path)[0] / "HEAD")
+        if target is None or target.startswith("refs/heads/"):
+            return target.removeprefix("refs/heads/") if target else None
+    except _Unreadable:
+        pass
     proc = run(["symbolic-ref", "--quiet", "--short", "HEAD"], path, check=False)
     return proc.stdout.strip() or None
 
 
 def default_branch(root: str | Path) -> str:
-    proc = run(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], root, check=False)
-    if proc.returncode == 0 and proc.stdout.strip():
-        return proc.stdout.strip().split("/", 1)[1]
+    try:
+        target = _symref(_git_dirs(root)[1] / "refs" / "remotes" / "origin" / "HEAD") or ""
+        if target and not target.startswith("refs/remotes/origin/"):
+            raise _Unreadable(target)
+        short = target.removeprefix("refs/remotes/")
+    except _Unreadable:
+        proc = run(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], root, check=False)
+        short = proc.stdout.strip() if proc.returncode == 0 else ""
+    if "/" in short:
+        return short.split("/", 1)[1]
     for candidate in ("main", "master"):
-        if branch_exists(root, candidate):
+        if _local_branch_exists(root, candidate):
             return candidate
     return current_branch(root) or "main"
+
+
+def _local_branch_exists(root: str | Path, branch: str) -> bool:
+    """``branch_exists``, from the git files where they can say."""
+    try:
+        return _ref(*_git_dirs(root), f"refs/heads/{branch}") is not None
+    except _Unreadable:
+        return branch_exists(root, branch)
 
 
 # Local branch names per repo root, from one ``for-each-ref`` that answers every
@@ -450,7 +676,11 @@ def branch_exists(root: str | Path, branch: str) -> bool:
 
 
 def remote_branch_exists(root: str | Path, branch: str, remote: str = "origin") -> bool:
-    return ok(["show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"], root)
+    name = f"refs/remotes/{remote}/{branch}"
+    try:
+        return _ref(*_git_dirs(root), name) is not None
+    except _Unreadable:
+        return ok(["show-ref", "--verify", "--quiet", name], root)
 
 
 def merged_into_default(root: str | Path, branch: str) -> bool:
@@ -620,8 +850,36 @@ def list_branches(root: str | Path, pattern: str = "*") -> list[str]:
     return [b for b in proc.splitlines() if b]
 
 
+_REMOTES: dict[str, tuple[tuple, frozenset[str]]] = {}
+
+
 def has_remote(root: str | Path, remote: str = "origin") -> bool:
-    return remote in out(["remote"], root).split()
+    return remote in _remotes(root)
+
+
+def _remotes(root: str | Path) -> frozenset[str]:
+    """The repo's remotes, as ``git remote`` lists them: asked once per repo,
+    whichever checkout asks, and again only when a file that can name a
+    remote changed (the repo's config, a worktree's own, the person's, and
+    the ``remotes`` and ``branches`` folders of long ago)."""
+    try:
+        own, common = _git_dirs(root)
+        key = str(common.resolve())
+        home = Path.home()
+        mine = [Path(os.environ["GIT_CONFIG_GLOBAL"])] if os.environ.get("GIT_CONFIG_GLOBAL") else [
+            home / ".gitconfig", Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config") / "git" / "config"]
+        stamps = tuple(_stamp(f) for f in (common / "config", own / "config.worktree", common / "remotes",
+                                           common / "branches", *mine))
+    except (_Unreadable, OSError, RuntimeError):
+        return frozenset(out(["remote"], root).split())
+    hit = _REMOTES.get(key)
+    if hit is not None and hit[0] == stamps:
+        return hit[1]
+    names = frozenset(out(["remote"], root).split())
+    if len(_REMOTES) >= _BRANCHES_MAX and key not in _REMOTES:
+        _REMOTES.clear()
+    _REMOTES[key] = (stamps, names)      # under the stamps taken before git looked: a later change asks again
+    return names
 
 
 # -- branch naming ---------------------------------------------------------
@@ -849,15 +1107,26 @@ def base_ref(path: str | Path, base: str) -> str:
     strictly behind ``origin/<base>`` (i.e. not pulled yet). Comparing to
     origin while local has unpushed commits would count those commits as
     the branch's own work."""
-    local = branch_exists(path, base)
-    if not remote_branch_exists(path, base):
+    try:
+        own, common = _git_dirs(path)
+        local = _ref(own, common, f"refs/heads/{base}")
+        origin = _ref(own, common, f"refs/remotes/origin/{base}")
+    except _Unreadable:
+        local = origin = None
+        if not remote_branch_exists(path, base):
+            return base
+        if not branch_exists(path, base):
+            return f"origin/{base}"
+        local_behind = ok(["merge-base", "--is-ancestor", base, f"origin/{base}"], path) and not ok(
+            ["merge-base", "--is-ancestor", f"origin/{base}", base], path
+        )
+        return f"origin/{base}" if local_behind else base
+    if origin is None:
         return base
-    if not local:
+    if local is None:
         return f"origin/{base}"
-    local_behind = ok(["merge-base", "--is-ancestor", base, f"origin/{base}"], path) and not ok(
-        ["merge-base", "--is-ancestor", f"origin/{base}", base], path
-    )
-    return f"origin/{base}" if local_behind else base
+    # Behind means an ancestor that isn't the same commit: one question, once per pair of commits.
+    return f"origin/{base}" if local != origin and is_ancestor(path, local, origin) else base
 
 
 def dirty_files(path: str | Path, tracked_only: bool = False) -> list[str]:
@@ -884,9 +1153,14 @@ def _bookkeeping(line: str) -> bool:
 
 
 def ahead_behind(path: str | Path, ref: str) -> tuple[int, int]:
-    """(behind, ahead) commit counts between ``ref`` and HEAD."""
-    proc = run(["rev-list", "--left-right", "--count", f"{ref}...HEAD"], path)
-    behind, ahead = (int(x) for x in proc.stdout.split())
+    """(behind, ahead) commit counts between ``ref`` and HEAD: counted once
+    per pair of commits when the git files say which they are."""
+    shas = resolve(path, ref, "HEAD")
+    if shas:
+        text = out_once(["rev-list", "--left-right", "--count", f"{shas[0]}...{shas[1]}"], path)
+    else:
+        text = out(["rev-list", "--left-right", "--count", f"{ref}...HEAD"], path)
+    behind, ahead = (int(x) for x in text.split())
     return behind, ahead
 
 
@@ -903,7 +1177,8 @@ def status(path: str | Path, base: str | None) -> Status:
 
 
 def merge_base(path: str | Path, ref: str) -> str:
-    return out(["merge-base", ref, "HEAD"], path)
+    shas = resolve(path, ref, "HEAD")
+    return out_once(["merge-base", *shas], path) if shas else out(["merge-base", ref, "HEAD"], path)
 
 
 def diff(path: str | Path, base: str, stat: bool = False) -> str:
