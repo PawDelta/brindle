@@ -242,11 +242,12 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
 
     monkeypatch.setattr(agents, "close_paused", close_paused)
     # Its start asks the person's login shell for their proxy settings, once (login_shell_env).
-    shells = []
-    monkeypatch.setattr(login_shell_env, "_run", lambda argv, **kw: shells.append(argv) or subprocess.CompletedProcess(
-        argv, 0, b"HTTPS_PROXY=http://proxy.corp.example:8080\0", b""))
+    # Only this first daemon's shell exports any: the launches further down run without them.
+    exported = [b"HTTPS_PROXY=http://proxy.corp.example:8080\0"]
+    monkeypatch.setattr(login_shell_env, "_run", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 0, exported.pop() if exported else b"", b""))
     serve(app_gone=False)
-    assert len(shells) == 1 and login_shell_env.for_launch("codex", environ={}) == {
+    assert not exported and login_shell_env.for_launch("codex", environ={}) == {
         "HTTPS_PROXY": "http://proxy.corp.example:8080"}
     assert stopped_again and lifecycle.read_info() is None, "a second stop cut the way out short"
     assert not swept.is_set(), "the daemon waited for the sweep before it paused and exited"
