@@ -155,6 +155,24 @@ def test_export_keeps_how_the_visual_looked():
     page = export("process-leaks.page.html")
     assert ".pill{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}" in page
     assert 'stroke-dasharray="4 3"' in page and 'marker-end="url(#a)"' in page
+    # layout-probe: the cases the export rehearsal is for, through the sanitiser. A 5vw padding and
+    # scheme-dependent columns behind an attribute selector come back as the viewed literals; 25%
+    # columns from a kept rule stay as declared; a gradient that differs by scheme and an arrowhead
+    # only dark has come back as one copy of the shape per scheme.
+    probe = export("layout-probe.snapshot.html")
+    split = probe.index("@media (prefers-color-scheme:dark){")
+    grid = re.search(r"\.(brindle-z\d+)\{[^}]*padding-left:55px !important;grid-template-columns:194[.\d]+px 389[.\d]+px !important\}",
+                     probe[:split]).group(1)
+    assert re.search(rf"\.{grid}\{{grid-template-columns:389[.\d]+px 194[.\d]+px !important\}}", probe[split:])
+    assert ".half{grid-template-columns:25% 25%}" in probe
+    assert not re.search(r'<div class="half[^"]*brindle-z', probe)
+    assert re.search(r'<rect class="shape brindle-s\d+ brindle-light"[^>]*fill="url\(#g\)"', probe)
+    assert re.search(r'<rect class="shape brindle-s\d+ brindle-dark"[^>]*fill="url\(#h\)"', probe)
+    assert re.search(r'<path class="arrow brindle-s\d+ brindle-dark"[^>]*marker-end="url\(#a\)"', probe)
+    assert not re.search(r'<path class="arrow brindle-s\d+ brindle-light"[^>]*marker-end', probe)
+    assert ".brindle-dark{display:none}" in probe
+    assert ".brindle-light{display:none}.brindle-dark{display:inline}" in probe
+
     # A pseudo-element only the light scheme has is switched off in dark.
     light_only = '.s::before{content:"old"}@media (prefers-color-scheme:dark){.s::before{content:none}}'
     assert light_only in visual_export.sanitise(f"<style>{light_only}</style>")

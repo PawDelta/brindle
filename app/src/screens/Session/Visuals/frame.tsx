@@ -61,9 +61,24 @@ const LAYOUT = ["display", "position", "box-sizing", "overflow-x", "overflow-y",
   "justify-self", "row-gap", "column-gap", "grid-auto-flow", "grid-column-start", "grid-column-end", "grid-row-start",
   "grid-row-end", "min-width", "max-width", "min-height", "max-height", "z-index", "vertical-align", "table-layout",
   "border-collapse", "border-spacing", "list-style-type", "text-overflow", "word-break", "overflow-wrap", "visibility", "aspect-ratio"];
-/* Layout values the browser answers in pixels for this window. Written only where they don't move
-   when the window widens (a fixed length); otherwise the page's own declaration stays in charge. */
+/* Layout values the browser answers in pixels for this window. The page's own declarations of them
+   stay (a percentage or an auto margin keeps working at any width), and a literal is written only
+   where the export wouldn't otherwise reproduce them: see inlineStyles. */
 const SIZED = [...SIDES.flatMap((side) => [`margin-${side}`, `padding-${side}`]), ...SIDES, "grid-template-columns"];
+/* What visual_export.py keeps of the page's own layout CSS: a subset of its property allowlist and
+   its value and selector rules, so what counts as kept here is kept there too. */
+const KEPT = new Set([...SIZED, "display", "position", "width", "height", "min-width", "max-width", "min-height", "max-height",
+  "box-sizing", "flex-direction", "flex-wrap", "flex-grow", "flex-shrink", "flex-basis", "order", "row-gap", "column-gap",
+  "grid-template-rows", "grid-auto-flow", "grid-auto-columns", "grid-auto-rows", "grid-column-start", "grid-column-end",
+  "grid-row-start", "grid-row-end", "align-items", "align-content", "align-self", "justify-content", "justify-items", "justify-self",
+  "overflow-x", "overflow-y", "aspect-ratio", "table-layout", "border-collapse", "border-spacing", "vertical-align", "white-space",
+  "font-size", "line-height", "letter-spacing"]);
+const KEPT_FUNCTIONS = new Set(["repeat", "minmax", "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color",
+  "color-mix", "calc", "min", "max", "clamp", "fit-content", "linear-gradient", "radial-gradient", "conic-gradient",
+  "repeating-linear-gradient", "repeating-radial-gradient"]);
+const FLAT = /^[A-Za-z0-9_#., >+~*-]+$/;
+const PSEUDO_ELEMENT = /::?(?:before|after)(?=$|[\s,>+~])/g;
+const SCHEME_MEDIA = /^\(\s*prefers-color-scheme\s*:\s*(?:light|dark)\s*\)$/i;
 const INITIAL: Record<string, string[]> = {
   "background-color": ["rgba(0, 0, 0, 0)", "transparent"], "background-image": ["none"], "box-shadow": ["none"],
   opacity: ["1"], "text-decoration-line": ["none"], ...Object.fromEntries(CORNERS.map((corner) => [`border-${corner}-radius`, ["0px"]])),
@@ -75,7 +90,7 @@ const INITIAL: Record<string, string[]> = {
   "grid-column-end": ["auto"], "grid-row-start": ["auto"], "grid-row-end": ["auto"], "min-width": ["auto", "0px"],
   "max-width": ["none"], "min-height": ["auto", "0px"], "max-height": ["none"], "z-index": ["auto"], "table-layout": ["auto"],
   "text-overflow": ["clip"], "word-break": ["normal"], "overflow-wrap": ["normal"], visibility: ["visible"],
-  "aspect-ratio": ["auto"], top: ["auto"], right: ["auto"], bottom: ["auto"], left: ["auto"], "grid-template-columns": ["none"],
+  "aspect-ratio": ["auto"],
 };
 /* The user agent styles these itself, so their box values are always written. */
 const UA_BOXED = new Set(["a", "u", "s", "ins", "del", "hr", "mark", "abbr"]);
@@ -140,18 +155,6 @@ function capture(element: Element, read: StyleReader): Captured[] {
   return parts;
 }
 
-/* Grid columns measured at two widths, as the tracks that were declared: a track that stays put is
-   a length, one that grows is a share (fr) of what the extra width added. Null when it can't say. */
-export function gridTracks(narrow: string, wide: string): string | null {
-  const [a, b] = [narrow.split(/\s+/), wide.split(/\s+/)];
-  if (a.length !== b.length || ![...a, ...b].every((track) => /^\d+(?:\.\d+)?px$/.test(track))) return null;
-  const grew = a.map((track, i) => parseFloat(b[i]) - parseFloat(track));
-  if (grew.some((g) => g < -0.5)) return null;
-  const unit = Math.min(...grew.filter((g) => g >= 0.5));
-  if (!Number.isFinite(unit)) return narrow;
-  return a.map((track, i) => grew[i] < 0.5 ? track : `${Math.round((grew[i] / unit) * 100) / 100}fr`).join(" ");
-}
-
 /* What `value` names if it is a reference to an element of `doc` itself (url(#id)), else null. */
 export function localReference(value: string | undefined, doc: Document): string | null {
   const target = /^url\(\s*(["']?)([^"'()\s]*)\1\s*\)$/.exec(value ?? "")?.[2];
@@ -202,77 +205,151 @@ function stripRules(rules: CSSRuleList) {
   }
 }
 
-/* Sized values that move with the window (measured narrower and wider: a max-width can hide the
-   change on one side) go to the page's own declarations; grid columns that do are written as the
-   tracks they were declared as, when that can be told. */
-function settleSized(light: Captured, dark: Captured, narrow: Captured | null, wide: Captured | null) {
-  for (const name of SIZED) {
-    if (!(name in light)) continue;
-    const viewed = light[name];
-    if (narrow && wide && narrow[name] === viewed && wide[name] === viewed) continue;
-    const tracks = name !== "grid-template-columns" || !narrow || !wide ? null
-      : narrow[name] !== viewed ? gridTracks(narrow[name], viewed) : gridTracks(viewed, wide[name]);
-    if (tracks) light[name] = dark[name] = tracks;
-    else { delete light[name]; delete dark[name]; }
+/* Whether visual_export.py keeps a value (its value rules: no url(), escapes or unlisted functions). */
+function keptValue(value: string): boolean {
+  if (/url\s*\(/i.test(value)) return false;
+  const plain = value.replace(/"[^"'\\<>@;{}\r\n]*"|'[^"'\\<>@;{}\r\n]*'/g, "_");
+  return /^[\w\s#.,%+\-/*()]+$/.test(plain) && Array.from(plain.matchAll(/([\w-]+)\s*\(/g)).every((call) => KEPT_FUNCTIONS.has(call[1].toLowerCase()));
+}
+
+function keptDeclarations(style: CSSStyleDeclaration): string {
+  const kept: string[] = [];
+  for (let i = 0; i < style.length; i++) {
+    const name = style.item(i);
+    const value = style.getPropertyValue(name).trim();
+    if (KEPT.has(name) && value && keptValue(value)) kept.push(`${name}:${value}${style.getPropertyPriority(name) ? " !important" : ""}`);
   }
+  return kept.join(";");
+}
+
+/* The layout part of the page's own CSS that the export keeps: flat rules, and flat rules behind a
+   colour-scheme @media. */
+function keptCss(rules: CSSRuleList, nested = false): string {
+  let out = "";
+  for (const rule of Array.from(rules)) {
+    const { selectorText, style } = rule as CSSStyleRule;
+    if (typeof selectorText === "string" && style) {
+      const body = keptDeclarations(style);
+      if (body && FLAT.test(selectorText.replace(PSEUDO_ELEMENT, ""))) out += `${selectorText}{${body}}`;
+      continue;
+    }
+    const media = (rule as CSSMediaRule).media?.mediaText ?? "";
+    const inner = !nested && SCHEME_MEDIA.test(media) ? keptCss((rule as CSSMediaRule).cssRules, true) : "";
+    if (inner) out += `@media ${media}{${inner}}`;
+  }
+  return out;
+}
+
+/* A paint or marker value as an SVG attribute the sanitiser keeps (no parentheses): none or hex. */
+function attributeValue(value: string | undefined): string | null {
+  if (value === "none") return "none";
+  const rgb = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/.exec(value ?? "");
+  if (!rgb) return null;
+  const hex = (n: number) => Math.round(n).toString(16).padStart(2, "0");
+  return `#${hex(+rgb[1])}${hex(+rgb[2])}${hex(+rgb[3])}${rgb[4] === undefined ? "" : hex(+rgb[4] * 255)}`;
 }
 
 /* SVG paint and markers that point at the page's own #id become attributes (CSS can't carry them
-   through the sanitiser); any other url() is dropped. */
-function settleReferences(element: Element, light: Captured, dark: Captured) {
-  for (const name of REFERENCES) {
-    const [lit, dim] = [localReference(light[name], element.ownerDocument), localReference(dark[name], element.ownerDocument)];
-    if (lit) {
-      element.setAttribute(name, `url(#${lit})`);
-      delete light[name];
-      if (dim === lit || !dark[name]) delete dark[name];
+   through the sanitiser); any other url() is dropped. Where light and dark differ, the element is
+   split in two, one per scheme (the returned step, run once classes are on): each copy carries its
+   scheme's values as attributes and shows only in its scheme. */
+function settleReferences(element: Element, light: Captured, dark: Captured): (() => void) | null {
+  const doc = element.ownerDocument;
+  const references = REFERENCES.map((name) => [name, localReference(light[name], doc), localReference(dark[name], doc)] as const);
+  const split = element.localName !== "svg" && references.some(([, lit, dim]) => lit !== dim);
+  const schemes: [string, string | null][][] = [[], []];
+  for (const [name, lit, dim] of references) {
+    if (!lit && !dim) continue;
+    if (lit === dim || !split) {
+      if (lit) element.setAttribute(name, `url(#${lit})`);
+    } else {
+      schemes[0].push([name, lit ? `url(#${lit})` : attributeValue(light[name])]);
+      schemes[1].push([name, dim ? `url(#${dim})` : attributeValue(dark[name])]);
     }
-    if (dim && dim !== lit) delete dark[name];
+    delete light[name];
+    delete dark[name];
   }
+  if (!split) return null;
+  return () => {
+    const copy = element.cloneNode(true) as Element;
+    for (const node of [copy, ...Array.from(copy.querySelectorAll("[id]"))]) node.removeAttribute("id");
+    for (const [target, attributes] of [[element, schemes[0]], [copy, schemes[1]]] as const) {
+      for (const [name, value] of attributes) value === null ? target.removeAttribute(name) : target.setAttribute(name, value);
+    }
+    element.classList.add("brindle-light");
+    copy.classList.add("brindle-dark");
+    element.after(copy);
+  };
 }
+
+/* One class per distinct set of declarations ([light, dark] per part: the element, ::before, ::after). */
+function classFor(classes: Map<string, string>, prefix: string, parts: [string, string][], light: string[], dark: string[]): string {
+  const key = JSON.stringify(parts);
+  let name = classes.get(key);
+  if (!name) {
+    name = `${prefix}${classes.size}`;
+    classes.set(key, name);
+    parts.forEach(([lit, dim], i) => {
+      const selector = `.${name}${["", "::before", "::after"][i]}`;
+      if (lit) light.push(`${selector}{${lit}}`);
+      if (dim) dark.push(`${selector}{${dim}}`);
+    });
+  }
+  return name;
+}
+
+const sheetText = (light: string[], dark: string[]) => light.join("") + (dark.length ? `@media (prefers-color-scheme: dark){${dark.join("")}}` : "");
+
+type Width = "narrow" | "wide" | "viewed";
 
 /* Write each element's computed presentation and layout as literal classes (light, then the dark
    differences), remove the page's own declarations of those properties, and return the document's
-   HTML. `resize` sets the frame narrower, wider, or back to the viewed width, to tell fixed lengths
-   from window-relative ones; without it no sized value is written. */
+   HTML.
+
+   Sized values (margins, padding, offsets, grid columns) keep the page's own declarations, which
+   still work at any width. To know where those don't survive the sanitiser (a selector or a var()
+   it refuses), the export is rehearsed: with only what visual_export.py keeps, plus the classes
+   written here, each sized value is measured again, in both schemes and (with `resize`) at a
+   narrower and a wider frame, and wherever the rehearsal differs from the page the viewed value
+   is written as a literal, per scheme, above anything the page kept. */
 export function inlineStyles(doc: Document, read: StyleReader = (element, pseudo) => doc.defaultView!.getComputedStyle(element, pseudo),
-  resize?: (width: "narrow" | "wide" | "viewed") => void): string {
+  resize?: (width: Width) => void): string {
   const elements = [doc.documentElement, ...(doc.body ? [doc.body, ...Array.from(doc.body.querySelectorAll("*"))] : [])]
     .filter((element) => !NOT_STYLED.has(element.localName));
+  const styles = Array.from(doc.querySelectorAll("style"));
   const seen = {} as Record<ColorScheme, Captured[][]>;
-  const sized: Record<"narrow" | "wide", (Captured | null)[]> = { narrow: elements.map(() => null), wide: elements.map(() => null) };
   for (const scheme of ["light", "dark"] as const) {
     const undo = forceScheme(doc, scheme);
-    try {
-      seen[scheme] = elements.map((element) => capture(element, read));
-      for (const width of scheme === "light" && resize ? (["narrow", "wide"] as const) : []) {
-        resize!(width);
-        try { sized[width] = elements.map((element) => laidOut(element) ? values(read(element), SIZED) : null); } finally { resize!("viewed"); }
-      }
-    } finally { undo(); }
+    try { seen[scheme] = elements.map((element) => capture(element, read)); } finally { undo(); }
   }
+  const probes: [ColorScheme, Width][] = [["light", "viewed"], ["dark", "viewed"]];
+  if (resize) probes.push(["light", "narrow"], ["light", "wide"]);
+  const measure = () => probes.map(([scheme, width]) => {
+    const undo = forceScheme(doc, scheme);
+    try {
+      if (width !== "viewed") resize!(width);
+      try { return elements.map((element) => laidOut(element) ? values(read(element), SIZED) : null); } finally { if (width !== "viewed") resize!("viewed"); }
+    } finally { undo(); }
+  });
+  const page = measure();
+
   const classes = new Map<string, string>();
   const light: string[] = [];
   const dark: string[] = [];
+  const splits: (() => void)[] = [];
+  const unsized = (captured: Captured) => Object.fromEntries(Object.entries(captured).filter(([name]) => !SIZED.includes(name)));
   elements.forEach((element, index) => {
-    const [lit, dim] = [seen.light[index][0], seen.dark[index][0]];
-    settleSized(lit, dim, sized.narrow[index], sized.wide[index]);
-    if (element.namespaceURI === SVG) settleReferences(element, lit, dim);
-    const parts = seen.light[index].map((part, i) => declarations(element.localName, part, seen.dark[index][i]));
-    const key = JSON.stringify(parts);
-    let name = classes.get(key);
-    if (!name) {
-      name = `brindle-s${classes.size}`;
-      classes.set(key, name);
-      parts.forEach(([lit, dim], i) => {
-        const selector = `.${name}${["", "::before", "::after"][i]}`;
-        if (lit) light.push(`${selector}{${lit}}`);
-        if (dim) dark.push(`${selector}{${dim}}`);
-      });
-    }
-    element.classList.add(name);
+    const parts = seen.light[index].map((part, i) => [unsized(part), unsized(seen.dark[index][i])] as const);
+    const split = element.namespaceURI === SVG ? settleReferences(element, parts[0][0], parts[0][1]) : null;
+    if (split) splits.push(split);
+    element.classList.add(classFor(classes, "brindle-s", parts.map(([lit, dim]) => declarations(element.localName, lit, dim)), light, dark));
   });
-  for (const sheet of Array.from(doc.querySelectorAll("style"))) {
+  for (const split of splits) split();
+  if (splits.length) {
+    light.push(".brindle-dark{display:none}");
+    dark.push(".brindle-light{display:none}.brindle-dark{display:inline}");
+  }
+  for (const sheet of styles) {
     try {
       if (!sheet.sheet) continue;
       stripRules(sheet.sheet.cssRules);
@@ -284,8 +361,34 @@ export function inlineStyles(doc: Document, read: StyleReader = (element, pseudo
     if (element.getAttribute("style")?.trim() === "") element.removeAttribute("style");
   }
   const generated = doc.createElement("style");
-  generated.textContent = light.join("") + (dark.length ? `@media (prefers-color-scheme: dark){${dark.join("")}}` : "");
+  generated.textContent = sheetText(light, dark);
   (doc.head ?? doc.documentElement).append(generated);
+
+  // The rehearsal: only what the sanitiser keeps of the page's CSS and inline styles.
+  const kept = styles.map((sheet) => sheet.textContent);
+  const inline = elements.map((element) => element.getAttribute("style"));
+  for (const sheet of styles) sheet.textContent = sheet.isConnected && sheet.sheet ? keptCss(sheet.sheet.cssRules) : "";
+  for (const element of elements) {
+    const declared = (element as HTMLElement).style ? keptDeclarations((element as HTMLElement).style) : "";
+    if (declared) element.setAttribute("style", declared);
+    else element.removeAttribute("style");
+  }
+  let exported: (Captured | null)[][];
+  try { exported = measure(); } finally {
+    styles.forEach((sheet, i) => { sheet.textContent = kept[i]; });
+    elements.forEach((element, i) => { const style = inline[i]; if (style === null) element.removeAttribute("style"); else element.setAttribute("style", style); });
+  }
+  const literals = new Map<string, string>();
+  elements.forEach((element, index) => {
+    const differs = SIZED.filter((name) => probes.some((_, p) => page[p][index]?.[name] !== exported[p][index]?.[name]));
+    if (!differs.length) return;
+    const [lit, dim] = [page[0][index]!, page[1][index]!];
+    const declared = (from: Captured, names: string[]) => names.map((name) => `${name}:${from[name]} !important`).join(";");
+    const parts: [string, string][] = [[declared(lit, differs.filter((name) => lit[name] && keptValue(lit[name]))),
+      declared(dim, differs.filter((name) => dim[name] && dim[name] !== lit[name] && keptValue(dim[name])))]];
+    element.classList.add(classFor(literals, "brindle-z", parts, light, dark));
+  });
+  generated.textContent = sheetText(light, dark);
   return doc.documentElement.outerHTML;
 }
 

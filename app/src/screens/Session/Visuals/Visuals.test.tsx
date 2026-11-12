@@ -1221,12 +1221,15 @@ describe("export snapshot", () => {
     const doc = frame.contentDocument!;
     doc.documentElement.innerHTML = `<head><style>.pill{color:var(--ink);padding:2px 8px;border-radius:999px}
       @media (prefers-color-scheme:light){:root{--ink:#222}}
-      div[data-grid]{display:grid;gap:var(--space);grid-template-columns:1fr 1fr}.shape{fill:url(#g);marker-end:url(#a)}</style></head>
+      div[data-grid]{display:grid;gap:var(--space);padding-left:var(--side);grid-template-columns:var(--cols)}
+      .half{grid-template-columns:25% 25%}.shape{fill:url(#g);marker-end:url(#a)}</style></head>
       <body><p><span class="pill" style="background:var(--soft);width:5%">fixed</span><span class="pill">open</span></p>
-      <div data-grid=""><div>A</div></div>
+      <div data-grid=""><div>A</div></div><div class="half"><div>B</div></div>
       <table><tr><td>cell</td></tr></table><svg><path d="M0 0" class="shape" stroke="var(--ink)"></path></svg></body>`;
     const media = (doc.styleSheets[0].cssRules[1] as CSSMediaRule).media;
     let width: "narrow" | "wide" | "viewed" = "viewed";
+    // While the export is rehearsed only what the sanitiser keeps is in the page: not div[data-grid].
+    const rehearsing = () => !Array.from(doc.querySelectorAll("style")).some((style) => style.textContent?.includes("data-grid"));
     // The page's colour-scheme rule is what decides the scheme here, as it does in a browser.
     const values = (element: Element, pseudo?: string): Record<string, string> => {
       const dark = !media.mediaText.includes("min-width");
@@ -1238,19 +1241,22 @@ describe("export snapshot", () => {
       if (pseudo) return { content: "none" };
       if (tag === "span") return { color: dark ? "rgb(2, 2, 2)" : "rgb(1, 1, 1)", "background-color": dark ? "rgb(3, 3, 3)" : "rgba(0, 0, 0, 0)",
         "border-top-style": "none", "border-top-width": "3px", "border-top-left-radius": "999px" };
-      // Layout from a selector and a variable the sanitiser can't keep: the grid's columns grow with
-      // the window, its padding doesn't, and its auto margin moves.
+      // Layout from a selector and variables the sanitiser can't keep: a padding of 5vw (it moves
+      // with the window) and columns that differ by scheme. Rehearsed, neither is there.
       if (element.hasAttribute("data-grid")) return { display: "grid", "row-gap": "16px", "padding-top": "16px",
-        "margin-left": { narrow: "0px", viewed: "50px", wide: "700px" }[width],
-        "grid-template-columns": { narrow: "200px 200px", viewed: "500px 500px", wide: "1150px 1150px" }[width] };
+        "padding-left": rehearsing() ? "0px" : { narrow: "30px", viewed: "50px", wide: "120px" }[width],
+        "grid-template-columns": rehearsing() ? "none" : dark ? "400px 600px" : { narrow: "200px 200px", viewed: "500px 500px", wide: "1150px 1150px" }[width] };
+      // Percentage columns from a rule the sanitiser keeps: rehearsed, they come out the same.
+      if (element.classList.contains("half")) return { "grid-template-columns": { narrow: "100px 100px", viewed: "250px 250px", wide: "600px 600px" }[width] };
       if (tag === "td") return { "border-bottom-style": "solid", "border-bottom-width": "1px", "border-bottom-color": dark ? "rgb(6, 6, 6)" : "rgb(5, 5, 5)" };
-      if (tag === "path") return { fill: 'url("about:blank#g")', "marker-end": 'url("#a")', "marker-start": 'url("https://evil.test/s.svg#a")',
-        stroke: "rgb(4, 4, 4)", "stroke-dasharray": "4 3" };
+      // A gradient that differs by scheme, an arrowhead only dark has, and another document's marker.
+      if (tag === "path") return { fill: dark ? 'url("#h")' : 'url("about:blank#g")', "marker-end": dark ? 'url("#a")' : "none",
+        "marker-start": 'url("https://evil.test/s.svg#a")', stroke: "rgb(4, 4, 4)", "stroke-dasharray": "4 3" };
       return {};
     };
     const html = inlineStyles(doc, (element, pseudo) => ({ getPropertyValue: (name) => values(element, pseudo)[name] ?? "" }), (to) => { width = to; });
-    const named = (tag: string) => {
-      const found = [...html.matchAll(new RegExp(`<${tag}[^>]*?(brindle-s\\d+)`, "g"))].map((m) => m[1]);
+    const named = (tag: string, prefix = "brindle-s") => {
+      const found = [...html.matchAll(new RegExp(`<${tag}[^>]*?(${prefix}\\d+)`, "g"))].map((m) => m[1]);
       return { all: found, rule: (pseudo = "", dark = false) => {
         const split = html.indexOf("@media (prefers-color-scheme: dark){");
         return new RegExp(`\\.${found[0]}${pseudo}\\{([^}]*)\\}`).exec(dark ? html.slice(split) : html.slice(0, split))?.[1];
@@ -1268,15 +1274,30 @@ describe("export snapshot", () => {
     expect(span.rule("::after", true)).toBe('content:"new";color:rgb(7, 7, 7)');
     expect(named("td").rule("::before")).toBe('content:"old"');
     expect(named("td").rule("::before", true)).toBe("content:none");
-    expect(named('div data-grid=""').rule()).toBe("display:grid;row-gap:16px;padding-top:16px;grid-template-columns:1fr 1fr");
+    // Sized values the export would lose are written as the viewed literals, per scheme, above the
+    // page; fixed ones (the padding-top) and ones a kept rule reproduces (25% columns) aren't.
+    const grid = named('div data-grid=""');
+    expect(grid.rule()).toBe("display:grid;row-gap:16px");
+    expect(named('div data-grid=""', "brindle-z").rule()).toBe("padding-left:50px !important;grid-template-columns:500px 500px !important");
+    expect(named('div data-grid=""', "brindle-z").rule("", true)).toBe("grid-template-columns:400px 600px !important");
+    expect(html).not.toMatch(/<div class="half[^"]*brindle-z/);
+    expect(html).toMatch(/\.half \{\s*grid-template-columns: 25% 25%;?\s*\}/);
     expect(named("path").rule()).toBe("stroke:rgb(4, 4, 4);stroke-dasharray:4 3");
-    // The gradient and the arrowhead go back as references to the page's own ids; another document's doesn't.
-    expect(html).toMatch(/<path [^>]*fill="url\(#g\)" marker-end="url\(#a\)"/);
+    // References go back as attributes to the page's own ids, one copy of the path per scheme where
+    // they differ; another document's marker doesn't.
+    const [lit, dim] = [...html.matchAll(/<path [^>]*>/g)].map((m) => m[0]);
+    expect(lit).toMatch(/brindle-light/);
+    expect(lit).toContain('fill="url(#g)"');
+    expect(lit).toContain('marker-end="none"');
+    expect(dim).toMatch(/brindle-dark/);
+    expect(dim).toContain('fill="url(#h)"');
+    expect(dim).toContain('marker-end="url(#a)"');
+    expect(html).toContain(".brindle-dark{display:none}");
+    expect(html).toContain(".brindle-light{display:none}.brindle-dark{display:inline}");
     expect(html).not.toContain("marker-start");
     // The page keeps what the captured values don't replace; its own colours, radii, layout values
     // and references are gone, and its scheme switch is restored.
     expect(html).toMatch(/\.pill \{\s*padding: 2px 8px;?\s*\}/);
-    expect(html).toMatch(/div\[data-grid\] \{\s*grid-template-columns: 1fr 1fr;?\s*\}/);
     expect(html).not.toContain("color: var(--ink)");
     expect(html).not.toContain("var(--soft)");
     expect(html).not.toContain("var(--space)");

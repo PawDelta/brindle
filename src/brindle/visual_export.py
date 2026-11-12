@@ -69,6 +69,8 @@ def _value(prop: str, value: str) -> bool:
         return value == "none" or re.fullmatch(STRING, value) is not None
     if re.search(r"url\s*\(", value, re.I):
         return False
+    # The app writes a literal above whatever else the page kept (frame.tsx, inlineStyles).
+    value = re.sub(r"\s*!\s*important\s*$", "", value, flags=re.I)
     value = re.sub(STRING, "_", value)
     if not re.fullmatch(r"[\w\s#.,%+\-/*()]+", value, re.ASCII):
         return False
