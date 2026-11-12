@@ -60,7 +60,9 @@ def test_session_branch_visible_without_worker_and_cached_by_heads(db, session_b
     b = replace(a, id="b", name="b", branch="session")
     for ws in (a, b):
         db.add_workspace(ws)
-        db.add_agent(Agent(ws.id, ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, 0))
+        # Idle just now: idle for STALLED_AFTER with no process, b couldn't hold anything.
+        db.add_agent(Agent(ws.id, ws.id, "supervisor", "claude", None, "interactive", "idle", "", None,
+                           tasks.time.time()))
     monkeypatch.setattr(git, "ref_shas", lambda root: refs)
     monkeypatch.setattr(git, "default_branch", lambda root: "main")
     reads = []
