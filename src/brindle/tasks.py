@@ -657,13 +657,14 @@ def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: flo
     PR from the holding branch merged after the wait began, "synced" once
     that branch no longer holds the task's files. With it, for a landing,
     the commit that landed (the PR's pushed head; "" when unknown, which
-    excuses nothing later). A worker or task holder ends its wait by
-    merging, as any dependency does."""
+    excuses nothing later). "stalled", with why, once that work can't make
+    progress (``stalled_holder``). A worker or task holder otherwise ends
+    its wait by merging, as any dependency does."""
     if now - since >= CROSS_SESSION_WAIT_LIMIT:
         return "expired", ""
-    if stalled_holder(db, dep, caller_ws.repo_root):
-        # Read again at launch, the clash then has no holder: it starts with a warning.
-        return "stalled", ""
+    if stalled := stalled_holder(db, dep, caller_ws.repo_root):
+        # Its launch warns of the overlap instead (``_launch_overlap``'s ``released``).
+        return "stalled", stalled
     roots, branch = _holder_session(db, dep, caller_ws.repo_root)
     if not roots or not branch:
         return None
@@ -691,10 +692,11 @@ def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: flo
 
 def _release_cross_waits(db: DB, t: Task, caller_ws: Workspace) -> Task:
     """End queued task ``t``'s waits on other sessions' work that has landed,
-    no longer holds its files, or has been waited on for the drift limit
-    (both supervisors are told of that one; nothing goes to the Inbox), and
-    return it as it is now. The other session's work is never changed. The
-    clash is read again at launch (``_launch_overlap``)."""
+    no longer holds its files, can't make progress (its launch warns of that
+    overlap: ``_stalled_releases``), or has been waited on for the drift
+    limit (both supervisors are told of that one; nothing goes to the
+    Inbox), and return it as it is now. The other session's work is never
+    changed. The clash is read again at launch (``_launch_overlap``)."""
     deps = _loads(t.depends_on)
     waits = {d: since for d in deps
              if (since := _cross_note(db, t.id, f"cross-wait:{d}")) is not None}
@@ -709,6 +711,7 @@ def _release_cross_waits(db: DB, t: Task, caller_ws: Workspace) -> Task:
             prefix = _released_prefix(dep)
             c.execute("DELETE FROM task_notes WHERE task_id=? AND substr(kind, 1, ?) = ?",
                       (t.id, len(prefix), prefix))
+            # For "stalled", ``landed`` is why: kept for the launch's warning.
             c.execute("INSERT INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
                       (t.id, f"{prefix}{why}\n{landed}", now))
     expired = [d for d, (why, _landed) in over.items() if why == "expired"]
@@ -726,6 +729,22 @@ def _release_cross_waits(db: DB, t: Task, caller_ws: Workspace) -> Task:
                            f"for your session's work ({dep}) to land and starts now on the same "
                            "files. Your work is not changed.")
     return db.get_task(t.id) or t
+
+
+def _stalled_releases(db: DB, t: Task, repo_root: str) -> Iterator[Clash]:
+    """A holderless clash for each wait of ``t``'s that ended because the
+    work it waited on stalled (``_release_cross_waits``): its launch warns of
+    that overlap even when it can't read it again (a paused worker is no
+    longer running, so no overlap scan finds it)."""
+    prefix = "cross-released:"
+    rows = db.conn.execute("SELECT kind FROM task_notes WHERE task_id=? AND substr(kind, 1, ?) = ?",
+                           (t.id, len(prefix), prefix)).fetchall()
+    for row in rows:
+        dep, _, rest = row["kind"][len(prefix):].partition("\n")
+        why, _, stalled = rest.partition("\n")
+        if why == "stalled":
+            yield Clash(f"overlaps with {dep}, which it waited for; not waiting for it: {stalled}, "
+                        "so it can't land soon", None, _holder_root(db, dep, repo_root), True)
 
 
 # -- predicted conflicts between unmerged branches ------------------------------
@@ -1705,6 +1724,8 @@ def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | 
             continue
         break
     else:
+        # Stalled work it stopped waiting for, which no scan may find again.
+        warned = warned or next(_stalled_releases(db, t, caller_ws.repo_root), None)
         if warned is None:
             return True, excused.warning if excused else None
         clash, how = warned, "warn"

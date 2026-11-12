@@ -119,7 +119,10 @@ def test_worker_stalling_after_its_hold_releases_the_task(db, sessions):
     start = sessions.pending()
     assert not start()
     assert tasks._loads(db.get_task("new").depends_on) == ["bw2"]
-    # The worker pauses while b stays live: it won't merge, so a's task starts.
+    # The worker pauses while b stays live: it won't merge, so a's task
+    # starts, and both supervisors hear of the overlap though no scan finds it now.
     db.set_status("bw2", "paused")
+    sessions.told.clear()
     assert start()
     assert db.get_task("new").state == "started"
+    assert set(sessions.told) == {"a", "b"}
