@@ -14,6 +14,8 @@ import shutil
 import subprocess
 from collections import Counter
 
+import pytest
+
 from conftest import sh
 from brindle import agents, autopilot, git, session_sync, status_cache, tmux
 from brindle.daemon import events, session_review
@@ -39,6 +41,7 @@ def _repo_question(argv: list[str], names: dict[str, str]) -> str | None:
     return None
 
 
+@pytest.mark.variant("stale-cache guard: a kept git answer must be asked again when a file git reads for it changes, or brindle reports old state")
 def test_a_kept_answer_is_asked_again_when_a_file_git_reads_for_it_changes(repo):
     """What is kept must go when anything git reads for it moves, wherever
     that is: a remote named in a file the repo's config includes, and an
