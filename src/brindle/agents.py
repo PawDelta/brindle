@@ -3482,6 +3482,7 @@ def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, firs
         forwarded = f"{result}\n\n{usage_mod.summary_line(u, dollars, free)}"
     else:
         forwarded = result
+    no_commits = False
     if ws and agent.mode in ("handoff", "handoff_detached", "assign"):
         if first:
             pipeline.note_reported(db, ws, agent)
@@ -3489,12 +3490,23 @@ def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, firs
         if forward and pipeline.on_report(db, agent, ws, forwarded, outbox_id=outbox_id):
             return ("result recorded. brindle is having your branch reviewed; it will merge it, "
                     "or send you the review's findings to fix.")
+        if forward:
+            try:
+                no_commits = not git.ahead_behind(ws.path, workspaces.require_base(ws))[1]
+            except (git.GitError, workspaces.WorkspaceError):
+                pass   # an unknown branch state must not be described as empty
     if forward and agent.mode in FORWARDING_MODES and agent.parent_id:
         parent = db.get_agent(agent.parent_id)
         if parent is None:
             return "result recorded"   # no supervisor to tell: the report stays accepted, undelivered
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
-        body = condense(f"Assigned task finished{where}: {first_line(result)}", forwarded)
+        if no_commits:
+            head = (f"{agent.id} reported{where}: the branch has no commits to review or merge. "
+                    f'Close the worker with remove_workspace(id="{ws.id}"), '
+                    f"or keep it for follow-up work. Report: {first_line(result)}")
+        else:
+            head = f"Assigned task finished{where}: {first_line(result)}"
+        body = condense(head, forwarded)
         if outbox_id is None:
             send_message(db, agent.parent_id, body, sender_id=agent.id)
         elif db.outbox_deliver(outbox_id, message=_report_message(db, parent, body, agent.id)):
