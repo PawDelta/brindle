@@ -375,6 +375,59 @@ git writes escaped) is edited through its link) and
 second sidebar due 30 s after the first's sweep doesn't sweep; the
 unmodified code did).
 
+### S4. What S3 left in an idle sidebar's refresh (fixed)
+
+After S3, release.144 still measured about 60 processes a minute per idle
+`brindle watch --sidebar`. One idle refresh (every `IDLE_SECONDS`, 10 s),
+read with `subprocess.Popen.__init__` wrapped against a copy of this
+machine's database (15 workspaces shown), started 41 processes, every time:
+
+- **git, from a cache that never hit**: a worktree whose base branch was
+  deleted (6 here) makes `git rev-list <base>...HEAD` fail. A failure was
+  never cached, so `status_cache.cached_status` ran `git status` and the
+  failing `rev-list` again for each of its three callers in a refresh
+  (`warm`, `retired`, `workspace_entry`): 36 git per refresh.
+- **tmux, re-read every refresh**: `list-panes`; `capture-pane` for each
+  running agent whose status isn't idle (`agents.reconcile`, from
+  `view.agent_entry`); `display` for the terminal showing the pane
+  (`sidebar_logo.viewer`) and two for `agents.sidebar_come_home`; one
+  `display -t <pane> #{pane_dead}` per active worker from the goal line's
+  worker count (`autopilot.working_workers` judged liveness without the
+  refresh's pane snapshot); and, in a terminal that can't show the braid,
+  `display #{client_termfeatures}` every 10 s (`Braid.image`).
+
+Fix:
+
+- `status_cache.cached_status` (a wrapper around the cache, now
+  `_cached_status`) remembers a git failure while HEAD reads from the git
+  files and the base ref names nothing there, and fails again without git
+  while the fingerprint and refs are the very ones git failed under. The
+  base branch coming back (a loose ref, `packed-refs`, `origin/<base>`)
+  changes them, and git is asked again.
+- `watch.TmuxLook` keeps the refresh's pane snapshot while nothing says tmux
+  changed: a key, a database commit or a failed pass take it again, and so
+  does `TMUX_LOOK_SECONDS` (60 s) passing. Screens are read
+  (`view.snapshot(read_screens=...)`), and while quiet the viewer, the
+  sidebar's home and the braid are asked, only with a fresh look.
+- The goal line's worker count and a failed milestone's work state use the
+  refresh's pane snapshot (`autopilot.working_workers(..., panes)`,
+  `autopilot.work_state(..., panes)`).
+
+Test: `tests/test_idle_spawns_sidebar.py` drives `watch._loop` itself
+(a fake screen, a fake `tmux` on PATH, a real repo with a worktree whose
+base branch is gone, a session root with a failed milestone and a worker
+waiting on the person) and
+counts every process started across two unchanged refreshes after the
+first three: 18 on the unmodified code (4 of them git with only the
+status_cache part undone), none with the fix.
+
+What is left: an idle sidebar takes one fresh tmux look a minute
+(`list-panes`, then `display` for the viewer, two for its home, the braid's
+recheck where it can't show, and a `capture-pane` per running non-idle
+agent): about 5 processes a minute instead of 6 refreshes' worth. That look
+is what notices a CLI that died without writing the database, a missed
+follow hook and a status its hooks left stale.
+
 ### Other sources, measured and left as they are
 
 - **gh**: an open session PR costs one `gh pr view` per 90 s
