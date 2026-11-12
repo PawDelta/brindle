@@ -436,6 +436,7 @@ def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, mo
         "the same pane linked into another session still keeps it, now its agents are stopped")),
     pytest.param("merged", None, False, marks=pytest.mark.variant(
         "real incident (release.153): the pipeline's cleanup with no reviewer logged 'worktree kept: in use'")),
+    ("resumed", None, False),    # the retired sweep's worker is back at work before its removal
 ])
 def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipped, monkeypatch, cleanup, child,
                                                                  onlooker):
@@ -446,7 +447,10 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipp
     its environment (TMUX=, a PWD in the worktree) and its paths there look
     like brindle's, and nor is another session the pane is linked into.
     ``onlooker``: True, someone attached to its own session; "viewer" or
-    "other", its pane shown in an app view or in another session."""
+    "other", its pane shown in an app view or in another session.
+    "resumed": the sweep chose it while its worker was done, and the worker
+    resumes (status and CLI) during the sweep's dirty-files check: kept,
+    never stopped."""
     ws = shipped
     wt = os.path.realpath(ws.path)
     keep = None
@@ -465,7 +469,7 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipp
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
                            "@998", None, time.time()))
     else:
-        pane = "-zsh"
+        pane = "-bash" if cleanup == "resumed" else "-zsh"
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done",
                            "@999", None, time.time() - 7200))
     command = {"vite": f"node {wt}/node_modules/.bin/vite",
@@ -495,6 +499,15 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipp
     monkeypatch.setattr(agents, "is_alive", lambda a, *rest, **kw: a.id == "w1" and a.status == "waiting"
                         and "w1" not in stopped)
     monkeypatch.setattr(agents, "_stop", lambda db, a: stopped.append(a.id))
+    if cleanup == "resumed":   # after the sweep chose it, at its dirty-files check
+        dirty_files = git.dirty_files
+
+        def resume(path):
+            if (510, 500, f"claude --mcp-config {mcp}") not in rows:
+                db.set_status("w1", "waiting")
+                rows.extend([(510, 500, f"claude --mcp-config {mcp}"), (511, 510, "/u/.local/bin/brindle mcp")])
+            return dirty_files(path)
+        monkeypatch.setattr(git, "dirty_files", resume)
 
     if cleanup == "post-merge":
         pipeline._remove(db, ws, keep=keep)
@@ -506,7 +519,7 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipp
     else:
         cull.prune_retired(db)
 
-    removed = child is None and onlooker in (False, "viewer")
+    removed = child is None and onlooker in (False, "viewer") and cleanup != "resumed"
     assert Path(ws.path).is_dir() == (not removed)
     assert (db.get_workspace(ws.id) is None) == removed
     assert stopped == (["w1"] if removed and cleanup != "retired" else [])

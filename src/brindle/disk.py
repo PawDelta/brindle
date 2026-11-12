@@ -481,7 +481,7 @@ def remove_tree(db, path: str, *, states: tuple[str, ...] = (MERGED, ABANDONED),
     for ws in db.find_workspaces(root):
         if os.path.realpath(ws.path) == os.path.realpath(path):
             try:
-                workspaces.remove(db, ws, delete_branch=False)
+                workspaces.remove(db, ws, delete_branch=False, stop=())   # judged from ``trees``: stop nothing
             except workspaces.WorkspaceError as e:
                 raise CantClean(f"kept {path}: {e}") from e
     if os.path.isdir(path):

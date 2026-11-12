@@ -703,9 +703,11 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
     caller that itself runs in it (the pipeline's reviewer), which killing
     the session would take down mid-cleanup. ``stop``: agents of it to stop
     first, once the worktree is known to go: kept, it keeps them. None (the
-    default): every live agent of a worktree's, read just before the check
-    (none with ``keep_session``), whose own CLI and plumbing in the worktree
-    then don't keep it."""
+    default, for a removal someone asked for): every live agent of a
+    worktree's, read just before the check (none with ``keep_session``),
+    whose own CLI and plumbing in the worktree then don't keep it. A sweep
+    that chose the workspace from an earlier look passes ``()``: a worker
+    back at work since then keeps it."""
     from brindle import agents
 
     def stop_them():
