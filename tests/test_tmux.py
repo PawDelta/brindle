@@ -9,6 +9,8 @@ import shlex
 import shutil
 from types import SimpleNamespace
 
+import pytest
+
 from brindle import doctor, tmux
 
 
@@ -53,6 +55,7 @@ def test_a_pane_runs_in_its_worktree_on_a_server_whose_directory_was_deleted(tmp
     assert check.level == doctor.WARN
 
 
+@pytest.mark.variant("real incident 2026-11-12: the hook script's shell behaviour, which Python coverage can't see")
 def test_sidebar_hook_stays_silent_when_its_respawn_fails(tmp_path, monkeypatch):
     """A failed restart (the pane already gone) once exited 1, and tmux showed
     "'...' returned 1" over whatever pane the person was looking at."""
