@@ -790,7 +790,11 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
                 or not holds.app_connected() or plans.open_plan(db, root_id) is not None:
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
-        if workers:     # work already under way: an offer now would hold what was assigned
+        queued = db.conn.execute(
+            "SELECT 1 FROM tasks WHERE state != 'cancelled' AND created_at >= ? AND (caller_id = ? "
+            "OR caller_id IN (SELECT id FROM agents WHERE parent_id = ?)) LIMIT 1",
+            (ap.offer_goal_at or 0, root_id, root_id)).fetchone()
+        if workers or queued:   # work already assigned, started or queued: an offer now would hold it
             return
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
                 and db.open_plan_offer(root_id, ap.goal, plans.OFFER_OPEN + secrets.token_hex(4)):

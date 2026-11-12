@@ -123,15 +123,22 @@ def test_an_answer_belongs_to_the_offer_it_saw_and_a_grown_plan_is_offered(db, g
     assert (_offer(db), db.get_autopilot("boss").plan_offer) == (None, plans.OFFER_DISMISSED)
 
 
-@pytest.mark.variant("the reported bug: a 3rd parallel worker opened the offer and held urgent work")
-def test_parallel_workers_never_make_a_goal_deserve_an_offer(db, boss, goal_env):
-    """The reported bug: a third parallel worker opened the offer on an urgent fix and held its workers."""
+@pytest.mark.parametrize("assigned", ["started", "queued"])
+def test_assigned_work_never_makes_a_goal_deserve_an_offer(assigned, db, boss, goal_env):
+    """The reported bug: a 3rd parallel worker opened the offer and held urgent work.
+    Neither workers nor queued assignments open one, even when the goal then grows."""
     autopilot.set_goal(db, "boss", "Small goal", _plan(1))
     for i in range(4):
-        db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "working", "", None, time.time()))
+        if assigned == "started":
+            db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "working", "",
+                               None, time.time()))
+        else:
+            db.conn.execute("INSERT INTO tasks (id, repo_root, caller_id, caller_ws_id, profile, task_text, "
+                            "mode, isolate, state, created_at) VALUES (?, '/r', 'boss', 'ws', 'developer', "
+                            "'t', 'assign', 1, 'pending', ?)", (f"t{i}", time.time()))
         autopilot.consider_plan_offer(db, "boss")
     assert _offer(db) is None
-    autopilot.set_goal(db, "boss", "Small goal", _plan(6))     # grown after work started: still not held
+    autopilot.set_goal(db, "boss", "Small goal", _plan(6))     # grown after work was assigned: still not held
     assert _offer(db) is None
 
 
