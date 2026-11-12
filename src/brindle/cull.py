@@ -1350,7 +1350,9 @@ def prune_retired(db: DB, now: float | None = None, *, cautious: bool = False) -
             done.append(f"kept {ws.branch}: merged, but {len(dirty)} uncommitted file(s) in {ws.path}")
             continue
         try:
-            removed = workspaces.remove(db, ws)
+            # Chosen from an earlier look: stop nothing, so a worker that is back
+            # at work since keeps it (its CLI is then in use there).
+            removed = workspaces.remove(db, ws, stop=())
         except (workspaces.WorkspaceError, git.GitError) as e:
             done.append(f"kept {ws.branch}: {e}")
             continue
