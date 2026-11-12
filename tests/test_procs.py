@@ -70,7 +70,9 @@ LEFT_TO_A_CULL = {      # these close the window and leave the processes to the 
 }
 
 
-@pytest.mark.parametrize("how", [*CLOSES, *LEFT_TO_A_CULL])
+@pytest.mark.parametrize("how", [pytest.param(h, marks=pytest.mark.variant(
+    "each stop path must stop the CLI's shells before its window closes (the 0.6.3 leak)"))
+    for h in [*CLOSES, *LEFT_TO_A_CULL]])
 def test_a_stop_leaves_nothing_the_agents_cli_started(db, monkeypatch, how):
     db.add_workspace(Workspace("w", "/repo", "w", "worktree", "main", "main", "/repo", None, "s", 1.0))
     db.add_agent(Agent("a1", "w", "developer", "claude", None, "interactive", "idle", "%7", None, time.time()))
@@ -155,7 +157,7 @@ NOTED = {   # (before the note, after it, why it's a variant, what is ended)
 
 
 @pytest.mark.parametrize("case", [
-    pytest.param(case, marks=pytest.mark.variant(why)) if why else case
+    pytest.param(case, marks=pytest.mark.variant(why or "a close's leftovers: only what it left, never anything else"))
     for case, (_, _, why, _) in NOTED.items()])
 def test_what_a_close_left_behind_is_ended_and_nothing_else(monkeypatch, case):
     """Only what a close left without its CLI is ended (procs.hand_off,
@@ -185,8 +187,9 @@ SIGNALS = {   # (what happens as a signal reaches a pid, the signals then sent)
 
 
 @pytest.mark.parametrize("case", [
-    pytest.param(c, marks=pytest.mark.variant("a race: an earlier signal of the batch frees a later pid"))
-    if c.startswith("the next") else c for c in SIGNALS])
+    pytest.param(c, marks=pytest.mark.variant("a race: an earlier signal of the batch frees a later pid"
+                                              if c.startswith("the next") else "a reused pid is never signalled"))
+    for c in SIGNALS])
 def test_a_pid_that_came_round_again_is_never_signalled(monkeypatch, case):
     """terminate with the births it was given reads each pid's birth again
     just before each of its signals: another's process on the pid gets

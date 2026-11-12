@@ -135,6 +135,7 @@ def test_idle_sync_quiet_session(db, repo, sess, other, told, monkeypatch):
     assert len([m for m in told if m[0] == "other-lead"]) == 1
 
 
+@pytest.mark.variant("the idle git storm measured live: 14 git calls per session every 5 s")
 def test_a_sweep_starts_no_git_for_a_session_whose_refs_have_not_moved(db, repo, sess, other, monkeypatch):
     """The daemon sweeps every few seconds: an idle, synced session costs no
     process until its HEAD or origin/main moves, and is synced again then;

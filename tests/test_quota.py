@@ -11,6 +11,7 @@ import pytest
 from brindle import providers, quota, spawn
 
 
+@pytest.mark.variant("the spawn source measured live: several sidebars each started their own usage run")
 def test_sidebars_share_one_claude_usage_run_per_refresh(monkeypatch):
     """Each sidebar is a process of its own with its own refresh clock; the
     claude CLI that answers /usage starts once per refresh for all of them."""
