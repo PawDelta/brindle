@@ -2,6 +2,7 @@
 abandoned ones reported, retention of brindle's own files, the free-disk
 guard, and dead branches."""
 
+import contextlib
 import dataclasses
 import errno
 import json
@@ -421,38 +422,60 @@ def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, mo
     assert Path(path).is_dir()
 
 
-@pytest.mark.parametrize("cleanup,child,attached", [
+@pytest.mark.parametrize("cleanup,child,onlooker", [
     ("retired", None, False),
     ("retired", "vite", False),
     ("retired", "pytest", False),
     ("retired", None, True),     # someone sits in its shell pane
     ("post-merge", None, False),
     ("post-merge", "vite", False),
+    pytest.param("tool", None, False, marks=pytest.mark.variant(
+        "real incident (release.153): remove_workspace refused a reported, idle worker for its own CLI and MCP")),
+    ("tool", None, "viewer"),    # the app's terminal view shows the worker's pane
+    pytest.param("tool", None, "other", marks=pytest.mark.variant(
+        "the same pane linked into another session still keeps it, now its agents are stopped")),
+    pytest.param("merged", None, False, marks=pytest.mark.variant(
+        "real incident (release.153): the pipeline's cleanup with no reviewer logged 'worktree kept: in use'")),
+    pytest.param("resumed", None, False, marks=pytest.mark.variant(
+        "a race from review: the retired sweep's worker resumes between selection and removal")),
 ])
 def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipped, monkeypatch, cleanup, child,
-                                                                 attached):
+                                                                 onlooker):
     """What the removal ends (the pane's own process when its session is
-    killed, the agents the pipeline stops) is excused; a dev server or test
-    run started in the workspace's own pane is not, though its environment
-    (TMUX=, a PWD in the worktree) and its paths there look like brindle's."""
+    killed, the agents it stops: by default every live one, with its CLI and
+    MCP server) is excused, and so is the app's view of that pane; a dev
+    server or test run started in the workspace's own pane is not, though
+    its environment (TMUX=, a PWD in the worktree) and its paths there look
+    like brindle's, and nor is another session the pane is linked into.
+    ``onlooker``: True, someone attached to its own session; "viewer" or
+    "other", its pane shown in an app view or in another session.
+    "resumed": the sweep chose it while its worker was done, and the worker
+    resumes (status and CLI) during the sweep's dirty-files check: kept,
+    never stopped."""
     ws = shipped
     wt = os.path.realpath(ws.path)
     keep = None
+    mcp = json.dumps({"mcpServers": {"brindle": {"env": {
+        "BRINDLE_AGENT_ID": "w1", "BRINDLE_HOME": os.environ.get("BRINDLE_HOME")}}}})
+    cli = []   # the worker's CLI and its brindle MCP server, under the pane's shell
     if cleanup == "post-merge":   # the worker's CLI in the pane; the approving reviewer runs this
-        mcp = json.dumps({"mcpServers": {"brindle": {"env": {
-            "BRINDLE_AGENT_ID": "w1", "BRINDLE_HOME": os.environ.get("BRINDLE_HOME")}}}})
         pane = f"claude --mcp-config {mcp}"
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
                            "@998", None, time.time()))
         keep = Agent("r1", ws.id, "reviewer", "claude", None, "review", "done", "@999", None, time.time())
         db.add_agent(keep)
+    elif cleanup in ("tool", "merged"):
+        pane = "-bash"
+        cli = [(510, 500, f"claude --mcp-config {mcp}"), (511, 510, "/u/.local/bin/brindle mcp")]
+        db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
+                           "@998", None, time.time()))
     else:
-        pane = "-zsh"
+        pane = "-bash" if cleanup == "resumed" else "-zsh"
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done",
                            "@999", None, time.time() - 7200))
     command = {"vite": f"node {wt}/node_modules/.bin/vite",
                "pytest": f"{wt}/.venv/bin/python3 {wt}/.venv/bin/pytest -q"}.get(child)
-    rows = [(500, 1, pane)] + ([(501, 500, command)] if command else [])
+    rows = [(500, 1, pane)] + cli + ([(501, 500, command)] if command else [])
     env = f"TMUX=/private/tmp/tmux-501/default,1,0 PWD={wt} HOME=/u"
 
     def ps(argv, **kw):   # the faked process table, read as procs.table reads it
@@ -468,22 +491,70 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipp
     monkeypatch.setattr(procs, "cwds", lambda *_: {pid: wt for pid, _ppid, _cmd in rows}
                         | {os.getpid(): os.getcwd()})
     real_panes, real_sessions = tmux.session_panes, tmux.list_sessions
-    monkeypatch.setattr(tmux, "session_panes", lambda s: [(500, wt)] if s == ws.tmux_session else real_panes(s))
-    monkeypatch.setattr(tmux, "list_sessions", lambda: real_sessions() + [(ws.tmux_session, attached)])
+    shown = {"viewer": "brindle-view-4321-1", "other": "someone-else"}.get(onlooker)   # the app's view names
+    monkeypatch.setattr(tmux, "session_panes", lambda s: [(500, wt)] if s in (ws.tmux_session, shown)
+                        else real_panes(s))
+    monkeypatch.setattr(tmux, "list_sessions", lambda: real_sessions() + [(ws.tmux_session, onlooker is True)]
+                        + ([(shown, True)] if shown else []))
     stopped = []
     monkeypatch.setattr(agents, "is_alive", lambda a, *rest, **kw: a.id == "w1" and a.status == "waiting"
                         and "w1" not in stopped)
     monkeypatch.setattr(agents, "_stop", lambda db, a: stopped.append(a.id))
+    if cleanup == "resumed":   # after the sweep chose it, at its dirty-files check
+        dirty_files = git.dirty_files
+
+        def resume(path):
+            if (510, 500, f"claude --mcp-config {mcp}") not in rows:
+                db.set_status("w1", "waiting")
+                rows.extend([(510, 500, f"claude --mcp-config {mcp}"), (511, 510, "/u/.local/bin/brindle mcp")])
+            return dirty_files(path)
+        monkeypatch.setattr(git, "dirty_files", resume)
 
     if cleanup == "post-merge":
         pipeline._remove(db, ws, keep=keep)
+    elif cleanup == "merged":
+        pipeline._remove(db, ws)
+    elif cleanup == "tool":
+        with contextlib.suppress(workspaces.WorkspaceError):
+            workspaces.remove(db, ws, delete_branch=True)
     else:
         cull.prune_retired(db)
 
-    removed = child is None and not attached
+    removed = child is None and onlooker in (False, "viewer") and cleanup != "resumed"
     assert Path(ws.path).is_dir() == (not removed)
     assert (db.get_workspace(ws.id) is None) == removed
-    assert stopped == (["w1"] if removed and keep else [])
+    assert stopped == (["w1"] if removed and cleanup != "retired" else [])
+
+
+def test_pipeline_cleanup_keeps_worker_messaged_after_initial_check(db, shipped, monkeypatch):
+    ws = shipped
+    worker = Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
+                   "@998", "Ready", 1)
+    db.add_agent(worker)
+    stopped = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, *args, **kw: a.id not in stopped)
+    monkeypatch.setattr(agents, "reconcile", lambda db, a, **kw: a)
+    monkeypatch.setattr(agents, "_stop", lambda db, a: stopped.append(a.id))
+    monkeypatch.setattr(disk, "live_in", lambda *args, **kw: False)
+    monkeypatch.setattr(pipeline, "_try_merge", lambda *args: "Merged shipped")
+    notices = []
+
+    def tell(db, parent_id, text, sender_id):
+        notices.append(text)
+        if len(notices) == 1:
+            assert db.pending_count(worker.id) == 0
+            db.enqueue(worker.id, "Please handle the follow-up", None)
+
+    monkeypatch.setattr(pipeline, "_tell", tell)
+
+    pipeline._finish_locked(db, worker, ws, None)
+
+    assert Path(ws.path).is_dir()
+    assert db.get_workspace(ws.id) is not None
+    assert db.get_agent(worker.id) is not None
+    assert stopped == []
+    assert db.pending_count(worker.id) == 1
+    assert len(notices) == 2
 
 
 def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, old_worktree, monkeypatch):
