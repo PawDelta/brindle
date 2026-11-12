@@ -527,8 +527,58 @@ def _handed_path() -> Path:
     return brindle_home() / HANDED
 
 
+def births(pids: set[int] | list[int]) -> dict[int, str]:
+    """When each of ``pids`` that runs now was started, as the kernel tells
+    it: with the pid, who a process is. A pid that comes round again has a
+    later birth; a process that execs another program keeps its own.
+    Linux: the start time in clock ticks since boot, with the boot's id;
+    macOS: ``ps``'s start time (to the second, a wall-clock date)."""
+    pids = sorted(set(pids))
+    if not pids:
+        return {}
+    out: dict[int, str] = {}
+    if (PROC / "self" / "stat").exists():
+        try:
+            boot = (PROC / "sys" / "kernel" / "random" / "boot_id").read_text().strip()
+        except OSError:
+            boot = "?"
+        for pid in pids:
+            try:
+                after = (PROC / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            out[pid] = f"{boot}:{after[19]}"      # field 22: starttime
+        return out
+    # One listing of every process, not ``-p`` with the list: ps refuses that
+    # whole when one entry isn't a valid pid, and a record can hold anything.
+    wanted = set(pids)
+    listing = spawn.read(["ps", "-axo", "pid=,lstart="], timeout=PS_LIMIT).stdout
+    for line in listing.splitlines():
+        pid, _, started = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) in wanted and started.strip():
+            out[int(pid)] = " ".join(started.split())
+    return out
+
+
+def _tree(roots: list[int], procs: dict[int, Proc]) -> set[int]:
+    """``roots`` and what they started, as :func:`descendants`, but never
+    Claude Code's daemon or anything under it (the sessions it hosts are
+    other agents' too), nor this process or its ancestors."""
+    children: dict[int, list[int]] = {}
+    for p in procs.values():
+        children.setdefault(p.ppid, []).append(p.pid)
+    skip, found, queue = _ancestors(procs), set(), [r for r in roots if r in procs]
+    while queue:
+        pid = queue.pop()
+        if pid in found or pid in skip or _is_daemon(procs[pid]):
+            continue
+        found.add(pid)
+        queue.extend(children.get(pid, []))
+    return found
+
+
 def _update_handed(change) -> object:
-    """Apply ``change`` to the records ({pid: [command line, noted at]}) under
+    """Apply ``change`` to the records ({pid: [birth, noted at]}) under
     an exclusive lock, written to a temporary file of its own and moved into
     place; returns what ``change`` returned."""
     import fcntl
@@ -560,7 +610,7 @@ def hand_off(roots: list[int], procs: dict[int, Proc] | None = None, now: float 
         return 0
     procs = table() if procs is None else procs
     now = time.time() if now is None else now
-    found = {pid: [command_line(procs[pid]), now] for pid in descendants(roots, procs) if pid in procs}
+    found = {pid: [born, now] for pid, born in births(_tree(roots, procs)).items()}
 
     def add(records: dict) -> None:
         records.update(found)
@@ -570,30 +620,35 @@ def hand_off(roots: list[int], procs: dict[int, Proc] | None = None, now: float 
     return len(found)
 
 
-def handed_orphans(procs: dict[int, Proc], now: float | None = None) -> set[int]:
-    """What closed panes left running (hand_off): each noted process that is
-    still there with the same command line and whose noted parents lead to
-    launchd (they lost the CLI that started them). Those are forgotten here, as are the
-    noted ones that have gone or grown too old; the rest wait for a later look."""
+def handed_orphans(procs: dict[int, Proc] | None = None, now: float | None = None) -> set[int]:
+    """What closed panes left running (hand_off), to be ended at once: each
+    noted process that is still the one noted (its birth, see births) and
+    whose noted parents lead to launchd (they lost the CLI that started
+    them), with whatever it has started since (never Claude Code's daemon or
+    what it hosts). Read from the process table as it is now (``procs``:
+    a table just read). What is returned is noted too, until a later look
+    finds it gone; records of processes gone, or grown too old, are dropped."""
+    if not _handed_path().exists():
+        return set()
     now = time.time() if now is None else now
-    skip = _ancestors(procs)
 
     def take(records: dict) -> set[int]:
-        for pid in [pid for pid, (cmd, at) in records.items()
-                    if pid not in procs or command_line(procs[pid]) != cmd or now - at > HANDED_MAX_AGE]:
+        current = table() if procs is None else procs
+        born = births([pid for pid in records if pid in current])
+        for pid in [pid for pid, (birth, at) in records.items()
+                    if born.get(pid) != birth or now - at > HANDED_MAX_AGE]:
             del records[pid]
+
         def orphaned(pid: int) -> bool:
             seen = set()
             while pid in records and pid not in seen:
                 seen.add(pid)
-                pid = procs[pid].ppid
+                pid = current[pid].ppid
             return pid == 1
 
-        out = {pid for pid in records if pid not in skip and orphaned(pid)}
-        for pid in out:
-            del records[pid]
-        return out
+        out = _tree([pid for pid in records if orphaned(pid)], current)
+        for pid, birth in births(out - set(records)).items():   # started since the note
+            records[pid] = [birth, now]
+        return out & set(records)
 
-    if not _handed_path().exists():
-        return set()
     return _update_handed(take)  # type: ignore[return-value]

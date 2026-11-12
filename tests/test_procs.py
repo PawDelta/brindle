@@ -26,9 +26,17 @@ class _World:
                      5002: procs.Proc(5002, 5001, shell, shell),
                      5003: procs.Proc(5003, 5002, "python -m pytest", "python -m pytest")}
         self.stopped: set[int] = set()
+        self.born = {pid: f"born {pid}" for pid in self.rows}
 
     def table(self) -> dict[int, procs.Proc]:
         return dict(self.rows)
+
+    def births(self, pids) -> dict[int, str]:
+        return {pid: self.born[pid] for pid in pids if pid in self.rows}
+
+    def start(self, pid: int, ppid: int, cmd: str) -> None:
+        self.rows[pid] = procs.Proc(pid, ppid, cmd, cmd)
+        self.born[pid] = f"born {pid} again" if pid in self.born else f"born {pid}"
 
     def close_window(self, *targets, **batch) -> None:
         if targets or batch.get("windows") or batch.get("sessions"):
@@ -64,6 +72,7 @@ def test_a_stop_leaves_nothing_the_agents_cli_started(db, monkeypatch, how):
     db.add_agent(Agent("a1", "w", "developer", "claude", None, "interactive", "idle", "%7", None, time.time()))
     world = _World("a1")
     monkeypatch.setattr(procs, "table", world.table)
+    monkeypatch.setattr(procs, "births", world.births)
     monkeypatch.setattr(procs, "terminate", world.terminate)
     monkeypatch.setattr(tmux, "kill_window", world.close_window)
     monkeypatch.setattr(tmux, "close", world.close_window)
@@ -86,12 +95,62 @@ def test_a_stop_leaves_nothing_the_agents_cli_started(db, monkeypatch, how):
     assert set(world.rows) <= {5001}
 
 
-def test_a_noted_process_is_left_while_it_still_has_its_parent_or_is_someone_elses(monkeypatch):
-    """Only what a close left without its CLI is ended: a noted process
-    whose parent still runs, or whose pid now runs another command, stays."""
-    world = _World("a1")
-    procs.hand_off([5001], world.table())
-    world.rows[5003] = procs.Proc(5003, 1, "vim notes.txt", "vim notes.txt")   # its pid came round again
-    assert procs.handed_orphans(world.table()) == set()
+def _not_closed(world):
+    """The pane's CLI still runs: what it started still has its parent."""
+
+
+def _pid_reused(world):
+    """The test run ended and its pid came round again, for the same command,
+    to a process of the person's own that launchd adopted."""
     world.close_window("%7")
-    assert procs.handed_orphans(world.table()) == {5002}
+    world.start(5003, 1, "python -m pytest")
+
+
+def _execed(world):
+    """The shell exec'd the program it ran: the same process, another command."""
+    world.close_window("%7")
+    world.rows[5002].cmd = world.rows[5002].text = "uv run pytest"
+
+
+def _child_since(world):
+    """The shell started another command after the note, before the cull."""
+    world.start(5004, 5002, "node dev-server")
+    world.close_window("%7")
+
+
+def _daemon_under_the_pane(world):
+    """The pane's CLI had started Claude Code's daemon, which hosts another
+    agent's session; the daemon outlives the close."""
+    world.start(5005, 5001, "/usr/local/bin/claude daemon run")
+    world.start(5006, 5005, "/usr/local/bin/claude --resume other-session")
+
+
+NOTED = {
+    "its parent still runs": (_not_closed, None, set()),
+    "its pid came round again": (_pid_reused, None, {5002}),
+    "it exec'd another program": (_execed, "a process keeps its birth across exec", {5002, 5003}),
+    "it started a child since the note": (_child_since, None, {5002, 5003, 5004}),
+    "the pane had started Claude's daemon": (_daemon_under_the_pane, None, {5002, 5003}),
+}
+
+
+@pytest.mark.parametrize("case", [
+    pytest.param(case, marks=pytest.mark.variant(why)) if why else case
+    for case, (_, why, _) in NOTED.items()])
+def test_what_a_close_left_behind_is_ended_and_nothing_else(monkeypatch, case):
+    """Only what a close left without its CLI is ended (procs.hand_off,
+    handed_orphans): told by its birth, not its pid or command, with what it
+    started since, and never Claude Code's daemon or what it hosts."""
+    happen, _, ended = NOTED[case]
+    world = _World("a1")
+    monkeypatch.setattr(procs, "table", world.table)
+    monkeypatch.setattr(procs, "births", world.births)
+    if case == "the pane had started Claude's daemon":
+        happen(world)
+        procs.hand_off([5001])
+        world.close_window("%7")
+        world.rows[5005].ppid = 1
+    else:
+        procs.hand_off([5001])
+        happen(world)
+    assert procs.handed_orphans() == ended

@@ -77,15 +77,27 @@ then close the window. `procs.stop` already skips the caller and its
 ancestors, so a pause running in the chat's own pane (`_ended`) is still safe.
 
 Fix, closes left to a cull: just before the close, `procs.hand_off` notes
-every process under the panes about to close (pid and command line) in
-`<brindle home>/closing-procs.json`. The record is written under a lock to a
-temporary file of its own and then moved into place. Each cull sweep then
-ends, through `procs.handed_orphans`, each noted process that is still running
-the same command line and whose chain of noted parents now leads to launchd,
-i.e. one the close left without its CLI. A noted process whose parent still
-runs, or whose pid now runs another command, is left alone. Records go once
-their process has gone, or after a day. This uses one `tmux list-panes` and
-one process-table read per close, and no waiting.
+every process under the panes about to close in
+`<brindle home>/closing-procs.json`. Each process is noted by its pid and its
+birth (`procs.births`: the kernel's start time, with the boot id on Linux,
+and `ps`'s start time on macOS). Claude Code's daemon and everything under it
+are never noted: the sessions it hosts may be other agents'. The record is
+written under a lock to a temporary file of its own and then moved into
+place.
+
+Each cull sweep then calls `procs.handed_orphans`. It reads the process table
+and the births as they are at that moment, not the table the sweep began
+with. It ends each noted process that is still the one noted (same pid, same
+birth) and whose chain of noted parents now leads to launchd, i.e. one the
+close left without its CLI. It also ends whatever that process has started
+since the note, again leaving out the daemon and what it hosts.
+
+What it ends stays noted until a later sweep finds it gone. A process that
+exec'd another program keeps its birth, so it is still found. A noted pid
+that came round again to another process, even one running the same command,
+has a later birth and is dropped. A noted process whose parent still runs is
+left alone. Records also go after a day. This costs one `tmux list-panes`, a
+process-table read and a start-time read per close, and no waiting.
 
 Test: `tests/test_procs.py::test_a_stop_leaves_nothing_the_agents_cli_started`,
 one row per path: session pause, worker stop, session pause left to a cull,
@@ -94,9 +106,15 @@ process table in which closing the window ends the CLI and reparents its Bash
 shell (and the test run under it) to launchd; the last three rows run a real
 cull sweep after the close. On the unmodified code nothing is stopped
 (`set() >= {5002, 5003}` fails) in every row; with the cull's new step set
-aside, the three deferred rows still fail. A second test checks that a noted
-process with a live parent, or whose pid came round to another command, is
-not ended.
+aside, the three deferred rows still fail.
+`test_what_a_close_left_behind_is_ended_and_nothing_else` covers five
+cases: a live parent (nothing ended), a pid that came round again for the
+same command (the new process is spared), an exec (still ended), a child
+started after the note (ended too) and a Claude daemon started from the pane
+(neither it nor the session it hosts is ended).
+
+What is left: a child started during the few seconds between SIGTERM and
+SIGKILL, by a process that then dies, is noted by no one.
 
 The resume path's kill (`agents.resume`, for a failed or settling agent) is
 reordered like the other synchronous stops. It has no test row of its own:
