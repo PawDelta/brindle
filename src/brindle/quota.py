@@ -10,6 +10,7 @@ State lives in ``~/.brindle/quota.json``, one entry per provider.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -263,6 +264,9 @@ CLAUDE_USAGE_TIMEOUT = 30
 _USAGE_LINE = re.compile(r"^\s*Current (session|week)(?: \(([^)]+)\))?:\s*(\d+(?:\.\d+)?)% used"
                          r"(?:\s*·\s*resets (.+?))?\s*(?:\(([^)]+)\))?\s*$")
 _claude_usage_at = 0.0
+# Every sidebar asks; this file's mtime is when any process of this brindle
+# home last did, so N sidebars start one claude CLI per refresh, not N.
+CLAUDE_USAGE_STAMP = "claude-usage.stamp"
 
 
 def _reset_time(text: str, zone: str | None, now: float) -> float | None:
@@ -310,6 +314,31 @@ def parse_claude_usage(text: str, now: float | None = None) -> list[Window]:
     return windows
 
 
+def _claim_usage_refresh(force: bool) -> float | None:
+    """Claim this refresh for this process: under a lock that every process
+    of this brindle home takes, the shared stamp is read and, when a refresh
+    is due (or ``force``), set to now before the lock is let go, so two
+    sidebars looking at once can't both find it due. None when this process
+    asks; otherwise when the other one did. A stamp that can't be used at
+    all (an unwritable home) claims nothing: this process asks."""
+    stamp = brindle_home() / CLAUDE_USAGE_STAMP
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        with open(stamp.with_name(stamp.name + ".lock"), "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                asked = stamp.stat().st_mtime
+            except FileNotFoundError:
+                asked = 0.0
+            if not force and time.time() - asked < CLAUDE_USAGE_REFRESH_SECONDS:
+                return asked
+            stamp.touch()
+            os.utime(stamp)
+    except OSError:
+        pass
+    return None
+
+
 def refresh_claude_usage(*, force: bool = False) -> bool:
     """Ask ``claude -p /usage`` (Claude Code reads the plan's usage itself;
     brindle never touches its credentials) at most every
@@ -322,12 +351,19 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
 
     if not force and time.time() - _claude_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
         return False
+    asked = _claim_usage_refresh(force)
+    if asked is not None:
+        _claude_usage_at = asked     # another process asked: its answer is in the shared record
+        return False
     _claude_usage_at = time.time()
     if _key_billed("claude"):
         return False
     try:
-        proc = spawn.read([claude_binary(), "-p", "/usage"], timeout=CLAUDE_USAGE_TIMEOUT,
-                          cwd=str(brindle_home()))
+        # No MCP servers: the answer needs none, and each would be one more
+        # process started (and inspected) every few minutes. ``reap``: nothing
+        # the CLI leaves in its process group outlives the answer.
+        proc = spawn.read([claude_binary(), "-p", "--strict-mcp-config", "/usage"],
+                          timeout=CLAUDE_USAGE_TIMEOUT, cwd=str(brindle_home()), reap=True)
     except (OSError, subprocess.TimeoutExpired):
         return False
     windows = parse_claude_usage(proc.stdout) if proc.returncode == 0 else []

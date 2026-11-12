@@ -347,12 +347,19 @@ def default_call(repo_root: str, db: DB | None = None) -> ModelCall:
     profile_name = chosen.name if chosen else "claude"
 
     def claude(prompt: str) -> str:
+        from brindle import spawn
+        from brindle.model_access import NO_TOOLS
+
         binary = providers.claude_binary()
-        argv = [binary, "-p", "--output-format", "json", "--model", model]
+        # Review findings are text brindle doesn't control: no tools, and no
+        # MCP servers for a call that only groups them. In a session of its
+        # own, so a timeout stops everything the CLI started, and anything it
+        # leaves running once it has answered is stopped too (reap).
+        argv = [binary, "-p", "--output-format", "json", "--model", model, *NO_TOOLS]
         try:
-            proc = subprocess.run(argv, input=prompt, capture_output=True, text=True,
-                                  timeout=CALL_TIMEOUT, cwd=repo_root)
-        except (OSError, subprocess.TimeoutExpired) as e:
+            proc = spawn.read(argv, input=prompt, timeout=CALL_TIMEOUT, cwd=repo_root, reap=True,
+                              to_its_end=True)
+        except (OSError, subprocess.SubprocessError, spawn.Busy) as e:
             raise LearnedRulesError(f"the grouping step's claude call failed: {e}") from e
         if proc.returncode != 0:
             raise LearnedRulesError(f"the grouping step's claude call failed: {proc.stderr.strip()[:300]}")
