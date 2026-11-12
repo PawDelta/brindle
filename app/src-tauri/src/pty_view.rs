@@ -462,6 +462,18 @@ fn crop_now(tmux_bin: &Path, server: &[String], view: &str, visible: u16, client
     Some(crop_of(&panes, visible, on))
 }
 
+/// Dispatch crop reads from the redraw channel. Keeping the receive separate
+/// lets tests drive idle ticks and disconnects without a clock or a tmux server.
+fn watch_crops(mut next: impl FnMut() -> Result<(), mpsc::RecvTimeoutError>, mut look: impl FnMut()) {
+    loop {
+        match next() {
+            Ok(()) => look(),
+            Err(mpsc::RecvTimeoutError::Timeout) => {},
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
 /// The pty `master` set to `size` (the view's own, in cells) and `crop`'s columns besides.
 #[cfg(unix)]
 fn set_size(master: &File, size: (u16, u16), crop: Crop) -> Result<(), String> {
@@ -807,18 +819,19 @@ impl PtyView {
         // The crop looked at again after the client draws: a layout change (a sidebar
         // split, moved, closed, a pane zoomed) is redrawn, and so is the window panned
         // on the client, so each is followed by bytes. One look at a time, a little
-        // after the bytes that asked for it; and each second besides, for a sidebar
-        // marked (its pane option set) after it was drawn, which redraws nothing. Until
-        // the client's output ends.
+        // after the bytes that asked for it. Idle ticks must not probe tmux: each
+        // probe starts list-panes and list-clients. Brindle marks a new sidebar
+        // before starting it (sidebar_follow::_create_sidebar), so its first draw
+        // also reveals its tag. The watcher ends with the client's output.
         let (redrawn, looks) = mpsc::sync_channel::<()>(1);
         {
             let (tmux_bin, server, view, master, size) = (tmux_bin.to_path_buf(), server.clone(), view.clone(), master.clone(), size.clone());
             std::thread::spawn(move || {
-                while !matches!(looks.recv_timeout(std::time::Duration::from_secs(1)), Err(mpsc::RecvTimeoutError::Disconnected)) {
+                watch_crops(|| looks.recv_timeout(std::time::Duration::from_secs(1)), || {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     while looks.try_recv().is_ok() {}
                     let visible = size.lock().unwrap_or_else(|e| e.into_inner()).0 .0;
-                    let Some(crop) = crop_now(&tmux_bin, &server, &view, visible, Some(client)) else { continue };
+                    let Some(crop) = crop_now(&tmux_bin, &server, &view, visible, Some(client)) else { return };
                     let mut size = size.lock().unwrap_or_else(|e| e.into_inner());
                     if size.1 != crop {
                         let resized = size.1.cols != crop.cols;
@@ -831,7 +844,7 @@ impl PtyView {
                     }
                     drop(size);
                     std::thread::sleep(std::time::Duration::from_millis(50));
-                }
+                });
             });
         }
         let (input, keys) = mpsc::channel::<Vec<u8>>();
@@ -1999,6 +2012,25 @@ mod tests {
         view.write(b"\x1b[23;8~");
         server.wait("C-c didn't reach the pane", |_| pane().contains("interrupted"));
         assert_eq!(shown().matches("\x1b]52;").count(), 1);
+    }
+
+    #[test]
+    fn idle_desktop_does_not_probe_crops_without_a_redraw() {
+        use mpsc::RecvTimeoutError::{Disconnected, Timeout};
+
+        // The real watcher's dispatch, with ticks instead of wall-clock waits.
+        // Each dispatched look runs crop_now's list-panes and list-clients.
+        let mut events = [Err(Timeout), Err(Timeout), Ok(()), Err(Timeout),
+            Err(Timeout), Ok(()), Err(Timeout), Err(Disconnected), Ok(())].into_iter();
+        let event = std::cell::Cell::new(0);
+        let mut probes = Vec::new();
+        watch_crops(|| {
+            event.set(event.get() + 1);
+            events.next().expect("the watcher must stop on disconnect")
+        }, || probes.push(event.get()));
+
+        assert_eq!(probes, [3, 6], "only redraws may start crop probes");
+        assert_eq!(event.get(), 8, "disconnect stops the watcher");
     }
 
     #[test]
