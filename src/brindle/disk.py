@@ -298,12 +298,12 @@ def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, ow
                 if attached and not keep_session:
                     return True
                 continue
-            # The app's view of a window links that very pane: one the removal
-            # ends is brindle's own viewer, not another session's.
             view = name.startswith(tmux.VIEW_PREFIX)
-            if any(p and _inside(os.path.realpath(p), real) and not (view and pid in excused)
-                   for pid, p in tmux.session_panes(name)):
-                return True
+            for pid, p in tmux.session_panes(name):
+                if view and pid in excused:
+                    continue   # the app's view links that very pane, which the removal ends
+                if p and _inside(os.path.realpath(p), real):
+                    return True
     except tmux.TmuxTimeout:
         return True
     return False

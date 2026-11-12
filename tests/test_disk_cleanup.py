@@ -429,11 +429,13 @@ def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, mo
     ("retired", None, True),     # someone sits in its shell pane
     ("post-merge", None, False),
     ("post-merge", "vite", False),
-    ("tool", None, False),       # remove_workspace on a reported, idle worker
+    pytest.param("tool", None, False, marks=pytest.mark.variant(
+        "real incident (release.153): remove_workspace refused a reported, idle worker for its own CLI and MCP")),
     ("tool", None, "viewer"),    # the app's terminal view shows the worker's pane
     pytest.param("tool", None, "other", marks=pytest.mark.variant(
         "the same pane linked into another session still keeps it, now its agents are stopped")),
-    ("merged", None, False),     # the pipeline's cleanup with no reviewer to keep
+    pytest.param("merged", None, False, marks=pytest.mark.variant(
+        "real incident (release.153): the pipeline's cleanup with no reviewer logged 'worktree kept: in use'")),
 ])
 def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipped, monkeypatch, cleanup, child,
                                                                  onlooker):
