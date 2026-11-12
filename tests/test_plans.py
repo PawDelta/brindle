@@ -383,7 +383,8 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
 
 
 @pytest.mark.parametrize("how", [
-    "declined",
+    pytest.param("declined", marks=pytest.mark.variant(
+        "the owner's reported case: declined, then the goal grew and was asked again")),
     pytest.param("approved", marks=pytest.mark.variant("an offer accepted and its plan approved: asked once as well")),
     pytest.param("direct", marks=pytest.mark.variant(
         "a small goal never offered, then a plan the person asked for and approved, then the goal grows")),
