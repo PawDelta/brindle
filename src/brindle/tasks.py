@@ -952,7 +952,9 @@ def _other_sessions_landing(db: DB, dep: str, ws: Workspace, caller_id: str | No
         return False
     from brindle import autopilot
 
-    roots = {autopilot.root_of(db, a.id) for a in db.list_agents(ws.id)}
+    # Only a real session's work: a worker with no supervisor belongs to none.
+    roots = {r.id for r in map(db.get_agent, {autopilot.root_of(db, a.id) for a in db.list_agents(ws.id)})
+             if r is not None and r.mode == "interactive"}
     if dep.startswith("workspace:"):
         roots.update(_holder_session(db, dep, "")[0])
     return bool(roots) and autopilot.root_of(db, caller_id) not in roots
