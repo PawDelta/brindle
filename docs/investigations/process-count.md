@@ -333,7 +333,9 @@ Fix:
   `includeIf` path whatever its condition, and every `core.excludesFile`.
   That `git config` runs on a sidebar's first look at a worktree and again
   only when one of those files, or the branch (for `onbranch:` includes),
-  changed; a list read while one of them changed is asked for again. A file new anywhere git looks, an empty folder deep down included,
+  changed; a list read while one of them changed is asked for again. A
+  `git config` that fails (busy, or an error) gives no list: the safety look
+  is a git look until one succeeds. A file new anywhere git looks, an empty folder deep down included,
   changes its directory. git runs only when that moved.
 - The baseline is stat'ed just before each git look (the first look's
   included), leaving out only what the previous look reported ignored (the

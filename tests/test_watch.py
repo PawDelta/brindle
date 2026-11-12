@@ -122,7 +122,8 @@ def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions
     an old empty folder deep down, an edit below the root in a v4 index
     (which compresses its paths), a folder no longer ignored and a file new
     in it afterwards, and a file no longer ignored once the excludes file is
-    edited through its symlink."""
+    edited through its symlink, though the first look couldn't learn which
+    files those are (git busy)."""
     from brindle import git, status_cache
 
     s1, s2, s3 = four_sessions[1:]
@@ -154,8 +155,20 @@ def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions
         assert safety_look()[0] == 3                 # ... (.gitignore, build/out/app.bin)
         built.write_text("built\n")                  # ... and a file new in it shows too
         assert safety_look()[0] == 4
+        status_cache.clear()                         # a sidebar opening while git is busy for s2's config
+        busy, run = [True], git.run
+
+        def busy_once(args, cwd, *a, **k):
+            if args[:2] == ["config", "--list"] and str(cwd) == str(s2) and busy[0]:
+                busy[0] = False
+                raise git.GitBusy("no room")
+            return run(args, cwd, *a, **k)
+        monkeypatch.setattr(git, "run", busy_once)
+        refresh()
         excludes.write_text("")
-        assert safety_look()[1] == 1                 # src/logs/debug.log
+        assert safety_look()[1] == 1                 # src/logs/debug.log: git looked, no list being known
+        started.clear()
+        assert safety_look()[1] == 1 and started == []   # the list known again: a quiet look asks nothing
     finally:
         for gone in (new, built):
             gone.unlink(missing_ok=True)

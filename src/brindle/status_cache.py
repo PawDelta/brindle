@@ -360,7 +360,7 @@ _sources: dict[str, tuple[tuple, list[Path]]] = {}
 _UNSETTLED = object()       # a list read while one of its files changed: never matches
 
 
-def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path]:
+def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | None:
     """Every file outside the worktree that can change what git ignores
     there: info/exclude, the default global ignore file, the config files
     git may read even when they don't exist yet (system, global, the repo's,
@@ -369,7 +369,8 @@ def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path]:
     included), every file it read, every include.path or includeIf path
     whatever its condition, and every core.excludesFile. git is asked again
     only when one of those files (or the branch, for onbranch: includes)
-    changed: an idle sidebar asks nothing."""
+    changed: an idle sidebar asks nothing. None when git couldn't say (busy,
+    or the command failed)."""
     key = str(path)
     try:
         head = (wt_gitdir / "HEAD").read_text()
@@ -387,10 +388,15 @@ def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path]:
     found += [Path(glob)] if glob else [Path.home() / ".gitconfig", xdg / "config"]
     before_ns = time.time_ns()
     try:
-        listed = git.run(["config", "--list", "--show-origin", "--includes", "-z"], path, check=False).stdout
-    except git.GitError:
-        listed = ""
-    fields = listed.split("\0")
+        proc = git.run(["config", "--list", "--show-origin", "--includes", "-z"], path, check=False)
+    except git.GitError:       # busy, or a deadline: no answer
+        proc = None
+    if proc is None or proc.returncode != 0:
+        # An incomplete list would be believed for good: there is none, and
+        # the next look asks again (git status meanwhile, see _deep_entries).
+        _sources.pop(key, None)
+        return None
+    fields = proc.stdout.split("\0")
     for origin, entry in zip(fields[0::2], fields[1::2]):
         source = None
         if origin.startswith("file:"):
@@ -417,12 +423,15 @@ def _deep_entries(path: Path, wt_gitdir: Path, common: Path, ignored: list[str] 
     directory (each ``.gitignore`` in it too) but nested repositories, which
     git doesn't enter, and the directories in ``ignored`` (git's last report;
     None: leave none out). A file new anywhere git looks changes its
-    directory. None when the index can't be read (see ``index_paths``)."""
+    directory. None when the index can't be read (see ``index_paths``) or
+    git couldn't say which files decide what is ignored: the safety look is
+    a git look then, until it can."""
     paths = index_paths(wt_gitdir / "index", _hash_len(common))
-    if paths is None:
+    sources = None if paths is None else _ignore_sources(path, wt_gitdir, common)
+    if paths is None or sources is None:
         return None
     root = os.fsencode(path)
-    out: list = [(0, str(p), _watched(p)) for p in _ignore_sources(path, wt_gitdir, common)]
+    out: list = [(0, str(p), _watched(p)) for p in sources]
     out += [(1, p, _stat(os.path.join(root, p))) for p in paths]
     skip = _ignored_dirs(root, ignored or [])
     for here, dirs, files in os.walk(root):
