@@ -123,6 +123,8 @@ def test_an_answer_belongs_to_the_offer_it_saw_and_a_grown_plan_is_offered(db, g
     assert (_offer(db), db.get_autopilot("boss").plan_offer) == (None, plans.OFFER_DISMISSED)
 
 
+@pytest.mark.variant("real incident: a 3rd parallel worker opened the offer and held urgent work; "
+                      "the audit then found a queued assignment did the same")
 @pytest.mark.parametrize("assigned", ["started", "queued"])
 def test_assigned_work_never_makes_a_goal_deserve_an_offer(assigned, db, boss, goal_env):
     """The reported bug: a 3rd parallel worker opened the offer and held urgent work.
