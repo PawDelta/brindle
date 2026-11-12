@@ -337,6 +337,71 @@ def _recorded_sessions(db, root, monkeypatch, sessions):
     monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
 
 
+def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db, monkeypatch):
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from brindle.daemon import routes_read
+    from brindle.db import Workspace
+
+    ws = Workspace("proj", "/proj", "proj", "root", "main", None, "/proj", None, "proj", 1)
+    db.add_workspace(ws)
+    for aid in ("first", "queued", "exhausted", "foreign", "manual"):
+        add(db, ws, aid)
+    db.update_agent("first", created_at=2, status_since=20)
+    db.update_agent("queued", created_at=1, status_since=10)
+    for aid, stopped in (("exhausted", 50), ("foreign", 40), ("manual", 30)):
+        db.update_agent(aid, status_since=stopped)
+    panes = tmux.PaneSnapshot()
+    monkeypatch.setattr(tmux, "current_server", lambda: None)
+    monkeypatch.setattr(tmux, "list_panes", lambda: panes)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
+    monkeypatch.setattr(procs, "stop", lambda *a, **kw: 0)
+    monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
+    monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 1)
+    monkeypatch.setattr(lifecycle, "_read_viewed", lambda: "first")
+    lifecycle._record_resume([{"id": "first", "server": None}, {"id": "queued", "server": None},
+                              {"id": "exhausted", "server": None, "tries": lifecycle.RESUME_TRIES},
+                              {"id": "foreign", "server": "elsewhere"}])
+    recovery = lifecycle.Recovery()
+    request = Request({"type": "http", "query_string": b"repo=/proj",
+                       "app": SimpleNamespace(state=SimpleNamespace(recovery=recovery))})
+
+    def statuses(db_):
+        return {row["id"]: row["status"] for row in routes_read.list_sessions.__wrapped__(db_, request)}
+
+    seen, launching, orders = [], [], []
+
+    def resume(db_, root_id, **kw):
+        seen.append(statuses(db_))
+        transitions = [list(seen[-1])]
+        # During launch it leaves both the paused list and the live-pane list.
+        db_.set_status(root_id, "starting")
+        starting = statuses(db_)
+        launching.append((root_id, starting.get(root_id)))
+        transitions.append(list(starting))
+        # Its position stays the same when tmux can see the pane, too.
+        pane = f"%{root_id}"
+        db_.update_agent(root_id, tmux_window=pane)
+        panes[pane] = True
+        db_.set_status(root_id, "idle")
+        transitions.append(list(statuses(db_)))
+        orders.append(transitions)
+        panes.pop(pane)
+        db_.set_status(root_id, "paused")
+        raise agents.AgentError("launch failed")
+
+    monkeypatch.setattr(agents, "resume", resume)
+    assert lifecycle.resume_after_start(recovery) == []
+    assert seen[0] == {"first": "resuming", "queued": "resuming", "exhausted": "paused",
+                       "foreign": "paused", "manual": "paused"}
+    assert seen[1]["first"] == "paused" and seen[1]["queued"] == "resuming"
+    assert launching == [("first", "resuming"), ("queued", "resuming")]
+    assert orders[0] == [["first", "queued", "exhausted", "foreign", "manual"]] * 3
+    assert set(statuses(db).values()) == {"paused"}
+
+
 @pytest.mark.variant("concurrent recovery must overlap distinct tmux sessions while serializing chats sharing one session")
 def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, root, monkeypatch):
     import threading
