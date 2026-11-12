@@ -266,8 +266,9 @@ def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, ow
     tmux server. ``cwds``: ``_cwds()`` already taken. Unknown counts as live.
     ``own``: the workspace being removed, whose processes its removal ends
     don't count (see ``_its_own``; ``keep_session`` and ``stopping`` say
-    what that removal ends), unless someone is attached to the session it
-    kills. ``why``: gets the ``procs.Refused`` process that made it
+    what that removal ends), nor do those of them the app's terminal view
+    shows (a ``tmux.VIEW_PREFIX`` session), unless someone is attached to
+    the session it kills. ``why``: gets the ``procs.Refused`` process that made it
     unknown, if that is why (see ``_cwds``)."""
     from brindle import tmux, workspaces
 
@@ -297,7 +298,11 @@ def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, ow
                 if attached and not keep_session:
                     return True
                 continue
-            if any(p and _inside(os.path.realpath(p), real) for _pid, p in tmux.session_panes(name)):
+            # The app's view of a window links that very pane: one the removal
+            # ends is brindle's own viewer, not another session's.
+            view = name.startswith(tmux.VIEW_PREFIX)
+            if any(p and _inside(os.path.realpath(p), real) and not (view and pid in excused)
+                   for pid, p in tmux.session_panes(name)):
                 return True
     except tmux.TmuxTimeout:
         return True

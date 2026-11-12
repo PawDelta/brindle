@@ -330,6 +330,9 @@ def scrubbed(command: list[str], unset: list[str]) -> list[str]:
 # The pane tag of the daemon's action terminals (sign-ins, upgrades, the
 # app's shell tabs): the person's own terminals, not agents' (see new_window).
 TERMINAL_TAG = "@brindle_terminal"
+# The sessions the app's terminal views make (daemon.pty_view): each links one
+# window it shows, so that window's panes are listed under it too.
+VIEW_PREFIX = "brindle-view-"
 
 
 def in_dir(cwd: str, command: list[str]) -> list[str]:
