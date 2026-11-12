@@ -810,7 +810,7 @@ function body() {
   if (ms.length > 15 && (F !== "all" || Q.trim())) {
     const q = Q.trim().toLowerCase();
     const hit = ms.filter((m) => (F === "all" || m.s === F) && (!q || m.title.toLowerCase().includes(q) || String(m.n) === q));
-    return hit.length ? hit.map((m) => row(m, m.s === "failed" || m.s === "running")).join("") : `<p class="empty">No milestone matches${q ? ` “${esc(Q.trim())}”` : ""}.</p>`;
+    return hit.length ? hit.map((m) => row(m, m.s === "failed" || m.s === "running")).join("") : `<p class="empty"></p>`;
   }
   if (phased()) return phases(ms);
   if (V === 2) return focus(ms);
@@ -843,7 +843,7 @@ function toolbar() {
   const c = counts();
   const chip = (k, l, n) => `<button class="chipf" type="button" data-f="${k}" aria-pressed="${F === k}">${l}<span>${n}</span></button>`;
   return `<div class="mtool" role="toolbar" aria-label="Filter milestones">${chip("all", "All", c.all)}${chip("failed", "Failing", c.failed)}${chip("running", "Running", c.running)}${chip("todo", "Upcoming", c.todo)}
-    <label class="msq">${SEARCH}<input type="search" placeholder="Search milestones" aria-label="Search milestones" value="${esc(Q)}"><kbd>/</kbd></label></div>`;
+    <label class="msq">${SEARCH}<input type="search" placeholder="Search milestones" aria-label="Search milestones"><kbd>/</kbd></label></div>`;
 }
 function panel() {
   const c = counts(), pi = curPhase();
@@ -865,8 +865,6 @@ const defaults = () => new Set(phased() ? [`ph${Math.max(0, curPhase())}`] : [])
 /* ── Render + behaviour ─────────────────────────────────────────────────── */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
-/* Escape user-typed text before it is interpolated into innerHTML markup. */
-function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
 const rm = () => document.documentElement.classList.contains("rm");
 function renderTabs() {
   $("#tabs").innerHTML = OPTIONS.map((o, i) => `<button class="tab" role="tab" type="button" aria-selected="${i === V}" data-i="${i}"><span class="k"><kbd>${i + 1}</kbd>Variation ${i + 1}</span><b>${o.name}</b><span class="d">${o.d}</span></button>`).join("");
@@ -883,10 +881,16 @@ function render(animate = true) {
   $$("pre[data-size]").forEach((p) => (p.hidden = p.dataset.size !== String(SIZE)));
   $("#sb-goal").innerHTML = `<div class="opt">${side()}</div>`;
   $("#panel-goal").innerHTML = `<div class="opt">${panel()}</div>`;
+  $(".msq input").value = Q;
   if (!animate) $$(".opt").forEach((e) => (e.style.animation = "none"));
   tickLive(false);
 }
-function renderList() { $(".js-list").innerHTML = body(); tickLive(false); }
+function renderList() {
+  $(".js-list").innerHTML = body();
+  const em = $(".js-list .empty");
+  if (em) em.textContent = `No milestone matches${Q.trim() ? ` “${Q.trim()}”` : ""}.`;
+  tickLive(false);
+}
 function select(i) { V = i; OPEN = defaults(); F = "all"; Q = ""; renderTabs(); render(); }
 
 /* A segment, the running title or the failing chip: show that milestone in the panel. */
