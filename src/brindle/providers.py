@@ -692,13 +692,48 @@ def _write_trust(config: str, key: str) -> bool:
 
 # Claude Code's own lock on its state file (2.1.323, the proper-lockfile
 # protocol): the directory ``<file>.lock``, made with mkdir by whoever writes
-# and removed when done. A holder touches it every 5 s, so one older than
-# CLAUDE_LOCK_STALE was left behind by a process that died and is taken over,
-# once, as Claude Code does. A live one is held for a single write: brindle
-# waits CLAUDE_LOCK_WAITS in turn, then gives up.
+# and removed when done. Its holder touches it while it works, so one not
+# touched for CLAUDE_LOCK_STALE was left behind by a process that died and is
+# taken over, once, as Claude Code does. A live one is held for a single
+# write: brindle waits CLAUDE_LOCK_WAITS in turn, then gives up.
 CLAUDE_LOCK_STALE = 10.0
 CLAUDE_LOCK_WAITS = (0.02, 0.05, 0.1, 0.2, 0.4)
 _lock_wait = threading.Event().wait
+
+
+class _ClaudeLock:
+    """Claude Code's lock directory ``path`` as brindle made it. The lock is
+    a lease: whoever finds it untouched for CLAUDE_LOCK_STALE takes it over
+    (removes it and makes its own), so it is brindle's only while it is still
+    the directory brindle made, last touched when brindle touched it."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.mark = self._look()
+
+    def _look(self) -> tuple[int, int]:
+        st = os.stat(self.path)
+        return st.st_ino, st.st_mtime_ns
+
+    def held(self) -> bool:
+        try:
+            return self._look() == self.mark
+        except FileNotFoundError:
+            return False
+
+    def renew(self) -> None:
+        """Touch the lock, as its holder does, for a fresh lease. OSError
+        when it is no longer brindle's (brindle was stopped for longer than
+        the lease and Claude Code took it over): the caller writes nothing."""
+        if not self.held():
+            raise OSError(f"{self.path} was taken over while brindle held it; the file is left as it is")
+        os.utime(self.path)
+        self.mark = self._look()
+
+    def release(self) -> None:
+        if self.held():     # never another holder's
+            with contextlib.suppress(OSError):
+                os.rmdir(self.path)
 
 
 @contextlib.contextmanager
@@ -723,11 +758,11 @@ def _claude_lock(named: str):
             if wait is None:
                 raise OSError(f"Claude Code is writing {named}; brindle left it as it is")
             _lock_wait(wait)
+    held = _ClaudeLock(lock)
     try:
-        yield
+        yield held
     finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.rmdir(lock)
+        held.release()
 
 
 # How many times _update_config starts over on a file that changed under it.
@@ -735,14 +770,67 @@ CONFIG_ATTEMPTS = 5
 
 
 class _ConfigChanged(Exception):
-    """The file changed after brindle read it: nothing was replaced."""
+    """The file is not the version brindle read: brindle's write is not in it."""
 
 
-# The file an update is about to replace, and how it looked when it was read
-# (_stamp). Set by _update_config around its _replace_json, read by
-# _replace_text just before the rename; unset for every other write.
+# The file an update is about to write, and how it looked when it was read
+# (_stamp; None: there was none). Set by _update_config around its
+# _replace_json, read by _replace_text; unset for every other write.
 _as_read: contextvars.ContextVar[tuple[str, tuple[int, int, int] | None] | None] = contextvars.ContextVar(
     "claude_config_as_read", default=None)
+
+
+def _renamex(src: str, dst: str, *, swap: bool) -> None:
+    """rename(2) as the kernel does it in one step: with ``swap``, ``src``
+    and ``dst`` trade places (both exist afterwards, each under the other's
+    name); without, ``src`` becomes ``dst`` only where there is no ``dst``
+    (FileExistsError otherwise). macOS renamex_np, Linux renameat2. OSError
+    where the system or the filesystem has neither: nothing was renamed."""
+    import ctypes
+    import errno
+
+    a, b = os.fsencode(src), os.fsencode(dst)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin":
+            failed = libc.renamex_np(a, b, ctypes.c_uint(0x2 if swap else 0x4))   # RENAME_SWAP, RENAME_EXCL
+        else:   # AT_FDCWD twice; RENAME_EXCHANGE, RENAME_NOREPLACE
+            failed = libc.renameat2(-100, a, -100, b, ctypes.c_uint(2 if swap else 1))
+    except (AttributeError, TypeError) as e:
+        raise OSError(errno.ENOSYS, f"no atomic exchange here ({e})", dst) from None
+    if failed:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), dst)
+
+
+def _swap_in(new: str, config: str, seen: tuple[int, int, int]) -> None:
+    """Make the file ``new`` Claude Code's state file ``config``, if
+    ``config`` is still the version ``seen``. There is no rename that
+    replaces a file only if it is a given one, and looking first leaves a
+    gap. So the two trade places in one step (_renamex), which hands brindle
+    the very file it displaced: when that is the version it read, nothing
+    was lost. When it is a newer one (Claude Code wrote meanwhile, without
+    its lock or after taking it over), it goes straight back the same way,
+    brindle's write comes out again, and _ConfigChanged says so. Should yet
+    another write have landed on top of brindle's in between, that one is
+    the newest and is put back instead; whatever happens, the last file
+    Claude Code wrote is the one left in place.
+
+    Returns with what came out of ``config`` under ``new``'s name, for the
+    caller to remove."""
+    placed = _stamp(new)
+    _renamex(new, config, swap=True)
+    held = _stamp(new)
+    if held == seen:
+        return
+    for _ in range(CONFIG_ATTEMPTS):
+        _renamex(new, config, swap=True)    # what came out goes back
+        out = _stamp(new)
+        if out == placed:                   # and what brindle had put there came out: nothing landed on it
+            raise _ConfigChanged(config)
+        placed, held = held, out            # a write landed on top of it: that one is the newest
+    os.replace(new, config)                 # still coming: the newest one in hand stays
+    raise _ConfigChanged(config)
 
 
 def _stamp(config: str) -> tuple[int, int, int] | None:
@@ -763,26 +851,34 @@ def _update_config(config: str, change, *, create: bool = False, mode: int | Non
     person's ``mcpServers``, the account, each folder's settings) is written
     back as it was read. The caller holds brindle's lock.
 
-    Claude Code writes this file too (an MCP server just added, a sign-in),
-    so the whole read, change and replace runs under Claude Code's own lock
-    (_claude_lock): its writers wait for brindle's rename and then work from
-    the file brindle wrote, and brindle reads only after theirs. A writer
-    that doesn't take that lock (Claude Code can write without it as it
-    exits, when it couldn't get it) is not held off by it: for those the file is
-    replaced only if it is still the version that was read (_stamp, checked
-    right before the rename), and brindle starts over from the new version
-    otherwise. Only such a write, in the instant between that check and the
-    rename, can still be lost.
+    Claude Code writes this file too (an MCP server just added, a sign-in).
+    Two things keep its writes:
+
+    - the read, change and write run under Claude Code's own lock
+      (_claude_lock), renewed right before the write, so its writers wait
+      for brindle and then work from the file brindle wrote;
+    - brindle's file never goes over one it hasn't read. It trades places
+      with the file there (_swap_in), and anything but the version read goes
+      straight back: a write Claude Code made without its lock (it can, as it
+      exits), or after taking the lock over from a brindle that was stopped
+      for longer than the lease. brindle then starts over from that version.
+      A missing file is only ever created, never written over.
+
+    Where the system can't trade two files in one step, nothing is written.
+    What is left: for the instant between the trade and the trade back, the
+    file is brindle's, made from the older version; a process that reads it
+    just then and writes it back out is not something brindle can see.
 
     A file with nothing to change isn't written. A missing one is created
     (0600) with ``create``, else FileNotFoundError; ``mode`` sets the file's
     mode, otherwise kept. ValueError for a file that isn't a JSON object;
-    OSError when Claude Code keeps its lock, or the file changed at every
-    attempt (it is then left alone)."""
+    OSError when Claude Code keeps its lock or took it over, the file can't
+    be traded, or it changed at every attempt (it is then left as Claude
+    Code wrote it)."""
     import copy
     import stat
 
-    with _claude_lock(claude_global_config()):
+    with _claude_lock(claude_global_config()) as lock:
         for _ in range(CONFIG_ATTEMPTS):
             seen = _stamp(config)
             if seen is None and create:
@@ -797,6 +893,7 @@ def _update_config(config: str, change, *, create: bool = False, mode: int | Non
             wanted = kept if mode is None else mode
             if seen is not None and data == before and wanted == kept:
                 return
+            lock.renew()
             token = _as_read.set((config, seen))
             try:
                 _replace_json(config, data, wanted)
@@ -809,7 +906,7 @@ def _update_config(config: str, change, *, create: bool = False, mode: int | Non
 
 
 def _replace_json(config: str, data: dict, mode: int) -> None:
-    """Write ``data`` over ``config`` atomically with ``mode``, through a temp
+    """Write ``data`` as ``config`` atomically with ``mode``, through a temp
     file beside it that never has a wider mode and is always removed."""
     _replace_text(config, json.dumps(data, indent=2), mode)
 
@@ -824,9 +921,15 @@ def _replace_text(config: str, text: str, mode: int) -> None:
             f.write(text)
         os.chmod(tmp, mode)  # the umask may have narrowed it
         guard = _as_read.get()
-        if guard is not None and guard[0] == config and _stamp(config) != guard[1]:
-            raise _ConfigChanged(config)
-        os.replace(tmp, config)  # atomic: Claude Code never reads half a file
+        if guard is None or guard[0] != config:
+            os.replace(tmp, config)  # atomic: no reader sees half a file
+        elif guard[1] is None:       # Claude Code's state file, and there was none: never over one
+            try:
+                _renamex(tmp, config, swap=False)
+            except FileExistsError:
+                raise _ConfigChanged(config) from None
+        else:
+            _swap_in(tmp, config, guard[1])
     finally:
         try:
             os.unlink(tmp)

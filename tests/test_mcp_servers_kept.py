@@ -3,6 +3,7 @@ Claude Code's state file never replace one Claude Code just made (a server
 added, a sign-in), and a Claude pane keeps the TLS client settings its
 company's remote MCP servers ask for."""
 
+import copy
 import json
 import os
 import time
@@ -28,48 +29,83 @@ def config(tmp_path):
     return home / ".claude.json"
 
 
-def _claude_code_writes(config, change, replace=os.replace):
-    """A write as Claude Code makes it: under its lock (mkdir of <file>.lock,
-    FileExistsError while another writer holds it), a new file renamed over."""
-    lock = config.with_name(".claude.json.lock")
-    lock.mkdir()
-    try:
-        state = json.loads(config.read_text())
-        change(state)
-        staged = config.with_name("claude-code-staged")
-        staged.write_text(json.dumps(state))
-        replace(staged, config)
-    finally:
-        lock.rmdir()
+class ClaudeCode:
+    """Claude Code's side of its state file: what it holds in memory, its
+    lock (the directory <file>.lock) and the ways it writes."""
 
+    def __init__(self, config):
+        self.config, self.lock = config, config.with_name(".claude.json.lock")
+        self.memory, self.waiting = copy.deepcopy(STATE), False
 
-def test_claude_code_waits_for_brindles_write_instead_of_losing_its_own(config, tmp_path, monkeypatch):
-    """Claude Code goes to add a server and sign in at the last instant, after
-    brindle's last look at the file and before its rename."""
-    replace, held_off = os.replace, []
-
-    def sign_in_and_add(state):
-        state["mcpServers"]["added"] = SERVER
+    def _signs_in_and_adds_a_server(self, state):
+        state["mcpServers"][f"added-{len(state['mcpServers'])}"] = SERVER
         state["oauthAccount"] = {"emailAddress": "signed-in@example.com"}
+        staged = self.config.with_name("claude-code-staged")
+        staged.write_text(json.dumps(state))
+        os.replace(staged, self.config)
+        self.memory = state
 
-    def brindle_renames(src, dst):
+    def writes_under_its_lock(self):
         try:
-            _claude_code_writes(config, sign_in_and_add, replace)
+            self.lock.mkdir()
         except FileExistsError:
-            held_off.append(dst)
-        replace(src, dst)
+            self.waiting = True     # held by another writer: it waits its turn
+            return
+        self._signs_in_and_adds_a_server(json.loads(self.config.read_text()))
+        self.lock.rmdir()
 
-    monkeypatch.setattr(os, "replace", brindle_renames)
-    assert providers.trust_folder(str(tmp_path / "worktree")) is True
-    monkeypatch.setattr(os, "replace", replace)
-    if held_off:
-        _claude_code_writes(config, sign_in_and_add)     # its turn, on the file brindle wrote
+    def writes_without_its_lock(self):
+        """As it can when it exits: what it holds in memory, over the file."""
+        self._signs_in_and_adds_a_server(self.memory)
+
+    def takes_the_lock_over(self):
+        """The lease ran out by its clock (brindle was stopped meanwhile): it
+        removes the lock, makes its own, writes, and is still at work."""
+        self.lock.rmdir()
+        self.lock.mkdir()
+        later = time.time() + 60
+        os.utime(self.lock, (later, later))
+        self.writes_without_its_lock()
+
+
+@pytest.mark.parametrize("there, how, renames, written", [
+    (True, "writes_under_its_lock", 1, True),       # held off by brindle's lock, then works from brindle's file
+    (True, "writes_without_its_lock", 1, True),     # traded back at once; brindle starts over from it
+    (True, "writes_without_its_lock", 99, False),   # ... at every rename: the file stays Claude Code's
+    (True, "takes_the_lock_over", 1, False),        # brindle lost its lease: it writes nothing more
+    (False, "writes_without_its_lock", 1, True),    # no file when brindle looked: created, never written over
+])
+def test_what_claude_code_writes_at_brindles_rename_is_kept(config, tmp_path, monkeypatch, there, how, renames,
+                                                            written):
+    """Claude Code writes at the last instant: after brindle's last look at
+    the file, right before each of its renames."""
+    worktree = tmp_path / "worktree"
+    if not there:
+        config.unlink()
+    claude, rename, seen = ClaudeCode(config), providers._renamex, []
+
+    def claude_code_first(src, dst, *, swap):
+        if len(seen) < renames:
+            seen.append(dst)
+            getattr(claude, how)()
+        rename(src, dst, swap=swap)
+
+    monkeypatch.setattr(providers, "_renamex", claude_code_first)
+    try:
+        done = providers.trust_folder(str(worktree)) if there else bool(providers.seed_ci_config([str(worktree)]))
+    except OSError:
+        done = False
+    assert done is written
+    if claude.waiting:
+        claude.writes_under_its_lock()      # its turn, on the file brindle wrote
 
     after = json.loads(config.read_text())
-    assert after["mcpServers"] == {"docs": SERVER, "added": SERVER}
+    assert len(after["mcpServers"]) > 1 and after["mcpServers"] == claude.memory["mcpServers"]
     assert after["oauthAccount"] == {"emailAddress": "signed-in@example.com"}
-    assert after["projects"] == {**STATE["projects"],
-                                 os.path.realpath(tmp_path / "worktree"): {"hasTrustDialogAccepted": True}}
+    assert after["projects"]["/repo"] == STATE["projects"]["/repo"]
+    assert (after["projects"].get(os.path.realpath(worktree)) == {"hasTrustDialogAccepted": True}) is written
+    taken = how == "takes_the_lock_over"    # and that lock is Claude Code's: left alone
+    assert sorted(p.name for p in config.parent.iterdir()) == [".claude.json", *([".claude.json.lock"] * taken)]
 
 
 @pytest.mark.parametrize("claude_code, trusted", [
@@ -93,37 +129,6 @@ def test_brindle_writes_claude_codes_state_only_with_its_lock(config, tmp_path, 
 
     assert lock.exists() is not trusted
     assert (json.loads(config.read_text()) == STATE) is not trusted
-
-
-@pytest.mark.parametrize("claude_writes, trusted", [
-    (2, True),      # a write made without the lock lands between brindle's read and its replace
-    (99, False),    # ... and at every attempt: brindle leaves the file to it
-])
-def test_a_write_made_without_the_lock_while_brindle_updates_the_file_is_kept(
-        config, tmp_path, monkeypatch, claude_writes, trusted):
-    added = []
-    read = providers._read_json
-
-    def read_then_claude_code_adds_a_server(path):
-        data = read(path)
-        if len(added) < claude_writes:
-            now = read(path)
-            now["mcpServers"][f"added-{len(added)}"] = SERVER
-            staged = config.with_name("claude-code-staged")
-            staged.write_text(json.dumps(now))
-            os.replace(staged, config)
-            added.append(f"added-{len(added)}")
-        return data
-
-    monkeypatch.setattr(providers, "_read_json", read_then_claude_code_adds_a_server)
-
-    assert providers.trust_folder(str(tmp_path / "worktree")) is trusted
-
-    after = json.loads(config.read_text())
-    assert after["mcpServers"] == {"docs": SERVER, **{name: SERVER for name in added}}
-    assert after["oauthAccount"] == STATE["oauthAccount"] and after["projects"]["/repo"] == STATE["projects"]["/repo"]
-    assert (after["projects"].get(os.path.realpath(tmp_path / "worktree")) == {"hasTrustDialogAccepted": True}) is trusted
-    assert [p.name for p in config.parent.iterdir()] == [".claude.json"]
 
 
 @pytest.mark.parametrize("provider, kept", [
