@@ -142,8 +142,11 @@ def test_plan_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
 
 def test_pr_not_now(db, tmp_path, monkeypatch):
     from brindle import git
+    from brindle.daemon import session_review
     from brindle.daemon.routes_actions import inbox_action
 
+    monkeypatch.setattr(session_review, "open_pr_for_head", lambda *args: None)
+    monkeypatch.setattr(session_review, "head_pr_known_none", lambda *args: False)
     ws = Workspace("pr-card", str(tmp_path), "pr-card", "session", "feat/pr-card", "main",
                    str(tmp_path / "checkout"), None, "pr-card", time.time())
     db.add_workspace(ws)
@@ -180,6 +183,10 @@ def test_pr_not_now(db, tmp_path, monkeypatch):
         assert cards(restarted) == []
         restarted.conn.execute("UPDATE session_pr_prep SET state = 'failed'")
         assert cards(restarted) == ["pr_failed"]
+        inbox_action(restarted, {"id": "r1", "action": "pr-not-now"}, {})
+        assert cards(restarted) == []
+        restarted.conn.execute("UPDATE session_pr_prep SET output = 'new failure'")
+        assert cards(restarted) == ["pr_failed"]
         restarted.conn.execute("UPDATE session_pr_prep SET state = 'passed'")
         head = "head2"
         assert cards(restarted) == ["pr_ready"]
@@ -187,6 +194,15 @@ def test_pr_not_now(db, tmp_path, monkeypatch):
         inbox_action(restarted, {"id": "r1", "action": "pr-not-now"}, {})
         restarted.conn.execute("UPDATE session_pr_prep SET sha = 'head2'")
         assert cards(restarted) == ["pr_ready"]
+        url = "https://github.com/o/r/pull/7"
+        restarted.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES (?, ?, ?, 1)",
+                               ("r1", ws.branch, url))
+        restarted.conn.execute("INSERT INTO session_pr_merges (url, state, error) VALUES (?, 'failed', 'merge failed')", (url,))
+        assert cards(restarted) == ["pr_failed"]
+        inbox_action(restarted, {"id": "r1", "action": "pr-not-now"}, {})
+        assert cards(restarted) == []
+        restarted.conn.execute("UPDATE session_pr_merges SET error = 'different problem'")
+        assert cards(restarted) == ["pr_failed"]
     finally:
         restarted.conn.close()
 
