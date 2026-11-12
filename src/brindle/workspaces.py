@@ -805,14 +805,27 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 pass  # checked out in another worktree, or it moved on since
         note = f"branch {ws.branch} kept"
     elif delete_branch:
-        try:
-            git.delete_branch(ws.repo_root, ws.branch, force=force)
-            deleted = True
-        except git.GitError as e:
-            note = f"kept branch {ws.branch}: {e} (use --force to delete anyway)"
+        deleted, note = _drop_if_merged(ws, force)
     else:
         note = f"branch {ws.branch} kept"
     return _forget(db, ws, Removed(deleted, note, teardown))
+
+
+def _drop_if_merged(ws, force: bool) -> tuple[bool, str | None]:
+    """Delete ``ws.branch`` (archived, restorable) when it is merged into the base
+    it was cut from, or ``force``. Judged against that base, not the checkout's
+    HEAD (``git branch -d`` checks HEAD). The tip is judged and then deleted only
+    while the branch still points at it: drop_branch refuses a moved branch.
+    Returns (deleted, note)."""
+    base = ws.base_branch or git.default_branch(ws.repo_root)
+    sha = disk.tip(ws.repo_root, ws.branch)
+    try:
+        if sha and (force or git.is_ancestor(ws.repo_root, sha, base)):
+            disk.drop_branch(ws.repo_root, ws.branch, sha)
+            return True, None
+        return False, f"kept branch {ws.branch}: not merged into {base} (use --force to delete anyway)"
+    except git.GitError as e:
+        return False, f"kept branch {ws.branch}: {e} (use --force to delete anyway)"
 
 
 def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:

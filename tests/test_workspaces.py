@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -92,6 +93,56 @@ def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
     sh("git checkout -q --orphan bare && git rm -rqf --cached .brindle", repo)
     sh("git commit -qm bare --allow-empty", repo)
     assert load_repo_config(repo, branch="bare").scoped_checks == "infer"
+
+
+def test_remove_deletes_branch_merged_into_non_main_base(db, repo):
+    # A session branch with its own commit, not in the checkout's HEAD (main); the
+    # worker branch is cut from it and has no commits of its own.
+    sh("git checkout -q -b session && git commit -q --allow-empty -m session && git checkout -q main", repo)
+    ws = workspaces.create(db, str(repo), "worker", base="session").workspace
+    removed = workspaces.remove(db, ws, delete_branch=True)
+    assert removed.branch_deleted
+    assert not git.branch_exists(str(repo), "worker")
+
+
+@pytest.fixture
+def ref_store(monkeypatch):
+    """A fake branch store behind the git calls _drop_if_merged makes: ``refs``
+    maps branch -> tip, ``ancestors`` holds (older, newer) pairs that are merged."""
+    refs, ancestors = {"worker": "A"}, set()
+    monkeypatch.setattr(disk, "tip", lambda root, branch: refs.get(branch))
+    monkeypatch.setattr(git, "is_ancestor", lambda root, older, newer: (older, newer) in ancestors)
+
+    def drop(root, branch, sha):
+        if refs.get(branch) != sha:
+            raise git.GitError(f"{branch} moved")
+        del refs[branch]
+    monkeypatch.setattr(disk, "drop_branch", drop)
+    return refs, ancestors
+
+
+def test_drop_keeps_branch_not_merged_into_base_even_if_merged_into_head(ref_store):
+    refs, ancestors = ref_store   # its commit is in main (the checkout's HEAD), not in the session base
+    ws = SimpleNamespace(repo_root="/r", branch="worker", base_branch="session")
+    deleted, note = workspaces._drop_if_merged(ws, force=False)
+    assert not deleted and note
+    assert refs == {"worker": "A"}
+
+
+def test_drop_keeps_branch_that_moved_after_it_was_judged(ref_store, monkeypatch):
+    refs, ancestors = ref_store
+    ancestors.add(("A", "session"))
+    real_is_ancestor = git.is_ancestor
+
+    def judged_then_moved(root, older, newer):
+        merged = real_is_ancestor(root, older, newer)
+        refs["worker"] = "B"   # the branch moves on before deletion
+        return merged
+    monkeypatch.setattr(git, "is_ancestor", judged_then_moved)
+    ws = SimpleNamespace(repo_root="/r", branch="worker", base_branch="session")
+    deleted, _ = workspaces._drop_if_merged(ws, force=False)
+    assert not deleted
+    assert refs == {"worker": "B"}
 
 
 def test_remove_refuses_dirty_and_keeps_branch(db, repo, feature):
