@@ -237,6 +237,12 @@ def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypat
 
     inbox_action(db, {"id": "r1", "action": "pr-not-now"}, {})   # Dismiss on the opened card
     assert cards() == []
+    # A push to the same PR moves HEAD: the dismissed card stays gone.
+    monkeypatch.setattr(git, "out", lambda args, path: "head2")
+    session_review._head_cache.clear()
+    cards()   # the first read for a new HEAD only starts the background look
+    assert cards() == []
+    monkeypatch.setattr(git, "out", lambda args, path: "head1")
     pr = None
     session_review._head_cache.clear()
     assert [i.kind for i in cards()] == ["pr_ready"]
