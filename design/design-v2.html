@@ -881,16 +881,18 @@ function render(animate = true) {
   $$("pre[data-size]").forEach((p) => (p.hidden = p.dataset.size !== String(SIZE)));
   $("#sb-goal").innerHTML = `<div class="opt">${side()}</div>`;
   $("#panel-goal").innerHTML = `<div class="opt">${panel()}</div>`;
-  $(".msq input").value = Q;
+  const si = $(".msq input");
+  if (si) si.value = Q;
+  fillEmpty();
   if (!animate) $$(".opt").forEach((e) => (e.style.animation = "none"));
   tickLive(false);
 }
-function renderList() {
-  $(".js-list").innerHTML = body();
+/* The no-results message is text, set after the markup is in place. */
+function fillEmpty() {
   const em = $(".js-list .empty");
   if (em) em.textContent = `No milestone matches${Q.trim() ? ` “${Q.trim()}”` : ""}.`;
-  tickLive(false);
 }
+function renderList() { $(".js-list").innerHTML = body(); fillEmpty(); tickLive(false); }
 function select(i) { V = i; OPEN = defaults(); F = "all"; Q = ""; renderTabs(); render(); }
 
 /* A segment, the running title or the failing chip: show that milestone in the panel. */
