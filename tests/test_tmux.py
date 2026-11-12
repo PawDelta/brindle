@@ -56,6 +56,35 @@ def test_a_pane_runs_in_its_worktree_on_a_server_whose_directory_was_deleted(tmp
     assert check.level == doctor.WARN
 
 
+def test_sidebar_stays_pinned_on_a_tmux_without_window_resized(monkeypatch):
+    """tmux 3.2 (Ubuntu 22.04's) has no window-resized hook and rejects it, so
+    the sidebar grew with every window resize. There the pin goes on
+    window-layout-changed, and follows the sidebar to another window."""
+    hooks: dict[tuple[str, str], str] = {}      # (window, hook) -> its command, as tmux 3.2 keeps them
+    window = ["@1"]                             # where the sidebar pane %9 is
+
+    def tmux_3_2(*args, **kwargs):
+        if "window-resized" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="invalid option: window-resized")
+        if args[0] == "join-pane":
+            window[0] = args[-1]
+        elif args[0] == "set-hook" and "-u" in args:
+            hooks.pop((args[3], args[-1]), None)
+        elif args[0] == "set-hook":
+            hooks[(args[3], args[4])] = args[5]
+        out = {"split-window": "%9\n", "display-message": window[0]}.get(args[0], "")
+        return SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(tmux, "_tmux", tmux_3_2)
+    assert tmux.split_left("@1", "/", ["cat"], {}) == "%9"
+    [(pinned, command)] = hooks.items()
+    assert pinned == ("@1", "window-layout-changed") and "resize-pane -t %9 -x 30" in command
+    # Zooming changes the layout too, and resize-pane would undo the zoom that hides the sidebar.
+    assert "window_zoomed_flag" in command
+    tmux.move_pane("%9", "@2")
+    assert hooks == {("@2", "window-layout-changed"): command}
+
+
 @pytest.mark.variant("real incident 2026-11-12: the hook script's shell behaviour, which Python coverage can't see")
 def test_sidebar_hook_stays_silent_when_its_respawn_fails(tmp_path, monkeypatch):
     """A failed restart (the pane already gone) once exited 1, and tmux showed
