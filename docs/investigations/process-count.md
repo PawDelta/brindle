@@ -428,6 +428,64 @@ agent): about 5 processes a minute instead of 6 refreshes' worth. That look
 is what notices a CLI that died without writing the database, a missed
 follow hook and a status its hooks left stale.
 
+### S5. The daemon's sweep still ran git for sessions S1 didn't settle (fixed)
+
+Live on the owner's machine (release.144, 28 agents, mostly paused or done
+coordinators and supervisors) the daemon started about 145 git a minute
+while idle (a 45 s `ps` sample, a lower bound): `status --porcelain
+--untracked-files=no|all`, `rev-parse HEAD`, `symbolic-ref`, `rev-list
+<sha>..HEAD`, `merge-base --is-ancestor`. A harness counting
+`subprocess.Popen` over an unchanged round found where:
+
+- **Readiness of a reached goal with no base branch.** `ReadinessWatch`
+  caches readiness behind `_state`, which is None for a session on the repo's
+  own checkout (no base branch), so `reasons` ran every sweep: a tracked
+  `git status`, `rev-parse HEAD`, and `merge-base`/`rev-list` for the audit
+  sha, only to say again that there is no branch to open a PR from. Four
+  such sessions on this machine. Now: not ready, no git.
+- **A session whose merge of origin/main conflicts** was merged and aborted
+  every sweep (16 processes). The refs the merge conflicted at are now
+  remembered like synced ones: tried again when HEAD or `origin/<default>` moves.
+- **A session with unsaved work**: `_quiet`'s `git status` every sweep. The
+  sweep's look now uses `status_cache` (git only when the checkout's files
+  moved); the sync still asks git, under its locks, before it merges.
+- **The repo's remote and default branch** are learned once per repo every
+  5 minutes, not once per session.
+- **The app's events feed** ran `git.status` (uncached) every 5 s for each
+  checkout with no base branch; `status_cache.cached_any_status` caches it
+  against its own branch.
+- **The cull** (once a minute) now starts no git while nothing moved:
+  `_last_edit` (an idle worker's latest uncommitted write, for
+  `note_idle_unreported` and `note_unreported_commits`) takes the dirty files
+  from `status_cache` and stats them; `note_unreported_commits` reads HEAD
+  from the git files and checks its "told" mark, or a count of none remembered
+  for the same HEAD, base and reported head, before any git;
+  `login_pause` builds the agent's env without the git identity
+  (`agent_env(identity=False)`: the login and route don't depend on it); and
+  `config._committed_text` reads the branch's sha from the git files instead
+  of `git rev-parse` on every `load_repo_config(branch=…)`.
+
+Test: `tests/test_idle_spawns_daemon.py::test_an_unchanged_sweep_starts_no_process`
+(a round of the daemon sweep and the feed over sessions in each of those
+states, then a whole cull sweep: on the unmodified code the daemon's part
+started 32 processes and the cull git for each live agent; now the daemon's
+none and the cull no git; each fix reverted alone fails it).
+
+- **The cull's screen reads**: `tmux.list_panes`' one listing now carries
+  each pane's `#{window_activity}` (`PaneSnapshot.activity`).
+  `decline_environment_setups`, `note_api_errors` and `note_model_refused`
+  remember (an agent mark per reader, so the sidebars taking turns share it)
+  the last output time a screen was read at with nothing to act on, and don't
+  capture it again until the pane prints; `note_api_errors` takes the time
+  from the listing instead of a `display-message` per worker. A read is
+  remembered only once the output is 2 s old (tmux counts whole seconds).
+- **`tmux.session_infos`** (the cull's `reap`) reads each session's
+  `BRINDLE_HOME` once per session (name and creation time), not every minute.
+
+Still per cull sweep (once a minute), whatever the number of agents: two `ps`
+(the process table), `tmux list-clients` (`login_pause`'s last input) and
+`reap`'s `tmux list-panes`.
+
 ### Other sources, measured and left as they are
 
 - **gh**: an open session PR costs one `gh pr view` per 90 s

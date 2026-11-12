@@ -625,7 +625,8 @@ def _again(db: DB, now: float, r: Reap, facts: dict | None = None) -> Reap | Non
     None: planning took a while, and since then a client may have attached,
     input arrived, a worker resumed or work gone uncommitted. With ``facts``
     its git probes aren't run again: only the quick reads."""
-    fresh = plan(db, now, tmux.list_panes(), tmux.session_infos(), only=r.target, facts=facts)
+    # Each session's home read again too: another brindle may have taken it since the plan.
+    fresh = plan(db, now, tmux.list_panes(), tmux.session_infos(fresh=True), only=r.target, facts=facts)
     return next((f for f in fresh if f.kind == r.kind and f.target == r.target), None)
 
 

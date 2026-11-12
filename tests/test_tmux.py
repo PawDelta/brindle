@@ -23,13 +23,14 @@ def test_dead_pane_exits_are_read_as_tmux_prints_them(monkeypatch):
         "@2\t%2\t1\t\tterm\t\t",     # the CLI itself, killed: macOS
         "@3\t%3\t1\t\t15\t\t",       # the same on Linux
         "@4\t%4\t1\t\tzzz\t\t",      # a name Python doesn't know
-        "@5\t%5\t0\t\t\tabc\t",      # alive, an agent's
+        "@5\t%5\t0\t\t\tabc\t\t1700000000",      # alive, an agent's, its window's last output
     ]) + "\n"
     monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: SimpleNamespace(returncode=0, stdout=out))
     panes = tmux.list_panes()
     assert panes.exits == {"%1": (143, None), "%2": (None, 15), "%3": (None, 15),
                            "%4": (None, "zzz")}
     assert panes["%5"] and not panes["%1"] and panes.tags == {"%5": {tmux.AGENT_TAG: "abc"}}
+    assert panes.activity == {"%5": 1700000000.0}
 
 
 def test_a_pane_runs_in_its_worktree_on_a_server_whose_directory_was_deleted(tmp_path, monkeypatch):

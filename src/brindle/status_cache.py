@@ -658,3 +658,22 @@ def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
 
     with ThreadPoolExecutor(max_workers=min(WARM_WORKERS, len(pairs))) as pool:
         list(pool.map(spawn.carry(one), pairs))   # under the request's deadline, if any
+
+
+def cached_any_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
+    """``cached_status`` for a checkout with no ``base`` too (the repo's own,
+    where its coordinators run), which ``git.status`` would ask git about on
+    every look: the daemon's events feed looks every 5 s. It is cached against
+    its own branch (read from HEAD, no git) and reported, as ``git.status``
+    does, with no base and nothing counted ahead or behind. A detached HEAD
+    is asked of git."""
+    if base:
+        return cached_status(path, base, now=now)
+    try:
+        head = (_worktree_gitdir(Path(path)) / "HEAD").read_text().strip()
+    except (OSError, ValueError, IndexError):
+        head = ""
+    if not head.startswith("ref: refs/heads/"):
+        return git.status(path, base)
+    st = cached_status(path, head[len("ref: refs/heads/"):], now=now)
+    return git.Status(st.branch, None, 0, 0, st.dirty_files, st.unpushed)

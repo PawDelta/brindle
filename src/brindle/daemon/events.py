@@ -136,7 +136,7 @@ class Feed:
     def _sweep_git(self) -> list[dict]:
         from brindle import status_cache
 
-        status = self._git_status or status_cache.cached_status
+        status = self._git_status or status_cache.cached_any_status    # no git for an unchanged checkout
         out = []
         roots = {}
         for agent in self.db.list_agents():

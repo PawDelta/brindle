@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, bus, config, gates, git, pipeline, session_sync, tasks, workspaces
+from brindle import agents, autopilot, bus, config, gates, git, pipeline, session_sync, status_cache, tasks, workspaces
 from brindle.daemon import session_review
 from brindle.db import Agent, Workspace
 from brindle.service import inbox
@@ -184,9 +184,11 @@ def test_idle_sync_worker_goes_live_before_merge(db, told, monkeypatch):
     monkeypatch.setattr(session_sync.time, "monotonic", lambda: 1000.0)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.status != "done")
     monkeypatch.setattr(session_sync, "upstream", lambda ws: "main")
+    monkeypatch.setattr(session_sync, "_remote_default", lambda root: "main")
     monkeypatch.setattr(session_sync, "fetch", lambda *args: True)
     monkeypatch.setattr(session_sync, "drift", lambda *args: session_sync.Drift("origin/main", "main-sha", 1, []))
     monkeypatch.setattr(git, "dirty_files", lambda *args, **kwargs: [])
+    monkeypatch.setattr(status_cache, "cached_status", lambda path, base: git.Status("session", base, 0, 0, [], None))
     monkeypatch.setattr(git, "out", lambda *args: "head-sha")
     monkeypatch.setattr(pipeline, "base_lock", lambda *args, **kwargs: nullcontext())
     merged = []

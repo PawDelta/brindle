@@ -233,6 +233,8 @@ def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
     if has_session(session):
         for k, v in env.items():
             _tmux("set-environment", "-t", f"={session}", k, v, check=False)
+        for key in [k for k in _SESSION_HOMES if k[1] == session]:
+            del _SESSION_HOMES[key]     # session_infos reads its BRINDLE_HOME again
         return
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     size = terminal_size()
@@ -689,17 +691,22 @@ class PaneSnapshot(dict):
     current_server): it says nothing about panes on any other server.
     ``exits``: dead pane id -> (exit status, signal), each None when tmux
     doesn't give it: a status for a program that exited, a signal (its
-    number; see _signal_number) for one a signal killed."""
+    number; see _signal_number) for one a signal killed. ``activity``: pane
+    id -> its window's last output (#{window_activity}, epoch seconds), for
+    a reader that skips a screen nothing has printed to since its last look;
+    a pane missing from it is unknown."""
 
     tags: dict[str, dict[str, str]]
     server: str | None
     exits: dict[str, tuple[int | None, int | str | None]]
+    activity: dict[str, float]
 
     def __init__(self, server: str | None = None) -> None:
         super().__init__()
         self.tags = {}
         self.server = server
         self.exits = {}
+        self.activity = {}
 
 
 def _signal_number(text: str) -> int | str | None:
@@ -730,7 +737,7 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
     server running, or tmux isn't installed at all."""
     result = PaneSnapshot(current_server() if server is _THIS_SERVER else server)  # type: ignore[arg-type]
     fmt = "\t".join(["#{window_id}", "#{pane_id}", "#{pane_dead}", "#{pane_dead_status}",
-                     "#{pane_dead_signal}", *(f"#{{{k}}}" for k in PANE_TAGS)])
+                     "#{pane_dead_signal}", *(f"#{{{k}}}" for k in PANE_TAGS), "#{window_activity}"])
     try:
         proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
     except TmuxTimeout:
@@ -750,6 +757,8 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
         tags = {k: v for k, v in zip(PANE_TAGS, values) if v}
         if tags:
             result.tags[pane_id] = tags
+        if len(values) > len(PANE_TAGS) and values[len(PANE_TAGS)].strip().isdigit():
+            result.activity[pane_id] = float(values[len(PANE_TAGS)])
     return result
 
 
@@ -1274,9 +1283,11 @@ _INFO_FORMAT = "\t".join([
     "#{pane_current_path}", "#{pane_start_command}"])
 
 
-def session_infos(prefix: str = "brindle_") -> list[SessionInfo]:
+def session_infos(prefix: str = "brindle_", fresh: bool = False) -> list[SessionInfo]:
     """Every session on brindle's server whose name starts with ``prefix``,
-    with its panes, in one listing (plus one environment read each). Empty
+    with its panes, in one listing (plus one environment read each, then
+    remembered: ``fresh`` reads them again, for a check just before a session
+    is stopped, as another process may have given it to another home). Empty
     with no server; a hung one raises TmuxTimeout."""
     try:
         proc = _tmux("list-panes", "-a", "-F", _INFO_FORMAT, check=False)
@@ -1303,10 +1314,23 @@ def session_infos(prefix: str = "brindle_") -> list[SessionInfo]:
         if pid.isdigit():
             s.panes.append(PaneInfo(pane, int(pid), path.strip(), cmd.strip(), dead == "1",
                                     start, num(wact)))
+    server = current_server()
     for s in found.values():
+        key = (server, s.name, s.created)
+        if key in _SESSION_HOMES and not fresh:
+            s.home = _SESSION_HOMES[key]
+            continue
         env = _tmux("show-environment", "-t", f"={s.name}", "BRINDLE_HOME", check=False).stdout.strip()
         s.home = (env.partition("=")[2] if env.startswith("BRINDLE_HOME=") else "") or None
+        _SESSION_HOMES[key] = s.home
+    for key in [k for k in _SESSION_HOMES if k[0] == server and k[1] not in found]:
+        del _SESSION_HOMES[key]
     return list(found.values())
+
+
+# Each session's BRINDLE_HOME as session_infos read it, by (server, name, created):
+# set when brindle creates the session, so read once (the cull lists sessions every minute).
+_SESSION_HOMES: dict[tuple[str | None, str, float], str | None] = {}
 
 
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"}
