@@ -367,14 +367,15 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
   } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc") {
     acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} onGo={item.kind === "doc" ? onGo : undefined} onNavigate={onNavigate} compact />;
-  } else if (item.kind === "pr_opened" && item.url && openUrl) {
-    // The supervisor already opened it: nothing for brindle to push.
+  } else if (item.kind === "pr_opened" || item.kind === "pr_failed") {
     const url = item.url;
     acts = (
       <>
-        <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(url)}>
+        {url ? openUrl && <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(url)}>
           Open on GitHub
-        </button>
+        </button> : item.kind === "pr_failed" && onReview && <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
+          Review &amp; open PR
+        </button>}
         {act("Dismiss", "pr-not-now", {}, GHOST)}
       </>
     );
@@ -385,12 +386,6 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
         <OpenPr item={item} actions={actions} onDone={onDone} openUrl={openUrl} />
         {act("Dismiss", "pr-not-now", {}, GHOST)}
       </>
-    );
-  } else if (item.kind === "pr_failed" && onReview) {
-    acts = (
-      <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
-        Review &amp; open PR
-      </button>
     );
   } else if (opensVisual(item)) {
     // A visual decision opens its reader (goTo), not the session it belongs to; disabled until that session has loaded.
