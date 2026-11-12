@@ -110,7 +110,7 @@ def test_an_answer_belongs_to_the_offer_it_saw_and_a_grown_plan_is_offered(db, g
     autopilot.set_goal(db, "boss", "Goal A", _plan(4))        # the plan grew: now it deserves one
     a = _offer(db)
     assert a
-    autopilot.set_goal(db, "boss", "Goal B", _plan(4))        # replaced before A's answer arrived
+    autopilot.set_goal(db, "boss", "Goal B", _plan(4), replace=True)        # replaced before A's answer arrived
     b = _offer(db)
     assert b and b != a
     with pytest.raises(ServiceError):
@@ -171,7 +171,7 @@ def test_workers_of_an_earlier_goal_do_not_count_for_a_new_goal(db, boss, goal_e
                            time.time()))
     autopilot.consider_plan_offer(db, "boss")
     assert _offer(db)
-    autopilot.set_goal(db, "boss", "Fix a typo", _plan(1))
+    autopilot.set_goal(db, "boss", "Fix a typo", _plan(1), replace=True)
     assert _offer(db) is None
 
 

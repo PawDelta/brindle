@@ -382,6 +382,49 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     assert started == ["build the preset schema"]
 
 
+@pytest.mark.parametrize("how", [
+    pytest.param("declined", marks=pytest.mark.variant(
+        "the owner's reported case: declined, then the goal grew and was asked again")),
+    pytest.param("approved", marks=pytest.mark.variant("an offer accepted and its plan approved: asked once as well")),
+    pytest.param("direct", marks=pytest.mark.variant(
+        "a small goal never offered, then a plan the person asked for and approved, then the goal grows")),
+])
+def test_answered_plan_offer_is_not_asked_again_as_the_goal_grows(how, db, session, monkeypatch):
+    """Owner report: every set_goal that reworded the goal and added milestones
+    asked again after the person had answered or approved a plan. The same
+    session's goal, however it is reworded and grown, is offered once and its
+    assignments start; an unrelated goal is asked afresh."""
+    from brindle import autopilot
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    db.add_autopilot("boss")
+    offers = lambda: [i for i in inbox.items(db, None) if i.kind == "plan_offer"]  # noqa: E731
+    items = lambda n, p="M": [{"title": f"{p}{i}", "check": "true"} for i in range(n)]  # noqa: E731
+    if how == "direct":
+        mcp_server.set_goal("Org presets", items(2))
+        assert offers() == []
+        visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    else:
+        mcp_server.set_goal("Org presets", items(4))
+        [offer] = offers()
+        plans.answer_offer(db, "boss", offer.request_id, how == "approved")
+    if how != "declined":
+        pid = mcp_server.propose_plan(PLAN).split()[2]
+        plans.decide(db, pid, 1, True, person=True)
+
+    mcp_server.set_goal("Organization-wide presets and their admin screens", items(8))
+    mcp_server.set_goal("Presets: admin screens and audit log", items(9))
+    assert offers() == [] and not plans.open_offer_id(db.get_autopilot("boss").plan_offer)
+    assert plans.holding(db, "boss") is None
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    assert started == ["build the preset schema"]
+
+    mcp_server.set_goal("Rewrite the installer", items(4, "N"), new_goal=True)
+    assert len(offers()) == 1                                # an unrelated goal may be asked once
+
+
 @pytest.mark.variant("reported stall: a terminal-only session's workers held by an offer nobody can answer (review 0.6.3, finding 3)")
 def test_plan_offer_without_app(db, session, monkeypatch):
     from brindle import autopilot
