@@ -971,7 +971,7 @@ class ClaudeCode(Provider):
 
     def command(self, ctx: LaunchContext) -> list[str]:
         from brindle import config as user_config
-        from brindle import wake
+        from brindle import subscription_usage, wake
 
         waiter = wake.applies(self.name, ctx.mode, bool(ctx.profile.headless))
         start_mode = ctx.profile.permission_mode or user_config.claude_permission_mode()
@@ -1015,8 +1015,9 @@ class ClaudeCode(Provider):
             # Claude Code only tells status lines how much of the plan's usage
             # is spent. brindle's records that, then runs the person's own
             # status line, so what they see doesn't change.
-            "statusLine": {"type": "command", "command": " ".join(
-                f"'{a}'" for a in [*brindle_invocation(), "_statusline"])},
+            "statusLine": {"type": "command", "command":
+                f"{subscription_usage.STATUS_IDENTITY}={shlex.quote(subscription_usage.identity() or '')} "
+                + " ".join(shlex.quote(a) for a in [*brindle_invocation(), "_statusline"])},
             # brindle's panes are one agent, one conversation. The agent view
             # (background sessions, "← for agents") lets a pane's foreground
             # session change, or show a task-launcher that looks like an
@@ -2403,13 +2404,16 @@ def status_line(stdin_text: str) -> str:
     print whatever the person's own status line prints (nothing if they have none)."""
     import subprocess
 
-    from brindle import autopilot
+    from brindle import autopilot, subscription_usage
 
     try:
         status = json.loads(stdin_text) if stdin_text.strip() else {}
     except ValueError:
         status = {}
-    if isinstance(status, dict):
+    # A still-running CLI can retain the previous subscription's windows.
+    # Unbound status lines from launches before identity tracking are ignored.
+    who = os.environ.get(subscription_usage.STATUS_IDENTITY)
+    if isinstance(status, dict) and who and who == subscription_usage.identity():
         try:
             autopilot.record_usage(status)
         except OSError:

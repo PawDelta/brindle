@@ -8,13 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from brindle import providers, quota, spawn
+from brindle import providers, quota, spawn, subscription_usage
 
 
 @pytest.mark.variant("the spawn source measured live: several sidebars each started their own usage run")
 def test_sidebars_share_one_claude_usage_run_per_refresh(monkeypatch):
     """Each sidebar is a process of its own with its own refresh clock; the
     claude CLI that answers /usage starts once per refresh for all of them."""
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
     runs = []
     answer = "Current session: 36% used · resets Oct 12 at 6:10pm (America/New_York)\n"
     monkeypatch.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or
@@ -32,6 +33,7 @@ def test_two_sidebars_looking_at_once_start_one_claude_usage_run(monkeypatch):
     """The second sidebar looks while the first is reading the shared stamp,
     before it has set it: the first goes on only once the second has finished
     or is waiting its turn at the lock."""
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
     runs = []
     answer = "Current session: 36% used · resets Oct 12 at 6:10pm (America/New_York)\n"
     monkeypatch.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or
@@ -53,7 +55,7 @@ def test_two_sidebars_looking_at_once_start_one_claude_usage_run(monkeypatch):
     stat, looked = Path.stat, []
 
     def first_looks_then_waits(self, *a, **kw):
-        if self.name != quota.CLAUDE_USAGE_STAMP or looked:
+        if not self.name.startswith(quota.CLAUDE_USAGE_STAMP + ".") or looked:
             return stat(self, *a, **kw)
         looked.append(self)
         try:

@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from brindle import agents, autopilot, cull, quota, workspaces
+from brindle import agents, autopilot, cull, quota, subscription_usage, workspaces
 from brindle.db import Agent
 
 NOW = time.time()
@@ -14,6 +14,7 @@ RESET = NOW + 30 * 86400
 
 @pytest.fixture
 def session(db, repo, monkeypatch):
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive",
                        "processing", "@0", None, time.time()))
