@@ -590,8 +590,13 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                       " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
             # The plan now holds the session's tasks: the offer to plan first is settled
             # (an open one too: the person asked for a plan in their own words).
-            settled.append(c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer LIKE ? OR offer=?)",
-                                     (OFFER_PLANNED, root.id, OFFER_OPEN + "%", OFFER_ACCEPTED)).rowcount)
+            # A plan asked for directly, with no offer before it, settles the goal too, so growing
+            # the goal later never offers to plan what already has a plan.
+            c.execute("INSERT OR IGNORE INTO goal_doc_requests (root_id, requested) "
+                      "SELECT root_id, 0 FROM autopilot WHERE root_id=?", (root.id,))
+            settled.append(c.execute(
+                "UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer IS NULL OR offer LIKE ? OR offer=?)",
+                (OFFER_PLANNED, root.id, OFFER_OPEN + "%", OFFER_ACCEPTED)).rowcount)
         else:
             # Only a plan still waiting on the person takes a revision: one
             # approved since the check above stays approved.

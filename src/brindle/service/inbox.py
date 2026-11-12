@@ -195,12 +195,38 @@ def _opened_pr(db: DB, root_id: str, branch: str, path: str) -> tuple[str, dict 
     return head, opened
 
 
-def opened_marker(db: DB, root_id: str, branch: str, path: str) -> str | None:
-    """What dismissing the "PR opened" card records: HEAD and the open PR's URL
-    (a new commit or another PR brings the card back), or None when no PR is
-    open on HEAD."""
+def _failure_marker(*parts: str | None) -> str:
+    return json.dumps(["failed", *parts])
+
+
+def _pr_problem(db: DB, root_id: str, branch: str, opened: dict | None) -> tuple[str, str] | None:
+    from brindle.daemon import session_review
+
+    recorded = db.conn.execute("SELECT url FROM session_prs WHERE root_id = ? AND branch = ?"
+                               " AND url IS NOT NULL AND merged_at IS NULL", (root_id, branch)).fetchone()
+    # A local fix can move HEAD beyond the PR: its failure still needs attention.
+    urls = dict.fromkeys([r["url"] for r in (recorded, opened) if r])
+    for url in urls:
+        if problem := session_review.pr_problem(db, root_id, url):
+            return url, problem
+    return None
+
+
+def dismiss_marker(db: DB, root_id: str, branch: str, path: str) -> str | None:
+    """Identify the PR card's commit and, for a failure, the current problem.
+
+    Ready/opened markers keep their existing format so saved dismissals stand.
+    """
     head, opened = _opened_pr(db, root_id, branch, path)
-    return f"{head}|{opened['url']}" if opened else None
+    if problem := _pr_problem(db, root_id, branch, opened):
+        return _failure_marker(head, *problem)
+    if opened:
+        return f"{head}|{opened['url']}"
+    prep = db.conn.execute("SELECT sha, state, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
+                           " AND state IN ('passed', 'failed')", (root_id, branch)).fetchone()
+    if prep:
+        return prep["sha"] if prep["state"] == "passed" else _failure_marker(prep["sha"], prep["check_cmd"], prep["output"])
+    return None
 
 
 def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) -> list[InboxItemDTO]:
@@ -213,14 +239,14 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
 
     path = home.path
     head, opened = _opened_pr(db, root_id, branch, path)
-    recorded = db.conn.execute("SELECT url FROM session_prs WHERE root_id = ? AND branch = ?"
-                               " AND url IS NOT NULL AND merged_at IS NULL", (root_id, branch)).fetchone()
-    # A local fix can move HEAD beyond the PR: its failure still needs attention.
-    urls = dict.fromkeys([r["url"] for r in (recorded, opened) if r])
-    for url in urls:
-        if problem := session_review.pr_problem(db, root_id, url):
-            return [InboxItemDTO(kind="pr_failed", reason="PR needs attention", detail=problem,
-                                 url=url, **link)]
+    declined = db.conn.execute("SELECT sha FROM session_pr_declined WHERE root_id = ? AND branch = ?",
+                               (root_id, branch)).fetchone()
+    if problem := _pr_problem(db, root_id, branch, opened):
+        if declined and declined["sha"] == _failure_marker(head, *problem):
+            return []
+        url, detail = problem
+        return [InboxItemDTO(kind="pr_failed", reason="PR needs attention", detail=detail,
+                             url=url, **link)]
     if opened:
         gone = db.conn.execute("SELECT 1 FROM session_pr_declined WHERE root_id = ? AND branch = ? AND sha = ?",
                                (root_id, branch, f"{head}|{opened['url']}")).fetchone()
@@ -229,14 +255,15 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
         return [InboxItemDTO(kind="pr_opened", reason="PR opened", detail=f"#{opened.get('number')} {opened.get('title') or ''}".strip(),
                              url=opened["url"], **link)]
     rows = db.conn.execute(
-        "SELECT state, title, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
+        "SELECT sha, state, title, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
         " AND state IN ('passed', 'failed')", (root_id, branch)).fetchall()
     merged = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ? AND url IS NOT NULL"
                              " AND merged_at IS NOT NULL", (root_id, branch)).fetchone()
     if rows and merged and not session_review.new_since_merge(db, home,merged["pushed_sha"]):
         return []
-    declined = db.conn.execute("SELECT sha FROM session_pr_declined WHERE root_id = ? AND branch = ?",
-                               (root_id, branch)).fetchone()
+    if declined:
+        rows = [r for r in rows if r["state"] != "failed"
+                or declined["sha"] != _failure_marker(r["sha"], r["check_cmd"], r["output"])]
     if declined and any(r["state"] == "passed" for r in rows):
         try:
             if git.out(["rev-parse", "HEAD"], path) == declined["sha"]:

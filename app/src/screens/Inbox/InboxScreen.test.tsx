@@ -83,12 +83,46 @@ describe("inbox", () => {
     const client = daemon.client(), reads: ((items: InboxItemDTO[]) => void)[] = [];
     const { sync } = mount(daemon, client);
     await screen.findByRole("region", { name: "Ship ls --json" }); await act(async () => sync.idle()); vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve))); act(() => { void sync.refresh(); });
-    expect(within(card("pr_failed")).queryByRole("button", { name: "Dismiss" })).toBeNull();
+    expect(within(card("pr_failed")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
     fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/sup1/pr-not-now", query: {}, body: {} }]));
     await waitFor(() => expect(card("pr_ready")).toBeNull());
     await act(async () => reads[0]([prReady, { ...prReady, kind: "pr_failed" }])); expect(card("pr_ready")).toBeNull(); await act(async () => { reads[1](daemon.data.inbox); await sync.idle(); });
     expect(card("pr_failed")).toBeTruthy();
+    sync.stop();
+  });
+
+  it("dismisses a failed PR and opens an existing PR on GitHub", async () => {
+    const failed: InboxItemDTO = { ...prOpened, kind: "pr_failed" };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root], inbox: [failed] });
+    const openUrl = vi.fn(async () => {});
+    const { sync, onOpen } = mount(daemon, undefined, { openUrl });
+    await waitFor(() => expect(card("pr_failed")).toBeTruthy());
+    const buttons = within(card("pr_failed"));
+    expect(buttons.getAllByRole("button")).toHaveLength(2);
+    fireEvent.click(buttons.getByRole("button", { name: "Open on GitHub" }));
+    expect(openUrl).toHaveBeenCalledWith(failed.url);
+    expect(onOpen).not.toHaveBeenCalled();
+    fireEvent.click(buttons.getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(card("pr_failed")).toBeNull());
+    sync.stop();
+    cleanup();
+    daemon.data.inbox = [{ ...failed, url: null }];
+    const { sync: noReviewSync } = mount(daemon, undefined, { onOpen: undefined });
+    await waitFor(() => expect(card("pr_failed")).toBeTruthy());
+    expect(within(card("pr_failed")).getAllByRole("button")).toHaveLength(1);
+    fireEvent.click(within(card("pr_failed")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(card("pr_failed")).toBeNull());
+    noReviewSync.stop();
+  });
+
+  it("dismisses an opened PR without a URL", async () => {
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root], inbox: [{ ...prOpened, url: null }] });
+    const { sync } = mount(daemon);
+    await waitFor(() => expect(card("pr_opened")).toBeTruthy());
+    expect(within(card("pr_opened")).getAllByRole("button")).toHaveLength(1);
+    fireEvent.click(within(card("pr_opened")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(card("pr_opened")).toBeNull());
     sync.stop();
   });
 
