@@ -685,10 +685,12 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
 
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None, *,
-             summary: str | None = None) -> None:
+             summary: str | None = None, replace: bool = False) -> None:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
     A milestone that keeps its title and check keeps its last result. A big
-    goal may open brindle's offer to plan it first (``consider_plan_offer``)."""
+    goal may open brindle's offer to plan it first (``consider_plan_offer``).
+    Rewording or growing the goal keeps the session's offer, answered or not;
+    only ``replace=True`` (an explicit, unrelated new goal) gives it a fresh one."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")
     if not milestones:
@@ -708,8 +710,9 @@ def set_goal(db: DB, root_id: str, goal: str,
     fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
-        fields["plan_offer"] = None     # a new goal gets its own, single offer
-        fields["offer_goal_at"] = time.time()
+        if ap is None or replace:
+            fields["plan_offer"] = None     # an unrelated goal gets its own, single offer
+            fields["offer_goal_at"] = time.time()
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
