@@ -410,7 +410,7 @@ pub const LAYOUT_FORMAT: &str = "#{@brindle_sidebar}\t#{pane_left}\t#{pane_right
 /// changed, so the view's idle redraws (a spinner, an age) send none.
 pub const LAYOUT_TITLE: &str = concat!(
     "#{window_id} #{window_visible_layout} #{P:#{@brindle_sidebar},} #{client_width} #{window_offset_x} ",
-    "#{?#{P:#{@brindle_sidebar}},#{?#{@brindle_sidebar},,#{?#{!=:#{window_width},#{client_width}},#{cursor_x},}},}",
+    "#{?#{P:#{@brindle_sidebar}},#{?#{@brindle_sidebar},,#{?#{!=:#{window_width},#{client_width}},#{pane_left}+#{cursor_x},}},}",
 );
 
 /// How tmux sets the title of a client with the "title" feature (`TSL`).
@@ -2236,6 +2236,17 @@ mod tests {
         server.run(&["refresh-client", "-t", &tty]);
         server.wait("the view redrawn", |_| asked.lock().unwrap().1 > reads);
         assert_eq!(asked.lock().unwrap().2, probes, "a redraw of the panned window, nothing moved, asks for no probe");
+        // Two more panes of the agent's, at the window's 125th and 150th columns, their cursors at their first
+        // column: either active, tmux pans the window to its end (59), and only the one at 150 is past the view.
+        let split = |target: &str, width: &str| server.run(&["split-window", "-d", "-h", "-l", width, "-P", "-F", "#{pane_id}", "-t", target, "cat"]);
+        let middle = split(&agent, "55");
+        let right = split(&middle, "30");
+        for (pane, left) in [(&middle, 0), (&right, 2), (&middle, 0)] {
+            server.run(&["select-pane", "-t", pane]);
+            server.wait(&format!("{pane} active: told {:?}, panned {}", last(), panned()), |_| panned() == 59 && last() == Some(Crop { cols: 31, left, width: None }));
+        }
+        server.run(&["kill-pane", "-t", &right]);
+        server.run(&["kill-pane", "-t", &middle]);
         view.take_window().unwrap();
         settled(at_left, "the view took the wider window back");
         terminal.kill().unwrap();
