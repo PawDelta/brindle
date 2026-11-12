@@ -73,13 +73,14 @@ def deserves_offer(milestones: int, repos: int = 1, text: str = "", workers: int
 
 def offer_reasons(milestones: int, repos: int = 1, text: str = "", workers: int = 0) -> list[str]:
     """The conditions this work meets, shared by the offer and its explanation."""
+    if _BUGFIX.search(text):    # a bug fix is fixed, not planned first, however wide or worded
+        return []
     reasons = []
-    design = bool(_DESIGN.search(text))
-    if milestones >= OFFER_MILESTONES and (design or not _BUGFIX.search(text)):   # a bug fix isn't planned
+    if milestones >= OFFER_MILESTONES:
         reasons.append(f"This goal has {milestones} milestones.")
     if repos >= 2:
         reasons.append(f"This work spans {repos} repositories.")
-    if milestones >= OFFER_DESIGN_MILESTONES and design:
+    if milestones >= OFFER_DESIGN_MILESTONES and _DESIGN.search(text):
         reasons.append(f"This goal includes design or restructuring work across {milestones} milestones.")
     return reasons
 

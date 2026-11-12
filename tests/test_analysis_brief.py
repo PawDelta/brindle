@@ -76,8 +76,10 @@ def goal_env(db, boss, monkeypatch):
 @pytest.mark.parametrize("milestones, goal, offered", [
     (_plan(3), "Redesign the sync architecture", True),
     # An omitted repo is the root checkout: with one attached repo that is two repos.
-    (_plan(1) + _plan(1, "web"), "Fix the typo", True), (_plan(2, "web"), "Fix the typo", False),
-    (_plan(5), "Fix the crash in sync", False), (_plan(5), "Ship the storage page", True)])
+    (_plan(1) + _plan(1, "web"), "Update the docs", True), (_plan(2, "web"), "Update the docs", False),
+    (_plan(5), "Ship the storage page", True),
+    # A bug fix is never offered, however many milestones or repos, or design words.
+    (_plan(5) + _plan(1, "web"), "Fix the crash by refactoring sync", False)])
 def test_large_goal_is_offered_planning_first_once(milestones, goal, offered, db, goal_env):
     from brindle.daemon import routes_actions
 
@@ -128,6 +130,8 @@ def test_parallel_workers_never_make_a_goal_deserve_an_offer(db, boss, goal_env)
     for i in range(4):
         db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "working", "", None, time.time()))
         autopilot.consider_plan_offer(db, "boss")
+    assert _offer(db) is None
+    autopilot.set_goal(db, "boss", "Small goal", _plan(6))     # grown after work started: still not held
     assert _offer(db) is None
 
 

@@ -773,13 +773,13 @@ def plan_offer_scope(db: DB, root_id: str, ap: Autopilot) -> tuple[list[Mileston
 
 def consider_plan_offer(db: DB, root_id: str) -> None:
     """Open the one offer to plan this goal first if it now deserves it: large,
-    by milestones, repos (an omitted repo is the root checkout) or workers, or
+    by milestones or repos (an omitted repo is the root checkout), or
     design-heavy (brindle.pro.analysis_brief.offer_reasons). Never re-offers a
     goal already offered or answered, and never while a plan is already open
     or plans can't be answered (visuals off or no app connected). While the
     offer is open the session's tasks queue behind it (brindle.plans.holding); the person
     answers it from the Inbox (brindle.plans.answer_offer). Run when the goal
-    changes and when a worker is assigned; never raises."""
+    changes, and only before any worker is assigned for it; never raises."""
     try:
         from brindle import plans, visuals
         from brindle.daemon import holds
@@ -790,6 +790,8 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
                 or not holds.app_connected() or plans.open_plan(db, root_id) is not None:
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
+        if workers:     # work already under way: an offer now would hold what was assigned
+            return
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
                 and db.open_plan_offer(root_id, ap.goal, plans.OFFER_OPEN + secrets.token_hex(4)):
             bus.publish_agent(db, "autopilot.goal", root_id)
