@@ -683,15 +683,17 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
     return items
 
 
-def _same_goal(old_goal: str, new_goal: str, old: dict, milestones: list[tuple]) -> bool:
+def _same_goal(old_goal: str, new_goal: str) -> bool:
     """Whether ``new_goal`` is the session's goal reworded or grown rather than
-    an unrelated replacement: it keeps a milestone, or most of the shorter
-    title's words. A reworded goal must not be offered the plan question again."""
-    if any((m[0], m[1]) in old for m in milestones):
+    an unrelated replacement: one title contains the other, or at least half
+    of their combined words are shared. A grown goal must not be offered the
+    plan question again."""
+    a, b = (re.findall(r"[a-z0-9]+", s.lower()) for s in (old_goal, new_goal))
+    if not a or not b:
+        return False
+    if " ".join(a) in " ".join(b) or " ".join(b) in " ".join(a):
         return True
-    words = lambda s: set(re.findall(r"[a-z0-9]{3,}", s.lower()))  # noqa: E731
-    a, b = words(old_goal), words(new_goal)
-    return bool(a and b) and len(a & b) * 2 >= min(len(a), len(b))
+    return len(set(a) & set(b)) * 2 >= len(set(a) | set(b))
 
 
 def set_goal(db: DB, root_id: str, goal: str,
@@ -719,7 +721,7 @@ def set_goal(db: DB, root_id: str, goal: str,
     fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
-        if ap is None or not _same_goal(ap.goal or "", goal, old, milestones):
+        if ap is None or not _same_goal(ap.goal or "", goal):
             fields["plan_offer"] = None     # an unrelated goal gets its own, single offer
             fields["offer_goal_at"] = time.time()
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
