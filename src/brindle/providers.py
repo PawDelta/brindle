@@ -488,9 +488,9 @@ def trust_folder(path: str) -> bool:
     A write keeps the file's mode (it's private: 0600), goes through a temp
     file beside it that never exists with a wider mode and is always
     removed, and holds a brindle lock so two brindle launches can't drop each
-    other's flag. Claude Code writes this file too, without that lock, so
-    the file is re-read right before the replace to keep the window for
-    losing one of its writes as small as possible."""
+    other's flag. Claude Code writes this file too, without that lock: the
+    person's MCP servers, its sign-in, every folder's settings. A write of
+    its own that lands while brindle works is never replaced (_update_config)."""
     # Through any symlink (dotfile managers link this file): replacing the
     # link itself would orphan the file it points to.
     config = os.path.realpath(claude_global_config())
@@ -521,13 +521,8 @@ def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
     a JSON object) when it can't write."""
     config = os.path.realpath(claude_global_config())
     os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
-    with _config_lock():
-        try:
-            data = _read_json(config)
-        except FileNotFoundError:
-            data = {}
-        if not isinstance(data, dict):
-            raise ValueError(f"{config} doesn't hold a JSON object")
+
+    def seed(data: dict) -> None:
         data["hasCompletedOnboarding"] = True
         data.setdefault("theme", CI_THEME)
         projects = data.setdefault("projects", {})
@@ -535,7 +530,9 @@ def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
             projects.setdefault(os.path.realpath(path), {})["hasTrustDialogAccepted"] = True
         if api_key:
             _record_approval(data, api_key)
-        _replace_json(config, data, 0o600)
+
+    with _config_lock():
+        _update_config(config, seed, create=True, mode=0o600)
     return config
 
 
@@ -565,17 +562,7 @@ def approve_api_key(api_key: str) -> str:
     config = os.path.realpath(claude_global_config())
     os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
     with _config_lock():
-        try:
-            data = _read_json(config)
-            import stat
-
-            mode = stat.S_IMODE(os.stat(config).st_mode)
-        except FileNotFoundError:
-            data, mode = {}, 0o600
-        if not isinstance(data, dict):
-            raise ValueError(f"{config} doesn't hold a JSON object")
-        _record_approval(data, api_key.strip())
-        _replace_json(config, data, mode)
+        _update_config(config, lambda data: _record_approval(data, api_key.strip()), create=True)
     return config
 
 
@@ -612,19 +599,13 @@ def record_claude_onboarding() -> str:
     anyone. Returns the file's path; raises OSError or ValueError."""
     config = os.path.realpath(claude_global_config())
     os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
-    with _config_lock():
-        try:
-            data = _read_json(config)
-            import stat
 
-            mode = stat.S_IMODE(os.stat(config).st_mode)
-        except FileNotFoundError:
-            data, mode = {}, 0o600
-        if not isinstance(data, dict):
-            raise ValueError(f"{config} doesn't hold a JSON object")
+    def onboarded(data: dict) -> None:
         data["hasCompletedOnboarding"] = True
         data.setdefault("theme", CI_THEME)
-        _replace_json(config, data, mode)
+
+    with _config_lock():
+        _update_config(config, onboarded, create=True)
     return config
 
 
@@ -702,15 +683,83 @@ def _trusted(data: dict, key: str) -> bool:
 
 def _write_trust(config: str, key: str) -> bool:
     """trust_folder's write; the caller holds the lock."""
+    def trust(data: dict) -> None:
+        data.setdefault("projects", {}).setdefault(key, {})["hasTrustDialogAccepted"] = True
+
+    _update_config(config, trust)       # no write when another launch trusted it meanwhile
+    return True
+
+
+# How many times _update_config starts over on a file Claude Code keeps writing.
+CONFIG_ATTEMPTS = 5
+
+
+class _ConfigChanged(Exception):
+    """The file changed after brindle read it: nothing was replaced."""
+
+
+# The file an update is about to replace, and how it looked when it was read
+# (_stamp). Set by _update_config around its _replace_json, read by
+# _replace_text just before the rename; unset for every other write.
+_as_read: contextvars.ContextVar[tuple[str, tuple[int, int, int] | None] | None] = contextvars.ContextVar(
+    "claude_config_as_read", default=None)
+
+
+def _stamp(config: str) -> tuple[int, int, int] | None:
+    """What tells one version of ``config`` from the next: its inode (an
+    atomic write, Claude Code's and brindle's, makes a new file), size and
+    modification time. None when there is no file."""
+    try:
+        st = os.stat(config)
+    except FileNotFoundError:
+        return None
+    return st.st_ino, st.st_size, st.st_mtime_ns
+
+
+def _update_config(config: str, change, *, create: bool = False, mode: int | None = None) -> None:
+    """Apply ``change`` to Claude Code's global state file ``config`` without
+    losing anything Claude Code wrote there. ``change`` edits the parsed file
+    in place and only touches brindle's own keys; everything else (the
+    person's ``mcpServers``, the account, each folder's settings) is written
+    back as it was read. The caller holds brindle's lock.
+
+    Claude Code writes this file too, under a lock of its own that brindle
+    can't take. So the file is replaced only if it is still the version that
+    was read (_stamp, checked right before the rename): when Claude Code got a
+    write in meanwhile (an MCP server just added, a sign-in), brindle starts
+    over from that version rather than replacing it with an older one. What
+    is left is the instant between that check and the rename.
+
+    A file with nothing to change isn't written. A missing one is created
+    (0600) with ``create``, else FileNotFoundError; ``mode`` sets the file's
+    mode, otherwise kept. ValueError for a file that isn't a JSON object;
+    OSError when it changed at every attempt (it is then left alone)."""
+    import copy
     import stat
 
-    mode = stat.S_IMODE(os.stat(config).st_mode)
-    data = _read_json(config)  # as late as possible: Claude Code may have just written it
-    if _trusted(data, key):
-        return True
-    data.setdefault("projects", {}).setdefault(key, {})["hasTrustDialogAccepted"] = True
-    _replace_json(config, data, mode)
-    return True
+    for _ in range(CONFIG_ATTEMPTS):
+        seen = _stamp(config)
+        if seen is None and create:
+            data, kept = {}, 0o600
+        else:
+            kept = stat.S_IMODE(os.stat(config).st_mode)    # FileNotFoundError: not brindle's to create
+            data = _read_json(config)
+        if not isinstance(data, dict):
+            raise ValueError(f"{config} doesn't hold a JSON object")
+        before = copy.deepcopy(data)
+        change(data)
+        wanted = kept if mode is None else mode
+        if seen is not None and data == before and wanted == kept:
+            return
+        token = _as_read.set((config, seen))
+        try:
+            _replace_json(config, data, wanted)
+            return
+        except _ConfigChanged:
+            pass
+        finally:
+            _as_read.reset(token)
+    raise OSError(f"{config} changed each time brindle went to write it; left as it is")
 
 
 def _replace_json(config: str, data: dict, mode: int) -> None:
@@ -728,6 +777,9 @@ def _replace_text(config: str, text: str, mode: int) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.chmod(tmp, mode)  # the umask may have narrowed it
+        guard = _as_read.get()
+        if guard is not None and guard[0] == config and _stamp(config) != guard[1]:
+            raise _ConfigChanged(config)
         os.replace(tmp, config)  # atomic: Claude Code never reads half a file
     finally:
         try:

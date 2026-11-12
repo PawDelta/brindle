@@ -867,7 +867,9 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
     # Claude Code's managed settings supply the credential: no stored Claude key.
     no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
     env = {**keystore.pane_keys(credentials - no_stored, {**env, **org_env}), **env, **org_env}
-    result = env, credentials, allow, deny, org_env
+    # The pane keeps its provider's credentials and, for Claude Code, its TLS
+    # client settings: only the credentials are stored keys (pane_keys above).
+    result = env, secrets.pane_keep(agent.provider, credentials), allow, deny, org_env
     # Resolve stored/org keys once for this launch: catalog, health identity
     # and pane must use the same key helper result, without repeated delays.
     agent._pane_environment = m, result
