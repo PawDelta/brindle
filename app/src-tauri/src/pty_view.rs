@@ -46,7 +46,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -421,6 +421,36 @@ const TITLE_START: &[u8] = b"\x1b]0;";
 /// cursor moving in a window panned as it was sends no title.
 const CURSOR_TITLED: (u32, u32) = (3, 7);
 
+/// What the looks at the crop and the client's redraws tell each other
+/// where no title says the cursor moved (a server older than `CURSOR_TITLED`).
+#[derive(Default)]
+struct Follows {
+    /// The crop follows the agent's cursor, as the last look at it found.
+    on: AtomicBool,
+    /// The client's redraws so far.
+    redraws: AtomicUsize,
+}
+
+impl Follows {
+    /// A look at the crop (`probe`: it, and whether it follows the agent's
+    /// cursor), told to `tell`. Once more when it follows the cursor as the
+    /// look before found it didn't, and the client redrew meanwhile: that
+    /// redraw, which may be the cursor moving on, asked for no look
+    /// (`Relayouts::ask`), and there may be none after it.
+    fn look(&self, mut probe: impl FnMut() -> Option<(Crop, bool)>, mut tell: impl FnMut(Crop)) {
+        loop {
+            let redraws = self.redraws.load(Ordering::SeqCst);
+            let Some((crop, following)) = probe() else { return };
+            // Set before the redraws are counted again, as `ask` counts one before it reads this: one of the two sees the other.
+            let began = following && !self.on.swap(following, Ordering::SeqCst);
+            tell(crop);
+            if !began || self.redraws.load(Ordering::SeqCst) == redraws {
+                return;
+            }
+        }
+    }
+}
+
 /// Which of the client's redraws ask for a look at the crop (`crop_now`: a
 /// tmux list-panes and list-clients each): one that sets its title
 /// (`LAYOUT_TITLE`), however it is split between reads. On a server older
@@ -429,19 +459,21 @@ const CURSOR_TITLED: (u32, u32) = (3, 7);
 struct Relayouts {
     /// The stream's last bytes: a title split between redraws is seen once.
     tail: Vec<u8>,
-    /// Whether the crop follows the agent's cursor, as the last look at it
-    /// found (`crop_now`), where no title says the cursor moved.
-    follows: Option<Arc<AtomicBool>>,
+    /// Where no title says the cursor moved: whether the crop follows it.
+    follows: Option<Arc<Follows>>,
 }
 
 impl Relayouts {
     /// Those of a client of a server of `version`, its crop following the cursor as `follows` says.
-    fn on(version: (u32, u32), follows: Arc<AtomicBool>) -> Self {
+    fn on(version: (u32, u32), follows: Arc<Follows>) -> Self {
         Relayouts { tail: Vec::new(), follows: (version < CURSOR_TITLED).then_some(follows) }
     }
 
     fn ask(&mut self, bytes: &[u8]) -> bool {
-        let followed = self.follows.as_ref().is_some_and(|follows| follows.load(Ordering::Relaxed));
+        let followed = self.follows.as_ref().is_some_and(|follows| {
+            follows.redraws.fetch_add(1, Ordering::SeqCst);
+            follows.on.load(Ordering::SeqCst)
+        });
         let keep = TITLE_START.len() - 1;
         let seam: Vec<u8> = self.tail.iter().chain(&bytes[..bytes.len().min(keep)]).copied().collect();
         let titled = |b: &[u8]| b.windows(TITLE_START.len()).any(|w| w == TITLE_START);
@@ -887,30 +919,33 @@ impl PtyView {
         // Neither idle ticks nor the redraws of an idle view (a spinner, the sidebar's ages)
         // probe tmux: each probe starts list-panes and list-clients. A tmux older than
         // `CURSOR_TITLED` draws no title as the cursor moves: there, while a look finds the
-        // crop following the cursor, every redraw asks for the next. The watcher ends with
-        // the client's output.
+        // crop following the cursor, every redraw asks for the next, and one drawn during the
+        // look that first finds it so has it looked at again (`Follows::look`). The watcher
+        // ends with the client's output.
         let (redrawn, looks) = mpsc::sync_channel::<()>(1);
-        let follows = Arc::new(AtomicBool::new(false));
+        let follows = Arc::<Follows>::default();
         {
             let (tmux_bin, server, view, master, size, follows) = (tmux_bin.to_path_buf(), server.clone(), view.clone(), master.clone(), size.clone(), follows.clone());
             std::thread::spawn(move || {
                 watch_crops(|| looks.recv_timeout(std::time::Duration::from_secs(1)), || {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     while looks.try_recv().is_ok() {}
-                    let visible = size.lock().unwrap_or_else(|e| e.into_inner()).0 .0;
-                    let Some((crop, following)) = crop_now(&tmux_bin, &server, &view, visible, Some(client)) else { return };
-                    follows.store(following, Ordering::Relaxed);
-                    let mut size = size.lock().unwrap_or_else(|e| e.into_inner());
-                    if size.1 != crop {
-                        let resized = size.1.cols != crop.cols;
-                        size.1 = crop;
-                        // Told first: the bytes drawn at the new size come after.
-                        on_crop(crop);
-                        if resized {
-                            let _ = set_size(&master, size.0, crop);
+                    let probe = || {
+                        let visible = size.lock().unwrap_or_else(|e| e.into_inner()).0 .0;
+                        crop_now(&tmux_bin, &server, &view, visible, Some(client))
+                    };
+                    follows.look(probe, |crop| {
+                        let mut size = size.lock().unwrap_or_else(|e| e.into_inner());
+                        if size.1 != crop {
+                            let resized = size.1.cols != crop.cols;
+                            size.1 = crop;
+                            // Told first: the bytes drawn at the new size come after.
+                            on_crop(crop);
+                            if resized {
+                                let _ = set_size(&master, size.0, crop);
+                            }
                         }
-                    }
-                    drop(size);
+                    });
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 });
             });
@@ -2112,7 +2147,7 @@ mod tests {
         redraws.push(b"]0;@3 a1b2,121x25,0,0{30x25,0,0,1,90x25,31,0,0} e6af0dc0, 121 0\x07\x1b[?2026l".to_vec());
         redraws.extend(["⠼", "⠴"].iter().map(|f| spinner(f).into_bytes()));
         let probes_for = |version, follows, redraws: &[Vec<u8>]| {
-            let mut relayouts = Relayouts::on(version, Arc::new(AtomicBool::new(follows)));
+            let mut relayouts = Relayouts::on(version, Arc::new(Follows { on: AtomicBool::new(follows), ..Default::default() }));
             let mut events = redraws.iter().map(|bytes| if relayouts.ask(bytes) { Ok(()) } else { Err(Timeout) }).chain([Err(Disconnected)]);
             let mut probes = 0;
             watch_crops(|| events.next().unwrap(), || probes += 1);
@@ -2124,6 +2159,25 @@ mod tests {
         // older one, which draws none, every redraw probes.
         assert_eq!(probes_for((3, 7), true, &redraws[..4]), 0, "a title says the cursor moved");
         assert_eq!(probes_for((3, 6), true, &redraws[..4]), 4, "no title says the cursor moved");
+        // The look that first finds the crop following the cursor: the cursor moves on (a redraw with
+        // no title, which asks for nothing) after tmux has answered and before the crop is told, and
+        // nothing is drawn after. Of an older tmux the crop is looked at again; from 3.7 a title asks.
+        let told_for = |version| {
+            let follows = Arc::new(Follows::default());
+            let mut relayouts = Relayouts::on(version, follows.clone());
+            let (mut answers, mut told) = ([0, 21].into_iter(), Vec::new());
+            follows.look(
+                || {
+                    let left = answers.next()?;
+                    assert!(left != 0 || !relayouts.ask(&redraws[0]), "the redraw during the first look asked");
+                    Some((Crop { cols: 31, left, width: None }, true))
+                },
+                |crop| told.push(crop.left),
+            );
+            told
+        };
+        assert_eq!(told_for((3, 6)), [0, 21], "the cursor's move during the look is followed");
+        assert_eq!(told_for((3, 7)), [0], "a title asks for the next look");
     }
 
     #[test]
