@@ -407,7 +407,10 @@ pub const LAYOUT_FORMAT: &str = "#{@brindle_sidebar}\t#{pane_left}\t#{pane_right
 /// the active one). tmux works the title out again on each full redraw (a
 /// layout change, a resize, a pan, an option set, any redraw of a window
 /// wider than the client) and sends it (`TITLE_START`) only when it
-/// changed, so the view's idle redraws (a spinner, an age) send none.
+/// changed, so the view's idle redraws (a spinner, an age) send none. A
+/// tmux before 3.7 works it out only on a full redraw: a cursor moving in a
+/// window panned to its end (its offset unchanged) sends none, and the view
+/// doesn't follow it there. No redraw probes in its place, on any tmux.
 pub const LAYOUT_TITLE: &str = concat!(
     "#{window_id} #{window_visible_layout} #{P:#{@brindle_sidebar},} #{client_width} #{window_offset_x} ",
     "#{?#{P:#{@brindle_sidebar}},#{?#{@brindle_sidebar},,#{?#{!=:#{window_width},#{client_width}},#{pane_left}+#{cursor_x},}},}",
