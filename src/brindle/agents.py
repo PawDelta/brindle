@@ -517,8 +517,6 @@ def spawn(
                                unfinished[0] if unfinished else None)
             if current:
                 db.set_agent_milestone(agent_id, current)
-    if session_root and mode in ("handoff", "assign"):
-        pilot.consider_plan_offer(db, session_root)   # another worker may make the goal large
     if person_prompt and raw_task and parent_id is None and mode == "interactive":
         from brindle import visual_offers
 
