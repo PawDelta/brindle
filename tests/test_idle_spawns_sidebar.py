@@ -17,7 +17,7 @@ def test_an_unchanged_sidebar_refresh_starts_no_process(db, tmp_path, monkeypatc
     which terminal shows the sidebar and whether it is home (three tmux
     calls), recheck the braid, and run git status and a failing rev-list
     three times over: about 60 processes a minute per sidebar."""
-    from brindle import agents, git, sidebar_logo, tmux, view
+    from brindle import agents, autopilot, git, sidebar_logo, tmux, view
     from brindle.db import Agent, Workspace
 
     for role in ("AUTHOR", "COMMITTER"):
@@ -37,6 +37,8 @@ def test_an_unchanged_sidebar_refresh_starts_no_process(db, tmp_path, monkeypatc
                        tmux_server=server))
     db.add_agent(Agent("work", "w1", "developer", "claude", "lead", "assign", "waiting", "%2", None, 0,
                        tmux_server=server))
+    autopilot.set_goal(db, "lead", "Ship it", [("Tests pass", "false", None)])
+    db.record_check(db.milestones("lead")[0].id, False, "nope")   # the goal line asks what's in flight
 
     fake = tmp_path / "bin" / "tmux"
     fake.parent.mkdir()
@@ -47,6 +49,7 @@ def test_an_unchanged_sidebar_refresh_starts_no_process(db, tmp_path, monkeypatc
                     "  *session_name*) echo brindle_s ;;\n"
                     "  *'#{session_attached}'*) echo 1 ;;\n"
                     "  *capture-pane*) echo 'Do you want to proceed?' ;;\n"
+                    "  *'#{pane_dead}'*) echo 0 ;;\n"
                     "esac\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
@@ -66,6 +69,8 @@ def test_an_unchanged_sidebar_refresh_starts_no_process(db, tmp_path, monkeypatc
     refreshes, started = [], []
     snapshot = view.snapshot
     monkeypatch.setattr(view, "snapshot", lambda *a, **k: refreshes.append(1) or snapshot(*a, **k))
+    pilots, entry = [], view.autopilot_entry
+    monkeypatch.setattr(view, "autopilot_entry", lambda *a, **k: pilots.append(entry(*a, **k)) or pilots[-1])
     popen = subprocess.Popen.__init__
     monkeypatch.setattr(subprocess.Popen, "__init__",
                         lambda self, args, *a, **k: started.append(args) or popen(self, args, *a, **k))
@@ -96,4 +101,5 @@ def test_an_unchanged_sidebar_refresh_starts_no_process(db, tmp_path, monkeypatc
     except _Done:
         pass
     assert len(refreshes) == 5
+    assert pilots[-1]["milestones"][0]["status"] == "waiting"   # the worker is in flight
     assert started == []

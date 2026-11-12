@@ -409,12 +409,14 @@ Fix:
   does `TMUX_LOOK_SECONDS` (60 s) passing. Screens are read
   (`view.snapshot(read_screens=...)`), and while quiet the viewer, the
   sidebar's home and the braid are asked, only with a fresh look.
-- The goal line's worker count uses the refresh's pane snapshot
-  (`autopilot.working_workers(..., panes)`).
+- The goal line's worker count and a failed milestone's work state use the
+  refresh's pane snapshot (`autopilot.working_workers(..., panes)`,
+  `autopilot.work_state(..., panes)`).
 
 Test: `tests/test_idle_spawns_sidebar.py` drives `watch._loop` itself
 (a fake screen, a fake `tmux` on PATH, a real repo with a worktree whose
-base branch is gone, a session root and a worker waiting on the person) and
+base branch is gone, a session root with a failed milestone and a worker
+waiting on the person) and
 counts every process started across two unchanged refreshes after the
 first three: 18 on the unmodified code (4 of them git with only the
 status_cache part undone), none with the fix.
@@ -424,9 +426,7 @@ What is left: an idle sidebar takes one fresh tmux look a minute
 recheck where it can't show, and a `capture-pane` per running non-idle
 agent): about 5 processes a minute instead of 6 refreshes' worth. That look
 is what notices a CLI that died without writing the database, a missed
-follow hook and a status its hooks left stale. A failed milestone's work
-state (`autopilot.work_state`) still judges each worker's liveness with its
-own `display`.
+follow hook and a status its hooks left stale.
 
 ### Other sources, measured and left as they are
 

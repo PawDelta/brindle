@@ -2143,10 +2143,11 @@ def counts(db: DB, root_id: str) -> tuple[int, int]:
     return sum(m.status == "passed" for m in ms), len(ms)
 
 
-def work_state(db: DB, root_id: str) -> str | None:
+def work_state(db: DB, root_id: str, panes: dict[str, bool] | None = None) -> str | None:
     """Display-only: "checking", "working" or "waiting" while the session has work in
     flight, else None. A failed milestone's last check is stale then, so it
     shouldn't read as a plain failure. Never stored on the milestone.
+    ``panes``: as for ``active_workers``.
 
     shortcut: work isn't tied to a milestone, so any in-flight work marks every
     failed milestone; upgrade if tasks get a milestone link."""
@@ -2157,7 +2158,7 @@ def work_state(db: DB, root_id: str) -> str | None:
         return "checking"
     if (ap is not None and (ap.state == "usage_paused" or ap.external_wait)) or login_pause.paused(db, root_id):
         return "waiting"
-    live = active_workers(db, root_id)
+    live = active_workers(db, root_id) if panes is None else active_workers(db, root_id, panes=panes)
     if any(a.status != "waiting" for a in live):
         return "working"
     if live or any(root_of(db, t.caller_id) == root_id
