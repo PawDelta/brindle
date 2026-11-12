@@ -349,8 +349,13 @@ def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db
     db.add_workspace(ws)
     for aid in ("first", "queued", "exhausted", "foreign", "manual"):
         add(db, ws, aid)
+    db.update_agent("first", created_at=2, status_since=20)
+    db.update_agent("queued", created_at=1, status_since=10)
+    for aid, stopped in (("exhausted", 50), ("foreign", 40), ("manual", 30)):
+        db.update_agent(aid, status_since=stopped)
+    panes = tmux.PaneSnapshot()
     monkeypatch.setattr(tmux, "current_server", lambda: None)
-    monkeypatch.setattr(tmux, "list_panes", lambda: tmux.PaneSnapshot())
+    monkeypatch.setattr(tmux, "list_panes", lambda: panes)
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(procs, "stop", lambda *a, **kw: 0)
     monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
@@ -366,13 +371,24 @@ def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db
     def statuses(db_):
         return {row["id"]: row["status"] for row in routes_read.list_sessions.__wrapped__(db_, request)}
 
-    seen, launching = [], []
+    seen, launching, orders = [], [], []
 
     def resume(db_, root_id, **kw):
         seen.append(statuses(db_))
+        transitions = [list(seen[-1])]
         # During launch it leaves both the paused list and the live-pane list.
         db_.set_status(root_id, "starting")
-        launching.append((root_id, statuses(db_).get(root_id)))
+        starting = statuses(db_)
+        launching.append((root_id, starting.get(root_id)))
+        transitions.append(list(starting))
+        # Its position stays the same when tmux can see the pane, too.
+        pane = f"%{root_id}"
+        db_.update_agent(root_id, tmux_window=pane)
+        panes[pane] = True
+        db_.set_status(root_id, "idle")
+        transitions.append(list(statuses(db_)))
+        orders.append(transitions)
+        panes.pop(pane)
         db_.set_status(root_id, "paused")
         raise agents.AgentError("launch failed")
 
@@ -382,6 +398,7 @@ def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db
                        "foreign": "paused", "manual": "paused"}
     assert seen[1]["first"] == "paused" and seen[1]["queued"] == "resuming"
     assert launching == [("first", "resuming"), ("queued", "resuming")]
+    assert orders[0] == [["first", "queued", "exhausted", "foreign", "manual"]] * 3
     assert set(statuses(db).values()) == {"paused"}
 
 
