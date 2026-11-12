@@ -432,9 +432,38 @@ STUCK_AFTER = 90.0
 STARTUP_GRACE = 40.0
 
 
+# How old a window's last output must be before a screen read of it is
+# remembered: tmux counts that time in whole seconds, so an output in the same
+# second as the read would leave it looking unchanged.
+SCREEN_SETTLE = 2.0
+
+
+def _screen_key(a: Agent, panes) -> str | None:
+    """What a read of ``a``'s screen is remembered by: its pane and its window's
+    last output, from the sweep's one pane listing (``PaneSnapshot.activity``).
+    None when that's unknown or too recent to tell a later output apart."""
+    activity = getattr(panes, "activity", {}).get(a.tmux_window)
+    if activity is None or time.time() - activity < SCREEN_SETTLE:
+        return None
+    return f"{a.tmux_window}:{activity:.0f}"
+
+
+def _screen_unchanged(db: DB, a: Agent, reader: str, key: str | None) -> bool:
+    """Whether ``reader`` already read ``a``'s screen as it is (nothing printed
+    since) and found nothing to do: a capture of it would say the same again.
+    Kept in the DB, as the sidebars take turns at the cull."""
+    return key is not None and db.mark(a.id, f"screen:{reader}") == key
+
+
+def _screen_read(db: DB, a: Agent, reader: str, key: str | None) -> None:
+    if key is not None and db.mark(a.id, f"screen:{reader}") != key:
+        db.set_mark(a.id, f"screen:{reader}", key)
+
+
 def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
     """Dismiss Claude's environment upsell even in an interactive supervisor
-    with no queued delivery and no waiting hook."""
+    with no queued delivery and no waiting hook. A screen read once with no
+    upsell on it isn't read again until the pane prints something."""
     from brindle import prompt_answer
 
     owners = agents.pane_owners(db, panes)
@@ -443,6 +472,9 @@ def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
                 or a.status not in ("starting", "idle", "processing", "waiting")
                 or not agents.same_server(a, panes) or not agents.is_alive(a, panes)
                 or not agents.owns_pane(db, a, owners)):
+            continue
+        key = _screen_key(a, panes)
+        if db.mark(a.id, "teach-auto-mode") is None and _screen_unchanged(db, a, "setup", key):
             continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
@@ -455,6 +487,8 @@ def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
                 and provider.screen_state(screen) == "idle"):
             db.set_mark(a.id, "teach-auto-mode", None)
             agents.screen_status(db, a, samples=2, gap=0)
+        if db.mark(a.id, "teach-auto-mode") is None:
+            _screen_read(db, a, "setup", key)
 
 
 def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
@@ -1086,8 +1120,14 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        # The window's last output from the sweep's pane listing; asked of tmux only when it lacks it.
+        activity = getattr(panes, "activity", {}).get(a.tmux_window)
+        if activity is None:
+            activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
         if activity is None or now - activity < API_ERROR_GRACE:
+            continue
+        key = _screen_key(a, panes)
+        if _screen_unchanged(db, a, "api", key):
             continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
@@ -1095,6 +1135,7 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         error = ClaudeCode.api_error(screen)
         if not error or model_access.classify(error):
+            _screen_read(db, a, "api", key)
             continue
         if a.status == "processing":
             db.set_status(a.id, "idle", only_if="processing")
@@ -1131,10 +1172,15 @@ def note_model_refused(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
+        # What a screen says is told once (first_time): one read until the pane prints again.
+        key = _screen_key(a, panes)
+        if _screen_unchanged(db, a, "refused", key):
+            continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
         except tmux.TmuxError:
             continue
+        _screen_read(db, a, "refused", key)
         ws = db.get_workspace(a.workspace_id)
         where = f" on branch `{ws.branch}`" if ws else ""
         error = ClaudeCode.api_error(screen)

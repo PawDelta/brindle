@@ -63,7 +63,10 @@ def test_an_unchanged_sweep_starts_no_process(db, repo, tmp_path, _repo_template
     db.add_agent(Agent("idler", still.id, "developer", "claude", "lead", "assign", "idle", "%idler", None, 1.0))
     panes = tmux.PaneSnapshot(tmux.current_server())
     panes.update({"%lead": True, "%clash-lead": True, "%messy-lead": True, "%worker": True, "%idler": True})
+    panes.activity.update({pane: time.time() - 600 for pane in panes})     # nothing printed for 10 minutes
+    read = []
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
+    monkeypatch.setattr(tmux, "capture", lambda target, **k: read.append(target) or "❯ \n")
     monkeypatch.setattr(agents, "is_alive", lambda a, p=None: panes.get(a.tmux_window, False))
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: None)
@@ -84,5 +87,7 @@ def test_an_unchanged_sweep_starts_no_process(db, repo, tmp_path, _repo_template
         started.append(args), real(self, args, *a, **k))[1])
     daemon()
     assert started == []
-    cull.sweep(db)                    # its process table and pane reads are its job; git isn't
-    assert [args for args in started if args[0] == "git"] == []
+    read.clear()
+    cull.sweep(db)                    # its process table and pane listing are its job; git isn't,
+    assert [args for args in started if args[0] == "git" or "display-message" in args] == []
+    assert read == []                 # nor reading screens nothing has printed to since the last read

@@ -36,10 +36,15 @@ def test_session_listing_is_parsed(monkeypatch):
     rows = ["brindle_p_a\t1\t100\t200\t%1\t11\t0\t300\tzsh\t/w/a\t", "other\t0\t1\t1\t%2\t12\t0\t1\tzsh\t/x\t",
             "brindle_p_a\t1\t100\t200\t%3\t13\t1\t300\tclaude\t\tclaude --resume"]
     out = {"list-panes": "\n".join(rows) + "\n", "show-environment": "BRINDLE_HOME=/some/home\n"}
-    monkeypatch.setattr(tmux, "_tmux", lambda *args, **k: SimpleNamespace(returncode=0, stdout=out[args[0]]))
+    asked = []
+    monkeypatch.setattr(tmux, "_tmux", lambda *args, **k: asked.append(args[0]) or SimpleNamespace(
+        returncode=0, stdout=out[args[0]]))
+    monkeypatch.setattr(tmux, "_SESSION_HOMES", {})
 
-    [s] = tmux.session_infos()
+    tmux.session_infos()
+    [s] = tmux.session_infos()        # the cull lists them every minute: the home is read once
 
+    assert asked.count("show-environment") == 1
     assert (s.name, s.attached, s.created, s.activity, s.home) == ("brindle_p_a", True, 100, 200, "/some/home")
     assert [(p.id, p.pid, p.path, p.dead, p.idle()) for p in s.panes] == [
         ("%1", 11, "/w/a", False, True), ("%3", 13, "", True, True)]
