@@ -1225,7 +1225,8 @@ describe("export snapshot", () => {
       .half{grid-template-columns:25% 25%}.shape{fill:url(#g);marker-end:url(#a)}</style></head>
       <body><p><span class="pill" style="background:var(--soft);width:5%">fixed</span><span class="pill">open</span></p>
       <div data-grid=""><div>A</div></div><div class="half"><div>B</div></div>
-      <table><tr><td>cell</td></tr></table><svg><path d="M0 0" class="shape" stroke="var(--ink)"></path></svg></body>`;
+      <table><tr><td>cell</td></tr></table><svg><path d="M0 0" class="shape" stroke="var(--ink)" style="fill:red"></path>
+      <g class="group"><path class="leaf" d="M1 1"></path></g></svg></body>`;
     const media = (doc.styleSheets[0].cssRules[1] as CSSMediaRule).media;
     let width: "narrow" | "wide" | "viewed" = "viewed";
     // While the export is rehearsed only what the sanitiser keeps is in the page: not div[data-grid].
@@ -1249,7 +1250,11 @@ describe("export snapshot", () => {
       // Percentage columns from a rule the sanitiser keeps: rehearsed, they come out the same.
       if (element.classList.contains("half")) return { "grid-template-columns": { narrow: "100px 100px", viewed: "250px 250px", wide: "600px 600px" }[width] };
       if (tag === "td") return { "border-bottom-style": "solid", "border-bottom-width": "1px", "border-bottom-color": dark ? "rgb(6, 6, 6)" : "rgb(5, 5, 5)" };
-      // A gradient that differs by scheme, an arrowhead only dark has, and another document's marker.
+      // A group and a shape inside it, each with a gradient that differs by scheme.
+      if (tag === "g") return { fill: dark ? 'url("#gd")' : 'url("#gl")' };
+      if (element.classList.contains("leaf")) return { fill: dark ? 'url("#cd")' : 'url("#cl")' };
+      // A gradient that differs by scheme, an arrowhead only dark has, and another document's marker;
+      // the page's inline fill is what dark's own stylesheet overrode.
       if (tag === "path") return { fill: dark ? 'url("#h")' : 'url("about:blank#g")', "marker-end": dark ? 'url("#a")' : "none",
         "marker-start": 'url("https://evil.test/s.svg#a")', stroke: "rgb(4, 4, 4)", "stroke-dasharray": "4 3" };
       return {};
@@ -1292,6 +1297,12 @@ describe("export snapshot", () => {
     expect(dim).toMatch(/brindle-dark/);
     expect(dim).toContain('fill="url(#h)"');
     expect(dim).toContain('marker-end="url(#a)"');
+    // Neither copy keeps the page's inline fill, which would override the captured values.
+    expect(lit).not.toContain("style=");
+    expect(dim).not.toContain("style=");
+    // The dark copy of a group is dark all the way down: its shape carries the shape's own dark gradient.
+    expect(html).toMatch(new RegExp('<g [^>]*brindle-light[^>]*fill="url\\(#gl\\)"><path class="leaf[^"]*" d="M1 1" fill="url\\(#cl\\)"></path></g>'
+      + '<g [^>]*brindle-dark[^>]*fill="url\\(#gd\\)"><path class="leaf[^"]*" d="M1 1" fill="url\\(#cd\\)"></path></g>'));
     expect(html).toContain(".brindle-dark{display:none}");
     expect(html).toContain(".brindle-light{display:none}.brindle-dark{display:inline}");
     expect(html).not.toContain("marker-start");

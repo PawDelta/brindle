@@ -249,37 +249,56 @@ function attributeValue(value: string | undefined): string | null {
   return `#${hex(+rgb[1])}${hex(+rgb[2])}${hex(+rgb[3])}${rgb[4] === undefined ? "" : hex(+rgb[4] * 255)}`;
 }
 
+/* An element's references that differ by scheme: the attributes its light and its dark copy carry. */
+type Split = Record<ColorScheme, [string, string | null][]>;
+
 /* SVG paint and markers that point at the page's own #id become attributes (CSS can't carry them
-   through the sanitiser); any other url() is dropped. Where light and dark differ, the element is
-   split in two, one per scheme (the returned step, run once classes are on): each copy carries its
-   scheme's values as attributes and shows only in its scheme. */
-function settleReferences(element: Element, light: Captured, dark: Captured): (() => void) | null {
+   through the sanitiser); any other url() is dropped. Where light and dark differ, the returned
+   split says what each scheme's copy of the element carries (see splitBySchemes). */
+function settleReferences(element: Element, light: Captured, dark: Captured): Split | null {
   const doc = element.ownerDocument;
   const references = REFERENCES.map((name) => [name, localReference(light[name], doc), localReference(dark[name], doc)] as const);
-  const split = element.localName !== "svg" && references.some(([, lit, dim]) => lit !== dim);
-  const schemes: [string, string | null][][] = [[], []];
+  const differs = element.localName !== "svg" && references.some(([, lit, dim]) => lit !== dim);
+  const split: Split = { light: [], dark: [] };
   for (const [name, lit, dim] of references) {
     if (!lit && !dim) continue;
-    if (lit === dim || !split) {
+    if (lit === dim || !differs) {
       if (lit) element.setAttribute(name, `url(#${lit})`);
     } else {
-      schemes[0].push([name, lit ? `url(#${lit})` : attributeValue(light[name])]);
-      schemes[1].push([name, dim ? `url(#${dim})` : attributeValue(dark[name])]);
+      split.light.push([name, lit ? `url(#${lit})` : attributeValue(light[name])]);
+      split.dark.push([name, dim ? `url(#${dim})` : attributeValue(dark[name])]);
     }
     delete light[name];
     delete dark[name];
   }
-  if (!split) return null;
-  return () => {
+  return differs ? split : null;
+}
+
+/* Each outermost split element becomes a light copy and a dark copy, each shown only in its scheme.
+   Run on the finished elements (classes on, the page's declarations stripped), so a copy carries
+   nothing the original no longer has. Inside a copied subtree every split descendant takes its
+   own scheme's attributes, so the dark copy is dark all the way down. */
+function splitBySchemes(splits: Map<Element, Split>) {
+  const nested = (element: Element) => {
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) if (splits.has(parent)) return true;
+    return false;
+  };
+  const apply = (target: Element, attributes: [string, string | null][]) => {
+    for (const [name, value] of attributes) value === null ? target.removeAttribute(name) : target.setAttribute(name, value);
+  };
+  for (const element of splits.keys()) {
+    if (nested(element)) continue;
     const copy = element.cloneNode(true) as Element;
-    for (const node of [copy, ...Array.from(copy.querySelectorAll("[id]"))]) node.removeAttribute("id");
-    for (const [target, attributes] of [[element, schemes[0]], [copy, schemes[1]]] as const) {
-      for (const [name, value] of attributes) value === null ? target.removeAttribute(name) : target.setAttribute(name, value);
-    }
+    const copies = [copy, ...Array.from(copy.querySelectorAll("*"))];
+    [element, ...Array.from(element.querySelectorAll("*"))].forEach((node, i) => {
+      const split = splits.get(node);
+      if (split) { apply(node, split.light); apply(copies[i], split.dark); }
+    });
+    for (const node of copies) node.removeAttribute("id");
     element.classList.add("brindle-light");
     copy.classList.add("brindle-dark");
     element.after(copy);
-  };
+  }
 }
 
 /* One class per distinct set of declarations ([light, dark] per part: the element, ::before, ::after). */
@@ -336,16 +355,15 @@ export function inlineStyles(doc: Document, read: StyleReader = (element, pseudo
   const classes = new Map<string, string>();
   const light: string[] = [];
   const dark: string[] = [];
-  const splits: (() => void)[] = [];
+  const splits = new Map<Element, Split>();
   const unsized = (captured: Captured) => Object.fromEntries(Object.entries(captured).filter(([name]) => !SIZED.includes(name)));
   elements.forEach((element, index) => {
     const parts = seen.light[index].map((part, i) => [unsized(part), unsized(seen.dark[index][i])] as const);
     const split = element.namespaceURI === SVG ? settleReferences(element, parts[0][0], parts[0][1]) : null;
-    if (split) splits.push(split);
+    if (split) splits.set(element, split);
     element.classList.add(classFor(classes, "brindle-s", parts.map(([lit, dim]) => declarations(element.localName, lit, dim)), light, dark));
   });
-  for (const split of splits) split();
-  if (splits.length) {
+  if (splits.size) {
     light.push(".brindle-dark{display:none}");
     dark.push(".brindle-light{display:none}.brindle-dark{display:inline}");
   }
@@ -388,6 +406,7 @@ export function inlineStyles(doc: Document, read: StyleReader = (element, pseudo
       declared(dim, differs.filter((name) => dim[name] && dim[name] !== lit[name] && keptValue(dim[name])))]];
     element.classList.add(classFor(literals, "brindle-z", parts, light, dark));
   });
+  splitBySchemes(splits);
   generated.textContent = sheetText(light, dark);
   return doc.documentElement.outerHTML;
 }
