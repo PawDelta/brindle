@@ -418,15 +418,20 @@ states, then a whole cull sweep: on the unmodified code the daemon's part
 started 32 processes and the cull git for each live agent; now the daemon's
 none and the cull no git; each fix reverted alone fails it).
 
-Still per cull sweep (once a minute), all tmux or `ps`: two `ps` and `tmux
-list-clients`; `reap`'s `tmux list-panes` plus a `show-environment` per
-brindle session (`tmux.session_infos`); and screen reads per live Claude
-agent, a `capture-pane` each for `decline_environment_setups` and
-`note_model_refused` and a `display-message #{window_activity}` (then a
-capture once it is old enough) for `note_api_errors`. Skipping a screen read
-while the pane hasn't changed needs each pane's `#{window_activity}` in
-`tmux.list_panes`'s one listing, and the session's `BRINDLE_HOME` needs
-caching in `session_infos`: both changes are in `tmux.py`.
+- **The cull's screen reads**: `tmux.list_panes`' one listing now carries
+  each pane's `#{window_activity}` (`PaneSnapshot.activity`).
+  `decline_environment_setups`, `note_api_errors` and `note_model_refused`
+  remember (an agent mark per reader, so the sidebars taking turns share it)
+  the last output time a screen was read at with nothing to act on, and don't
+  capture it again until the pane prints; `note_api_errors` takes the time
+  from the listing instead of a `display-message` per worker. A read is
+  remembered only once the output is 2 s old (tmux counts whole seconds).
+- **`tmux.session_infos`** (the cull's `reap`) reads each session's
+  `BRINDLE_HOME` once per session (name and creation time), not every minute.
+
+Still per cull sweep (once a minute), whatever the number of agents: two `ps`
+(the process table), `tmux list-clients` (`login_pause`'s last input) and
+`reap`'s `tmux list-panes`.
 
 ### Other sources, measured and left as they are
 
