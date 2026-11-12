@@ -467,6 +467,34 @@ def test_viewed_session_comes_back_first(db, root, monkeypatch, case):
         assert waiting == [2, 2] and all(done for _, done in began)     # none begun beside it
 
 
+def test_on_a_busy_cpu_the_persons_sessions_come_back_viewed_first_without_waiting_for_room(db, root, monkeypatch):
+    """Reported: after an update every session sat 3 s waiting for room on a
+    loaded machine before it even began. The person's own sessions only wait
+    for critical memory: the viewed one first, then the rest at once."""
+    from brindle.daemon import lifecycle
+
+    _recorded_sessions(db, root, monkeypatch, [("recent", "a"), ("older", "b"), ("viewed", "c")])
+    lifecycle.record_viewed("viewed")
+    recovery, checks = lifecycle.Recovery(), []
+    monkeypatch.setattr(lifecycle, "RESUME_BUSY_WAIT", 60)
+    monkeypatch.setattr(spawn, "pressure", lambda: 1)
+
+    real = spawn._has_room
+
+    def has_room(*waits):       # never any room for a session; a wait that goes round again would hold it up
+        if waits:               # a process's own start (a tmux read) isn't what is under test
+            return real(*waits)
+        checks.append(1)
+        if len(checks) > 3:
+            recovery.stopping.set()
+        return False
+
+    monkeypatch.setattr(spawn, "_has_room", has_room)
+    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: None)
+    resumed = lifecycle.resume_after_start(recovery)
+    assert resumed[0] == "viewed" and sorted(resumed[1:]) == ["older", "recent"]
+
+
 @pytest.mark.variant("stop racing concurrent recovery must finish an in-flight launch and retain preflight and unstarted sessions")
 def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_pending(db, root, monkeypatch, caplog):
     import re
