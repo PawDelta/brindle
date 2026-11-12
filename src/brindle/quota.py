@@ -263,6 +263,9 @@ CLAUDE_USAGE_TIMEOUT = 30
 _USAGE_LINE = re.compile(r"^\s*Current (session|week)(?: \(([^)]+)\))?:\s*(\d+(?:\.\d+)?)% used"
                          r"(?:\s*·\s*resets (.+?))?\s*(?:\(([^)]+)\))?\s*$")
 _claude_usage_at = 0.0
+# Every sidebar asks; this file's mtime is when any process of this brindle
+# home last did, so N sidebars start one claude CLI per refresh, not N.
+CLAUDE_USAGE_STAMP = "claude-usage.stamp"
 
 
 def _reset_time(text: str, zone: str | None, now: float) -> float | None:
@@ -322,12 +325,28 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
 
     if not force and time.time() - _claude_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
         return False
+    stamp = brindle_home() / CLAUDE_USAGE_STAMP
+    try:
+        asked = stamp.stat().st_mtime
+    except OSError:
+        asked = 0.0
+    if not force and time.time() - asked < CLAUDE_USAGE_REFRESH_SECONDS:
+        _claude_usage_at = asked     # another process asked: its answer is in the shared record
+        return False
     _claude_usage_at = time.time()
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        pass
     if _key_billed("claude"):
         return False
     try:
-        proc = spawn.read([claude_binary(), "-p", "/usage"], timeout=CLAUDE_USAGE_TIMEOUT,
-                          cwd=str(brindle_home()))
+        # No MCP servers: the answer needs none, and each would be one more
+        # process started (and inspected) every few minutes. ``reap``: nothing
+        # the CLI leaves in its process group outlives the answer.
+        proc = spawn.read([claude_binary(), "-p", "--strict-mcp-config", "/usage"],
+                          timeout=CLAUDE_USAGE_TIMEOUT, cwd=str(brindle_home()), reap=True)
     except (OSError, subprocess.TimeoutExpired):
         return False
     windows = parse_claude_usage(proc.stdout) if proc.returncode == 0 else []

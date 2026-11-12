@@ -135,6 +135,29 @@ def test_idle_sync_quiet_session(db, repo, sess, other, told, monkeypatch):
     assert len([m for m in told if m[0] == "other-lead"]) == 1
 
 
+def test_a_sweep_starts_no_git_for_a_session_whose_refs_have_not_moved(db, repo, sess, other, monkeypatch):
+    """The daemon sweeps every few seconds: an idle, synced session costs no
+    process until its HEAD or origin/main moves, and is synced again then."""
+    import subprocess
+
+    clock = [1000.0]
+    monkeypatch.setattr(session_sync.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(session_review.spawn, "room", lambda: 0)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
+    db.conn.execute("UPDATE workspaces SET base_branch = 'main' WHERE id = ?", (sess.id,))
+    watch = session_review.ReadinessWatch()
+    watch.sweep(db)
+    started, real = [], subprocess.Popen.__init__
+    monkeypatch.setattr(subprocess.Popen, "__init__", lambda self, args, *a, **k: (
+        started.append(args), real(self, args, *a, **k))[1])
+    watch.sweep(db)
+    assert started == []
+    main = commit(other, "hot.py", "fix\n", push=True)
+    clock[0] += session_sync.IDLE_FETCH_SECONDS
+    watch.sweep(db)
+    assert contains(sess.path, main)
+
+
 def test_idle_sync_worker_goes_live_before_merge(db, told, monkeypatch):
     sess = Workspace("session", "/repo", "session", "worktree", "sess", "main", "/repo/session", None, "", 0)
     owner = Workspace("owner", "/primary", "owner", "root", "main", None, "/primary", None, "", 0)

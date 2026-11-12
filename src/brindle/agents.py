@@ -1642,6 +1642,15 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
     owners = pane_owners(db)    # first: a tmux server that doesn't answer stops the pause before anything changes
     closing = _record_pause(db, root_id)
     windows = closing.windows(db, owners)
+    # Before the windows close: closing one ends the CLI in it, and what that
+    # CLI started in a session of its own (a Bash tool's shell, a background
+    # job) is left with launchd as its parent, out of reach of the agent's
+    # process tree. Stopped while the tree is whole, all of it goes.
+    # Skipped for this process and its ancestors: this can run in the chat's pane.
+    if stop_procs:
+        from brindle import procs
+
+        procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
     # The sidebar follows the person around, so it may not be sitting in any
     # of the windows about to close: find it wherever it is and stop it too,
     # rather than leaving it running with nothing left to show it. Status was
@@ -1662,12 +1671,6 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
             assert sidebar is not None
             tmux.kill_pane(sidebar)
             db.clear_sidebar_pane(root_id)
-    # Closing the windows doesn't stop sessions Claude Code's daemon hosts.
-    # Skipped for this process and its ancestors: this can run in the chat's pane.
-    if stop_procs:
-        from brindle import procs
-
-        procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
     others = _sessions_in_use(closing)
     for session in closing.sessions - others:
         if closing.closes(session, tmux.windows(session)):
@@ -2097,15 +2100,18 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
                     continue
                 db.set_status(a.id, "paused")
         if a.status != "paused":
+            from brindle import procs
+            try:
+                procs.stop([a.id], grace=2.0)   # before its window closes (see pause)
+                stopped = True
+            except Exception:
+                stopped = False
             if a.tmux_window and same_server(a) and owns_pane(db, a):
                 try:
                     tmux.kill_window(a.tmux_window)
                 except Exception:
                     pass
-            from brindle import procs
-            try:
-                procs.stop([a.id], grace=2.0)
-            except Exception:
+            if not stopped:
                 continue
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path):
@@ -3722,8 +3728,8 @@ def close_later(agent_id: str, delay: float = 5.0) -> None:
 
 
 def _stop(db: DB, agent: Agent) -> None:
-    """Stop an agent: its window, and every process of its that outlives the
-    window (Claude Code's daemon can host the real session; see brindle.procs).
+    """Stop an agent: every process of its (Claude Code's daemon can host the
+    real session; see brindle.procs), then its window.
     A pane id a newer agent has since been given is left alone (see owns_pane)."""
     from brindle import procs, spawn
 
@@ -3740,9 +3746,10 @@ def _stop(db: DB, agent: Agent) -> None:
         # sidebar's would otherwise be stopped with the agent's.
         rescue_sidebar_from_window(db, agent)
     pane_pids = tmux.window_pids(window) if window else []
+    # Before the window closes, while the agent's process tree is whole (see pause).
+    procs.stop([agent.id], {agent.id: pane_pids})
     if window:
         tmux.kill_window(window)
-    procs.stop([agent.id], {agent.id: pane_pids})
     db.end_native_subagents(agent.id)
 
 
