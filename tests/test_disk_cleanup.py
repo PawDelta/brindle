@@ -436,7 +436,8 @@ def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, mo
         "the same pane linked into another session still keeps it, now its agents are stopped")),
     pytest.param("merged", None, False, marks=pytest.mark.variant(
         "real incident (release.153): the pipeline's cleanup with no reviewer logged 'worktree kept: in use'")),
-    ("resumed", None, False),    # the retired sweep's worker is back at work before its removal
+    pytest.param("resumed", None, False, marks=pytest.mark.variant(
+        "a race from review: the retired sweep's worker resumes between selection and removal")),
 ])
 def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipped, monkeypatch, cleanup, child,
                                                                  onlooker):
