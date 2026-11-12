@@ -442,7 +442,8 @@ impl Follows {
             let redraws = self.redraws.load(Ordering::SeqCst);
             let Some((crop, following)) = probe() else { return };
             // Set before the redraws are counted again, as `ask` counts one before it reads this: one of the two sees the other.
-            let began = following && !self.on.swap(following, Ordering::SeqCst);
+            let followed = self.on.swap(following, Ordering::SeqCst);
+            let began = following && !followed;
             tell(crop);
             if !began || self.redraws.load(Ordering::SeqCst) == redraws {
                 return;
@@ -2178,6 +2179,14 @@ mod tests {
         };
         assert_eq!(told_for((3, 6)), [0, 21], "the cursor's move during the look is followed");
         assert_eq!(told_for((3, 7)), [0], "a title asks for the next look");
+        // A look finds the crop following the cursor, the next that it doesn't (the sidebar closed,
+        // say): a redraw with no title asks for nothing again.
+        let follows = Arc::new(Follows::default());
+        let mut relayouts = Relayouts::on((3, 6), follows.clone());
+        for following in [true, false] {
+            follows.look(|| Some((Crop::default(), following)), |_| {});
+        }
+        assert!(!relayouts.ask(&redraws[0]), "a redraw of a crop that follows the cursor no more asked");
     }
 
     #[test]
