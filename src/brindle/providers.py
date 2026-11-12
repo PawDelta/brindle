@@ -489,8 +489,8 @@ def trust_folder(path: str) -> bool:
     file beside it that never exists with a wider mode and is always
     removed, and holds a brindle lock so two brindle launches can't drop each
     other's flag. Claude Code writes this file too, without that lock: the
-    person's MCP servers, its sign-in, every folder's settings. A write of
-    its own that lands while brindle works is never replaced (_update_config)."""
+    person's MCP servers, its sign-in, every folder's settings. So the write
+    also holds Claude Code's own lock on the file (_update_config)."""
     # Through any symlink (dotfile managers link this file): replacing the
     # link itself would orphan the file it points to.
     config = os.path.realpath(claude_global_config())
@@ -690,7 +690,47 @@ def _write_trust(config: str, key: str) -> bool:
     return True
 
 
-# How many times _update_config starts over on a file Claude Code keeps writing.
+# Claude Code's own lock on its state file (2.1.323, the proper-lockfile
+# protocol): the directory ``<file>.lock``, made with mkdir by whoever writes
+# and removed when done. A holder touches it every 5 s, so one older than
+# CLAUDE_LOCK_STALE was left behind by a process that died and is taken over,
+# once, as Claude Code does. A live one is held for a single write: brindle
+# waits CLAUDE_LOCK_WAITS in turn, then gives up.
+CLAUDE_LOCK_STALE = 10.0
+CLAUDE_LOCK_WAITS = (0.02, 0.05, 0.1, 0.2, 0.4)
+_lock_wait = threading.Event().wait
+
+
+@contextlib.contextmanager
+def _claude_lock(named: str):
+    """Hold Claude Code's lock on its state file ``named`` (the path as
+    Claude Code names it, links unresolved). While brindle holds it, Claude
+    Code's writers wait, and then read the file again before they write.
+    OSError when a live Claude Code keeps it past the waits."""
+    lock = f"{named}.lock"
+    waits, took_over = iter(CLAUDE_LOCK_WAITS), False
+    while True:
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(lock)
+            break
+        with contextlib.suppress(FileNotFoundError):    # let go between the two calls: go round
+            if time.time() - os.stat(lock).st_mtime > CLAUDE_LOCK_STALE and not took_over:
+                took_over = True
+                with contextlib.suppress(OSError):
+                    os.rmdir(lock)
+                continue
+            wait = next(waits, None)
+            if wait is None:
+                raise OSError(f"Claude Code is writing {named}; brindle left it as it is")
+            _lock_wait(wait)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.rmdir(lock)
+
+
+# How many times _update_config starts over on a file that changed under it.
 CONFIG_ATTEMPTS = 5
 
 
@@ -723,42 +763,48 @@ def _update_config(config: str, change, *, create: bool = False, mode: int | Non
     person's ``mcpServers``, the account, each folder's settings) is written
     back as it was read. The caller holds brindle's lock.
 
-    Claude Code writes this file too, under a lock of its own that brindle
-    can't take. So the file is replaced only if it is still the version that
-    was read (_stamp, checked right before the rename): when Claude Code got a
-    write in meanwhile (an MCP server just added, a sign-in), brindle starts
-    over from that version rather than replacing it with an older one. What
-    is left is the instant between that check and the rename.
+    Claude Code writes this file too (an MCP server just added, a sign-in),
+    so the whole read, change and replace runs under Claude Code's own lock
+    (_claude_lock): its writers wait for brindle's rename and then work from
+    the file brindle wrote, and brindle reads only after theirs. A writer
+    that doesn't take that lock (Claude Code can write without it as it
+    exits, when it couldn't get it) is not held off by it: for those the file is
+    replaced only if it is still the version that was read (_stamp, checked
+    right before the rename), and brindle starts over from the new version
+    otherwise. Only such a write, in the instant between that check and the
+    rename, can still be lost.
 
     A file with nothing to change isn't written. A missing one is created
     (0600) with ``create``, else FileNotFoundError; ``mode`` sets the file's
     mode, otherwise kept. ValueError for a file that isn't a JSON object;
-    OSError when it changed at every attempt (it is then left alone)."""
+    OSError when Claude Code keeps its lock, or the file changed at every
+    attempt (it is then left alone)."""
     import copy
     import stat
 
-    for _ in range(CONFIG_ATTEMPTS):
-        seen = _stamp(config)
-        if seen is None and create:
-            data, kept = {}, 0o600
-        else:
-            kept = stat.S_IMODE(os.stat(config).st_mode)    # FileNotFoundError: not brindle's to create
-            data = _read_json(config)
-        if not isinstance(data, dict):
-            raise ValueError(f"{config} doesn't hold a JSON object")
-        before = copy.deepcopy(data)
-        change(data)
-        wanted = kept if mode is None else mode
-        if seen is not None and data == before and wanted == kept:
-            return
-        token = _as_read.set((config, seen))
-        try:
-            _replace_json(config, data, wanted)
-            return
-        except _ConfigChanged:
-            pass
-        finally:
-            _as_read.reset(token)
+    with _claude_lock(claude_global_config()):
+        for _ in range(CONFIG_ATTEMPTS):
+            seen = _stamp(config)
+            if seen is None and create:
+                data, kept = {}, 0o600
+            else:
+                kept = stat.S_IMODE(os.stat(config).st_mode)    # FileNotFoundError: not brindle's to create
+                data = _read_json(config)
+            if not isinstance(data, dict):
+                raise ValueError(f"{config} doesn't hold a JSON object")
+            before = copy.deepcopy(data)
+            change(data)
+            wanted = kept if mode is None else mode
+            if seen is not None and data == before and wanted == kept:
+                return
+            token = _as_read.set((config, seen))
+            try:
+                _replace_json(config, data, wanted)
+                return
+            except _ConfigChanged:
+                pass
+            finally:
+                _as_read.reset(token)
     raise OSError(f"{config} changed each time brindle went to write it; left as it is")
 
 
