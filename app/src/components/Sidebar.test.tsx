@@ -292,7 +292,10 @@ describe("Sidebar", () => {
     expect(agentRow("w2")!.querySelector("[data-testid=agent-title]")).toBeNull();
     vi.useFakeTimers();
     onTestFinished(() => { vi.useRealTimers(); });
-    await act(async () => fireEvent.dblClick(agentRow("w1")!));
+    await act(async () => {
+      fireEvent.dblClick(agentRow("w1")!);
+      await writeText.mock.results[0].value;
+    });
     expect(writeText).toHaveBeenCalledWith("id: w1\nrole: developer\nprofile: developer-haiku\nbranch: feat/ls\nmilestone: Logo goes Home");
     expect(screen.getByRole("status")).toBeTruthy();
     sync.stop();
