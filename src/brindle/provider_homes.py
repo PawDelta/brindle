@@ -19,7 +19,21 @@ resolved once (a dotfile manager may link ~/.claude itself); below it, a path
 with a link anywhere (a folder, the file) is never copied, nor is a file or
 folder named like a credential, and only regular files are read, without
 following links. The Markdown is copied as it is, unscanned. After that one
-copy, brindle's changes stay in brindle's copy."""
+copy, brindle's changes stay in brindle's copy.
+
+One exception, for Claude only: once brindle's home is in use (the person
+signed in to Claude inside brindle, ``.brindle-signed-in``), brindle copies,
+once, the person's user-scope MCP server list (top-level ``mcpServers`` of
+their ``.claude.json``: ``$CLAUDE_CONFIG_DIR/.claude.json``, else
+``~/.claude.json``, its folder resolved once, the file itself a regular file
+and never a link) into brindle's home ``.claude.json``. Each server keeps its
+name, type, url, command, args and other plain settings; a setting named like
+a credential (OAuth state, tokens) is dropped, and so is each ``headers`` or
+``env`` entry whose name looks secret (secrets.secret_looking), the server
+itself kept. A server of the same name already in brindle's home is never
+overwritten. The merge holds brindle's Claude config lock and re-reads
+brindle's file right before an atomic replace. Nothing else of that file
+(sign-ins, projects, OAuth state) is copied."""
 
 from __future__ import annotations
 
@@ -179,7 +193,9 @@ def effective_home(provider: str) -> Path | None:
 def _prepared(provider: str, where: Path) -> dict[str, str]:
     try:
         ensure(provider)
-    except OSError:      # never stop a launch over the copy; it is tried again next time
+        if provider == "claude" and (where / SIGNED_IN).exists():
+            copy_mcp_servers(where)
+    except (OSError, ValueError):      # never stop a launch over the copy; it is tried again next time
         log.warning("brindle: couldn't copy the setup for %s into %s", provider, where, exc_info=True)
     return {VARIABLE[provider]: str(where)}
 
@@ -320,3 +336,71 @@ def ensure(provider: str) -> bool:
             _copy(src, where, rel)
         (where / MARKER).write_text(f"{time.time()}\n")
         return True
+
+
+# -- the person's MCP servers (Claude) ---------------------------------------------
+
+MCP_MARKER = ".brindle-mcp-copied"
+CLAUDE_JSON = ".claude.json"
+
+
+def _plain_server(conf: object) -> dict | None:
+    """An MCP server's settings without anything secret: settings named like
+    a credential are dropped, and so are secret-named ``headers``/``env`` entries."""
+    from brindle.secrets import secret_looking
+
+    if not isinstance(conf, dict):
+        return None
+    out = {}
+    for key, value in conf.items():
+        if key in ("headers", "env"):
+            if not isinstance(value, dict):
+                continue
+            value = {k: v for k, v in value.items() if not secret_looking(str(k).replace("-", "_"))}
+        elif SECRET_NAME.search(key):
+            continue
+        out[key] = value
+    return out
+
+
+def copy_mcp_servers(where: Path) -> bool:
+    """Copy the person's user-scope MCP servers into brindle's Claude home
+    ``where``, once (see the module docstring). Whether it merged any now."""
+    if (where / MCP_MARKER).exists():
+        return False
+    # The person's folder, resolved once; the file below it is never a link.
+    folder = Path(os.path.realpath(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home()))
+    dest = os.path.realpath(where / CLAUDE_JSON)
+    if os.path.realpath(folder / CLAUDE_JSON) == dest:
+        return False            # one and the same file: nothing to copy
+    raw = _read(folder, CLAUDE_JSON)
+    try:
+        servers = json.loads(raw).get("mcpServers") if raw is not None else None
+    except (ValueError, AttributeError):
+        servers = None
+    plain = {name: s for name, conf in (servers.items() if isinstance(servers, dict) else ())
+             if (s := _plain_server(conf)) is not None}
+    from brindle import providers
+
+    merged = False
+    with providers._config_lock():
+        if plain:
+            where.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:        # re-read as late as possible: Claude Code may have just written it
+                data = providers._read_json(dest)
+                mode = stat.S_IMODE(os.stat(dest).st_mode)
+            except FileNotFoundError:
+                data, mode = {}, 0o600
+            if not isinstance(data, dict):
+                raise ValueError(f"{dest} doesn't hold a JSON object")
+            have = data.get("mcpServers")
+            if not isinstance(have, dict):
+                have = data["mcpServers"] = {}
+            new = {name: s for name, s in plain.items() if name not in have}
+            if new:
+                have.update(new)
+                providers._replace_json(dest, data, mode)
+                merged = True
+        where.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (where / MCP_MARKER).write_text(f"{time.time()}\n")
+    return merged
