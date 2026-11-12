@@ -341,7 +341,9 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
       await reload();
     }
   };
-  const status = node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
+  const resuming = sessionStatus === "resuming" && (!node || node.agent.id === root);
+  const status = resuming ? { glyph: "◌", label: "resuming", style: "dim" as const, needs: false }
+    : node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
   const named = useContext(SessionsContext)?.find(root)?.name;
   const who = node ? (node.agent.id === root ? (named || "supervisor") : agentName(workspaces, node.agent.id)) : named || "supervisor";
   const provider = node ? providerName(node.agent.provider) : "Session";
@@ -357,7 +359,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         <span className={`${mono} hidden text-xs text-ink-3 sm:inline`} data-testid={node ? "agent-id" : "session-id"} title={node?.workspace.branch}>
           {node?.agent.id ?? root}
         </span>
-        <span className={`flex items-center gap-1 text-xs ${status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status">
+        <span className={`flex items-center gap-1 text-xs ${status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status" data-state={resuming ? "resuming" : node?.agent.status ?? sessionStatus ?? "paused"}>
           <span className={`font-mono ${CLI_INK[status.style]}`} aria-hidden>
             {status.glyph}
           </span>
@@ -376,7 +378,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         <LoadingButton className={main} busy={recovery.busy} disabled={recovery.busy} onClick={() => recovery.resume()}>
           Continue
         </LoadingButton>
-      ) : (
+      ) : !resuming && (
         <LoadingButton className={button} busy={busy} disabled={busy} onClick={() => pause()}>
           Pause
         </LoadingButton>

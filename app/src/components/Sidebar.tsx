@@ -355,6 +355,7 @@ const goalDone = (goal: GoalDTO | null | undefined) => !!goal && goalPhase(goal,
 /* The supervisor's live activity, even when its workers are folded away.
    A finished goal wins; a paused process cannot still be doing its last stage. */
 function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined) {
+  if (session.status === "resuming") return "Resuming";
   if (goalDone(goal)) return "Done";
   if (session.status === "failed") return "Failed";
   if (isPaused(session)) return "Paused";
@@ -380,7 +381,7 @@ function sessionStageClass(word: string) {
 function SessionStatus({ word }: { word: string }) {
   const stageClass = sessionStageClass(word);
   return (
-    <span className={`max-w-[50%] shrink truncate text-[11px] ${stageClass}${stageClass === "text-ink-3" ? "" : " stage-word"}`} data-testid="session-status">
+    <span className={`max-w-[50%] shrink truncate text-[11px] ${stageClass}${stageClass === "text-ink-3" ? "" : " stage-word"}`} data-testid="session-status" data-state={word.toLowerCase()}>
       {word}
     </span>
   );

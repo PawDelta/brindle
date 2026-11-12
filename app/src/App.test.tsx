@@ -54,6 +54,26 @@ const paneWaits = () => screen.queryByTestId("state-card")?.dataset.kind === "re
 
 describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
+  it("keeps recovery visible in the session row and header until it succeeds or fails", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: "resuming" }], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      const states = () => screen.getAllByTestId("session-status").map((el) => el.getAttribute("data-state"));
+      await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
+      expect(screen.getByTestId("state-card").getAttribute("data-kind")).toBe("returning");
+      daemon.data.sessions = [{ ...session, status: "paused" }];
+      daemon.data.workspaces = [];
+      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "paused" } });
+      await waitFor(() => expect(states()).toEqual(["paused", "paused"]));
+      daemon.data.sessions = [session];
+      daemon.data.workspaces = [root];
+      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "idle" } });
+      await waitFor(() => expect(states()).toEqual(["idle", "idle"]));
+    } finally { sync.stop(); }
+  });
   it("startup steps are timed", async () => {
     const native = vi.spyOn(shell, "isTauri").mockReturnValue(true);
     const invoke = vi.spyOn(shell, "invoke").mockResolvedValue(undefined);

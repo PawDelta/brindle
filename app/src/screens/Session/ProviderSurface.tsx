@@ -67,6 +67,7 @@ type Card =
 /* The card the surface shows instead of a pane, or null for a live pane.
    `unshowable`: why a live pane can't be shown here (the pty view's status). */
 export function surfaceCard(agent: AgentDTO | null, alive: boolean | undefined, sessionStatus: string | null | undefined, view: TerminalView | null, credentials: InboxItemDTO | null | undefined, unshowable?: string | null): Card | null {
+  if (sessionStatus === "resuming" && !agent?.locked) return { kind: "returning" };
   const name = agent ? providerName(agent.provider) : "The session";
   if (!agent) {
     if (sessionStatus === "failed") return { kind: "failed", title: `${name} failed`, why: "Its supervisor stopped with an error." };
