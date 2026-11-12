@@ -28,9 +28,9 @@ their ``.claude.json``: ``$CLAUDE_CONFIG_DIR/.claude.json``, else
 ``~/.claude.json``, its folder resolved once, the file itself a regular file
 and never a link) into brindle's home ``.claude.json``. Each server keeps its
 name, type, url, command, args and other plain settings; at any depth, a
-setting or ``headers``/``env`` entry named like a credential (OAuth state,
-tokens; SECRET_NAME or secrets.secret_looking) is dropped, the server itself
-kept. A server of the same name already in brindle's home is never
+setting named like a credential (OAuth state, tokens: SECRET_NAME or
+secrets.secret_looking) is dropped, and so is a ``headers``/``env`` entry
+whose name secrets.secret_looking says is secret, the server itself kept. A server of the same name already in brindle's home is never
 overwritten. The merge holds brindle's Claude config lock, checks inside it
 that the copy hasn't happened yet, and re-reads brindle's file right before
 an atomic replace; brindle's file is only read and replaced when it is a
@@ -346,13 +346,18 @@ MCP_MARKER = ".brindle-mcp-copied"
 CLAUDE_JSON = ".claude.json"
 
 
-def _scrub(value: object) -> object:
-    """``value`` without any entry, at any depth, named like a credential."""
+def _scrub(value: object, variables: bool = False) -> object:
+    """``value`` without any entry, at any depth, named like a credential.
+    ``variables``: ``value`` is a ``headers``/``env`` table, whose names are
+    judged by secrets.secret_looking alone (SSH_AUTH_SOCK stays); any other
+    setting is also dropped when SECRET_NAME matches its name."""
     from brindle.secrets import secret_looking
 
+    def secret(name: str) -> bool:
+        return secret_looking(name.replace("-", "_")) or (not variables and bool(SECRET_NAME.search(name)))
+
     if isinstance(value, dict):
-        return {k: _scrub(v) for k, v in value.items()
-                if not SECRET_NAME.search(str(k)) and not secret_looking(str(k).replace("-", "_"))}
+        return {k: _scrub(v, k in ("headers", "env")) for k, v in value.items() if not secret(str(k))}
     if isinstance(value, list):
         return [_scrub(v) for v in value]
     return value

@@ -25,6 +25,7 @@ def _homes(tmp_path, monkeypatch):
                      "headers": {"X-API-Key": "s3cr3t", "X-Team": "core"},
                      "config": {"accessToken": "synthetic", "region": "eu"}},
             "local": {"type": "stdio", "command": "npx", "args": ["-y", "server"]},
+            "agent": {"type": "stdio", "command": "ssh-mcp", "env": {"SSH_AUTH_SOCK": "agent.sock"}},
         },
     }))
     (ours / provider_homes.SIGNED_IN).write_text("1\n")
@@ -41,6 +42,7 @@ def test_signed_in_home_gets_the_persons_mcp_servers_without_secrets(tmp_path, m
     assert data["mcpServers"] == {
         "docs": {"type": "http", "url": "https://mcp.example.com", "headers": {"X-Team": "core"},
                  "config": {"region": "eu"}},
+        "agent": {"type": "stdio", "command": "ssh-mcp", "env": {"SSH_AUTH_SOCK": "agent.sock"}},
         "local": MINE,
     }
     assert "oauthAccount" not in data
