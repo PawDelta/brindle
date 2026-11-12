@@ -683,26 +683,14 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
     return items
 
 
-def _same_goal(old_goal: str, new_goal: str) -> bool:
-    """Whether ``new_goal`` is the session's goal reworded or grown rather than
-    an unrelated replacement: one title contains the other, or more than half
-    of the shorter title's words appear in the other. A grown goal must not be offered the
-    plan question again."""
-    a, b = (re.findall(r"[a-z0-9]+", s.lower()) for s in (old_goal, new_goal))
-    if not a or not b:
-        return False
-    if " ".join(a) in " ".join(b) or " ".join(b) in " ".join(a):
-        return True
-    sa, sb = set(a), set(b)
-    return len(sa & sb) * 2 > min(len(sa), len(sb))     # most of the shorter title's words survive
-
-
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None, *,
-             summary: str | None = None) -> None:
+             summary: str | None = None, replace: bool = False) -> None:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
     A milestone that keeps its title and check keeps its last result. A big
-    goal may open brindle's offer to plan it first (``consider_plan_offer``)."""
+    goal may open brindle's offer to plan it first (``consider_plan_offer``).
+    Rewording or growing the goal keeps the session's offer, answered or not;
+    only ``replace=True`` (an explicit, unrelated new goal) gives it a fresh one."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")
     if not milestones:
@@ -722,7 +710,7 @@ def set_goal(db: DB, root_id: str, goal: str,
     fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
-        if ap is None or not _same_goal(ap.goal or "", goal):
+        if ap is None or replace:
             fields["plan_offer"] = None     # an unrelated goal gets its own, single offer
             fields["offer_goal_at"] = time.time()
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:

@@ -1769,8 +1769,10 @@ def _session(db: DB) -> tuple[str, Workspace] | str:
 
 @mcp.tool()
 def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None,
-             summary: str | None = None) -> str:
-    """Autopilot: record what we're building. milestones is an ordered list of
+             summary: str | None = None, new_goal: bool = False) -> str:
+    """Autopilot: record what we're building. Rewording the goal or adding
+    milestones never asks the person about planning again once they have
+    answered; pass new_goal=true only when replacing it with an unrelated goal. milestones is an ordered list of
     {"title": ..., "check": ..., "detail": ..., "profile": ..., "repo": ...}. Include
     summary: a few words (at most 30 characters) naming the goal for the sidebar's single-line session label. The optional
     profile names the default worker profile for `assign` while that milestone
@@ -1792,7 +1794,7 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
             return found
         root_id, _ = found
         items = autopilot.milestone_items(db, root_id, milestones)
-        autopilot.set_goal(db, root_id, goal, items, detail, summary=summary)
+        autopilot.set_goal(db, root_id, goal, items, detail, summary=summary, replace=new_goal)
         text = autopilot.progress(db, root_id)
         from brindle import plans
 

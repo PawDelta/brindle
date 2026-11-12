@@ -413,14 +413,14 @@ def test_answered_plan_offer_is_not_asked_again_as_the_goal_grows(how, db, sessi
         pid = mcp_server.propose_plan(PLAN).split()[2]
         plans.decide(db, pid, 1, True, person=True)
 
-    mcp_server.set_goal("Org-wide presets and their admin screens", items(8))
-    mcp_server.set_goal("Org-wide presets, admin screens and audit log", items(9))
+    mcp_server.set_goal("Organization-wide presets and their admin screens", items(8))
+    mcp_server.set_goal("Presets: admin screens and audit log", items(9))
     assert offers() == [] and not plans.open_offer_id(db.get_autopilot("boss").plan_offer)
     assert plans.holding(db, "boss") is None
     asyncio.run(mcp_server.assign("developer", "build the preset schema"))
     assert started == ["build the preset schema"]
 
-    mcp_server.set_goal("Rewrite the installer", items(4, "N"))
+    mcp_server.set_goal("Rewrite the installer", items(4, "N"), new_goal=True)
     assert len(offers()) == 1                                # an unrelated goal may be asked once
 
 
