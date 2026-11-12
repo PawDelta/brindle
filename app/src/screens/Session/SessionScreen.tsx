@@ -267,7 +267,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
               root={root}
               agent={node?.agent ?? null}
               alive={node ? alive[node.agent.id] : undefined}
-              sessionStatus={!node || node.agent.id === root ? session?.status ?? null : null}
+              sessionStatus={session?.status === "resuming" || !node || node.agent.id === root ? session?.status ?? null : null}
               sessionName={session?.name || session?.goal}
               credentials={credentials}
               recovery={recovery}
@@ -341,7 +341,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
       await reload();
     }
   };
-  const resuming = sessionStatus === "resuming" && (!node || node.agent.id === root);
+  const resuming = sessionStatus === "resuming";
   const status = resuming ? { glyph: "◌", label: "resuming", style: "dim" as const, needs: false }
     : node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
   const named = useContext(SessionsContext)?.find(root)?.name;
@@ -375,7 +375,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         </button>
       )}
       {paused ? (
-        <LoadingButton className={main} busy={recovery.busy} disabled={recovery.busy} onClick={() => recovery.resume()}>
+        <LoadingButton className={main} data-session-start={root} busy={recovery.busy} disabled={recovery.busy} onClick={() => recovery.resume()}>
           Continue
         </LoadingButton>
       ) : !resuming && (
@@ -385,7 +385,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
       )}
       {/* Not keyed by the agent, and kept when no agent is left to show (a transfer pauses the scratch
           session's root, which leaves the snapshot): a card it opened stays while its job runs and says how it ended. */}
-      {menuNode && (
+      {!resuming && menuNode && (
         <AgentMenu client={client} agent={menuNode.agent} workspace={menuNode.workspace} gone={!node} root={root} repo={repo} refresh={refresh} onAgent={onAgent} onSession={onOpen} closeSession={closeSession} />
       )}
       {/* No agent shown (a paused session's root is in no snapshot): the session's own ⋯, so it can still be closed. */}

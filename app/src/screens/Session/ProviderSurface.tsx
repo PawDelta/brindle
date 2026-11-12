@@ -43,7 +43,7 @@ export interface ProviderSurfaceProps {
   agent: AgentDTO | null;
   /* Whether its process is alive, from the liveness sweep (undefined: not known yet). */
   alive?: boolean;
-  /* The root's listed state; omitted when showing a worker. */
+  /* The root's listed state; only resuming also applies while showing a worker. */
   sessionStatus?: string | null;
   /* The session's name or goal: with no agent to show, what tells one stopped session's card from another's. */
   sessionName?: string | null;
@@ -180,7 +180,8 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
   const returning = !panesReadyFor(panes, root) && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
   const card: Card | null = returning ? { kind: "returning" } : surfaceCard(agent, alive, sessionStatus, view, credentials, unshowable);
   const name = agent ? providerName(agent.provider) : "the session";
-  const { resume, busy, notice, preflight, setPreflight } = recovery;
+  const { resume, busy, notice, preflight: savedPreflight, setPreflight } = recovery;
+  const preflight = sessionStatus === "resuming" ? null : savedPreflight;
 
   /* A fresh socket to the pane after a dropped stream. */
   const reconnect = () => {
@@ -219,7 +220,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
           worker's pane (the supervisor's chat is what the continue brings back) as a strip, else as the surface. */}
       {preflight && (
-        <div className={`${live ? "shrink-0 border-b border-shell-line" : "flex-1"} flex items-start justify-center overflow-auto bg-canvas p-s4`}>
+        <div className={`${live ? "shrink-0 border-b border-shell-line" : "flex-1"} flex items-start justify-center overflow-auto bg-canvas p-s4`} data-session-start={root ?? agent?.id}>
           <Preflight preflight={preflight} onRefresh={setPreflight} onLaunch={() => void resume()} launchLabel="Continue" repo={repo} />
         </div>
       )}
@@ -274,7 +275,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
                       </button>
                     )}
                     {!(card.kind === "ended" && card.locked) && !(card.kind === "failed" && card.unshowable) && (
-                      <LoadingButton className={credentials && card.kind === "failed" ? button : main} busy={busy} disabled={busy} onClick={() => resume()}>
+                      <LoadingButton className={credentials && card.kind === "failed" ? button : main} data-session-start={root ?? agent?.id} busy={busy} disabled={busy} onClick={() => resume()}>
                         {card.kind === "failed" ? "Restart" : "Continue"}
                       </LoadingButton>
                     )}

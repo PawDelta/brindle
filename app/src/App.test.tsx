@@ -55,19 +55,39 @@ const paneWaits = () => screen.queryByTestId("state-card")?.dataset.kind === "re
 describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
   it("keeps recovery visible in the session row and header until it succeeds or fails", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: "resuming" }], workspaces: [root] });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: "paused" }], workspaces: [], inbox: [{ ...question, kind: "failed", agent_id: "sup1", root_id: "sup1" }], preflight: { claude: [{ id: "trust", kind: "trust", label: "Trust folder", done: false }] } });
     const client = daemon.client();
     const store = createAppStore();
     const sync = startSync({ client, store, connect: daemon.connect });
     try {
       renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
       const states = () => screen.getAllByTestId("session-status").map((el) => el.getAttribute("data-state"));
+      await waitFor(() => expect(states()).toEqual(["paused", "paused"]));
+      const startControls = () => document.querySelectorAll('[data-session-start="sup1"]');
+      fireEvent.click(screen.getByTestId("session-bar").querySelector<HTMLButtonElement>('[data-session-start="sup1"]')!);
+      await screen.findByTestId("preflight");
+      daemon.data.sessions = [{ ...session, status: "resuming" }];
+      daemon.data.workspaces = [root, worker];
+      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "starting" } });
       await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
       expect(screen.getByTestId("state-card").getAttribute("data-kind")).toBe("returning");
+      expect(startControls()).toHaveLength(0);
+      expect(screen.queryByTestId("agent-menu")).toBeNull();
+      await waitFor(() => expect(treeAgent("w1")).toBeTruthy());
+      fireEvent.click(treeAgent("w1"));
+      expect(screen.getByTestId("state-card").getAttribute("data-kind")).toBe("returning");
+      expect(startControls()).toHaveLength(0);
+      expect(screen.queryByTestId("agent-menu")).toBeNull();
+      fireEvent.click(screen.getByTestId("inbox-link"));
+      await screen.findByTestId("inbox-card");
+      expect(startControls()).toHaveLength(0);
+      fireEvent.click(treeSession("sup1"));
+      await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
       daemon.data.sessions = [{ ...session, status: "paused" }];
       daemon.data.workspaces = [];
       daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "paused" } });
       await waitFor(() => expect(states()).toEqual(["paused", "paused"]));
+      expect(startControls().length).toBeGreaterThan(0);
       daemon.data.sessions = [session];
       daemon.data.workspaces = [root];
       daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "idle" } });

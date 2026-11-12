@@ -497,6 +497,7 @@ function ResumeButton({ client, root, repo, navigate, refresh }: { client: Daemo
         className="mt-[4px] shrink-0 whitespace-nowrap rounded-sm border border-line-strong px-1.5 py-px text-[10.5px] font-medium text-ink-2 hover:text-ink disabled:opacity-50"
         title="Continue the session and open its chat"
         data-testid={`session-resume-${root}`}
+        data-session-start={root}
         disabled={recovery.busy}
         onClick={() => void recovery.resume()}
       >
