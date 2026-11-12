@@ -37,7 +37,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import PurePath
 
@@ -183,8 +183,8 @@ def _session_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str],
     for root, holder, branch, changed in _session_changes(db, ws, own, start, caller, isolate):
         shared = _overlap_files(files, [], list(changed))
         if shared:
-            yield Clash(f"overlaps with session {root} ({branch}) on {', '.join(shared)}; "
-                        "consider depends_on or merging first", holder, root, True, shared)
+            yield _unless_stalled(db, Clash(f"overlaps with session {root} ({branch}) on {', '.join(shared)}; "
+                                            "consider depends_on or merging first", holder, root, True, shared))
 
 
 def active_tasks(db: DB, repo_root: str) -> list[Task]:
@@ -214,8 +214,18 @@ def running_tasks(db: DB, repo_root: str) -> list[tuple[Task, Agent, Workspace |
     return out
 
 
+# A "#NNN" right after one of these cites history (a pull request, what came
+# after what, a commit subject's "(#NNN)"), not the issue the task is about.
+_CITES_HISTORY = re.compile(r"(?:\b(?:PRs?|pull requests?|after|since|from|per|see|via|merged|landed|reverted)"
+                            r"\s+|\()$", re.IGNORECASE)
+
+
 def _issue_numbers(text: str | None) -> set[str]:
-    return set(re.findall(r"#(\d+)", text or ""))
+    """The issues ``text`` names as its subject: every #NNN but those it only
+    cites as history (``_CITES_HISTORY``), which must not hold a task."""
+    text = text or ""
+    return {m.group(1) for m in re.finditer(r"#(\d+)", text)
+            if not _CITES_HISTORY.search(text[max(0, m.start() - 24):m.start()])}
 
 
 def _reported_unmerged(db: DB, repo_root: str) -> list[tuple[Task, Agent, Workspace]]:
@@ -275,10 +285,75 @@ def _own_roots(db: DB, ws: Workspace, caller_id: str | None) -> set[str]:
 
 
 def _held(db: DB, own: set[str], warning: str, holder: str | None,
-          shared_files: tuple[str, ...] = ()) -> Clash:
+          shared_files: tuple[str, ...] = (), *, probe: bool = True) -> Clash:
     from brindle import autopilot
     root = autopilot.root_of(db, holder) if holder else None
-    return Clash(warning, holder, root, root is not None and root not in own, shared_files)
+    return _unless_stalled(db, Clash(warning, holder, root, root is not None and root not in own, shared_files),
+                           probe=probe)
+
+
+# A session whose supervisor has had no live process, and no status change,
+# for this long counts as stalled: what it holds won't land on its own.
+STALLED_AFTER = 12 * 3600
+
+
+def _session_stalled(db: DB, root: Agent, probe: bool, now: float) -> str | None:
+    from brindle import identity_lock
+
+    if root.status == "paused":
+        return f"session {root.id} is paused"
+    if root.dismissed_at is not None:
+        return f"session {root.id} was closed"
+    if probe and (who := identity_lock.locked_by(root.id)):
+        return f"session {root.id} is locked to another sign-in ({who})"
+    since = root.status_since
+    if (root.status not in ("starting", "processing", "waiting") and since is not None
+            and now - since >= STALLED_AFTER and not agents.is_alive(root)):
+        return f"session {root.id} has had no live process for {int((now - since) // 3600)} h"
+    return None
+
+
+def stalled_holder(db: DB, holder: str, *, probe: bool = True) -> str | None:
+    """Why another session's ``holder`` (a worker id, ``workspace:<id>`` or
+    ``task:<id>``) can't make progress, or None: every session it belongs to
+    is paused, closed, locked to another sign-in, or long idle with no live
+    process (or the holding worker itself was closed). A task is never held
+    behind such work: it starts with a warning instead. Without ``probe`` the
+    sign-in lock isn't asked (assign's reply reads only the database)."""
+    from brindle import autopilot, identity_lock
+
+    if holder.startswith("workspace:"):
+        ids = [a.id for a in db.list_agents(holder.removeprefix("workspace:"))]
+    elif holder.startswith("task:"):
+        t = db.get_task(holder.removeprefix("task:"))
+        ids = [i for i in (t.agent_id, t.caller_id) if i] if t else []
+    else:
+        ids = [holder]
+    held_by = [a for a in map(db.get_agent, ids) if a is not None]
+    for a in held_by:
+        if a.parent_id and a.dismissed_at is not None:
+            return f"its worker {a.id} was closed"
+        if probe and a.parent_id and (who := identity_lock.locked_by(a.id)):
+            return f"its worker {a.id} is locked to another sign-in ({who})"
+    roots = [r for r in map(db.get_agent, {autopilot.root_of(db, a.id) for a in held_by}) if r is not None]
+    now = time.time()
+    whys = [_session_stalled(db, r, probe, now) for r in roots]
+    if not whys or not all(whys):
+        return None
+    return "; ".join(w for w in whys if w)
+
+
+def _unless_stalled(db: DB, clash: Clash, *, probe: bool = True) -> Clash:
+    """``clash``, or, when it is another session's work that can't make
+    progress (``stalled_holder``), the same clash with no holder to wait for:
+    the task starts and its supervisor is warned of the overlap instead."""
+    if not (clash.cross_session and clash.holder):
+        return clash
+    why = stalled_holder(db, clash.holder, probe=probe)
+    if not why:
+        return clash
+    return replace(clash, holder=None,
+                   warning=f"{clash.warning}; not waiting for it: {why}, so it can't land soon")
 
 
 def _intent_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Iterator[Clash]:
@@ -320,9 +395,10 @@ def _queued_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str], *,
         shared = _overlap_files(files, _loads(t.files), [], ws if inspect else None)
         if shared:
             root = autopilot.root_of(db, t.caller_id) if t.caller_id else None
-            yield Clash(f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
-                        f"{', '.join(shared)}; consider depends_on or merging first",
-                        f"task:{t.id}", root, root is not None and root not in own, shared)
+            yield _unless_stalled(db, Clash(
+                f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
+                f"{', '.join(shared)}; consider depends_on or merging first",
+                f"task:{t.id}", root, root is not None and root not in own, shared), probe=inspect)
 
 
 def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
@@ -351,7 +427,7 @@ def _running_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str], ch
         if shared:
             branch = other_ws.branch if other_ws else "?"
             yield _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {', '.join(shared)}; "
-                        "consider depends_on or merging first", t.agent_id, shared)
+                        "consider depends_on or merging first", t.agent_id, shared, probe=changed)
 
 
 def declared_clash(db: DB, ws: Workspace, files: list[str] | None,
@@ -581,6 +657,9 @@ def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: flo
     merging, as any dependency does."""
     if now - since >= CROSS_SESSION_WAIT_LIMIT:
         return "expired", ""
+    if stalled_holder(db, dep):
+        # Read again at launch, the clash then has no holder: it starts with a warning.
+        return "stalled", ""
     roots, branch = _holder_session(db, dep, caller_ws.repo_root)
     if not roots or not branch:
         return None
@@ -840,7 +919,7 @@ def unmet_dependencies(
         target_repo, task, ws = _resolve_dependency(
             db, caller_ws, dep, session_roots, dependent_task_id=dependent_task_id)
         resolved[dep] = (target_repo, task, ws)
-        if ws is not None and inspect and lock_identities and not _other_sessions_landing(db, dep, caller_id):
+        if ws is not None and inspect and lock_identities and not _other_sessions_landing(db, dep, ws, caller_id):
             # its lookup can probe sign-ins for a minute: the start's job
             identity_lock.ensure_workspace(db, ws)
 
@@ -863,16 +942,19 @@ def unmet_dependencies(
     return unmet
 
 
-def _other_sessions_landing(db: DB, dep: str, caller_id: str | None) -> bool:
-    """Whether ``dep`` is an overlap wait on another session's work (a
-    ``workspace:<id>`` its supervisors hold): the task only waits for that
-    session to land and never acts in its worktree, so whoever that session is
-    signed in as doesn't concern it."""
-    if not dep.startswith("workspace:") or caller_id is None:
+def _other_sessions_landing(db: DB, dep: str, ws: Workspace, caller_id: str | None) -> bool:
+    """Whether ``dep`` (resolved to worktree ``ws``) is another session's
+    work: a ``workspace:<id>`` its supervisors hold, or a worker or task of
+    theirs. The task only waits for that work to land and never acts in its
+    worktree, so whoever that session is signed in as doesn't concern it, and
+    its sign-in lock must never cancel the task."""
+    if caller_id is None:
         return False
     from brindle import autopilot
 
-    roots, _ = _holder_session(db, dep, "")
+    roots = {autopilot.root_of(db, a.id) for a in db.list_agents(ws.id)}
+    if dep.startswith("workspace:"):
+        roots.update(_holder_session(db, dep, "")[0])
     return bool(roots) and autopilot.root_of(db, caller_id) not in roots
 
 
@@ -1603,17 +1685,23 @@ def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | 
 
     setting = load_repo_config(t.repo_root).overlap
     excused: Clash | None = None
+    warned: Clash | None = None
     for clash in inspected_clashes(db, caller_ws, _loads(t.files), t.task_text, t.caller_id, task_id=t.id):
         how = overlap_mode(setting, clash.cross_session)
-        if how == "queue" and not clash.holder:   # an intent has no worker to wait for
+        if how == "queue" and not clash.holder:   # an intent, or stalled work: nothing to wait for
             how = "warn"
         # Work it already stopped waiting for never hides another holder's.
         if how == "queue" and cross_wait_excused(db, t, clash, caller_ws.repo_root):
             excused = excused or clash
             continue
+        if how == "warn":   # nor does a warning: a later clash may still hold or refuse it
+            warned = warned or clash
+            continue
         break
     else:
-        return True, excused.warning if excused else None
+        if warned is None:
+            return True, excused.warning if excused else None
+        clash, how = warned, "warn"
     deps = _loads(t.depends_on)
     proceed = False
     if how == "queue":
