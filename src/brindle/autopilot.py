@@ -683,6 +683,17 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
     return items
 
 
+def _same_goal(old_goal: str, new_goal: str, old: dict, milestones: list[tuple]) -> bool:
+    """Whether ``new_goal`` is the session's goal reworded or grown rather than
+    an unrelated replacement: it keeps a milestone, or most of the shorter
+    title's words. A reworded goal must not be offered the plan question again."""
+    if any((m[0], m[1]) in old for m in milestones):
+        return True
+    words = lambda s: set(re.findall(r"[a-z0-9]{3,}", s.lower()))  # noqa: E731
+    a, b = words(old_goal), words(new_goal)
+    return bool(a and b) and len(a & b) * 2 >= min(len(a), len(b))
+
+
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None, *,
              summary: str | None = None) -> None:
@@ -708,8 +719,9 @@ def set_goal(db: DB, root_id: str, goal: str,
     fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
-        fields["plan_offer"] = None     # a new goal gets its own, single offer
-        fields["offer_goal_at"] = time.time()
+        if ap is None or not _same_goal(ap.goal or "", goal, old, milestones):
+            fields["plan_offer"] = None     # an unrelated goal gets its own, single offer
+            fields["offer_goal_at"] = time.time()
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None

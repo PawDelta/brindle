@@ -382,6 +382,35 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     assert started == ["build the preset schema"]
 
 
+@pytest.mark.parametrize("accept", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant("an approved offer is asked once as well")),
+])
+def test_answered_plan_offer_is_not_asked_again_as_the_goal_grows(accept, db, session, monkeypatch, connected_app):
+    """Owner report: every set_goal that reworded the goal and added milestones
+    asked again after the person had answered. The same session's goal, however
+    it is reworded and grown, is offered once; an unrelated goal is asked afresh."""
+    from brindle import autopilot
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    db.add_autopilot("boss")
+    offers = lambda: [i for i in inbox.items(db, None) if i.kind == "plan_offer"]  # noqa: E731
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    [offer] = offers()
+    plans.answer_offer(db, "boss", offer.request_id, accept)
+
+    grown = [{"title": f"M{i}", "check": "true"} for i in range(8)]
+    reply = mcp_server.set_goal("Org presets and their admin screens", grown)
+    assert "asked the person" not in reply and offers() == []
+    mcp_server.set_goal("Org presets, admin screens and audit log", grown + [{"title": "M9", "check": "true"}])
+    assert offers() == [] and not plans.open_offer_id(db.get_autopilot("boss").plan_offer)
+
+    mcp_server.set_goal("Rewrite the installer", [{"title": f"N{i}", "check": "true"} for i in range(4)])
+    assert len(offers()) == 1                                # an unrelated goal may be asked once
+
+
 @pytest.mark.variant("reported stall: a terminal-only session's workers held by an offer nobody can answer (review 0.6.3, finding 3)")
 def test_plan_offer_without_app(db, session, monkeypatch):
     from brindle import autopilot

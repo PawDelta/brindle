@@ -1796,7 +1796,7 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
         text = autopilot.progress(db, root_id)
         from brindle import plans
 
-        if (plans.holding(db, root_id) or {}).get("offer"):
+        if plans.open_offer_id((plans.holding(db, root_id) or {}).get("offer")):   # not an accepted one: nothing new was asked
             text += ("\n\nThis goal looks big, so brindle asked the person whether to plan it first. "
                      "Workers you assign queue until they answer; you'll get a message either way.")
         repo_root = found[1].repo_root
