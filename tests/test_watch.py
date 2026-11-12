@@ -123,14 +123,20 @@ def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions
     (which compresses its paths), a folder no longer ignored and a file new
     in it afterwards, and a file no longer ignored once the excludes file is
     edited through its symlink, though the first look couldn't learn which
-    files those are (git busy)."""
+    files those are (git busy). The global config is /dev/null, which
+    every process writing to it touches: still nothing to ask git."""
+    import os
+    from pathlib import Path
+
     from brindle import git, status_cache
 
     s1, s2, s3 = four_sessions[1:]
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     refresh, started = _sidebar(db, four_sessions, monkeypatch)
     first = refresh()
     started.clear()
     for _ in range(int(2400 / watch.IDLE_SECONDS)):
+        Path(os.devnull).write_text("noise\n")     # another process's output, thrown away
         shown = refresh()
     assert started == []
     assert shown == first
