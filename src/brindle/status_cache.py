@@ -77,6 +77,8 @@ def clear() -> None:
     _reported.clear()
     _failed.clear()
     _sources.clear()
+    _tracked_names.clear()
+    _tracked_dirty.clear()
 
 
 def _worktree_gitdir(path: Path) -> Path:
@@ -323,6 +325,59 @@ def _stat(path: str | bytes | Path) -> tuple | None:
     except OSError:
         return None
     return (s.st_mtime_ns, s.st_ctime_ns, s.st_size, s.st_ino)
+
+
+# What ``git status`` of tracked files alone reads, and what it said: per worktree.
+_tracked_names: dict[str, tuple[tuple, list[bytes] | None]] = {}    # the index's paths, per version of the index
+_tracked_dirty: dict[str, tuple[tuple, list[str]]] = {}
+_TRACKED_MAX = 256
+
+
+def _tracked_stamps(path: Path) -> tuple | None:
+    """Everything the tracked files' status depends on: HEAD's commit, the
+    index, the repo's config and attributes, and every tracked file, each one
+    stat'ed wherever it is (exact, unlike the shallow fingerprint: git itself
+    judges a file modified by its stat). None when that can't be read without
+    git (no commit yet, an index ``index_paths`` doesn't read)."""
+    try:
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+        head = _resolve(wt_gitdir, common, (wt_gitdir / "HEAD").read_text().strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    index = _stat(wt_gitdir / "index")
+    if head is None or index is None:
+        return None
+    key = str(wt_gitdir)
+    names = _tracked_names.get(key)
+    if names is None or names[0] != index:
+        if len(_tracked_names) >= _TRACKED_MAX:
+            _tracked_names.clear()
+        names = _tracked_names[key] = (index, index_paths(wt_gitdir / "index", _hash_len(common)))
+    if names[1] is None:
+        return None
+    root = os.fsencode(path)
+    return (head, index, _stat(common / "config"), _stat(common / "info" / "attributes"),
+            tuple(_stat(os.path.join(root, name)) for name in names[1]))
+
+
+def tracked_dirty(path: str | Path) -> list[str]:
+    """``git.dirty_files(path, tracked_only=True)``, asked of git only when
+    something it reads has moved since it last looked (``_tracked_stamps``,
+    taken before git looks, so a change made meanwhile asks again). For the
+    daemon's sweeps, which judge a session's readiness again whenever one of
+    its workers' rows changes: its own checkout is usually as it was."""
+    path = Path(path)
+    stamps = _tracked_stamps(path)
+    hit = _tracked_dirty.get(str(path))
+    if stamps is not None and hit is not None and hit[0] == stamps:
+        return list(hit[1])
+    dirty = git.dirty_files(path, tracked_only=True)
+    if stamps is not None:
+        if len(_tracked_dirty) >= _TRACKED_MAX:
+            _tracked_dirty.clear()
+        _tracked_dirty[str(path)] = (stamps, dirty)
+    return list(dirty)
 
 
 _SYSTEM_CONFIGS: list[Path] | None = None

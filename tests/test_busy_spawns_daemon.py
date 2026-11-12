@@ -72,8 +72,10 @@ def test_a_repo_question_is_asked_once_however_many_sessions_are_at_work(db, rep
     sh("git merge -q --no-ff --no-edit origin/main", sessions["one"].path)
     _done_goal(db, "lead-two")
     panes = tmux.PaneSnapshot(tmux.current_server())
+    edited = set()
     for branch in ("one", "two"):
         ws = worktree(db, repo, f"work-{branch}", base=branch, files={"work.txt": branch})
+        edited.add(ws.path)
         db.add_agent(Agent(f"worker-{branch}", ws.id, "developer", "claude", f"lead-{branch}", "assign", "working",
                            f"%worker-{branch}", None, 1.0))
         panes[f"%worker-{branch}"] = True
@@ -117,3 +119,5 @@ def test_a_repo_question_is_asked_once_however_many_sessions_are_at_work(db, rep
     # Nor is a session whose workers are at work, its own checkout as it was, asked anything again:
     # what git said of its commits and its files stands until they move.
     assert [argv for argv, cwd in started if cwd in (sessions["one"].path, sessions["two"].path)] == []
+    # git status runs where files changed since the last look (the workers' worktrees), and nowhere else.
+    assert {cwd for argv, cwd in started if "status" in argv} == edited

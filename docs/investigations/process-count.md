@@ -536,9 +536,14 @@ Fix, in `git.py` so every caller has it (`conflicts`, `gates`,
 - Whatever the files can't say (a reftable repo, `GIT_DIR` in the
   environment, a path that isn't a checkout's root, a name like `main~2`) is
   asked of git every time, as before.
-- `ReadinessWatch` keeps a session's uncommitted tracked files while its
-  checkout's stamps (taken before git looked) are unchanged, and `reasons`
-  asks `git status` once, not twice.
+- `reasons` and `phase_reasons` take a checkout's uncommitted tracked files
+  from `status_cache.tracked_dirty`: `git status --untracked-files=no` runs
+  only when something it reads moved since it last looked. That is HEAD's
+  commit, the index, the repo's config and attributes, and every tracked
+  file, each one stat'ed wherever it is (names from the index, read without
+  git), so it is as exact as git's own stat check; the stamps are taken
+  before git looks. An index that can't be read that way (a submodule, a
+  split or sparse index) asks git every time.
 
 Measured with `subprocess.Popen.__init__` wrapped: three sessions in one
 repo (two with a reached goal and a worker at work, one quiet), `origin/main`
@@ -552,14 +557,17 @@ moved once.
 The 4 left: the quiet session's sync finding its merge synced (2, once),
 and `git status` for each of the two worktrees a worker edited.
 
-Test: `tests/test_busy_spawns_daemon.py` (that scenario: each repo question
-at most once on the sweep that sees the move, none on the next, and no git
-at all in the checkouts of the sessions whose workers are at work).
+Test: `tests/test_busy_spawns_daemon.py` (that scenario, one session with a
+merged PR and a sync's merge on top: each repo question at most once on the
+sweep that sees the move and nothing asked about that merge again; on the
+next sweep no repo question, no git at all in the checkouts of the sessions
+whose workers are at work, and `git status` only in the two worktrees whose
+files changed).
 
 What is left: a worktree an agent is editing still costs one `git status`
-per sweep that sees its files change (the app's feed), and requests the app
-makes (a goal read runs `reasons`, with one `git status`) are not sweeps and
-were not measured here.
+per sweep that sees its files change (the app's feed). Requests the app
+makes (a goal read runs `reasons`) are not sweeps and were not measured
+here; they go through the same functions.
 
 ### Other sources, measured and left as they are
 

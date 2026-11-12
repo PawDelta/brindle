@@ -95,19 +95,12 @@ def _only_review_edits_since(db: DB, ws: Workspace, sha: str) -> bool:
     return set(listed.split()) <= recorded
 
 
-def reasons(db: DB, root: Agent, ws: Workspace, dirty: list[str] | None = None) -> list[str]:
+def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
     """What keeps the session from being ready for a PR; none when it is.
-    ``dirty``: the checkout's uncommitted tracked files, from a caller that
-    knows them (the sweep, while the checkout's files haven't moved); git is
-    asked otherwise, once."""
+    Its checkout's uncommitted files come from ``status_cache.tracked_dirty``
+    (git only when the checkout moved): a sweep judges a session again
+    whenever one of its workers' rows changes."""
     out: list[str] = []
-
-    def uncommitted() -> list[str]:
-        nonlocal dirty
-        if dirty is None:
-            dirty = git.dirty_files(ws.path, tracked_only=True)
-        return dirty
-
     ap = db.get_autopilot(root.id)
     ms = db.milestones(root.id)
     if ap is None:
@@ -116,7 +109,7 @@ def reasons(db: DB, root: Agent, ws: Workspace, dirty: list[str] | None = None) 
         out += [f"milestone {m.position} ({m.title}) hasn't passed its check"
                 for m in ms if m.status != "passed"]
         if not out:
-            head = None if uncommitted() else git.head(ws.path)
+            head = None if status_cache.tracked_dirty(ws.path) else git.head(ws.path)
             if head and ap.audit_sha and _only_review_edits_since(db, ws, ap.audit_sha):
                 head = ap.audit_sha     # the person's own edits don't un-audit the work
             if due := autopilot.audit_due(ap, load_repo_config(ws.repo_root), head):
@@ -133,7 +126,7 @@ def reasons(db: DB, root: Agent, ws: Workspace, dirty: list[str] | None = None) 
     out += needs_you(db, root, ap)
     if not ws.base_branch or ws.branch in ("", "HEAD"):
         out.append("the session isn't on a branch with a base to open a PR against")
-    elif uncommitted():
+    elif status_cache.tracked_dirty(ws.path):
         out.append("the session's checkout has uncommitted changes")
     elif not git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1]:
         out.append(f"the session's branch has no commits ahead of {ws.base_branch}")
@@ -155,7 +148,7 @@ def phase_reasons(db: DB, root: Agent, ws: Workspace, phase: str, sha: str) -> l
         out.append(f"the goal has no phase {phase!r} any more")
     if not ws.base_branch or ws.branch in ("", "HEAD"):
         out.append("the session isn't on a branch with a base to open a PR against")
-    elif git.dirty_files(ws.path, tracked_only=True):
+    elif status_cache.tracked_dirty(ws.path):
         out.append("the session's checkout has uncommitted changes")
     elif not git.is_ancestor(ws.path, sha, "HEAD"):
         out.append(f"{sha[:12]}, the commit phase {phase!r} passed on, isn't on {ws.branch} any more")
@@ -1335,7 +1328,6 @@ class ReadinessWatch:
         self.idle_fetched_at: dict[str, float] = {}
         self.sync_seen = session_sync.Seen()   # idle sync and drift: sessions whose refs haven't moved
         self._tracked: dict[str, tuple[tuple[str, int], list[str] | None]] = {}
-        self._dirty: dict[str, tuple[tuple, list[str]]] = {}   # root -> (its checkout's stamps, uncommitted files)
         self.announce: set[str] = set()    # became ready while GitHub's first look at its PR was pending
 
     def _working_tree(self, ws: Workspace, fp: _Fingerprint) -> tuple | None:
@@ -1428,7 +1420,6 @@ class ReadinessWatch:
             log.exception("brindle: couldn't land a goal phase's PR")
         now: dict[str, bool] = {}
         fingerprints: dict[str, tuple] = {}
-        dirties: dict[str, tuple[tuple, list[str]]] = {}
         for (root_id,) in db.conn.execute("SELECT root_id FROM autopilot").fetchall():
             ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
             # Only a reached goal (or one whose every milestone passes) can be ready: skip the git work otherwise.
@@ -1444,25 +1435,16 @@ class ReadinessWatch:
                 continue
             try:
                 state = self._state(db, root_id, ap, ms)
-                dirty = None
                 if state is not None:
                     fingerprints[root_id] = state
-                    kept = self._dirty.get(root_id)
-                    if kept is not None and kept[0] == state[:2]:
-                        dirties[root_id] = kept
                     if self.fingerprints.get(root_id) == state and self.ready is not None:
                         now[root_id] = self.ready.get(root_id, False)
                         continue
-                    # A worker's row changed, not the checkout: its uncommitted files are as git last
-                    # said (the stamps were taken before git looked, so a later edit asks again).
-                    if root_id not in dirties:
-                        dirties[root_id] = (state[:2], git.dirty_files(ws.path, tracked_only=True))
-                    dirty = dirties[root_id][1]
-                now[root_id] = not reasons(db, *session(db, root_id), dirty=dirty)
+                now[root_id] = not reasons(db, *session(db, root_id))
             except (ServiceError, git.GitError, workspaces.WorkspaceError):
                 fingerprints.pop(root_id, None)
                 now[root_id] = False
-        self.fingerprints, self._dirty = fingerprints, dirties
+        self.fingerprints = fingerprints
         was, self.ready = self.ready, now
         if was is None:
             return []
