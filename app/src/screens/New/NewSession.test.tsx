@@ -303,6 +303,26 @@ describe("NewSession", () => {
     stop();
   });
 
+  it("says a start is under way the moment Start is pressed, and until its session opens", async () => {
+    // A start the engine is slow to answer (a busy machine) left the screen looking frozen.
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [{ ...root, agents: [] }] });
+    const fetch = daemon.fetch;
+    let answer!: () => void;
+    const held = new Promise<void>((resolve) => (answer = resolve));
+    daemon.fetch = async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/sessions") && init?.method === "POST") await held;
+      return fetch(input, init);
+    };
+    const { onOpen, stop } = setup(daemon);
+    fireEvent.click(await startButton());
+    const form = screen.getByRole("form", { name: "Start a session" });
+    expect(within(form).getByRole("status")).toBeTruthy();
+    answer();
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
+    expect(within(form).queryByRole("status")).toBeNull();
+    stop();
+  });
+
   it("opens a session it started once the sessions list has it, so it arrives not paused (#216)", async () => {
     // A first launch: nothing has ever run in the project. Opened before the list is read again, the
     // session view finds the root in neither the list nor the snapshot, and takes it for paused.
