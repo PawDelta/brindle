@@ -80,7 +80,7 @@ same `procs.stop` call, and the resume tests in `test_sessions.py` and
 ### L2. The learned-rules `claude -p` call left its helpers on a timeout (fixed)
 
 `learned_rules.default_call`'s Claude path ran `claude -p` with
-`subprocess.run(..., timeout=300)`, in the caller's own session and with every
+`subprocess.run` (with `CALL_TIMEOUT`, five minutes), in the caller's own session and with every
 tool and every MCP server the person has configured. On a timeout
 `subprocess.run` kills only the CLI itself: the MCP servers and shells it
 started kept running (and kept the output pipes open).
@@ -196,7 +196,7 @@ and `reap=True`. Test:
   (`window_alive`, one `tmux display` each) for an idle supervisor with
   workers; one call a sweep while a worker is alive.
 - **Developer machines only**: every pytest process (each xdist worker) runs a
-  watchdog shell (`tests/conftest.py::private_tmux_server`) that starts `sleep 1`
+  watchdog shell (`tests/conftest.py::private_tmux_server`) that starts a one-second wait process
   every second while the run lasts: about 60 processes a minute per worker.
 
 ## Live numbers on this machine
