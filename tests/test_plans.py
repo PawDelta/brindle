@@ -409,13 +409,13 @@ def test_approved_design_counts_as_the_plan(answer, goal_first, db, session, mon
     monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
     visuals.answer(db, shown["id"], 1, **answer)
 
-    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(5)])
     offers = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
     asyncio.run(mcp_server.assign("developer", "build the preset schema"))
     if answer == {"option": "build"}:
         assert offers == [] and started == ["build the preset schema"] and plans.holding(db, "boss") is None
         # The approval belonged to that goal: a later, unrelated goal gets the normal offer.
-        mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(4)])
+        mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(5)], new_goal=True)
         assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
     else:
         assert len(offers) == 1 and started == []
@@ -437,7 +437,7 @@ def test_approval_stays_with_the_goal_the_design_was_shown_for(db, session, monk
                             [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
     mcp_server.set_goal("Billing export", [{"title": "B", "check": "true"}])
     visuals.answer(db, shown["id"], 1, option="build")        # A's design, answered while B is the goal
-    mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(4)])
+    mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(5)])
     assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
 
 
@@ -460,7 +460,7 @@ def test_failed_answer_delivery_leaves_no_approval_behind(delivered, db, session
 
     def fail(*a, **k):      # a big goal and an assign arrive while the answer is being delivered
         monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)   # starting a task also messages
-        mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+        mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(5)])
         asyncio.run(mcp_server.assign("developer", "build the preset schema"))
         if not delivered:
             raise RuntimeError("not delivered")
@@ -495,7 +495,8 @@ def test_approval_delivered_while_the_offer_is_being_opened(db, session, monkeyp
         visuals.answer(db, shown["id"], 1, option="build")
         return real(self, *args)
     monkeypatch.setattr(DBClass, "open_plan_offer", late)
-    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(5)])
+    assert visuals.get(db, shown["id"])["answer"] is not None
     asyncio.run(mcp_server.assign("developer", "build the preset schema"))
     assert plans.holding(db, "boss") is None and started == ["build the preset schema"]
 
