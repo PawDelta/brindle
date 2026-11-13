@@ -11,7 +11,130 @@ import pytest
 from typer.testing import CliRunner
 
 from brindle import agents, demo, workspaces
-from brindle.db import Agent
+from brindle.db import Agent, Workspace
+
+
+def _practice_session(db, root, name):
+    (root / ".brindle").mkdir(parents=True)
+    (root / ".brindle" / "goals.md").write_text("Practice")
+    for suffix, parent in (("supervisor", None), ("worker", f"{name}-supervisor")):
+        agent_id = f"{name}-{suffix}"
+        path = root if parent is None else root / "worker"
+        path.mkdir(exist_ok=True)
+        db.add_workspace(Workspace(agent_id, str(root), agent_id, "root" if parent is None else "worktree",
+                                   "main", None, str(path), None, "", 0))
+        db.add_agent(Agent(agent_id, agent_id, suffix, "shell", parent, "supervisor" if parent is None else "assign",
+                           "processing", "", None, 0))
+
+
+@pytest.mark.variant("The whole End practice run press through the route: running and held practice repos go, a second press is a no-op")
+def test_end_practice_run_stops_agents_and_removes_repo(db, brindle_home, tmp_path, monkeypatch):
+    from brindle import tmux
+    from brindle.daemon import routes_actions
+
+    root = brindle_home / "demo" / "textkit-running"
+    _practice_session(db, root, "practice")
+    project = tmp_path / "project"
+    _practice_session(db, project, "person")
+    held = brindle_home / "demo" / "textkit-held"
+    (held / ".brindle").mkdir(parents=True)
+    (held / ".brindle" / "goals.md").write_text("Practice")
+    stopped = set()
+
+    def stop(db, agent):
+        assert root.exists()
+        stopped.add(agent.id)
+
+    monkeypatch.setattr(tmux, "list_panes", lambda: {})
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    monkeypatch.setattr(agents, "_stop", stop)
+    got = routes_actions.cancel_demo(db, {}, {})
+    assert set(got["removed"]) == {str(root), str(held)}
+    assert stopped == {"practice-supervisor", "practice-worker"}
+    assert not root.exists() and not held.exists()
+    assert db.find_workspaces(str(root)) == []
+    assert {a.id for a in db.list_agents()} == {"person-supervisor", "person-worker"}
+    assert project.exists()
+    assert routes_actions.cancel_demo(db, {}, {}) == {"removed": []}
+
+
+@pytest.mark.parametrize("case", ["outside", "changed_during_close", "attached_project"])
+def test_end_practice_run_refuses_non_demo_repo(db, brindle_home, tmp_path, monkeypatch, case):
+    from brindle import tmux
+
+    project = tmp_path / "textkit-project"
+    root = project if case == "outside" else brindle_home / "demo" / "textkit-running"
+    _practice_session(db, root, "practice")
+    if case == "attached_project":
+        _practice_session(db, project, "person")
+        db.update_agent("person-supervisor", parent_id="practice-supervisor")
+    stopped = []
+
+    def stop(db, agent):
+        stopped.append(agent.id)
+        if agent.parent_id is not None:
+            # Swap the candidate after stopping, before its directory is removed.
+            root.rename(project)
+            root.symlink_to(project, target_is_directory=True)
+
+    monkeypatch.setattr(tmux, "list_panes", lambda: {})
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    monkeypatch.setattr(agents, "_stop", stop)
+    demo.discard(db, root)
+    assert (project / ".brindle" / "goals.md").exists()
+    assert db.get_workspace("practice-supervisor") is not None
+    if case == "changed_during_close":
+        assert root.is_symlink()
+    else:
+        assert stopped == []
+        assert db.get_agent("practice-supervisor").status == "processing"
+
+
+@pytest.mark.parametrize("change", [
+    pytest.param("attached_after_validation", marks=pytest.mark.variant(
+        "A personal subtree joining after validation must not enter the close dispatch.")),
+    "moved_before_close",
+])
+def test_end_practice_run_rechecks_agents_after_tree_changes(db, brindle_home, tmp_path, monkeypatch, change):
+    from brindle import tmux
+
+    root = brindle_home / "demo" / "textkit-running"
+    project = tmp_path / "project"
+    _practice_session(db, root, "practice")
+    _practice_session(db, project, "person")
+    tree = agents.tree
+    stopped = []
+
+    def changed_tree(db, agent_id):
+        snapshot = tree(db, agent_id)
+        # A new assignment joins the tree after the validation snapshot was read.
+        db.update_agent("person-supervisor", parent_id="practice-supervisor")
+        return snapshot
+
+    def stop(db, agent):
+        stopped.append(agent.id)
+        if change == "moved_before_close" and agent.id == "practice-supervisor":
+            db.update_agent("practice-worker", workspace_id="person-worker")
+
+    if change == "attached_after_validation":
+        monkeypatch.setattr(agents, "tree", changed_tree)
+    monkeypatch.setattr(tmux, "list_panes", lambda: {})
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    monkeypatch.setattr(agents, "_stop", stop)
+    demo.discard(db, root)
+    assert "practice-supervisor" in stopped
+    for agent_id in ("person-supervisor", "person-worker"):
+        agent = db.get_agent(agent_id)
+        assert agent.status == "processing" and agent.dismissed_at is None
+        assert agent_id not in stopped
+    assert project.exists()
+    if change == "moved_before_close":
+        assert "practice-worker" not in stopped
+        assert db.get_agent("practice-worker").status == "processing"
+        assert root.exists()
 
 
 def _no_identity(monkeypatch, tmp_path):

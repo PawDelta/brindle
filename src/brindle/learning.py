@@ -242,7 +242,7 @@ def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace
 def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
                files: list[str] | None = None, candidates: list[str] | None = None,
                weight: str | None = None,
-               default: str | None = None) -> tuple[str | None, str | None]:
+               default: str | None = None, *, design_heavy: bool = False) -> tuple[str | None, str | None]:
     """(override, reason): the learner's pick among ``candidates`` (default:
     the repo's ``learning_candidates``, else the medium tier's routing list)
     when it overrides ``default`` (what brindle would use: the first
@@ -251,10 +251,10 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
     _forget_note(cfg, repo_root)
     if candidates is None:
         candidates = cfg.learning_candidates or cfg.routing.get("medium") or []
-    names = [c for c in candidates if isinstance(c, str)]
+    names = [c for c in candidates if isinstance(c, str) and cfg.routing_allows(c, design_heavy)]
     if not names:
         return None, None
-    default = default or names[0]
+    default = default if default and cfg.routing_allows(default, design_heavy) else names[0]
     if default not in names:
         # e.g. default_agent outside learning_candidates: it's still the baseline to beat
         names.insert(0, default)
@@ -278,10 +278,12 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
 
 def choose(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
            files: list[str] | None = None, candidates: list[str] | None = None,
-           weight: str | None = None, default: str | None = None) -> str | None:
+           weight: str | None = None, default: str | None = None, *,
+           design_heavy: bool = False) -> str | None:
     """The learner's override of ``default`` among ``candidates``, or None
     (no learner, nothing to choose between, or it kept the default)."""
-    return choose_why(db, cfg, repo_root, task, files, candidates, weight, default)[0]
+    options = {"design_heavy": True} if design_heavy else {}
+    return choose_why(db, cfg, repo_root, task, files, candidates, weight, default, **options)[0]
 
 
 def _forget_note(cfg: RepoConfig, repo_root: str) -> None:

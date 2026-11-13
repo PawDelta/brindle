@@ -157,11 +157,57 @@ def held(db: DB, provider: str | None = None) -> Path | None:
     return found
 
 
-def discard(db: DB, root: Path) -> None:
-    """Remove an unused practice repo and forget it (its preflight was cancelled)."""
-    for ws in db.find_workspaces(os.path.realpath(root)):
+def end(db: DB) -> list[Path]:
+    """End running or held practice runs, returning the repos removed."""
+    return [root for root in sorted((brindle_home() / "demo").glob("textkit-*"), reverse=True)
+            if discard(db, root)]
+
+
+def discard(db: DB, root: Path) -> bool:
+    """Close a practice repo's sessions, then remove it and forget it.
+
+    A repo outside the demo folder, or one that changes during shutdown, is
+    left alone. Session trees reaching into a person's project are refused.
+    """
+    from brindle import agents
+    from brindle.service import sessions
+
+    if not is_demo_repo(root):
+        return False
+    repo = os.path.realpath(root)
+    members = {a.id: a for ws in db.find_workspaces(repo) for a in db.list_agents(ws.id)}
+    candidates = {}
+    for agent in members.values():
+        if agent.parent_id in members:
+            continue
+        if not is_demo_repo(root) or os.path.realpath(root) != repo:
+            return False
+        for member in agents.tree(db, agent.id):
+            ws = db.get_workspace(member.workspace_id)
+            if ws is None or os.path.realpath(ws.repo_root) != repo or not is_demo_repo(ws.repo_root):
+                return False
+            candidates[member.id] = None
+    # Do not expand the tree again: a new descendant may belong to a person's
+    # project. Re-read ownership for each validated candidate before closing it.
+    for agent_id in candidates:
+        agent = db.get_agent(agent_id)
+        ws = db.get_workspace(agent.workspace_id) if agent else None
+        if ws is None or os.path.realpath(ws.repo_root) != repo or not is_demo_repo(ws.repo_root):
+            return False
+        if not is_demo_repo(root) or os.path.realpath(root) != repo:
+            return False
+        if agent.dismissed_at is None:
+            sessions.close(db, agent_id)
+    spaces = db.find_workspaces(repo)
+    if any(a.dismissed_at is None for ws in spaces for a in db.list_agents(ws.id)):
+        return False
+    # The path may have been replaced while the sessions were being stopped.
+    if not is_demo_repo(root) or os.path.realpath(root) != repo:
+        return False
+    shutil.rmtree(root)
+    for ws in spaces:
         db.delete_workspace(ws.id)
-    shutil.rmtree(root, ignore_errors=True)
+    return True
 
 
 def create(local: bool = False, provider: str | None = None) -> Path:
