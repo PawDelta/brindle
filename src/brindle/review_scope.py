@@ -98,7 +98,7 @@ def _callers(ws: Workspace, symbols: list[str], head: str) -> str:
         except (OSError, subprocess.SubprocessError, spawn.Busy):
             pass
     if not result:
-        pattern = r"\b(" + "|".join(re.escape(name) for name in selected) + r")[[:space:]]*\("
+        pattern = r"(^|[^[:alnum:]_])(" + "|".join(re.escape(name) for name in selected) + r")[[:space:]]*\("
         proc = git.run(["grep", "-n", "-I", "-E", pattern, head, "--"], ws.path, check=False)
         result = "Grep call-site candidates (includes definitions):\n" + (
             proc.stdout if proc.returncode == 0 else "No matches; follow imports or aliases if needed.")

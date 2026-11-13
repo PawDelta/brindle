@@ -1,5 +1,6 @@
 """Opt-in review cost controls through real dispatch and commit-bound packs."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -119,6 +120,9 @@ def test_pack_includes_callers_of_changed_and_deleted_functions(repo, monkeypatc
             return SimpleNamespace(returncode=0, stdout="caller.py:L2" if found else "")
 
         monkeypatch.setattr(review_scope.spawn, "read", graph_read)
+    else:
+        # Exercise the platform's Git, including Apple's POSIX regex engine.
+        monkeypatch.setenv("PATH", os.defpath + os.pathsep + os.environ["PATH"])
     pack = review_scope.context_pack(ws, base, head)
     assert "+    return 3" in pack
     assert "caller.py" in pack
