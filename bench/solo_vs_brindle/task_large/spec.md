@@ -142,6 +142,10 @@ Rules:
 - An update that leaves every recorded column of a row equal to what it was
   records nothing. So an upsert of identical data, or `UPDATE t SET x = x`,
   leaves no trace. An insert that is ignored (`ignore=True`) records nothing.
+  "Equal" means the same value of the same SQLite storage class: where a
+  column's type lets both be stored, the integer `1`, the real `1.0` and the
+  text `'1'` are three different values, and going from one to another is a
+  change.
 - An update that changes a row's primary key (or the `rowid` of a table
   without one) is recorded as two changes: a `delete` of the row under its old
   key, then an `insert` under the new key.
@@ -347,8 +351,11 @@ becoming the integer `5`).
 **Changes made behind the library's back.** If the table is altered some
 other way (a raw `ALTER TABLE ... ADD COLUMN`, or someone dropping your
 triggers), history cannot know until `table.enable_history()` is called
-again. Until then a raw-added column is not recorded. That call must repair
-things:
+again. Until then a raw-added column is not a recorded column: it is not in
+`history_columns`, changes to it are not recorded, and everything else
+(`changes()`, time travel, `diff()`, restoring, recording changes to the
+other columns) keeps working as if the column were not there. That call must
+repair things:
 
 - the recorded columns are brought in line with the table's columns, and
 - the table is compared with its last recorded state, and every difference

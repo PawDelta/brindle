@@ -1549,10 +1549,10 @@ index c011d9b..5027f14 100644
          columns: Iterable[str],
 diff --git a/sqlite_utils/history.py b/sqlite_utils/history.py
 new file mode 100644
-index 0000000..a7c5883
+index 0000000..62139ee
 --- /dev/null
 +++ b/sqlite_utils/history.py
-@@ -0,0 +1,1128 @@
+@@ -0,0 +1,1144 @@
 +"""
 +Row history: change tracking, time travel and undo for tables.
 +
@@ -1783,8 +1783,16 @@ index 0000000..a7c5883
 +        self.floor: int = meta[1]
 +        self.shadow = shadow_name(table.name)
 +        self.pks: list[str] = [] if table.use_rowid else table.pks
-+        self.columns = [
++        #: The columns that should be recorded, going by the table as it is now
++        self.live_columns = [
 +            column.name for column in table.columns if column.name not in self.exclude
++        ]
++        # The columns that are recorded. A column added behind our back is in
++        # the table but not in the shadow table or the triggers until
++        # _sync_schema() has run, and must not be read from history before then
++        stored = {column.name for column in table.db.table(self.shadow).columns}
++        self.columns = [
++            column for column in self.live_columns if "d_" + column in stored
 +        ]
 +
 +    @property
@@ -1969,12 +1977,13 @@ index 0000000..a7c5883
 +        info = _Tracked(table)
 +    key_index, changeset_index = _index_names(table.name)
 +    shadow = db.table(info.shadow)
++    wanted = ["d_" + column for column in info.live_columns]
 +    _drop_triggers(db, table.name)
 +    db.execute(f"DROP INDEX IF EXISTS {_q(key_index)}")
 +    # Data columns are declared BLOB, which gives them no type affinity:
 +    # every value is stored exactly as the table held it
 +    if not shadow.exists():
-+        columns = "".join(f",\n   {_q(column)} BLOB" for column in info.shadow_columns)
++        columns = "".join(f",\n   {_q(column)} BLOB" for column in wanted)
 +        db.execute(
 +            f"CREATE TABLE {_q(info.shadow)} (\n"
 +            "   _version INTEGER PRIMARY KEY,\n"
@@ -1987,14 +1996,16 @@ index 0000000..a7c5883
 +        existing = [
 +            column.name for column in shadow.columns if column.name.startswith("d_")
 +        ]
-+        stale = [column for column in existing if column not in info.shadow_columns]
++        stale = [column for column in existing if column not in wanted]
 +        if stale:
 +            shadow.transform(drop=stale)
-+        for column in info.shadow_columns:
++        for column in wanted:
 +            if column not in existing:
 +                db.execute(
 +                    f"ALTER TABLE {_q(info.shadow)} ADD COLUMN {_q(column)} BLOB"
 +                )
++    # From here on the recorded columns are the table's columns
++    info = _Tracked(table)
 +    db.execute(
 +        "CREATE INDEX {} ON {} ({}, _version)".format(
 +            _q(key_index),
@@ -2026,8 +2037,13 @@ index 0000000..a7c5883
 +        same_key = " AND ".join(f"old.{_q(pk)} IS new.{_q(pk)}" for pk in info.pks)
 +    else:
 +        same_key = "old.rowid IS new.rowid"
++    # IS NOT alone treats the integer 1 and the real 1.0 as the same value,
++    # so the storage class is compared as well - as _reconcile() does
 +    changed = " OR ".join(
-+        f"old.{_q(column)} IS NOT new.{_q(column)}" for column in info.columns
++        "old.{c} IS NOT new.{c} OR typeof(old.{c}) IS NOT typeof(new.{c})".format(
++            c=_q(column)
++        )
++        for column in info.columns
 +    )
 +    insert, update, rekey, delete = (_q(name) for name in _trigger_names(info.name))
 +    for sql in (
@@ -2722,10 +2738,10 @@ index 69397ba..fd19ead 100644
              {
 diff --git a/tests/test_history.py b/tests/test_history.py
 new file mode 100644
-index 0000000..a7f12da
+index 0000000..d7b29f0
 --- /dev/null
 +++ b/tests/test_history.py
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,257 @@
 +import json
 +
 +import pytest
@@ -2801,6 +2817,32 @@ index 0000000..a7f12da
 +            dogs.delete(1)
 +            1 / 0
 +    assert fresh_db.history_version == 2
++
++
++def test_change_of_storage_class_is_recorded(fresh_db):
++    # 1 and 1.0 compare equal in SQLite but are different stored values
++    table = fresh_db.table("loose", pk="id")
++    table.create({"id": int, "value": bytes})
++    table.insert({"id": 1, "value": 1})
++    table.enable_history()
++    fresh_db.execute("update loose set value = 1.0")
++    fresh_db.execute("update loose set value = 1.0")
++    changes = list(table.changes())
++    assert summary(changes) == [(1, "insert", 1), (2, "update", 1)]
++    assert [type(c.row["value"]) for c in changes] == [int, float]
++    assert type(table.get_as_of(1, 1)["value"]) is int
++
++
++def test_column_added_with_raw_sql_waits_for_enable_history(fresh_db, dogs):
++    fresh_db.execute("alter table dogs add column breed text default 'mutt'")
++    assert dogs.history_columns == ["id", "name", "age"]
++    assert [change.row for change in dogs.changes()] == [CLEO, PANCAKES]
++    assert list(dogs.as_of(2)) == [CLEO, PANCAKES]
++    dogs.update(1, {"age": 5, "breed": "corgi"})
++    assert list(dogs.changes())[-1].row == dict(CLEO, age=5)
++    dogs.enable_history()
++    assert dogs.history_columns == ["id", "name", "age", "breed"]
++    assert list(dogs.as_of(fresh_db.history_version)) == list(dogs.rows)
 +
 +
 +def test_time_travel_and_diff(fresh_db, dogs):

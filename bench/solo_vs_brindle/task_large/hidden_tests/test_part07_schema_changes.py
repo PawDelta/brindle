@@ -191,9 +191,29 @@ def test_enable_again_picks_up_columns_added_with_raw_sql(db, people):
     assert db.history_version == 3
     people.enable_history()
     assert people.history_columns == ["id", "name", "team", "score", "city"]
+    assert [(c.version, c.op, c.pk) for c in people.changes(since=3)] == [
+        (4, "update", 1)
+    ]
     assert in_step(people)
     people.update(2, {"city": "Rome"})
     assert list(people.changes())[-1].changed == {"city": (None, "Rome")}
+
+
+def test_history_keeps_working_before_a_raw_added_column_is_picked_up(db, people):
+    db.execute("alter table people add column city text default 'Oslo'")
+    assert people.history_columns == ["id", "name", "team", "score"]
+    assert [change.row for change in people.changes()] == [ANN, BO, CY]
+    assert list(people.as_of(3)) == [ANN, BO, CY]
+    assert people.get_as_of(2, 3) == BO
+    people.update(2, {"score": 70, "city": "Rome"})
+    change = list(people.changes())[-1]
+    assert (change.version, change.row) == (4, dict(BO, score=70))
+    assert change.changed == {"score": (7, 70)}
+    assert [(d.pk, d.before, d.after) for d in people.diff(3)] == [
+        (2, BO, dict(BO, score=70))
+    ]
+    assert people.revert(2, 3) is True
+    assert people.get(2) == dict(BO, city="Rome")
 
 
 def test_enable_again_reconciles_untracked_writes(db, people):

@@ -165,6 +165,27 @@ def test_values_are_recorded_exactly(db):
     }
 
 
+def test_change_of_storage_class_is_a_change(db):
+    table = db.table("loose", pk="id")
+    table.create({"id": int, "value": bytes})
+    table.insert({"id": 1, "value": 1})
+    table.enable_history()
+    db.execute("update loose set value = 1.0")
+    db.execute("update loose set value = '1'")
+    db.execute("update loose set value = '1'")
+    changes = list(table.changes())
+    assert [(c.version, c.op) for c in changes] == [
+        (1, "insert"),
+        (2, "update"),
+        (3, "update"),
+    ]
+    assert db.history_version == 3
+    assert [type(c.row["value"]) for c in changes] == [int, float, str]
+    assert [type(value) for value in changes[1].changed["value"]] == [int, float]
+    assert [type(value) for value in changes[2].changed["value"]] == [float, str]
+    assert type(table.get(1)["value"]) is str
+
+
 def test_rowid_table_uses_rowid_as_pk(db, brief):
     table = db.table("notes")
     table.insert_all([{"text": "one"}, {"text": "two"}])

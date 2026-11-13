@@ -58,7 +58,7 @@ the obvious sqlite-utils feature, already exist at this commit.
 
 "Row history": a table can have history enabled, after which every change to
 its rows is recorded in the database, can be read back, and can be reversed.
-Ten parts, 538 lines of spec:
+Ten parts, 545 lines of spec:
 
 1. Enabling and disabling history; what cannot be tracked.
 2. What is recorded: every write by any means (so: triggers), database-wide
@@ -114,20 +114,20 @@ update record's `NULL` means "unchanged" unless its mask bit is set.
 
 ## Hidden tests
 
-`hidden_tests/test_partNN_<name>.py`, one file per part: 168 test functions
-(184 cases with parametrization), a little above the 100 to 150 the brief
+`hidden_tests/test_partNN_<name>.py`, one file per part: 170 test functions
+(186 cases with parametrization), a little above the 100 to 150 the brief
 aimed for, because ten parts at about 15 tests each is what it took to cover
 every rule in the spec once.
 
 | Part | File | Tests |
 |------|------|-------|
 | 1 | `test_part01_tracking.py` | 17 |
-| 2 | `test_part02_recording.py` | 20 |
+| 2 | `test_part02_recording.py` | 21 |
 | 3 | `test_part03_reading.py` | 12 |
 | 4 | `test_part04_time_travel.py` | 14 |
 | 5 | `test_part05_restoring.py` | 12 |
 | 6 | `test_part06_changesets.py` | 20 |
-| 7 | `test_part07_schema_changes.py` | 18 |
+| 7 | `test_part07_schema_changes.py` | 19 |
 | 8 | `test_part08_exclude_prune.py` | 20 |
 | 9 | `test_part09_legacy_import.py` | 13 |
 | 10 | `test_part10_cli_docs.py` | 22 |
@@ -150,20 +150,20 @@ test files).
 
 ## Reference solution
 
-`reference.patch` is a complete solution: all 168 hidden tests pass and the
-repo's own suite passes with it (1,530 passed, 16 skipped).
+`reference.patch` is a complete solution: all 170 hidden tests pass and the
+repo's own suite passes with it (1,532 passed, 16 skipped).
 
 | | Files | Lines added |
 |---|---|---|
-| New subsystem: `sqlite_utils/history.py` | 1 | 1,128 |
+| New subsystem: `sqlite_utils/history.py` | 1 | 1,144 |
 | Integration: `db.py`, `cli.py`, `migrations.py` | 3 | 721 (6 removed) |
-| Tests: `tests/test_history.py` | 1 | 231 |
+| Tests: `tests/test_history.py` | 1 | 257 |
 | Hand-written docs: `cli.rst`, `python-api.rst`, `reference.rst`, `migrations.rst` | 4 | 353 |
 | Generated docs: `cli-reference.rst` (via `cog`) | 1 | 275 |
-| **Total** | **10** | **2,708 added, 6 removed** |
+| **Total** | **10** | **2,750 added, 6 removed** |
 
 That is about five and a half times the small kit's reference (536 patch
-lines against 2,959), over ten files instead of two.
+lines against 3,001), over ten files instead of two.
 
 **Expected solo time: about an hour, not measured.** No model was run to
 build this kit. The estimate scales the small kit's 7 minutes by the size of
