@@ -2,6 +2,7 @@
 of the API in pawdelta-web's docs/shared-designs-api.md."""
 
 import asyncio
+import base64
 import copy
 import dataclasses
 import functools
@@ -12,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.testclient import TestClient
 
 from brindle import identity_lock, mcp_server, plan_docs, plans, tasks, visual_offers
+from brindle.crdt import SharedDoc
 from brindle.daemon import holds
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
@@ -41,8 +43,10 @@ class Library:
         self.lose_answer, self.lose_create, self.list_status, self.plan = False, False, 200, None
         self.sign_offs, self.author, self.refuse_accept = [], "u_e", False
         self.answer_status, self.refuse_suggest = 200, False     # once committed, answer this; refuse before committing
-        self.refuse_vote = False
+        self.refuse_vote, self.draft = False, None
         remote.routes.update({
+            f"GET {DESIGN}/draft": lambda f, h: (200, {"rev": self.rev, "frozen": None, "snapshot": base64.b64encode(
+                self.draft.export_snapshot()).decode()}),
             **{f"POST {DESIGN}/threads/{n}": functools.partial(self.act, n) for n in range(1, 12)},
             f"POST {DESIGN}/comments": self.comment, f"POST {DESIGN}/suggestions": self.suggest,
             f"POST {DESIGN}/votes": self.vote,
@@ -55,7 +59,7 @@ class Library:
 
     def view(self):
         out = {**copy.deepcopy(self.content), "rev": self.rev, "author": self.author,
-               "threads": copy.deepcopy(self.threads),
+               "threads": copy.deepcopy(self.threads), "draft": self.draft and {"base_rev": self.rev, "frozen": None},
                "permissions": dict(self.permissions), "reviewers": list(self.reviewers),
                "sign_offs": list(self.sign_offs), "policy_reviewers": [],
                "pending_reviewers": [r["sub"] for r in self.reviewers if r["required"] and not any(
@@ -153,6 +157,18 @@ class Library:
         if self.lose_answer:
             raise auth.AuthError("offline", code="network")
         return 200, self.view()
+
+    def open_draft(self):
+        """As the relay: the head's text, seeded once, becomes the live draft."""
+        self.draft = SharedDoc.new({"lede": self.content["lede"],
+                                    **{s["id"]: s["markdown"] for s in self.content["sections"]}})
+
+    def freeze(self):
+        """The author freezes the draft: its text is the next version."""
+        self.content["lede"] = self.draft.text("lede")
+        for s in self.content["sections"]:
+            s["markdown"] = self.draft.text(s["id"])
+        self.rev, self.votes = self.rev + 1, {}
 
     def set_permissions(self, form, headers):
         self.permissions = dict(form["permissions"])
@@ -629,6 +645,56 @@ def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(d
     plans.decide(db, pid, 3, False, person=True)
     said = messages(db)[-1]
     assert "Name the VM rule." in said and "u_a" in said and "Yes." in said and "u_b" in said
+
+
+class Relay:
+    """The relay a live draft's Loro updates travel on, over the Library's draft."""
+
+    def __init__(self, lib):
+        self.lib = lib
+
+    def pull(self, doc_id, since):
+        return self.lib.draft.export_updates(since), self.lib.draft.version()
+
+    def push(self, doc_id, updates):
+        self.lib.draft.import_updates(updates)
+
+
+def test_two_writers_in_one_shared_section_both_land_in_the_live_draft_and_only_versions_count(
+        db, parts, backend, monkeypatch):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a"}], **net)
+    lib.sign_offs.append({"rev": 1, "sub": "u_a", "at": 9.0})
+    lib.open_draft()
+    monkeypatch.setattr(sd, "relays", {DOC: Relay(lib)}, raising=False)
+    sd.sync(db, pid, **net)
+    dto = lambda: plans.to_dto(db, plans.get(db, pid))  # noqa: E731
+
+    # A teammate adds a sentence while the person rewrites the first one, neither seeing the other's.
+    lib.draft.insert("summary", len(SUMMARY), " It stays on.")
+    plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")
+    sd.sync(db, pid, **net)
+    both = "Hosts run on a machine the customer controls. It stays on."
+    assert lib.draft.text("summary") == dto()["sections"][0]["markdown"] == both
+    # No revision is made or sent, so r1's sign-off still counts and nothing is in conflict.
+    assert not sent(backend, f"POST {DESIGN}/revisions")
+    assert (dto()["rev"], dto()["gate"]["state"]) == (1, "ready")
+
+    # A suggestion on the last "on" follows its words as a teammate types before them.
+    plan_docs.suggest(db, pid, 1, "summary", both.rindex("on"), "on", "put")
+    lib.draft.insert("summary", 0, "The team agreed, after a call: ")
+    sd.sync(db, pid, **net)
+    plan_docs.accept(db, pid, dto()["threads"][-1]["id"], 1)
+    sd.sync(db, pid, **net)
+    agreed = "The team agreed, after a call: Hosts run on a machine the customer controls. It stays put."
+    assert lib.draft.text("summary") == dto()["sections"][0]["markdown"] == agreed
+    assert (dto()["rev"], dto()["threads"][-1]["status"]) == (1, "accepted")
+
+    # Only a version frozen in the Library counts: it comes in, and r1's sign-off isn't on it.
+    lib.freeze()
+    sd.sync(db, pid, **net)
+    got = dto()
+    assert (got["rev"], got["sections"][0]["markdown"], got["gate"]["state"]) == (2, agreed, "waiting")
 
 
 def test_a_teammates_edit_comes_in_as_a_revision_and_later_sends_go_on_it(db, parts, backend):

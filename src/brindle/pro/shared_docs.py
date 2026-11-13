@@ -21,6 +21,18 @@ changed here takes the Library's head as a new revision. If the plan changed
 here too nothing is merged or sent: the build gate's state is ``conflict``
 (:func:`plans._gate`) until the Library's head is a revision this plan has.
 
+Once the Library's document has a live draft that can't happen to the
+person's writing. This machine keeps a replica of the draft
+(:mod:`brindle.plan_drafts`), made once from the Library's snapshot, and the
+person's direct edits and accepted suggestions go into it, not into
+revisions (:func:`plan_docs.edit`, :func:`plan_docs.accept`). A sync trades
+Loro updates with the relay (a :class:`DraftLink` in ``relays``): first what teammates
+typed, then whatever the relay's version lacks from here, worked out afresh
+each time, so nothing unsent is lost while there is no link. The text is
+never sent as a revision then: the Library refuses one once a draft exists,
+and only a freeze there makes a version, which comes in by :func:`_import`
+like a teammate's. Comments and suggestions stay threads, as before.
+
 What the person writes after sharing goes up as theirs: comments, replies,
 suggestions, thread actions and votes. What they wrote before stays here. A
 suggestion they accepted goes up as the Library's own ``accept``, which makes
@@ -44,14 +56,18 @@ Calls raise ``RuntimeError`` with a readable reason, as ``brindle docs`` does.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlencode
 
 from brindle import plan_docs, plans, visuals
+from brindle.crdt import CrdtError
 from brindle.db import DB
+from brindle.plan_drafts import DraftReplica
 from brindle.pro import analysis_docs as ad
 from brindle.pro import review_policies
 from brindle.redact import mask, mask_data
@@ -809,7 +825,8 @@ def _send(db: DB, p: dict, view: dict, client, store, now: float) -> bool:
     try:
         share_ = link(db, p["id"])
         head = _Head(db, p, share_["doc_id"], view, client, store)
-        pushed = _send_text(db, p["id"], head)
+        # With a live draft the text changes only there: the Library refuses revisions.
+        pushed = not view.get("draft") and _send_text(db, p["id"], head)
         _send_threads(db, p["id"], share_["owner"], head)
         _send_actions(db, p["id"], head)
         _send_votes(db, p["id"], head)
@@ -825,13 +842,64 @@ def _send(db: DB, p: dict, view: dict, client, store, now: float) -> bool:
             c.execute("UPDATE plan_shares SET claimed_at=NULL WHERE plan_id=?", (p["id"],))
 
 
+# -- the live draft -------------------------------------------------------------------------
+
+
+class DraftLink(Protocol):
+    """The relay connection a live draft's Loro updates travel on."""
+
+    def pull(self, doc_id: str, since: bytes) -> tuple[bytes, bytes]:
+        """The updates a replica at version ``since`` lacks, and the relay's version."""
+
+    def push(self, doc_id: str, updates: bytes) -> None:
+        """Hand the relay updates made here."""
+
+
+# Each document's relay connection, by doc id, while the live client holds one.
+# With none, sync trades nothing and the replica keeps what was typed here.
+relays: dict[str, DraftLink] = {}
+
+
+def _draft(db: DB, p: dict, share_: dict, view: dict, client, store) -> DraftReplica | None:
+    """This machine's replica of the document's live draft, or None while the
+    Library has none. The first time, it starts from the Library's snapshot:
+    a draft's first state is the server's, so its text is never seeded twice."""
+    doc_id = share_["doc_id"]
+    if not view.get("draft"):
+        return None
+    if db.conn.execute("SELECT 1 FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone():
+        return DraftReplica.open(db, doc_id)
+    status, got = ad._call("GET", _path(doc_id, "/draft"), client=client, store=store)
+    if status != 200:
+        raise RuntimeError(f"the Library's live draft can't be read ({got.get('error') or status})")
+    try:
+        replica = DraftReplica.open(db, doc_id, base64.b64decode(got["snapshot"], validate=True))
+    except (KeyError, TypeError, binascii.Error, CrdtError) as e:
+        raise RuntimeError("the Library's live draft can't be read here") from e
+    plan_docs._changed(db, p, p["rev"])
+    return replica
+
+
+def _trade(replica: DraftReplica, live: DraftLink) -> bool:
+    """Take what teammates typed, then send the relay what it lacks from
+    here. Returns whether the text here changed."""
+    before = replica.sections()
+    theirs, version = live.pull(replica.doc_id, replica.version())
+    if theirs:
+        replica.apply_remote(theirs)
+    if replica.lacks(version):
+        live.push(replica.doc_id, replica.export_updates(version))
+    return replica.sections() != before
+
+
 def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = None) -> dict:
     """Take a teammate's new text if the plan hasn't changed here, bring back
-    what teammates wrote, then send what was done here. Pulled first, so a
-    refused send still leaves their comments here. Returns the link, plus
-    ``pulled`` (how many things changed here) and ``pushed``. Refused for
-    want of a Team plan the server confirms has ended, it syncs nothing and
-    the plan becomes a personal doc; any other failure is raised."""
+    what teammates wrote, then send what was done here; with a live draft,
+    trade its updates on the document's relay (``relays``) last. Pulled first, so a refused send still
+    leaves their comments here. Returns the link, plus ``pulled`` (how many
+    things changed here) and ``pushed``. Refused for want of a Team plan the
+    server confirms has ended, it syncs nothing and the plan becomes a
+    personal doc; any other failure is raised."""
     p = plan_docs._plan(db, plan_id)
     client, store = ad._session(client, store)
     try:
@@ -849,7 +917,11 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
         p = plan_docs._plan(db, p["id"])
     pulled = imported + _pull(db, p, share_, view)
     pushed = _send(db, p, view, client, store, time.time() if now is None else now)
-    if pushed or imported:
+    replica = _draft(db, p, share_, view, client, store)
+    live = relays.get(share_["doc_id"])
+    typed = replica is not None and live is not None and _trade(replica, live)
+    pulled += typed
+    if pushed or imported or typed:
         plan_docs._changed(db, p, p["rev"])
     return {**link(db, p["id"]), "pulled": pulled, "pushed": pushed}
 

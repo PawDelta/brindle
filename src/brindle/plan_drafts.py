@@ -119,6 +119,16 @@ class DraftReplica:
     def export_updates(self, since: bytes | None = None) -> bytes:
         return self._doc.export_updates(since)
 
+    def lacks(self, since: bytes) -> bool:
+        """Whether a replica at version ``since`` lacks a change this one holds."""
+        return self._doc.lacks(since)
+
+    def cursor(self, section: str, offset: int) -> bytes:
+        return self._doc.cursor(section, offset)
+
+    def resolve(self, cursor: bytes) -> int:
+        return self._doc.resolve(cursor)
+
     # -- writing --------------------------------------------------------
 
     def insert(self, section: str, offset: int, text: str) -> bytes:
@@ -127,8 +137,11 @@ class DraftReplica:
     def delete(self, section: str, offset: int, length: int) -> bytes:
         return self._write(lambda d: d.delete(section, offset, length))[0]
 
-    def replace(self, section: str, offset: int, length: int, text: str) -> bytes:
-        return self._write(lambda d: d.replace(section, offset, length, text))[0]
+    def replace(self, section: str, offset: int, length: int, text: str,
+                also: Callable[[sqlite3.Connection], None] | None = None) -> bytes:
+        """``also`` runs in the same transaction (marking the suggestion this
+        accepts, say): if it raises, neither it nor the edit is stored."""
+        return self._write(lambda d: d.replace(section, offset, length, text), also=also)[0]
 
     def apply_remote(self, data: bytes) -> bool:
         """Merge another replica's updates; False while they wait on changes
@@ -136,8 +149,8 @@ class DraftReplica:
         positional, so another holder's writes since do not refuse it."""
         return data not in self._write(lambda d: d.import_updates(data), incoming=data)[1]
 
-    def _write(self, change: Callable[[SharedDoc], object],
-               incoming: bytes | None = None) -> tuple[bytes, list[bytes]]:
+    def _write(self, change: Callable[[SharedDoc], object], incoming: bytes | None = None,
+               also: Callable[[sqlite3.Connection], None] | None = None) -> tuple[bytes, list[bytes]]:
         """Apply ``change`` to the stored draft; the update it made, and the
         updates still waiting on changes not yet received."""
         with self.db.tx() as c:
@@ -150,6 +163,8 @@ class DraftReplica:
                 raise StaleDraft(f"the draft of {self.doc_id} changed since this holder read it")
             before = doc.version()
             change(doc)
+            if also is not None:
+                also(c)
             waiting = pending
             if incoming is not None:
                 # Importing again is a no-op once merged, so what still says

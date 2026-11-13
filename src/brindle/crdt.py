@@ -59,6 +59,15 @@ def code_point_offset(text: str, utf16: int) -> int:
     raise CrdtError(f"UTF-16 offset {utf16} is outside a text of {units} units")
 
 
+def _version(since: bytes | None) -> loro.VersionVector:
+    try:
+        return loro.VersionVector() if since is None else loro.VersionVector.decode(since)
+    except BaseException as e:
+        if _refused(e):
+            raise CrdtError(f"not a version: {e}") from None
+        raise
+
+
 def _section_name(section: str) -> str:
     if not isinstance(section, str) or not section or "/" in section or "\0" in section:
         raise CrdtError(f"not a section id: {section!r}")
@@ -178,13 +187,11 @@ class SharedDoc:
 
     def export_updates(self, since: bytes | None = None) -> bytes:
         """The changes a replica at version ``since`` lacks (all of them if None)."""
-        try:
-            vv = loro.VersionVector() if since is None else loro.VersionVector.decode(since)
-        except BaseException as e:
-            if _refused(e):
-                raise CrdtError(f"not a version: {e}") from None
-            raise
-        return self._doc.export(loro.ExportMode.Updates(vv))
+        return self._doc.export(loro.ExportMode.Updates(_version(since)))
+
+    def lacks(self, since: bytes) -> bool:
+        """Whether a replica at version ``since`` lacks any change this one holds."""
+        return not _version(since).includes_vv(self._doc.oplog_vv)
 
     def import_updates(self, data: bytes) -> bool:
         """Merge a snapshot or updates from another replica. False when some
