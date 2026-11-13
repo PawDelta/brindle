@@ -1586,6 +1586,14 @@ def _restart_holds(c: sqlite3.Connection, agent_id: str, now: float | None = Non
         return False
 
 
+def _deliveries_in_flight(c: sqlite3.Connection, agent_id: str) -> bool:
+    """Whether mail to ``agent_id`` is part way to it: a pane delivery typing
+    it, or a waiter that took it and hasn't finished handing it over."""
+    return (_pane_delivery_message(c, agent_id) is not None
+            or c.execute(f"SELECT 1 FROM agent_marks WHERE agent_id=? AND kind LIKE '{WAITER_CLAIM}%' LIMIT 1",
+                         (agent_id,)).fetchone() is not None)
+
+
 def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
     """The id of the message ``agent_id``'s pane-delivery mark is typing in,
     while that message is still there. A mark whose message is gone (a
@@ -2761,12 +2769,14 @@ class DB:
         other path (read_messages, the waiter, a pane delivery) takes it too.
         Returns the claim's time, or None if another path already had it: one
         that delivered it, or a pane delivery typing it (its row stays
-        undelivered while its mark owns it)."""
+        undelivered while its mark owns it). None too while a supervisor
+        restart holds the recipient's queue (RESTART_HOLD)."""
         now = time.time()
         with self.tx() as c:
             row = c.execute("SELECT agent_id FROM inbox WHERE id=? AND delivered_at IS NULL",
                             (message_id,)).fetchone()
-            if row is None or _pane_delivery_message(c, row["agent_id"]) == message_id:
+            if (row is None or _pane_delivery_message(c, row["agent_id"]) == message_id
+                    or _restart_holds(c, row["agent_id"], now)):
                 return None
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (now, message_id))
         return now
@@ -2922,6 +2932,15 @@ class DB:
     def pane_delivery_holds(self, agent_id: str) -> bool:
         """Whether a pane delivery's mark is holding ``agent_id``'s queue."""
         return _pane_delivery_message(self.conn, agent_id) is not None
+
+    def restart_holding(self, agent_id: str) -> bool:
+        """Whether a supervisor restart holds ``agent_id``'s queue (RESTART_HOLD)."""
+        return _restart_holds(self.conn, agent_id)
+
+    def deliveries_in_flight(self, agent_id: str) -> bool:
+        """Whether mail to ``agent_id`` is part way to it: a pane delivery
+        typing it, or a waiter that took it and hasn't finished handing it over."""
+        return _deliveries_in_flight(self.conn, agent_id)
 
     @staticmethod
     def _drop_unwritten_pane_mark(c: sqlite3.Connection, agent_id: str, message_id: int) -> None:

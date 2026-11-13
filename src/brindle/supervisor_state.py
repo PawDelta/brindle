@@ -22,14 +22,16 @@ own and the session hasn't moved on since.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import secrets
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from brindle import bus
-from brindle.db import DB, RESTART_HOLD, Agent, _restart_holds
+from brindle.db import DB, RESTART_HOLD, Agent, _deliveries_in_flight, _restart_holds
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ LATEST_MESSAGES = 8
 KEEP_ANSWERED = 3          # answered questions kept, for the replies in the latest messages
 TAIL_BYTES = 512 * 1024    # of the transcript read for its context size and latest messages
 RESTART_CLAIM = 600.0      # seconds a restart claim (and its hold on the queue) lasts at most
+RESTART_LOCK_WAIT = 120.0  # seconds a pause waits for a restart's launch to commit (restart_lock)
 RESTART_HEAD = "[brindle] Your context was restarted"
 
 
@@ -296,8 +299,8 @@ def _claim(db: DB, root: Agent, now: float) -> str | None:
     The claim's token, or None while another restart holds it."""
     token = secrets.token_hex(8)
     with db.tx() as c:
-        if _restart_holds(c, root.id, now):
-            return None
+        if _restart_holds(c, root.id, now) or _deliveries_in_flight(c, root.id):
+            return None   # mail part way to this session goes in first: a later turn restarts
         c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?, ?, ?)"
                   " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
                   (root.id, RESTART_HOLD, json.dumps({"token": token, "ref": root.session_ref,
@@ -316,6 +319,59 @@ def _held_claim(db: DB, root_id: str, token: str) -> dict | None:
     if not claim or claim.get("token") != token or float(claim.get("until") or 0) <= time.time():
         return None
     return claim
+
+
+def restart_lock(root_id: str):
+    """Held, across processes, by a restart from its last look at the session
+    through stopping it, and by each of its launch's commits (``_gate``); taken
+    by ``cancel``, so a pause or new turn and the restart never interleave."""
+    from brindle import pipeline
+
+    key = hashlib.sha1(root_id.encode()).hexdigest()[:16]
+    return pipeline._reentrant_lock(f"supervisor-restart-{key}", timeout=RESTART_LOCK_WAIT)
+
+
+def cancel(db: DB, root_id: str, session: str | None = None) -> None:
+    """The person paused session ``root_id``, or a new turn began in it
+    (``session``: the CLI session it began in; None: any): a restart claimed
+    for it no longer applies. A launch the restart is committing ends first;
+    nothing of it starts after this returns. A new turn in another session (the
+    fresh one the restart started) leaves the claim be."""
+    from brindle import pipeline
+
+    row = db.conn.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                          (root_id, RESTART_HOLD)).fetchone()
+    if row is None:
+        return
+    try:
+        ref = json.loads(row["value"]).get("ref")
+    except ValueError:
+        ref = None
+    if session is not None and ref is not None and session != ref:
+        return
+    try:
+        with restart_lock(root_id):
+            _drop_claim(db, root_id)
+    except pipeline.LockTimeout:
+        log.warning("brindle: supervisor %s's restart held its lock too long; cancelling it anyway", root_id)
+        _drop_claim(db, root_id)
+
+
+def _drop_claim(db: DB, root_id: str) -> None:
+    with db.tx() as c:
+        c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=?", (root_id, RESTART_HOLD))
+
+
+@contextmanager
+def _gate(db: DB, root_id: str, token: str):
+    """The restart's resume gate (agents.resume): its launch goes ahead, and
+    commits, only while claim ``token`` stands; else agents.Cancelled."""
+    from brindle import agents
+
+    with restart_lock(root_id):
+        if _held_claim(db, root_id, token) is None:
+            raise agents.Cancelled("the supervisor's restart was cancelled")
+        yield
 
 
 def _release(db: DB, root_id: str, token: str) -> None:
@@ -382,20 +438,30 @@ def restart(db: DB, root_id: str, token: str, transcript: Path | None = None) ->
 
     try:
         with agents.resume_lock(root_id):
-            # Checked under the lock, immediately before the stop.
-            claim = _held_claim(db, root_id, token)
-            if claim is None:
-                return None
-            root = db.get_agent(root_id)
-            if root is None or root.status != "idle" or root.session_ref != claim.get("ref"):
-                log.info("brindle: supervisor %s's restart no longer applies; left as it is", root_id)
-                return None
-            # Paused before its CLI stops, so the stop isn't taken for the person closing the chat (agents.ended).
-            db.set_status(root_id, "paused")
-            agents._stop(db, root)
+            # No paste into its pane under way, no pause or new turn meanwhile
+            # (cancel waits on restart_lock): checked immediately before the stop.
+            with agents.delivery_lock(root_id), restart_lock(root_id):
+                claim = _held_claim(db, root_id, token)
+                if claim is None:
+                    return None
+                root = db.get_agent(root_id)
+                if (root is None or root.status != "idle" or root.session_ref != claim.get("ref")
+                        or db.deliveries_in_flight(root_id)):
+                    log.info("brindle: supervisor %s's restart no longer applies; left as it is", root_id)
+                    return None
+                # Paused before its CLI stops, so the stop isn't taken for the person closing the chat
+                # (agents.ended).
+                db.set_status(root_id, "paused")
+                agents._stop(db, root)
             refresh(db, root_id)
             seed = seed_prompt(db, root_id, transcript)
-            agents.resume(db, root_id, only={root_id}, prompts={root_id: seed})
+            try:
+                # The launch commits only while the claim stands (_gate): a pause from here on wins.
+                agents.resume(db, root_id, only={root_id}, prompts={root_id: seed},
+                              gate=lambda: _gate(db, root_id, token))
+            except agents.Cancelled:
+                log.info("brindle: supervisor %s's restart was cancelled before its launch", root_id)
+                return None
         with db.tx() as c:
             c.execute("UPDATE supervisor_state SET restarts=restarts+1 WHERE root_id=?", (root_id,))
         bus.publish_agent(db, "supervisor.restarted", root_id)

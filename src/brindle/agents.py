@@ -1698,6 +1698,11 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
     Records every status first and closes windows last: this can run inside
     one of the windows it closes (see _pause_when_done)."""
     owners = pane_owners(db)    # first: a tmux server that doesn't answer stops the pause before anything changes
+    from brindle import supervisor_state
+
+    # A supervisor restart under way gives way to the pause: a launch it has
+    # begun ends first (so its window is among those closed), and none follows.
+    supervisor_state.cancel(db, root_id)
     closing = _record_pause(db, root_id)
     windows = closing.windows(db, owners)
     # Before the windows close: closing one ends the CLI in it, and what that
@@ -2699,6 +2704,8 @@ def _hand_over(db: DB, agent: Agent, message_id: int, text: str, sender_id: str 
 
     if login_pause.holding(db, agent.id):
         return "queued"  # its session waits on an expired cloud login
+    if db.restart_holding(agent.id):
+        return "queued"  # a supervisor restart: it goes to the fresh session
     from brindle import wake
 
     if wake.enabled(agent):
@@ -3115,12 +3122,14 @@ def delivery_lock(agent_id: str):
 def _delivery_held(db: DB, agent: Agent | None, waiter: bool = True) -> bool:
     """Whether ``flush`` must leave the queue alone: the agent is gone or
     headless (its runner takes messages from the inbox itself), its session
-    waits on an expired cloud login (resuming flushes it), or, with
-    ``waiter``, a live waiter hands the queue over (brindle.wake)."""
+    waits on an expired cloud login (resuming flushes it), a supervisor
+    restart holds its queue for the fresh session (brindle.supervisor_state),
+    or, with ``waiter``, a live waiter hands the queue over (brindle.wake)."""
     from brindle import login_pause
     from brindle import wake
 
     return (agent is None or agent.headless or login_pause.holding(db, agent.id)
+            or db.restart_holding(agent.id)
             or (waiter and wake.enabled(agent) and wake.live(agent)))
 
 
@@ -6023,9 +6032,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if event == "prompt-submit" or unreported_note_expired(agent):
             db.update_agent(agent_id, unreported_noted=None)
     if event == "prompt-submit":
-        from brindle import open_items
+        from brindle import open_items, supervisor_state
 
         open_items.close(db, agent_id)   # at work again: a later stop is a new item
+        if agent.mode == "interactive":
+            # A new turn in the session a restart was claimed for: that restart no longer applies.
+            supervisor_state.cancel(db, agent_id, session=payload.get("session_id"))
 
     if event == "session-start":
         from brindle import inbox

@@ -7,6 +7,7 @@ launch, the process stop and the detached helper's start are faked."""
 
 import asyncio
 import json
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -89,22 +90,32 @@ def test_state_reflects_a_merge_a_decision_and_an_open_question(db, repo, sessio
 
 @pytest.fixture
 def restarting(db, session, tmp_path, monkeypatch):
-    """``start(on)``: the supervisor with a decision, an open question and a
-    queued message ends a turn past the threshold through the real Stop
-    hook. Returns what was detached, stopped and launched; ``helper(argv)``
-    runs a detached restart as its process would."""
-    calls = SimpleNamespace(detached=[], stopped=[], launched=[])
+    """``start(on, before_stop)``: the supervisor with a decision, an open
+    question and a queued message (``calls.mail``) ends a turn past the
+    threshold through the real Stop hook. Returns what was detached, stopped
+    and launched; ``helper(argv)`` runs a detached restart as its process
+    would. The launch is faked from its preflight (``calls.preflight``, run
+    first) to its commit, which holds the resume's gate as the real one does."""
+    calls = SimpleNamespace(detached=[], stopped=[], launched=[], preflight=lambda: None)
     monkeypatch.setattr(agents, "_detach_orphan", lambda argv: calls.detached.append(list(argv)))
     monkeypatch.setattr(agents, "_stop", lambda db_, a: calls.stopped.append(a.id))
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
-    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: calls.launched.append(kw))
 
-    def start(on: bool = True) -> SimpleNamespace:
+    def launch(db_, a, ws, **kw):
+        calls.preflight()
+        with ExitStack() as hold:
+            agents._gate_commit(hold)
+            calls.launched.append(kw)
+            db_.set_status(a.id, "processing")
+    monkeypatch.setattr(agents, "_launch", launch)
+
+    def start(on: bool = True, before_stop=lambda: None) -> SimpleNamespace:
         session(supervisor_state=on, supervisor_restart_tokens=50_000)
         decide_and_ask("storage", "Ship on Friday or Monday?")
         db.update_agent("boss", session_ref="old-long-chat")
         db.set_status("boss", "processing")
-        db.enqueue("boss", "[brindle] w2 finished", None)
+        calls.mail = db.enqueue("boss", "[brindle] w2 finished", None)
+        before_stop()
         big = transcript(tmp_path, 60_000, "Ship on Monday.")
         agents.handle_hook(db, "boss", "stop", {"transcript_path": str(big), "session_id": "old-long-chat"})
         return calls
@@ -127,8 +138,16 @@ def test_restart_seeds_a_fresh_session_and_loses_no_decision_or_question(db, tmp
     assert supervisor_state.on_turn_end(db, db.get_agent("boss"), {"transcript_path": str(small)}) is False
 
     [argv] = calls.detached
-    # Until the fresh session starts, the real waiter takes nothing: the mail is the fresh session's.
-    assert wake.take(db, db.get_agent("boss")) is None and db.pending_count("boss") == 1
+    # Until the fresh session starts, no transport takes the mail: it is the fresh session's.
+    boss = db.get_agent("boss")
+    assert wake.take(db, boss) is None                     # the waiter
+    assert db.claim_delivery(calls.mail) is None           # the inbox transport
+    partial = json.dumps({"message_id": calls.mail, "pane": boss.tmux_window, "server": agents.server_of(boss),
+                          "provider": "claude", "body": "[brindle] w2 finished", "lead": "", "stage": "lead"})
+    db.set_mark("boss", "pane-delivery", partial)
+    assert agents.flush(db, "boss") is False               # a pane delivery part way, resumed
+    db.set_mark("boss", "pane-delivery", None)
+    assert db.pending_count("boss") == 1
     calls.helper(argv)
     calls.helper(argv)   # a second helper with the same claim does nothing
 
@@ -148,36 +167,63 @@ def test_restart_seeds_a_fresh_session_and_loses_no_decision_or_question(db, tmp
     assert "Ship on Friday or Monday?" in state.split("## Open questions")[1]
 
 
-@pytest.mark.parametrize("meanwhile", [
-    "typed",
-    pytest.param("paused", marks=pytest.mark.variant(
-        "a late helper must not undo the person's pause of the session")),
-    pytest.param("launch fails", marks=pytest.mark.variant(
-        "a failed fresh launch must leave the old chat resumable, losing nothing")),
+def typed(db) -> None:
+    """The person sends a prompt in the claimed (old) CLI session."""
+    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "one more thing", "session_id": "old-long-chat"})
+
+
+def turn_completed(db, tmp_path) -> None:
+    """New turns in the same CLI session: they start and end again, and the
+    last leaves it idle as the claimed one did."""
+    typed(db)
+    small = transcript(tmp_path, 20_000, "one more thing")
+    agents.handle_hook(db, "boss", "stop", {"transcript_path": str(small), "session_id": "old-long-chat"})
+    assert db.pending_count("boss") == 0   # its Stop delivered the queued mail: no longer held
+    db.set_status("boss", "idle")          # the turn that mail started ends with nothing more to say
+
+
+@pytest.mark.parametrize("meanwhile, stopped, status", [
+    # Looks like the claimed turn by status and session: only the claim's cancel tells them apart.
+    ("turn completed", [], "idle"),
+    pytest.param("paused", [], "paused", marks=pytest.mark.variant(
+        "a pause before the helper starts must not be undone by it")),
+    ("paused during launch", ["boss"], "paused"),
 ])
-def test_a_restart_gives_way_to_what_happened_since_its_claim(db, restarting, monkeypatch, meanwhile):
+def test_a_restart_gives_way_to_what_happened_since_its_claim(db, tmp_path, restarting, meanwhile,
+                                                              stopped, status):
     calls = restarting()
     [argv] = calls.detached
-    if meanwhile == "paused":
-        db.set_status("boss", "paused")   # the person paused the session (agents.pause records this first)
-    elif meanwhile == "typed":
-        agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "one more thing", "session_id": "old-long-chat"})
-    else:
-        def refuse(*a, **kw):
-            raise agents.AgentError("the launch failed")
-        monkeypatch.setattr(agents, "_launch", refuse)
+    if meanwhile == "turn completed":
+        turn_completed(db, tmp_path)
+    elif meanwhile == "paused":
+        agents.pause(db, "boss")
+    else:   # the person pauses while the fresh launch is in its preflight, before it commits
+        calls.preflight = lambda: agents.pause(db, "boss")
 
-    if meanwhile == "launch fails":
-        with pytest.raises(agents.AgentError):
-            calls.helper(argv)
-        # The long chat stays resumable, so ordinary recovery loses nothing.
-        assert db.get_agent("boss").status == "paused" and db.get_agent("boss").session_ref == "old-long-chat"
-        monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: calls.launched.append(kw))
-        monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: True))
-        agents.resume(db, "boss")
-        assert [kw["resume"] for kw in calls.launched] == ["old-long-chat"]
-    else:
+    calls.helper(argv)
+    assert calls.stopped == stopped and calls.launched == []
+    assert db.get_agent("boss").status == status
+    assert not db.restart_holding("boss")   # the mail is delivered again
+
+
+def test_no_restart_is_claimed_while_mail_is_part_way_to_the_supervisor(db, restarting):
+    def typing_a_message() -> None:
+        mail = db.enqueue("boss", "[brindle] review approved", None)
+        db.set_mark("boss", "pane-delivery", json.dumps({"message_id": mail, "stage": "lead"}))
+    calls = restarting(before_stop=typing_a_message)
+    assert calls.detached == [] and not db.restart_holding("boss")
+
+
+def test_a_failed_fresh_launch_leaves_the_old_chat_resumable(db, restarting, monkeypatch):
+    calls = restarting()
+    [argv] = calls.detached
+    calls.preflight = lambda: (_ for _ in ()).throw(agents.AgentError("the launch failed"))
+    with pytest.raises(agents.AgentError):
         calls.helper(argv)
-        assert calls.stopped == [] and calls.launched == []
-        assert db.get_agent("boss").status == ("paused" if meanwhile == "paused" else "processing")
-    assert db.pop_pending("boss") is not None   # the claim's hold on the mail is released
+    # The long chat stays resumable, so ordinary recovery loses nothing.
+    assert db.get_agent("boss").status == "paused" and db.get_agent("boss").session_ref == "old-long-chat"
+    assert not db.restart_holding("boss")
+    calls.preflight = lambda: None
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: True))
+    agents.resume(db, "boss")
+    assert [kw["resume"] for kw in calls.launched] == ["old-long-chat"]
