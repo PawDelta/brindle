@@ -1191,6 +1191,30 @@ def socket_dir() -> Path:
     return Path(os.environ.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}"
 
 
+def abandoned(name: str) -> bool:
+    """Whether nothing serves the named server's socket: it is no socket, or
+    a connection to it is refused. A failed tmux command is no proof: a
+    process that may not connect (a sandbox: "Operation not permitted")
+    can't tell, and deleting a live server's socket leaves the server
+    running unreachable, while the next tmux call starts a second one."""
+    import errno
+    import socket
+    import stat
+
+    path = socket_dir() / name
+    try:
+        if not stat.S_ISSOCK(path.stat().st_mode):
+            return True
+    except OSError:
+        return True
+    with socket.socket(socket.AF_UNIX) as s:
+        try:
+            s.connect(str(path))
+        except OSError as e:
+            return e.errno == errno.ECONNREFUSED
+    return False
+
+
 def remove_socket(name: str) -> None:
     """Remove a private server's socket file (never the default server's)."""
     if not name or name == DEFAULT_SOCKET:

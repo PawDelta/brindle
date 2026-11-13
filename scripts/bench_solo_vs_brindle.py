@@ -42,7 +42,13 @@ runs the setup commands, starts the clock, then runs one arm:
   under a temporary BRINDLE_HOME, never the person's: a branch's CLI migrates
   the database it opens. It gets its own tmux server and daemon, stopped when
   the run ends, and reaches the person's provider logins without copying
-  them (see checkout_env). The record's ``brindle_checkout`` names the path,
+  them (see checkout_env). Exactly two writes outside the temporary home are
+  allowed, because the logins can't work without them, and each record lists
+  them in ``provider_writes``: Claude writes transcripts and trust entries
+  into the person's existing Claude config folder (what an installed-brindle
+  run writes too), and a Codex token refresh writes through the auth.json
+  link. Nothing else of the person's provider files is written. The record's
+  ``brindle_checkout`` names the path,
   commit and whether it had uncommitted changes. ``--brindle-setting
   KEY=VALUE`` (either brindle) writes into the clone's
   ``.brindle/config.local.json``; the record keeps them in ``brindle_settings``.
@@ -1149,6 +1155,33 @@ def checkout_env(env: dict, root: Path, homes: dict[str, dict], socket: str) -> 
     return out
 
 
+def provider_writes(env: dict) -> list[dict]:
+    """The only writes a checkout run under ``env`` (checkout_env) may make to
+    the person's provider files, for the record."""
+    temp = Path(env["BRINDLE_HOME"]).parent
+    ours = env.get("BRINDLE_CLAUDE_CONFIG_HOME")
+    if ours and Path(ours).is_relative_to(temp):   # brindle's own folder unused: the person's Claude home
+        ours = None
+    claude = env.get("CLAUDE_CONFIG_DIR") or ours or str(Path.home() / ".claude")
+    out = [{"provider": "claude", "path": claude,
+            "writes": "transcripts and trust entries, as an installed-brindle run makes"}]
+    link = Path(env.get("BRINDLE_CODEX_CONFIG_HOME", "")) / "auth.json"
+    if env.get("BRINDLE_CODEX_CONFIG_HOME") and link.is_symlink():
+        out.append({"provider": "codex", "path": os.readlink(link),
+                    "writes": "a token refresh through the auth.json link"})
+    return out
+
+
+def bench_socket(root: Path) -> str:
+    """The run's private tmux server: named outside ``brindle-*``, which every
+    brindle's leftover-server sweeps (``brindle prune``, the test suite's
+    teardown) treat as theirs to tidy. A sweep that couldn't reach it (a
+    sandboxed test run) deleted its socket mid-run: the server ran on
+    unreachable, the next agent started a second one, and the supervisor
+    dropped out of sight."""
+    return "bench-brindle-" + root.name.rsplit("-", 1)[-1]
+
+
 def checkout_info(path: Path, env: dict) -> dict:
     head = sh(["git", "rev-parse", "HEAD"], path, env, capture_output=True).stdout.strip()
     dirty = sh(["git", "status", "--porcelain"], path, env, capture_output=True).stdout.strip()
@@ -1164,7 +1197,7 @@ def checkout_client(args, clone: Path, env: dict, root: Path) -> Brindle:
     if not (source / "pyproject.toml").is_file():
         raise BenchError(f"{source} is not a brindle checkout (no pyproject.toml)")
     homes = installed_client(args, clone, env).probe("provider_homes")["homes"]
-    tenv = checkout_env(env, root, homes, "brindle-bench-" + root.name.rsplit("-", 1)[-1])
+    tenv = checkout_env(env, root, homes, bench_socket(root))
     run = ["uv", "run", "--project", str(source)]
     python = sh([*run, "python", "-c", "import sys; print(sys.executable)"],
                 clone, tenv, capture_output=True).stdout.strip().splitlines()[-1]
@@ -1178,6 +1211,22 @@ def checkout_client(args, clone: Path, env: dict, root: Path) -> Brindle:
     return Brindle(shim, python, clone, tenv, argv=[*run, "brindle"], source=source)
 
 
+def serving(path: Path) -> bool:
+    """Whether a server may still be listening on the Unix socket at ``path``
+    (unknown counts as yes)."""
+    import errno
+    import socket
+
+    if not path.is_socket():
+        return False
+    with socket.socket(socket.AF_UNIX) as s:
+        try:
+            s.connect(str(path))
+        except OSError as e:
+            return e.errno != errno.ECONNREFUSED
+    return True
+
+
 def stop_checkout(b: Brindle | None, root: Path) -> None:
     """End what the checkout's brindle started (``b``: None when it never
     started): its daemon, its tmux server; and remove the links to the
@@ -1186,6 +1235,10 @@ def stop_checkout(b: Brindle | None, root: Path) -> None:
         b.cli("daemon", "stop", check=False)
         sh(["tmux", "-L", b.env["BRINDLE_TMUX_SOCKET"], "kill-server"], b.clone, b.env,
            check=False, capture_output=True)
+        # tmux leaves a killed server's socket file behind, and no brindle sweep tidies bench-* ones.
+        sock = Path(b.env.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}" / b.env["BRINDLE_TMUX_SOCKET"]
+        if not serving(sock):
+            sock.unlink(missing_ok=True)
     for p in Path(root).rglob("*"):
         if p.is_symlink():
             p.unlink()
@@ -1447,10 +1500,12 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
     b = None
     try:
         b = checkout_client(args, clone, env, root)
+        writes = provider_writes(b.env)   # before teardown removes the links it reads
         out = drive_brindle(args, b, clone, spec, settings)
     finally:
         stop_checkout(b, root)
-    return {**out, "brindle_settings": settings, "brindle_checkout": info, "brindle_home": str(root / "home")}
+    return {**out, "brindle_settings": settings, "brindle_checkout": info, "brindle_home": str(root / "home"),
+            "provider_writes": writes}
 
 
 def drive_brindle(args, b: Brindle, clone: Path, spec: str, settings: dict) -> dict:
@@ -1563,7 +1618,7 @@ def cmd_run(args) -> int:
                   "wall_seconds_first_pass", "cost_first_pass", "fix_rounds", "fix_rounds_cap_hit",
                   "followup_messages", "review_checks", "harness_tokens", "harness_cost_usd",
                   "first_pass_checkout", "review_followup", "brindle_settings", "brindle_checkout",
-                  "brindle_home"):
+                  "brindle_home", "provider_writes"):
         if extra in out:
             record[extra] = out[extra]
     results_path = Path(args.results)

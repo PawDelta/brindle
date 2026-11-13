@@ -1471,7 +1471,10 @@ def orphan_servers() -> list[str]:
             # server another pytest run is using right now.
             continue
         if homes is None:
-            tmux.remove_socket(name)  # nothing listening: just the file
+            if tmux.abandoned(name):
+                tmux.remove_socket(name)  # nothing listening: just the file
+            else:
+                done.append(f"left tmux server {name} alone: it is running but couldn't be asked")
             continue
         if m:
             reason = "its test run is over"
