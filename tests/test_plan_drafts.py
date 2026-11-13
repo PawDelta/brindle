@@ -13,6 +13,7 @@ def written_by(replica: DraftReplica, peer: int) -> int:
     return SharedDoc.load(replica.export_updates()).written_by(peer)
 
 
+@pytest.mark.variant("Restarted replicas must retain peer identity and merge concurrent edits without renumbering authorship")
 def test_replica_reloaded_after_restart_keeps_its_peer_id_and_merges(db, tmp_path):
     a = DraftReplica.open(db, "doc1", LIBRARY)
     b = DraftReplica.open(DB(str(tmp_path / "other-machine.db")), "doc1", LIBRARY)
@@ -34,6 +35,7 @@ def test_replica_reloaded_after_restart_keeps_its_peer_id_and_merges(db, tmp_pat
     assert written_by(b, a.peer_id) == 7
 
 
+@pytest.mark.variant("An update received before its dependency must survive a restart and merge when the dependency arrives")
 def test_updates_received_out_of_order_merge_across_a_restart(db, tmp_path):
     a = DraftReplica.open(db, "doc1", LIBRARY)
     first, second = a.insert("intro", 5, "1"), a.insert("intro", 6, "2")

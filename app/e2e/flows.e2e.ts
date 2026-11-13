@@ -51,7 +51,7 @@ test("sidebar keeps its goal pinned and its lists reachable when resized", async
     await page.setViewportSize({ width, height });
     await milestones.evaluate((el) => { el.scrollTop = 0; });
     const lineHeight = await line.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
-    expect((await box(line)).height).toBeLessThanOrEqual(lineHeight + 1);
+    expect((await box(line)).height).toBeLessThanOrEqual(2 * lineHeight + 1); // the goal title clamps to two lines
     await fullyInView(line);
     await fullyInView(count);
     expect(await count.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
