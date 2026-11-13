@@ -328,9 +328,14 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    and caller context from graphify (or git grep). Re-reviews get only the
    current round's diff. Automatic reviews of docs/test-only branches, or
    branches within both `review_small_max_files` and `review_small_max_lines`,
-   use `reviewer-light` (Sonnet, low effort). Binary changes and paths matching
+   use `reviewer-light` (Sonnet, low effort). When the writer used Claude and
+   the usual reviewer uses Codex, sizing uses `reviewer-codex-light` instead,
+   keeping its Codex model and lowering effort. An existing cross-vendor
+   pairing is preserved; unknown or unsupported pairings keep the usual
+   reviewer. This preserves a pairing already selected by the repo, without
+   requiring cross-vendor review by default. Binary changes and paths matching
    `review_risky_paths` keep the usual reviewer. Explicit profile requests and
-   locked reviewer routing take precedence; unavailable Sonnet falls back to
+   locked reviewer routing take precedence; an unavailable cheaper profile falls back to
    the usual reviewer. Sizing uses the whole branch even on later rounds.
 4. **It keeps going.** If the supervisor stops while milestones are still
    unverified and no worker is running, brindle tells it to continue. It stops
@@ -748,7 +753,7 @@ Goal driving, merge gates and cleanup:
 | `review` | required for sessions | require a reviewer's approval before merging |
 | `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |
 | `review_profile` | none | force `request_review`'s profile, skipping its automatic cross-model pick (see below) |
-| `review_sizing` | `false` | scoped review context and automatic Sonnet sizing; explicit profile requests still win |
+| `review_sizing` | `false` | scoped review context and cheaper profiles preserving existing cross-vendor pairings; explicit profile requests still win |
 | `review_small_max_files` | `5` | maximum touched files for a small review |
 | `review_small_max_lines` | `200` | maximum added + deleted lines for a small review; docs/test-only branches also qualify |
 | `review_risky_paths` | `*auth*`, `*permission*`, `*daemon*`, `*concurr*`, `*thread*`, `*lock*`, `*async*` | globs over repo-relative paths that retain the usual reviewer, including deleted paths |

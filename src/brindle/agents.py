@@ -4310,6 +4310,37 @@ def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig)
     return name
 
 
+def _sized_review_profile(pick: str, worker: Agent | None, repo_root: str) -> str | None:
+    """A cheaper profile that preserves an existing cross-vendor pairing.
+
+    This is the selection point for a future org review-policy hook. Native
+    and third-party providers can serve several vendors: without a known
+    relationship, keep the current reviewer rather than guess.
+    """
+    from brindle import review_scope
+
+    name = review_scope.LIGHT_PROFILE
+    current = None
+    if worker is not None:
+        current = load_profile(pick, repo_root)
+        known = {"claude", "codex", "antigravity"}
+        if worker.provider not in known or current.provider not in known:
+            return None
+        if worker.provider == "claude" and current.provider != "claude":
+            if current.provider != "codex":
+                return None
+            name = review_scope.CODEX_LIGHT_PROFILE
+    cheap = load_profile(name, repo_root)
+    if name == review_scope.CODEX_LIGHT_PROFILE:
+        # Keep the same model capacity, reducing effort only. A custom profile
+        # must not replace that model with a mini/other smaller verifier.
+        return name if current is not None and cheap.provider == "codex" and cheap.model == current.model else None
+    # Local overrides must not silently turn a verifier into Haiku.
+    if cheap.provider == "claude" and re.fullmatch(r"(?:claude-)?sonnet(?:[-.\d]+)?", cheap.model or ""):
+        return name
+    return None
+
+
 def _review_choice(db: DB, ws: Workspace, profile: str | None,
                    cfg: RepoConfig) -> tuple[str, str | None]:
     """The reviewer profile to use, checked to be one that can run, rather than
@@ -4330,10 +4361,9 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
             from brindle import review_scope
 
             if review_scope.small_branch(ws, cfg):
-                cheap = load_profile(review_scope.LIGHT_PROFILE, ws.repo_root)
-                # Local overrides must not silently turn a verifier into Haiku.
-                if cheap.provider == "claude" and re.fullmatch(r"(?:claude-)?sonnet(?:[-.\d]+)?", cheap.model or ""):
-                    candidates.insert(0, review_scope.LIGHT_PROFILE)
+                cheap = _sized_review_profile(pick, worker, ws.repo_root)
+                if cheap:
+                    candidates.insert(0, cheap)
     first: AgentError | None = None
     for name in candidates:
         try:
@@ -4741,7 +4771,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
 
         # Recheck a queued cheap pick against the current branch. Keep explicit
         # strong profiles, including the pipeline's recovery fallback.
-        if profile == review_scope.LIGHT_PROFILE:
+        if profile in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE):
             profile = None
     profile = _review_profile(db, ws, profile, cfg)
     if second and not slot:

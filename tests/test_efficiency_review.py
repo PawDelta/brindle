@@ -7,6 +7,7 @@ import pytest
 
 from brindle import agents, codemap, git, review_scope, workspaces
 from brindle.config import RepoConfig, load_repo_config
+from brindle.db import Agent
 from brindle.profiles import load_profile
 from test_reviewer_dedupe import fake_spawn
 from test_routing import config
@@ -21,15 +22,26 @@ def commit(repo, path, text):
     return git.out(["rev-parse", "HEAD"], repo)
 
 
-def test_review_dispatch_scopes_docs_then_keeps_risky_rereview_strong(db, repo, monkeypatch):
+@pytest.mark.parametrize("writer_provider,light_profile", [
+    ("codex", "reviewer-light"),
+    ("claude", "reviewer-codex-light"),
+    ("native", "reviewer-codex"),
+])
+def test_review_dispatch_scopes_docs_then_keeps_risky_rereview_strong(
+        db, repo, monkeypatch, writer_provider, light_profile):
     config(repo, review_sizing=True, reviewer="reviewer-codex", learning="off")
     ws = workspaces.create(db, str(repo), "review-scope").workspace
+    writer_profile = "developer-codex" if writer_provider == "codex" else "developer"
+    db.add_agent(Agent("writer", ws.id, writer_profile, writer_provider, None,
+                       "assign", "done", "@0", "done", 0))
     started = fake_spawn(monkeypatch)
     monkeypatch.setattr(agents, "alive_or_starting", lambda a: True)
     monkeypatch.setattr(agents, "unusable", lambda *a: None)
     first = commit(Path(ws.path), "docs/usage.md", "A scoped review.\n")
     reviewer = agents.start_review(db, None, ws, cfg=load_repo_config(repo))
-    assert reviewer.profile == "reviewer-light"
+    assert reviewer.profile == light_profile
+    if writer_provider == "claude":
+        assert load_profile(reviewer.profile, ws.repo_root).provider != writer_provider
     pack = reviewer.task.split("Scoped review context pack:")[1]
     assert pack.split("Touched files:\n")[1].split("\n\nDiff")[0] == "- docs/usage.md"
     assert "+A scoped review." in pack
@@ -39,7 +51,7 @@ def test_review_dispatch_scopes_docs_then_keeps_risky_rereview_strong(db, repo, 
     db.set_result(reviewer.id, "reviewed")
     second = commit(Path(ws.path), "src/auth.py", "def authorize():\n    return False\n")
     # A preflight pick must not pin the cheap profile after the branch grows risky.
-    reviewer = agents.request_review(db, None, ws, "reviewer-light", cfg=load_repo_config(repo), slot="")
+    reviewer = agents.request_review(db, None, ws, light_profile, cfg=load_repo_config(repo), slot="")
     assert reviewer.profile == "reviewer-codex"
     pack = reviewer.task.split("Scoped review context pack:")[1]
     assert "src/auth.py" in pack and "docs/usage.md" not in pack

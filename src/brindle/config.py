@@ -113,7 +113,7 @@ class RepoConfig:
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
-    review_sizing: bool = False       # scoped context and Sonnet for small or docs/test-only reviews
+    review_sizing: bool = False       # scoped context and cheaper profiles for small or docs/test-only reviews
     review_small_max_files: int = 5
     review_small_max_lines: int = 200  # additions + deletions; binary changes keep the usual reviewer
     review_risky_paths: list[str] = field(default_factory=lambda: [

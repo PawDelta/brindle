@@ -12,6 +12,7 @@ from brindle.db import Workspace
 
 
 LIGHT_PROFILE = "reviewer-light"
+CODEX_LIGHT_PROFILE = "reviewer-codex-light"
 DIFF_CHARS = 32000
 CALLER_CHARS = 6000
 MAX_SYMBOLS = 30
