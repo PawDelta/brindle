@@ -20,11 +20,9 @@ import { EphemeralStore, LoroDoc, UndoManager } from "loro-crdt";
 import { LoroEphemeralPlugin, getCursorEphemeralKey, getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
 import { useEffect, useRef, useState } from "react";
 import type { DaemonClient } from "../../../api/client";
+import { PEER_COLOURS, PRESENCE_TTL, peerClass } from "./docAwareness";
 
 export type LiveClient = Pick<DaemonClient, "visualLive">;
-
-/* How long a writer's caret and name last on others' screens unless written again (ms). */
-const PRESENCE_TTL = 30_000;
 
 /* A change that came from Loro (another writer's, or an undo): already in the document. */
 const fromLoro = Annotation.define<boolean>();
@@ -72,8 +70,6 @@ function loroSync(doc: LoroDoc, section: string): Extension {
 }
 
 /* Each writer's caret in a colour of their own, from the app's group colours. */
-const PEER_COLOURS = 9;
-const peerClass = (name: string) => `loro-peer-${[...name].reduce((h, c) => (h * 31 + c.codePointAt(0)!) >>> 0, 7) % PEER_COLOURS}`;
 const peerTheme = EditorView.theme(
   Object.fromEntries(
     Array.from({ length: PEER_COLOURS }, (_, i) => [
@@ -88,7 +84,7 @@ const look = EditorView.theme({
   "&.cm-focused": { outline: "none" },
 });
 
-export function DocEditor({ client, visual, section, name, label }: {
+export function DocEditor({ client, visual, section, name, label, isAuthor = false }: {
   client: LiveClient;
   /* The shared doc's visual id, and the section edited (its id, "lede" for the overview). */
   visual: string;
@@ -97,6 +93,7 @@ export function DocEditor({ client, visual, section, name, label }: {
   name: string;
   /* The editor's accessible name, e.g. "Text of Goals". */
   label: string;
+  isAuthor?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<"connecting" | "live" | "closed">("connecting");
@@ -111,15 +108,18 @@ export function DocEditor({ client, visual, section, name, label }: {
     let view: EditorView | null = null;
     let gone = false;
     let stopRefresh = () => {};
+    let locked = true;
+    const editability = () => [EditorState.readOnly.of(locked), EditorView.editable.of(!locked)];
     const mount = () => {
       if (!host.current) return null;
-      const run = (step: () => boolean) => () => step() || true;
+      const run = (step: () => boolean) => () => locked || step() || true;
       return new EditorView({
         parent: host.current,
         state: EditorState.create({
           doc: doc.getText(section).toString(),
           extensions: [
             loroSync(doc, section),
+            EditorState.transactionFilter.of((tr) => locked && tr.docChanged && !tr.annotation(fromLoro) ? [] : tr),
             LoroEphemeralPlugin(doc, presence, user, (d) => d.getText(section)),
             keymap.of([
               { key: "Mod-z", run: run(() => undo.undo()), preventDefault: true },
@@ -129,7 +129,7 @@ export function DocEditor({ client, visual, section, name, label }: {
             ]),
             EditorView.lineWrapping,
             EditorView.contentAttributes.of({ "aria-label": label, "aria-multiline": "true" }),
-            editable.of([]),
+            editable.of(editability()),
             look,
             peerTheme,
           ],
@@ -137,6 +137,10 @@ export function DocEditor({ client, visual, section, name, label }: {
       });
     };
     const channel = client.visualLive(visual, {
+      onState(state) {
+        locked = state.lock === "sign_off" || (state.lock === "author_offline" && !isAuthor);
+        view?.dispatch({ effects: editable.reconfigure(editability()) });
+      },
       onUpdate(bytes) {
         doc.import(bytes);
         if (view || gone) return;
@@ -149,6 +153,7 @@ export function DocEditor({ client, visual, section, name, label }: {
       onClose() {
         if (gone) return;
         stopRefresh();
+        locked = true;
         setState("closed");
         view?.dispatch({ effects: editable.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
       },
@@ -173,6 +178,7 @@ export function DocEditor({ client, visual, section, name, label }: {
       stopRefresh();
       // Teammates stop seeing this caret: its removal goes out before the channel closes.
       presence.delete(getCursorEphemeralKey(doc));
+      presence.delete(getUserEphemeralKey(doc));
       view?.destroy();
       offUpdates();
       offPresence();
@@ -182,7 +188,7 @@ export function DocEditor({ client, visual, section, name, label }: {
     };
     // `label` only names the box: a new one is not a new editor.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, visual, section]);
+  }, [client, visual, section, isAuthor]);
   return (
     <div className="grid gap-1" data-live={state}>
       <div ref={host} data-testid={`doc-editor-${section}`} className="min-h-24 rounded-md border border-line-strong bg-surface px-2.5" />
