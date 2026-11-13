@@ -62,11 +62,17 @@ _HOST = re.compile(r"[A-Za-z0-9*._-]+(:\d+)?(/\d+)?|\[?[0-9A-Fa-f:.]+\]?(:\d+)?(
 # profile, none of the daemon's own settings or secrets.
 _SHELL_ENV = ("HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "LANG")
 # What the login shell runs: /bin/sh printing the allowed names it inherited
-# as NUL-separated NAME=value, and nothing else of the environment (`env -0`
-# would print all of it, and older macOS has no -0). No single quote in it:
-# it is handed to the shell inside one, which zsh, bash and fish read alike.
-_PRINT = ("for n in " + " ".join(sorted(ALLOWED)) + '; do eval "v=\\${$n-}"; '
-          'if [ -n "$v" ]; then printf "%s=%s\\0" "$n" "$v"; fi; done')
+# as NUL-terminated NAME=value records, and nothing else of the environment
+# (`env -0` would print all of it, and older macOS has no -0). MARK, a record
+# of its own, comes before the first and after the last: whatever the
+# person's profile prints (a banner, with or without "=" in it) is outside
+# them and never read. No single quote in it: it is handed to the shell
+# inside one, which zsh, bash and fish read alike.
+MARK = "brindle-login-shell-env"
+_PRINT = (f'printf "\\0%s\\0" {MARK}; '
+          "for n in " + " ".join(sorted(ALLOWED)) + '; do eval "v=\\${$n-}"; '
+          'if [ -n "$v" ]; then printf "%s=%s\\0" "$n" "$v"; fi; done; '
+          f'printf "%s\\0" {MARK}')
 
 
 def enabled() -> bool:
@@ -116,13 +122,18 @@ def valid(name: str, value: str) -> bool:
 
 
 def parse(output: bytes) -> dict[str, str]:
-    """The allowed, valid settings in the shell's NUL-separated NAME=value
-    output. Whatever the person's profile printed before it sits in front of
-    the first name."""
+    """The allowed, valid settings among the NUL-terminated NAME=value records
+    between the shell's two MARK records. What the person's profile printed
+    before the first or after the last is not looked at; output without both
+    (a shell cut short) gives nothing."""
+    mark = MARK.encode()
+    _, began, rest = output.partition(b"\0" + mark + b"\0")
+    records = rest.split(b"\0")
+    if not began or mark not in records:
+        return {}
     found: dict[str, str] = {}
-    for entry in output.decode("utf-8", "replace").split("\0"):
-        name, eq, value = entry.partition("=")
-        name = name.rpartition("\n")[2]
+    for record in records[:records.index(mark)]:
+        name, eq, value = record.decode("utf-8", "replace").partition("=")
         if eq and valid(name, value):
             found[name] = value
     return found
