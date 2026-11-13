@@ -192,17 +192,14 @@ def redact(text: str, words) -> str:
     return text
 
 
-def redact_file(path: Path, words) -> None:
-    """Redact ``words`` in a text file in place (binary files are left alone)."""
-    if path.is_symlink() or not path.is_file():
-        return
+def redact_bytes(data: bytes, words) -> bytes:
+    """``data`` with ``words`` redacted if it is UTF-8 text (binary is left alone)."""
+    if not words:
+        return data
     try:
-        text = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        return
-    clean = redact(text, words)
-    if clean != text:
-        path.write_text(clean, encoding="utf-8")
+        return redact(data.decode("utf-8"), words).encode("utf-8")
+    except UnicodeDecodeError:
+        return data
 
 
 def place_link(dest: Path, rel: str, target: str, checkout: Path, words=()) -> None:
@@ -257,73 +254,82 @@ def confine_links(root: Path) -> None:
                     changed = True
 
 
-def extract_base(archive: bytes, dest: Path, checkout: Path, words=()) -> None:
-    """Unpack ``git archive``'s tar into ``dest``: regular files first (no
-    member may leave ``dest``), then its symlinks through ``place_link``."""
-    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        members = tar.getmembers()
-        for m in members:
-            if os.path.isabs(m.name) or ".." in Path(m.name).parts:
-                raise BenchError(f"the base archive has a path outside the tree: {m.name}")
-        plain = [m for m in members if not (m.issym() or m.islnk())]
-        if hasattr(tarfile, "data_filter"):
-            tar.extractall(dest, members=plain, filter="data")
-        else:
-            tar.extractall(dest, members=plain)
-        for m in members:
-            if m.issym():
-                place_link(dest, m.name, m.linkname, checkout)
+def write_tree(dest: Path, files: list, links: list, checkout: Path, words=()) -> None:
+    """Write ``files`` ((path, mode, read) triples) and ``links`` ((path,
+    target) pairs) into ``dest``, which holds no link yet. Every final
+    (redacted) path is checked first: two entries that redact to one path, or
+    one that would sit under another, stop it before anything is written.
+    Regular files come next, each a new file in freshly made directories, so
+    no write can pass through a link. Links come last (``place_link``), and
+    ``confine_links`` checks them all together. Nothing is written once a
+    link exists."""
+    final = [redact(rel, words) for rel, _, _ in files] + [redact(rel, words) for rel, _ in links]
+    taken: set[str] = set()
+    for out in final:
+        parts = Path(out).parts
+        if not parts or os.path.isabs(out) or ".." in parts:
+            raise BenchError(f"a path outside the tree: {out!r}")
+        if out in taken:
+            raise BenchError(f"two paths become {out!r} once redacted")
+        taken.add(out)
+    for out in taken:
+        parts = Path(out).parts
+        for i in range(1, len(parts)):
+            if str(Path(*parts[:i])) in taken:
+                raise BenchError(f"{out!r} would sit under {str(Path(*parts[:i]))!r} once redacted")
+    for rel, mode, read in files:
+        out = dest / redact(rel, words)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(out, flags, 0o755 if mode & 0o111 else 0o644), "wb") as f:
+            f.write(redact_bytes(read(), words))
+    for rel, target in links:
+        place_link(dest, rel, target, checkout, words)
     confine_links(dest)
+
+
+def clear_tree(dest: Path) -> None:
+    """Remove everything in ``dest`` but ``.git``, never following a link."""
+    for name in os.listdir(dest):
+        p = dest / name
+        if name == ".git":
+            continue
+        if p.is_symlink() or not p.is_dir():
+            p.unlink()
+        else:
+            shutil.rmtree(p)
 
 
 def blind_tree(checkout: Path, base: str, dest: Path, env: dict, words=()) -> str:
     """Build the blinded repo in ``dest`` (see the module doc) and return its
     staged diff against the base commit. With ``words``, they are redacted in
-    every text file's content, every path and every link before anything is
-    committed or staged, so neither the working tree, the index nor the
-    history holds them. Symlinks never resolve outside ``dest``: each is
-    placed by ``place_link``, and ``confine_links`` then checks them all
-    together (chains included) before the base is committed and again
-    before the tree is staged."""
-    extract_base(git(checkout, "archive", "--format=tar", base, env=env, binary=True), dest, checkout)
+    every text file's content, every path and every link as it is written,
+    so neither the working tree, the index nor the history ever holds them.
+    Both the base snapshot and the arm's files go in through ``write_tree``
+    (collisions refused, files before links, links confined as a whole), so
+    no write ever passes through a link and no link resolves outside ``dest``."""
+    archive = git(checkout, "archive", "--format=tar", base, env=env, binary=True)
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        members = tar.getmembers()
+        write_tree(dest, [(m.name, m.mode, lambda m=m: tar.extractfile(m).read()) for m in members if m.isfile()],
+                   [(m.name, m.linkname) for m in members if m.issym()], checkout, words)
     base_paths = set(git(checkout, "ls-tree", "-r", "-z", "--name-only", base, env=env).split("\0")) - {""}
-    if words:
-        for rel in sorted(base_paths):
-            p = dest / rel
-            if p.is_symlink():
-                target = os.readlink(p)
-                p.unlink()
-                place_link(dest, rel, target, dest, words)
-                continue
-            clean = dest / redact(rel, words)
-            redact_file(p, words)
-            if clean != p and p.exists():
-                clean.parent.mkdir(parents=True, exist_ok=True)
-                p.rename(clean)
-        confine_links(dest)   # the redacted links, again as a whole, before the base is committed
     ident = ["-c", "user.name=review", "-c", "user.email=review@localhost", "-c", "commit.gpgsign=false"]
     git(dest, "init", "-q", "-b", "review", env=env)
     git(dest, "add", "-A", env=env)
     git(dest, *ident, "commit", "-q", "--no-verify", "--allow-empty", "-m", "base", env=env)
-    for rel in git(dest, "ls-files", "-z", env=env).split("\0"):
-        p = dest / rel
-        if rel and (p.is_symlink() or p.is_file()):
-            p.unlink()
-    files = git(checkout, "ls-files", "-z", "-co", "--exclude-standard", env=env).split("\0")
-    links = []
-    for rel in sorted({f for f in files if f}):   # regular files first: no copy goes through a link
-        src, dst = checkout / rel, dest / redact(rel, words)
-        if not kept(rel, base_paths) or not (src.is_symlink() or src.is_file()):
+    clear_tree(dest)
+    files, links = [], []
+    for rel in sorted({f for f in git(checkout, "ls-files", "-z", "-co", "--exclude-standard", env=env).split("\0")
+                       if f}):
+        src = checkout / rel
+        if not kept(rel, base_paths):
             continue
         if src.is_symlink():
             links.append((rel, os.readlink(src)))
-        else:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            redact_file(dst, words)
-    for rel, target in links:
-        place_link(dest, rel, target, checkout, words)
-    confine_links(dest)   # chains of links resolved as a whole, before anyone reads the tree
+        elif src.is_file():
+            files.append((rel, src.stat().st_mode, src.read_bytes))
+    write_tree(dest, files, links, checkout, words)
     git(dest, "add", "-A", env=env)
     return git(dest, "diff", "--cached", "--no-color", "--no-ext-diff", env=env)
 

@@ -132,6 +132,29 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     assert rec["review_cost_usd"] > 0 and "cost_usd" not in solo
 
 
+def test_redacting_a_base_snapshot_never_writes_through_a_link(tmp_path):
+    # Every link resolves inside on its own, but redacting "zbrindle" turns
+    # "[redacted] -> zbrindle/../OUT" into a link out of the tree (through
+    # "z[redacted] -> ."), and "brindle/data" redacts onto that same path.
+    base, dest = tmp_path / "base", tmp_path / "tree"
+    for d in ("OUT", "deep", "brindle"):
+        (base / d).mkdir(parents=True)
+    (base / "OUT" / "keep").write_text("in")
+    (base / "deep" / "keep").write_text("in")
+    (base / "brindle" / "data").write_text("brindle payload")
+    (base / "zbrindle").symlink_to("deep")
+    (base / "z[redacted]").symlink_to(".")
+    (base / "[redacted]").symlink_to("zbrindle/../OUT")
+    sh(f"git init -q -b main && git add -A && {GIT_ID} commit -qm init", base)
+    (tmp_path / "OUT").mkdir()
+    (tmp_path / "OUT" / "data").write_text("sentinel")   # the tree's sibling, where the escape would land
+    dest.mkdir()
+    with pytest.raises(review.BenchError):
+        review.blind_tree(base, sh("git rev-parse HEAD", base), dest, dict(os.environ), ["brindle"])
+    assert (tmp_path / "OUT" / "data").read_text() == "sentinel"
+    assert os.listdir(dest) == []   # refused before anything was written
+
+
 @pytest.mark.parametrize("sandboxed", [True, False])
 def test_a_reproduction_never_writes_or_runs_outside_its_copy(tmp_path, monkeypatch, sandboxed):
     tree, scratch, outside = tmp_path / "tree", tmp_path / "scratch", tmp_path / "outside.txt"
