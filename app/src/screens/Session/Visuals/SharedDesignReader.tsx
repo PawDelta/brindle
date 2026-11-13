@@ -1,5 +1,5 @@
 /* A design someone else shared, opened from the Inbox's "Review requested" card: the doc screen
-   (PlanReader.tsx) on the Library's copy (design/planning-doc-round6.html §2). Read, comment, suggest,
+   (PlanReader.tsx) on the Library's copy. Read, comment, suggest,
    vote and sign off, as far as the Library lets this account; never approve or build, and no edit
    mode. Nothing is kept on this machine: the doc lives in this component's state and is read from the
    Library again while open, so losing access takes it off the screen. */

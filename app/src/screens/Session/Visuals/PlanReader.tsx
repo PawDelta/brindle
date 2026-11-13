@@ -1,7 +1,7 @@
 /* A design doc (brindle/plans.py, brindle/plan_docs.py), opened over the whole window like any
    visual. Unlike a visual it isn't the agent's HTML: brindle renders it itself (DocText.tsx:
    elements only, no raw HTML, no fetched images), so it needs no frame, and every control on it
-   is the app's own. It is one scrolling doc (design/planning-doc-round6.html §1): the title and
+   is the app's own. It is one scrolling doc: the title and
    what it is waiting on, the overview, each section with its number in the margin, then each
    decision as a table of its alternatives with who voted for which. Beside it, the review
    column (DocReview.tsx): what is left to decide, and the comment and suggestion threads, each

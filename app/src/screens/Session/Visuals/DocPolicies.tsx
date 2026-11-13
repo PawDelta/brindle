@@ -1,4 +1,4 @@
-/* The org review policies on a design doc (design/planning-doc-round6.html §3): locked rows nobody
+/* The org review policies on a design doc: locked rows nobody
    on the doc can remove, each with why it applies and who can meet it, and any waiver or stand-in an
    org admin has recorded. The Library decides who may override a rule; adminOrg only says whom to offer it to. */
 

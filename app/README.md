@@ -73,11 +73,9 @@ Mac's own architecture, and copies the two bundles to
   from the last launch (`routes.ts` `readLastSession`), else the first live
   one, else the empty state (`screens/New`). `src/main.tsx` wires the
   store, the daemon client and the sync to it.
-- `src/components/Sidebar.tsx`: the merged sidebar, drawn to
-  `design/options-v2/M3b-multi.html` (its layout, spacing, type sizes,
-  dots and section headings; `styles.css`'s `.side-*` rules) with
-  `design/options-v3/C2b-inbox-only.html`'s one entry for what needs a
-  person, brindle's whole layer in one column. From the top: "Inbox · N"
+- `src/components/Sidebar.tsx`: the merged sidebar (`styles.css`'s
+  `.side-*` rules), with one entry for what needs a person, brindle's
+  whole layer in one column. From the top: "Inbox · N"
   (the Inbox page; "empty" when nothing waits), the only thing about
   attention in the sidebar; the selected session's context
   (`SessionContext.tsx`: the goal's title with the session's id, repo and
@@ -161,8 +159,7 @@ Mac's own architecture, and copies the two bundles to
   in with `POST /v1/terminals/{id}/input`; tmux's "Pane is dead" is its
   end), says "Signed in ✓" once the provider reads so again, and keeps the
   CLI's pane behind "Show details" (`PtyTerminal`).
-- `src/screens/Inbox/`: `InboxScreen`, the Inbox page
-  (`design/options-v3/C2b-inbox-only.html`): every decision across
+- `src/screens/Inbox/`: `InboxScreen`, the Inbox page: every decision across
   sessions as banner cards grouped by session (the kind, one readable line
   of what is asked, its detail, the agent and branch, the session, the
   age), each group with "Open the session ›" and each card with "Go to
@@ -277,8 +274,7 @@ Mac's own architecture, and copies the two bundles to
   surface: the one sheet, "Review & open PR", opens only from the
   sidebar's "Ready for PR" entry (`routes.ts` `sheet`), on purpose.
 - `src/screens/Session/ReviewSheet.tsx`: "Review & open PR", per
-  supervisor session (`design/options-v2/V2-stepped-sheet`'s one calm
-  sheet with `V1-fullscreen-tree`'s file list, and no worker attribution:
+  supervisor session (one sheet with a file list, and no worker attribution:
   the engine's `authors` / `workers` are never shown). It exists only
   once the engine says the session is ready (`review.ts` `usePrReadiness`:
   `GET /v1/sessions/{root}/pr/readiness`, read again on `session.pr_ready`,

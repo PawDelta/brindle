@@ -1,7 +1,6 @@
 /* Where the doc on screen (PlanReader.tsx) gets its content and sends what the person writes: one
    interface, so the screen doesn't care which it is. Two sources today: the author's plan on this
-   machine, and a design someone else shared, read from the Library by its doc id. A live draft
-   (design/coediting-plan.html) is one more source behind the same interface. */
+   machine, and a design someone else shared, read from the Library by its doc id. */
 
 import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type SharedDesign } from "../../../api/client";
 import type { PlanDocClient, PlansClient, SharedDesignClient } from "./client";

@@ -1,4 +1,4 @@
-/* Settings › Permissions (design/permissions-settings.html): the person's
+/* Settings › Permissions: the person's
    permission policy (GET /permissions).
 
    Capability groups, the default view: the preset picker
@@ -331,7 +331,7 @@ function Segmented({ label, value, levels, disabled, onPick }: { label: string; 
   );
 }
 
-/* The default view (design/permissions-settings.html): the preset, how often agents are asked, and one row per
+/* The default view: the preset, how often agents are asked, and one row per
    capability group with its baseline, expanding to the subcategories that may override it. */
 const Lock = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>

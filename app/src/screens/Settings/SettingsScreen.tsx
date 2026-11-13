@@ -16,7 +16,7 @@
    its first visit and stays (hidden) after, so work started in it carries on;
    the config, doctor and providers are read once for the screen.
 
-   Providers (design/connect/ step 8, with the owner's final model): brindle
+   Providers: brindle
    detects each CLI (GET /v1/providers/installed) and uses it as-is; the CLI
    keeps itself up to date, so there is nothing here about updates. A row
    says where the CLI was found and its version, or that it isn't
@@ -823,7 +823,7 @@ function rowState(row: ProviderInstalled): RowState {
   return turnedOff(row) ? "off" : "not_installed";
 }
 
-/* A provider's row (design/connect/ step 8, the owner's final model): where
+/* A provider's row: where
    brindle found the CLI and its version, or that it isn't installed; signed
    in or not. Connect runs the maker's official installer as-is, its lines
    streaming into the calm progress card (a failure stays there with Retry,

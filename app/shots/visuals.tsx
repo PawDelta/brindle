@@ -32,8 +32,8 @@ let rows: VisualDTO[] = [
   { id: "v_old2", session: "sup-42", title: "Permission prompt layout", by: "b31c9f02", kind: "visual", rev: 3, question: "Inline or sheet?", options: [{ id: "inline", label: "Inline" }, { id: "sheet", label: "Sheet" }], answer: { option: "sheet", note: "", at: now - 20000 }, kept: false, unread: false, created_at: now - 30000 },
 ];
 
-// The plan row's design doc (shots/plan-shots.mjs), as design/planning-doc-round6.html §1 draws
-// one: text sections, a diagram, code with a suggestion on it, a table, an open question, three
+// The plan row's design doc (shots/plan-shots.mjs): text sections, a diagram,
+// code with a suggestion on it, a table, an open question, three
 // decisions (one confirmed), comment threads, and a split where two workers change one file.
 // Approved, the board shows a test in each state.
 const SUMMARY = "Let Pro users start a goal, close the laptop, and come back to reviewed pull requests.\n\nWorkers run on a machine the customer controls, so code never passes through PawDelta.";

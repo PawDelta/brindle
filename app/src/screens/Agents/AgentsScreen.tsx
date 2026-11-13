@@ -1,5 +1,5 @@
 /* Agents: which model runs each kind of work, and what takes over at a
-   limit (design/agents-2, option A, as the owner approved it). Two cards:
+   limit. Two cards:
 
    - "How a task gets run": the four steps, automatic.
    - "Who does each kind of work": a row per kind (the four sizes the

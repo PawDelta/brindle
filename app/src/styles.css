@@ -178,7 +178,7 @@ body {
   }
 }
 
-/* Buttons, the Tinted scheme (design/design-v3.html .sch-tinted): one base
+/* Buttons, the Tinted scheme: one base
    in Geist Sans 13px, and four roles. The one main action (primary) is pass
    text on a 12% pass wash with a 40% pass hairline; secondary is a hairline;
    quiet is text only; destructive is primary's shape in fail. Hover deepens
@@ -289,8 +289,8 @@ body {
 
 /* The sidebar (components/Sidebar.tsx, SessionContext.tsx): the site's
    surfaces, canvas-2 as its ground, with purple (branch) only as the
-   accent for the selected row and the current milestone; its vocabulary
-   (design/options-v2/M3b-multi's layout): one dot for a status (work
+   accent for the selected row and the current milestone; its vocabulary:
+   one dot for a status (work
    branch, wait sap, done pass, idle quiet, fail red, paused hollow), a
    section heading, the needs-you badge, the milestone ring and bars, the
    small button. The split between the context and the tree is a handle

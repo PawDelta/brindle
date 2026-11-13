@@ -1,4 +1,4 @@
-/* Settings › Organization › Review policies (design/planning-doc-round6.html §3, Enterprise governance):
+/* Settings › Organization › Review policies (Enterprise governance):
    one row per rule, what it matches and who it requires, how many designs in review it covers now, and
    the form to add or edit one. Read through the daemon (GET /v1/review-policies: the rules, the teams
    and roles they can name, the designs each covers) and saved as the whole list at the version read

@@ -1,5 +1,4 @@
-/* The merged sidebar (design/options-v2/M3b-multi's layout, with
-   design/options-v3/C2b-inbox-only's one entry for what needs a person):
+/* The merged sidebar, with one entry for what needs a person:
    brindle's whole layer in one column beside the provider's session. From
    the top: the logo (and New session); "Inbox · N", the one place anything
    about attention shows in the sidebar (the Inbox page, in the main area,
@@ -138,7 +137,7 @@ function AccountButton({ route, navigate, provider, warning, failed }: Pick<Side
   );
 }
 
-/* The foot's Library button (design/library-placement.html §1, icon only): beside the terminal
+/* The foot's Library button (icon only): beside the terminal
    switch on every screen, a dot while designs wait on the person, and on (green) while the
    Library is open. Pressed again, or ⌘L, it goes back to where the person was. */
 function LibraryButton({ open, waiting, onToggle }: { open: boolean; waiting: number; onToggle(): void }) {
@@ -601,7 +600,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
   );
 }
 
-/* "Inbox · N" at the very top (design/options-v3/C2b-inbox-only): the one
+/* "Inbox · N" at the very top: the one
    entry about what needs a person, everything else about attention being
    the Inbox page's. "empty" when nothing waits. The app's own update item
    counts too (store/appUpdates.ts). */

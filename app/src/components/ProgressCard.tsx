@@ -1,4 +1,4 @@
-/* The calm progress card (design/connect/'s install card): what runs, a slim
+/* The progress card: what runs, a slim
    bar, the last lines the command prints (a maker's installer, git's
    clone), and when it stops, a tinted strip with what it said and Retry.
    Underneath, whatever the screen adds (From / Into / License). */

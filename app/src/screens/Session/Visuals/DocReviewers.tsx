@@ -1,4 +1,4 @@
-/* Who reviews a design doc, in its header (design/planning-doc-round6.html §2): each reviewer,
+/* Who reviews a design doc, in its header: each reviewer,
    required or optional, with their sign-off state, and the org rules nobody on the list meets.
    Before the doc is shared, the control that shares it; after, the same list to edit. Required
    reviewers hold the build (the gate, brindle/plans.py), optional ones never do. Once the plan is

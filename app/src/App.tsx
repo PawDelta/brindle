@@ -378,8 +378,8 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   // sheet lies over it); the pages scroll.
   const shown = route ?? HOME;
   const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox";
-  // A visual open in the session takes the whole window (design/visualizer-build-plan-amendments.md
-  // item 1): the sidebar hides, still mounted, so Back finds it as it was (folds, scroll, split).
+  // A visual open in the session takes the whole window: the sidebar hides, still mounted,
+  // so Back finds it as it was (folds, scroll, split).
   const reading = shown.screen === "session" && shown.sheet?.kind === "visual";
   // Where a shell of the person's own starts: the open session's worktree, else the repo's root.
   const workspaces = useAppState((s) => s.workspaces);

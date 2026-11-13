@@ -1,5 +1,5 @@
-/* The Library's navigation, in the app sidebar's place while the Library is open
-   (design/library-placement.html §2, design/library-search.html): "← Sessions" back to
+/* The Library's navigation, in the app sidebar's place while the Library is open:
+   "← Sessions" back to
    where the person was, then Recent, Pinned, Stage (the stages a design moves through),
    Folders and Sources (the map, imported docs, decisions and kept visuals). The row that
    is open is marked as the Settings rail marks its tab. The glyphs are the approved
@@ -66,7 +66,7 @@ const scopeSpec = (scope: DocScope) => (scope.kind === "user" ? "user" : `${scop
 const scopeName = (scope: DocScope) => (scope.kind === "user" ? "My folders" : scope.name || (scope.kind === "group" ? "Team" : "Org"));
 const VISIBLE_TO = (scope: DocScope, visibility: FolderVisibility) => (visibility === "private" ? "only me" : scope.kind === "group" ? "team" : scope.kind === "org" ? "org" : "shared");
 
-/* The Folders group (design/planning-doc-round7.html §1): My folders, then each team and the org,
+/* The Folders group: My folders, then each team and the org,
    each folder saying who can see it. "+ New" opens the New folder form; while a design is open, each
    folder offers "Move here". Nothing is listed until `folders` arrives. */
 type CreateFolder = (scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members") => Promise<void> | void;

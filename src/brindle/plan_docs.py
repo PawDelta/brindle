@@ -1,5 +1,5 @@
-"""A planning doc as a design doc (phase 1 of design/build-plan.html: one
-person): a series of revisions, comment threads anchored in it, suggestions
+"""A planning doc as a design doc for one person:
+a series of revisions, comment threads anchored in it, suggestions
 and direct edits. brindle.plans keeps what a plan *does* (it holds the
 session's assigns until the person approves it); this module keeps what the
 person reads and writes on it.

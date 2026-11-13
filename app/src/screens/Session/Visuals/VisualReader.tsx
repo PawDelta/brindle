@@ -1,4 +1,4 @@
-/* An open visual takes the whole window (design/visualizer-build-plan-amendments.md item 1): the
+/* An open visual takes the whole window: the
    sidebar and the session's bar hide, and the terminal stays mounted behind, hidden: it keeps
    streaming, and its scrollback and draft survive. Back or Esc returns to the session as it was;
    Esc pressed inside the page reaches the host as the page's brindle.esc.

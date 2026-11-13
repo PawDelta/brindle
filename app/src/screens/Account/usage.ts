@@ -1,10 +1,10 @@
-/* Usage's words, apart from React (design/usage/usage.js, which mirrors the
-   engine's quota.py): each provider's name and the CLI that reports for it,
+/* Usage's words, apart from React, mirroring the engine's quota.py:
+   each provider's name and the CLI that reports for it,
    a reset time as quota._when writes it ("5:10pm" today, "Thu 9:00am"
    later) or "in N min" under the hour, how old a reading is, and the two
    thresholds brindle acts on: 80% is `brindle watch`'s alert line, 90% is
    RepoConfig.usage_limit, where brindle pauses new work by stopping new starts. The
-   sidebar's status-line reading (design/usage/A4) is `nearReading`. Every
+   sidebar's status-line reading is `nearReading`. Every
    function takes `now` (epoch seconds) so the words can be checked. */
 
 import type { ProviderUsage, UsageNear, UsageWindow } from "../../api/client";
@@ -83,7 +83,7 @@ export function hint(q: ProviderUsage): string | null {
   return null;
 }
 
-/* The sidebar's status-line reading (design/usage/A4): the worst near
+/* The sidebar's status-line reading: the worst near
    provider (the engine lists them worst first) in the fewest words, "Claude
    88% · 5:10pm" or "Antigravity limit · 7:18pm", and how many more are
    near; null when none is. */

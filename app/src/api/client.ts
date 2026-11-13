@@ -342,7 +342,7 @@ export interface Meta {
   airgap: boolean;
 }
 
-/* The visualizer's wave-1 contract (design/visualizer-build-plan.html §4; brindle/visuals.py,
+/* The visualizer's contract (brindle/visuals.py,
    daemon/routes_visuals.py): a page an agent published into a session, its options when it asks
    the person to choose, and the person's answer once given. `rev` is the revision on screen; an
    answer names it, and a newer revision makes an older one's answer a 409. */

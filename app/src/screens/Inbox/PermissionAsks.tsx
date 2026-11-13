@@ -1,4 +1,4 @@
-/* The Inbox's permission cards (design/inbox-permission-card.html): one
+/* The Inbox's permission cards: one
    card for every request that needs a person, whoever holds it. A request
    brindle's hook holds comes grouped by the daemon (GET /permissions/asks),
    one card per kind and general form, decided at once for every request in
