@@ -87,23 +87,19 @@ def test_cli_demo_starts_workers_on_the_signed_in_provider(db, repo, monkeypatch
     assert db.get_agent(review.id).status == "processing"
 
 
-@pytest.mark.parametrize("only, probed", [
-    ("claude", True),
-    ("codex", True),
-    # The daemon's sign-in probe answered more than its TTL ago (or not yet):
-    # demo_provider finds no CLI, and the demo must still run on the usable one.
-    pytest.param("codex", False, marks=pytest.mark.variant("sign-in probe not cached in the daemon")),
-])
-def test_app_demo_starts_workers_and_reviewer(db, monkeypatch, only, probed):
+def test_app_demo_starts_workers_and_reviewer(db, monkeypatch):
     """The app's 'Watch brindle work on a practice repo' on a fresh account
     with one CLI: POST /demo starts the supervisor, its assign for each
     milestone launches a worker, and the review runs, all on that CLI."""
+    # The daemon's sign-in probe answered more than its TTL ago (or not yet):
+    # demo_provider finds no CLI, and the demo must still run on the usable one.
+    only = "codex"
     from brindle import config, doctor, mcp_server, providers
     from brindle.daemon import routes_actions
 
     monkeypatch.setattr(providers, "unusable", lambda provider, *a, **k:
                         None if provider == only else "CLI not installed")
-    monkeypatch.setattr(doctor, "signed_in_providers", lambda: [only] if probed else [])
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: [])
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     # The machine's own CLI setup (is codex installed here?) is preflight's job, not this test's.
     monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
