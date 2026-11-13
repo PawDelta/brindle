@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 from conftest import sh
 
 spec = importlib.util.spec_from_file_location(
@@ -52,30 +53,41 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     }
     outcomes = {("SOLO", "A"): "bug", ("SOLO", "A2"): "bug", ("SOLO", "NOPE"): "ok", ("SOLO", "B"): "inconclusive",
                 ("OTHER", "A"): "bug", ("OTHER", "A2"): "ok", ("OTHER", "B"): "bug"}
-    seen = []
+    seen, ran_on = [], []
+
+    def readable(workdir):   # what a reviewer can read there: files, the index and the history
+        files = [p.read_text(errors="ignore") + str(p) for p in workdir.rglob("*") if p.is_file() and ".git" not in p.parts]
+        return "\n".join([*files, sh("git grep -i brindle HEAD; git grep -i --cached brindle; true", workdir),
+                          sh("git log --format=%s%d", workdir)])
 
     def fake_reviewer(name, model, prompt, workdir, scratch, env, seconds):
-        seen.append((prompt, workdir, sh("git log --format=%s%d", workdir)))
+        seen.append((prompt, readable(workdir), sh("git log --format=%s%d", workdir)))
         usage = {"input": 1000, "output": 200, "cache_creation": 0, "cache_read": 0, "cache_creation_1h": 0}
         return {"findings": answers.get((name, "SOLO" if "SOLO" in prompt else "OTHER"), []),
                 "by_model": {"claude-opus-5-5" if name == "opus" else "gpt-5.5": usage}, "error": None}
 
-    def fake_repro(tree, python, code, scratch, seconds, sandbox):
+    def fake_repro(tree, python, code, scratch, seconds):
         assert python.name == "python" and seconds == review.REPRO_SECONDS
+        ran_on.append((tree / "helper.py").read_text() if (tree / "helper.py").exists() else "")
         return {"status": outcomes[("SOLO" if "SOLO" in (tree / "lib.py").read_text() else "OTHER", code)],
                 "exit": None, "output": ""}
 
+    monkeypatch.setattr(review, "can_sandbox", lambda: True)
     monkeypatch.setattr(review, "call_reviewer", fake_reviewer)
     monkeypatch.setattr(review, "run_repro", fake_repro)
     assert review.main(["review", "--task", "t", "--run-id", "1", "--task-dir", str(kit), "--results", str(results),
                         "--out", str(out), "--scratch", str(tmp_path / "scratch")]) == 0
 
-    # blind: no brindle file, commit message, branch name or the word itself reaches a reviewer
+    # blind: no brindle file, commit message, branch name or the word itself reaches a reviewer,
+    # in the prompt or in any file, index entry or commit of the tree it reads
     assert len(seen) == 4
-    for prompt, workdir, log in seen:
-        assert "brindle" not in prompt.lower() and "session-7" not in prompt and "HISTORY_SPEC" not in prompt
+    for prompt, files, log in seen:
+        for shown in (prompt, files):
+            assert "brindle" not in shown.lower() and "session-7" not in shown and "HISTORY_SPEC" not in shown
         assert log == "base (HEAD -> review)"
     assert any("helper.py" in p and "[redacted]" in p for p, _, _ in seen)
+    # reproductions run on the arm's files as written, not on the reviewers' redacted copy
+    assert any("Brindle" in helper for helper in ran_on)
 
     rec = json.loads(out.read_text())
     solo, other = rec["arms"]["solo"], rec["arms"]["brindle"]
@@ -93,3 +105,52 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     # the review's own cost, per reviewer, apart from the arms
     assert rec["reviewers"]["opus"]["tokens_total"] == rec["reviewers"]["codex"]["tokens_total"] == 2400
     assert rec["review_cost_usd"] > 0 and "cost_usd" not in solo
+
+
+@pytest.mark.parametrize("sandboxed", [True, False])
+def test_a_reproduction_never_writes_or_runs_outside_its_copy(tmp_path, monkeypatch, sandboxed):
+    tree, scratch, outside = tmp_path / "tree", tmp_path / "scratch", tmp_path / "outside.txt"
+    tree.mkdir()
+    scratch.mkdir()
+    outside.write_text("keep")
+    (tree / review.REPRO_NAME).symlink_to(outside)   # a checkout's own repro.py pointing out of the copy
+    started = []
+
+    class FakeProc:
+        pid, returncode = 0, 0
+
+        def __init__(self, cmd, cwd, **kw):
+            started.append((cmd, (Path(cwd) / review.REPRO_NAME).read_text()))
+
+        def communicate(self, timeout=None):
+            return "", None
+
+    monkeypatch.setattr(review, "can_sandbox", lambda: sandboxed)
+    monkeypatch.setattr(review.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(review, "_kill_group", lambda pid: None)
+    if sandboxed:
+        assert review.run_repro(tree, Path("py"), "print(1)", scratch, 1.0)["status"] == "ok"
+        assert started[0][0][0] == "sandbox-exec" and started[0][1] == "print(1)"
+    else:   # no enforcing sandbox: fail closed, before writing or running anything
+        with pytest.raises(review.BenchError):
+            review.run_repro(tree, Path("py"), "print(1)", scratch, 1.0)
+        assert started == [] and list(scratch.iterdir()) == []
+    assert outside.read_text() == "keep"
+
+
+def test_reports_on_different_functions_stay_apart_and_each_is_checked_in_both_arms():
+    found = {"solo": [{**finding("Insert loses rows after a failed write", "high", "I", "db.py:insert"),
+                       "reviewer": "opus"},
+                      {**finding("Update loses rows after a failed write", "high", "U", "db.py:update"),
+                       "reviewer": "codex"}],
+             "brindle": []}
+    ran = []
+
+    def reproduce(arm, code):
+        ran.append((arm, code))
+        return {"status": "bug" if arm == "solo" or code == "U" else "ok", "exit": None, "output": ""}
+
+    out = review.assess(found, reproduce)
+    assert [b["location"] for b in out["solo"]["bugs"]] == ["db.py:insert", "db.py:update"]
+    assert [(b["location"], b["how"]) for b in out["brindle"]["bugs"]] == [("db.py:update", "cross-applied")]
+    assert sorted(ran) == [("brindle", "I"), ("brindle", "U"), ("solo", "I"), ("solo", "U")]

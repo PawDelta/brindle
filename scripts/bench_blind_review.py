@@ -17,7 +17,9 @@ then for each arm:
    Markdown file the arm added (planning notes), the grader's
    ``bench_hidden_tests/``, ``.venv/`` and ``.git``. No commit message or
    branch of the arm's is carried over, and every "brindle" and arm branch
-   name in the diff is redacted.
+   name is redacted in every text file and path of the reviewers' copy
+   (working tree, index and history). Reproductions run on a separate,
+   unredacted copy of the same files.
 2. Gives the staged diff and ``spec.md`` to two independent reviewers, each
    through its own CLI as installed (never patched or wrapped) and run in the
    blinded repo: Opus 5.5 (``claude -p --model claude-opus-5-5``, read-only
@@ -26,12 +28,14 @@ then for each arm:
    script that exits 3 when the bug is present and 0 when it isn't.
 3. Verifies each finding by running its reproduction in a fresh temp copy of
    the blinded tree with the arm's ``.venv`` interpreter, under a time limit
-   (the subprocess API's own) and, on macOS, ``sandbox-exec`` denying writes
-   outside that copy. Only exit 3 confirms it; anything else drops it.
-4. Merges duplicates across reviewers and arms (same location and similar
-   title, or near-identical titles), then cross-applies: every confirmed
-   bug's reproductions run against the other arm too, so a bug found on one
-   side is checked on both.
+   (the subprocess API's own) and ``sandbox-exec``, which denies writes
+   outside that copy. Only exit 3 confirms it; anything else drops it. With
+   no enforcing sandbox (anywhere but macOS) the review refuses to start.
+4. Cross-applies: every confirmed reproduction also runs against the other
+   arm, so a bug found on one side is checked on both. Then duplicates merge
+   across reviewers and arms (same location and similar title, or
+   near-identical titles; reports naming different files or functions never
+   merge).
 
 One record per task and run is appended to ``.brindle/bench/blind_review.jsonl``:
 per arm, the bugs (title, severity, reproduction, who found it, found there or
@@ -187,9 +191,24 @@ def redact(text: str, words) -> str:
     return text
 
 
-def blind_tree(checkout: Path, base: str, dest: Path, env: dict) -> str:
+def redact_file(path: Path, words) -> None:
+    """Redact ``words`` in a text file in place (binary files are left alone)."""
+    if path.is_symlink() or not path.is_file():
+        return
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    clean = redact(text, words)
+    if clean != text:
+        path.write_text(clean, encoding="utf-8")
+
+
+def blind_tree(checkout: Path, base: str, dest: Path, env: dict, words=()) -> str:
     """Build the blinded repo in ``dest`` (see the module doc) and return its
-    staged diff against the base commit."""
+    staged diff against the base commit. With ``words``, they are redacted in
+    every text file's content and every path before anything is committed or
+    staged, so neither the working tree, the index nor the history holds them."""
     archive = git(checkout, "archive", "--format=tar", base, env=env, binary=True)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         if hasattr(tarfile, "data_filter"):
@@ -197,24 +216,32 @@ def blind_tree(checkout: Path, base: str, dest: Path, env: dict) -> str:
         else:
             tar.extractall(dest)
     base_paths = set(git(checkout, "ls-tree", "-r", "-z", "--name-only", base, env=env).split("\0")) - {""}
+    if words:
+        for rel in sorted(base_paths):
+            p, clean = dest / rel, dest / redact(rel, words)
+            redact_file(p, words)
+            if clean != p and (p.is_symlink() or p.exists()):
+                clean.parent.mkdir(parents=True, exist_ok=True)
+                p.rename(clean)
     ident = ["-c", "user.name=review", "-c", "user.email=review@localhost", "-c", "commit.gpgsign=false"]
     git(dest, "init", "-q", "-b", "review", env=env)
     git(dest, "add", "-A", env=env)
     git(dest, *ident, "commit", "-q", "--no-verify", "--allow-empty", "-m", "base", env=env)
-    for rel in base_paths:
+    for rel in git(dest, "ls-files", "-z", env=env).split("\0"):
         p = dest / rel
-        if p.is_symlink() or p.is_file():
+        if rel and (p.is_symlink() or p.is_file()):
             p.unlink()
     files = git(checkout, "ls-files", "-z", "-co", "--exclude-standard", env=env).split("\0")
     for rel in sorted({f for f in files if f}):
-        src, dst = checkout / rel, dest / rel
+        src, dst = checkout / rel, dest / redact(rel, words)
         if not kept(rel, base_paths) or not (src.is_symlink() or src.is_file()):
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_symlink():
-            os.symlink(os.readlink(src), dst)
+            os.symlink(redact(os.readlink(src), words), dst)
         else:
             shutil.copy2(src, dst)
+            redact_file(dst, words)
     git(dest, "add", "-A", env=env)
     return git(dest, "diff", "--cached", "--no-color", "--no-ext-diff", env=env)
 
@@ -394,13 +421,34 @@ def sandbox_profile(root: Path) -> str:
 
 
 def can_sandbox() -> bool:
+    """Whether reproductions can run confined: only sandbox-exec (macOS) is supported."""
     return sys.platform == "darwin" and shutil.which("sandbox-exec") is not None
 
 
-def run_repro(tree: Path, python: Path, code: str, scratch: Path, seconds: float, sandbox: bool) -> dict:
-    """Run one reproduction in a fresh copy of ``tree``: {"status": "bug" | "ok" |
+NO_SANDBOX = ("reproductions need an enforcing sandbox (sandbox-exec, macOS) so they can't write outside "
+              "their temp copy; none is available here, so none is run")
+
+
+def write_new(path: Path, text: str) -> None:
+    """Write ``path`` as a new regular file, never through a symlink or onto
+    something the copied tree already had there."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
+def run_repro(tree: Path, python: Path, code: str, scratch: Path, seconds: float) -> dict:
+    """Run one reproduction in a fresh copy of ``tree`` under sandbox-exec,
+    which denies writes outside the copy: {"status": "bug" | "ok" |
     "inconclusive", "exit", "output"}. Its HOME, TMPDIR and working directory
-    are inside the copy, and the copy is removed afterwards."""
+    are inside the copy, and the copy is removed afterwards. Without a
+    sandbox it raises before writing or running anything."""
+    if not can_sandbox():
+        raise BenchError(NO_SANDBOX)
     run = Path(tempfile.mkdtemp(prefix="repro-", dir=scratch)).resolve()
     python = Path(os.path.abspath(python))   # absolute, but not resolved: the venv is found from its path
     try:
@@ -408,13 +456,11 @@ def run_repro(tree: Path, python: Path, code: str, scratch: Path, seconds: float
         shutil.copytree(tree, work, symlinks=True, ignore=shutil.ignore_patterns(".git"))
         for d in ("home", "tmp"):
             (run / d).mkdir()
-        (work / REPRO_NAME).write_text(code)
+        write_new(work / REPRO_NAME, code)
         env = {"PATH": os.pathsep.join([str(python.parent), "/usr/bin", "/bin"]), "HOME": str(run / "home"),
                "TMPDIR": str(run / "tmp"), "PYTHONPATH": str(work), "PYTHONDONTWRITEBYTECODE": "1",
                "PYTHONNOUSERSITE": "1", "LANG": "en_US.UTF-8"}
-        cmd = [str(python), "-B", REPRO_NAME]
-        if sandbox:
-            cmd = ["sandbox-exec", "-p", sandbox_profile(run), *cmd]
+        cmd = ["sandbox-exec", "-p", sandbox_profile(run), str(python), "-B", REPRO_NAME]
         proc = subprocess.Popen(cmd, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, start_new_session=True)
         try:
@@ -462,11 +508,16 @@ def _location(loc: str) -> tuple[str, str]:
 
 
 def same_bug(a: dict, b: dict) -> bool:
+    """Whether two confirmed findings report one bug. Reports whose known
+    locations differ (another file, or another function in the same file)
+    are always kept apart, however alike their titles."""
+    (fa, sa), (fb, sb) = _location(a["location"]), _location(b["location"])
+    if (fa and fb and fa != fb) or (sa and sb and sa != sb):
+        return False
     wa, wb = _words(a["title"]), _words(b["title"])
     overlap = len(wa & wb) / min(len(wa), len(wb)) if wa and wb else 0.0
     ratio = difflib.SequenceMatcher(None, a["title"].lower(), b["title"].lower()).ratio()
-    (fa, sa), (fb, sb) = _location(a["location"]), _location(b["location"])
-    if fa and fa == fb and (sa == sb or not sa or not sb):
+    if fa and fa == fb:
         return overlap >= 0.5 or ratio >= 0.6
     return ratio >= 0.9 or (overlap >= 0.8 and min(len(wa), len(wb)) >= 3)
 
@@ -494,9 +545,10 @@ def assess(found: dict[str, list[dict]], reproduce) -> dict[str, dict]:
     """Per arm, its confirmed bugs. ``found``: per arm, the reviewers' findings
     (each with its ``reviewer``); ``reproduce(arm, code)`` runs a reproduction
     against that arm. A finding counts only if its reproduction shows the bug
-    in the arm it was found in; confirmed findings that are the same bug merge
-    (across reviewers and arms); each merged bug is then checked in every arm
-    it wasn't found in, and counts there too if any of its reproductions shows it."""
+    in the arm it was found in. Every confirmed reproduction then runs against
+    every other arm too, before confirmed findings that are the same bug merge
+    (across reviewers and arms); a merged bug counts in an arm it wasn't found
+    in if any of its reproductions shows it there."""
     cache: dict[tuple[str, str], dict] = {}
 
     def check(arm: str, code: str) -> dict:
@@ -516,6 +568,9 @@ def assess(found: dict[str, list[dict]], reproduce) -> dict[str, dict]:
                 out[arm]["unconfirmed"].append({k: f.get(k) for k in ("title", "severity", "location", "reviewer")}
                                                | {"status": res["status"], "exit": res.get("exit"),
                                                   "output": _tail(res.get("output"), 500)})
+    for f in confirmed:   # cross-apply every confirmed reproduction before anything merges
+        for arm in found:
+            check(arm, f["reproduction"])
     for group in merge_duplicates(confirmed):
         lead = min(group, key=lambda f: SEV_RANK.get(f["severity"], len(SEVERITIES)))
         found_in = sorted({f["arm"] for f in group}, key=list(found).index)
@@ -548,14 +603,12 @@ def cmd_review(args) -> int:
     base = json.loads((kit / "repo.json").read_text())["commit"]
     spec = (kit / "spec.md").read_text()
     env = bench.clean_env()
+    if not can_sandbox():   # before any reviewer spends tokens
+        raise BenchError(NO_SANDBOX)
     scratch = (Path(args.scratch).resolve() / f"{args.task}-{args.run_id}-{time.strftime('%Y%m%d-%H%M%S')}")
     if scratch.is_relative_to(REPO):
         raise BenchError(f"the scratch directory must be outside this repo: {scratch}")
     scratch.mkdir(parents=True)
-    sandbox = not args.no_sandbox and can_sandbox()
-    if not sandbox:
-        print("warning: reproductions run without sandbox-exec: only their copy, HOME and TMPDIR keep them "
-              "inside the scratch directory", file=sys.stderr)
     models = {"opus": args.opus_model, "codex": args.codex_model or codex_default_model()}
     try:
         checkouts = {arm: Path(r["checkout"]) for arm, r in arms.items()}
@@ -564,10 +617,13 @@ def cmd_review(args) -> int:
             if not py.exists():
                 raise BenchError(f"{arm}: no {py} (the checkout's .venv runs the reproductions)")
         words = ["brindle", *(b for co in checkouts.values() if (b := branch(co, env)) not in COMMON_BRANCHES)]
-        trees, diffs = {}, {}
+        # reviewers read a redacted tree; reproductions run on the arm's files as written
+        trees, run_trees, diffs = {}, {}, {}
         for arm, co in checkouts.items():
             trees[arm] = Path(tempfile.mkdtemp(prefix="change-", dir=scratch))
-            diffs[arm] = redact(blind_tree(co, base, trees[arm], env), words)
+            diffs[arm] = blind_tree(co, base, trees[arm], env, words)
+            run_trees[arm] = Path(tempfile.mkdtemp(prefix="exec-", dir=scratch))
+            blind_tree(co, base, run_trees[arm], env)
         print(f"reviewing {', '.join(f'{a} ({len(d.splitlines())} diff lines)' for a, d in diffs.items())}",
               file=sys.stderr)
         jobs = [(arm, name) for arm in arms for name in REVIEWERS]
@@ -579,14 +635,14 @@ def cmd_review(args) -> int:
             calls = {job: f.result() for job, f in futures.items()}
         found = {arm: [{**f, "reviewer": name} for name in REVIEWERS for f in calls[(arm, name)]["findings"]]
                  for arm in arms}
-        result = assess(found, lambda arm, code: run_repro(trees[arm], pythons[arm], code, scratch,
-                                                           args.repro_seconds, sandbox))
+        result = assess(found, lambda arm, code: run_repro(run_trees[arm], pythons[arm], code, scratch,
+                                                           args.repro_seconds))
     finally:
         if not args.keep:
             shutil.rmtree(scratch, ignore_errors=True)
     costs = review_costs(calls, models)
     record = {"task": args.task, "run_id": str(args.run_id), "reviewed_at": time.time(), "base_commit": base,
-              "sandboxed": sandbox, "repro_seconds": args.repro_seconds,
+              "sandbox": "sandbox-exec", "repro_seconds": args.repro_seconds,
               "arms": {arm: {"checkout": str(checkouts[arm]), "run_valid": r.get("valid", True),
                              "pass_rate": r.get("pass_rate"), "diff_lines": len(diffs[arm].splitlines()),
                              "reviewer_errors": {n: calls[(arm, n)]["error"] for n in REVIEWERS
@@ -632,8 +688,6 @@ def main(argv: list[str] | None = None) -> int:
                      help="time limit for each reviewer run")
     rev.add_argument("--jobs", type=int, default=len(REVIEWERS) * len(bench.ARMS),
                      help="reviewer runs at once")
-    rev.add_argument("--no-sandbox", action="store_true",
-                     help="don't wrap reproductions in sandbox-exec (it is only used on macOS)")
     rev.add_argument("--keep", action="store_true", help="keep the scratch directory afterwards")
     args = ap.parse_args(argv)
     try:
