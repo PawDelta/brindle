@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import os
 
 import pytest
 
@@ -59,6 +60,40 @@ def test_a_linked_home_config_is_never_written_through(tmp_path, monkeypatch):
     provider_homes.launch_env("claude")
 
     assert elsewhere.read_text() == '{"mcpServers": {}}'
+
+
+@pytest.mark.variant("launch-time MCP copy must preserve a Claude save and remain pending for the next launch")
+def test_a_claude_save_during_the_mcp_copy_is_kept(tmp_path, monkeypatch):
+    ours = _homes(tmp_path, monkeypatch)
+    config = ours / ".claude.json"
+    config.write_text(json.dumps({"mcpServers": {"local": MINE}}))
+    saved = {"oauthAccount": {"emailAddress": "signed-in@example.com"},
+             "mcpServers": {"local": MINE, "added": {"command": "claude-added"}}}
+    replace = providers._replace_json
+    locks = []
+
+    def claude_saves_first(path, data, mode):
+        locks.append(config.with_name(".claude.json.lock").is_dir())
+        staged = ours / "claude-save"
+        staged.write_text(json.dumps(saved))
+        os.replace(staged, config)
+        return replace(path, data, mode)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(providers, "_replace_json", claude_saves_first)
+        provider_homes.launch_env("claude")
+
+    assert json.loads(config.read_text()) == saved
+    assert locks == [True]
+    assert not (ours / provider_homes.MCP_MARKER).exists()
+
+    provider_homes.launch_env("claude")
+
+    copied = json.loads(config.read_text())
+    assert copied["oauthAccount"] == saved["oauthAccount"]
+    assert copied["mcpServers"] == {**saved["mcpServers"], **provider_homes._person_servers(), "local": MINE}
+    assert (ours / provider_homes.MCP_MARKER).exists()
+    assert not config.with_name(".claude.json.lock").exists()
 
 
 @pytest.mark.variant("race: two launches switch homes at once; the second must not copy again")

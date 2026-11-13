@@ -886,7 +886,10 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
         inherited = tmux.inherited_env(ws.tmux_session)
         env = {**{k: v for k, v in network.items() if not inherited.get(k)}, **env}
     credentials = credentials | login_shell_env.kept(agent.provider)
-    result = env, credentials, allow, deny, org_env
+    # The pane keeps its provider's credentials and, for Claude Code, its TLS
+    # client settings, inherited from the tmux server as much as read from the
+    # login shell: only the credentials are stored keys (pane_keys above).
+    result = env, secrets.pane_keep(agent.provider, credentials), allow, deny, org_env
     # Resolve stored/org keys once for this launch: catalog, health identity
     # and pane must use the same key helper result, without repeated delays.
     agent._pane_environment = m, result

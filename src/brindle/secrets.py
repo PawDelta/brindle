@@ -74,6 +74,12 @@ CLAUDE_CLOUD_CREDENTIALS = (
     "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
     "AZURE_CONFIG_DIR", "AZURE_CLIENT_CERTIFICATE_PATH", "AZURE_AUTHORITY_HOST",
 )
+# Claude Code's own TLS client identity (its CLAUDE_CODE_CLIENT_* settings, beside
+# CLAUDE_CODE_CLIENT_CERT): what a company's gateway and its remote MCP servers ask of
+# every connection. Secret-looking names, so a Claude pane used to start with the
+# certificate and without its key, and those servers refused it there and nowhere else.
+# Settings, not sign-ins: kept in a Claude pane (pane_keep), never stored or looked up.
+CLAUDE_TLS_CLIENT = ("CLAUDE_CODE_CLIENT_KEY", "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE")
 CODEX_CREDENTIALS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 ANTIGRAVITY_CREDENTIALS = ("GEMINI_API_KEY",)
 # OpenCode signs in to whichever provider its model names (see cloud_login.CLOUD_KEYS).
@@ -128,6 +134,13 @@ def provider_credentials(provider: str, api_key_env: str | None = None) -> froze
     if api_key_env and not is_job_secret(api_key_env):
         names.add(api_key_env)
     return frozenset(names)
+
+
+def pane_keep(provider: str, credentials: Iterable[str]) -> frozenset[str]:
+    """What a pane of ``provider``'s keeps of the secret-looking names it
+    inherits: its ``credentials`` and, for Claude Code, its TLS client
+    settings (CLAUDE_TLS_CLIENT), which no other provider's pane gets."""
+    return frozenset(credentials) | frozenset(CLAUDE_TLS_CLIENT if provider == "claude" else ())
 
 
 def agent_credentials(provider: str, profile: str, repo_root: str | None = None) -> frozenset[str]:
@@ -411,4 +424,4 @@ __all__ = ["SECRET_ENV", "SECRET_PREFIXES", "is_job_secret", "scrub_secrets",
            "provider_credentials", "agent_credentials", "pane_unset", "BASE_ENV", "env_allowed",
            "PERSONAL_KEYS", "register_proxy", "clear_proxy", "proxy_exempt", "pane_deny",
            "org_key", "org_key_exempt", "secret_looking", "NOT_SECRET", "AGENT_ENV_MODES",
-           "allowlist_drops", "record_env", "env_report", "dropped_for", "launch_keep"]
+           "allowlist_drops", "record_env", "env_report", "dropped_for", "launch_keep", "pane_keep"]
