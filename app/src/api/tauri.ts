@@ -245,5 +245,5 @@ export function readAbout(): Promise<About> {
 }
 
 export function tauriClient(): DaemonClient {
-  return new DaemonClient({ baseUrl: SHELL_URL, token: "", fetch: tauriFetch });
+  return new DaemonClient({ baseUrl: SHELL_URL, token: "", fetch: tauriFetch, connect: tauriSocket });
 }
