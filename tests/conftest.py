@@ -163,6 +163,7 @@ def no_login_shell(monkeypatch):
     monkeypatch.setattr(login_shell_env, "_run", no_shell)
     monkeypatch.setattr(login_shell_env, "_values", {})
     monkeypatch.setattr(login_shell_env, "_loading", None)
+    monkeypatch.setattr(login_shell_env, "_reader", False)
 
 
 @pytest.fixture
