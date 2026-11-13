@@ -6,8 +6,10 @@ import base64
 import copy
 import dataclasses
 import functools
+import json
 import time
 
+import loro
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.testclient import TestClient
@@ -740,19 +742,28 @@ def test_a_comment_follows_its_words_through_edits_and_detaches_only_when_they_a
     assert (a["state"], text[a["start"]:a["end"]]) == ("current", quote)
     assert a["start"] == text.index(quote)
 
-    # Pinned again before the server compacts, it still follows them.
+    # A reply (which has no anchor of its own) doesn't stop it being pinned again before the
+    # server compacts, and it still follows the words, now with a letter typed inside them.
+    plan_docs.comment(db, pid, parent=plans.to_dto(db, plans.get(db, pid))["threads"][0]["id"], text="Acme")
     assert plan_docs.reanchor(db, pid, lib.draft) == 1
-    lib.draft.insert("summary", 0, "🙂 ")
+    lib.draft.insert("summary", lib.draft.text("summary").index(quote) + 4, "😀")
     sd.sync(db, pid, **net)
     a = thread()
-    assert lib.draft.text("summary")[a["start"]:a["end"]] == quote
+    assert (a["state"], lib.draft.text("summary")[a["start"]:a["end"]]) == ("current", "cust😀omer")
 
-    # Deleting the words detaches it, even though the same word is typed elsewhere.
-    at = lib.draft.text("summary").index(quote)
-    lib.draft.delete("summary", at, len(quote))
+    # Deleting the words detaches it, even though the same word is typed elsewhere, and it
+    # stays detached once the draft is compacted to a shallow snapshot.
+    at = lib.draft.text("summary").index("cust")
+    lib.draft.delete("summary", at, len("cust😀omer"))
     lib.draft.insert("summary", 0, quote)
     sd.sync(db, pid, **net)
     assert thread()["state"] == "detached"
+    assert plan_docs.reanchor(db, pid, lib.draft) == 1
+    raw = lib.draft._doc
+    compacted = SharedDoc.load(raw.export(loro.ExportMode.ShallowSnapshot(raw.state_frontiers)))
+    stored = json.loads(db.conn.execute("SELECT anchor FROM plan_threads WHERE anchor IS NOT NULL").fetchone()[0])
+    cur = plan_docs.current(db, plans.get(db, pid))
+    assert plan_docs._where(cur, plan_docs._followed(compacted, stored))["state"] == "detached"
 
 
 @pytest.mark.parametrize("changed_too", [False, True], ids=["same word typed first", "and the word itself changed"])
