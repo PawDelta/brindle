@@ -135,6 +135,12 @@ class UnknownModel(BenchError):
 # -- tokens and dollars -----------------------------------------------------------------------------
 
 
+# The solo arm's opt-in to Claude Code's own multi-agent tools: its Workflow tool runs only when
+# the person asks for orchestration in their own words, so the person's permission is passed here.
+SOLO_NOTE = ("You may use subagents and multi-agent orchestration (including running a workflow) "
+             "if you judge that it helps; whether to is up to you.")
+
+
 def normalize_model(model: str) -> str:
     """``model`` without a context tag (``[1m]``), provider prefix or date suffix."""
     m = model.strip().lower()
@@ -616,11 +622,12 @@ def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict) -> dict:
         entries = iter_json(text.splitlines())
         return entries + ([{"type": "result", "gave_up": True}] if state["finished"] == "gave_up" else [])
 
-    entries = solo_session(run_turn, spec, args.max_answers)
+    prompt = f"{args.solo_note}\n\n{spec}" if args.solo_note else spec
+    entries = solo_session(run_turn, prompt, args.max_answers)
     stop = time.time()
     by_model = stream_usage(entries)
     return {"finished": state["finished"], "valid": state["finished"] in VALID_FINISHES, "why": None,
-            "permission_mode": permission_mode(entries),
+            "permission_mode": permission_mode(entries), "solo_note": args.solo_note,
             "wall_seconds": round(stop - t0, 1), "by_model": by_model,
             "by_role": {"solo": by_model}, "rates": {}, "free": set(),
             "prompts": solo_prompts(entries, iter_json(approvals.read_text().splitlines())),
@@ -1186,6 +1193,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--permission-mode", default="default",
                      help="solo: the CLI's --permission-mode ('' for the person's own setting); "
                           "the mode it ran in is recorded either way")
+    run.add_argument("--solo-note", default=SOLO_NOTE,
+                     help="solo: a line put before the spec ('' for none); recorded in the record")
     run.add_argument("--max-answers", type=int, default=5,
                      help="solo: how many closing questions to answer by resuming the session")
     run.add_argument("--supervisor-model", default=SUPERVISOR_MODEL,
