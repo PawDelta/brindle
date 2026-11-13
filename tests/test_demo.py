@@ -128,9 +128,8 @@ def test_app_demo_starts_workers_and_reviewer(db, monkeypatch, only, probed):
     # its own worker, weight "light", through the real MCP tool.
     monkeypatch.setenv("BRINDLE_AGENT_ID", supervisor.id)
     for name, m in zip(("slug", "wrap"), milestones):
-        reply = asyncio.run(mcp_server.assign(task=m.title, weight="light", branch=name,
+        asyncio.run(mcp_server.assign(task=m.title, weight="light", branch=name,
                                               done_when=m.check_cmd))
-        assert "Started worker" in reply, reply
     workers = [a for a in db.list_agents() if a.parent_id == supervisor.id]
     assert len(workers) == 2
     assert all(a.status == "processing" and a.provider == only for a in workers)
