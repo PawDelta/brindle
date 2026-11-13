@@ -28,10 +28,12 @@ The local server signs entitlements with a key it makes at each start, and a
 daemon trusts only keys pinned in brindle/pro/keys.py: each test daemon pins
 that run's key in its own process, in memory (never written anywhere).
 
-Bob "offline" (4): the daemon can't be cut off from the relay alone here (the
-Library URL must be the entitlement's issuer, which both daemons share), so
-bob's daemon is stopped and his edits are typed into his replica the way the
-engine types them, then his daemon starts again and its outbox sweep sends them.
+Bob "offline" (4): the Library URL must be the entitlement's issuer, which both
+daemons share, so bob's relay socket alone is routed through a TCP gate in this
+script (his daemon's process patches where that one socket connects; REST goes
+direct). Cutting the gate drops it as a network would; his daemon keeps running,
+his window keeps typing into the live socket, and restoring the gate lets his
+link reconnect and send its outbox.
 """
 
 from __future__ import annotations
@@ -191,11 +193,80 @@ class Server:
 # -- a brindle daemon -----------------------------------------------------------------------------
 
 PINNED_DAEMON = (
-    "import sys\n"
+    "import os, sys\n"
     "from brindle.pro import keys\n"
     "keys.PINNED_KEYS[sys.argv[1]] = sys.argv[2]   # this run's local Library key, in this process only\n"
+    "gate = os.environ.get('LIVE_RELAY_GATE')\n"
+    "if gate:\n"
+    "    import asyncio\n"
+    "    from brindle.pro import live_docs\n"
+    "    class Gated:                               # the relay socket only, through the driver's gate\n"
+    "        def __getattr__(self, name):\n"
+    "            return getattr(asyncio, name)\n"
+    "        async def open_connection(self, host, port, **kw):\n"
+    "            return await asyncio.open_connection('127.0.0.1', int(gate), **kw)\n"
+    "    live_docs.asyncio = Gated()\n"
     "from brindle.cli import app\n"
     "app(sys.argv[3:], prog_name='brindle')\n")
+
+
+class Gate:
+    """A TCP door between one daemon and the relay: its relay socket goes
+    through here (REST calls don't), so the driver can take that machine
+    off the relay and bring it back while the daemon keeps running."""
+
+    def __init__(self, target: int) -> None:
+        self.target = target
+        self.open = True
+        self.port = 0
+        self.pairs: set[tuple] = set()
+        self.server = None
+
+    async def start(self) -> None:
+        self.server = await asyncio.start_server(self._serve, LOCAL, 0)
+        self.port = self.server.sockets[0].getsockname()[1]
+
+    async def _serve(self, reader, writer) -> None:
+        if not self.open:
+            writer.transport.abort()
+            return
+        try:
+            up_reader, up_writer = await asyncio.open_connection(LOCAL, self.target)
+        except OSError:
+            writer.transport.abort()
+            return
+        pair = (writer, up_writer)
+        self.pairs.add(pair)
+
+        async def pipe(r, w) -> None:
+            try:
+                while data := await r.read(65536):
+                    w.write(data)
+                    await w.drain()
+            except (OSError, ConnectionError):
+                pass
+            finally:
+                w.close()
+
+        try:
+            await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
+        finally:
+            self.pairs.discard(pair)
+
+    def cut(self) -> None:
+        """The network goes: every connection through here drops (no clean close), new ones fail."""
+        self.open = False
+        for pair in list(self.pairs):
+            for w in pair:
+                w.transport.abort()
+
+    def restore(self) -> None:
+        self.open = True
+
+    def stop(self) -> None:
+        self.cut()
+        if self.server is not None:
+            self.server.close()
 
 
 class Daemon:
@@ -205,12 +276,16 @@ class Daemon:
         self.port = 0
         self.token = ""
         self.starts = 0
+        self.gate: Gate | None = None
 
     def env(self) -> dict:
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("BRINDLE_", "TMUX", "CLAUDE"))}
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("BRINDLE_", "TMUX", "CLAUDE", "LIVE_RELAY_GATE"))}
         env.update({"BRINDLE_HOME": str(self.home), "BRINDLE_PRO_BASE_URL": self.server.base,
                     "BRINDLE_PRO_CREDENTIAL_STORE": "file", "BRINDLE_PRO_DEV": "1", "BRINDLE_VISUALS": "1",
                     "PYTHONPATH": str(ROOT / "src")})
+        if self.gate is not None:
+            env["LIVE_RELAY_GATE"] = str(self.gate.port)
         return env
 
     def run(self, *args: str) -> str:
@@ -302,6 +377,9 @@ class Window:
                 return
             if text is None:
                 self.closed = conn.closed_code or 1006
+                if self.closed == CLOSE_RELOAD:          # the daemon replaced the text: open again, as the app does
+                    self.reloads += 1
+                    asyncio.get_running_loop().create_task(self._open_once())
                 return
             frame = json.loads(text)
             if "peer" in frame:
@@ -324,11 +402,7 @@ class Window:
         await self._open_once()
 
         async def loaded():
-            if self.closed == CLOSE_RELOAD:
-                self.reloads += 1
-                await self._open_once()
-                return False
-            if self.closed is not None:
+            if self.closed not in (None, CLOSE_RELOAD):
                 raise Failed(f"{self.daemon.name}'s live socket closed with {self.closed}")
             return self.doc is not None and (self.peer is not None or not writer)
 
@@ -378,16 +452,6 @@ def seed_plan() -> None:
     print(plans.propose(db, boss, LEDE, sections=SECTIONS)["id"])
 
 
-def type_offline(doc_id: str, section: str, text: str) -> None:
-    """An edit into this machine's replica, as the engine makes one while no relay is reachable."""
-    from brindle.db import DB
-    from brindle.plan_drafts import DraftReplica
-
-    replica = DraftReplica.open(DB(), doc_id)
-    replica.insert(section, len(replica.text(section)), text)
-    print(json.dumps(replica.sections()))
-
-
 def store_credentials() -> None:
     """live_local.sh writes credentials.json as plain JSON; brindle's file store
     holds base64 of it (keystore._encode). Save what it wrote through that store."""
@@ -424,6 +488,8 @@ class Run:
         self.server.start()
         await self.server.ready()
         self.plan = self.alice.run("--seed-plan")
+        self.bob.gate = Gate(self.server.port)
+        await self.bob.gate.start()
         for d in (self.alice, self.bob):
             d.run("--store-credentials")
             d.start()
@@ -497,20 +563,21 @@ class Run:
 
     # 4
     async def check_offline(self) -> str:
-        await self.b.close()
-        self.bob.stop()
-        typed = " (typed offline by bob)"
-        self.bob.run("--type-offline", self.doc, "notes", typed)
-        await pause(1.0)
-        if typed in self.a.text("notes"):
-            raise Failed("bob's offline edit reached alice while his daemon was down")
-        self.bob.start()
-        await self.bob.ready()
-        await until("bob's queued edit to reach alice", lambda: self.a.text("notes").endswith(typed), SWEEP_WAIT)
-        self.b = await Window(self.bob, self.doc).open()
-        text = await self.converged("notes", typed)
+        """Bob's daemon keeps running and his window stays open; only his relay socket is cut."""
+        self.bob.gate.cut()
+        typed, first = " (typed by bob, offline)", "Bob: "
+        await self.b.edit("notes", len(self.b.text("notes")), typed)
+        await self.b.edit("notes", 0, first)
+        await pause(3.0)
+        relay = self.server.draft(self.doc)["texts"]["notes"]
+        if typed in self.a.text("notes") or typed in relay:
+            raise Failed("bob's edit got past the cut relay connection")
+        self.bob.gate.restore()
+        await until("bob's queued edits to reach alice",
+                    lambda: typed in self.a.text("notes") and self.a.text("notes").startswith(first), SWEEP_WAIT)
+        text = await self.converged("notes", typed, first)
         await self.relay_holds("notes", text)
-        return repr(text)
+        return f"held while cut (relay had {relay!r}); after: {text!r}"
 
     # 5
     async def check_author_offline(self) -> str:
@@ -645,6 +712,8 @@ async def main(args) -> int:
                 await window.close()
         for d in (alice, bob):
             d.stop()
+        if bob.gate is not None:
+            bob.gate.stop()
         server.stop()
     print()
     print(run.table())
@@ -655,9 +724,6 @@ async def main(args) -> int:
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--seed-plan"]:
         seed_plan()
-        sys.exit(0)
-    if sys.argv[1:2] == ["--type-offline"]:
-        type_offline(*sys.argv[2:5])
         sys.exit(0)
     if sys.argv[1:2] == ["--store-credentials"]:
         store_credentials()

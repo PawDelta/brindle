@@ -115,9 +115,7 @@ async def visual_live(socket: WebSocket) -> None:
 
     def current_plan():
         if teammate:
-            if replica is None:
-                raise DraftGone("the relay hasn't sent this design's text yet")
-            return None
+            return None     # the relay checks who may write; presence may come before the text does
         current_id, p = _live_doc(db, socket.path_params["id"])
         if current_id != doc_id:
             raise DraftGone("the visual's shared document changed")
@@ -150,6 +148,8 @@ async def visual_live(socket: WebSocket) -> None:
         onto the new one (DraftReplica.receive); None for nothing yet."""
         current_plan()
         if data is not None:
+            if replica is None:     # a teammate's window before the relay's text: it has nothing to edit
+                raise ValueError("no text to edit yet")
             return replica.receive(data)[1]
         return None
 

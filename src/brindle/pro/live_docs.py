@@ -78,6 +78,8 @@ MAX_CLAIMS = 8              # analysis_live.MAX_REPLICAS: numbers one connection
 MAX_REGISTER = 2            # analysis_live: "register" lists at most two marks
 SPARE_WINDOWS = 1           # numbers kept free, so a window opened offline can still type
 MAX_AWARENESS = 4000        # under the relay's 4096-character awareness state
+DRAIN_FOR = 10.0            # seconds a Freeze waits for the edits typed before it to reach the relay
+DRAIN_STEP = 0.1            # between looks
 MARK = "person"             # whom a number writes for: the person (replica and windows) ...
 SUPERVISOR = "supervisor"   # ... or the session's supervisor (plan_drafts.supervisor_peer)
 
@@ -856,15 +858,37 @@ class Manager:
         """An app window's Freeze (or Reopen): the Library makes the draft's
         text a version out for sign-off (or withdraws it), for the author only.
         The relay tells nobody of either, so this machine's windows are told
-        here; a refusal leaves the state as it was, and they are told that."""
+        here; a refusal leaves the state as it was, and they are told that.
+
+        A freeze is of what was typed here before it: those edits reach the
+        relay (acknowledged) first, else the Library is never asked. Edits
+        typed while it is asked are held, as on a frozen draft, and go once
+        it is refused or the version is reopened."""
         link = self.link(doc_id)
         try:
+            if not reopen and not link.frozen:
+                await self._drain(link)
+                link.blocked = True
             link.frozen = await asyncio.to_thread(_library_freeze, doc_id, reopen)
         except Exception as e:  # noqa: BLE001 - refused or unreachable: the windows keep the state they had
             log.warning("brindle: couldn't %s %s: %s", "reopen" if reopen else "freeze", doc_id, e)
         link.blocked = bool(link.frozen or link.author_offline)
         await link._to_windows(link.state_frame())
         await link.flush()
+
+    async def _drain(self, link: DocLink) -> None:
+        """Until every edit this machine holds of the doc is acknowledged by
+        the relay; raises RelayError if that can't happen now (no connection,
+        a lock holding the outbox back, or not within DRAIN_FOR)."""
+        waited = 0.0
+        while True:
+            await link.flush()
+            if not link.inflight and not link._unsent:
+                return
+            if link.conn is None or link.blocked or waited >= DRAIN_FOR:
+                raise RelayError("edits made here haven't reached the relay yet: nothing was frozen")
+            await self.wait(DRAIN_STEP)
+            waited += DRAIN_STEP
 
     async def sweep(self) -> None:
         """File edits typed offline that aren't on their plan yet, and start a

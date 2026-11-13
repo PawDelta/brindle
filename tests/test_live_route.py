@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import json
 import threading
 
 import loro
@@ -211,50 +212,66 @@ def test_an_app_window_edit_reaches_another_machine_under_the_number_its_socket_
 def test_the_authors_freeze_and_reopen_frames_lock_the_draft_for_sign_off_and_open_it_again(db, live_doc, monkeypatch):
     """DocPresence's Freeze and Reopen buttons send {"freeze": true} and
     {"reopen": true} on the live socket: the Library makes and withdraws the
-    version, and the channel stays open showing the lock."""
+    version, and the channel stays open showing the lock. The version holds
+    what was typed before Freeze even while the relay hasn't taken it yet (the
+    freeze goes over HTTP and could overtake it); what is typed once it is
+    frozen waits for Reopen."""
     from brindle.pro import live_docs
-    from test_live_docs import Clock, FakeRelay
+    from test_live_docs import Clock, FakeRelay, settle
 
     relay = FakeRelay(Clock(), author="owner")
-    sent = threading.Event()
     receive = relay.receive
-    at_reopen: list[str] = []
+    held: list[tuple] = []
+    stashed = threading.Event()
+    versions: dict[bool, list[str]] = {False: [], True: []}
 
-    def library(doc_id, reopen):                        # what the Library's freeze and reopen do to the relay
-        if reopen:
-            at_reopen.append(relay.sections()["body"])  # the socket handles frames in turn: the edit came first
+    def library(doc_id, reopen):                        # the Library's freeze and reopen, and the text each saw
+        versions[reopen].append(relay.sections()["body"])
         relay.frozen = None if reopen else 2
         return relay.frozen
 
-    def receive_and_note(pipe, text):
-        receive(pipe, text)
-        sent.set()
+    def slow_socket(pipe, text):                        # the relay takes an update only once time passes
+        if json.loads(text)["type"] == "update":
+            held.append((pipe, text))
+            stashed.set()
+        else:
+            receive(pipe, text)
+
+    async def time_passes(seconds):                     # Manager.wait: the held updates arrive and are acked
+        while held:
+            receive(*held.pop(0))
+        await settle(here.link("doc1"))
 
     monkeypatch.setattr(live_docs, "_library_freeze", library, raising=False)
-    here = live_docs.Manager(relay.transport("owner"), available=lambda: True, drive=False)
+    here = live_docs.Manager(relay.transport("owner"), available=lambda: True, drive=False, wait=time_passes)
     app = build_app(TOKEN)
     app.state.live_docs = here
     with TestClient(app) as client:
         client.portal.call(here.link("doc1").connect)
+        relay.receive = slow_socket
         with client.websocket_connect(f"/v1/visuals/{live_doc}/live") as window:
             window.send_text(TOKEN)
             peer = window.receive_json()["peer"]
             window.receive_json()
             doc = SharedDoc.load(base64.b64decode(window.receive_json()["update"]))
             doc.set_peer_id(int(peer))
-            window.send_json({"freeze": True})
-            assert window.receive_json()["state"]["lock"] == "sign_off"
-            before = doc.version()
-            doc.insert("body", 5, "!")
-            window.send_json({"update": encoded(doc.export_updates(before))})
-            relay.receive = receive_and_note
+            for text in ("!", "?"):
+                before = doc.version()
+                doc.insert("body", len(doc.text("body")), text)
+                window.send_json({"update": encoded(doc.export_updates(before))})
+                if text == "!":                             # typed before Freeze, still on its way to the relay
+                    window.send_json({"freeze": True})
+                    assert window.receive_json()["state"]["lock"] == "sign_off"
+                    assert versions[False] == ["World!"]       # the version has it
+            stashed.clear()
             window.send_json({"reopen": True})
             assert window.receive_json()["state"]["lock"] is None
-            assert sent.wait(FIRST_FRAME_TIMEOUT)               # the held edit goes once it is open again
+            assert stashed.wait(FIRST_FRAME_TIMEOUT)            # the edit typed while frozen goes once it is open
+            client.portal.call(time_passes, 0)
         client.portal.call(here.stop)
-    assert at_reopen == ["World"]                           # held back while frozen
+    assert versions[True] == ["World!"]                     # "?" was held while frozen
     assert relay.refusals == []
-    assert relay.sections()["body"] == "World!"
+    assert relay.sections()["body"] == "World!?"
 
 
 def test_a_teammate_opens_a_design_shared_with_them_by_its_library_id_and_writes_in_it(db):
@@ -273,6 +290,14 @@ def test_a_teammate_opens_a_design_shared_with_them_by_its_library_id_and_writes
         heard.set()
 
     here = live_docs.Manager(relay.transport("bob"), available=lambda: True, drive=False)
+    told = threading.Event()
+    pass_on = here.awareness
+
+    async def awareness(lease, section, data):          # the socket passed a presence frame on to the relay
+        told.set()
+        await pass_on(lease, section, data)
+
+    here.awareness = awareness
     app = build_app(TOKEN)
     app.state.live_docs = here
     path = "/v1/visuals/ad_shared1/live"
@@ -281,6 +306,11 @@ def test_a_teammate_opens_a_design_shared_with_them_by_its_library_id_and_writes
             waiting.send_text(TOKEN)
             assert waiting.receive_json() == {"peer": None}
             assert waiting.receive_json()["state"]["lock"] is None
+            # DocPresence announces the reader at once, before any text has come.
+            presence = loro.EphemeralStore(30_000)
+            presence.set("123-cm-user", {"name": "Bob"})
+            waiting.send_json({"section": "__document__", "awareness": encoded(presence.encode_all())})
+            assert told.wait(FIRST_FRAME_TIMEOUT)
             client.portal.call(here.link("ad_shared1").connect)     # the link's first join stores the relay's text
             with pytest.raises(WebSocketDisconnect) as closed:
                 waiting.receive_json()
@@ -291,6 +321,13 @@ def test_a_teammate_opens_a_design_shared_with_them_by_its_library_id_and_writes
             assert window.receive_json()["state"]["lock"] is None
             doc = SharedDoc.load(base64.b64decode(window.receive_json()["update"]))
             assert doc.sections() == REVISION
+            if peer is None:
+                # The reloaded socket's close came first: the link closed with no window left, and
+                # joins again for this one (its task does; here the test), lending it a number.
+                client.portal.call(here.link("ad_shared1").connect)
+                while "peer" not in (frame := window.receive_json()):
+                    pass
+                peer = frame["peer"]
             doc.set_peer_id(int(peer))
             before = doc.version()
             doc.insert("body", 5, "!")
