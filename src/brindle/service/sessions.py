@@ -191,7 +191,14 @@ def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | No
     sessions (in any worktree). With some running and no ``choice``, a
     Conflict: open one ("o"), start another here alongside them ("a"), start
     in a new worktree ("n"), or pause one and start fresh here ("p").
+    "n" needs no session picked, nor any running: the app's Send asks for it
+    whenever a session is there, running or paused.
     ``live`` is the Conflict's list, to skip asking tmux again."""
+    if choice == "n":
+        made = _new_session_worktree(db, ws, defer_setup=True)
+        created = made.workspace
+        return Placed(created, [Note(f"✓ new session in its own worktree: {created.path} ({created.branch})")],
+                      fresh=True, finish=made.finish)
     live = sessions_mod.live(db, ws.repo_root) if live is None else live
     if not live:
         return Placed(ws)
@@ -204,11 +211,6 @@ def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | No
         return Opened(picked.workspace, picked.root)
     if choice == "a":
         return Placed(ws)
-    if choice == "n":
-        made = _new_session_worktree(db, ws, defer_setup=True)
-        created = made.workspace
-        return Placed(created, [Note(f"✓ new session in its own worktree: {created.path} ({created.branch})")],
-                      fresh=True, finish=made.finish)
     # A session starts here next: keep its local models loaded.
     agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
     return Placed(ws, [Note(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back.")])
