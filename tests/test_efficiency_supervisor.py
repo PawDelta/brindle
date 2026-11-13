@@ -109,15 +109,16 @@ def restarting(db, session, tmp_path, monkeypatch):
             db_.set_status(a.id, "processing")
     monkeypatch.setattr(agents, "_launch", launch)
 
-    def start(on: bool = True, before_stop=lambda: None) -> SimpleNamespace:
+    def start(on: bool = True, around_stop=lambda end_turn: end_turn()) -> SimpleNamespace:
+        """``around_stop(end_turn)``: what else happens as the turn ends."""
         session(supervisor_state=on, supervisor_restart_tokens=50_000)
         decide_and_ask("storage", "Ship on Friday or Monday?")
         db.update_agent("boss", session_ref="old-long-chat")
         db.set_status("boss", "processing")
         calls.mail = db.enqueue("boss", "[brindle] w2 finished", None)
-        before_stop()
         big = transcript(tmp_path, 60_000, "Ship on Monday.")
-        agents.handle_hook(db, "boss", "stop", {"transcript_path": str(big), "session_id": "old-long-chat"})
+        around_stop(lambda: agents.handle_hook(
+            db, "boss", "stop", {"transcript_path": str(big), "session_id": "old-long-chat"}))
         return calls
 
     def helper(argv: list[str]) -> None:
@@ -187,7 +188,10 @@ def turn_completed(db, tmp_path) -> None:
     ("turn completed", [], "idle"),
     pytest.param("paused", [], "paused", marks=pytest.mark.variant(
         "a pause before the helper starts must not be undone by it")),
-    ("paused during launch", ["boss"], "paused"),
+    pytest.param("paused during launch", ["boss"], "paused", marks=pytest.mark.variant(
+        "the person's own pause() during the launch's preflight, beside the app exit's batch pause")),
+    pytest.param("app quit during launch", ["boss"], "paused", marks=pytest.mark.variant(
+        "the app's exit pauses through record_pauses, a second entry point that once skipped the cancel")),
 ])
 def test_a_restart_gives_way_to_what_happened_since_its_claim(db, tmp_path, restarting, meanwhile,
                                                               stopped, status):
@@ -197,8 +201,10 @@ def test_a_restart_gives_way_to_what_happened_since_its_claim(db, tmp_path, rest
         turn_completed(db, tmp_path)
     elif meanwhile == "paused":
         agents.pause(db, "boss")
-    else:   # the person pauses while the fresh launch is in its preflight, before it commits
+    elif meanwhile == "paused during launch":   # while the fresh launch is in its preflight, before it commits
         calls.preflight = lambda: agents.pause(db, "boss")
+    else:   # the app's daemon on its way out records every session's pause at once
+        calls.preflight = lambda: agents.record_pauses(db, ["boss"])
 
     calls.helper(argv)
     assert calls.stopped == stopped and calls.launched == []
@@ -206,12 +212,34 @@ def test_a_restart_gives_way_to_what_happened_since_its_claim(db, tmp_path, rest
     assert not db.restart_holding("boss")   # the mail is delivered again
 
 
-def test_no_restart_is_claimed_while_mail_is_part_way_to_the_supervisor(db, restarting):
-    def typing_a_message() -> None:
+@pytest.mark.parametrize("transport", ["pane", "inbox"])
+def test_no_restart_is_claimed_while_mail_is_part_way_to_the_supervisor(db, restarting, monkeypatch, transport):
+    """The turn ends while a message is part way in: typed into the pane, or
+    sent through the real direct inbox hand-over (a supervisor without brindle's
+    waiter), its send faked at the socket."""
+    from brindle import inbox
+
+    def typing_into_the_pane(end_turn) -> None:
         mail = db.enqueue("boss", "[brindle] review approved", None)
         db.set_mark("boss", "pane-delivery", json.dumps({"message_id": mail, "stage": "lead"}))
-    calls = restarting(before_stop=typing_a_message)
+        end_turn()
+
+    def sending_to_its_inbox(end_turn) -> None:
+        monkeypatch.setattr(inbox, "usable", lambda agent: True)
+        sends = []
+
+        def send(agent, text, **kw):
+            sends.append(text)
+            if len(sends) == 1:
+                end_turn()   # the turn ends while the hand-over's send is under way
+            return True
+        monkeypatch.setattr(inbox, "send", send)
+        mail = db.enqueue("boss", "[brindle] review approved", None)
+        assert agents._hand_over(db, db.get_agent("boss"), mail, "[brindle] review approved", None) == "delivered"
+
+    calls = restarting(around_stop=typing_into_the_pane if transport == "pane" else sending_to_its_inbox)
     assert calls.detached == [] and not db.restart_holding("boss")
+    assert not db.deliveries_in_flight("boss") or transport == "pane"   # a finished send is in flight no more
 
 
 def test_a_failed_fresh_launch_leaves_the_old_chat_resumable(db, restarting, monkeypatch):

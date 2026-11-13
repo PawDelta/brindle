@@ -1586,12 +1586,27 @@ def _restart_holds(c: sqlite3.Connection, agent_id: str, now: float | None = Non
         return False
 
 
-def _deliveries_in_flight(c: sqlite3.Connection, agent_id: str) -> bool:
+INBOX_SEND = "inbox-send:"   # agent_marks kind prefix, then the message id: a direct inbox send under way
+INBOX_SEND_EXPIRES = 120.0   # seconds after which such a mark is a dead sender's, holding nothing
+
+
+def _deliveries_in_flight(c: sqlite3.Connection, agent_id: str, now: float | None = None) -> bool:
     """Whether mail to ``agent_id`` is part way to it: a pane delivery typing
-    it, or a waiter that took it and hasn't finished handing it over."""
-    return (_pane_delivery_message(c, agent_id) is not None
+    it, a waiter that took it and hasn't finished handing it over, or a
+    direct inbox send (DB.claim_delivery) that hasn't finished."""
+    if (_pane_delivery_message(c, agent_id) is not None
             or c.execute(f"SELECT 1 FROM agent_marks WHERE agent_id=? AND kind LIKE '{WAITER_CLAIM}%' LIMIT 1",
-                         (agent_id,)).fetchone() is not None)
+                         (agent_id,)).fetchone() is not None):
+        return True
+    now = time.time() if now is None else now
+    for row in c.execute(f"SELECT value FROM agent_marks WHERE agent_id=? AND kind LIKE '{INBOX_SEND}%'",
+                         (agent_id,)):
+        try:
+            if now - float(json.loads(row["value"])["at"]) < INBOX_SEND_EXPIRES:
+                return True
+        except (ValueError, TypeError, KeyError):
+            continue
+    return False
 
 
 def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
@@ -2770,7 +2785,9 @@ class DB:
         Returns the claim's time, or None if another path already had it: one
         that delivered it, or a pane delivery typing it (its row stays
         undelivered while its mark owns it). None too while a supervisor
-        restart holds the recipient's queue (RESTART_HOLD)."""
+        restart holds the recipient's queue (RESTART_HOLD). Until
+        ``finish_delivery`` or ``release_delivery``, the send counts as in
+        flight (_deliveries_in_flight), so no restart stops the recipient under it."""
         now = time.time()
         with self.tx() as c:
             row = c.execute("SELECT agent_id FROM inbox WHERE id=? AND delivered_at IS NULL",
@@ -2779,13 +2796,21 @@ class DB:
                     or _restart_holds(c, row["agent_id"], now)):
                 return None
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (now, message_id))
+            c.execute("INSERT OR REPLACE INTO agent_marks (agent_id, kind, value) VALUES (?, ?, ?)",
+                      (row["agent_id"], f"{INBOX_SEND}{message_id}", json.dumps({"at": now})))
         return now
+
+    def finish_delivery(self, message_id: int) -> None:
+        """A claimed send (claim_delivery) is over, sent or put back: no longer in flight."""
+        with self.tx() as c:
+            c.execute("DELETE FROM agent_marks WHERE kind=?", (f"{INBOX_SEND}{message_id}",))
 
     def release_delivery(self, message_id: int, claimed_at: float) -> None:
         """Put back a message whose send failed, only if the claim is still this one's."""
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND delivered_at=?",
                       (message_id, claimed_at))
+        self.finish_delivery(message_id)
 
     # -- permission requests left to the person (brindle.permissions) --
 

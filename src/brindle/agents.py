@@ -1698,11 +1698,6 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
     Records every status first and closes windows last: this can run inside
     one of the windows it closes (see _pause_when_done)."""
     owners = pane_owners(db)    # first: a tmux server that doesn't answer stops the pause before anything changes
-    from brindle import supervisor_state
-
-    # A supervisor restart under way gives way to the pause: a launch it has
-    # begun ends first (so its window is among those closed), and none follows.
-    supervisor_state.cancel(db, root_id)
     closing = _record_pause(db, root_id)
     windows = closing.windows(db, owners)
     # Before the windows close: closing one ends the CLI in it, and what that
@@ -1787,7 +1782,13 @@ def _sessions_in_use(closing: Closing) -> set[str]:
 
 def _record_pause(db: DB, root_id: str) -> Closing:
     """A pause's first step: ``root_id`` and everything it started marked
-    paused (done, for a worker that had finished), nothing closed yet."""
+    paused (done, for a worker that had finished), nothing closed yet.
+    Every pause, one by one or all at once (record_pauses), comes through here."""
+    from brindle import supervisor_state
+
+    # A supervisor restart under way gives way to the pause: a launch it has
+    # begun commits first (so its window is among those closed), and none follows.
+    supervisor_state.cancel(db, root_id)
     agents, paused, sessions = tree(db, root_id), [], set()
     for a in agents:
         ws = db.get_workspace(a.workspace_id)
@@ -3056,7 +3057,9 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
     try:
         sent = _send_to_inbox(db, agent, text, who)
     finally:
-        if not sent:
+        if sent:
+            db.finish_delivery(message_id)   # no longer in flight (a supervisor restart waits for that)
+        else:
             db.release_delivery(message_id, claimed)
     return sent
 
