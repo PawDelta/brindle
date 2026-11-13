@@ -7,7 +7,7 @@ from brindle import permissions
 
 
 @pytest.mark.parametrize("decision, profile", [
-    pytest.param("deny", False, id="deny"),
+    pytest.param("deny", False, id="deny", marks=pytest.mark.variant("deny rules bind possible expansions (base case of the bypass)")),
     pytest.param("ask", False, id="ask", marks=pytest.mark.variant("ask rules also bind possible expansions")),
     pytest.param("deny", True, id="profile", marks=pytest.mark.variant("profile glob denies also bind possible expansions")),
 ])
