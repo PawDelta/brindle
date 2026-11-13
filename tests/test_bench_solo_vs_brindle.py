@@ -213,11 +213,14 @@ def test_probe_lists_the_sessions_pr_in_its_inbox(db, tmp_path, opened, kinds):
         if opened:   # opened from that preparation: its row stays, the card is the open PR's
             c.execute("INSERT INTO session_prs (root_id, branch, url, opened_at)"
                       " VALUES ('r1', 'brindle/session-1', 'https://github.com/o/r/pull/7', ?)", (time.time(),))
+    from brindle.daemon import session_review
+    lookup = session_review.open_pr_for_head
     ns = {"__name__": "bench_probe"}
     exec(bench.PROBE, ns)
     out = ns["main"]({"op": "snapshot", "clone": repo, "root_id": "r1", "repo_root": repo})
     assert out["errors"] == []
     assert [i["kind"] for i in out["inbox"]] == kinds
+    assert session_review.open_pr_for_head is lookup   # its GitHub stub doesn't outlive the probe
 
 
 def test_report_medians_and_require_runs(tmp_path):

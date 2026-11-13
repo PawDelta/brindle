@@ -618,10 +618,15 @@ def main(args):
             # brindle recorded: in this short-lived process GitHub is never asked.
             from brindle.daemon import session_review
             from brindle.service import inbox
+            kept = session_review.open_pr_for_head, session_review.head_pr_known_none
             session_review.open_pr_for_head = lambda *a, **k: None
             session_review.head_pr_known_none = lambda *a, **k: False
             link = {"agent_id": rid, "workspace_id": home.id, "root_id": rid}
-            for i in guarded("pr", lambda: inbox._pr_items(db, rid, home.branch, home, link)) or []:
+            try:
+                prs = guarded("pr", lambda: inbox._pr_items(db, rid, home.branch, home, link)) or []
+            finally:   # put back: the probe may run inside a longer-lived process (tests)
+                session_review.open_pr_for_head, session_review.head_pr_known_none = kept
+            for i in prs:
                 items.append({"kind": i.kind, "agent_id": rid, "detail": i.detail or i.url})
             from brindle import session_sync
             stuck = guarded("sync", lambda: session_sync.needs_you(db, home))
