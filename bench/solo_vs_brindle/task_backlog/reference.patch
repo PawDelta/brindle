@@ -1,0 +1,942 @@
+diff --git a/src/click/__init__.py b/src/click/__init__.py
+index a34ab02..61f8c42 100644
+--- a/src/click/__init__.py
++++ b/src/click/__init__.py
+@@ -56,6 +56,7 @@ from .termui import unstyle as unstyle
+ from .types import BOOL as BOOL
+ from .types import Choice as Choice
+ from .types import DateTime as DateTime
++from .types import Duration as Duration
+ from .types import File as File
+ from .types import FLOAT as FLOAT
+ from .types import FloatRange as FloatRange
+diff --git a/src/click/_compat.py b/src/click/_compat.py
+index 8507a50..491ebd4 100644
+--- a/src/click/_compat.py
++++ b/src/click/_compat.py
+@@ -15,8 +15,13 @@ WIN = sys.platform.startswith("win")
+ # One CSI escape sequence per the ECMA-48 grammar: parameter bytes (0x30-0x3F),
+ # intermediate bytes (0x20-0x2F), then a final byte (0x40-0x7E). Broader than the
+ # SGR codes Click emits, so foreign sequences (colon-delimited true-color, mouse
+-# reporting) are stripped too.
+-_ansi_re = re.compile(r"\033\[[0-?]*[ -/]*[@-~]")
++# reporting) are stripped too. The second alternative is an OSC 8 hyperlink
++# sequence (``ESC ] 8 ; params ; URI`` ended by ``ESC \`` or ``BEL``), which
++# is invisible too: only the link text between the opening and closing
++# sequences is shown.
++_ansi_re = re.compile(
++    r"\033\[[0-?]*[ -/]*[@-~]|\033\]8;[^;\007\033]*;[^\007\033]*(?:\033\\|\007)"
++)
+ 
+ 
+ def _make_text_stream(
+diff --git a/src/click/formatting.py b/src/click/formatting.py
+index b9f86b7..1e43df5 100644
+--- a/src/click/formatting.py
++++ b/src/click/formatting.py
+@@ -1,12 +1,17 @@
+ from __future__ import annotations
+ 
+ import collections.abc as cabc
++import re
++import typing as t
+ from contextlib import contextmanager
+ from gettext import gettext as _
+ 
+ from ._compat import term_len
+ from .parser import _split_opt
+ 
++if t.TYPE_CHECKING:
++    from ._textwrap import TextWrapper
++
+ # Can force a width.  This is used by the test system
+ FORCED_WIDTH: int | None = None
+ 
+@@ -44,6 +49,11 @@ def wrap_text(
+     line containing the ``\\b`` character (``\\x08``) to indicate that
+     no rewrapping should happen in that block.
+ 
++    If paragraphs are handled, a line starting with a list marker (``-``,
++    ``*``, ``+``, or a number followed by ``.`` or ``)``, then whitespace)
++    starts a list item. Each item starts on its own line and wraps with its
++    continuation lines indented under the item text.
++
+     :param text: the text that should be rewrapped.
+     :param width: the maximum width for the text. A word wider than that is not cut, and
+                   goes on a line of its own.
+@@ -58,6 +68,10 @@ def wrap_text(
+         Lines no longer break within a hyphenated word or a long word. A word
+         wider than ``width`` goes on a line of its own.
+ 
++    .. versionchanged:: 8.6.0
++        With ``preserve_paragraphs``, list items keep their own lines, and a
++        line of only whitespace separates paragraphs like an empty line.
++
+     .. versionchanged:: 8.4.0
+         Width is measured in visible characters. ANSI escape sequences in
+         ``text``, ``initial_indent``, or ``subsequent_indent`` no longer
+@@ -80,24 +94,56 @@ def wrap_text(
+     if not preserve_paragraphs:
+         return wrapper.fill(text)
+ 
+-    p: list[tuple[int, bool, str]] = []
++    # A paragraph is "raw" (a \b block), plain "text", or a "list": optional
++    # intro text followed by items of (extra indent, marker, item text).
++    p: list[tuple[int, str, t.Any]] = []
+     buf: list[str] = []
++    originals: list[str] = []
+     indent = None
+ 
++    def _split_list(par_indent: int) -> tuple[str, list[tuple[int, str, str]]]:
++        intro: list[str] = []
++        items: list[tuple[int, str, list[str]]] = []
++
++        for line, original in zip(buf, originals):
++            stripped = original.lstrip()
++            match = _list_item_re.match(stripped)
++
++            if match is not None:
++                lead = len(original) - len(stripped)
++                extra = max(lead - par_indent, 0)
++                items.append((extra, match.group(1), [stripped[match.end() :]]))
++            elif items:
++                items[-1][2].append(stripped)
++            else:
++                intro.append(line)
++
++        return " ".join(intro), [
++            (extra, marker, " ".join(words)) for extra, marker, words in items
++        ]
++
+     def _flush_par() -> None:
+         if not buf:
+             return
+         if buf[0].strip() == "\b":
+-            p.append((indent or 0, True, "\n".join(buf[1:])))
++            p.append((indent or 0, "raw", "\n".join(buf[1:])))
+         else:
+-            p.append((indent or 0, False, " ".join(buf)))
++            intro, items = _split_list(indent or 0)
++
++            if items:
++                p.append((indent or 0, "list", (intro, items)))
++            else:
++                p.append((indent or 0, "text", " ".join(buf)))
+         del buf[:]
++        del originals[:]
+ 
+     for line in text.splitlines():
+-        if not line:
++        # A line holding only whitespace separates paragraphs like an empty one.
++        if not line.strip():
+             _flush_par()
+             indent = None
+         else:
++            originals.append(line)
+             if indent is None:
+                 orig_len = term_len(line)
+                 line = line.lstrip()
+@@ -106,16 +152,46 @@ def wrap_text(
+     _flush_par()
+ 
+     rv = []
+-    for indent, raw, text in p:
++    for indent, kind, payload in p:
+         with wrapper.extra_indent(" " * indent):
+-            if raw:
+-                rv.append(wrapper.indent_only(text))
++            if kind == "raw":
++                rv.append(wrapper.indent_only(payload))
++            elif kind == "text":
++                rv.append(wrapper.fill(payload))
+             else:
+-                rv.append(wrapper.fill(text))
++                intro, items = payload
++                lines = [wrapper.fill(intro)] if intro else []
++
++                for extra, marker, item_text in items:
++                    with wrapper.extra_indent(" " * extra):
++                        lines.append(_fill_item(wrapper, marker, item_text))
++
++                rv.append("\n".join(lines))
+ 
+     return "\n\n".join(rv)
+ 
+ 
++# A list item: a bullet ("-", "*", "+") or a number followed by "." or ")",
++# then whitespace and the item text.
++_list_item_re = re.compile(r"([-*+]|\d+[.)])[ \t]+(?=\S)")
++
++
++def _fill_item(wrapper: TextWrapper, marker: str, text: str) -> str:
++    """Wrap one list item: the marker starts the first line, and continuation
++    lines are indented to line up with the item text.
++    """
++    old_initial_indent = wrapper.initial_indent
++    old_subsequent_indent = wrapper.subsequent_indent
++    wrapper.initial_indent = f"{old_initial_indent}{marker} "
++    wrapper.subsequent_indent = old_subsequent_indent + " " * (len(marker) + 1)
++
++    try:
++        return wrapper.fill(text)
++    finally:
++        wrapper.initial_indent = old_initial_indent
++        wrapper.subsequent_indent = old_subsequent_indent
++
++
+ class HelpFormatter:
+     """This class helps with formatting text-based help pages.  It's
+     usually just needed for very special internal cases, but it's also
+diff --git a/src/click/termui.py b/src/click/termui.py
+index 8fe0085..5cd66a0 100644
+--- a/src/click/termui.py
++++ b/src/click/termui.py
+@@ -651,6 +651,7 @@ def style(
+     reverse: bool | None = None,
+     strikethrough: bool | None = None,
+     reset: bool = True,
++    link: str | None = None,
+ ) -> str:
+     """Styles a text with ANSI styles and returns the new string.  By
+     default the styling is self contained which means that at the end
+@@ -712,6 +713,13 @@ def style(
+     :param reset: by default a reset-all code is added at the end of the
+                   string which means that styles do not carry over.  This
+                   can be disabled to compose styles.
++    :param link: if provided, a URL that the text links to. The styled text
++        is wrapped in an OSC 8 hyperlink, which terminals that support it
++        show as a clickable link. The link is always closed at the end of
++        the text, even with ``reset=False``.
++
++    .. versionchanged:: 8.6.0
++        Added the ``link`` parameter.
+ 
+     .. versionchanged:: 8.5.0
+         All invalid color values raise :exc:`ValueError`. 256-color index
+@@ -735,8 +743,14 @@ def style(
+     if not isinstance(text, str):
+         text = str(text)
+ 
++    if link and any(ord(c) < 32 or ord(c) == 127 for c in link):
++        raise ValueError(f"Invalid link {link!r}: control characters are not allowed.")
++
+     bits = []
+ 
++    if link:
++        bits.append(f"\033]8;;{link}\033\\")
++
+     if fg is not None:
+         bits.append(f"\033[{_interpret_color(fg)}m")
+ 
+@@ -762,6 +776,8 @@ def style(
+     bits.append(text)
+     if reset:
+         bits.append(_ansi_reset_all)
++    if link:
++        bits.append("\033]8;;\033\\")
+     return "".join(bits)
+ 
+ 
+diff --git a/src/click/testing.py b/src/click/testing.py
+index ac9a93d..a5b0960 100644
+--- a/src/click/testing.py
++++ b/src/click/testing.py
+@@ -192,18 +192,27 @@ class _NamedTextIOWrapper(io.TextIOWrapper):
+     _name: str
+     _mode: str
+     _original_fd: int
++    _tty: bool
+ 
+     def __init__(
+         self,
+         buffer: t.BinaryIO,
+         name: str,
+         mode: str,
++        tty: bool = False,
+         **kwargs: t.Any,
+     ) -> None:
+         super().__init__(buffer, **kwargs)
+         self._name = name
+         self._mode = mode
+         self._original_fd = -1
++        self._tty = tty
++
++    def isatty(self) -> bool:
++        """Whether the stream pretends to be an interactive terminal, as
++        :class:`CliRunner`'s ``tty`` option asks.
++        """
++        return self._tty
+ 
+     def close(self) -> None:
+         """The buffer this object contains belongs to some other object,
+@@ -232,6 +241,13 @@ class _NamedTextIOWrapper(io.TextIOWrapper):
+         return self._mode
+ 
+ 
++def _check_terminal_width(width: object) -> None:
++    if isinstance(width, bool) or not isinstance(width, int) or width < 1:
++        raise ValueError(
++            f"terminal_width={width!r} is not valid. Use a positive integer."
++        )
++
++
+ def make_input_stream(
+     input: str | bytes | t.IO[t.Any] | None, charset: str
+ ) -> t.BinaryIO:
+@@ -362,6 +378,17 @@ class CliRunner:
+         ``1`` and ``2`` via :func:`os.dup2` to a temporary file, also catching
+         output from stale stream references, C extensions, and subprocesses.
+         ``fd`` is not supported on Windows.
++    :param tty: Whether `<stdout>` and `<stderr>` behave as an interactive
++        terminal: their ``isatty()`` returns ``True``, so styles are kept
++        unless ``color=False`` is passed, progress bars are drawn, and
++        :func:`click.clear` writes its escape sequence. `<stdin>` holds the
++        scripted input and is never a terminal.
++    :param terminal_width: The width of the emulated terminal in columns.
++        Help pages are wrapped to it, and :func:`shutil.get_terminal_size`
++        reports it, with 24 lines, during an invocation.
++
++    .. versionchanged:: 8.6.0
++        Added the ``tty`` and ``terminal_width`` parameters.
+ 
+     .. versionchanged:: 8.6.0
+         ``echo_stdin`` echoes the `<stdin>` bytes ``\\x04`` and ``\\x1a`` to
+@@ -385,6 +412,8 @@ class CliRunner:
+     echo_stdin: bool
+     catch_exceptions: bool
+     capture: CaptureMode
++    tty: bool
++    terminal_width: int
+ 
+     def __init__(
+         self,
+@@ -393,7 +422,10 @@ class CliRunner:
+         echo_stdin: bool = False,
+         catch_exceptions: bool = True,
+         capture: CaptureMode = "sys",
++        tty: bool = False,
++        terminal_width: int = 80,
+     ) -> None:
++        _check_terminal_width(terminal_width)
+         if capture not in {"sys", "fd"}:
+             raise ValueError(
+                 f"capture={capture!r} is not valid. Choose from 'sys' or 'fd'."
+@@ -407,6 +439,8 @@ class CliRunner:
+         self.echo_stdin = echo_stdin
+         self.catch_exceptions = catch_exceptions
+         self.capture = capture
++        self.tty = tty
++        self.terminal_width = terminal_width
+ 
+     def get_default_prog_name(self, cli: Command) -> str:
+         """Given a command object it will return the default program name
+@@ -429,7 +463,9 @@ class CliRunner:
+         self,
+         input: str | bytes | t.IO[t.Any] | None = None,
+         env: cabc.Mapping[str, str | None] | None = None,
+-        color: bool = False,
++        color: bool | None = None,
++        tty: bool | None = None,
++        terminal_width: int | None = None,
+     ) -> cabc.Generator[tuple[io.BytesIO, io.BytesIO, io.BytesIO]]:
+         """A context manager that sets up the isolation for invoking of a
+         command line tool.  This sets up `<stdin>` with the given input data
+@@ -443,6 +479,13 @@ class CliRunner:
+         :param env: the environment overrides as dictionary.
+         :param color: whether the output should contain color codes. The
+                       application can still override this explicitly.
++                      Defaults to the value of ``tty``.
++        :param tty: overrides the runner's ``tty`` for this isolation.
++        :param terminal_width: overrides the runner's ``terminal_width`` for
++            this isolation.
++
++        .. versionchanged:: 8.6.0
++            Added the ``tty`` and ``terminal_width`` parameters.
+ 
+         .. versionadded:: 8.2
+             An additional output stream is returned, which is a mix of
+@@ -458,6 +501,14 @@ class CliRunner:
+         .. versionchanged:: 4.0
+             Added the ``color`` parameter.
+         """
++        if tty is None:
++            tty = self.tty
++        if color is None:
++            color = tty
++        if terminal_width is None:
++            terminal_width = self.terminal_width
++        _check_terminal_width(terminal_width)
++
+         bytes_input = make_input_stream(input, self.charset)
+         echo_input = None
+ 
+@@ -465,9 +516,15 @@ class CliRunner:
+         old_stdout = sys.stdout
+         old_stderr = sys.stderr
+         old_forced_width = formatting.FORCED_WIDTH
+-        formatting.FORCED_WIDTH = 80
++        formatting.FORCED_WIDTH = terminal_width
+ 
+-        env = self.make_env(env)
++        # shutil.get_terminal_size() reads these before asking the real
++        # terminal, so code under test sees the emulated size.
++        env = {
++            "COLUMNS": str(terminal_width),
++            "LINES": "24",
++            **self.make_env(env),
++        }
+ 
+         stream_mixer = StreamMixer()
+ 
+@@ -490,6 +547,7 @@ class CliRunner:
+             encoding=self.charset,
+             name="<stdout>",
+             mode="w",
++            tty=tty,
+         )
+ 
+         sys.stderr = _NamedTextIOWrapper(
+@@ -498,6 +556,7 @@ class CliRunner:
+             name="<stderr>",
+             mode="w",
+             errors="backslashreplace",
++            tty=tty,
+         )
+ 
+         @_pause_echo(echo_input)  # type: ignore
+@@ -629,8 +688,10 @@ class CliRunner:
+         input: str | bytes | t.IO[t.Any] | None = None,
+         env: cabc.Mapping[str, str | None] | None = None,
+         catch_exceptions: bool | None = None,
+-        color: bool = False,
++        color: bool | None = None,
+         context_settings: cabc.Mapping[str, t.Any] | None = None,
++        tty: bool | None = None,
++        terminal_width: int | None = None,
+         **extra: t.Any,
+     ) -> Result:
+         """Invokes a command in an isolated environment.  The arguments are
+@@ -653,11 +714,18 @@ class CliRunner:
+         :param extra: the keyword arguments to pass to :meth:`main`.
+         :param color: whether the output should contain color codes. The
+                       application can still override this explicitly.
++                      Defaults to the value of ``tty``.
+         :param context_settings: settings to pass to the
+             :class:`~click.Context` of the command. They take precedence
+             over the ``context_settings`` of the command. Unlike ``extra``,
+             they can hold a setting named like a parameter of this method,
+             such as ``color``.
++        :param tty: overrides the runner's ``tty`` for this call.
++        :param terminal_width: overrides the runner's ``terminal_width`` for
++            this call.
++
++        .. versionchanged:: 8.6.0
++            Added the ``tty`` and ``terminal_width`` parameters.
+ 
+         .. versionchanged:: 8.6.0
+             Added the ``context_settings`` parameter.
+@@ -701,7 +769,13 @@ class CliRunner:
+             except OSError:
+                 cap_out = cap_err = None
+ 
+-        with self.isolation(input=input, env=env, color=color) as outstreams:
++        with self.isolation(
++            input=input,
++            env=env,
++            color=color,
++            tty=tty,
++            terminal_width=terminal_width,
++        ) as outstreams:
+             # Point the captured streams' fileno() at the saved (original)
+             # fd so that C-level consumers like faulthandler keep working
+             # while fd 1/2 are redirected to the capture tmpfile.
+diff --git a/src/click/types.py b/src/click/types.py
+index 5d11e9f..d36fca7 100644
+--- a/src/click/types.py
++++ b/src/click/types.py
+@@ -4,11 +4,13 @@ import abc
+ import collections.abc as cabc
+ import enum
+ import os
++import re
+ import stat
+ import sys
+ import typing as t
+ import uuid
+ from datetime import datetime
++from datetime import timedelta
+ from gettext import gettext as _
+ from gettext import ngettext
+ 
+@@ -878,6 +880,145 @@ class UUIDParameterType(ParamType[uuid.UUID]):
+         return "UUID"
+ 
+ 
++class DurationInfoDict(ParamTypeInfoDict):
++    min: float | None
++    max: float | None
++
++
++# Units in the order they must appear, longest first, with their keyword for
++# timedelta. "ms" comes before "m" in the pattern so "5ms" is not read as
++# five minutes followed by a stray "s".
++_DURATION_UNITS: t.Final[dict[str, str]] = {
++    "w": "weeks",
++    "d": "days",
++    "h": "hours",
++    "m": "minutes",
++    "s": "seconds",
++    "ms": "milliseconds",
++}
++_DURATION_NUMBER = r"\d+(?:\.\d+)?"
++_duration_bare_re = re.compile(_DURATION_NUMBER)
++_duration_part_re = re.compile(rf"({_DURATION_NUMBER})(ms|w|d|h|m|s)", re.IGNORECASE)
++_duration_re = re.compile(
++    rf"(?:{_DURATION_NUMBER}(?:ms|w|d|h|m|s)\s*)+", re.IGNORECASE
++)
++
++
++def _seconds_to_timedelta(value: timedelta | float) -> timedelta:
++    if isinstance(value, timedelta):
++        return value
++    return timedelta(seconds=value)
++
++
++class Duration(ParamType[timedelta]):
++    """A length of time, converted to a :class:`datetime.timedelta`.
++
++    Accepts one or more components made of a number and a unit, such as
++    ``90s``, ``1h30m`` or ``1.5d``, optionally separated by whitespace. The
++    units are ``w`` (weeks), ``d`` (days), ``h`` (hours), ``m`` (minutes),
++    ``s`` (seconds) and ``ms`` (milliseconds), in that order, each at most
++    once, in any letter case. A bare number is a number of seconds. A
++    :class:`~datetime.timedelta`, or an ``int`` or ``float`` number of seconds,
++    is accepted as is.
++
++    :param min: The smallest accepted duration, inclusive. A timedelta or a
++        number of seconds.
++    :param max: The largest accepted duration, inclusive. A timedelta or a
++        number of seconds.
++
++    .. versionadded:: 8.6.0
++    """
++
++    name = "duration"
++
++    def __init__(
++        self,
++        min: timedelta | float | None = None,
++        max: timedelta | float | None = None,
++    ) -> None:
++        self.min = None if min is None else _seconds_to_timedelta(min)
++        self.max = None if max is None else _seconds_to_timedelta(max)
++
++        if self.min is not None and self.max is not None and self.min > self.max:
++            raise ValueError("'min' must not be greater than 'max'.")
++
++    def to_info_dict(self) -> DurationInfoDict:
++        info_dict = t.cast(DurationInfoDict, super().to_info_dict())
++        info_dict["min"] = None if self.min is None else self.min.total_seconds()
++        info_dict["max"] = None if self.max is None else self.max.total_seconds()
++        return info_dict
++
++    def get_metavar(self, param: Parameter, ctx: Context) -> str:
++        return "DURATION"
++
++    def _parse(self, value: str) -> timedelta | None:
++        text = value.strip()
++
++        if _duration_bare_re.fullmatch(text):
++            return timedelta(seconds=float(text))
++
++        if not _duration_re.fullmatch(text):
++            return None
++
++        order = list(_DURATION_UNITS)
++        last = -1
++        total = timedelta()
++
++        for match in _duration_part_re.finditer(text):
++            unit = match.group(2).lower()
++            index = order.index(unit)
++
++            if index <= last:
++                return None
++
++            last = index
++            total += timedelta(**{_DURATION_UNITS[unit]: float(match.group(1))})
++
++        return total
++
++    def convert(
++        self, value: t.Any, param: Parameter | None, ctx: Context | None
++    ) -> timedelta:
++        if isinstance(value, timedelta):
++            result: timedelta | None = value
++        elif isinstance(value, (int, float)) and not isinstance(value, bool):
++            result = timedelta(seconds=value) if value >= 0 else None
++        elif isinstance(value, str):
++            result = self._parse(value)
++        else:
++            result = None
++
++        if result is None:
++            self.fail(
++                _("{value!r} is not a valid duration.").format(value=value),
++                param,
++                ctx,
++            )
++
++        if (self.min is not None and result < self.min) or (
++            self.max is not None and result > self.max
++        ):
++            self.fail(
++                _("{value!r} is not in the range {range}.").format(
++                    value=value, range=self._describe_range()
++                ),
++                param,
++                ctx,
++            )
++
++        return result
++
++    def _describe_range(self) -> str:
++        if self.min is None:
++            return f"<={self.max}"
++        if self.max is None:
++            return f">={self.min}"
++        return f"{self.min} to {self.max}"
++
++    def __repr__(self) -> str:
++        return "DURATION"
++
++
+ class FileInfoDict(ParamTypeInfoDict):
+     mode: str
+     encoding: str | None
+@@ -1352,6 +1493,9 @@ def convert_type(
+     if guessed is bool:
+         return BOOL
+ 
++    if guessed is timedelta:
++        return Duration()
++
+     if is_guessed:
+         return STRING
+ 
+diff --git a/src/click/utils.py b/src/click/utils.py
+index 417c89a..b20ce26 100644
+--- a/src/click/utils.py
++++ b/src/click/utils.py
+@@ -465,7 +465,37 @@ def format_filename(
+     return filename
+ 
+ 
+-def get_app_dir(app_name: str, roaming: bool = True, force_posix: bool = False) -> str:
++# For each kind of application folder: the XDG environment variable and its
++# default under the home folder on Unix, whether it is the macOS cache folder,
++# and whether Windows keeps it in the local (non-roaming) folder.
++_APP_DIR_KINDS: dict[str, tuple[str, str, bool, bool]] = {
++    "config": ("XDG_CONFIG_HOME", "~/.config", False, False),
++    "data": ("XDG_DATA_HOME", "~/.local/share", False, False),
++    "cache": ("XDG_CACHE_HOME", "~/.cache", True, True),
++    "state": ("XDG_STATE_HOME", "~/.local/state", False, True),
++}
++
++
++def _absolute_env_dir(key: str) -> str | None:
++    """The value of the environment variable ``key`` if it is an absolute
++    path. The XDG specification says a relative path is invalid and must be
++    ignored, and an empty value counts as unset.
++    """
++    value = os.environ.get(key)
++
++    if value and os.path.isabs(value):
++        return value
++
++    return None
++
++
++def get_app_dir(
++    app_name: str,
++    roaming: bool = True,
++    force_posix: bool = False,
++    *,
++    kind: str = "config",
++) -> str:
+     r"""Returns the config folder for the application.  The default behavior
+     is to return whatever is most appropriate for the operating system.
+ 
+@@ -495,23 +525,44 @@ def get_app_dir(app_name: str, roaming: bool = True, force_posix: bool = False)
+                         folder will be stored in the home folder with a leading
+                         dot instead of the XDG config home or darwin's
+                         application support folder.
++    :param kind: which folder: ``"config"`` (the default), ``"data"``,
++        ``"cache"`` or ``"state"``. On Unix these follow the XDG base
++        directories (``XDG_DATA_HOME`` or ``~/.local/share``,
++        ``XDG_CACHE_HOME`` or ``~/.cache``, ``XDG_STATE_HOME`` or
++        ``~/.local/state``). On macOS the cache goes in ``~/Library/Caches``
++        and the others in the application support folder. On Windows the
++        cache and state always use the local folder. With ``force_posix``
++        the data, cache and state folders are ``data``, ``cache`` and
++        ``state`` inside the dot folder.
++
++    .. versionchanged:: 8.6.0
++        Added the ``kind`` parameter. An ``XDG_*_HOME`` variable (or a Windows
++        folder variable) that is empty or a relative path is ignored.
+     """
++    try:
++        xdg_key, xdg_default, mac_cache, win_local = _APP_DIR_KINDS[kind]
++    except KeyError:
++        choices = ", ".join(map(repr, _APP_DIR_KINDS))
++        raise ValueError(f"Invalid kind {kind!r}. Choose from {choices}.") from None
++
+     if WIN:
+-        key = "APPDATA" if roaming else "LOCALAPPDATA"
+-        folder = os.environ.get(key)
++        key = "APPDATA" if roaming and not win_local else "LOCALAPPDATA"
++        folder = _absolute_env_dir(key)
+         if folder is None:
+             folder = os.path.expanduser("~")
+         return os.path.join(folder, app_name)
+     if force_posix:
+-        return os.path.join(os.path.expanduser(f"~/.{_posixify(app_name)}"))
++        folder = os.path.expanduser(f"~/.{_posixify(app_name)}")
++        if kind == "config":
++            return folder
++        return os.path.join(folder, kind)
+     if sys.platform == "darwin":
+-        return os.path.join(
+-            os.path.expanduser("~/Library/Application Support"), app_name
+-        )
+-    return os.path.join(
+-        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+-        _posixify(app_name),
+-    )
++        base = "~/Library/Caches" if mac_cache else "~/Library/Application Support"
++        return os.path.join(os.path.expanduser(base), app_name)
++    folder = _absolute_env_dir(xdg_key)
++    if folder is None:
++        folder = os.path.expanduser(xdg_default)
++    return os.path.join(folder, _posixify(app_name))
+ 
+ 
+ class _PacifyFlushWrapper:
+diff --git a/tests/test_formatting.py b/tests/test_formatting.py
+index 4b0d5e2..939c5f6 100644
+--- a/tests/test_formatting.py
++++ b/tests/test_formatting.py
+@@ -140,13 +140,28 @@ def test_formatting_empty_help_lines(runner):
+         "",
+         "  Top level command",
+         "",
+-        "",
+-        "",
+         "Options:",
+         "  --help  Show this message and exit.",
+     ]
+ 
+ 
++@pytest.mark.parametrize(
++    ("text", "expect"),
++    [
++        ("Formats:\n- csv\n-   json", "Formats:\n- csv\n- json"),
++        (
++            "1. one two three four five\n10) six",
++            "1. one two three\n   four five\n10) six",
++        ),
++        ("- a\n  continued\n  - nested item", "- a continued\n  - nested item"),
++        ("- a\n--flag is text", "- a --flag is text"),
++        ("First.\n   \nSecond.", "First.\n\nSecond."),
++    ],
++)
++def test_wrap_text_lists(text, expect):
++    assert click.wrap_text(text, 20, preserve_paragraphs=True) == expect
++
++
+ def test_formatting_usage_error(runner):
+     @click.command()
+     @click.argument("arg")
+diff --git a/tests/test_testing.py b/tests/test_testing.py
+index 95f41d2..81de71a 100644
+--- a/tests/test_testing.py
++++ b/tests/test_testing.py
+@@ -966,3 +966,34 @@ def test_capture_pytest_matrix(
+     # Click output is not leaking into Pytest.
+     assert "inside-stdout" not in captured.out
+     assert "inside-stderr" not in captured.err
++
++
++def test_tty_emulation():
++    @click.command()
++    def cli():
++        ttys = (sys.stdin.isatty(), sys.stdout.isatty(), sys.stderr.isatty())
++        click.secho(" ".join(map(str, ttys)), fg="red")
++        click.clear()
++
++    runner = CliRunner(tty=True)
++    expect = click.style("False True True", fg="red") + "\n\x1b[2J\x1b[1;1H"
++    assert runner.invoke(cli).output == expect
++    assert runner.invoke(cli, color=False).output == "False True True\n"
++    assert runner.invoke(cli, tty=False).output == "False False False\n"
++
++
++def test_terminal_width():
++    import shutil
++
++    @click.command(help="word " * 30)
++    def cli():
++        click.echo(tuple(shutil.get_terminal_size()))
++
++    runner = CliRunner(terminal_width=30)
++    assert runner.invoke(cli).output == "(30, 24)\n"
++    assert runner.invoke(cli, terminal_width=70).output == "(70, 24)\n"
++    lines = runner.invoke(cli, ["--help"]).output.splitlines()
++    assert max(map(len, lines)) <= 30
++
++    with pytest.raises(ValueError):
++        CliRunner(terminal_width=0)
+diff --git a/tests/test_types/test_Duration.py b/tests/test_types/test_Duration.py
+new file mode 100644
+index 0000000..5e99230
+--- /dev/null
++++ b/tests/test_types/test_Duration.py
+@@ -0,0 +1,48 @@
++from datetime import timedelta
++
++import pytest
++
++import click
++
++
++@pytest.mark.parametrize(
++    ("value", "expect"),
++    [
++        ("90", timedelta(seconds=90)),
++        ("1h30m", timedelta(hours=1, minutes=30)),
++        ("1D 2h", timedelta(days=1, hours=2)),
++        ("250ms", timedelta(milliseconds=250)),
++        (timedelta(minutes=1), timedelta(minutes=1)),
++        (5, timedelta(seconds=5)),
++    ],
++)
++def test_duration_convert(value, expect):
++    assert click.Duration().convert(value, None, None) == expect
++
++
++@pytest.mark.parametrize("value", ["", "1 h", "30m1h", "1h1h", "-1s", True])
++def test_duration_invalid(value):
++    with pytest.raises(click.BadParameter):
++        click.Duration().convert(value, None, None)
++
++
++def test_duration_bounds():
++    duration = click.Duration(min=1, max=timedelta(minutes=1))
++    assert duration.convert("60s", None, None) == timedelta(minutes=1)
++
++    with pytest.raises(click.BadParameter):
++        duration.convert("61s", None, None)
++
++    with pytest.raises(ValueError):
++        click.Duration(min=10, max=5)
++
++
++def test_duration_from_timedelta_type(runner):
++    @click.command()
++    @click.option("--every", type=timedelta)
++    @click.option("--wait", default=timedelta(seconds=5))
++    def cli(every, wait):
++        click.echo(f"{every} {wait}")
++
++    result = runner.invoke(cli, ["--every", "2m"])
++    assert result.output == "0:02:00 0:00:05\n"
+diff --git a/tests/test_utils/test_get_app_dir.py b/tests/test_utils/test_get_app_dir.py
+new file mode 100644
+index 0000000..f602bef
+--- /dev/null
++++ b/tests/test_utils/test_get_app_dir.py
+@@ -0,0 +1,58 @@
++import os
++import sys
++
++import pytest
++
++import click
++
++
++@pytest.fixture
++def linux_home(tmp_path, monkeypatch):
++    monkeypatch.setattr(sys, "platform", "linux")
++    monkeypatch.setenv("HOME", str(tmp_path))
++    for kind in ("CONFIG", "DATA", "CACHE", "STATE"):
++        monkeypatch.delenv(f"XDG_{kind}_HOME", raising=False)
++    return str(tmp_path)
++
++
++@pytest.mark.parametrize(
++    ("kind", "default"),
++    [
++        ("config", ".config"),
++        ("data", os.path.join(".local", "share")),
++        ("cache", ".cache"),
++        ("state", os.path.join(".local", "state")),
++    ],
++)
++def test_get_app_dir_kinds(linux_home, monkeypatch, kind, default):
++    expect = os.path.join(linux_home, default, "foo-bar")
++    assert click.get_app_dir("Foo Bar", kind=kind) == expect
++
++    # Empty and relative values are invalid per the XDG spec and ignored.
++    for value in ("", "relative"):
++        monkeypatch.setenv(f"XDG_{kind.upper()}_HOME", value)
++        assert click.get_app_dir("Foo Bar", kind=kind) == expect
++
++    monkeypatch.setenv(f"XDG_{kind.upper()}_HOME", "/xdg")
++    assert click.get_app_dir("Foo Bar", kind=kind) == os.path.join("/xdg", "foo-bar")
++
++
++def test_get_app_dir_force_posix(linux_home):
++    assert click.get_app_dir("Foo Bar", force_posix=True) == os.path.join(
++        linux_home, ".foo-bar"
++    )
++    assert click.get_app_dir("Foo Bar", force_posix=True, kind="cache") == (
++        os.path.join(linux_home, ".foo-bar", "cache")
++    )
++
++
++def test_get_app_dir_macos_cache(linux_home, monkeypatch):
++    monkeypatch.setattr(sys, "platform", "darwin")
++    assert click.get_app_dir("Foo Bar", kind="cache") == os.path.join(
++        linux_home, "Library", "Caches", "Foo Bar"
++    )
++
++
++def test_get_app_dir_invalid_kind():
++    with pytest.raises(ValueError):
++        click.get_app_dir("Foo Bar", kind="logs")
+diff --git a/tests/test_utils/test_style.py b/tests/test_utils/test_style.py
+index bf66d2a..06b5411 100644
+--- a/tests/test_utils/test_style.py
++++ b/tests/test_utils/test_style.py
+@@ -162,3 +162,21 @@ def test_unstyle_exception_message():
+ )
+ def test_unstyle_other_ansi(text, expect):
+     assert click.unstyle(text) == expect
++
++
++def test_style_link():
++    url = "https://example.com/a;b"
++    styled = click.style("docs", fg="red", reset=False, link=url)
++    assert styled == f"\x1b]8;;{url}\x1b\\\x1b[31mdocs\x1b]8;;\x1b\\"
++    assert click.unstyle(styled) == "docs"
++
++
++@pytest.mark.parametrize("terminator", ["\x1b\\", "\x07"])
++def test_unstyle_link(terminator):
++    text = f"a \x1b]8;id=1;https://example.com{terminator}b\x1b]8;;{terminator} c"
++    assert click.unstyle(text) == "a b c"
++
++
++def test_style_link_rejects_control_characters():
++    with pytest.raises(ValueError):
++        click.style("docs", link="https://example.com/\x1b")
