@@ -90,13 +90,42 @@ def test_review_size_selection(db, tmp_path, monkeypatch, enabled, path, stats, 
 def test_disabled_review_preserves_prompt_and_explicit_profile(db, repo, monkeypatch):
     ws = workspaces.create(db, str(repo), "unchanged").workspace
     fake_spawn(monkeypatch)
-    monkeypatch.setattr(review_scope, "small_branch", lambda *a: pytest.fail("sizing was not requested"))
-    monkeypatch.setattr(review_scope, "context_pack", lambda *a: pytest.fail("pack was not requested"))
-    reviewer = agents.request_review(db, None, ws, cfg=RepoConfig(learning="off"))
-    assert reviewer.profile == "reviewer"
-    assert "Scoped review context pack:" not in reviewer.task
-    # Explicit selection also bypasses automatic sizing when the feature is on.
-    assert agents._review_choice(db, ws, "reviewer", RepoConfig(review_sizing=True))[0] == "reviewer"
+    monkeypatch.setattr(agents, "unusable", lambda *a: None)
+    with monkeypatch.context() as disabled:
+        disabled.setattr(review_scope, "small_branch", lambda *a: pytest.fail("sizing was not requested"))
+        disabled.setattr(review_scope, "context_pack", lambda *a: pytest.fail("pack was not requested"))
+        reviewer = agents.request_review(db, None, ws, cfg=RepoConfig(learning="off"))
+        assert reviewer.profile == "reviewer"
+        assert "Scoped review context pack:" not in reviewer.task
+        # Explicit selection also bypasses automatic sizing when the feature is on.
+        assert agents._review_choice(db, ws, "reviewer", RepoConfig(review_sizing=True))[0] == "reviewer"
+    db.set_result(reviewer.id, "reviewed")
+    commit(Path(ws.path), "docs/usage.md", "A small docs change.\n")
+    configured = agents.request_review(db, None, ws, cfg=RepoConfig(
+        review_sizing=True, review_profile="reviewer-codex", learning="off"))
+    assert configured.profile == "reviewer-codex"
+
+
+@pytest.mark.parametrize("missing", [
+    "current",
+    pytest.param("cheap", marks=pytest.mark.variant(
+        "a missing cheap-profile parent must preserve the valid original reviewer")),
+])
+def test_unresolved_sizing_profile_preserves_candidate_fallback(db, repo, monkeypatch, missing):
+    ws = workspaces.create(db, str(repo), "missing-profile").workspace
+    db.add_agent(Agent("writer", ws.id, "developer-codex", "codex", None,
+                       "assign", "done", "@0", "done", 0))
+    monkeypatch.setattr(git, "out", lambda *a: "1\t0\tdocs/a.md\0")
+    monkeypatch.setattr(agents, "unusable", lambda *a: None)
+    if missing == "cheap":
+        profile = repo / ".brindle" / "agents" / "reviewer-light.md"
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        profile.write_text("---\nextends: missing-reviewer-profile\n---\n")
+    cfg = RepoConfig(review_sizing=True, learning="off", reviewer_fallbacks=["reviewer"],
+                     reviewer="missing-reviewer-profile" if missing == "current" else "reviewer-codex")
+    chosen, reason = agents._review_choice(db, ws, None, cfg)
+    assert chosen == ("reviewer" if missing == "current" else "reviewer-codex")
+    assert (reason is not None) == (missing == "current")
 
 
 @pytest.mark.parametrize("graph", [
@@ -117,7 +146,7 @@ def test_pack_includes_callers_of_changed_and_deleted_functions(repo, monkeypatc
                 return read(argv, **kwargs)
             # Supply an index entry only for the relevant changed symbols.
             found = all(name in argv[2] for name in ("changed", "removed"))
-            return SimpleNamespace(returncode=0, stdout="caller.py:L2" if found else "")
+            return SimpleNamespace(returncode=0, stdout="indirect_caller.py:L7" if found else "")
 
         monkeypatch.setattr(review_scope.spawn, "read", graph_read)
     else:
@@ -125,8 +154,10 @@ def test_pack_includes_callers_of_changed_and_deleted_functions(repo, monkeypatc
         monkeypatch.setenv("PATH", os.defpath + os.pathsep + os.environ["PATH"])
     pack = review_scope.context_pack(ws, base, head)
     assert "+    return 3" in pack
-    assert "caller.py" in pack
-    if not graph:
+    if graph:
+        assert "indirect_caller.py:L7" in pack
+    else:
+        assert "caller.py" in pack
         assert "removed()" in pack.split("Grep call-site candidates")[1]
 
 
@@ -138,6 +169,7 @@ def test_sizing_keeps_strong_reviewer_when_light_is_unsafe_or_unavailable(db, tm
     light.model = model
     monkeypatch.setattr(agents, "load_profile", lambda name, repo: light if name == "reviewer-light"
                         else load_profile(name, repo))
-    monkeypatch.setattr(agents, "unusable", lambda provider, *a: "unavailable" if provider == "claude" else None)
+    monkeypatch.setattr(agents, "unusable", lambda provider, *a:
+                        "unavailable" if model == "sonnet" and provider == "claude" else None)
     cfg = RepoConfig(review_sizing=True, learning="off", reviewer="reviewer-codex")
     assert agents._review_choice(db, ws, None, cfg)[0] == "reviewer-codex"

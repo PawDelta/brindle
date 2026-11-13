@@ -4321,16 +4321,20 @@ def _sized_review_profile(pick: str, worker: Agent | None, repo_root: str) -> st
 
     name = review_scope.LIGHT_PROFILE
     current = None
-    if worker is not None:
-        current = load_profile(pick, repo_root)
-        known = {"claude", "codex", "antigravity"}
-        if worker.provider not in known or current.provider not in known:
-            return None
-        if worker.provider == "claude" and current.provider != "claude":
-            if current.provider != "codex":
+    try:
+        if worker is not None:
+            current = load_profile(pick, repo_root)
+            known = {"claude", "codex", "antigravity"}
+            if worker.provider not in known or current.provider not in known:
                 return None
-            name = review_scope.CODEX_LIGHT_PROFILE
-    cheap = load_profile(name, repo_root)
+            if worker.provider == "claude" and current.provider != "claude":
+                if current.provider != "codex":
+                    return None
+                name = review_scope.CODEX_LIGHT_PROFILE
+        cheap = load_profile(name, repo_root)
+    except KeyError:
+        # Let normal candidate validation handle the original pick and fallbacks.
+        return None
     if name == review_scope.CODEX_LIGHT_PROFILE:
         # Keep the same model capacity, reducing effort only. A custom profile
         # must not replace that model with a mini/other smaller verifier.
@@ -4357,7 +4361,7 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
         worker = workspace_worker(db, ws)
         pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
         candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
-        if cfg.review_sizing and not cfg.routing_locked.get("reviewer"):
+        if cfg.review_sizing and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
             from brindle import review_scope
 
             if review_scope.small_branch(ws, cfg):
