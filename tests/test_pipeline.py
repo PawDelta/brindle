@@ -494,6 +494,65 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
     assert db.get_agent("w1").pipeline == "reviewing"
 
 
+def test_unchanged_branch_is_not_reviewed_again(db, tmp_path, monkeypatch):
+    from brindle.db import Workspace
+
+    ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
+                   str(tmp_path), None, "fake", 1)
+    db.add_workspace(ws)
+    add(db, ws, "boss", "interactive", "supervisor", status="processing")
+    add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="fixing")
+    db.update_agent("w1", pipeline_rounds=1)
+    findings = "The changed handler must validate the incoming request."
+    reason = "This handler predates my task and is out of scope."
+    add(db, ws, "rejecting-reviewer", "review", "reviewer", parent="boss")
+    db.update_agent("rejecting-reviewer", review_slot="")
+    db.add_review(ws.id, "head", "rejecting-reviewer", False, findings)
+    other_finding = "The new endpoint also needs an authorization check."
+    db.add_review(ws.id, "head", "second-reviewer", False, other_finding)
+    add(db, ws, "approving-reviewer", "review", "reviewer", parent="boss")
+    db.update_agent("approving-reviewer", review_slot="independent")
+    db.add_review(ws.id, "head", "approving-reviewer", True, "approved")
+    head = "head"
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: RepoConfig(checks=["true"], review_profile="reviewer"))
+    monkeypatch.setattr(agents, "_branch_head", lambda *a: head)
+    monkeypatch.setattr(gates, "head", lambda *a: head)
+    monkeypatch.setattr(agents.git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(agents.git, "dirty_files", lambda *a, **k: [])
+    monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+    starts = []
+    monkeypatch.setattr(agents, "_detach", lambda argv: starts.append(argv))
+
+    agents.report_result(db, "w1", reason)
+    assert not starts
+    assert db.get_agent("w1").pipeline is None
+    messages = drain(db)
+    assert len(messages) == 1 and findings in messages[0] and reason in messages[0]
+    assert other_finding in messages[0]
+    agents.report_result(db, "w1", reason)
+    agents.report_result(db, "w1", "Still out of scope; no changes made.")
+    assert not starts and not drain(db)
+    assert db.get_agent("w1").pipeline_rounds == 1
+    assert len(bus.tail(db, kinds=("pipeline.escalated",))) == 1
+
+    head = "new-commit"
+    agents.report_result(db, "w1", "Committed a fix.")
+    assert len(starts) == 1 and db.get_agent("w1").pipeline == "reviewing"
+    assert not drain(db)
+
+    # An approval of the current commit must not be treated as an open finding.
+    db.add_review(ws.id, head, None, True, "approved")
+    agents.report_result(db, "w1", "Ready to merge.")
+    assert len(starts) == 2 and not drain(db)
+
+    db.add_review(ws.id, head, None, False, findings)
+    agents.report_result(db, "w1", "The new finding also needs a scope decision.")
+    assert len(starts) == 2 and db.get_agent("w1").pipeline is None
+    messages = drain(db)
+    assert len(messages) == 1 and findings in messages[0]
+
+
 def test_report_dispatch_preserves_the_current_claim(db, tmp_path, monkeypatch):
     """Duplicate, superseding, failed and legacy dispatches share one branch's history."""
     from brindle.db import Workspace

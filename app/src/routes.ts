@@ -6,9 +6,11 @@
    surface (an inbox item's). "new" is the calm
    empty state with the New session composer (where the app opens with no
    session to show); the Inbox lists everything waiting on a person, each
-   row jumping to its session. Knowledge (a repo's decisions and sources),
-   Agents (which model runs each kind of work, and the person's custom
-   agents) and Settings (with Account and Usage among its tabs) are the pages behind the profile button's rail. There is
+   row jumping to its session. The Library (designs, decisions and sources;
+   the "knowledge" screen) opens from the sidebar foot's button and takes the
+   sidebar for its own navigation. Agents (which model runs each kind of work,
+   and the person's custom agents) and Settings (with Account and Usage among
+   its tabs) are the pages behind the profile button's rail. There is
    no home board: the sidebar is the overview. */
 
 export interface SessionRef {
@@ -28,18 +30,32 @@ export interface SessionRef {
    place (the header's Visuals, a brindle://visual/<id> link in the chat). */
 export type SheetRef = { kind: "review" } | { kind: "changes" } | { kind: "visual"; id: string };
 
-/* Knowledge's tabs. */
+/* The Library's views: its designs ("docs"), and its Sources. */
 export type KnowledgeView = "map" | "docs" | "imported" | "decisions" | "kept";
+
+/* The stages a design moves through, as the Library's sidebar lists them. */
+export const LIBRARY_STAGES = [
+  { id: "needs-you", label: "Needs you" },
+  { id: "in-review", label: "In review" },
+  { id: "approved", label: "Approved" },
+  { id: "building", label: "Building" },
+  { id: "shipped", label: "Shipped" },
+] as const;
+export type LibraryStage = (typeof LIBRARY_STAGES)[number]["id"];
 
 export type Route =
   /* `repo`: the project to start in (one just picked, as the first launch ends). */
   | { screen: "new"; repo?: string }
   /* `session`: only what waits in that session (its root), from its bar's count. */
   | { screen: "inbox"; session?: string }
-  /* `doc`: a library doc's id (opened in the Docs reader) or an imported doc's number;
-     `session`: Docs only of that session (its root), from the session's goal panel;
-     `from`: the session the person came from, for Docs' Back to session. */
-  | { screen: "knowledge"; view?: KnowledgeView; doc?: number | string; section?: string; session?: string; from?: SessionRef }
+  /* The Library. `view`: the designs (the default) or one of its Sources; `stage`: the
+     Stage row picked in its sidebar; `doc`: a library doc's id (opened in the reader) or an
+     imported doc's number; `session`: only that session's docs (its root), from the
+     session's goal panel; `from`: the session the person came from, for Back to session. */
+  | { screen: "knowledge"; view?: KnowledgeView; stage?: LibraryStage; doc?: number | string; section?: string; session?: string; from?: SessionRef }
+  /* A design someone else shared, by its Library doc id (from the Inbox's "Review requested" card):
+     `title`, the card's; `repo`, the local project a question to the supervisor should stay in. */
+  | { screen: "shared-design"; doc: string; title?: string; repo?: string }
   | { screen: "agents" }
   /* Settings, one place with tabs (settingsTab below). `tab`: the tab to open on;
      `section`: the tab it lives on, scrolled to on opening (a provider's problem opens
@@ -87,14 +103,26 @@ export function settingsTab(route: Route): SettingsTab | null {
   }
 }
 
-/* The full screens the profile button's rail also opens, beside Settings' tabs. */
-export type RailPage = "knowledge" | "agents";
+/* The full screen the profile button's rail also opens, beside Settings' tabs. */
+export type RailPage = "agents";
 export function railPage(route: Route): RailPage | null {
-  return route.screen === "knowledge" || route.screen === "agents" ? route.screen : null;
+  return route.screen === "agents" ? route.screen : null;
 }
 
-/* Whether the sidebar shows the profile rail (with its "← Sessions") and Esc goes back. */
+/* Whether the sidebar shows the profile rail (Settings' tabs and Agents). */
 export const inProfileRail = (route: Route): boolean => settingsTab(route) !== null || railPage(route) !== null;
+
+/* Whether the sidebar shows the Library's navigation. */
+export const inLibrary = (route: Route): boolean => route.screen === "knowledge";
+
+/* The view a Library route opens on: its own, else Imported docs for an imported doc's
+   number, else the designs. */
+export const libraryView = (route: Extract<Route, { screen: "knowledge" }>): KnowledgeView =>
+  route.view ?? (typeof route.doc === "number" ? "imported" : "docs");
+
+/* Whether the sidebar is swapped for a rail (the profile's or the Library's, each with its
+   "← Sessions"), and Esc goes back to the page before it. */
+export const inRail = (route: Route): boolean => inProfileRail(route) || inLibrary(route);
 
 /* Where the app lands before it knows its sessions: the empty state. */
 export const HOME: Route = { screen: "new" };

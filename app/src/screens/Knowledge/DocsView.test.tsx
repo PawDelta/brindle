@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { useReaderDoc } from "../../store/libraryReader";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonClient, type DocResults } from "../../api/client";
 import { DocsView } from "./DocsView";
@@ -57,6 +58,148 @@ const view = (d: (typeof DOCS)[number], extra: object = {}) => {
 };
 
 describe("docs view", () => {
+  it("library search", async () => {
+    const docs = [
+      listed("d1", "Recovery", "Design", "root1", { created_by: "person", updated_at: Date.now() / 1000, used_in_briefs: 3 }),
+      listed("d2", "Hosting", "Design", "root2", { created_by: "supervisor" }),
+    ];
+    const record = {
+      revisions: [{ rev: 2, author: "person", source: "edit", changed: ["s1"], at: 1760000000 }],
+      threads: [{ id: 1, author: "person", text: "Reconnect credentials first.", replies: [{ text: "Keep the token encrypted." }] }],
+      decisions: [{ id: "storage", title: "Journal format", options: [{ id: "a", label: "Transactional database" }] }],
+      verdict: { approved: true, picks: { storage: "a" } },
+    };
+    const details = docs.map((d, i) => view(d, {
+      files: [{ name: "design.md", md: i ? "Use hosted machines." : "Store the journal in SQLite." }],
+      source: i ? d.source : { kind: "goal", ref: "v_recovery", session: "root1" },
+      ...(i ? { ...record, design: { rev: 1, reviewers: [{ sub: "sam", required: true }], sign_offs: [] } } : {}),
+    }));
+    let finishOld: ((r: Response) => void) | undefined;
+    const api = new DaemonClient({ baseUrl: "http://daemon.test", token: "t", fetch: async (input) => {
+      const url = new URL(String(input));
+      const path = url.pathname.replace(/^\/v1/, "");
+      if (path === "/kb/search" && url.searchParams.get("q") === "old") return new Promise<Response>((resolve) => { finishOld = resolve; });
+      if (path === "/analysis-docs/results") return new Response("{}", { status: 404 });
+      const body = path === "/analysis-docs" ? { docs }
+        : path === "/analysis-docs/topics" ? { topics: [] }
+        : path === "/analysis-docs/scopes" ? { scopes: SCOPES }
+        : path === "/decisions" ? [{ id: "dec", topic: "SQLite", body: "Use SQLite", rationale: "Atomic journal", created_at: 1760000000 }]
+        : path === "/kb/search" ? [
+          { chunk_id: "c1", external_id: "README.md", url: "file:///docs/a/README.md", title: "SQLite runbook", text: "SQLite recovery procedure", updated_at: 1760000000 },
+          { chunk_id: "c1b", external_id: "README.md", url: "file:///docs/a/README.md", title: "SQLite runbook", text: "Another SQLite passage", updated_at: 1760000000 },
+          { chunk_id: "c2", external_id: "README.md", url: "file:///docs/b/README.md", title: "SQLite operations", text: "SQLite maintenance", updated_at: 1760000000 },
+          { chunk_id: "c3", external_id: "README.md", url: null, title: "SQLite notes", text: "SQLite notes without a URL", updated_at: 1760000000 },
+          { chunk_id: "c4", external_id: "README.md", url: null, title: "SQLite checklist", text: "SQLite checklist without a URL", updated_at: 1760000000 },
+        ]
+        : path === "/kept-visuals" ? [
+          { id: "k1", title: "SQLite layout", repo: "/r", from_session_name: "Recovery", kept_at: 1760000000 },
+          { id: "k2", title: "SQLite private layout", repo: "/other", from_session_name: "Other", kept_at: 1760000000 },
+        ]
+        : path === "/plans/v_recovery" ? { ...record, state: "approved", session: "root1", markdown: "Store the journal in SQLite." }
+        : details[docs.findIndex((d) => path.endsWith(d.doc_id))];
+      return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+    } });
+    render(<DocsView client={api} repo="/r" />);
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
+    await waitFor(() => expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["decision:dec", "kept:k1"]));
+    // A reviewer narrows designs, and drops the sources that have no reviewer; clearing restores everything.
+    const hits = () => [...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"));
+    fireEvent.change(await screen.findByRole("combobox", { name: "Reviewer" }), { target: { value: "sam" } });
+    expect(shown()).toEqual(["d2"]);
+    expect(hits()).toEqual([]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Reviewer" }), { target: { value: "" } });
+    expect(shown()).toEqual(["d1", "d2"]);
+    expect(hits()).toEqual(["decision:dec", "kept:k1"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "decisions" } });
+    expect(shown()).toEqual([]);
+    expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["decision:dec"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "kept" } });
+    expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["kept:k1"]);
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.queryByTestId("results")).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Author" }), { target: { value: "person" } });
+    expect(shown()).toEqual(["d1"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Changed" }), { target: { value: "7" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Author" }), { target: { value: "" } });
+    expect(shown()).toEqual(["d1"]);
+    const box = screen.getByRole("searchbox", { name: "Search the library" });
+    fireEvent.change(box, { target: { value: "sqlite" } });
+    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(0));
+    await waitFor(() => expect(shown()).toEqual(["d1"]));
+    await waitFor(() => expect(screen.getByTestId("docs").querySelector('[data-doc="d1"]')?.textContent).toContain("Store the journal in SQLite."));
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    fireEvent.change(box, { target: { value: "sqlite" } });
+    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(6));
+    expect([...screen.getByTestId("docs").querySelectorAll('[data-library-hit^="imported:"]')].map((li) => li.getAttribute("data-library-hit"))).toEqual(["imported:c1", "imported:c2", "imported:c3", "imported:c4"]);
+    expect(screen.getByTestId("docs").querySelector('[data-library-hit="kept:k2"]')).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Shared" }), { target: { value: "user" } });
+    expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Search whole Library" }));
+    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(6));
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "imported" } });
+    expect(shown()).toEqual([]);
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('[data-library-hit="imported:c1"]')!).getByRole("button"));
+    expect((await screen.findByTestId("doc-body")).textContent).toContain("SQLite recovery procedure");
+    fireEvent.click(screen.getByRole("button", { name: "← Library" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "decisions" } });
+    expect(shown()).toEqual([]);
+    expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(1);
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>("[data-library-hit]")!).getByRole("button"));
+    expect((await screen.findByTestId("doc-body")).textContent).toContain("Atomic journal");
+    fireEvent.click(screen.getByRole("button", { name: "← Library" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "encrypted" } });
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "transactional" } });
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
+    await screen.findByTestId("doc-body");
+    const recordElement = screen.getByRole("complementary", { name: "Design record" });
+    expect(recordElement.querySelector("[data-revision='2']")).toBeTruthy();
+    expect(recordElement.querySelector("[data-decision='storage']")).toBeTruthy();
+    expect(within(recordElement).getByRole("region", { name: "Comments" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "← Library" }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "old" } });
+    await waitFor(() => expect(finishOld).toBeTruthy());
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "missing" } });
+    await waitFor(() => expect(shown()).toEqual([]));
+    await act(async () => { finishOld!(new Response(JSON.stringify([{ chunk_id: "stale", external_id: "stale", title: "Stale", text: "Old result" }]))); });
+    expect(screen.queryByText("Stale")).toBeNull();
+    cleanup();
+    render(<DocsView client={client(() => ({}), RESULTS, [])} repo="/r" />);
+    expect(await screen.findByTestId("library-empty")).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Type" })).toBeTruthy();
+  });
+
+  it("library search stage and reviewer: stages come from each shared design's review state, Reviewer selects and clears, and the record lists every signer", async () => {
+    const designs: Record<string, object> = {
+      d1: { rev: 2, ready: false, reviewers: [{ sub: "sam", required: true }, { sub: "dana", required: false }], sign_offs: [{ sub: "sam", rev: 2 }, { sub: "dana", rev: 1 }, { sub: "ops", rev: 1 }, { sub: "ops", rev: 2 }] },
+      d2: { rev: 1, ready: true, reviewers: [{ sub: "dana", required: true }], sign_offs: [{ sub: "dana", rev: 1 }] },
+      d3: { rev: 1, ready: false, reviewers: [{ sub: "sam", required: true }], sign_offs: [] },
+    };
+    // d3 is in the person's queue; d1 and d2 have no Inbox card at all. d4 is a personal design.
+    const queue = new Map<string, "needs-you">([["d3", "needs-you"]]);
+    const api = client((id) => view(DOCS.find((d) => d.doc_id === id)!, designs[id] ? { design: designs[id] } : {}));
+    render(<DocsView client={api} stage="in-review" stages={queue} />);
+    await waitFor(() => expect(shown()).toEqual(["d1"]));
+    const pick = (name: string, value: string) => fireEvent.change(screen.getByRole("combobox", { name }), { target: { value } });
+    pick("Stage", "approved");
+    expect(shown()).toEqual(["d2"]);
+    pick("Stage", "needs-you");
+    expect(shown()).toEqual(["d3"]);
+    pick("Stage", "");
+    expect(shown()).toHaveLength(4);
+    pick("Reviewer", "sam");
+    expect(shown().sort()).toEqual(["d1", "d3"]);
+    pick("Reviewer", "");
+    expect(shown()).toHaveLength(4);
+    fireEvent.click(screen.getByTestId("docs").querySelector("li[data-doc='d1'] button")!);
+    const record = await screen.findByRole("complementary", { name: "Design record" });
+    const rows = [...record.querySelectorAll("[data-signoff]")].map((r) => `${r.getAttribute("data-signoff")}@${r.getAttribute("data-rev") || "waiting"}:${r.getAttribute("data-signed")}`);
+    // Every recorded signature keeps its revision (ops, outside the roster, signed two); dana signed rev 1 only, so she is also waiting.
+    expect(rows).toEqual(["sam@2:yes", "dana@1:no", "ops@1:no", "ops@2:yes", "dana@waiting:no"]);
+  });
+
   it("lists one session's docs as cards, narrows them by category and search, and opens one in the reader", async () => {
     const docs = DOCS.map((d) => ({ ...d, category: d.doc_id === "d2" ? "Fees" : "Checkout" }));
     render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!), RESULTS, docs)} repo="/r" session="root1" />);
@@ -71,14 +214,20 @@ describe("docs view", () => {
     fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
     expect(shown()).toEqual(["d2"]);
     fireEvent.change(screen.getByRole("searchbox", { name: "Search the library" }), { target: { value: "pricing" } });
-    expect(screen.getByText("No doc matches.")).toBeTruthy();
+    await waitFor(() => expect(shown()).toEqual([]));
     fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
     const body = await screen.findByTestId("doc-body");
     expect(body.textContent).toContain("Body.");
+    const readerDoc = () => renderHook(() => useReaderDoc()).result.current;
+    expect(readerDoc()).toBe("d1");
     // A connected doc is named by its title and opens in turn.
     fireEvent.click(screen.getByRole("button", { name: "Stripe vs Adyen fees" }));
     await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toContain("Stripe vs Adyen fees"));
+    // The Library rail moves whichever doc is open here: the row's, then the connected one, then none.
+    expect(readerDoc()).toBe("d2");
+    fireEvent.click(screen.getByRole("button", { name: /Library/ }));
+    await waitFor(() => expect(readerDoc()).toBeNull());
   });
 
   it("groups docs under their categories, largest first and uncategorised last, and remembers a collapsed one", async () => {
@@ -88,7 +237,7 @@ describe("docs view", () => {
     const at = (repo: string, listed: object[] = docs) => <DocsView client={client(() => ({}), RESULTS, listed)} repo={repo} />;
     const open = () => render(at("/r"));
     open();
-    await waitFor(() => expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label")).slice(2)).toEqual(["Security", "Desktop updates", "Uncategorised"]));
+    await waitFor(() => expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label")).filter((name) => name !== "Docs" && name !== "Results")).toEqual(["Security", "Desktop updates", "Uncategorised"]));
     expect([...screen.getByRole("region", { name: "Security" }).querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"))).toEqual(["d1", "d3"]);
     fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
     expect(shown()).toEqual(["d4", "d2"]);

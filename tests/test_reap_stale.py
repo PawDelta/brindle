@@ -39,7 +39,7 @@ def test_session_listing_is_parsed(monkeypatch):
     out = {"list-panes": "\n".join(rows) + "\n", "show-environment": "BRINDLE_HOME=/some/home\n"}
     asked = []
     monkeypatch.setattr(tmux, "_tmux", lambda *args, **k: asked.append(args[0]) or SimpleNamespace(
-        returncode=0, stdout=out[args[0]]))
+        returncode=0, stdout=out.get(args[0], "")))
     monkeypatch.setattr(tmux, "_SESSION_HOMES", {})
 
     tmux.session_infos()
@@ -49,6 +49,11 @@ def test_session_listing_is_parsed(monkeypatch):
     assert (s.name, s.attached, s.created, s.activity, s.home) == ("brindle_p_a", True, 100, 200, "/some/home")
     assert [(p.id, p.pid, p.path, p.dead, p.idle()) for p in s.panes] == [
         ("%1", 11, "/w/a", False, True), ("%3", 13, "", True, True)]
+
+    out["show-environment"] = "BRINDLE_HOME=/another/home\n"
+    tmux.ensure_session(s.name, "/w/a", {"BRINDLE_HOME": "/another/home"}, size=(171, 54))
+    [s] = tmux.session_infos()
+    assert s.home == "/another/home"
 
 
 def session(name, *panes, attached=False, home=None, activity=OLD):

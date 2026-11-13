@@ -966,6 +966,128 @@ def test_goal_activity_stage(db, root, boss, checking, workers, expected):
     assert autopilot.goal_activity(db, "boss")["stage"] == expected
 
 
+@pytest.mark.parametrize("scenario", [
+    pytest.param("unstarted", marks=pytest.mark.variant(
+        "A live milestone must not hide an unclaimed sibling, including while paused")),
+    pytest.param("chain", marks=pytest.mark.variant(
+        "Queued milestone dependencies must gate launches even with an idle supervisor")),
+    pytest.param("parallel", marks=pytest.mark.variant(
+        "Independent queued milestones must be counted once rather than summed")),
+    pytest.param("limited", marks=pytest.mark.variant(
+        "The same queued milestone graph must respect a single execution slot")),
+    pytest.param("overdue", marks=pytest.mark.variant(
+        "An overdue branch must extend its estimate as observed effort grows")),
+    pytest.param("no_history", marks=pytest.mark.variant(
+        "A goal with no measurements must still estimate its unstarted work")),
+    pytest.param("global_history", marks=pytest.mark.variant(
+        "A new repository must use other repos' measured times before fixed defaults")),
+    pytest.param("review_rounds", marks=pytest.mark.variant(
+        "A branch past two review rounds must not budget the full review duration again")),
+    pytest.param("load", marks=pytest.mark.variant(
+        "Retained merge completions must affect ETA immediately and remain counted once after pruning")),
+    pytest.param("load_open", marks=pytest.mark.variant(
+        "A merge must recover its report start after default pruning moved it into stage_open")),
+    "session_limited",
+])
+def test_goal_eta_counts_unstarted_milestones(db, root, monkeypatch, scenario):
+    from brindle import fair_share
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from brindle.db import Task
+
+    _, ws = root
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(autopilot.time, "time", lambda: now)
+    monkeypatch.setattr(git, "out", lambda *args: "")
+    monkeypatch.setattr(fair_share, "limit", lambda: 1 if scenario == "limited" else
+                        16 if scenario == "session_limited" else 2)
+    db.update_autopilot("boss", goal="Ship both milestones")
+    db.update_agent("boss", status="idle")
+    db.set_milestones("boss", [("first", None, None), ("second", None, None)])
+    if scenario == "session_limited":
+        db.add_session_repo("boss", "other", "/attached-repo")
+        monkeypatch.setattr(autopilot, "load_repo_config", lambda path: RepoConfig(
+            max_agents=1 if path == ws.repo_root else 16))
+        db.set_milestones("boss", [(f"step{i}", None, None, "builder", "other" if i % 2 else None)
+                                   for i in range(6)])
+        db.add_task(Task("attached", "/attached-repo", None, "boss", ws.id, "builder", "step1",
+                         "assign", 1, "attached", None, None, None, "pending", now))
+        db.set_task_milestone("attached", "step1")
+    if scenario != "no_history":
+        repo_root = "/past-repo" if scenario == "global_history" else ws.repo_root
+        duration = 1800 if scenario == "global_history" else 1200
+        day = time.strftime("%Y-%m-%d", time.gmtime(now - 86400))
+        for stage in ("build:builder", "report_to_merge"):
+            db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, ?, 5, ?, ?, ?)",
+                            (day, repo_root, stage, duration, duration, json.dumps([duration] * 5)))
+    if scenario in ("unstarted", "overdue", "review_rounds", "load", "load_open"):
+        add_agent(db, ws, "writing", mode="assign", parent="boss")
+        db.set_agent_milestone("writing", "first")
+        db.update_agent("writing", profile="builder", created_at=now - (2400 if scenario == "overdue" else 300))
+        if scenario == "review_rounds":
+            db.update_agent("writing", pipeline="reviewing", reviewing_since=now - 100,
+                            pipeline_rounds=2, result="done")
+        if scenario in ("load", "load_open"):
+            for i in range(1 if scenario == "load_open" else 6):
+                past = replace(ws, id=f"history{i}")
+                end = now - 60 - i
+                with monkeypatch.context() as clock:
+                    clock.setattr(bus.time, "time", lambda: end - (90000 if scenario == "load_open" else 2400))
+                    bus.publish_ws(db, "pipeline.reported", past)
+                    clock.setattr(bus.time, "time", lambda: end)
+                    bus.publish_ws(db, "pipeline.merged", past)
+            bus.prune(db, now=now)
+    if scenario in ("chain", "parallel", "limited"):
+        for i, title in enumerate(("first", "second")):
+            db.add_task(Task(f"queued{i}", ws.repo_root, None, "boss", ws.id, "builder", title,
+                             "assign", 1, f"branch{i}", None, None,
+                             json.dumps(["task:queued0"]) if i and scenario == "chain" else None,
+                             "pending", now + i))
+            db.set_task_milestone(f"queued{i}", title)
+    got = autopilot.goal_activity(db, "boss", now=now)["eta_seconds"]
+    assert got is not None and got > 0
+    if scenario == "chain":
+        assert got == 4800
+    elif scenario == "limited":
+        assert got == 3600
+    elif scenario == "overdue":
+        # The overdue worker still needs meaningful build time, then review.
+        assert got >= 1800
+        db.record_check(db.milestones("boss")[1].id, True, "")
+        overdue = autopilot.goal_activity(db, "boss", now=now)["eta_seconds"]
+        assert overdue >= 1800
+        assert autopilot.goal_activity(db, "boss", now=now + 2400)["eta_seconds"] > overdue
+    elif scenario == "review_rounds":
+        db.record_check(db.milestones("boss")[1].id, True, "")
+        assert 60 < autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] < 1100
+    elif scenario == "load":
+        assert got == 4800
+        bus.prune(db, older_than=0, now=now + 1)
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == got
+    elif scenario == "load_open":
+        assert got == 180000
+    elif scenario == "session_limited":
+        assert got == 8400
+        # Session admission still constrains work when the machine cap is off,
+        # and an attached-repo worker must reserve the same session's slot.
+        monkeypatch.setattr(fair_share, "limit", lambda: 0)
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == got
+        attached = replace(ws, id="attached-live", repo_root="/attached-repo")
+        db.add_workspace(attached)
+        add_agent(db, attached, "attached-worker", mode="assign", parent="boss")
+        db.update_agent("attached-worker", profile="builder", created_at=now - 300)
+        db.set_agent_milestone("attached-worker", "step1")
+        db.update_task("attached", state="running", agent_id="attached-worker")
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 8100
+    elif scenario == "global_history":
+        assert got == 3600
+    elif scenario != "no_history":
+        assert got == 2400
+    if scenario == "unstarted":
+        db.update_agent("boss", status="paused")
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == got
+
+
 def test_goal_activity_commits_and_estimate(db, root, repo):
     _, ws = root
     with_goal(db)
@@ -976,6 +1098,8 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     add_agent(db, ws, "w0", mode="assign", parent="boss", status="idle")
     now = t + 10000
     db.update_agent("w0", pipeline="ready", result="done", reviewing_since=now - 600)
+    db.set_agent_milestone("w0", db.milestones("boss")[0].title)
+    db.record_check(db.milestones("boss")[1].id, True, "")
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
 
     def history(samples):
@@ -985,9 +1109,9 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
 
     history([1800.0] * 4)
     got = autopilot.goal_activity(db, "boss", now=now)
-    assert (got["commits_last_hour"], got["last_commit_at"], got["eta_seconds"]) == (2, int(t + 9800), None)
+    assert (got["commits_last_hour"], got["last_commit_at"], got["eta_seconds"]) == (2, int(t + 9800), 180)
     history([1800.0] * 5)
-    assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 1200
+    assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 180
     assert autopilot.goal_activity(db, "boss", now=now)["checking"] is False
     autopilot.check_in_background(db, "boss", ws, None, detach=lambda argv: None)   # the real start path
     got = autopilot.goal_activity(db, "boss", now=now)
@@ -1000,10 +1124,10 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     got = autopilot.goal_activity(db, "boss", now=now)
     assert (got["checking"], got["auditing"]) == (False, True)
     db.update_autopilot("boss", state="running")
-    # Paused, nothing runs: no estimate, the commits still told.
+    # Pausing changes the activity stage, but the remaining work is still estimated.
     db.update_agent("boss", status="paused")
     got = autopilot.goal_activity(db, "boss", now=now)
-    assert (got["commits_last_hour"], got["eta_seconds"]) == (2, None)
+    assert (got["commits_last_hour"], got["eta_seconds"]) == (2, 180)
 
 
 def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
@@ -1016,7 +1140,7 @@ def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
     db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, 'report_to_merge', 5, 1200, 1200, ?)",
                     (day, ws.repo_root, json.dumps([1200] * 5)))
-    for elapsed, expected in [(300, 900), (1500, 60)]:
+    for elapsed, expected in [(300, 900), (1500, 375)]:
         db.update_agent("fixer", pipeline="fixing", result="done", reviewing_since=now - elapsed)
         got = autopilot.goal_activity(db, "boss", now=now)
         assert (got["stage"], got["eta_seconds"]) == ("working", expected)
@@ -1040,15 +1164,15 @@ def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
 @pytest.mark.parametrize("runs, elapsed, queued, overhead, expected", [
     (5, 300, False, False, 2100),
     (4, 300, False, False, 1800),  # sparse profile falls back to the repo median
-    (5, 1500, False, False, 1260),
+    (5, 1500, False, False, 1575),
     (5, 300, True, False, 4500),
     (5, 300, "chain", False, 6900),
     (5, 300, "slots", False, 5700),
     (5, 300, "attached", False, 3300),
-    pytest.param(5, 1500, "fixing", False, 2460,
+    pytest.param(5, 1500, "fixing", False, 2775,
                  marks=pytest.mark.variant("A fixing occupant can outlast the report-to-merge median")),
     (5, 300, "other_session", False, 3300),
-    (5, 300, "unknown_session", False, None),
+    (5, 300, "unknown_session", False, 2925),
     (5, 300, "unknown_session_room", False, 2400),
     (5, 300, "claim_session", False, 3300),
     (5, 300, "own_claim", False, 2100),
@@ -1068,7 +1192,7 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
                         3 if queued == "unknown_session_room" else 2)
     other_ws = replace(ws, id="elsewhere", repo_root="/another-repo", name="elsewhere", branch="feat/upstream")
     db.add_workspace(other_ws)
-    # Prefer a profile's history; other repositories never supply the fallback.
+    # Prefer a profile's local history before falling back across repositories.
     for i in range(5):
         add_agent(db, ws, f"past{i}", mode="assign", status="done")
         db.update_agent(f"past{i}", profile="builder" if i < runs else "other",

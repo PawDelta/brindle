@@ -1,6 +1,8 @@
 import fcntl
+import itertools
 import os
 import pty
+import re
 import shlex
 import shutil
 import struct
@@ -323,6 +325,90 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     # A record made on another tmux server isn't resumed here.
     lifecycle._record_resume([{"id": "chat", "server": "elsewhere"}])
     assert lifecycle.resume_after_start() == [] and len(events) == 3
+
+
+class _NoClientTmux:
+    """A tmux server with no client attached, in place of tmux._tmux: each window
+    keeps its size, and a new one takes its session's default-size, else 80x24."""
+
+    def __init__(self):
+        self.panes, self.default_size, self.ids = {}, {}, itertools.count(1)
+
+    def open(self, session, name, size, agent=""):
+        pane = f"%{next(self.ids)}"
+        self.panes[pane] = {"#{pane_id}": pane, "#{window_id}": f"@{pane[1:]}", "#{session_name}": session,
+                            "#{window_name}": name, "#{window_width}": str(size[0]), "#{window_height}": str(size[1]),
+                            "#{pane_dead}": "0", f"#{{{tmux.AGENT_TAG}}}": agent}
+        return pane
+
+    def has(self, session):
+        return any(p["#{session_name}"] == session for p in self.panes.values())
+
+    def drop(self, session):
+        self.panes = {k: p for k, p in self.panes.items() if p["#{session_name}"] != session}
+        self.default_size.pop(session, None)
+
+    def size(self, pane):
+        return int(self.panes[pane]["#{window_width}"]), int(self.panes[pane]["#{window_height}"])
+
+    def run(self, cmd):
+        verb, flag = cmd[0], lambda f: cmd[cmd.index(f) + 1]
+        if verb == "has-session":
+            return "", 0 if self.has(flag("-t").removeprefix("=")) else 1
+        if verb == "new-session":
+            self.open(flag("-s"), "shell", (int(flag("-x")), int(flag("-y"))) if "-x" in cmd else (80, 24))
+        elif verb == "set-option" and "default-size" in cmd:
+            self.default_size[flag("-t")] = tuple(int(n) for n in cmd[cmd.index("default-size") + 1].split("x"))
+        elif verb == "new-window":
+            session = flag("-t").removeprefix("=").removesuffix(":")
+            return self.open(session, flag("-n"), self.default_size.get(session, (80, 24))), 0
+        elif verb == "list-panes" and "-a" in cmd:
+            return "\n".join(re.sub(r"#\{[^}]+\}", lambda m: p.get(m.group(0), ""), flag("-F"))
+                             for p in self.panes.values()), 0
+        elif verb == "kill-window":
+            self.panes = {k: p for k, p in self.panes.items() if flag("-t") not in (k, p["#{window_id}"])}
+            self.default_size = {s: v for s, v in self.default_size.items() if self.has(s)}
+        elif verb == "kill-session":
+            self.drop(flag("-t").removeprefix("="))
+        return "", 0
+
+    def __call__(self, *args, **kw):
+        out, code = "", 0
+        for is_separator, cmd in itertools.groupby(args, lambda a: a == ";"):
+            if not is_separator:
+                out, code = self.run(list(cmd))
+        return subprocess.CompletedProcess(args, code, out, "")
+
+
+@pytest.mark.parametrize("session_survives", [
+    pytest.param(True, marks=pytest.mark.variant(
+        "a surviving tmux session keeps its stale default size: recovery must resize it before opening the resumed chat")),
+    pytest.param(False, marks=pytest.mark.variant(
+        "the update also takes the tmux session down: the windows must be rebuilt at the remembered size, not tmux's 80x24")),
+])
+def test_update_relaunch_recovered_windows_start_at_the_size_the_app_left_them(db, root, monkeypatch, session_survives):
+    # The daemon has no terminal and no view is attached yet when it recovers, so each
+    # window came back at tmux's 80x24 (a 49-column chat beside the sidebar) and the
+    # resumed TUI drew there, to be resized under it when the app showed it.
+    server = _NoClientTmux()
+    monkeypatch.setattr(tmux, "_tmux", server)
+    add(db, root, "chat", status="idle")
+    server.open(root.tmux_session, "shell", (80, 24))
+    pane = server.open(root.tmux_session, "chat", (171, 54), agent="chat")
+    db.update_agent("chat", tmux_window=pane, tmux_server=tmux.current_server())
+    # Bigger, but a terminal panel's and not an agent's: it says nothing about the chat's view.
+    server.open("brindle-app", "shell", (300, 80))
+
+    assert lifecycle.pause_for_exit() == ["chat"]
+    assert pane not in server.panes
+    server.drop(root.tmux_session)
+    if session_survives:
+        server.open(root.tmux_session, "shell", (80, 24))
+    monkeypatch.setattr(agents, "_launch",
+                        lambda db_, a, ws, **kw: agents._open_window(db_, a, ws, "chat", ["cat"], False))
+
+    assert lifecycle.resume_after_start() == ["chat"]
+    assert server.size(db.get_agent("chat").tmux_window) == (171, 54)
 
 
 def _recorded_sessions(db, root, monkeypatch, sessions):

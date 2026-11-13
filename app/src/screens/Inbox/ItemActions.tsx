@@ -14,7 +14,7 @@ import { button, quiet } from "../../components/ui";
 import { useAppState } from "../../store/useStore";
 import type { Route } from "../../routes";
 import { CloudLoginStatus, useCloudLogin } from "./CloudSignIn";
-import { itemKey, loginProvider } from "./items";
+import { REVIEW_KINDS, itemKey, loginProvider } from "./items";
 import type { InboxActions } from "./useInboxActions";
 
 export interface ItemActionsProps {
@@ -54,6 +54,10 @@ export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, com
             {onGo && <button type="button" className={`${quiet} ${size}`} onClick={onGo}>Reply</button>}
             <button type="button" className={`${quiet} ${size}`} disabled={actions.busy.has(key)} onClick={() => actions.now(item, "dismiss")}>Dismiss</button>
           </>
+        )}
+        {REVIEW_KINDS.includes(item.kind) && (
+          <button type="button" className={`${button} ${size}`} disabled={item.doc == null || !onNavigate}
+            onClick={() => onNavigate?.(item.kind === "review_requested" ? { screen: "shared-design", doc: String(item.doc), title: item.detail ?? undefined, repo: repo ?? undefined } : { screen: "knowledge", view: "docs", doc: item.doc! })}>Open</button>
         )}
         {item.kind === "credentials" && (
           <ProviderSignIn

@@ -404,6 +404,31 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("test_update_relaunch: a session's pane shown during recovery is not reopened when the recovery ends", async () => {
+    vi.useFakeTimers();
+    const sup2 = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: windowOf("sup2") })) };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }],
+      workspaces: [root, sup2],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    let resuming = true;
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming, ...(resuming ? { recovery: { done: 1, total: 2, pending: ["sup1"] } } : {}) }));
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      const pane = screen.getByTestId("terminal");
+      expect(pane.textContent).toBe("sup2");
+      resuming = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(screen.getByTestId("terminal")).toBe(pane);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("shows once its session is back: one slow read after it, not after a read begun while it was pending and another behind that", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
@@ -704,7 +729,7 @@ describe("App", () => {
     fireEvent.click(link("Open Account › Usage"));
     expect(within(nav()).getByRole("button", { name: "New session" })).toBeTruthy();
     expect(within(nav()).getByRole("button", { name: "Home" })).toBeTruthy();
-    expect(within(nav()).getByRole("button", { name: "Knowledge" })).toBeTruthy();
+    expect(within(nav()).getByRole("button", { name: "Agents" })).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByTestId("terminal")).toBe(terminal);
     expect(terminal.scrollTop).toBe(96);
@@ -738,25 +763,99 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("profile rail: Knowledge and Agents sit in the profile button's rail, open their screens with the rail kept, and are no longer page links", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+  it("library sidebar: the foot's button opens the Library with the sidebar as its navigation, ← Sessions and ⌘L go back, and Settings keeps Agents", async () => {
+    const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
+    const decided = { id: "a".repeat(32), repo_key: "proj", topic: "storage", body: "use sqlite", rationale: "", scope: [], status: "accepted", created_at: 1 };
+    const OTHER = "/home/u/other";
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [session], workspaces: [root], inbox: [plan], decisions: [decided] });
     const store = createAppStore();
     const client = daemon.client();
     const sync = startSync({ client, store, connect: daemon.connect });
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    expect(await screen.findByRole("region", { name: "Session" }, { timeout: 4000 })).toBeTruthy();
-    expect(within(screen.getByTestId("sidebar-foot-row")).queryByRole("button", { name: "Knowledge" })).toBeNull();
-    expect(within(screen.getByTestId("sidebar-foot-row")).queryByRole("button", { name: "Agents" })).toBeNull();
+    const sessionPage = await screen.findByRole("region", { name: "Session" }, { timeout: 4000 });
+    // The foot's button, beside the terminal switch: off, with the dot while a design waits on the person.
+    const foot = screen.getByTestId("sidebar-foot-row");
+    const button = await within(foot).findByRole("button", { name: /^Library, 1 needs you/ });
+    expect(button.nextElementSibling).toBe(screen.getByTestId("terminal-toggle"));
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    expect(within(button).getByTestId("library-dot")).toBeTruthy();
 
+    // Pressed: the Library's page, and the sidebar is its navigation in the sessions' place.
+    fireEvent.click(button);
+    expect(await screen.findByRole("region", { name: "Library" })).toBeTruthy();
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
+    const rail = within(nav()).getByRole("navigation", { name: "Library" });
+    // Only what is real is listed: the plans waiting on the person, and the Sources. No tab strip on the page.
+    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["Needs you", "Map", "Imported docs", "Decisions", "Kept visuals"]);
+    expect(within(screen.getByRole("main")).queryByRole("tablist")).toBeNull();
+    // The repo picked on the page stays picked as the sidebar moves between a stage and a Source.
+    const picked = () => screen.getByRole<HTMLSelectElement>("combobox", { name: "Repo" }).value;
+    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: OTHER } });
+    fireEvent.click(within(rail).getByRole("button", { name: /^Needs you/ }));
+    expect(within(rail).getByRole("button", { name: /^Needs you/ }).getAttribute("aria-current")).toBe("page");
+    expect(picked()).toBe(OTHER);
+    // A Source's row counts what it holds, opens today's view of it, and is marked.
+    await waitFor(() => expect(within(rail).getByRole("button", { name: /^Decisions/ }).textContent).toContain("1"));
+    fireEvent.click(within(rail).getByRole("button", { name: /^Decisions/ }));
+    expect(await screen.findByTestId("decisions")).toBeTruthy();
+    expect(within(rail).getByRole("button", { name: /^Decisions/ }).getAttribute("aria-current")).toBe("page");
+    expect(picked()).toBe(OTHER);
+    expect(daemon.requests.filter((r) => r.path === "/decisions").at(-1)?.query).toEqual({ repo: OTHER });
+
+    // ← Sessions: the session as it was left, and the sessions list again.
+    fireEvent.click(link("← Sessions"));
+    expect(screen.getByRole("region", { name: "Session" })).toBe(sessionPage);
+    expect(within(nav()).getByRole("navigation", { name: "Sessions" })).toBeTruthy();
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+
+    // Settings has no Library heading or Knowledge entry; Agents sits under "brindle", after General.
     fireEvent.click(link("Open Account › Usage"));
-    for (const name of ["Knowledge", "Agents"]) {
-      fireEvent.click(link(name));
-      expect(await screen.findByRole("region", { name })).toBeTruthy();
-      expect(link(name).getAttribute("aria-current")).toBe("page");
-      expect(link("← Sessions")).toBeTruthy();
-    }
+    expect(within(nav()).queryByRole("button", { name: "Knowledge" })).toBeNull();
+    expect(within(nav()).queryByText("Library")).toBeNull();
+    expect(screen.getByRole("tab", { name: "General" }).nextElementSibling).toBe(link("Agents"));
+    fireEvent.click(link("Agents"));
+    expect(await screen.findByRole("region", { name: "Agents" })).toBeTruthy();
+    expect(link("Agents").getAttribute("aria-current")).toBe("page");
+    // ⌘L from there opens the Library, and ⌘L again goes back to where the person was.
+    fireEvent.keyDown(window, { key: "l", metaKey: true });
+    expect(await screen.findByRole("region", { name: "Library" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "l", metaKey: true });
+    expect(await screen.findByRole("region", { name: "Agents" })).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Session" })).toBe(sessionPage);
+    sync.stop();
+  });
+
+  it("library sidebar recent and stages: shared designs with no Inbox card are counted from their own review state, and the rail lists the newest", async () => {
+    const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
+    const libraryDocs = [
+      { doc_id: "a1", title: "Waiting on sam", updated_at: 30, design: { rev: 1, ready: false, reviewers: [{ sub: "sam", required: true }], sign_offs: [] } },
+      { doc_id: "a2", title: "All signed", updated_at: 20, design: { rev: 1, ready: true, reviewers: [{ sub: "sam", required: true }], sign_offs: [{ sub: "sam", rev: 1 }] } },
+      { doc_id: "a3", title: "Personal note", updated_at: 10 },
+      { doc_id: "a4", title: "Asked of me", updated_at: 40, design: { rev: 1, ready: false, reviewers: [{ sub: "me", required: true }], sign_offs: [] } },
+    ];
+    const asked = { kind: "review_requested", reason: "Review requested", doc: "a4" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [plan, asked], libraryDocs });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await screen.findByRole("region", { name: "Session" }, { timeout: 4000 });
+    fireEvent.click(await within(screen.getByTestId("sidebar-foot-row")).findByRole("button", { name: /^Library/ }));
+    const rail = await within(nav()).findByRole("navigation", { name: "Library" });
+    await waitFor(() => expect(within(rail).getByRole("button", { name: /^In review/ }).textContent).toContain("1"));
+    expect(within(rail).getByRole("button", { name: /^Approved/ }).textContent).toContain("1");
+    expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");     // a4, in the queue; the unrelated plan isn't a Library design
+    expect([...rail.querySelectorAll("button")].slice(0, 3).map((row) => row.textContent?.replace(/^\W+/, "").trim())).toEqual(["Asked of me", "Waiting on sam", "All signed"]);
+    // Choosing a stage opens the Library's results narrowed to it, and they are the designs its count counted.
+    const listed = () => [...screen.getByTestId("docs").querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"));
+    fireEvent.click(within(rail).getByRole("button", { name: /^In review/ }));
+    await waitFor(() => expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Stage" }).value).toBe("in-review"));
+    await waitFor(() => expect(listed()).toEqual(["a1"]));
+    fireEvent.click(within(rail).getByRole("button", { name: /^Needs you/ }));
+    await waitFor(() => expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Stage" }).value).toBe("needs-you"));
+    await waitFor(() => expect(listed()).toEqual(["a4"]));
     sync.stop();
   });
 
@@ -1021,8 +1120,8 @@ describe("App", () => {
     expect(after).toContain("/snapshot");
     expect(after).toContain("/inbox");
     expect(after).toContain("/meta");
-    fireEvent.click(link("Knowledge"));
-    expect(await screen.findByRole("region", { name: "Knowledge" })).toBeTruthy();
+    fireEvent.click(link("Library"));
+    expect(await screen.findByRole("region", { name: "Library" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     sync.stop();
   });

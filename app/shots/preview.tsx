@@ -69,6 +69,9 @@ const SCENES: Record<string, Route> = {
   agents: { screen: "agents" },
   "agents-make": { screen: "agents" },
   knowledge: { screen: "knowledge" },
+  // The Library open from the foot's button: the sidebar is its navigation; then one of its Sources.
+  library: { screen: "knowledge" },
+  "library-decisions": { screen: "knowledge", view: "decisions" },
   "knowledge-map": { screen: "knowledge", view: "map" },
   "knowledge-record": { screen: "knowledge" },
   "knowledge-search": { screen: "knowledge" },
@@ -290,7 +293,7 @@ const THEN: Record<string, () => void> = {
   "settings-signin": () => document.querySelector('[data-testid="provider-codex"]')?.scrollIntoView({ block: "center" }),
   // A search that finds a decision and the documents' chunks alike.
   "knowledge-search": () => {
-    const box = document.querySelector<HTMLInputElement>('input[aria-label="Search knowledge"]');
+    const box = document.querySelector<HTMLInputElement>('input[aria-label="Search the Library"]');
     if (!box) return;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(box, "tmux");
     box.dispatchEvent(new Event("input", { bubbles: true }));

@@ -382,6 +382,132 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     assert started == ["build the preset schema"]
 
 
+@pytest.mark.parametrize("answer, goal_first, assigned_first", [
+    pytest.param({"option": "build"}, True, False, marks=pytest.mark.variant(
+        "the ordinary approval: goal first, then an approving option starts the plan")),
+    pytest.param({"option": "build"}, False, False, marks=pytest.mark.variant(
+        "the design is approved before the session has a goal: the goal that follows claims it")),
+    pytest.param({"option": "build"}, True, True, marks=pytest.mark.variant(
+        "review: approving a design after work was assigned must still record approval independently of offer suppression")),
+    pytest.param({"option": "back"}, True, False, marks=pytest.mark.variant(
+        "a redirect option ('Go back and revise') is not an approval, whatever its words: the offer must still open")),
+    pytest.param({"option": "build", "note": "change the split first"}, True, False, marks=pytest.mark.variant(
+        "an approving option with a redirect note is not an approval: the offer must still open")),
+])
+def test_approved_design_counts_as_the_plan(answer, goal_first, assigned_first, db, session, monkeypatch):
+    from brindle import autopilot, visuals
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    if goal_first:      # goal A starts small, so it has no offer yet; its design is approved while it runs
+        mcp_server.set_goal("Org presets", [{"title": "M0", "check": "true"}])
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    if assigned_first:
+        asyncio.run(mcp_server.assign("developer", "start the schema"))
+        assert started == ["start the schema"]
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True},
+                             {"id": "back", "label": "Go back and revise"}])
+    visuals.answer(db, shown["id"], 1, **answer)
+
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(5)])
+    assert visuals.has_approved_design(db, "boss", "Org presets") is (answer == {"option": "build"})
+    offers = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    if answer == {"option": "build"}:
+        expected = ["start the schema", "build the preset schema"] if assigned_first else ["build the preset schema"]
+        assert offers == [] and started == expected and plans.holding(db, "boss") is None
+        # The approval belonged to that goal: a later, unrelated goal gets the normal offer.
+        mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(5)], new_goal=True)
+        assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+    else:
+        assert len(offers) == 1 and started == []
+
+
+@pytest.mark.variant("review: a design approved after the session moved on belongs to the goal it was shown for")
+def test_approval_stays_with_the_goal_the_design_was_shown_for(db, session, monkeypatch):
+    from brindle import autopilot, visuals
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    mcp_server.set_goal("Org presets", [{"title": "A", "check": "true"}])
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+    mcp_server.set_goal("Billing export", [{"title": "B", "check": "true"}])
+    visuals.answer(db, shown["id"], 1, option="build")        # A's design, answered while B is the goal
+    mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(5)])
+    assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+
+
+@pytest.mark.parametrize("delivered", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant(
+        "a delivery that succeeds after the offer opened must release the held worker")),
+])
+@pytest.mark.variant("review: a delivery that fails after a goal claimed the approval must still undo the answer")
+def test_failed_answer_delivery_leaves_no_approval_behind(delivered, db, session, monkeypatch):
+    from brindle import autopilot, visuals
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    db.add_autopilot("boss")
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+
+    def fail(*a, **k):      # a big goal and an assign arrive while the answer is being delivered
+        monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)   # starting a task also messages
+        mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(5)])
+        asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+        if not delivered:
+            raise RuntimeError("not delivered")
+    monkeypatch.setattr(agents, "send_message", fail)
+    if delivered:
+        visuals.answer(db, shown["id"], 1, option="build")
+        assert plans.holding(db, "boss") is None and started == ["build the preset schema"]
+        return
+    with pytest.raises(RuntimeError):
+        visuals.answer(db, shown["id"], 1, option="build")
+    assert visuals.get(db, shown["id"])["answer"] is None
+    assert not visuals.has_approved_design(db, "boss", "Org presets")
+    assert started == [] and plans.holding(db, "boss") is not None      # the undelivered answer exempted nothing
+
+
+@pytest.mark.variant("review: the answer is delivered between the offer's evaluation and its insertion")
+def test_approval_delivered_while_the_offer_is_being_opened(db, session, monkeypatch):
+    from brindle import autopilot, visuals
+    from brindle.db import DB as DBClass
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+    real = DBClass.open_plan_offer
+
+    def late(self, *args):      # the approval lands after the evaluation saw none, before the offer is written
+        visuals.answer(db, shown["id"], 1, option="build")
+        return real(self, *args)
+    monkeypatch.setattr(DBClass, "open_plan_offer", late)
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(5)])
+    assert visuals.get(db, shown["id"])["answer"] is not None
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    assert plans.holding(db, "boss") is None and started == ["build the preset schema"]
+
+
 @pytest.mark.parametrize("how", [
     pytest.param("declined", marks=pytest.mark.variant(
         "the owner's reported case: declined, then the goal grew and was asked again")),
@@ -474,6 +600,374 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     mcp_server.propose_plan(PLAN + "\n\nRevised.", DECISIONS, plan_id=pid)
     assert plans.decide(db, pid, 2, True, person=True)["state"] == "approved"
     assert started == ["build the preset schema"]
+
+
+def test_design_doc_round_trip_comment_reply_and_next_revision(db, session):
+    from brindle import plan_docs
+
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    sections = [{"id": "goal", "title": "Goal", "markdown": "Presets per org."},
+                {"id": "flow", "title": "Flow", "kind": "mermaid", "markdown": "graph TD; A-->B"}]
+    pid = mcp_server.propose_plan("# Org presets", DECISIONS, sections=sections).split()[2]
+    assert [s["kind"] for s in plan_docs.revision(db, pid)["sections"]] == ["markdown", "mermaid"]
+
+    tid = plan_docs.comment(db, pid, 1, {"kind": "text", "section": "goal", "quote": "per org"}, "Which orgs?")
+    sid = plan_docs.suggest(db, pid, 1, "goal", 0, "Presets", "Rules", "clearer")
+    plans.decide(db, pid, 1, False, person=True)
+    [msg] = messages(db)                                  # one message for the batch, naming the thread
+    with pytest.raises(ToolError):                        # a suggestion can't be resolved ...
+        mcp_server.reply_plan_thread(pid, sid, "no", resolve=True)
+    assert not next(t for t in plan_docs.fields(db, plans.get(db, pid))["threads"] if t["id"] == sid)["replies"]
+    assert f"[thread #{tid}]" in msg and "Which orgs?" in msg
+
+    assert f"#{tid}" in mcp_server.reply_plan_thread(pid, tid, "All of them.", resolve=True)
+    thread = next(t for t in plan_docs.fields(db, plans.get(db, pid))["threads"] if t["id"] == tid)
+    assert thread["status"] == "resolved" and thread["replies"][0]["author"] == plan_docs.SUPERVISOR
+
+    sections[0]["markdown"] = "Presets per org, all orgs."
+    assert mcp_server.propose_plan("# Org presets", DECISIONS, sections=sections, plan_id=pid).split()[3] == "r2"
+    assert plans.get(db, pid)["state"] == "open"
+
+
+def _shared(db, pid, review, local_rev=1, remote_rev=1):
+    """A plan as a sync leaves it: linked to the Library, with its last review state."""
+    review = {"policy_reviewers": [], **review} if review else review   # the Library always sends the list
+    with db.tx() as c:
+        c.execute("INSERT INTO plan_shares (plan_id, doc_id, owner, remote_rev, local_rev, review) VALUES (?,'doc','me',?,?,?)"
+                  " ON CONFLICT(plan_id) DO UPDATE SET remote_rev=excluded.remote_rev, local_rev=excluded.local_rev,"
+                  " review=excluded.review", (pid, remote_rev, local_rev, json.dumps(review)))
+
+
+def _signed_off(*subs, rev=1):
+    return [{"sub": s, "rev": rev, "at": 5.0} for s in subs]
+
+
+TWO = [{"sub": "a", "required": True}, {"sub": "b", "required": True}, {"sub": "c", "required": False}]
+ONE = [{"sub": "a", "required": True}]
+RULE = {"org_id": "org_1", "policy": "staff", "name": "Staff sign-off", "approvals": 1, "on_list": ["a"], "met_by": ["a"],
+        "status": "met"}
+
+
+@pytest.fixture
+def library(monkeypatch):
+    from brindle.pro import shared_docs
+
+    monkeypatch.setattr(shared_docs, "sync", lambda db, plan_id: {})
+    return shared_docs
+
+
+@pytest.mark.parametrize("review, local_rev, teammate, state, signed", [
+    pytest.param({"rev": 1, "reviewers": TWO, "sign_offs": _signed_off("a", "b")}, 1, None, "ready", (2, 2), id="all-signed",
+                 marks=pytest.mark.variant("every required reviewer on a plain list (no rules) has signed: the gate opens at 2 of 2")),
+    pytest.param({"rev": 1, "reviewers": TWO, "sign_offs": _signed_off("a", "c")}, 1, None, "waiting", (1, 2), id="optional-doesnt-count",
+                 marks=pytest.mark.variant("an optional reviewer's sign-off must not stand in for a missing required one")),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a"),
+                  "policy_reviewers": [RULE, {**RULE, "policy": "security", "name": "Security"}]},
+                 1, None, "ready", (1, 1), id="one-sign-off-meets-every-rule"),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a"),
+                  "policy_reviewers": [{**RULE, "on_list": [], "met_by": [], "status": "waiting"}]},
+                 1, None, "waiting", (1, 2), id="a-rule-nobody-met",
+                 marks=pytest.mark.variant("a rule nobody on its list has met holds the gate even though the required list is signed")),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a", rev=0)}, 1, None, "waiting", (0, 1),
+                 id="sign-off-on-an-older-revision",
+                 marks=pytest.mark.variant("a stale sign-off must never open the gate on text the reviewer hasn't read")),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 0, None, "waiting", (0, 1), id="revision-not-sent-yet"),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 1, "a", "changes_requested", (0, 1), id="changes-after-sign-off",
+                 marks=pytest.mark.variant("a reviewer who signed and then asked for changes closes the gate they had signed")),
+    pytest.param({"rev": 1, "reviewers": [], "sign_offs": _signed_off("a"), "policy_reviewers": [{**RULE, "on_list": []}]},
+                 1, "a", "changes_requested", (0, 1), id="changes-from-a-signer-only-a-rule-counts"),
+    pytest.param({}, 1, None, "waiting", (0, 0), id="library-not-heard-from",
+                 marks=pytest.mark.variant("no review data from the Library at all must wait, not read as nobody required")),
+    pytest.param({"rev": 1, "reviewers": [], "policy_reviewers": ["unreadable"]}, 1, None, "waiting", (0, 0), id="unreadable-rule"),
+])
+def test_required_reviewers_gate(db, session, library, monkeypatch, review, local_rev, teammate, state, signed):
+    from brindle import plan_docs
+
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    _shared(db, pid, review, local_rev=local_rev)
+    if teammate:
+        plan_docs.comment(db, pid, 1, {"kind": "section", "section": "s1"}, "Not like this.",
+                          author=plan_docs.TEAMMATE + teammate)
+    gate = plans.to_dto(db, plans.get(db, pid))["gate"]
+    assert (gate["state"], (gate["signed"], gate["required"])) == (state, signed)
+    if teammate:                                                    # the person it waits on is named
+        assert any(r["sub"] == teammate or teammate in r["changes_by"] for r in gate["reviewers"])
+    if state == "ready":
+        # All signed, and still only the approval starts it: losing the app can't skip that step.
+        monkeypatch.setattr(holds, "app_connected", lambda: False)
+        asyncio.run(mcp_server.assign("developer", "build it"))
+        assert started == [] and tasks.sweep(db) == 0 and started == []
+        assert plans.decide(db, pid, 1, True, person=True)["state"] == "approved" and started == ["build it"]
+        assert plans.gate(db, plans.get(db, pid))["state"] == "closed"
+        return
+    # Refused outright, even with no app connected: teammates sign off from their own machines.
+    monkeypatch.setattr(holds, "app_connected", lambda: False)
+    asyncio.run(mcp_server.assign("developer", "build it"))
+    assert db.list_tasks() == [] and started == []
+    with pytest.raises(ServiceError) as e:
+        plans.decide(db, pid, 1, True, person=True)
+    assert e.value.code == "gate_closed" and plans.get(db, pid)["state"] == "open" and messages(db) == []
+
+
+def test_required_reviewers_request_changes_blocks_and_building_closes_the_review(db, session, library):
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")})
+    asyncio.run(mcp_server.assign("developer", "queued before it was blocked"))
+
+    # Request changes works with reviewers still out, and holds the build whatever was signed.
+    assert plans.decide(db, pid, 1, False, note="Rework it.", person=True)["state"] == "redirected"
+    assert plans.gate(db, plans.get(db, pid))["state"] == "changes_requested"
+    assert tasks.sweep(db) == 0 and started == []
+
+    # The new revision needs its own sign-off, which the earlier one doesn't carry over to.
+    mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
+    _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": _signed_off("a", rev=1)}, local_rev=2, remote_rev=2)
+    assert plans.gate(db, plans.get(db, pid))["state"] == "waiting"
+    _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": _signed_off("a", rev=2)}, local_rev=2, remote_rev=2)
+    assert plans.decide(db, pid, 2, True, person=True)["state"] == "approved"
+    assert started == ["queued before it was blocked"]
+
+    assert plans.gate(db, plans.get(db, pid))["state"] == "closed"
+    for attempt in (lambda: library.set_reviewers(db, pid, ONE), lambda: library.sign_off(db, pid, 2)):
+        with pytest.raises(ServiceError) as e:
+            attempt()
+        assert e.value.code == "review_closed"
+
+
+@pytest.mark.parametrize("reviewers", [
+    pytest.param(ONE, marks=pytest.mark.variant(
+        "a cached required list that is fully signed still can't open the gate while the Library is unreachable")),
+    pytest.param([], marks=pytest.mark.variant(
+        "an empty cached list can't prove nobody was added since: a first required reviewer may be waiting remotely")),
+])
+def test_required_reviewers_approval_needs_the_library(db, session, library, monkeypatch, reviewers):
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    _shared(db, pid, {"rev": 1, "reviewers": reviewers, "sign_offs": _signed_off("a")})
+
+    def offline(db_, plan_id):
+        raise RuntimeError("the Library can't be reached")
+    monkeypatch.setattr(library, "sync", offline)
+    with pytest.raises(ServiceError) as e:
+        plans.decide(db, pid, 1, True, person=True)
+    assert e.value.code == "gate_unverified" and plans.get(db, pid)["state"] == "open"
+
+
+NO_REVIEW = {"rev": 1, "reviewers": [], "policy_reviewers": [], "sign_offs": []}
+
+
+@pytest.fixture
+def outage(db, session, monkeypatch):
+    """A plan shared with no required reviewers, a task queued behind it, and a
+    Library that is down until ``down`` is cleared and then answers ``view``."""
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import auth, license, shared_docs
+
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    _shared(db, pid, NO_REVIEW)
+    shared_docs._remember(db, pid, NO_REVIEW)
+    asyncio.run(mcp_server.assign("developer", "build it"))
+    line = SimpleNamespace(pid=pid, view=NO_REVIEW, signed_in="me", calls=[], down=auth.TransportError("no route to 10.0.0.1"),
+                           patch=monkeypatch, real_sync=shared_docs.sync)
+
+    def sync(db_, plan_id, **kw):
+        if line.down:
+            raise line.down
+        shared_docs._remember(db_, plan_id, line.view)
+        return {}
+
+    def api(method, path, body=None, **kw):
+        if line.down:
+            raise line.down
+        line.calls.append((method, path))
+        return {"scope": {"kind": "user", "id": "me"}, "scopes": [{"kind": "user", "id": "me"}, {"kind": "group", "id": "t_1"}]}
+
+    monkeypatch.setattr(shared_docs, "sync", sync)
+    monkeypatch.setattr(shared_docs, "_require_team", lambda store: SimpleNamespace(sub="me", org_id="org_1"))
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (None, None))
+    monkeypatch.setattr(ad, "api", api)
+    monkeypatch.setattr(license, "current", lambda **kw: SimpleNamespace(sub=line.signed_in, org_id="org_1", in_grace=False,
+                                                                         features=frozenset()))
+    return line
+
+
+def _approve(app, line):
+    return app.post(f"/v1/plans/{line.pid}/decide", json={"rev": 1, "approved": True})
+
+
+def _refused_approval(app, line, reason):
+    """Approve while the Library is down: refused in plain words, and nothing starts."""
+    error = _approve(app, line).json()["error"]
+    assert (error["code"], error["reason"]) == ("gate_unverified", reason)
+    assert error["message"] and str(line.down) not in error["message"]      # the failure's own words stay out
+    return app.get(f"/v1/plans/{line.pid}").json()
+
+
+def _unshares(db):
+    return [r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM plan_unshares")]
+
+
+def _approves_by_itself(db, app, line, started):
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import auth, shared_docs
+
+    for down, reason in [(auth.AuthError("token rejected", code="invalid_grant", revoked=True), "sign_in"),
+                         (ad.Refused("kms said no", 503, "key_unavailable"), "key_unavailable"),
+                         (ad.Refused("boom", 500), "library_error"),
+                         (line.down, "offline")]:
+        line.down = down
+        held = _refused_approval(app, line, reason)["gate"]["unconfirmed"]
+        assert held["reason"] == reason and held["approval_held"] and started == []
+
+    assert shared_docs.sync_open(db) == 0 and started == []     # still down: nothing moves
+    line.down = None
+    assert shared_docs.sync_open(db) == 1
+    assert plans.get(db, line.pid)["state"] == "approved" and started == ["build it"]
+
+
+def _not_approved_when_a_reviewer_appeared(db, app, line, started):
+    from brindle.pro import shared_docs
+    from brindle.service import inbox
+
+    _refused_approval(app, line, "offline")
+    line.down, line.view = None, {**NO_REVIEW, "reviewers": ONE}
+    for _ in range(2):      # told once, and the next pass doesn't approve it either
+        shared_docs.sync_open(db)
+        gate = app.get(f"/v1/plans/{line.pid}").json()["gate"]
+        assert plans.get(db, line.pid)["state"] == "open" and started == [] and messages(db) == []
+        assert gate["approval_refused"] and gate["unconfirmed"] is None
+    told = [i for i in inbox.items(db, None) if i.kind == "visual" and i.visual_id == line.pid]
+    assert [i.reason for i in told] == [gate["approval_refused"]]
+
+
+def _stops_sharing_and_builds(db, app, line, started):
+    from brindle.pro import shared_docs
+
+    assert _refused_approval(app, line, "offline")["gate"]["unconfirmed"]["can_stop_sharing"]
+    now = app.post(f"/v1/plans/{line.pid}/stop-sharing", json={"rev": 1}).json()
+    assert now["gate"] is None and now["team_ended"] is False
+    assert _approve(app, line).json()["state"] == "approved" and started == ["build it"]
+
+    shared_docs.sync_open(db)                                   # the Library is still down: kept for later
+    assert _unshares(db) == ["doc"] and line.calls == []
+    line.down = None
+    shared_docs.sync_open(db)
+    assert line.calls == [("GET", "/analysis-docs/doc"), ("DELETE", "/analysis-docs/doc/share/group/t_1")]
+    assert _unshares(db) == []
+
+
+def _access_refusal_stands_until_the_library_answers(db, app, line, started):
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import shared_docs
+
+    answers = [(403, {"error": "forbidden"})]
+    line.patch.setattr(shared_docs, "sync", line.real_sync)
+    line.patch.setattr(ad, "_call", lambda *a, **kw: answers[-1])
+    refused = _refused_approval(app, line, "library_error")["gate"]["unconfirmed"]
+    assert not refused["can_stop_sharing"] and not refused["approval_held"]
+    assert app.post(f"/v1/plans/{line.pid}/stop-sharing", json={"rev": 1}).status_code == 409 and _unshares(db) == []
+
+    answers.append((200, NO_REVIEW))
+    assert shared_docs.sync_open(db) == 1 and started == []
+    answers.append((503, {"error": "unavailable"}))             # an outage now: nothing has refused them
+    assert _refused_approval(app, line, "library_error")["gate"]["unconfirmed"]["can_stop_sharing"]
+
+
+def _reviewers_once_existed(db, line):
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import shared_docs
+
+    # Only the read inside set_reviewers shows the reviewer: the answer that gets stored no longer lists them.
+    line.patch.setattr(ad, "_call", lambda method, path, body=None, **kw: (
+        200, {**NO_REVIEW, "reviewers": ONE} if method == "GET" else NO_REVIEW))
+    shared_docs.set_reviewers(db, line.pid, [])
+
+
+def _another_account(db, line):
+    line.signed_in = "someone-else"
+
+
+@pytest.mark.parametrize("scenario", [
+    _approves_by_itself, _not_approved_when_a_reviewer_appeared, _stops_sharing_and_builds,
+    pytest.param(_access_refusal_stands_until_the_library_answers, marks=pytest.mark.variant(
+        "bypass attempt: a 403 from the Library is a refusal, not an outage, so it can't open the way around the review")),
+])
+def test_held_plan_when_the_library_is_down(db, session, outage, scenario):
+    _, started = session
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        scenario(db, app, outage, started)
+
+
+@pytest.mark.parametrize("arrange", [
+    pytest.param(_reviewers_once_existed, marks=pytest.mark.variant(
+        "bypass attempt: a required reviewer removed before the outage must not reopen the way out")),
+    pytest.param(_another_account, marks=pytest.mark.variant(
+        "bypass attempt: only the account that shared the plan may unshare it")),
+])
+def test_held_plan_when_the_library_is_down_refuses_stop_sharing(db, session, outage, arrange):
+    _, started = session
+    arrange(db, outage)
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        assert not _refused_approval(app, outage, "offline")["gate"]["unconfirmed"]["can_stop_sharing"]
+        refused = app.post(f"/v1/plans/{outage.pid}/stop-sharing", json={"rev": 1})
+        assert refused.json()["error"]["code"] == "stop_sharing_refused" and refused.status_code == 409
+        assert app.get(f"/v1/plans/{outage.pid}").json()["gate"] is not None and started == []
+    assert _unshares(db) == []
+
+
+def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, session, monkeypatch):
+    from brindle import plan_docs
+    from brindle.service import inbox
+
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    me = {"sub": "me"}
+    monkeypatch.setattr(inbox, "_my_sub", lambda: me["sub"])
+    kinds = lambda: [(i.kind, i.doc) for i in inbox._review_items(db, None)]  # noqa: E731
+
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": []})
+    assert kinds() == []                                   # the author waits: no card yet
+    from brindle.pro import review_queue
+
+    asked = lambda on: review_queue._seen.__setitem__("a", [{"doc_id": "doc", "title": "t"}] if on else [])  # noqa: E731
+    me["sub"] = "a"
+    asked(True)
+    assert kinds() == [("review_requested", "doc")]        # the Library asks the reviewer, and it opens the doc
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")})
+    asked(False)
+    assert kinds() == []                                   # signing takes it off the queue
+    me["sub"] = "me"
+    assert kinds() == [("signed_off", "doc")]
+    plan_docs.comment(db, pid, 1, {"kind": "section", "section": "s1"}, "No.", author=plan_docs.TEAMMATE + "a")
+    assert kinds() == [("changes_requested", "doc")]
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": []})
+    me["sub"] = "a"
+    assert kinds() == []                                   # asking for changes answers the request too
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
+    _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": []}, local_rev=2, remote_rev=2)
+    asked(True)
+    assert kinds() == [("review_requested", "doc")]        # the answer was to r1: r2 needs its own review
+    with monkeypatch.context() as m:
+        m.setattr(inbox.identity_lock, "locked_by", lambda _id: True)
+        assert [(i.doc, i.request_id) for i in inbox._review_items(db, None)] == [("doc", None)]   # the queue's card, no session link
+    asked(False)
+    me["sub"] = "me"
+    assert kinds() == [("changes_requested", "doc")]
+    with monkeypatch.context() as m:
+        m.setattr(inbox.identity_lock, "locked_by", lambda _id: True)
+        assert kinds() == []                               # another identity's session shows nothing
+    me["sub"] = None                                      # logged out: no cards, no error
+    assert kinds() == []
 
 
 def test_only_the_person_decides_and_only_when_they_asked(db, session):

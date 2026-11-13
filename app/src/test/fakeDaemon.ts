@@ -54,6 +54,8 @@ export interface DaemonData {
   decisions: DecisionDTO[];
   /* Optional hosted library fixtures, independent of the local KB. */
   docScopes?: import("../api/client").DocScope[];
+  /* The Library's designs as the server lists them (doc_id) with each one's `design` review state; none: not entitled. */
+  libraryDocs?: { doc_id: string; title: string; updated_at?: number; design?: object }[];
   knowledgeMap?: import("../api/client").KnowledgeMap;
   kbDocuments?: import("../api/client").MapNode[];
   profiles: ProfileDTO[];
@@ -2727,6 +2729,11 @@ export class FakeDaemon {
     if ((m = path.match(/^\/sessions\/([^/]+)\/visuals$/))) return json(this.visualRows.filter((v) => v.session === m![1]));
     if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
     // The doc library, as an engine not signed in to a plan answers it (routes_actions._docs_entitlement).
+    if (this.data.libraryDocs) {
+      if (path === "/analysis-docs") return json({ docs: this.data.libraryDocs.map(({ design: _, ...doc }) => doc) });
+      const one = this.data.libraryDocs.find((doc) => path === `/analysis-docs/${doc.doc_id}`);
+      if (one) return json({ ...one, id: one.doc_id, files: [] });
+    }
     if (path === "/analysis-docs") return error("not_entitled", "analysis docs need brindle Pro", 402);
     return error("not_found", `no route ${path}`, 404);
   };

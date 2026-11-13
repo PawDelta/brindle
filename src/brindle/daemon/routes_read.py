@@ -921,6 +921,17 @@ def analysis_doc_scopes(db: DB, request: Request) -> Any:
 
 
 @_json
+def library_folders(db: DB, request: Request) -> Any:
+    """``{"scopes": [{scope: {kind, id, name}, folders: [...]}]}``: the folders
+    the person can see in each scope they read (see pro/library_folders)."""
+    from brindle.pro import library_folders as folders
+
+    repo = _repo(request)
+    return {"scopes": folders.list_all(docs_scopes(repo), api=lambda m, p, b=None: docs_api(m, p, b, repo=repo),
+                                       refusals=(ServiceError,))}
+
+
+@_json
 def analysis_doc_switches(db: DB, request: Request) -> Any:
     """The person's own switches, and which their org has locked (see routes_actions.doc_switches)."""
     return doc_switches(_repo(request))
@@ -1037,6 +1048,7 @@ ROUTES = [
     Route("/v1/analysis-docs/export-config", analysis_doc_export_config),
     Route("/v1/analysis-docs/destination", analysis_doc_destination),
     Route("/v1/analysis-docs/{id}", analysis_doc),
+    Route("/v1/library/folders", library_folders),
     Route("/v1/profiles", list_profiles),
     Route("/v1/profiles/{name}", get_profile),
     Route("/v1/rules", list_rules),

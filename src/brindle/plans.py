@@ -20,7 +20,17 @@ tasks; Redirect sends their picks and per-section comments back to the
 supervisor as a message from them and lets it publish one new revision. An
 approval from an agent is refused. Like the rest of the visualizer, plans
 are behind the visuals capability (``visuals.enabled``), but not behind the
-Visuals setting: that only governs offers."""
+Visuals setting: that only governs offers.
+
+A plan shared for team review (brindle.pro.shared_docs) has a build gate
+(``gate``): it opens when every required reviewer and org review rule has
+signed off the revision on screen. One sign-off counts for every rule it
+meets. A reviewer's or rule signer's open comment or suggestion written after
+their sign-off is how they ask for changes (the Library has no verdict of its
+own), and blocks it too. While the gate is closed Approve is refused and
+assign is refused. A shared plan's queued tasks wait for its approval even
+with no app connected: only that approval checks the Library, starts them and
+closes the review."""
 
 from __future__ import annotations
 
@@ -50,6 +60,24 @@ LEDE = "lede"
 SPLIT = "split"
 DECISION = "decision:"
 HOLDING = ("open", "redirected")
+# A row of the build gate.
+SIGNED, CHANGES, WAITING, WAIVED = "signed_off", "changes_requested", "waiting", "waived"
+_MET = (SIGNED, WAIVED)
+_RULE_STATUS = {"met": SIGNED, "waived": WAIVED}   # the Library's policy_reviewers[].status; anything else waits
+CONFLICT = "conflict"       # the plan and the Library's copy both changed since they last matched
+# The gate's states that keep a build from starting.
+GATE_SHUT = (WAITING, CHANGES, CONFLICT)
+# Why the Library couldn't confirm a shared plan's review (plan_shares.unconfirmed), in the person's words.
+OFFLINE, SIGN_IN, KEY_UNAVAILABLE, LIBRARY_ERROR, OTHER_ACCOUNT = (
+    "offline", "sign_in", "key_unavailable", "library_error", "other_account")
+UNCONFIRMED = {
+    OFFLINE: "brindle can't reach the Library right now, so it can't confirm this plan's review.",
+    SIGN_IN: "Your brindle sign-in has expired, so the Library can't confirm this plan's review.",
+    KEY_UNAVAILABLE: "Your organization's encryption key isn't available, so the Library can't confirm this "
+                     "plan's review. Contact your admin.",
+    LIBRARY_ERROR: "The Library ran into a problem and couldn't confirm this plan's review.",
+    OTHER_ACCOUNT: "This plan was shared from another brindle account. Sign in to that account to confirm its review.",
+}
 # The offer to plan a goal first (goal_doc_requests.offer): plan:open:<id>
 # until answered, then plan:accepted (waiting for the plan), plan:planned (a
 # plan was proposed) or plan:dismissed. Open and accepted hold the session's
@@ -205,9 +233,14 @@ def _row(db: DB, plan_id: str) -> dict:
 
 
 def get(db: DB, plan_id: str) -> dict:
-    """The plan and its visual's row, as ``{**plan, "visual": {...}}``."""
+    """The plan and its visual's row, as ``{**plan, "visual": {...}}``, with
+    the current revision's ``lede`` and ``sections`` (brindle.plan_docs)."""
+    from brindle import plan_docs
+
     p = _row(db, plan_id)
     p["visual"] = visuals.get(db, p["id"])
+    cur = plan_docs.revision(db, p["id"])
+    p["lede"], p["sections"] = cur["lede"], cur["sections"]
     return p
 
 
@@ -223,19 +256,206 @@ def open_plan(db: DB, root_id: str) -> dict | None:
     return _row(db, row["id"]) if row else None
 
 
+def _review_rows(review: dict) -> tuple[dict[str, bool], list[dict]] | None:
+    """The Library's reviewers as ``{sub: required}`` and its policy rules, or
+    None when it hasn't answered or a row can't be read: an unreadable rule
+    must keep the gate shut, never drop out of it. The Library always sends
+    the rules, an empty list when there are none: no list is no answer."""
+    from brindle.pro import review_policies
+
+    people, rules = review.get("reviewers"), review.get("policy_reviewers")
+    if not isinstance(people, list) or not isinstance(rules, list):
+        return None
+    out: dict[str, bool] = {}
+    for r in people:
+        if not isinstance(r, dict) or not isinstance(r.get("sub"), str) or not r["sub"]:
+            return None
+        out[r["sub"]] = out.get(r["sub"], False) or bool(r.get("required"))
+    if not all(review_policies.readable(r) for r in rules):
+        return None
+    if not review_policies.pending_agrees(review.get("pending_policies"), rules):
+        return None
+    return out, rules
+
+
+def demands_review(review: dict) -> bool:
+    """Whether a review state has required reviewers or org rules, or can't be
+    read well enough to say it doesn't."""
+    read = _review_rows(review)
+    return read is None or any(read[0].values()) or bool(read[1])
+
+
+def _signed(review: dict) -> dict[str, float]:
+    """Who signed the Library's head revision, and when: sign-offs on older ones don't count."""
+    rows = review.get("sign_offs")
+    return {s["sub"]: s["at"] if isinstance(s.get("at"), (int, float)) else 0
+            for s in (rows if isinstance(rows, list) else [])
+            if isinstance(s, dict) and isinstance(s.get("sub"), str) and s.get("rev") == review.get("rev")}
+
+
+def tally(people: dict[str, bool], rules: list[dict], signed: dict[str, float], asked: dict[str, float],
+          current: bool, you: str | None) -> tuple[list[dict], list[dict], list[dict], int, list[str], list[str]]:
+    """Count a design's reviewers and org rules: ``(rows, policies, required,
+    met, unmet, changes)``. ``signed`` and ``asked`` say when each person
+    signed the head revision and last left an open comment or suggestion;
+    ``current``: whether rule results describe the revision on screen."""
+    from brindle.pro import review_policies
+
+    def asked_since(sub: str) -> bool:
+        return sub in asked and asked[sub] > signed.get(sub, -1)
+
+    def status(sub: str) -> str:
+        if asked_since(sub):
+            return CHANGES
+        return SIGNED if sub in signed else WAITING
+
+    rows = [{"sub": sub, "name": None, "required": required, "status": status(sub), "met_by": [], "changes_by": [],
+             "meets": [], "you": sub == you} for sub, required in people.items()]
+    by_sub = {r["sub"]: r for r in rows}
+    policies = []
+    for rule in rules:
+        name = review_policies.name(rule)
+        state = _RULE_STATUS.get(rule.get("status"), WAITING) if current and review_policies.backed(rule) else WAITING
+        met_by = rule["met_by"] if current else []
+        # A signer who has since asked for changes no longer counts towards the
+        # rule, even one who isn't on the reviewer list. A waiver stands.
+        withdrawn = [s for s in met_by if asked_since(s)] if state == SIGNED else []
+        approvals = rule["approvals"]
+        if withdrawn:
+            met_by = [s for s in met_by if s not in withdrawn]
+            if len(met_by) < approvals:
+                state = CHANGES
+        policies.append(review_policies.row(rule, state, met_by, withdrawn if state == CHANGES else []))
+        listed = [by_sub[s] for s in rule["on_list"] if s in by_sub and by_sub[s]["required"]]
+        # Someone already on the list adds no second sign-off, unless their
+        # signing didn't meet the rule (an author can't sign for a team's).
+        if listed and approvals == 1 and (state in _MET or any(r["status"] != SIGNED for r in listed)):
+            for r in listed:
+                r["meets"].append(name)
+        else:
+            rows.append({"sub": None, "name": name, "required": True, "status": state, "met_by": met_by,
+                         "changes_by": withdrawn if state == CHANGES else [], "meets": [], "you": False})
+    required = [r for r in rows if r["required"]]
+    met = sum(r["status"] in _MET for r in required)
+    unmet = [r["sub"] or r["name"] for r in required if r["status"] not in _MET]
+    changes = [who for r in required if r["status"] == CHANGES for who in ([r["sub"]] if r["sub"] else r["changes_by"])]
+    return rows, policies, required, met, unmet, changes
+
+
+def _gate(c, p: dict) -> dict | None:
+    """Plan ``p``'s build gate, read on connection ``c``; None if it isn't
+    shared, or its Team plan has ended and that still holds for whoever is
+    signed in (shared_docs.lapse_stands). Sign-offs and rules count only
+    while the Library's head is the revision on screen: until a new revision
+    is sent they say nothing about it."""
+    from brindle.plan_docs import PERSON, TEAMMATE
+
+    row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+    if row is None:
+        return None
+    from brindle.pro import review_policies, shared_docs
+
+    if shared_docs.lapse_stands(row, p):
+        return None
+
+    review = json.loads(row["review"])
+    read = _review_rows(review)
+    people, rules = read or ({}, [])
+    refusal = review.get(review_policies.REFUSED)
+    current = (read is not None and not refusal and row["doc_id"] is not None and row["local_rev"] == p["rev"]
+               and review.get("rev") == row["remote_rev"])
+    signed = _signed(review) if current else {}
+    # Pre-sharing notes stay private. Missing or in-flight links still count:
+    # an objection awaiting upload must not leave the build gate open.
+    asked: dict[str, float] = {}
+    for r in c.execute(
+        "SELECT author, MAX(created_at) AS at FROM plan_threads WHERE plan_id=? AND parent_id IS NULL"
+        " AND status='open' AND question=0 AND (author=? OR author LIKE ?)"
+        " AND id NOT IN (SELECT local_id FROM plan_share_threads WHERE plan_id=? AND remote_id<0 AND status<>?)"
+        " GROUP BY author", (p["id"], PERSON, TEAMMATE + "%", p["id"], shared_docs.SENDING)):
+        sub = row["owner"] if r["author"] == PERSON else r["author"][len(TEAMMATE):]
+        asked[sub] = max(asked.get(sub, r["at"]), r["at"])
+    rows, policies, required, met, unmet, changes = tally(people, rules, signed, asked, current, row["owner"])
+    if p["state"] == "approved":
+        state, reason = "closed", "The review is closed: this plan is building."
+    elif p["state"] == "redirected":
+        state, reason = CHANGES, "Changes were requested: the build waits for the supervisor's next revision."
+    elif (row["doc_id"] is not None and row["local_rev"] != p["rev"] and isinstance(review.get("rev"), int)
+          and review["rev"] != row["remote_rev"]):
+        state, reason = CONFLICT, (f"A teammate changed this plan in the Library (r{review['rev']}) and it changed "
+                                   f"here too, so r{p['rev']} wasn't sent. Neither copy was overwritten.")
+    elif refusal:
+        state, reason = WAITING, review_policies.refusal_reason(refusal)
+    elif changes:
+        state, reason = CHANGES, f"Changes requested by {', '.join(changes)}."
+    elif row["doc_id"] is None:
+        state, reason = WAITING, "This plan is still being saved to the Library."
+    elif read is None and isinstance(review.get("reviewers"), list):
+        state, reason = WAITING, "brindle can't read this plan's org review rules, so the build stays closed."
+    elif read is None:
+        state, reason = WAITING, "brindle hasn't heard back from the Library about this plan's review yet."
+    elif not current:
+        state, reason = WAITING, "This revision hasn't reached the Library yet, so sign-offs on it can't be counted."
+    elif unmet:
+        state, reason = WAITING, f"Waiting on {', '.join(unmet)} ({met} of {len(required)} required sign-offs)."
+    else:
+        state, reason = "ready", None
+    is_open = p["state"] == "open"
+    unconfirmed = None
+    if is_open and row["unconfirmed"] is not None:
+        unconfirmed = {"reason": row["unconfirmed"],
+                       "message": UNCONFIRMED.get(row["unconfirmed"], UNCONFIRMED[LIBRARY_ERROR]),
+                       "approval_held": row["approve_wanted"] is not None,
+                       "can_stop_sharing": shared_docs.may_stop(row, shared_docs.account())}
+    return {"state": state, "reason": reason, "required": len(required), "signed": met, "waiting_on": unmet,
+            "reviewers": rows, "policies": policies, "unconfirmed": unconfirmed,
+            "approval_refused": row["approve_refused"] if is_open else None}
+
+
+def gate(db: DB, p: dict) -> dict | None:
+    """Plan ``p``'s build gate as ``{state, reason, required, signed,
+    waiting_on, reviewers}``, or None if it isn't shared. ``state``: waiting,
+    changes_requested, conflict (the plan and the Library's copy both changed),
+    ready, or closed once it is building."""
+    return _gate(db.conn, p)
+
+
+def _team_ended(db: DB, p: dict) -> bool:
+    from brindle.pro import shared_docs
+
+    row = db.conn.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+    return row is not None and shared_docs.lapse_stands(row, p)
+
+
+def gate_shut(db: DB, root_id: str) -> dict | None:
+    """Session ``root_id``'s plan (with its ``gate``) while required reviewers
+    keep it from building, whether or not the app is connected."""
+    if not visuals.enabled() or not root_id:
+        return None
+    plan = open_plan(db, root_id)
+    found = gate(db, plan) if plan else None
+    return {**plan, "gate": found} if found and found["state"] in GATE_SHUT else None
+
+
 def holding(db: DB, root_id: str) -> dict | None:
     """What session ``root_id``'s queued tasks wait on, if anything: its plan
     the person hasn't approved yet or, before one is proposed, brindle's
     offer to plan the goal first, unanswered or accepted (``{"offer": state}``).
-    None while the visuals capability is off or the app is disconnected,
-    so nothing waits on a verdict nobody can give. This also releases work
-    if the app disconnects after opening an offer or redirecting a plan;
-    the saved plan and its decision remain available when it reconnects."""
+    None while the visuals capability is off or the app is disconnected, so
+    nothing waits on a verdict nobody can give. This also releases work if
+    the app disconnects after opening an offer or redirecting a plan; the
+    saved plan and its decision remain available when it reconnects. A plan
+    shared for review is held with or without the app: only the approval
+    checks the sign-offs with the Library and closes the review."""
     from brindle.daemon import holds
 
-    if not visuals.enabled() or not root_id or not holds.app_connected():
+    if not visuals.enabled() or not root_id:
         return None
     plan = open_plan(db, root_id)
+    if plan is not None and gate(db, plan) is not None:
+        return plan
+    if not holds.app_connected():
+        return None
     if plan is not None:
         return plan
     row = db.conn.execute("SELECT offer FROM goal_doc_requests WHERE root_id=? AND (offer LIKE ? OR offer=?)",
@@ -251,14 +471,14 @@ def _queued(db: DB, root_id: str) -> int:
 
 
 def to_dto(db: DB, p: dict) -> dict:
+    from brindle import plan_docs
     from brindle.service.dto import PlanDTO
 
-    lede, parts = sections(p["markdown"])
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
-                   state=p["state"], ask=p.get("ask"),
-                   markdown=p["markdown"], lede=lede, sections=parts, decisions=p["decisions"], split=_board(db, p),
+                   state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=_board(db, p),
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
-                   created_at=p["created_at"]).to_json()
+                   created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
+                   **plan_docs.fields(db, p)).to_json()
 
 
 def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
@@ -314,19 +534,31 @@ def _page(title: str, markdown: str) -> str:
 
 
 def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, split: Any = None,
-            title: str | None = None, plan_id: str | None = None, ask: Any = None) -> dict:
+            title: str | None = None, plan_id: str | None = None, ask: Any = None,
+            sections: Any = None) -> dict:
     """The session's supervisor proposes a plan, or (``plan_id``) a new
     revision of its open or redirected one. Each publication spends the
     person's request: their ask for a planning doc, or their Redirect.
     ``ask``: the person's request restated in the supervisor's words, shown
-    on every step of the reader for them to correct."""
+    on every step of the reader for them to correct. ``sections``: the doc
+    as sections, markdown or diagrams (brindle.plan_docs.parse_sections);
+    then ``markdown`` is only the text before them (the title and lede).
+    Without it, the markdown's ``##`` headings make the sections."""
+    from brindle import plan_docs
+
     visuals.require_enabled()
     root, _ws = visuals._session(db, caller)
     if caller.id != root.id:
         raise ServiceError("forbidden", "only the session's supervisor proposes a plan", 403)
-    if not isinstance(markdown, str) or not markdown.strip():
+    if sections is not None:
+        parts = plan_docs.parse_sections(sections)
+        lede = plan_docs._body_text(markdown, "markdown", MAX_MARKDOWN).strip()
+        markdown = plan_docs.render(lede, parts)
+    elif not isinstance(markdown, str) or not markdown.strip():
         raise ServiceError("invalid", "markdown is required", 400)
-    markdown = markdown.strip()
+    else:
+        markdown = markdown.strip()
+        lede, parts = plan_docs.from_markdown(markdown)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     decisions, split = _decisions(decisions), _split(split)
@@ -349,13 +581,18 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             raise ServiceError("not_found", "no such plan in this session", 404)
         if current["state"] not in HOLDING:
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
+    replaced = plan_docs.revision(db, plan_id) if plan_id else None
+    previous = {s["id"]: s for s in replaced["sections"]} if replaced else {}
 
     settled: list[int] = []
 
-    def write(c, vid: str, rev: int) -> None:
+    def write(c, vid: str, visual_rev: int) -> None:
         now = time.time()
+        # The plan's revisions count the person's own edits too, so they run
+        # ahead of its visual's (the supervisor's publications).
+        rev = 1 if visual_rev == 1 else c.execute("SELECT rev FROM plans WHERE id=?", (vid,)).fetchone()[0] + 1
         args = (rev, markdown, json.dumps(decisions), json.dumps(split), ask, now)
-        if rev == 1:
+        if visual_rev == 1:
             c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                       " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
             # The plan now holds the session's tasks: the offer to plan first is settled
@@ -375,6 +612,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                 " decision=NULL WHERE id=? AND state IN ('open','redirected')", (*args, vid)).rowcount
             if not changed:
                 raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
+            plan_docs.keep(c, replaced)
+        plan_docs.insert_revision(c, vid, rev, plan_docs.SUPERVISOR, "proposal", lede, parts, markdown, decisions,
+                                  split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now)
 
     try:
         v = visuals.publish(db, caller, title, _page(title, markdown), visual_id=plan_id, kind="plan", extra=write)
@@ -387,6 +627,41 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     if any(settled):
         bus.publish_agent(db, "autopilot.goal", root.id)   # the offer's card goes
     return get(db, v["id"])
+
+
+def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any, resolve: bool = False) -> int:
+    """The session's supervisor answers a thread the person opened on its
+    plan's doc (a comment or a suggestion), optionally resolving a comment
+    thread. The person sees the reply on the doc; it never reaches the
+    supervisor's own inbox. Returns the reply's id."""
+    from brindle import plan_docs
+
+    visuals.require_enabled()
+    root, _ws = visuals._session(db, caller)
+    p = _row(db, plan_id)
+    if caller.id != root.id or p["root_id"] != root.id:
+        raise ServiceError("forbidden", "only the session's supervisor answers on its plan", 403)
+    thread = plan_docs._thread(db, p, thread_id)
+    if thread["question"]:
+        from brindle.pro import doc_questions, shared_docs
+
+        shared = shared_docs.link(db, plan_id)
+        remote = db.conn.execute("SELECT remote_id FROM plan_share_threads WHERE plan_id=? AND local_id=?"
+                                 " AND remote_id>0", (plan_id, thread_id)).fetchone()
+        if shared and remote:
+            doc_questions.reply(db, caller, shared["doc_id"], remote["remote_id"], text)
+            return thread_id
+        if thread["author"] != plan_docs.PERSON or shared:
+            raise ServiceError("forbidden", "only the asker's supervisor answers a question", 403)
+    if resolve and plan_docs._thread(db, p, thread_id)["kind"] != "comment":
+        # refuse before replying: a failed call must leave nothing behind
+        raise ServiceError("invalid", "only a comment thread is resolved; a suggestion is accepted or rejected", 400)
+    rid = plan_docs.comment(db, plan_id, text=text, parent=thread_id, author=plan_docs.SUPERVISOR)
+    if thread["question"]:
+        db.conn.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (rid,))
+    if resolve:
+        plan_docs.resolve(db, plan_id, thread_id)
+    return rid
 
 
 # -- the person decides -----------------------------------------------------------------
@@ -405,7 +680,7 @@ def anchors(p: dict) -> dict[str, str]:
     """What a comment on revision ``p`` may name, with the title the
     supervisor reads it under: each ``##`` section and, when the plan has
     them, the restated ask, the lede, the split and each decision."""
-    lede, parts = sections(p["markdown"])
+    lede, parts = (p["lede"], p["sections"]) if "sections" in p else sections(p["markdown"])
     out = {s["id"]: s["title"] for s in parts}
     if p.get("ask"):
         out[ASK] = "What I understood (your restated ask)"
@@ -432,7 +707,8 @@ def _comments(raw: Any, section_ids: set[str]) -> list[dict]:
     return out
 
 
-def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: str | None, titles: dict) -> str:
+def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: str | None, titles: dict,
+             doc: list[str] = (), files: list[str] = ()) -> str:
     verb = "approved" if approved else "redirected"
     lines = [f"The person {verb} plan {p['id']} (r{p['rev']})."]
     for d in p["decisions"]:
@@ -442,8 +718,11 @@ def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: s
             lines.append(f"Decision {d['id']} ({d['title']}): they chose {pick} ({label}) over yours.")
     for c in comments:
         lines.append(f"On \"{titles[c['section']]}\": {c['text']}")
+    lines.extend(doc)
     if note:
         lines.append(f"Their note: {note}")
+    if files:
+        lines.append(" ".join(["Attached to their note:", *files]))
     if approved:
         lines.append("The tasks you assigned behind the plan start now; assign the rest as planned.")
     else:
@@ -451,8 +730,88 @@ def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: s
     return "\n".join(lines)
 
 
+def _check_with_library(db: DB, p: dict) -> str | None:
+    """Before an approval of a shared plan: bring the Library's review state
+    up to date. Returns why it couldn't be asked (a key of UNCONFIRMED), and
+    the approval is then refused even with no required reviewers on record:
+    the last answer can't say nobody was added since. A share whose Team plan
+    has ended comes here too: only a lapse the server confirms now lets it
+    through, not the one on record."""
+    if db.conn.execute("SELECT 1 FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone() is None:
+        return None
+    from brindle.pro import shared_docs
+
+    try:
+        shared_docs.sync(db, p["id"])
+    except Exception as e:  # noqa: BLE001 - whatever stopped it, the review state is unconfirmed
+        log.info("brindle: couldn't sync plan %s before its approval", p["id"], exc_info=True)
+        return shared_docs.why_unconfirmed(db, p["id"], e)
+    return None
+
+
+def _hold_approval(db: DB, p: dict, why: str, was_ready: bool, wanted: dict) -> bool:
+    """Record why an approval couldn't be confirmed and, when the confirmation
+    is all that failed, the approval itself: the gate read ready when the
+    person pressed, nothing but the outage stands in the way, and it is the
+    account that shared the plan. Returns whether the approval is held."""
+    from brindle import plan_docs
+    from brindle.pro import review_policies
+
+    with db.tx() as c:
+        row = c.execute("SELECT review, access_refused FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+        if row is None:
+            return False
+        refusal = json.loads(row["review"]).get(review_policies.REFUSED)
+        held = (was_ready and why != OTHER_ACCOUNT and row["access_refused"] is None
+                and (not refusal or refusal.get("code") == "key_unavailable"))
+        c.execute("UPDATE plan_shares SET unconfirmed=?, approve_refused=NULL,"
+                  " approve_wanted=COALESCE(?, approve_wanted) WHERE plan_id=?",
+                  (why, json.dumps(wanted) if held else None, p["id"]))
+    plan_docs._changed(db, p, p["rev"])
+    return held
+
+
+def _drop_held_approval(db: DB, p: dict, why: str) -> None:
+    from brindle import plan_docs
+
+    with db.tx() as c:
+        c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=? WHERE plan_id=?", (why, p["id"]))
+    plan_docs._changed(db, p, p["rev"])
+
+
+def settle_held_approval(db: DB, plan_id: str) -> None:
+    """After a sync the Library answered: apply the Approve it couldn't confirm
+    earlier if the gate reads ready for that same revision. If it doesn't, the
+    person is told and nothing is approved. While the Team plan's end stands
+    there is no gate to read, and the approval keeps waiting."""
+    row = db.conn.execute("SELECT approve_wanted FROM plan_shares WHERE plan_id=?", (plan_id,)).fetchone()
+    if row is None or row["approve_wanted"] is None:
+        return
+    wanted = json.loads(row["approve_wanted"])
+    p = get(db, plan_id)
+    try:
+        visuals.require_enabled()
+        visuals._unlocked(p["root_id"])
+    except ServiceError:        # nothing is decided here for now: a later pass looks again
+        return
+    found = gate(db, p)
+    if found is None:
+        return
+    if wanted["rev"] != p["rev"]:
+        _drop_held_approval(db, p, f"Your approval of r{wanted['rev']} wasn't applied: the plan has changed since "
+                                   "you approved it. Read the new revision and approve again.")
+    elif found["state"] != "ready":
+        _drop_held_approval(db, p, f"Your approval wasn't applied: {found['reason']}")
+    else:
+        try:
+            decide(db, plan_id, wanted["rev"], True, wanted["picks"], wanted["comments"], wanted["note"],
+                   person=True, attachments=wanted["attachments"], confirmed=True)
+        except ServiceError as e:
+            _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}")
+
+
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
-           note: Any = None, *, person: bool) -> dict:
+           note: Any = None, *, person: bool, attachments: Any = None, confirmed: bool = False) -> dict:
     """The person's verdict on the revision on their screen (``rev``):
     approve, or redirect with their picks and per-section comments. Only the
     person (the app, through the daemon's guarded route) decides: anyone
@@ -466,8 +825,19 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     starts unless the supervisor's message is queued with it. Pushing the
     message to the supervisor's terminal comes after, and failing that loses
     nothing: it stays queued for its next turn. Then an approval releases the
-    session's queued tasks."""
-    from brindle import agents, tasks
+    session's queued tasks.
+
+    The verdict starts from the decisions the person confirmed on the doc
+    (``picks`` given here win), and carries what they wrote on it that the
+    supervisor hasn't had (brindle.plan_docs.pending) and the files
+    ``attachments`` put on their note.
+
+    If the Library can't confirm the review the approval is refused
+    (``gate_unverified``, with a typed ``reason``), and held for
+    :func:`settle_held_approval`, whose call passes ``confirmed``: it has just
+    heard from the Library, and the gate is still read in the verdict's own
+    transaction."""
+    from brindle import agents, plan_docs, tasks
 
     visuals.require_enabled()
     if not person:
@@ -480,25 +850,45 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
+    unconfirmed, was_ready = None, False
+    if approved and not confirmed:
+        before = gate(db, p)            # what the person pressed Approve on, before asking can change it
+        was_ready = before is not None and before["state"] == "ready"
+        unconfirmed = _check_with_library(db, p)
     titles = anchors(p)
-    picks = _picks(picks, p["decisions"])
+    picks = {**plan_docs.confirmed(db, p), **_picks(picks, p["decisions"])}
     comments = _comments(comments, set(titles))
     note = visuals._text(note, "note", visuals.MAX_NOTE)
-    if not approved and not comments and not note and not any(picks.get(d["id"]) not in (None, d["mine"])
-                                                              for d in p["decisions"]):
+    doc, doc_record, threads = plan_docs.pending(db, p)
+    if not approved and not comments and not note and not doc and not any(
+            picks.get(d["id"]) not in (None, d["mine"]) for d in p["decisions"]):
         raise ServiceError("invalid", "say what to change: a comment, a note or a different pick", 400)
     visuals._refuse_secrets([("your note", note), *((f"your comment on {titles[c['section']]}", c["text"])
                                                     for c in comments)])
+    if unconfirmed is not None:
+        held = _hold_approval(db, p, unconfirmed, was_ready, {"rev": rev, "picks": picks, "comments": comments,
+                                                              "note": note, "attachments": attachments})
+        raise ServiceError("gate_unverified", UNCONFIRMED[unconfirmed], 503, reason=unconfirmed, approval_held=held)
+    files = plan_docs._attachments(db, p, attachments)
     at = time.time()
-    verdict = {"approved": bool(approved), "picks": picks, "comments": comments, "note": note, "at": at, "rev": rev}
+    verdict = {"approved": bool(approved), "picks": picks, "comments": comments, "note": note, "at": at, "rev": rev,
+               "attachments": [f["name"] for f in files]}
     record = json.dumps(verdict)
     answer = json.dumps({"option": "approve" if approved else "redirect", "note": note, "at": at, "rev": rev})
     state = "approved" if approved else "redirected"
-    text = _message(p, approved, picks, comments, note, titles)
+    text = _message(p, approved, picks, comments, note, titles, doc, [f["ref"] for f in files])
     with db.tx() as c:
+        if approved:
+            # In the verdict's own transaction: a sync landing a new reviewer can't slip in between.
+            shut = _gate(c, p)
+            if shut is not None and shut["state"] in GATE_SHUT:
+                raise ServiceError("gate_closed", shut["reason"], 409)
         claimed = c.execute("UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
                             (state, record, at, p["id"], rev)).rowcount == 1
         if claimed:
+            plan_docs.mark_sent(c, threads, rev)
+            c.execute("UPDATE plan_shares SET unconfirmed=NULL, approve_wanted=NULL, approve_refused=NULL"
+                      " WHERE plan_id=?", (p["id"],))
             c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) WHERE id=?", (answer, p["id"]))
             if not approved:
                 visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for
@@ -518,12 +908,14 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     bus.publish(db, "visual.answered", repo_root=p["visual"]["repo_root"], root_id=p["root_id"], visual=p["id"],
                 rev=rev, option=state)
     if approved:
-        _to_library(p, picks, comments, note, titles)
+        if gate(db, p) is None:             # a shared plan's one Library entry is its document
+            _to_library(p, picks, comments, note, titles, doc_record)
         tasks.on_resumed(db, p["root_id"], why="the person's approval of the plan")
     return get(db, p["id"])
 
 
-def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict) -> str:
+def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
+            doc: list[str] = ()) -> str:
     """The approved revision with what the person decided under it."""
     out = [p["markdown"].rstrip(), "", f"## What the person approved (r{p['rev']})", ""]
     for d in p["decisions"]:
@@ -539,19 +931,21 @@ def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles
         if s.get("test"):
             out.append(f"  - finish line (test): {s['test']}")
     out += [f"- On \"{titles[c['section']]}\": {c['text']}" for c in comments]
+    out += [f"- {line}" for line in doc]
     if note:
         out.append(f"- Their note: {note}")
     return "\n".join(out) + "\n"
 
 
-def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict) -> None:
+def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
+                doc: list[str] = ()) -> None:
     """Store the approved plan in the person's plan library. Entitlement, the
     store switch and the network are the uploader's to judge; nothing here
     blocks or fails an approval."""
     try:
         from brindle.pro import analysis_docs
 
-        md = _record(p, picks, comments, note, titles)
+        md = _record(p, picks, comments, note, titles, doc)
         doc = analysis_docs.Doc(files=[{"name": f"plan-{p['id']}.md", "md": md}],
                                 source={"kind": "goal", "ref": p["id"], "session": p["root_id"]})
         analysis_docs.on_merged(p["visual"]["repo_root"], [doc])

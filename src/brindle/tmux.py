@@ -223,27 +223,42 @@ def status_lines(session: str) -> int:
     return 0 if status == "off" else int(status) if status.isdigit() else 1
 
 
-def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
+def _default_size(session: str, size: tuple[int, int]) -> None:
+    """New windows of ``session`` start ``size`` (columns, rows) while no client
+    says otherwise. On its own and best effort: a tmux that refuses the option
+    refuses only this."""
+    _tmux("set-option", "-t", session, "default-size", f"{size[0]}x{size[1]}", check=False)
+
+
+def ensure_session(session: str, cwd: str, env: dict[str, str], size: tuple[int, int] | None = None) -> None:
     """Create a detached session whose first window is a plain shell, sized
     for the terminal that will attach to it (see terminal_size): its new
     windows start at the size that terminal shows them at, its rows less
     the session's status line, so a chat draws once at the size it's seen
     at. Detached sessions are otherwise 80x24, and attaching resized a chat
-    that had already drawn: Claude Code resuming a conversation went blank."""
+    that had already drawn: Claude Code resuming a conversation went blank.
+
+    ``size``: the window size to start them at instead, for a caller with no
+    terminal that knows it (a daemon's recovery: agent_window_size, as the
+    last daemon left it). It applies to a session that already exists too."""
     if has_session(session):
         for k, v in env.items():
             _tmux("set-environment", "-t", f"={session}", k, v, check=False)
+        if size:
+            _default_size(session, size)
         for key in [k for k in _SESSION_HOMES if k[1] == session]:
             del _SESSION_HOMES[key]     # session_infos reads its BRINDLE_HOME again
         return
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
-    size = terminal_size()
-    size_args = ["-x", str(size[0]), "-y", str(size[1])] if size else []
+    terminal = None if size else terminal_size()
+    first = size or terminal
+    size_args = ["-x", str(first[0]), "-y", str(first[1])] if first else []
     _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *size_args, *env_args)
-    if size:
+    if terminal:
         # Known only now: the server (and the person's config) may have just started.
-        rows = max(size[1] - status_lines(session), 1)
-        _tmux("set-option", "-t", session, "default-size", f"{size[0]}x{rows}", check=False)
+        size = (terminal[0], max(terminal[1] - status_lines(session), 1))
+    if size:
+        _default_size(session, size)
 
 
 # tmux refuses a command over its message size (about 16 KB) with "command
@@ -791,6 +806,19 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
         if len(values) > len(PANE_TAGS) and values[len(PANE_TAGS)].strip().isdigit():
             result.activity[pane_id] = float(values[len(PANE_TAGS)])
     return result
+
+
+def agent_window_size() -> tuple[int, int] | None:
+    """The largest window holding an agent's pane on this server, (columns,
+    rows): the size the app or a person's terminal last showed one at, as
+    tmux keeps a window at its last client's size. None without one."""
+    fmt = "\t".join(["#{window_width}", "#{window_height}", f"#{{{AGENT_TAG}}}"])
+    sizes = []
+    for line in _tmux("list-panes", "-a", "-F", fmt, check=False).stdout.splitlines():
+        width, height, tag = (line.split("\t") + ["", ""])[:3]
+        if tag and width.isdigit() and height.isdigit():
+            sizes.append((int(width), int(height)))
+    return max(sizes, key=lambda s: s[0] * s[1], default=None)
 
 
 def window_pids(target: str, server: object = _THIS_SERVER) -> list[int]:

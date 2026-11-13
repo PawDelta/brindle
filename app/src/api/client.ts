@@ -29,6 +29,7 @@ import type {
   ProfileDTO,
   ProviderConnectionDTO,
   RepoDTO,
+  SharedDesignDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -391,6 +392,7 @@ export interface KeptVisualDTO {
 /* A planning doc (brindle/plans.py): markdown the app renders itself, by section. */
 export type Plan = PlanDTO;
 export type PlanComment = PlanCommentDTO;
+export type SharedDesign = SharedDesignDTO;
 
 /* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
 export interface PlanVerdict {
@@ -399,6 +401,25 @@ export interface PlanVerdict {
   picks: Record<string, string>;
   comments: PlanComment[];
   note: string;
+  /* Paths of the files attached to the note. */
+  attachments?: string[];
+}
+
+/* Where a new comment on the design doc is anchored (brindle/plan_docs.py): a text range of a
+   section (`start` is a hint, `quote` the section's own text there), a diagram, a decision, or a
+   whole part of the doc (a section, "ask", "lede", "split"). */
+export type PlanAnchor =
+  | { kind: "text"; section: string; start: number; quote: string }
+  | { kind: "diagram"; section: string }
+  | { kind: "decision"; decision: string; option?: string }
+  | { kind: "section"; section: string };
+
+/* A change to a section's text: `before` at `start` becomes `after` (an empty `before` inserts). */
+export interface PlanChange {
+  section: string;
+  start: number;
+  before: string;
+  after: string;
 }
 
 export type Repo = RepoDTO;
@@ -481,16 +502,102 @@ export interface KbHit {
   updated: string | null;
 }
 
-/* brindle Pro's analysis-doc library, proxied by the daemon (routes_read.analysis_docs).
+/* brindle Pro's Library of approved plans, proxied by the daemon (routes_read.analysis_docs).
    The Wire* types are the server's own shapes (pawdelta-web pro_api.analysis_docs: _listed,
    _view, topics); the client methods turn them into the AnalysisDoc* below. A scope is
    {kind: user | group | org, id}; the daemon's filter spells it `user`, `team:<id>` or `org:<id>`. */
+export interface PlanReviewerChoice {
+  sub: string;
+  required: boolean;
+}
+
+export interface LibraryPerson {
+  sub: string;
+  email: string;
+}
+
+/* An org admin's waiver of a review rule for one revision, or a stand-in for it until `until` (Unix seconds). */
+export interface PlanPolicyOverride {
+  rev: number;
+  org_id: string;
+  policy: string;
+  action: "waive" | "stand_in";
+  reason: string;
+  stand_in?: string;
+  until?: number;
+}
+
+/* An org review rule (docs/shared-designs-api.md "Review policies"). `needs.name`, `eligible`, `set_by`
+   and `set_at` come back to an admin on a read; the daemon leaves them out of a save. */
+export interface ReviewPolicyRule {
+  id: string;
+  name: string;
+  when: { kind: "paths" | "label" | "any"; paths?: string[]; label?: string };
+  needs: { kind: "team" | "role" | "person"; id: string; name?: string };
+  approvals: number;
+  note?: string | null;
+  eligible?: number;
+  set_by?: string;
+  set_at?: number;
+  reviewer_editors?: { kind: string; id?: string }[];
+}
+
+export interface ReviewPoliciesState {
+  org_id: string;
+  version: number;
+  policies: ReviewPolicyRule[];
+  directory: {
+    teams: { id: string; name: string; path?: string; members?: number }[];
+    roles: { id: string; name: string; builtin?: boolean; members?: number }[];
+  };
+  in_review: { truncated?: boolean; policies: { policy: string; count: number; designs: { doc_id: string; title: string }[] }[] };
+}
+
+/* What saving a draft list would do to the designs in review (`truncated`: count is a lower bound). */
+export interface DraftImpact {
+  org_id: string;
+  truncated: boolean;
+  count: number;
+  designs: { doc_id: string; title: string }[];
+  reopens_gates: boolean;
+  reopened: number;
+}
+
+/* A rule that would cover a design, before it is shared. */
+export interface PolicyPreviewRow {
+  org_id: string;
+  policy: string;
+  name: string;
+  note: string | null;
+  when: string | null;
+  label: string | null;
+  paths: string[];
+  matched: string[];
+  needs_kind: string | null;
+  needs_name: string | null;
+  approvals: number;
+  eligible: number | null;
+}
+
 export interface DocScope {
   kind: string;
   id: string;
   /* From GET /analysis-docs/scopes only: the team's or org's name, and whether the person may share into it. */
   name?: string;
   can_share?: boolean;
+}
+
+/* A Library folder as the server lists it: private (its creator only) or shared (the scope's members). */
+export type FolderVisibility = "private" | "shared";
+export interface LibraryFolder {
+  id: string;
+  name: string;
+  visibility: FolderVisibility;
+}
+/* One scope's folders (GET /library/folders). */
+export interface FolderGroup {
+  scope: DocScope;
+  folders: LibraryFolder[];
 }
 
 export interface DocSource {
@@ -576,6 +683,9 @@ export interface AnalysisDoc {
   category?: string;
   version?: number;
   created_at?: number;
+  updated_at?: number;
+  created_by?: string;
+  source?: DocSource;
   used_in_briefs?: number;
   findings?: string[];
   open_questions?: string[];
@@ -593,6 +703,14 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   mentions: string[];
   /* The scopes it is shared into besides its owner's. */
   shared_with: DocScope[];
+  /* Optional plan record fields, using the plan engine's DTO names. */
+  revisions?: { rev: number; author: string; source: string; changed: string[]; at: number }[];
+  threads?: { id: number; author: string; text: string; replies: { text: string }[] }[];
+  decisions?: { id: string; title: string; mine?: string | null; confirmed?: string | null; options: { id: string; label: string }[] }[];
+  verdict?: { approved: boolean; picks?: Record<string, string> } | null;
+  /* A shared design's review state (shared-designs-api.md: GET /analysis-docs/{id} `design`):
+     the revision on screen, who is asked to review (`required` or optional) and who has signed it. */
+  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean } | null;
 }
 
 export interface DocTopic {
@@ -1678,6 +1796,114 @@ export class DaemonClient {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 
+  /* The design doc's writes (brindle/plan_docs.py). Each names the revision on screen where the
+     engine checks it (a newer one is a 409) and answers with the plan as it is now. */
+  commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string, question = false) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { rev, anchor, text, ...(question ? { question } : {}) });
+  }
+
+  replyPlan(id: string, thread: number, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { parent: thread, text });
+  }
+
+  /* Resolve a comment thread, or (resolved false) reopen it. */
+  resolvePlanThread(id: string, thread: number, resolved = true) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/resolve`, { resolved });
+  }
+
+  suggestPlan(id: string, rev: number, change: PlanChange, text = "") {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/suggestions`, { rev, ...change, text });
+  }
+
+  /* Accepting a suggestion makes its change: a new revision. */
+  acceptPlanSuggestion(id: string, thread: number, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/accept`, { rev });
+  }
+
+  rejectPlanSuggestion(id: string, thread: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/reject`, {});
+  }
+
+  /* The person's direct edit: a new revision. */
+  editPlan(id: string, rev: number, change: PlanChange) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/edit`, { rev, ...change });
+  }
+
+  /* The person's pick on one decision (Confirm A); the verdict starts from these. */
+  confirmPlan(id: string, rev: number, decision: string, option: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
+  }
+
+  /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */
+  sharePlan(id: string, scope: { kind: string; id: string }, reviewers: PlanReviewerChoice[]) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/share`, { scope, reviewers });
+  }
+
+  setPlanReviewers(id: string, reviewers: PlanReviewerChoice[]) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/reviewers`, { reviewers });
+  }
+
+  /* Bring back what teammates wrote; what changed reaches the reader as an event. */
+  syncPlan(id: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sync`, {});
+  }
+
+  /* Make a plan the Library can't confirm a personal doc. The engine says when it may be offered. */
+  stopSharingPlan(id: string, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/stop-sharing`, { rev });
+  }
+
+  /* The person's own sign-off, as one of the plan's reviewers, on the revision on screen. */
+  signOffPlan(id: string, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sign-off`, { rev });
+  }
+
+  /* An org admin's waiver of a review rule, or a stand-in for it. The Library checks they are an admin. */
+  overridePlanPolicy(id: string, override: PlanPolicyOverride) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/policy-override`, override);
+  }
+
+  /* An org admin asks the people a waiting rule counts again, on revision `rev`. */
+  askPlanPolicyAgain(id: string, ask: { rev: number; org_id: string; policy: string }) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/policy-ask`, ask);
+  }
+
+  /* The org rules that would cover the plan once it is shared. */
+  previewPlanPolicies(id: string) {
+    return this.post<{ policies: PolicyPreviewRow[] }>(`/plans/${encodeURIComponent(id)}/policy-preview`, {});
+  }
+
+  /* A design someone else shared (brindle/pro/shared_reader.py), by its Library doc id: read from the
+     Library each time and held only in memory. A write answers with the design as it is now. */
+  sharedDesign(doc: string, repo?: string) {
+    return this.get<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}`, { repo });
+  }
+
+  writeSharedDesign(doc: string, tail: string, body: Record<string, unknown>) {
+    return this.post<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}/${tail}`, body);
+  }
+
+  /* An org admin's review rules, with the teams and roles they can name and the designs each covers now. */
+  reviewPolicies() {
+    return this.get<ReviewPoliciesState>("/review-policies");
+  }
+
+  /* What saving `policies` as `org_id`'s list would do to the designs in review; writes nothing. */
+  reviewPolicyImpact(org_id: string, policies: ReviewPolicyRule[]) {
+    return this.post<DraftImpact>("/review-policies/draft-impact", { org_id, policies });
+  }
+
+  /* Replaces the rules of `org_id`, the org they were read for (another active org is a 409, nothing written);
+     `version` is the one last read (a stale one is a 409). */
+  saveReviewPolicies(org_id: string, version: number, policies: ReviewPolicyRule[]) {
+    return this.put<{ version: number; policies: ReviewPolicyRule[] }>("/review-policies", { org_id, version, policies });
+  }
+
+  /* The people of the person's org, to pick reviewers from, without the person (me); admin_org, the org whose rules they can override. */
+  libraryPeople() {
+    return this.get<{ people: LibraryPerson[]; me?: string; admin_org?: string | null }>("/library/people");
+  }
+
   async keptVisuals(): Promise<KeptVisualDTO[]> {
     const got = await this.get<KeptVisualDTO[] | { visuals?: KeptVisualDTO[] }>("/kept-visuals");
     return Array.isArray(got) ? got : (got.visuals ?? []);
@@ -1687,7 +1913,7 @@ export class DaemonClient {
     return this.get<KeptVisualDTO>(`/kept-visuals/${encodeURIComponent(id)}`);
   }
 
-  /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.
+  /* The Library of approved plans (brindle Pro), through the daemon; nothing is kept on disk.
      A plan without it throws DaemonError "not_entitled". */
   async docs(query: DocsQuery = {}): Promise<{ docs: AnalysisDoc[] }> {
     const got = await this.get<{ docs?: WireListedDoc[] }>("/analysis-docs", { ...query });
@@ -1708,13 +1934,37 @@ export class DaemonClient {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
   }
 
+  /* The folders the person can see, per scope they read (GET /library/folders). */
+  libraryFolders() {
+    return this.get<{ scopes: FolderGroup[] }>("/library/folders", {});
+  }
+
+  /* `scope` is the daemon's spelling: user, team:<id> or org:<id>. */
+  createLibraryFolder(scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members" = "owner") {
+    return this.post<LibraryFolder>("/library/folders", { scope, name, visibility, can_add: canAdd });
+  }
+
+  moveDocToFolder(id: string, scope: string, folder: string) {
+    return this.put<unknown>(`/analysis-docs/${encodeURIComponent(id)}/folder`, { scope, folder });
+  }
+
   async knowledgeMap(repo: string, scope: DocScope, paths: string[] = []): Promise<KnowledgeMap> {
     const got = await this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
     return { ...got, nodes: got.nodes.map(({ category, ...node }) => ({ ...node, ...categoryOf(category) })) };
   }
 
   async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {
-    return docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
+    const doc = docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
+    // Approved plans already link their local record through source.ref. The
+    // saved text stays readable when that session is no longer on this device.
+    if (doc.source?.kind === "goal" && doc.source.ref?.startsWith("v_")) {
+      const plan = await this.plan(doc.source.ref).catch(() => null);
+      if (plan?.state === "approved" && plan.session === doc.source.session && plan.markdown && doc.files.some((f) => f.md === plan.markdown || f.md.startsWith(`${plan.markdown.trimEnd()}\n\n## What the person approved (r${plan.rev})`))) {
+        const record = plan as Plan & Pick<AnalysisDocDetail, "revisions" | "threads">;
+        return { ...doc, revisions: record.revisions, threads: record.threads, decisions: plan.decisions, verdict: plan.verdict };
+      }
+    }
+    return doc;
   }
 
   /* Computed on this machine from its own records; needs no plan. */

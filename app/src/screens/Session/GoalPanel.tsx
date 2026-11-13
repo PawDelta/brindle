@@ -300,20 +300,21 @@ function shortAgo(at: number, now: number): string {
   return `${Math.round(s / 86400)}d`;
 }
 
-/* The sidebar's activity line: commits in the last hour, else when the last one landed, and how long is left
-   when brindle can say and something runs. Null when there is nothing to say (an older engine sends none of it). */
+/* The sidebar's activity line, including queued work. Older engines and sparse
+   snapshots use a 40-minute build/review budget per unfinished milestone. */
 export function activityLine(goal: GoalDTO, now = Date.now() / 1000): { what: string | null; eta: string | null; checks: boolean } | null {
   const commits = goal.commits_last_hour ?? 0;
-  if (goal.checking || goal.auditing) return { what: "Finishing up", eta: null, checks: true };
-  const what = commits > 0
+  const checks = !!(goal.checking || goal.auditing);
+  const what = checks ? "Finishing up" : commits > 0
     ? `${commits} ${commits === 1 ? "commit" : "commits"} in the last hour`
     : goal.last_commit_at != null ? `last commit ${shortAgo(goal.last_commit_at, now)} ago` : null;
-  const estimate = goal.eta_seconds;
-  // An expired estimate carries no useful remaining duration; keep the activity without inventing time left.
-  const minutes = isStage(goal.stage) && estimate != null && Number.isFinite(estimate) && estimate >= 0
-    ? Math.max(1, Math.round(estimate / 60)) : null;
+  const unfinished = goal.milestones?.filter((m) => m.status !== "passed").length ?? 0;
+  const active = goal.state !== "done" && (!!goal.goal || isStage(goal.stage));
+  const estimate = active && goal.eta_seconds != null && Number.isFinite(goal.eta_seconds) && goal.eta_seconds > 0
+    ? goal.eta_seconds : active ? Math.max(1, unfinished) * 2400 : null;
+  const minutes = estimate === null ? null : Math.max(1, Math.round(estimate / 60));
   const eta = minutes === null ? null : minutes < 90 ? `~${minutes}m left` : `~${Math.round(minutes / 60)}h left`;
-  return what || eta ? { what, eta, checks: false } : null;
+  return what || eta ? { what, eta, checks } : null;
 }
 
 const CHEV = (
@@ -596,7 +597,7 @@ export interface GoalPanelProps {
   openUrl?: OpenUrl;
   /* Closes the whole session, at once and unasked: the Done step's action. */
   onCloseSession?(): void;
-  /* Opens Knowledge › Docs filtered to this session: the docs line's action. */
+  /* Opens the Library's docs filtered to this session: the docs line's action. */
   onOpenDocs?(): void;
 }
 
@@ -761,7 +762,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
   /* The session's docs, one quiet line under the milestones; hidden with none. */
   const docsLine =
     docSummary && docSummary.total > 0 ? (
-      <button type="button" className={`${quiet} self-start text-xs`} data-testid="goal-docs" title="Knowledge › Docs for this session" onClick={onOpenDocs}>
+      <button type="button" className={`${quiet} self-start text-xs`} data-testid="goal-docs" title="This session's docs in the Library" onClick={onOpenDocs}>
         {docSummary.total} {docSummary.total === 1 ? "doc" : "docs"} · writing {docSummary.writing}, using {docSummary.using} →
       </button>
     ) : null;
@@ -868,7 +869,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
         </div>
         {activity && (
           <div className="side-act" data-testid="goal-activity">
-            <span data-testid="goal-activity-what">{activity.what}</span>
+            {activity.what && <span data-testid="goal-activity-what">{activity.what}</span>}
             {activity.what && activity.eta && ", "}
             {activity.eta && <span data-testid="goal-eta">{activity.eta.replace("~", "about ")}</span>}
           </div>

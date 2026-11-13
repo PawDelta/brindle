@@ -10,6 +10,7 @@ npm ci                                   # once
 node shots/shots.mjs --step 06-final     # shots/out/06-final/<scene>-<theme>.png
 node shots/shots.mjs --step x --out /some/dir --scene sessions,inbox --theme dark
 node shots/shots.mjs --step x --scene session-done --browser webkit   # in WebKit, as Tauri on macOS
+node shots/shots.mjs --step x --scene library --channel chrome        # the Chrome already installed, no download
 ```
 
 - `shots.mjs` serves `preview.html` with Vite (in-process, on a free port
@@ -49,6 +50,9 @@ the session, each pane its provider's own in the state its row shows),
 `agents` (how a task gets run, and a row per kind of work under the
 org's policy), `agents-make` (Medium's model list open, the custom agent
 builder under it),
+`library` (the Library open from the foot's button: the sidebar as its
+navigation, the docs in the main area), `library-decisions` (its Decisions
+source: three decisions as cards),
 `knowledge` (three decisions as cards, two document folders),
 `knowledge-map` (Map on open: zero hosted docs in three scopes, local decisions, imported folders and indexed KB documents),
 `knowledge-record` (the record form open), `knowledge-search` (a search
@@ -70,6 +74,15 @@ own update, over a fake shell (not in the default list, so pass `--scene`):
 (Update now pressed, downloading), `update-later` (set aside: the sidebar's
 pill) and `update-session` (the strip over a session). Themes
 (`--theme`): `dark`, `light`.
+
+## The design doc
+
+`node shots/plan-shots.mjs --out <dir> [--channel chrome]` opens the plan in
+`visuals.tsx` (a design doc with a diagram, three decisions, a suggestion
+and comment threads, over a small in-memory engine) and takes it with its
+review column open, the next decision's table, a highlight with its comment bar, the comment landed in
+the column, the column collapsed to its strip, Suggesting with a section in
+its box, and signed off under its live board, in both themes.
 
 ## Timing the wheel over a live Claude Code
 
