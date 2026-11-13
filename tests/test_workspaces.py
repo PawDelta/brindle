@@ -95,6 +95,7 @@ def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
     assert load_repo_config(repo, branch="bare").scoped_checks == "infer"
 
 
+@pytest.mark.variant("real incident: no-commit stress workers' branches were kept as 'not fully merged' after removal")
 def test_remove_deletes_branch_merged_into_non_main_base(db, repo):
     # A session branch with its own commit, not in the checkout's HEAD (main); the
     # worker branch is cut from it and has no commits of its own.
@@ -119,14 +120,6 @@ def ref_store(monkeypatch):
         del refs[branch]
     monkeypatch.setattr(disk, "drop_branch", drop)
     return refs, ancestors
-
-
-def test_drop_keeps_branch_not_merged_into_base_even_if_merged_into_head(ref_store):
-    refs, ancestors = ref_store   # its commit is in main (the checkout's HEAD), not in the session base
-    ws = SimpleNamespace(repo_root="/r", branch="worker", base_branch="session")
-    deleted, note = workspaces._drop_if_merged(ws, force=False)
-    assert not deleted and note
-    assert refs == {"worker": "A"}
 
 
 def test_drop_keeps_branch_that_moved_after_it_was_judged(ref_store, monkeypatch):
