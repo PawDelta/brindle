@@ -10,24 +10,26 @@ The task kit lives in bench/solo_vs_brindle/task/: ``repo.json`` ({"url",
 ``grade.sh <checkout>``, which prints {"passed", "failed", "per_part"}.
 
 ``run`` clones the repo at the pinned commit into a scratch directory outside
-this repo, runs the setup commands, starts the clock, then runs one arm:
+this repo, with its origin a local bare copy there and every GitHub URL sent
+nowhere (no arm may push to, fork or open a PR on the task's public repo),
+runs the setup commands, starts the clock, then runs one arm:
 
 - solo: ``claude -p <spec> --model claude-fable-5-2 --output-format
-  stream-json --verbose`` in the clone, in Claude Code's default permission
-  mode, with ``--permission-prompt-tool`` pointing at a small stdio MCP server
-  in this script that logs and approves each request (an AskUserQuestion gets
-  its recommended, else first, option). A turn that ends by asking the person
-  something is answered by resuming the same session. Tokens are summed per
-  model (subagents included) from the stream's assistant messages.
+  stream-json --verbose`` in the clone, in ``--permission-mode`` (default
+  "default"), with ``--permission-prompt-tool`` pointing at a small stdio MCP
+  server in this script that logs and approves each request (an
+  AskUserQuestion gets its recommended, else first, option). A turn that ends
+  by asking the person something is answered by resuming the same session.
+  Tokens per model (subagents included) are each turn's result totals.
 - brindle: the INSTALLED ``brindle`` (never this checkout's CLI: it would
   migrate the real database). ``brindle init`` in the clone, the supervisor
   pinned to ``--supervisor-model`` (a repo profile named in
-  ``supervisor_profile``), the app's hold on a permission ask shortened to
-  ``--hold-seconds`` (so it reaches the agent's own prompt, where this runner
-  answers it), then ``brindle start --no-attach -p <spec>``. Done is the goal
-  reached, or the whole session quiet (supervisor idle, no agent working,
-  nothing waiting on the person) for ``--idle-grace`` seconds; the clock stops
-  when that quiet began. Tokens per model for the supervisor and every worker
+  ``supervisor_profile``), then ``brindle start --no-attach -p <spec>``. Done
+  is the goal reached with nothing actionable left in the Inbox, or the whole
+  session quiet (supervisor idle, no agent working, nothing waiting on the
+  person) for ``--idle-grace`` seconds; the clock stops then. A permission
+  ask only the person can answer, in the app, is never answered here: the
+  run waits for them (``needs_person``). Tokens per model for the supervisor and every worker
   and reviewer of that session come from their transcripts (Codex and others
   without one: brindle's own usage reader), read through the installed
   brindle's Python.
@@ -36,18 +38,17 @@ Person-facing interruptions are counted in both arms. Solo: each request the
 permission tool logged, each AskUserQuestion, and each turn that ends in a
 question. brindle: permission asks its checker or the worker's supervisor did
 not answer (``permission_asks``), the supervisor stopping on a question or a
-need_user call, and anything else that lands in the session's Inbox. Each is
-answered automatically ("go ahead with your recommendation", or the Inbox
-item's own answer) so the run keeps going.
+need_user call, and anything else that lands in the session's Inbox. Each but
+a held permission ask is answered automatically ("go ahead with your
+recommendation", or the Inbox item's own answer) so the run keeps going.
 
 Then ``grade.sh`` runs on the final checkout (brindle: the session branch's
 worktree) and one JSON record is appended to
 ``.brindle/bench/solo_vs_brindle.jsonl``.
 
-A run that hits an interruption the runner can't automate (a permission ask
-from a worker with no prompt of its own, an expired login, an Inbox item the
-supervisor doesn't resolve), or that gives up, is recorded with ``"valid":
-false`` and why.
+A run that hits an interruption the runner can't automate (an expired login,
+an Inbox item the supervisor doesn't resolve), or that gives up, is recorded
+with ``"valid": false`` and why.
 
 ``report`` prints, per arm, the median and min-max of wall time, total tokens,
 cost, hidden-test pass rate and interruptions over the valid runs; with
@@ -492,9 +493,44 @@ def load_kit(task_dir: Path) -> tuple[dict, str, Path]:
     return json.loads((task_dir / "repo.json").read_text()), (task_dir / "spec.md").read_text(), task_dir / "grade.sh"
 
 
+# Where a GitHub URL used in the clone goes instead: a path that doesn't exist,
+# so a push, fetch or PR against the task's real (someone else's) repo fails.
+BLOCKED_URL = "file:///nonexistent/bench-solo-vs-brindle-no-github/"
+GITHUB_PREFIXES = ("https://github.com/", "http://github.com/", "git@github.com:", "ssh://git@github.com/")
+
+
+def is_local(url: str) -> bool:
+    return url.startswith(("/", "file://"))
+
+
+def remote_urls(path: Path, env: dict) -> list[str]:
+    res = sh(["git", "config", "--get-regexp", r"^remote\..*url$"], path, env, check=False, capture_output=True)
+    return [line.split(" ", 1)[1] for line in res.stdout.splitlines() if " " in line]
+
+
+def github_rewrites(path: Path, env: dict) -> list[str]:
+    """The URL prefixes git in ``path`` sends to BLOCKED_URL instead."""
+    res = sh(["git", "config", "--get-all", f"url.{BLOCKED_URL}.insteadOf"], path, env,
+             check=False, capture_output=True)
+    return res.stdout.split()
+
+
 def prepare_clone(repo: dict, scratch: Path, env: dict) -> Path:
-    clone = scratch / "repo"
-    sh(["git", "clone", "-q", repo["url"], str(clone)], scratch, env)
+    """The task repo at its pinned commit, cut off from where it came from:
+    its origin is a local bare copy in ``scratch`` (no remote of its own), and
+    any GitHub URL git is given there goes nowhere. Neither arm can then push
+    to, fork or open a PR on the task's public repo."""
+    origin, clone = scratch / "origin.git", scratch / "repo"
+    sh(["git", "clone", "-q", "--bare", repo["url"], str(origin)], scratch, env)
+    sh(["git", "config", "--remove-section", "remote.origin"], origin, env, check=False)
+    sh(["git", "clone", "-q", str(origin), str(clone)], scratch, env)
+    for path in (origin, clone):
+        for prefix in GITHUB_PREFIXES:
+            sh(["git", "config", "--add", f"url.{BLOCKED_URL}.insteadOf", prefix], path, env)
+    for path in (origin, clone):
+        foreign = [u for u in remote_urls(path, env) if not is_local(u)]
+        if foreign:
+            raise BenchError(f"{path} still has a remote off this machine: {foreign}")
     sh(["git", "checkout", "-q", "-B", "bench", repo["commit"]], clone, env)
     for cmd in repo.get("setup") or []:
         sh(cmd, clone, env, shell=True)
@@ -817,12 +853,12 @@ class Brindle:
         return out
 
 
-def configure_clone(clone: Path, model: str, hold_seconds: int) -> None:
+def configure_clone(clone: Path, model: str, hold_seconds: int | None) -> None:
     """A repo profile on ``model`` and ``supervisor_profile`` naming it (a new
-    supervisor chat takes its provider, model and effort from there), and the
-    app's hold on a permission ask shortened to ``hold_seconds``: an ask the
-    person must answer then reaches the agent's own prompt, where this runner
-    answers it, instead of waiting a day for the app."""
+    supervisor chat takes its provider, model and effort from there), and,
+    when ``hold_seconds`` is given, the app's hold on a permission ask cut to
+    it: a Claude or Codex agent's ask then reaches its own prompt, where this
+    runner answers it, but any other provider's is refused when the hold ends."""
     agents_dir = clone / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / f"{PROFILE_NAME}.md").write_text(
@@ -831,7 +867,8 @@ def configure_clone(clone: Path, model: str, hold_seconds: int) -> None:
     local = clone / ".brindle" / "config.local.json"
     cfg = json.loads(local.read_text()) if local.exists() else {}
     cfg["supervisor_profile"] = PROFILE_NAME
-    cfg["permission_hold_seconds"] = hold_seconds
+    if hold_seconds is not None:
+        cfg["permission_hold_seconds"] = hold_seconds
     local.write_text(json.dumps(cfg, indent=2) + "\n")
 
 
@@ -865,10 +902,15 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
     answering what waits on the person, and counting each such interruption.
     Done: the goal reached, or the whole session quiet (supervisor idle, no
     agent working, nothing waiting on the person) for ``args.idle_grace``
-    seconds; ``stop`` is when that quiet began. An interruption the runner
-    can't automate ends the run there (``stuck:<kind>``), and one handed to the
-    supervisor that is still listed after ``args.unresolved_after`` seconds
-    ends it too (``unresolved:<kind>``): both are recorded as invalid runs."""
+    seconds; ``stop`` is when that quiet began. A reached goal finishes only
+    once nothing actionable is left in the Inbox. A permission ask only the
+    person can answer (held for the app, with no prompt of the agent's own
+    the runner could answer after the hold) is never answered here: the run
+    waits for the person, the clock running, and is marked ``needs_person``.
+    An interruption the runner can't automate ends the run there
+    (``stuck:<kind>``), and one handed to the supervisor that is still listed
+    after ``args.unresolved_after`` seconds ends it too
+    (``unresolved:<kind>``): both are recorded as invalid runs."""
     seen: dict[str, dict] = {rid: root}            # every session agent ever seen (workers get removed)
     transcripts: dict[str, set[str]] = {}
     outside: dict[str, dict] = {}
@@ -878,12 +920,16 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
     answered: set[tuple] = set()
     delegated: dict[tuple, float] = {}
     pressed: dict[str, float] = {}
+    told: set[str] = set()
     quiet_since = None
     snap: dict = {}
+    short_hold = getattr(args, "hold_seconds", None) is not None
+    needs_person = False
 
     def finish(how: str, at: float, why: str | None = None) -> dict:
-        return {"finished": how, "stop": at, "valid": how in VALID_FINISHES, "why": why, "seen": seen,
-                "transcripts": transcripts, "outside": outside, "rates": rates, "events": events, "snap": snap}
+        return {"finished": how, "stop": at, "valid": how in VALID_FINISHES, "why": why,
+                "needs_person": needs_person, "seen": seen, "transcripts": transcripts, "outside": outside,
+                "rates": rates, "events": events, "snap": snap}
 
     while True:
         snap = b.probe("snapshot", root_id=rid, repo_root=root["repo_root"])
@@ -901,11 +947,15 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
         for item in snap["inbox"]:
             kind, aid = item["kind"], item.get("agent_id")
             if item.get("held"):
-                waiting = True   # held for the app: after --hold-seconds it reaches the agent's prompt
-                if item.get("held_by") == "person" and item.get("provider") not in PROMPT_AFTER_HOLD:
-                    # No prompt of its own: the ask would be refused when the hold ends, and
-                    # answering it in the app means acting as the person there.
-                    return finish("stuck:permission", now, f"{item.get('provider')} agent {aid} asks the person")
+                waiting = True
+                if item.get("held_by") == "person" and not (short_hold and item.get("provider") in PROMPT_AFTER_HOLD):
+                    # Only the person can answer it, in the app: never as them from here. It is
+                    # counted from permission_asks; the run waits for them, the clock running.
+                    needs_person = True
+                    if aid not in told:
+                        told.add(aid)
+                        print(f"waiting for the person: answer {item.get('provider')} agent {aid}'s "
+                              "permission ask in the brindle app", file=sys.stderr)
                 continue
             if kind == "waiting":
                 # A prompt or dialog still on an agent's screen after --answer-after: take its
@@ -949,9 +999,13 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
         asking = stopped and (ap.get("state") == "blocked" or ends_with_question(
             last_text(sup.get("transcript_path"))))
         if ap.get("state") == "done":
-            if asking:
+            spell = ("question", rid, sup.get("status_since"))
+            if asking and spell not in counted:   # a closing question: counted, not answered
+                counted.add(spell)
                 events.append({"kind": "question", "agent_id": rid, "at": now})
-            return finish("goal", now)
+            if not waiting:
+                return finish("goal", now)
+            asking = False   # the goal is reached: only the Inbox's open items are left to settle
         if asking:
             waiting = True
             spell = ("question", rid, sup.get("status_since"))
@@ -995,7 +1049,7 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
             if a.get("status") not in ("done", "paused"):
                 b.cli("close", aid, check=False)
     checkout = Path(w["seen"][rid].get("workspace_path") or clone)
-    return {"finished": w["finished"], "valid": w["valid"], "why": w["why"],
+    return {"finished": w["finished"], "valid": w["valid"], "why": w["why"], "needs_person": w["needs_person"],
             "permission_mode": w["snap"].get("permission_mode"),   # brindle's Claude agents' mode
             "wall_seconds": round(w["stop"] - t0, 1), **usage, "rates": w["rates"],
             "prompts": brindle_prompts(w["snap"].get("permission_asks", []), w["events"]),
@@ -1058,7 +1112,8 @@ def cmd_run(args) -> int:
     graded = grade(grade_sh, out["checkout"], env)
     prompts = out["prompts"]
     record = {"arm": args.arm, "run_id": args.run_id, "started_at": started, "finished": out["finished"],
-              "valid": out["valid"], "why": out["why"], "permission_mode": out.get("permission_mode"),
+              "valid": out["valid"], "why": out["why"], "needs_person": out.get("needs_person", False),
+              "permission_mode": out.get("permission_mode"),
               "wall_seconds": out["wall_seconds"], "supervisor_model": out["supervisor_model"],
               "supervisor_model_observed": out["supervisor_model_observed"],
               "tokens": {"by_model": out["by_model"], "by_role": out["by_role"]},
@@ -1086,17 +1141,21 @@ def cmd_run(args) -> int:
     return 0
 
 
-ARMS_HELP = """arms:
+ARMS_HELP = """Both arms work on a clone whose origin is a local bare copy, with GitHub URLs
+sent nowhere: nothing reaches the task's public repo.
+
+arms:
   solo     claude -p <spec> --model claude-fable-5-2 --output-format stream-json --verbose,
-           in default permission mode; --permission-prompt-tool points at this script's
+           in --permission-mode; --permission-prompt-tool points at this script's
            approver MCP server, which logs and allows each request (AskUserQuestion: its
            recommended option). A turn ending in a question is answered with --resume.
   brindle  the installed brindle: `brindle init`, the supervisor pinned to
-           --supervisor-model, the app's permission hold cut to --hold-seconds, `brindle
-           start --no-attach -p <spec>`; done when the goal is reached or the whole session
-           is quiet for --idle-grace seconds. Questions are answered "go ahead with your
+           --supervisor-model, `brindle start --no-attach -p <spec>`; done when the goal
+           is reached and the Inbox is settled, or the whole session is quiet for
+           --idle-grace seconds. Questions are answered "go ahead with your
            recommendation", Inbox items with their own answer, prompts on an agent's
-           screen with their default choice.
+           screen with their default choice. A permission ask only the person can answer
+           in the app waits for them (the record says needs_person).
 """
 
 
@@ -1123,8 +1182,10 @@ def main(argv: list[str] | None = None) -> int:
                      help="brindle: the supervisor's model (workers keep default routing)")
     run.add_argument("--brindle", help="brindle: the installed brindle (default: `brindle` on PATH)")
     run.add_argument("--brindle-python", help="brindle: the Python the installed brindle runs on")
-    run.add_argument("--hold-seconds", type=int, default=30,
-                     help="brindle: how long the app holds a permission ask before the agent's own prompt")
+    run.add_argument("--hold-seconds", type=int, default=None,
+                     help="brindle: cut the app's hold on a permission ask to this (default: brindle's own). "
+                          "Claude and Codex asks then reach the agent's prompt, which the runner answers; "
+                          "other providers' asks are refused when it ends")
     run.add_argument("--poll", type=float, default=20.0, help="brindle: seconds between looks")
     run.add_argument("--idle-grace", type=float, default=300.0,
                      help="brindle: seconds the session must stay quiet to count as done")

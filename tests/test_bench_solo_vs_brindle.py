@@ -148,8 +148,8 @@ class FakeSession:
     """brindle as watch_session sees it, on a fake clock: ``state(fake)`` gives
     the snapshot at ``fake.t``; every probe and CLI call is kept."""
 
-    def __init__(self, state):
-        self.t, self.calls, self.state = 0.0, [], state
+    def __init__(self, state, autopilot="running"):
+        self.t, self.calls, self.state, self.autopilot = 0.0, [], state, autopilot
 
     def clock(self):
         return self.t
@@ -162,7 +162,7 @@ class FakeSession:
         if op != "snapshot":
             return {}
         agents, inbox = self.state(self)
-        return {"agents": agents, "inbox": inbox, "autopilot": {"state": "running"}}
+        return {"agents": agents, "inbox": inbox, "autopilot": {"state": self.autopilot}}
 
     def cli(self, *argv, check=True):
         self.calls.append(("cli", argv))
@@ -217,18 +217,47 @@ def test_watch_answers_inbox_items_and_held_asks_before_counting_the_session_qui
     assert [e["kind"] for e in got["events"]] == ["plan_offer", "visual", "visual"]
 
 
-@pytest.mark.parametrize("item, finished, sent", [
-    # Handed to the supervisor once; still listed after --unresolved-after.
-    ({"kind": "pr_failed", "agent_id": "root", "detail": "checks failed"}, "unresolved:pr_failed", 1),
-    # A native worker has no prompt to fall back to: its ask can't be answered here.
-    ({"kind": "permission", "agent_id": "w1", "held": True, "held_by": "person", "provider": "native"},
-     "stuck:permission", 0),
-])
-def test_watch_ends_a_run_it_cannot_complete_as_invalid(item, finished, sent):
-    s = FakeSession(lambda s: ([ROOT, {"id": "w1", "status": "idle"}], [item]))
+def test_watch_finishes_a_reached_goal_only_once_its_inbox_is_settled():
+    # The goal is reached from t=0, but a plan waits on the person until it is answered.
+    s = FakeSession(lambda s: ([ROOT], [] if s.ops("answer") else [{"kind": "plan", "agent_id": "w1"}]), "done")
     got = bench.watch_session(s, "root", ROOT, 0, ARGS, s.clock, s.pause)
-    assert (got["finished"], got["valid"]) == (finished, False)
-    assert len(s.ops("cli")) == sent
+    assert (got["finished"], got["stop"]) == ("goal", 50)
+    assert len(s.ops("answer")) == 1
+
+
+def test_watch_ends_a_run_whose_delegated_item_stays_unresolved_as_invalid():
+    item = {"kind": "pr_failed", "agent_id": "root", "detail": "checks failed"}
+    s = FakeSession(lambda s: ([ROOT], [item]))
+    got = bench.watch_session(s, "root", ROOT, 0, ARGS, s.clock, s.pause)
+    assert (got["finished"], got["valid"]) == ("unresolved:pr_failed", False)
+    assert len(s.ops("cli")) == 1   # handed to the supervisor once
+
+
+def test_watch_waits_for_the_person_on_an_ask_only_they_can_answer():
+    # A native worker's ask, held for the app: never answered from here; the person answers at t=200.
+    def state(s):
+        held = [{"kind": "permission", "agent_id": "w1", "held": True, "held_by": "person", "provider": "native"}]
+        return [ROOT, {"id": "w1", "status": "idle"}], held if s.t < 200 else []
+
+    s = FakeSession(state)
+    got = bench.watch_session(s, "root", ROOT, 0, ARGS, s.clock, s.pause)
+    assert (got["finished"], got["valid"], got["needs_person"], got["stop"]) == ("idle", True, True, 200)
+    assert s.ops("press_enter") == s.ops("answer") == s.ops("cli") == []
+
+
+def test_prepare_clone_leaves_only_local_remotes(repo, tmp_path):
+    # The task repo is on GitHub: this test's git finds it locally under that URL.
+    url = "https://github.com/o/task"
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text(f'[url "{repo}"]\n\tinsteadOf = {url}\n')
+    env = {**bench.clean_env(), "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1"}
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    clone = bench.prepare_clone({"url": url, "commit": "main", "setup": []}, scratch, env)
+    for path in (clone, scratch / "origin.git"):
+        assert all(bench.is_local(u) for u in bench.remote_urls(path, env))
+        assert set(bench.github_rewrites(path, env)) == set(bench.GITHUB_PREFIXES)
+    assert bench.remote_urls(clone, env) == [str(scratch / "origin.git")]
 
 
 @pytest.mark.parametrize("opened, kinds", [(False, ["pr_ready"]), (True, ["pr_opened"])])
