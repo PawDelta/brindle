@@ -96,17 +96,19 @@ class RelayError(RuntimeError):
 # -- what this machine keeps (sync; one DB connection, the manager's thread) ------------------------
 
 
-def note_seed(db: DB, doc_id: str, sections: dict[str, str]) -> None:
+def note_seed(db: DB, doc_id: str, sections: dict[str, str], version: bytes | None = None) -> None:
     """A replica was seeded here from the doc's revision before any join:
-    keep that text as the base its local edits are re-typed from."""
+    keep that text (and the replica's ``version`` right after seeding) as
+    the base its local edits are re-typed from."""
     with db.tx() as c:
-        c.execute("INSERT INTO live_docs (doc_id, relay_version, seed, updated_at) VALUES (?, NULL, ?, ?)"
-                  " ON CONFLICT(doc_id) DO NOTHING", (doc_id, json.dumps(sections), time.time()))
+        c.execute("INSERT INTO live_docs (doc_id, relay_version, seed, seed_version, updated_at)"
+                  " VALUES (?, NULL, ?, ?, ?) ON CONFLICT(doc_id) DO NOTHING",
+                  (doc_id, json.dumps(sections), version, time.time()))
 
 
 def _link(db: DB | sqlite3.Connection, doc_id: str):
     c = db.conn if isinstance(db, DB) else db
-    return c.execute("SELECT relay_version, seed FROM live_docs WHERE doc_id=?", (doc_id,)).fetchone()
+    return c.execute("SELECT relay_version, seed, seed_version FROM live_docs WHERE doc_id=?", (doc_id,)).fetchone()
 
 
 def _put_relay_version(c: sqlite3.Connection, doc_id: str, version: bytes) -> None:
@@ -146,6 +148,13 @@ def _base(replica: plan_drafts.DraftReplica | SharedDoc, row) -> dict[str, str] 
     return None
 
 
+def _base_version(row) -> bytes | None:
+    """The version :func:`_base` is the text of, when it is known."""
+    if row is None:
+        return None
+    return row["relay_version"] if row["relay_version"] is not None else row["seed_version"]
+
+
 def unsent(db: DB, doc_id: str) -> bool:
     """Whether the replica holds edits the relay has not acknowledged."""
     replica, row = _replica(db, doc_id), _link(db, doc_id)
@@ -176,17 +185,21 @@ def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int | None, carry: bool
             # The number's earlier changes are the relay's, all in the snapshot: only now may it write.
             doc.set_peer_id(peer)
         if carry and current is not None:
-            base = _base(current, _link(c, doc_id))
+            link = _link(c, doc_id)
+            base, since = _base(current, link), _base_version(link)
             ours = current.sections()
-            # Letters the supervisor typed (under its relay number, or one it chose before it had
-            # one) are re-typed under its relay number; the rest under the person's.
+            # What the supervisor typed or deleted (under its relay number, or one it chose before
+            # it had one) is re-typed under its relay number; the rest under the person's.
             row = c.execute("SELECT supervisor_peer FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
             theirs = {n for n in (row["supervisor_peer"] if row else None, supervisor) if n is not None}
-            writers = None
+            writers = deleters = None
             if supervisor is not None and theirs:
                 writers = {s: [supervisor if e in theirs else doc.peer_id for e in current.editors(s)]
                            for s in ours}
-            retype(doc, doc.sections() if base is None else base, ours, writers)
+                if since is not None:
+                    deleters = {s: [supervisor if e in theirs else doc.peer_id for e in who]
+                                for s, who in current.deleters_since(since).items()}
+            retype(doc, doc.sections() if base is None else base, ours, writers, deleters)
         _put_relay_version(c, doc_id, update_version(snapshot))
         return doc
 

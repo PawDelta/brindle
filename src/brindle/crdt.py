@@ -19,6 +19,7 @@ turns the rest into :class:`CrdtError`.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 
 import loro
@@ -249,6 +250,39 @@ class SharedDoc:
         """Whether every change in ``version`` is already here: nothing past it
         would be exported to a replica at ``version``."""
         return _vv(version).includes_vv(self._doc.oplog_vv)
+
+    def deleters_since(self, version: bytes) -> dict[str, list[int | None]]:
+        """For each character of each section as it stood at ``version``
+        (:meth:`sections_at`), the peer id that deleted it since, or None if
+        it still stands (or the change that removed it isn't known here)."""
+        vv = _vv(version).intersection(self._doc.oplog_vv)
+        then = self._doc.fork_at(self._doc.vv_to_frontiers(vv))
+        log = json.loads(self._doc.export_json_updates(vv, self._doc.oplog_vv))
+        peers = [int(p) for p in log.get("peers", [])]
+
+        def ref(s: str) -> tuple[int, int]:
+            counter, index = s.split("@")
+            return int(counter), peers[int(index)]
+
+        gone: dict[tuple[str, int, int], int] = {}      # (container, peer, counter) of a letter -> who deleted it
+        for change in log.get("changes", []):
+            who = ref(change["id"])[1]
+            for op in change["ops"]:
+                content = op["content"]
+                if content.get("type") != "delete":
+                    continue
+                counter, peer = ref(content["start_id"])
+                n = content["len"]
+                for k in (range(counter, counter + n) if n > 0 else range(counter + n + 1, counter + 1)):
+                    gone[(op["container"], peer, k)] = who
+        out: dict[str, list[int | None]] = {}
+        for name, value in then.get_deep_value().items():
+            if not isinstance(value, str):
+                continue
+            t, container = then.get_text(name), f"cid:root-{name}:Text"
+            ids = (t.get_cursor(i, loro.Side.Middle).id for i in range(t.len_unicode))
+            out[name] = [gone.get((container, i.peer, i.counter)) for i in ids]
+        return out
 
     def sections_at(self, version: bytes) -> dict[str, str]:
         """Every section's text as it stood once the changes in ``version``

@@ -361,34 +361,42 @@ def mapping(base: str, other: str) -> tuple[Callable[[int], int], list[tuple[int
 
 
 def retype(doc: SharedDoc, base: dict[str, str], ours: dict[str, str],
-           writers: dict[str, list[int]] | None = None) -> None:
+           writers: dict[str, list[int]] | None = None, deleters: dict[str, list[int]] | None = None) -> None:
     """Make on ``doc`` what changed from ``base`` to ``ours`` (both texts by
     section) somewhere else. Where ``doc``'s text also changed a stretch that
     ours changed, ours goes in beside it and deletes nothing of it.
 
-    ``writers``: for each section, the peer id to write each character of
-    ``ours`` under (each one's earlier changes in ``doc``), so re-typed text
-    stays credited to whoever typed it; deletions, and every character
-    without one, are written under ``doc``'s own peer id, which it keeps."""
+    So re-typed changes stay credited to whoever made them: ``writers``, for
+    each section, the peer id to write each character of ``ours`` under, and
+    ``deleters``, the one to delete each character of ``base`` under (each
+    peer's earlier changes in ``doc``). What has none is written under
+    ``doc``'s own peer id, which it keeps."""
     own = doc.peer_id
     try:
         for section in sorted(set(base) | set(ours)):
             was, mine = base.get(section, ""), ours.get(section, "")
             if was == mine:
                 continue
-            who = (writers or {}).get(section) or [own] * len(mine)
+            who = (writers or {}).get(section) or []
+            gone = (deleters or {}).get(section) or []
+            who = who if len(who) == len(mine) else [own] * len(mine)       # a list that doesn't fit isn't used
+            gone = gone if len(gone) == len(was) else [own] * len(was)
             at, changed = mapping(was, doc.text(section))
             edits = []
             for i1, i2, j1, j2 in hunks(was, mine):
                 start = at(i1)
-                touched = any(b1 < i2 and i1 < b2 for b1, b2 in changed)
+                touched = any(b1 < i2 and i1 < b2 for b1, b2 in changed) or at(i2) - start != i2 - i1
                 runs = [(peer, "".join(ch for _, ch in run)) for peer, run in itertools.groupby(
                     zip(who[j1:j2], mine[j1:j2]), key=lambda pair: pair[0])]
-                edits.append((start, 0 if touched else max(at(i2) - start, 0), runs))
-            for start, length, runs in reversed(edits):
-                if length:
-                    doc.set_peer_id(own)
-                    doc.delete(section, start, length)
+                # Untouched here, the stretch is the same letters in doc from ``start`` on.
+                cuts = [] if touched else [(peer, len(list(run))) for peer, run in itertools.groupby(gone[i1:i2])]
+                edits.append((start, cuts, runs))
+            for start, cuts, runs in reversed(edits):
+                end = start + sum(n for _, n in cuts)
+                for peer, n in reversed(cuts):
+                    end -= n
+                    doc.set_peer_id(peer)
+                    doc.delete(section, end, n)
                 for peer, text in runs:
                     doc.set_peer_id(peer)
                     doc.insert(section, start, text)

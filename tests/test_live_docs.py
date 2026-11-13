@@ -238,12 +238,12 @@ class Machine:
         self.replica().insert(section, offset, text)
         await self.manager.changed("doc1")
 
-    async def supervise_in(self, section: str, offset: int, text: str) -> None:
+    async def supervise_in(self, section: str, offset: int, text: str, delete: int = 0) -> None:
         """The supervisor's edit, the way plan_docs.supervise writes it: under its own peer id."""
         db = self.db()
         replica = DraftReplica.open(db, "doc1")
         with db.tx() as c:
-            replica.supervise(c, lambda doc: doc.insert(section, offset, text))
+            replica.supervise(c, lambda doc: doc.replace(section, offset, delete, text))
         await self.manager.changed("doc1")
 
     def supervisor_peer(self) -> int | None:
@@ -251,6 +251,16 @@ class Machine:
 
     def generation(self) -> float:
         return self.db().conn.execute("SELECT created_at FROM plan_drafts").fetchone()["created_at"]
+
+
+def edits_by(relay: FakeRelay, peer: int) -> tuple[int, int]:
+    """How many letters the relay holds as typed, and as deleted, by ``peer``."""
+    log = json.loads(relay.doc.export_json_updates(loro.VersionVector(), relay.doc.oplog_vv))
+    peers = [int(p) for p in log["peers"]]
+    ops = [op["content"] for change in log["changes"] if peers[int(change["id"].split("@")[1])] == peer
+           for op in change["ops"]]
+    return (sum(len(op["text"]) for op in ops if op.get("type") == "insert"),
+            sum(abs(op["len"]) for op in ops if op.get("type") == "delete"))
 
 
 async def settle(*links: live_docs.DocLink) -> None:
@@ -275,16 +285,20 @@ def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay
         # A's window seeded the replica from the revision before any join, as the local socket
         # does, and A wrote in it under a number of its own before joining.
         seeded = a.db()
-        DraftReplica.open(seeded, "doc1", SharedDoc.new(REVISION).export_snapshot()).insert("body", 5, " here")
-        live_docs.note_seed(seeded, "doc1", REVISION)
-        await a.supervise_in("lede", len(REVISION["lede"]), " (sv)")     # the supervisor, before any join too
+        replica = DraftReplica.open(seeded, "doc1", SharedDoc.new(REVISION).export_snapshot())
+        live_docs.note_seed(seeded, "doc1", REVISION, replica.version())
+        replica.insert("body", 5, " here")
+        # The supervisor writes and deletes before any join too.
+        await a.supervise_in("lede", len(REVISION["lede"]), " (sv)")
+        await a.supervise_in("lede", len("# Design\n\n"), "", delete=len("Hello"))
         await a.link.connect()
         await settle(a.link, b.link)
         # The relay's seed only, never a second one; A's early edits re-typed onto it, B's kept.
-        assert a.sections() == b.sections() == {"lede": "># Design\n\nHello (sv)", "body": "World here"}
-        # The supervisor's letters went in under the number the relay issued it, not the person's.
+        assert a.sections() == b.sections() == {"lede": "># Design\n\n (sv)", "body": "World here"}
+        # The supervisor's letters, and its deletion, went in under the number the relay issued it.
         supervisor = a.supervisor_peer()
-        assert relay.marks[supervisor] == "supervisor" and relay.doc.oplog_vv.get_last(supervisor) == len(" (sv)") - 1
+        assert relay.marks[supervisor] == "supervisor"
+        assert edits_by(relay, supervisor) == (len(" (sv)"), len("Hello"))
 
         window = Window()
         lease = await a.manager.open_window("doc1", window)
@@ -298,8 +312,7 @@ def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay
         await settle(a.link, b.link)
 
         assert relay.refusals == []
-        assert a.sections() == b.sections() == relay.sections() == {"lede": "#># Design\n\nHello (sv)",
-                                                                       "body": "World here!"}
+        assert a.sections() == b.sections() == relay.sections() == {"lede": "#># Design\n\n (sv)", "body": "World here!"}
 
         relay.drop("alice")                                   # A is away a while; its window stays open
         await b.type_in("body", 0, "Remote ")
@@ -309,23 +322,24 @@ def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay
         for frame in window.frames:
             if "update" in frame:
                 app.import_updates(base64.b64decode(frame["update"]))
-        assert app.sections() == relay.sections() == {"lede": "#># Design\n\nHello (sv)", "body": "Remote World here!"}
+        assert app.sections() == relay.sections() == {"lede": "#># Design\n\n (sv)", "body": "Remote World here!"}
 
-        # A change under a number the relay never issued goes up with the supervisor's next one:
-        # the batch is refused, and both are re-typed, each still under its own writer.
+        # A change under a number the relay never issued goes up with the supervisor's next ones:
+        # the batch is refused, and all are re-typed, each still under its own writer.
         stray = SharedDoc.load(a.replica().export_bootstrap()[0])
         before = stray.version()
         stray.insert("body", 0, "?")
         a.replica().apply_remote(stray.export_updates(before))
         await a.supervise_in("lede", 0, "Also: ")
+        await a.supervise_in("body", 1, "", delete=len("Remote "))
         await settle(a.link, b.link)
         assert relay.refusals == ["batch_refused"]
         await a.link.connect()
         await settle(a.link, b.link)
-        assert a.sections() == b.sections() == relay.sections() == {"lede": "Also: #># Design\n\nHello (sv)",
-                                                                       "body": "?Remote World here!"}
+        assert a.sections() == b.sections() == relay.sections() == {"lede": "Also: #># Design\n\n (sv)",
+                                                                       "body": "?World here!"}
         assert a.supervisor_peer() == supervisor
-        assert relay.doc.oplog_vv.get_last(supervisor) == len(" (sv)Also: ") - 1
+        assert edits_by(relay, supervisor) == (len(" (sv)Also: "), len("HelloRemote "))
 
     asyncio.run(run())
 
@@ -364,10 +378,10 @@ def test_a_window_edit_racing_the_first_join_is_carried_onto_the_relays_draft(tm
             except sqlite3.OperationalError:
                 blocked.append(True)                          # the rebuild holds the write lock
 
-        def racing(doc, base, ours, writers=None):
+        def racing(*args):
             # The window's frame arrives (on the socket's own thread) while the first join rebuilds the replica.
             asyncio.run_coroutine_threadsafe(frame_arrives(), loop).result()
-            retype(doc, base, ours, writers)
+            retype(*args)
 
         monkeypatch.setattr(live_docs, "retype", racing)
         await a.link.connect()

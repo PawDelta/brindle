@@ -114,7 +114,7 @@ async def visual_live(socket: WebSocket) -> None:
         replica = DraftReplica.open(db, doc_id, initial)
         if not exists:
             # Seeded here, not by the relay: its first join re-types local edits from this text.
-            live_docs.note_seed(db, doc_id, sections)
+            live_docs.note_seed(db, doc_id, sections, replica.version())
         return replica.export_bootstrap()
 
     def apply_update(data):

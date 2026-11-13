@@ -1200,6 +1200,7 @@ CREATE TABLE IF NOT EXISTS live_docs (
     doc_id TEXT PRIMARY KEY,
     relay_version BLOB,            -- a Loro version vector; NULL until the first join
     seed TEXT,                     -- JSON {section: text}, until the first join
+    seed_version BLOB,             -- the replica's version once seeded (who changed what since), likewise
     updated_at REAL NOT NULL
 );
 -- Replica numbers the relay issued to this account for a doc: the replica's
