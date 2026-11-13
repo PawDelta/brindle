@@ -60,9 +60,40 @@ def _loads(text: str | None) -> list[str]:
 # -- overlap warnings ---------------------------------------------------------
 
 
+# A declared region: "src/a.py:120-180" (or "src/a.py:42"), the lines of the
+# task's base it expects to change.
+_REGION = re.compile(r"^(?P<path>.+):(?P<start>\d+)(?:-(?P<end>\d+))?$")
+
+Region = tuple[int, int]
+
+
+def _region(spec: str) -> tuple[str, Region | None]:
+    """``spec``'s path and declared line range (None: the whole file)."""
+    m = _REGION.match(spec or "")
+    if not m:
+        return spec, None
+    start = int(m["start"])
+    end = int(m["end"]) if m["end"] else start
+    return m["path"], (min(start, end), max(start, end))
+
+
+def _meets(a: Region, b: Region) -> bool:
+    """Whether line ranges ``a`` and ``b`` overlap or nearly touch, with the
+    margin ``conflicts.overlapping_hunks`` uses."""
+    return a[0] <= b[1] + conflicts.ADJACENCY and b[0] <= a[1] + conflicts.ADJACENCY
+
+
+def overlap_granularity(repo_root: str) -> str:
+    """The repo's ``overlap_granularity``: "hunk" judges a shared file by the
+    regions each task declares or has changed; anything else, "file"."""
+    from brindle.config import load_repo_config
+    return "hunk" if getattr(load_repo_config(repo_root), "overlap_granularity", None) == "hunk" else "file"
+
+
 def _normpath(p: str) -> str:
-    """``p`` with a leading './' and redundant separators collapsed, so
-    "./src/a.py" compares equal to "src/a.py"."""
+    """``p`` without a declared region, with a leading './' and redundant
+    separators collapsed, so "./src/a.py:3-9" compares equal to "src/a.py"."""
+    p = _region(p)[0]
     return os.path.normpath(p) if p else p
 
 
@@ -92,13 +123,53 @@ def _has_glob(path: str) -> bool:
 
 
 def _overlap_files(files: list[str], declared: list[str], changed: list[str],
-                   ws: Workspace | None = None) -> tuple[str, ...]:
+                   ws: Workspace | None = None, *, hunks: bool = False,
+                   holder_hunks: conflicts.Hunks | None = None) -> tuple[str, ...]:
     """Broad declarations need concrete evidence from the holder's diff.
 
     Defer globs on the database-only path. At inspection a recursive tree
     glob, or one matching more than 20 tracked files, is broad. Narrow
     declarations still reserve files before the worker edits them.
+
+    With ``hunks`` (``overlap_granularity`` "hunk"), a shared file whose
+    regions both sides know ("path:start-end", ``_region``) is shared only
+    when they meet: a declared region against the other's declared one, or
+    against ``holder_hunks``, the hunks the holder's branch actually changed
+    (old side, against its base). A file either side declared whole, or
+    whose changed hunks can't be read, is shared as before.
     """
+    if hunks:
+        return _overlap_regions(files, declared, changed, ws, holder_hunks)
+    return _overlap_whole_files(files, declared, changed, ws)
+
+
+def _overlap_regions(files: list[str], declared: list[str], changed: list[str],
+                     ws: Workspace | None, holder_hunks: conflicts.Hunks | None) -> tuple[str, ...]:
+    shared = set(_overlap_whole_files(files, declared, changed, ws))
+    if not shared:
+        return ()
+    mine = [_region(f) for f in files]
+    theirs = [_region(d) for d in declared]
+    changed_set = {_normpath(p) for p in changed}
+    kept = set()
+    for path in shared:
+        ours = [r for pat, r in mine if _glob_match(pat, path)]
+        if not ours or any(r is None for r in ours):
+            kept.add(path)
+            continue
+        held = [r for pat, r in theirs if _glob_match(pat, path)]
+        if any(r is None or any(_meets(a, r) for a in ours) for r in held):
+            kept.add(path)
+            continue
+        if _normpath(path) in changed_set:
+            actual = (holder_hunks or {}).get(_normpath(path))
+            if not actual or any(_meets(a, b) for a in ours for b in actual):
+                kept.add(path)
+    return tuple(sorted(kept))
+
+
+def _overlap_whole_files(files: list[str], declared: list[str], changed: list[str],
+                         ws: Workspace | None = None) -> tuple[str, ...]:
     tracked = []
     if ws and any(_has_glob(p) for p in files + declared):
         try:
@@ -118,7 +189,7 @@ def _overlap_files(files: list[str], declared: list[str], changed: list[str],
             continue
         for theirs in declared:
             if not broad(theirs) and _glob_match(mine, theirs):
-                shared.add(theirs)
+                shared.add(_region(theirs)[0])
     return tuple(sorted(shared))
 
 
@@ -376,12 +447,12 @@ def _intent_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str]) -> 
 
 
 def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], *,
-                    inspect: bool = False, task_id: str | None = None) -> Clash | None:
-    return next(_queued_overlaps(db, ws, files, own, inspect=inspect, task_id=task_id), None)
+                    inspect: bool = False, task_id: str | None = None, hunks: bool = False) -> Clash | None:
+    return next(_queued_overlaps(db, ws, files, own, inspect=inspect, task_id=task_id, hunks=hunks), None)
 
 
 def _queued_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str], *,
-                     inspect: bool = False, task_id: str | None = None) -> Iterator[Clash]:
+                     inspect: bool = False, task_id: str | None = None, hunks: bool = False) -> Iterator[Clash]:
     """A clash if ``files`` matches the declared files of a task queued in
     ``ws``'s repo that hasn't started its worker yet (its request still
     replying, waiting, or starting in the background): assign/handoff start
@@ -395,7 +466,7 @@ def _queued_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str], *,
         # itself or a later task which may already be waiting for this one.
         if current and (t.created_at, t.id) >= (current.created_at, current.id):
             continue
-        shared = _overlap_files(files, _loads(t.files), [], ws if inspect else None)
+        shared = _overlap_files(files, _loads(t.files), [], ws if inspect else None, hunks=hunks)
         if shared:
             root = autopilot.root_of(db, t.caller_id) if t.caller_id else None
             yield _unless_stalled(db, Clash(
@@ -417,16 +488,32 @@ def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | 
             or inspected_clash(db, ws, files, task_text, caller_id))
 
 
-def _running_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], changed: bool) -> Clash | None:
-    return next(_running_overlaps(db, ws, files, own, changed), None)
+def _running_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], changed: bool,
+                     hunks: bool = False) -> Clash | None:
+    return next(_running_overlaps(db, ws, files, own, changed, hunks), None)
 
 
-def _running_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str], changed: bool) -> Iterator[Clash]:
+def _holder_overlap(files: list[str], declared: list[str], actual: list[str], ws: Workspace | None,
+                    other_ws: Workspace | None, hunks: bool) -> tuple[str, ...]:
+    """``_overlap_files`` against a holder's declared and changed files,
+    reading its changed hunks (``conflicts.hunks``) only when a region is
+    all that could tell the shared files apart."""
+    shared = _overlap_files(files, declared, actual, ws)
+    if not (shared and hunks):
+        return shared
+    regions = None
+    if other_ws is not None and actual and any(_region(f)[1] for f in files):
+        regions = conflicts.hunks(other_ws)
+    return _overlap_files(files, declared, actual, ws, hunks=True, holder_hunks=regions)
+
+
+def _running_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str], changed: bool,
+                      hunks: bool = False) -> Iterator[Clash]:
     """Clashes with running tasks' declared files, or (``changed``) with
     the files their branches have actually changed, which takes git to tell."""
     for t, _agent, other_ws in running_tasks(db, ws.repo_root):
         actual = _changed_files(other_ws) if changed and other_ws else []
-        shared = _overlap_files(files, _loads(t.files), actual, ws if changed else None)
+        shared = _holder_overlap(files, _loads(t.files), actual, ws if changed else None, other_ws, hunks)
         if shared:
             branch = other_ws.branch if other_ws else "?"
             yield _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {', '.join(shared)}; "
@@ -441,7 +528,9 @@ def declared_clash(db: DB, ws: Workspace, files: list[str] | None,
     if not files:
         return None
     own = _own_roots(db, ws, caller_id)
-    return _running_overlap(db, ws, files, own, changed=False) or _queued_overlap(db, ws, files, own)
+    hunks = overlap_granularity(ws.repo_root) == "hunk"
+    return (_running_overlap(db, ws, files, own, changed=False, hunks=hunks)
+            or _queued_overlap(db, ws, files, own, hunks=hunks))
 
 
 def inspected_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
@@ -459,9 +548,10 @@ def inspected_clashes(db: DB, ws: Workspace, files: list[str] | None, task_text:
     each read only when asked for: a launch passes over the holders its
     task no longer waits on (``_launch_overlap``) without missing the rest."""
     own = _own_roots(db, ws, caller_id)
+    hunks = bool(files) and overlap_granularity(ws.repo_root) == "hunk"
     if files:
-        yield from _running_overlaps(db, ws, files, own, changed=True)
-        yield from _queued_overlaps(db, ws, files, own, inspect=True, task_id=task_id)
+        yield from _running_overlaps(db, ws, files, own, changed=True, hunks=hunks)
+        yield from _queued_overlaps(db, ws, files, own, inspect=True, task_id=task_id, hunks=hunks)
         yield from _session_overlaps(db, ws, files, own, task_id, caller_id)
         yield from _intent_overlaps(db, ws, files, own)
     mine_issues = _issue_numbers(task_text)
@@ -469,7 +559,8 @@ def inspected_clashes(db: DB, ws: Workspace, files: list[str] | None, task_text:
         return
     for t, _agent, other_ws in _reported_unmerged(db, ws.repo_root):
         where = f"{t.agent_id} ({_where(other_ws)})"
-        shared_files = _overlap_files(files, _loads(t.files), _changed_files(other_ws), ws) if files else ()
+        shared_files = (_holder_overlap(files, _loads(t.files), _changed_files(other_ws), ws, other_ws, hunks)
+                        if files else ())
         if shared_files:
             yield _held(db, own, f"overlaps with {where}, reported but not yet merged, on "
                         f"{', '.join(shared_files)}; consider depends_on or merging first", t.agent_id, ws.repo_root,
@@ -486,6 +577,30 @@ def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
     """``find_clash``'s warning text, or None."""
     clash = find_clash(db, ws, files, task_text)
     return clash.warning if clash else None
+
+
+def merge_hunk_warning(db: DB, ws: Workspace) -> str | None:
+    """Under ``overlap_granularity`` "hunk", the running tasks whose changed
+    hunks meet ``ws``'s branch's (read before it merges): they started on
+    regions that didn't meet, and have drifted into each other since. A
+    warning only: the merge's own sync and gates still catch a conflict."""
+    if ws.kind != "worktree" or overlap_granularity(ws.repo_root) != "hunk":
+        return None
+    mine = conflicts.hunks(ws)
+    if not mine:
+        return None
+    hits = []
+    for _t, agent, other_ws in running_tasks(db, ws.repo_root):
+        if other_ws is None or other_ws.id == ws.id:
+            continue
+        theirs = conflicts.hunks(other_ws)
+        files = [p for p in sorted(mine) if conflicts.overlapping_hunks({p: mine[p]}, theirs)]
+        if files:
+            hits.append(f"{agent.id} ({other_ws.branch}) on {', '.join(files)}")
+    if not hits:
+        return None
+    return ("its changes meet running work's changed regions: " + "; ".join(hits)
+            + ". Those workers will have conflicts to resolve when they sync")
 
 
 def overlap_mode(setting: str | None, cross_session: bool) -> str:

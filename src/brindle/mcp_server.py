@@ -1661,7 +1661,11 @@ async def merge_workspace(workspace: str, squash: bool = False, repo: str | None
             identity_lock.ensure_workspace(db, ws)
         except agents.AgentError as e:
             return f"Not merged: {e}"
-        return pipeline.merge(db, caller, ws, squash=squash)
+        drift = tasks.merge_hunk_warning(db, ws)   # its hunks read before they land
+        out = pipeline.merge(db, caller, ws, squash=squash)
+        if drift and out.startswith("Merged"):
+            out += f"\nWarning: {drift}."
+        return out
 
     return await asyncio.to_thread(run)
 
