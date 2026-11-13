@@ -330,9 +330,10 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
 
 
 @pytest.mark.parametrize("migration, incompatible", [
-    ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT", None),
-    ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL DEFAULT ''", None),
-    ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL", "workspaces: from_a_newer_engine"),
+    pytest.param("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT", None, marks=pytest.mark.variant("new nullable column permits old writes")),
+    pytest.param("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL DEFAULT ''", None, marks=pytest.mark.variant("new defaulted column permits old writes")),
+    pytest.param("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL", "workspaces: from_a_newer_engine",
+                 marks=pytest.mark.variant("new required column blocks old writes")),
     pytest.param("CREATE TABLE dev_only (required TEXT NOT NULL)", None,
                  marks=pytest.mark.variant("an undeclared dev table must not block this version's writes")),
     (f"PRAGMA user_version={SCHEMA_VERSION + 1}", "user_version"),
@@ -419,7 +420,9 @@ def _modern(id, method, **params):
 LISTEN = {"id": "listen:0", "method": "subscriptions/listen", "notifications": {"toolsListChanged": True}}
 
 
-@pytest.mark.parametrize("replacement_knows_the_column, modern", [(True, False), (False, False), (True, True)])
+@pytest.mark.parametrize("replacement_knows_the_column, modern", [
+    pytest.param(True, False, marks=pytest.mark.variant("#344: legacy connection across schema reload")),
+    (False, False), (True, True)])
 def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypatch, replacement_knows_the_column,
                                                                        modern):
     """The update migrated the database under a session's `brindle mcp`: the

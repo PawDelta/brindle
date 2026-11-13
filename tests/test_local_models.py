@@ -120,7 +120,10 @@ def test_stop_unused_stops_the_server_and_its_runner_when_no_session_uses_it(db,
     assert not serve.pids_path().exists()
 
 
-@pytest.mark.parametrize("is_ollama", [True, False])
+@pytest.mark.parametrize("is_ollama", [
+    True,
+    pytest.param(False, marks=pytest.mark.variant("cancellation: a request ending during a negative process probe must preserve the server and record")),
+])
 def test_stop_unused_stops_nothing_once_its_request_stopped_after_the_probe(db, monkeypatch, fake_serve,
                                                                             is_ollama):
     # POST pause_session reaches stop_unused: an app that left after the ps probe

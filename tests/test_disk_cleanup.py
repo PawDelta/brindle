@@ -48,9 +48,13 @@ def test_corrupt_trash_does_not_block_retention(brindle_home, monkeypatch, metad
     assert (trash.directory() / "broken" / "tree").is_dir()
 
 
-@pytest.mark.parametrize("action", ["restore", "expiry", "refused", "path", "cap", "empty",
-                                  "registration-failure", "moved", "deleted", "restore-race",
-                                  "path-race", "locked", "prune"])
+@pytest.mark.parametrize("action", ["restore",
+    pytest.param("expiry", marks=pytest.mark.variant("Expired trash must be removed without affecting recoverable entries")),
+    "refused", "path",
+    pytest.param("cap", marks=pytest.mark.variant("Trash exceeding its disk cap must evict entries through the retention path")),
+    "empty", "registration-failure", "moved", "deleted", "restore-race", "path-race", "locked",
+    pytest.param("prune", marks=pytest.mark.variant("Restore survives pruning of the saved worktree registration")),
+])
 def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     from brindle import trash
 
@@ -334,7 +338,12 @@ def test_upgrade_sweep_removes_merged_worktrees_whole_once_and_never_a_dirty_one
     assert disk.upgrade_sweep(db) is None   # recorded: it runs once
 
 
-@pytest.mark.parametrize("state", ["dirty", "live", "process", "unknown"])
+@pytest.mark.parametrize("state", [
+    pytest.param("dirty", marks=pytest.mark.variant("Abandoned cleanup must preserve uncommitted work")),
+    "live",
+    pytest.param("process", marks=pytest.mark.variant("A detached process in a nested directory must protect its abandoned worktree")),
+    pytest.param("unknown", marks=pytest.mark.variant("An unreadable process scan must fail closed before deleting abandoned work")),
+])
 def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, old_worktree, monkeypatch, state):
     wt = old_worktree("idea")
     if state == "dirty":
@@ -360,6 +369,7 @@ def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, old_worktre
 
 @pytest.mark.parametrize("cleanup", ["post-merge", "retired"])
 @pytest.mark.parametrize("other", ["pane", "process", None])
+@pytest.mark.variant("Post-merge and retired cleanup must distinguish foreign panes and detached processes from the workspace's own session")
 def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, shipped, process_scan, cleanup, other,
                                                                   monkeypatch):
     """The pipeline's post-merge removal and the sweep of retired workspaces
@@ -423,11 +433,11 @@ def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, mo
 
 
 @pytest.mark.parametrize("cleanup,child,onlooker", [
-    ("retired", None, False),
-    ("retired", "vite", False),
-    ("retired", "pytest", False),
+    pytest.param("retired", None, False, marks=pytest.mark.variant("Its own idle shell must not prevent cleanup")),
+    pytest.param("retired", "vite", False, marks=pytest.mark.variant("Inherited worker identity must not excuse a dev server")),
+    pytest.param("retired", "pytest", False, marks=pytest.mark.variant("A project venv test runner is not a Brindle helper")),
     ("retired", None, True),     # someone sits in its shell pane
-    ("post-merge", None, False),
+    pytest.param("post-merge", None, False, marks=pytest.mark.variant("Reviewer cleanup must recognize the worker's own CLI")),
     ("post-merge", "vite", False),
     pytest.param("tool", None, False, marks=pytest.mark.variant(
         "real incident (release.153): remove_workspace refused a reported, idle worker for its own CLI and MCP")),
@@ -602,28 +612,31 @@ STARTED = f"started {123456 / os.sysconf('SC_CLK_TCK'):.2f}s after boot, argv[0]
     # more than a root process is.
     ("runner", _status(uids=(0, UID, 0, UID)), False,
      "runs with another's ids (uid real 0, uid saved 0), so it isn't this user's: pid 1354, Name runsvc"),
-    ("runner", _status(gids=(GID + 1,) * 4), False,
-     f"runs with another's ids (gid real {GID + 1}, gid effective {GID + 1}"),
+    pytest.param("runner", _status(gids=(GID + 1,) * 4), False,
+     f"runs with another's ids (gid real {GID + 1}, gid effective {GID + 1}",
+     marks=pytest.mark.variant("Issue 344: a foreign group must distinguish a protected host runner from a project process")),
     # Refused with this user's own ids (capabilities, non-dumpable, a
     # security module): can't be told, so in use; logged to tell what it is.
-    ("runner", _status(cap_prm=1 << 10), True, "CapEff 0000000000000400"),
-    ("runner", _status(), True, "a process with this user's ids has a folder that can't be read, so it "
+    pytest.param("runner", _status(cap_prm=1 << 10), True, "CapEff 0000000000000400", marks=pytest.mark.variant("Issue 344: capabilities do not excuse an unreadable cwd")),
+    pytest.param("runner", _status(), True, "a process with this user's ids has a folder that can't be read, so it "
      "counts as in use: pid 1354, Name runsvc, State R (running), PPid 1 (systemd), "
-     f"{IDS}, CapEff 0000000000000000, NoNewPrivs 0, Seccomp 0, {STARTED}"),
-    ("runner", None, True, f"nor can its ids (FileNotFoundError), so it counts as in use: pid 1354, "
-     f"Name ?, State ?, PPid 1 (systemd), Uid ?, Gid ?, CapEff ?, NoNewPrivs ?, Seccomp ?, {STARTED}"),
+     f"{IDS}, CapEff 0000000000000000, NoNewPrivs 0, Seccomp 0, {STARTED}",
+     marks=pytest.mark.variant("Issue 344: an unreadable cwd with this user's IDs must fail closed")),
+    pytest.param("runner", None, True, f"nor can its ids (FileNotFoundError), so it counts as in use: pid 1354, "
+     f"Name ?, State ?, PPid 1 (systemd), Uid ?, Gid ?, CapEff ?, NoNewPrivs ?, Seccomp ?, {STARTED}",
+     marks=pytest.mark.variant("Issue 344: missing process identity must not authorize worktree deletion")),
     # Whatever the service, this user's own process in the worktree keeps it.
-    ("runner+shell", _status(uids=(0, UID, 0, UID)), True, "uid real 0, uid saved 0"),
+    pytest.param("runner+shell", _status(uids=(0, UID, 0, UID)), True, "uid real 0, uid saved 0", marks=pytest.mark.variant("Issue 344: exempt runner must not hide a live shell")),
     # Linux's per-user service manager (``systemd --user``), refused for its
     # CAP_WAKE_ALARM with this user's ids: it never runs in a project.
     ("systemd", _status(name="systemd", cap_prm=1 << 35), False, None),
     # Something else calling itself systemd, not started by PID 1: unknown.
     ("systemd", _status(name="systemd", ppid=2000, cap_prm=1 << 35), True, "Name systemd, State R (running), "
      "PPid 2000"),
-    ("ssh-agent", _status(name="ssh-agent"), False, None),   # it chdirs to / as it daemonizes
+    pytest.param("ssh-agent", _status(name="ssh-agent"), False, None, marks=pytest.mark.variant("Issue 344: SSH agent must not block all cleanup")),
     ("ignored", _status(name="syncd"), False, None),   # the repo's live_check_ignore names it
     # Anything else refused keeps every worktree, and a removal says what it was.
-    ("unknown", _status(name="syncd"), True, "Name syncd"),
+    pytest.param("unknown", _status(name="syncd"), True, "Name syncd", marks=pytest.mark.variant("Unknown daemon with unreadable cwd fails closed")),
     # A worktree's own config can't excuse what holds it: only the repo's base config does.
     ("own-config", _status(name="syncd"), True, "Name syncd"),
 ], ids=["proc-unreadable", "lsof-partial", "runner-root-ids", "runner-other-group", "runner-capabilities",
@@ -805,7 +818,7 @@ def test_setup_waits_for_disk_unless_overridden(db, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("held", [
-    lambda repo: agents.admission("developer", str(repo)),
+    pytest.param(lambda repo: agents.admission("developer", str(repo)), marks=pytest.mark.variant("Worker admission honors disk pressure")),
     lambda repo: spawn.check_no_room(str(repo)),
 ])
 def test_low_free_disk_holds_a_launch(repo, monkeypatch, held):
@@ -924,13 +937,11 @@ def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo, monkeypatch
     assert sh("git ls-remote --heads origin brindle/session-1", repo).strip() == ""
 
 
+@pytest.mark.variant("macOS root creation excludes both worktree storage and Brindle home from Spotlight")
 def test_spotlight_is_kept_out_of_brindle_dirs(db, repo, monkeypatch):
     monkeypatch.setattr(disk.sys, "platform", "darwin")
-    # Faked darwin makes spawn.ensure_git probe xcode-select, which a Linux host lacks: the tools are present here.
     monkeypatch.setattr(spawn, "_tools_checked", True)
-
     root = workspaces.new_worktree_root(str(repo))
     workspaces.new_worktree_root(str(repo))
-
     assert (root / disk.NEVER_INDEX).is_file()
     assert (config.brindle_home() / disk.NEVER_INDEX).is_file()

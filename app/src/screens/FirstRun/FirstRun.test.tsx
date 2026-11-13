@@ -61,34 +61,6 @@ const INSTALL_OUTPUT = [
 ];
 
 describe("FirstRun", () => {
-  it("onboarding's engine step installs brindle's engine with its lines in the progress card, never a terminal, then starts it and goes on", async () => {
-    const { setup, print, exit } = fakeSetup([detection(["claude"])], [null]);
-    const onReady = vi.fn();
-    render(<FirstRun setup={setup} reason={NOT_INSTALLED} onReady={onReady} />);
-
-    // The first launch's own frame, saying what the install adds.
-    const frame = screen.getByTestId("onboarding");
-    expect(frame.getAttribute("data-step")).toBe("engine");
-    expect(screen.getByTestId("first-run-reason").textContent).toBe(NOT_INSTALLED);
-    await waitFor(() => expect(frame.textContent).toContain("Installing it adds uv, brindle, tmux (with Homebrew)"));
-    // No terminal, no commands to type, nothing about providers (the first launch's later steps).
-    expect(frame.textContent).not.toMatch(/npm install|brew install|Profiles|terminal/i);
-
-    fireEvent.click(screen.getByRole("button", { name: "Install brindle's engine" }));
-    await waitFor(() => expect(setup.attach).toHaveBeenCalled());
-    print("\x1b[32mInstalling uv\x1b[0m\r\nInstalled brindle 0.9.2\r\n");
-    const card = await screen.findByTestId("engine-install");
-    await waitFor(() => expect(within(card).getByTestId("engine-install-lines").textContent).toContain("Installed brindle 0.9.2"));
-    expect(within(card).getByTestId("engine-install-lines").textContent).toContain("Installing uv");
-    expect(card.getAttribute("data-state")).toBe("running");
-    expect(setup.connect).not.toHaveBeenCalled();
-
-    // Done: the engine starts, and on into the app.
-    exit(0);
-    await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
-    expect(setup.connect).toHaveBeenCalledTimes(1);
-  });
-
   it("onboarding's engine step says when the install fails, keeps its lines, and Retry runs it again inline", async () => {
     const { setup, print, exit } = fakeSetup([detection([])], [null]);
     const onReady = vi.fn();
@@ -140,7 +112,10 @@ describe("Launch", () => {
     expect(lines.textContent).toContain("Installed 1 executable: brindle");
     expect(screen.getByTestId("onboarding").textContent).not.toMatch(COMMANDS);
 
-    // Done: the app, and no instruction to type a command anywhere afterwards.
+    expect(screen.getByTestId("engine-install").getAttribute("data-state")).toBe("running");
+    expect(missing.setup.connect).toHaveBeenCalledTimes(1);
+    expect(lines.textContent).not.toContain("\x1b");
+    // The same install path calls through to Launch's child once it finishes.
     missing.exit(0);
     expect(await screen.findByText("the app")).toBeTruthy();
     expect(document.body.textContent).not.toMatch(COMMANDS);

@@ -55,8 +55,8 @@ def test_handling_inbox_items_notifies_connected_apps(db, tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize("claimed, registered_digest, listed", [
-    (False, None, True),     # a live hold nobody answered: listed
-    (True, None, False),     # its answer is already claimed: answer_permission refuses it
+    pytest.param(False, None, True, marks=pytest.mark.variant("a live unclaimed permission hold must remain actionable")),
+    pytest.param(True, None, False, marks=pytest.mark.variant("an already claimed permission hold cannot be listed or answered again")),
     (False, "other", False),  # the hook registered a different request: refused
 ])
 def test_items_lists_no_hook_request_the_answer_refuses(db, repo, claimed, registered_digest, listed):
@@ -82,7 +82,7 @@ def test_items_lists_no_hook_request_the_answer_refuses(db, repo, claimed, regis
 
 
 @pytest.mark.parametrize("parent, plan_first", [
-    ("r1", None),   # not a plan-first worker: approve_plan refuses it
+    pytest.param("r1", None, marks=pytest.mark.variant("a stale proposed plan on a non-plan-first worker cannot offer an unusable action")),
 ])
 def test_items_lists_no_plan_the_action_refuses(db, repo, parent, plan_first):
     ws = workspaces.create(db, str(repo), "feat/stale").workspace

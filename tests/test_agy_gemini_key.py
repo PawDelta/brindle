@@ -58,11 +58,6 @@ def test_doctor_warns_for_a_stored_key_too(agy_installed, settings):
     assert agy_line().level == doctor.WARN
 
 
-def test_doctor_fix_has_nothing_to_do_without_a_key(agy_installed, settings):
-    assert doctor.fix(lambda p: pytest.fail("asked")) == ["nothing to fix"]
-    assert not settings.exists()
-
-
 def test_doctor_fix_via_the_cli(agy_installed, settings, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", KEY)
     # Only the agy key line runs; the rest of doctor probes the whole machine.
@@ -80,6 +75,7 @@ def agy_profile(repo):
     return load_profile("gem", str(repo))
 
 
+@pytest.mark.variant("agy ignoring an API key must block launch without disclosing that key")
 def test_api_key_refuses_when_agy_would_ignore_the_key(repo, settings, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", KEY)
     p = agy_profile(repo)

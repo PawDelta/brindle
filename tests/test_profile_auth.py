@@ -57,6 +57,7 @@ def test_an_unknown_auth_is_an_error(repo):
         load_profile("odd", str(repo))
 
 
+@pytest.mark.variant("credential isolation: subscription panes strip stored and exported API keys while retaining their own OAuth login")
 def test_subscription_puts_no_stored_key_in_the_pane_and_strips_exported_ones(
         db, repo, monkeypatch, brindle_home, keyed):
     write_profile(repo, "sub", "subscription")

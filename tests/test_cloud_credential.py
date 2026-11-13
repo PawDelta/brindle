@@ -103,7 +103,10 @@ def mode(path):
     return stat.S_IMODE(os.stat(path).st_mode)
 
 
-@pytest.mark.parametrize("cloud", ["aws", "azure"])
+@pytest.mark.parametrize("cloud", [
+    pytest.param("aws", marks=pytest.mark.variant("AWS federation exchanges through STS, caches private credentials and refreshes near expiry")),
+    "azure",
+])
 def test_each_cloud_gets_what_its_library_reads_and_the_mint_sends_device_headers(cloud, fed, backend, store, caplog):
     import brindle
 
@@ -282,7 +285,11 @@ def script(tmp_path, name="brindle", mode=0o755, directory="bin"):
     return str(p)
 
 
-@pytest.mark.parametrize("how", ["relative", "world_writable_file", "world_writable_dir", "quote", "missing", "not_executable"])
+@pytest.mark.parametrize("how", [
+    "relative", "world_writable_file",
+    pytest.param("world_writable_dir", marks=pytest.mark.variant("bypass: a private executable is unsafe inside a replaceable directory")),
+    "quote", "missing", "not_executable",
+])
 def test_a_hook_path_that_could_be_swapped_or_misread_is_refused(how, tmp_path):
     exe = script(tmp_path)
     if how == "relative":

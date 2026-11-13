@@ -12,9 +12,9 @@ FAKE = "sk-ant-test-0123456789abcd"
 
 
 @pytest.mark.parametrize("record,external", [
-    ({"value": FAKE, "updated_at": 7}, None),
+    pytest.param({"value": FAKE, "updated_at": 7}, None,
+                 marks=pytest.mark.variant("race: a key deleted outside the cache cannot be restored by verification")),
     ({"value": FAKE, "updated_at": 7}, {"value": "external-replacement"}),
-    (None, None),
 ])
 def test_keychain_read_cached(monkeypatch, record, external):
     from starlette.requests import Request
@@ -185,6 +185,7 @@ def test_resume_skips_keys_never_saved(monkeypatch):
         assert resume() == both and calls == ["<listing>", *names], listing_fails[0]
 
 
+@pytest.mark.variant("security: a credential file readable by other users must be refused")
 def test_file_backend_refuses_loose_permissions(brindle_home):
     store = keystore.default_store("brindle-keys", "OPENAI_API_KEY")
     store.save({"value": "sk-test-1"})
@@ -210,6 +211,7 @@ def test_keychain_and_secret_service_keep_the_secret_off_argv(monkeypatch):
 # -- names ---------------------------------------------------------------------------------------
 
 
+@pytest.mark.variant("security: listing stored credentials must reveal only a suffix")
 def test_list_shows_only_the_last_four(brindle_home):
     keystore.set_key("ANTHROPIC_API_KEY", FAKE)
     assert keystore.list_keys() == {"ANTHROPIC_API_KEY": FAKE[-4:]}

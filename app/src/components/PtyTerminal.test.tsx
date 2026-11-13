@@ -284,7 +284,7 @@ it("sends Caps Lock letters on keydown exactly once without invoking clipboard s
 });
 
 it("draws the client's bytes as they come and sends what xterm.js says, as is", async () => {
-  const { written, opened, term } = mount();
+  const { written, opened, view, term } = mount();
   expect(opened.at).toEqual({ server: "brindle", target: "s:@1" });
   act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[2J\x1b[Hhello \x1b[1mtmux\x1b[0m")));
   await parsed(term());
@@ -296,6 +296,8 @@ it("draws the client's bytes as they come and sends what xterm.js says, as is", 
     term().input("\x1b[<64;10;5M", false);
   });
   expect(written).toEqual(["a", "\x1b[A", "\x1b[<64;10;5M"]);
+  view.unmount();
+  expect(opened.closed).toBe(true);
 });
 
 it("puts an OSC 52 write on the app's clipboard, and never tells a program what the clipboard holds", async () => {
@@ -363,6 +365,9 @@ it("off a Mac, ⌘V pastes the app's clipboard (bracketed where asked), and ⌘C
   press("v");
   await settled();
   expect(written).toEqual(["\x1b[200~from the clipboard ✓\x1b[201~"]);
+  webviewPaste(textarea, "menu paste");
+  await settled();
+  expect(written).toEqual(["\x1b[200~from the clipboard ✓\x1b[201~", "\x1b[200~menu paste\x1b[201~"]);
 });
 
 it("keeps what's typed after ⌘V behind the paste while the clipboard is read, pastes in the order pressed, and drops a paste that can't be read", async () => {
@@ -786,30 +791,6 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
   expect(reads).toBe(before);
 });
 
-it("off a Mac, ⌘V pastes the app's clipboard, and an Edit > Paste after it pastes too, never dropped or doubled", async () => {
-  const { written, clipboard, opened, term } = mount();
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
-  await parsed(term());
-  const textarea = term().textarea!;
-  const press = () => {
-    const e = new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true, cancelable: true });
-    act(() => void textarea.dispatchEvent(e));
-    return e;
-  };
-  // ⌘V taken (no webview paste follows it to double it), the app's clipboard read at once.
-  clipboard.text = "fallback";
-  expect(press().defaultPrevented).toBe(true);
-  await settled();
-  expect(written).toEqual(["\x1b[200~fallback\x1b[201~"]);
-  // Edit > Paste right after: its own paste, pasted.
-  webviewPaste(textarea, "menu paste");
-  await settled();
-  expect(written).toEqual(["\x1b[200~fallback\x1b[201~", "\x1b[200~menu paste\x1b[201~"]);
-  // And nothing more, however long on.
-  await settled(50);
-  expect(written).toHaveLength(2);
-});
-
 it("opens a link Ctrl-clicked (⌘-clicked on a Mac) in the system browser, a URL the pane prints or a program's OSC 8 hyperlink; a plain click opens nothing; a session's brindle://visual link opens the visual", async () => {
   const urls: string[] = [];
   const visuals: string[] = [];
@@ -854,10 +835,4 @@ it("copies a selection across rows only from the columns shown: never a cropped 
   expect(selectionIn(term(), 11, 80)).toBe("row 1\nagent row 2\nagent");
   // Columns from 14 on hidden (a right sidebar's): no row has them, the ends kept where they are.
   expect(selectionIn(term(), 0, 14)).toBe("\nside 2    │age\nside 3    │age");
-});
-
-it("closes the client when unmounted", () => {
-  const { opened, view } = mount();
-  view.unmount();
-  expect(opened.closed).toBe(true);
 });

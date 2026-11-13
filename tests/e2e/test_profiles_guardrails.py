@@ -85,6 +85,7 @@ def flag(argv, name):
 # -- 1. loading: .brindle/agents, ~/.brindle/agents, built-ins ------------------------------------------
 
 
+@pytest.mark.variant("quoted hashes and inline comments must not corrupt profile environment values or lists")
 def test_frontmatter_comments_blank_values_and_list_forms(repo, agents_dir):
     (agents_dir / "fm.md").write_text(
         "---\n"
@@ -227,6 +228,7 @@ def test_a_learned_rule_flows_from_findings_to_a_failing_gate(db, repo, pro):
     assert any("m.py:3" in v.detail for v in result.violations)
 
 
+@pytest.mark.variant("accepted deny patterns containing hashes or commas must survive serialization")
 def test_learned_patterns_with_a_comment_marker_survive_the_roundtrip(db, repo, pro):
     root = str(repo)
     for b in ("feat/a", "feat/b", "feat/c"):
@@ -286,6 +288,7 @@ def test_the_pretool_hook_denies_out_of_scope_tools(db, repo, api_dev, pro):
     assert denied(decide("Glob", pattern="../*", path=f"{root}/src"))
 
 
+@pytest.mark.variant("profile allowlists and credential declarations cannot override forbidden secret names")
 def test_secrets_never_reach_a_pane_whatever_env_allow_says():
     inherited = ["PATH", "HOME", "BRINDLE_HOME", "LC_ALL", "NPM_TOKEN", "AWS_REGION", "DATABASE_URL",
                  "GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "BRINDLE_PRO_TOKEN", "CI_JOB_TOKEN",
@@ -384,6 +387,7 @@ def test_a_codex_worker_with_rules_gets_them_in_its_prompt(repo, agents_dir, lau
     assert "Rules: security/backend" in text and "Write scope" in text
 
 
+@pytest.mark.variant("subagent profiles must carry their rule pack and write scope into the delegated brief")
 def test_a_subagent_profile_with_rules_gets_them_in_the_brief(db, repo, agents_dir, rules_dir, pro):
     (agents_dir / "sub.md").write_text(
         "---\nname: sub\nextends: subagent\nrules: tests/only\nwrite_scope: [tests/**]\n---\nSub.\n")
@@ -391,5 +395,3 @@ def test_a_subagent_profile_with_rules_gets_them_in_the_brief(db, repo, agents_d
     agent = agents.spawn(db, ws, "sub", prompt="Write tests", mode="assign")
     brief = agent.task
     assert "Rules: tests/only" in brief and "Write scope" in brief and "Write tests" in brief
-
-

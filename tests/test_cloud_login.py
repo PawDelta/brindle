@@ -104,6 +104,7 @@ AZ_TOKEN = json.dumps({"accessToken": "SECRET", "expiresOn": "2027-01-15 08:00:0
     (SimpleNamespace(returncode=0, stdout=AZ_TOKEN, stderr=""), NOW + 5, False),
     (SimpleNamespace(returncode=1, stdout="", stderr="AADSTS70043: refresh token expired"), NOW, False),
 ])
+@pytest.mark.variant("credential expiry: distinguish a valid Azure token, an expired token and a failed CLI without exposing the token")
 def test_azure_expiry_comes_from_the_cli_token(proc, now, ok):
     calls = []
 
@@ -121,6 +122,7 @@ def test_azure_expiry_comes_from_the_cli_token(proc, now, ok):
     (SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant: Bad Request invalid_rapt"), False, None),
     (SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr=""), False, 0.0),
 ])
+@pytest.mark.variant("credential expiry: distinguish refreshed, refused and already expired Google tokens without exposing secrets")
 def test_google_status_refreshes_through_gcloud_in_the_given_env(proc, ok, left, tmp_path):
     calls = []
 
@@ -148,7 +150,8 @@ def test_google_status_refreshes_through_gcloud_in_the_given_env(proc, ok, left,
     ("vertex", "ERROR: (gcloud.auth.application-default.print-access-token) "
                "Your default credentials were not found."),
     # after `aws sso logout`: no cached token
-    ("bedrock", "Error loading SSO Token: Token for dev-sess does not exist"),
+    pytest.param("bedrock", "Error loading SSO Token: Token for dev-sess does not exist",
+                 marks=pytest.mark.variant("signed-out AWS SSO must not open an unsolicited interactive login")),
 ])
 def test_signed_out_never_prompts(provider, stderr, tmp_path):
     (tmp_path / ".aws").mkdir()

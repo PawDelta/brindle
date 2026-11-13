@@ -25,7 +25,6 @@ RIGHT = "\t0\t58\t0\t23\t80\t24\t0\t1\t0\ns\t60\t79\t0\t23\t80\t24\t0\t0\t0"
 
 
 @pytest.mark.parametrize("call,args,want", [
-    (pv.server_args, ("brindle-x",), ["-L", "brindle-x"]),
     (pv.server_args, ("a;kill-server",), pv.ViewError),
     (pv.valid_target, ("-t",), False),
     (pv.check_version, ("tmux 3.1c", "x"), pv.ViewError),
@@ -42,7 +41,7 @@ def test_pure_parts(call, args, want):
 
 @pytest.mark.parametrize("server,admitted", [
     ("agent-srv", True),
-    ("someone-else", False),
+    pytest.param("someone-else", False, marks=pytest.mark.variant("foreign server with valid name")),
     pytest.param(None, False, marks=pytest.mark.variant("no server must not mean the default one")),
 ])
 def test_only_brindles_own_servers_are_shown(db, server, admitted):

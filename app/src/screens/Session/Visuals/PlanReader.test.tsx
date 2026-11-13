@@ -1,3 +1,4 @@
+import { inTestStore } from "../../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import { DaemonError, type DaemonClient, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
@@ -38,7 +39,7 @@ it("keeps an approved plan board live from recorded worker events and drops stal
     decidePlan: () => new Promise<Plan>((resolve) => { decided = resolve; }),
   };
   const store = createAppStore();
-  const view = render(<StoreContext.Provider value={store}><PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} /></StoreContext.Provider>);
+  const view = render(inTestStore(<><PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} /></>, store));
   await act(async () => reads.shift()!(plan));
   expect(screen.queryByRole("region", { name: "Plan board" })).toBeNull();
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign off" })));

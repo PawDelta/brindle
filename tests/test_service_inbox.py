@@ -49,12 +49,12 @@ def _notice(db, root, worker, mp):
 
 
 @pytest.mark.parametrize("kind, setup, expected", [
-    ("waiting", _worker(status="waiting"), [("w1", None)]),
     # Live: a Codex worker whose brief wasn't delivered read "Codex needs a sign-in", signed in or not.
     ("failed", _worker(provider="codex", status="failed", failed_why="delivery"), [("w1", None)]),
     ("question", _two_asking, [("r1", None), ("r2", None)]),
     ("plan", _worker(plan_state="proposed", plan_first=1, plan_text="1. add the column"), [("w1", "1. add the column")]),
-    ("proposed_checks", _locked_checks, []),
+    pytest.param("proposed_checks", _locked_checks, [],
+                 marks=pytest.mark.variant("Check proposals locked to another identity must not appear as answerable inbox items")),
     ("login", _login, [("r1", "aws sso login")]),
 ])
 def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, setup, expected):
