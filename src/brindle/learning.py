@@ -251,10 +251,10 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
     _forget_note(cfg, repo_root)
     if candidates is None:
         candidates = cfg.learning_candidates or cfg.routing.get("medium") or []
-    names = [c for c in candidates if isinstance(c, str)]
+    names = [c for c in candidates if isinstance(c, str) and cfg.routing_allows(c, task)]
     if not names:
         return None, None
-    default = default or names[0]
+    default = default if default and cfg.routing_allows(default, task) else names[0]
     if default not in names:
         # e.g. default_agent outside learning_candidates: it's still the baseline to beat
         names.insert(0, default)
