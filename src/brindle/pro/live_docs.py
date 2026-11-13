@@ -17,18 +17,27 @@ for it, signed in with the account's Library credentials. Over it:
   time, and the version moves on with each ack. Since the replica is in
   SQLite, unsent edits outlive a dropped connection and a restart.
 - **Remote changes** are merged into the replica and passed to the app's
-  windows. Lock and freeze states go to them as the app contract's
-  ``{"state": {...}}`` (``app/src/api/client.ts``).
+  windows, and so, at a join, is whatever others wrote while this machine was
+  away (the relay replays nothing). Lock and freeze states go to them as the
+  app contract's ``{"state": {...}}`` (``app/src/api/client.ts``). A lock or
+  freeze holds the outbox back until it ends; the relay says nothing when an
+  author-offline lock lapses or a version is reopened over REST, so a held
+  link checks (:meth:`DocLink.reconcile`): the lock's ``until``, or a join.
 - **Re-typing.** A replica the relay cannot take as it is (seeded here before
   its first join, which would put the revision's text in twice, or under a
   number that is no longer this account's) is rebuilt: the relay's draft,
   with what changed here since the base re-typed onto it under the
-  replica's number (:func:`_retype`). App windows on the old text are told
-  to open the channel again (``RELOAD``).
+  replica's number (:func:`plan_drafts.retype`), in one write transaction
+  with reading the old one (:func:`plan_drafts.rebuild`). An app window's
+  edit that arrives on the old replica after that is re-typed onto the new
+  one, and windows are told to open the channel again (``RELOAD``).
 - **Stale offline edits.** After an author-offline lock lapsed (24 hours),
-  the relay refuses the author's old replicas (``stale_offline``). Their
-  edits become suggestions (:func:`plan_docs.suggest`) and the replica
-  starts again from the relay's draft under new numbers.
+  the relay refuses the author's old replicas (``stale_offline``). In the
+  write that drops the replica, each of their edits is kept in
+  ``live_doc_offline`` with the live text it was made against; each is
+  forgotten only once it stands on the plan's revision as a suggestion (or,
+  for words only removed, a comment), filed now or at a later sweep. The
+  replica starts again from the relay's draft under new numbers.
 - **Closing.** Only an unclean drop mid-edit sets the author-offline lock,
   so once the last window closes and nothing is unsent the connection is
   closed cleanly (1000), and on the daemon's way out too.
@@ -40,10 +49,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import difflib
 import itertools
 import json
 import logging
+import sqlite3
 import ssl
 import time
 from collections.abc import Awaitable, Callable
@@ -55,6 +64,7 @@ from typing import Any, Protocol
 from brindle import plan_drafts
 from brindle.crdt import CrdtError, SharedDoc, merge_versions, update_version
 from brindle.db import DB
+from brindle.plan_drafts import retype
 
 log = logging.getLogger(__name__)
 
@@ -90,15 +100,20 @@ def note_seed(db: DB, doc_id: str, sections: dict[str, str]) -> None:
                   " ON CONFLICT(doc_id) DO NOTHING", (doc_id, json.dumps(sections), time.time()))
 
 
-def _link(db: DB, doc_id: str):
-    return db.conn.execute("SELECT relay_version, seed FROM live_docs WHERE doc_id=?", (doc_id,)).fetchone()
+def _link(db: DB | sqlite3.Connection, doc_id: str):
+    c = db.conn if isinstance(db, DB) else db
+    return c.execute("SELECT relay_version, seed FROM live_docs WHERE doc_id=?", (doc_id,)).fetchone()
+
+
+def _put_relay_version(c: sqlite3.Connection, doc_id: str, version: bytes) -> None:
+    c.execute("INSERT INTO live_docs (doc_id, relay_version, seed, updated_at) VALUES (?, ?, NULL, ?)"
+              " ON CONFLICT(doc_id) DO UPDATE SET relay_version=excluded.relay_version, seed=NULL,"
+              " updated_at=excluded.updated_at", (doc_id, version, time.time()))
 
 
 def _set_relay_version(db: DB, doc_id: str, version: bytes) -> None:
     with db.tx() as c:
-        c.execute("INSERT INTO live_docs (doc_id, relay_version, seed, updated_at) VALUES (?, ?, NULL, ?)"
-                  " ON CONFLICT(doc_id) DO UPDATE SET relay_version=excluded.relay_version, seed=NULL,"
-                  " updated_at=excluded.updated_at", (doc_id, version, time.time()))
+        _put_relay_version(c, doc_id, version)
 
 
 def _peers(db: DB, doc_id: str) -> dict[int, str]:
@@ -118,7 +133,7 @@ def _replica(db: DB, doc_id: str) -> plan_drafts.DraftReplica | None:
     return plan_drafts.DraftReplica.open(db, doc_id)
 
 
-def _base(replica: plan_drafts.DraftReplica, row) -> dict[str, str] | None:
+def _base(replica: plan_drafts.DraftReplica | SharedDoc, row) -> dict[str, str] | None:
     """The text the relay last held of this replica, or None if unknown."""
     if row is not None and row["relay_version"] is not None:
         return replica.sections_at(row["relay_version"])
@@ -142,57 +157,34 @@ def docs_with_unsent(db: DB) -> list[str]:
             if unsent(db, r["doc_id"])]
 
 
-def _edits(base: str, ours: str, theirs: str) -> list[tuple[int, int, str]]:
-    """What changed from ``base`` to ``ours``, as (start, length, text) in
-    ``theirs``, another descendant of ``base``. A change of ours whose range
-    they also changed deletes nothing of theirs: ours goes in beside it."""
-    mapping = difflib.SequenceMatcher(None, base, theirs, autojunk=False).get_opcodes()
+def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int | None, carry: bool) -> None:
+    """The replica becomes the relay's draft, written under ``peer`` (None:
+    a reader's, which writes nothing); with ``carry``, what changed here since
+    the base re-typed onto it. One write transaction from reading the old
+    replica to storing the new one and the relay's version with it, so an
+    edit another holder commits meanwhile lands before (and is carried) or
+    after (and is re-typed onto the new replica: DraftReplica.apply_remote)."""
+    def make(c: sqlite3.Connection, current: SharedDoc | None) -> SharedDoc:
+        doc = SharedDoc.load(snapshot)
+        if peer is not None:
+            # The number's earlier changes are the relay's, all in the snapshot: only now may it write.
+            doc.set_peer_id(peer)
+        if carry and current is not None:
+            base = _base(current, _link(c, doc_id))
+            retype(doc, doc.sections() if base is None else base, current.sections())
+        _put_relay_version(c, doc_id, update_version(snapshot))
+        return doc
 
-    def at(pos: int) -> int:
-        for tag, i1, i2, j1, _ in mapping:
-            if tag == "equal" and i1 <= pos <= i2:
-                return j1 + pos - i1
-        return next((j2 for _, i1, i2, _, j2 in mapping if i1 <= pos <= i2), len(theirs))
-
-    out = []
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, base, ours, autojunk=False).get_opcodes():
-        if tag == "equal":
-            continue
-        start = at(i1)
-        touched = any(t != "equal" and i1 < b2 and b1 < i2 for t, b1, b2, _, _ in mapping)
-        out.append((start, 0 if touched else max(at(i2) - start, 0), ours[j1:j2]))
-    return out
-
-
-def _retype(doc: SharedDoc, base: dict[str, str], ours: dict[str, str]) -> None:
-    """Make on ``doc`` (the relay's draft) what changed from ``base`` to ``ours`` here."""
-    for section in sorted(set(base) | set(ours)):
-        was, mine = base.get(section, ""), ours.get(section, "")
-        if was == mine:
-            continue
-        for start, length, text in reversed(_edits(was, mine, doc.text(section))):
-            doc.replace(section, start, length, text)
-
-
-def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int, carry: bool) -> None:
-    """The replica becomes the relay's draft under ``peer``; with ``carry``,
-    what changed here since the base re-typed onto it."""
-    replica, row = _replica(db, doc_id), _link(db, doc_id)
-    doc = SharedDoc.load(snapshot)
-    # The number's earlier changes are the relay's, all in the snapshot: only now may it write.
-    doc.set_peer_id(peer)
-    if carry and replica is not None:
-        base = _base(replica, row)
-        _retype(doc, doc.sections() if base is None else base, replica.sections())
-    plan_drafts.adopt(db, doc_id, doc)
-    _set_relay_version(db, doc_id, update_version(snapshot))
+    plan_drafts.rebuild(db, doc_id, make)
 
 
 def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed: list[int],
-                rebase: bool) -> bool:
+                rebase: bool) -> tuple[bool, bytes | None]:
     """A join's answer: record the numbers it issued, then bring the replica
-    up to the relay's draft. True if the replica was replaced (app windows
-    on it must load it again)."""
+    up to the relay's draft. Returns whether the replica was replaced (app
+    windows on it must load it again) and, if not, what the join brought in
+    that the windows lack (the relay sends nobody what it accepted while this
+    machine was away)."""
     fresh = [n for n in issued if n not in claimed]
     roles = _peers(db, doc_id)
     with db.tx() as c:
@@ -200,32 +192,22 @@ def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed
             role = "window" if "replica" in roles.values() else "replica"
             roles[n] = role
             c.execute("INSERT OR IGNORE INTO live_doc_peers (doc_id, peer, role) VALUES (?, ?, ?)", (doc_id, n, role))
-    mine = next((n for n, r in roles.items() if r == "replica"), None)
+    mine = next((n for n, r in roles.items() if r == "replica"), None)   # None: a reader, nothing to send
     replica, row = _replica(db, doc_id), _link(db, doc_id)
-    if mine is None:        # a reader: no numbers, nothing of its own to send
-        if replica is not None and row is not None and row["relay_version"] is not None and not rebase:
-            try:
-                replica.apply_remote(snapshot)
-                _set_relay_version(db, doc_id, merge_versions(row["relay_version"], update_version(snapshot)))
-                return False
-            except CrdtError:
-                pass
-        plan_drafts.adopt(db, doc_id, SharedDoc.load(snapshot))
-        _set_relay_version(db, doc_id, update_version(snapshot))
-        return replica is not None
     if replica is None:
         _rebuild(db, doc_id, snapshot, mine, carry=False)
-        return False
-    if rebase or row is None or row["relay_version"] is None or replica.peer_id != mine:
-        _rebuild(db, doc_id, snapshot, mine, carry=True)
-        return True
+        return False, None
+    if rebase or row is None or row["relay_version"] is None or (mine is not None and replica.peer_id != mine):
+        _rebuild(db, doc_id, snapshot, mine, carry=mine is not None)
+        return True, None
+    before = replica.version()
     try:
         replica.apply_remote(snapshot)
-    except CrdtError:       # the relay compacted past what this replica holds
-        _rebuild(db, doc_id, snapshot, mine, carry=True)
-        return True
+    except (CrdtError, plan_drafts.DraftGone):     # compacted past what this replica holds, or replaced
+        _rebuild(db, doc_id, snapshot, mine, carry=mine is not None)
+        return True, None
     _set_relay_version(db, doc_id, merge_versions(row["relay_version"], update_version(snapshot)))
-    return False
+    return False, (None if replica.holds(before) else replica.export_updates(before))
 
 
 def _join_numbers(db: DB, doc_id: str, in_use: set[int], wanted_windows: int, reader: bool) -> tuple[list[int], int]:
@@ -263,39 +245,96 @@ def _remote(db: DB, doc_id: str, batch: bytes) -> None:
     _set_relay_version(db, doc_id, merge_versions(row["relay_version"], update_version(batch)))
 
 
-def _suggest_offline(db: DB, doc_id: str) -> int:
-    """Turn what changed here since the relay last held this replica into
-    suggestions on the plan, then drop the replica (its numbers were retired)
-    so the next join starts again from the relay's draft. Returns how many."""
+def _hold_offline(db: DB, doc_id: str) -> int:
+    """The relay refused this replica's unsent edits as stale (typed offline
+    under numbers retired when the author-offline lock lapsed). In one write:
+    keep each edit, with the live text it was made against, in
+    ``live_doc_offline``, and drop the replica and its numbers, so the next
+    join starts again from the relay's draft. Returns how many were kept."""
+    kept = 0
+    with db.tx() as c:
+        got = plan_drafts._read(c, doc_id)
+        base = _base(got[1], _link(c, doc_id)) if got is not None else None
+        if got is not None and base is not None:
+            ours = got[1].sections()
+            for section in sorted(set(base) | set(ours)):
+                was, mine = base.get(section, ""), ours.get(section, "")
+                for i1, i2, j1, j2 in (plan_drafts.hunks(was, mine) if was != mine else []):
+                    c.execute("INSERT INTO live_doc_offline (doc_id, section, base, start, before, after)"
+                              " VALUES (?, ?, ?, ?, ?, ?)", (doc_id, section, was, i1, was[i1:i2], mine[j1:j2]))
+                    kept += 1
+        for table in ("live_docs", "live_doc_peers", "plan_drafts"):
+            c.execute(f"DELETE FROM {table} WHERE doc_id=?", (doc_id,))
+    return kept
+
+
+def _quote(text: str, limit: int = 300) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _file_one(db: DB, plan_id: str, edit) -> None:
+    """One offline edit onto the plan's revision as it is now: a suggestion
+    replacing the same words where they still stand there, else one inserting
+    the new words where they would go (the note says what they replaced in
+    the live draft), else, for words only removed, a comment saying so.
+    Filing what is already filed changes nothing, so a restart between filing
+    and forgetting the edit makes no second thread. Raises ServiceError."""
     from brindle import plan_docs
+
+    p = plan_docs._plan(db, plan_id)
+    body = plan_docs._body(plan_docs.revision(db, plan_id), edit["section"])
+    section, before, after = edit["section"], edit["before"], edit["after"]
+    if body is not None:
+        at, _ = plan_drafts.mapping(edit["base"], body)
+        start, end = at(edit["start"]), at(edit["start"] + len(before))
+        if not (before and body[start:end] == before):
+            note = (f"Typed offline while the author's lock had lapsed. In the live draft it replaced "
+                    f"“{_quote(before)}”." if before else "Typed offline while the author's lock had lapsed.")
+            start, before = at(edit["start"]), ""
+        else:
+            note = "Typed offline while the author's lock had lapsed."
+        if after:
+            if not _already(db, plan_id, "suggestion", note, after, (section, start)):
+                plan_docs.suggest(db, plan_id, p["rev"], section, start, before, after, note)
+            return
+    note = f"Typed offline while the author's lock had lapsed: removed “{_quote(edit['before'])}” from {section}."
+    if not _already(db, plan_id, "comment", note, None, None):
+        plan_docs.comment(db, plan_id, p["rev"], None, note)
+
+
+def _already(db: DB, plan_id: str, kind: str, body: str, after: str | None, at: tuple[str, int] | None) -> bool:
+    where = "" if at is None else " AND json_extract(anchor, '$.section')=? AND json_extract(anchor, '$.start')=?"
+    return db.conn.execute(
+        "SELECT 1 FROM plan_threads WHERE plan_id=? AND kind=? AND body=? AND after IS ? AND parent_id IS NULL" + where,
+        (plan_id, kind, body, after, *(at or ()))).fetchone() is not None
+
+
+def _file_offline(db: DB, doc_id: str) -> int:
+    """File the edits ``live_doc_offline`` keeps for ``doc_id`` onto its plan;
+    each is forgotten only once it stands there. One that can't be filed now
+    (the plan is approved, a secret in it, ...) stays for the next pass.
+    Returns how many are left."""
     from brindle.service.errors import ServiceError
 
-    replica, row = _replica(db, doc_id), _link(db, doc_id)
-    made = 0
     share = db.conn.execute("SELECT plan_id FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
-    base = _base(replica, row) if replica is not None else None
-    rev = None
-    if share is not None:
+    edits = db.conn.execute("SELECT * FROM live_doc_offline WHERE doc_id=? ORDER BY n", (doc_id,)).fetchall()
+    if share is None:
+        return len(edits)
+    left = 0
+    for edit in edits:
         try:
-            rev = plan_docs._plan(db, share["plan_id"])["rev"]
+            _file_one(db, share["plan_id"], edit)
         except ServiceError as e:
-            log.warning("brindle: offline edits to %s have no plan to become suggestions on: %s", doc_id, e)
-    if replica is not None and rev is not None and base is not None:
-        ours = replica.sections()
-        for section in sorted(set(base) | set(ours)):
-            was, mine = base.get(section, ""), ours.get(section, "")
-            ops = difflib.SequenceMatcher(None, was, mine, autojunk=False).get_opcodes()
-            for tag, i1, i2, j1, j2 in ops:
-                if tag == "equal":
-                    continue
-                try:
-                    plan_docs.suggest(db, share["plan_id"], rev, section, i1, was[i1:i2], mine[j1:j2],
-                                      "Written offline while the author's lock had lapsed")
-                    made += 1
-                except ServiceError as e:
-                    log.warning("brindle: an offline edit to %s couldn't become a suggestion: %s", doc_id, e)
-    plan_drafts.drop(db, doc_id)
-    return made
+            left += 1
+            log.warning("brindle: an edit to %s typed offline isn't on the plan yet: %s", doc_id, e)
+            continue
+        with db.tx() as c:
+            c.execute("DELETE FROM live_doc_offline WHERE n=?", (edit["n"],))
+    return left
+
+
+def docs_with_offline(db: DB) -> list[str]:
+    return [r["doc_id"] for r in db.conn.execute("SELECT DISTINCT doc_id FROM live_doc_offline ORDER BY doc_id")]
 
 
 # -- the relay connection ------------------------------------------------------------------------
@@ -363,6 +402,7 @@ class DocLink:
         return bool(self.windows) or bool(self.inflight) or self._unsent
 
     _unsent: bool = False
+    _reconciled: float = 0.0     # when a blocked outbox was last checked (manager.clock)
 
     # -- the app's side
 
@@ -439,14 +479,35 @@ class DocLink:
         self.author, self.frozen = said.get("author") or "", said.get("frozen")
         self.author_offline = said.get("author_offline")
         self.blocked = bool(self.frozen)
-        replaced = await self.manager.work(_take_state, self.doc_id, _unb64(said.get("snapshot")),
-                                           self.claimed, claims, self.rebase)
+        replaced, missed = await self.manager.work(_take_state, self.doc_id, _unb64(said.get("snapshot")),
+                                                   self.claimed, claims, self.rebase)
         self.rebase = False
         if replaced:
             await self._reload_windows()
         else:
             await self._to_windows(self.state_frame())
+            if missed is not None:      # what others wrote while this machine was away
+                await self._to_windows({"update": _b64(missed)})
             await self._lend_numbers()
+
+    async def reconcile(self) -> None:
+        """While a lock or a freeze holds the outbox back, find out whether it
+        still does: the relay tells nobody when an author-offline lock lapses
+        or a frozen version is reopened (a REST call). A lapsed lock is read
+        from its ``until``; a freeze, from a join's state (the connection is
+        closed cleanly and joined again)."""
+        if not self.blocked:
+            return
+        if self.frozen:
+            if self.conn is not None:
+                await self.close()
+                await self.connect()
+            return
+        until = (self.author_offline or {}).get("until")
+        if not isinstance(until, (int, float)) or self.manager.clock() >= until:
+            self.author_offline, self.blocked = None, False
+            await self._to_windows(self.state_frame())
+            await self.flush()
 
     async def flush(self) -> None:
         """Send the next batch of the outbox, if nothing is in flight."""
@@ -498,9 +559,9 @@ class DocLink:
         async with self.lock:
             self.inflight.pop(said.get("id"), None)
         if error == "stale_offline":
-            made = await self.manager.work(_suggest_offline, self.doc_id)
-            log.info("brindle: %d edit(s) to %s typed offline became suggestions", made, self.doc_id)
-            await self.manager.work(_forget_peers, self.doc_id)
+            kept = await self.manager.work(_hold_offline, self.doc_id)
+            left = await self.manager.work(_file_offline, self.doc_id)
+            log.info("brindle: %d edit(s) to %s typed offline go to the plan (%d not yet)", kept, self.doc_id, left)
             await self._reload_windows()
             await self.close()
         elif error == "author_offline":
@@ -547,12 +608,16 @@ class DocLink:
                 text = await asyncio.wait_for(conn.recv(), PING_EVERY)
             except TimeoutError:
                 await self._send({"type": "ping"})
-                continue
+                text = ""
             if text is None:
                 if self.conn is conn:
                     self.conn, self.inflight = None, {}
                 return
-            await self.handle(text)
+            if text:
+                await self.handle(text)
+            if self.blocked and self.manager.clock() - self._reconciled >= PING_EVERY:
+                self._reconciled = self.manager.clock()
+                await self.reconcile()
 
     async def drive(self) -> None:
         """Keep the link up while it is wanted (the manager's task for it)."""
@@ -595,9 +660,11 @@ class Manager:
 
     def __init__(self, transport: Transport | None = None, *, db_factory: Callable[[], DB] = DB,
                  wait: Callable[[float], Awaitable[None]] = _elapse,
-                 available: Callable[[], bool] | None = None, drive: bool = True) -> None:
+                 available: Callable[[], bool] | None = None, drive: bool = True,
+                 clock: Callable[[], float] = time.time) -> None:
         self.transport = transport or RelayTransport()
         self.wait = wait
+        self.clock = clock          # the relay's lock times are its wall clock's
         self.stopping = False
         self._db_factory = db_factory
         self._db: DB | None = None
@@ -667,7 +734,10 @@ class Manager:
             await link.awareness(lease, section, data)
 
     async def sweep(self) -> None:
-        """Start a link for every doc whose replica holds unsent edits."""
+        """File edits typed offline that aren't on their plan yet, and start a
+        link for every doc whose replica holds unsent edits."""
+        for doc_id in await self.work(docs_with_offline):
+            await self.work(_file_offline, doc_id)
         if not await self.available():
             return
         for doc_id in await self.work(docs_with_unsent):

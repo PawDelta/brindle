@@ -25,6 +25,9 @@ load until what it waits on arrives.
 
 from __future__ import annotations
 
+import difflib
+import itertools
+import re
 import secrets
 import sqlite3
 import time
@@ -56,7 +59,7 @@ def _fresh_peer(doc: SharedDoc) -> int:
 
 def _read(c: sqlite3.Connection, doc_id: str) -> tuple[sqlite3.Row, SharedDoc, list[bytes]] | None:
     """The stored row, its document with the waiting updates imported, and those updates."""
-    row = c.execute("SELECT peer_id, state, seq FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+    row = c.execute("SELECT peer_id, state, seq, created_at FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
     if row is None:
         return None
     doc = SharedDoc.load(row["state"])
@@ -73,12 +76,16 @@ class DraftReplica:
     offsets into the text as this holder last read it, and are stored before
     they return; each returns the Loro update it made, for the other replicas."""
 
-    def __init__(self, db: DB, doc_id: str, peer_id: int, doc: SharedDoc, seq: int) -> None:
+    def __init__(self, db: DB, doc_id: str, peer_id: int, doc: SharedDoc, seq: int, made: float) -> None:
         self.db = db
         self.doc_id = doc_id
         self.peer_id = peer_id
         self._doc = doc
         self._seq = seq
+        self._made = made       # which replica of the doc this is: :func:`rebuild` makes a new one
+
+    def _same(self, row: sqlite3.Row) -> bool:
+        return row["peer_id"] == self.peer_id and row["created_at"] == self._made
 
     @classmethod
     def open(cls, db: DB, doc_id: str, initial: bytes | None = None) -> DraftReplica:
@@ -89,7 +96,7 @@ class DraftReplica:
                 got = _read(c, doc_id)
             if got is not None:
                 row, doc, _ = got
-                return cls(db, doc_id, row["peer_id"], doc, row["seq"])
+                return cls(db, doc_id, row["peer_id"], doc, row["seq"], row["created_at"])
             doc = SharedDoc.load(initial) if initial else SharedDoc.new()
             peer = _fresh_peer(doc)
             doc.set_peer_id(peer)
@@ -102,7 +109,7 @@ class DraftReplica:
             except sqlite3.IntegrityError:
                 continue    # another replica already has that peer id: pick again
             if added:
-                return cls(db, doc_id, peer, doc, 0)
+                return cls(db, doc_id, peer, doc, 0, now)
             # Another process made it first: use theirs.
 
     # -- reading --------------------------------------------------------
@@ -134,7 +141,7 @@ class DraftReplica:
         """
         with self.db.snapshot() as c:
             got = _read(c, self.doc_id)
-        if got is None or got[0]["peer_id"] != self.peer_id:
+        if got is None or not self._same(got[0]):
             raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
         row, doc, pending = got
         self._doc, self._seq = doc, row["seq"]
@@ -154,8 +161,21 @@ class DraftReplica:
     def apply_remote(self, data: bytes) -> bool:
         """Merge another replica's updates; False while they wait on changes
         not yet received (they are kept, and merged once those arrive). Not
-        positional, so another holder's writes since do not refuse it."""
+        positional, so another holder's writes since do not refuse it.
+
+        If the replica was rebuilt since this holder read it (:func:`rebuild`),
+        ``data`` was made against the old one and cannot merge into the new:
+        what it changed in the text this holder read is re-typed onto the new
+        replica instead (:func:`retype`), and this holder goes on with it."""
         return data not in self._write(lambda d: d.import_updates(data), incoming=data)[1]
+
+    def _carry(self, data: bytes) -> Callable[[SharedDoc], None]:
+        """``data``'s change to the text this holder last read, as an edit for another replica."""
+        base = self._doc.sections()
+        after = SharedDoc.load(self._doc.export_snapshot())
+        after.import_updates(data)
+        ours = after.sections()
+        return lambda doc: retype(doc, base, ours)
 
     def _write(self, change: Callable[[SharedDoc], object],
                incoming: bytes | None = None) -> tuple[bytes, list[bytes]]:
@@ -163,8 +183,17 @@ class DraftReplica:
         updates still waiting on changes not yet received."""
         with self.db.tx() as c:
             got = _read(c, self.doc_id)
-            if got is None or got[0]["peer_id"] != self.peer_id:
+            if got is None or (not self._same(got[0]) and incoming is None):
                 raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
+            if not self._same(got[0]):
+                row, doc, pending = got
+                before = doc.version()
+                self._carry(incoming)(doc)
+                seq = row["seq"] + 1
+                c.execute("UPDATE plan_drafts SET state=?, seq=?, updated_at=? WHERE doc_id=?",
+                          (doc.export_snapshot(), seq, time.time(), self.doc_id))
+                self.peer_id, self._made, self._doc, self._seq = row["peer_id"], row["created_at"], doc, seq
+                return doc.export_updates(before), pending
             row, doc, pending = got
             if incoming is None and row["seq"] != self._seq:
                 self._doc, self._seq = doc, row["seq"]
@@ -187,22 +216,83 @@ class DraftReplica:
         return doc.export_updates(before), waiting
 
 
-def adopt(db: DB, doc_id: str, doc: SharedDoc) -> DraftReplica:
-    """Make ``doc`` this machine's replica of ``doc_id``, writing under its
-    own peer id from now on: the relay's draft with the local text re-typed
-    onto it (:mod:`brindle.pro.live_docs`). ``doc``'s peer id must be one
-    whose earlier changes ``doc`` already holds. Whatever the replica held
-    before, the updates it held back included, is replaced; a holder of the
-    old replica gets :class:`DraftGone` at its next write."""
-    peer, now = doc.peer_id, time.time()
+def rebuild(db: DB, doc_id: str,
+            make: Callable[[sqlite3.Connection, SharedDoc | None], SharedDoc]) -> DraftReplica:
+    """Replace this machine's replica of ``doc_id`` with ``make(c, current)``
+    (current: the stored replica, its waiting updates in, or None), writing
+    under the new document's peer id from now on: the relay's draft with the
+    local text re-typed onto it (:mod:`brindle.pro.live_docs`). The new
+    document's peer id must be one whose earlier changes it already holds.
+
+    The read, ``make`` and the write are one write transaction, so nothing
+    another holder commits can fall between what ``make`` read and what
+    replaces it; ``make`` writes what goes with it through ``c``. The result
+    is a new replica (a new ``created_at``): an old holder's positional edit
+    gets :class:`DraftGone`, and its ``apply_remote`` is re-typed onto it."""
     with db.tx() as c:
-        c.execute("DELETE FROM plan_draft_pending WHERE doc_id=?", (doc_id,))
-        row = c.execute("SELECT seq FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
-        seq = 0 if row is None else row["seq"] + 1
-        c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,))
+        got = _read(c, doc_id)
+        doc = make(c, None if got is None else got[1])
+        now = time.time()
+        if got is not None:
+            # Strictly newer than the replica it replaces, however coarse the clock.
+            now = max(now, got[0]["created_at"] + 1e-6)
+        seq = 0 if got is None else got[0]["seq"] + 1
+        c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,))      # its held-back updates go with it
         c.execute("INSERT INTO plan_drafts (doc_id, peer_id, state, seq, created_at, updated_at)"
-                  " VALUES (?, ?, ?, ?, ?, ?)", (doc_id, peer, doc.export_snapshot(), seq, now, now))
-    return DraftReplica(db, doc_id, peer, doc, seq)
+                  " VALUES (?, ?, ?, ?, ?, ?)", (doc_id, doc.peer_id, doc.export_snapshot(), seq, now, now))
+    return DraftReplica(db, doc_id, doc.peer_id, doc, seq, now)
+
+
+def adopt(db: DB, doc_id: str, doc: SharedDoc) -> DraftReplica:
+    """:func:`rebuild` with ``doc`` as it is."""
+    return rebuild(db, doc_id, lambda c, current: doc)
+
+
+_TOKEN = re.compile(r"\w+|\s+|[^\w\s]")
+
+
+def hunks(base: str, ours: str) -> list[tuple[int, int, int, int]]:
+    """What changed from ``base`` to ``ours``, word by word: (i1, i2, j1, j2)
+    for each ``base[i1:i2]`` that became ``ours[j1:j2]``."""
+    a, b = _TOKEN.findall(base), _TOKEN.findall(ours)
+    at_a = [0, *itertools.accumulate(len(t) for t in a)]
+    at_b = [0, *itertools.accumulate(len(t) for t in b)]
+    return [(at_a[i1], at_a[i2], at_b[j1], at_b[j2])
+            for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+            if tag != "equal"]
+
+
+def mapping(base: str, other: str) -> tuple[Callable[[int], int], list[tuple[int, int]]]:
+    """Where an offset into ``base`` is in ``other``, another descendant of it
+    (an offset inside a stretch ``other`` changed lands just after that
+    change), and the stretches of ``base`` that ``other`` changed."""
+    ops = difflib.SequenceMatcher(None, base, other, autojunk=False).get_opcodes()
+
+    def at(pos: int) -> int:
+        for tag, i1, i2, j1, _ in ops:
+            if tag == "equal" and i1 <= pos <= i2:
+                return j1 + pos - i1
+        return next((j2 for _, i1, i2, _, j2 in ops if i1 <= pos <= i2), len(other))
+
+    return at, [(i1, i2) for tag, i1, i2, _, _ in ops if tag != "equal"]
+
+
+def retype(doc: SharedDoc, base: dict[str, str], ours: dict[str, str]) -> None:
+    """Make on ``doc`` what changed from ``base`` to ``ours`` (both texts by
+    section) somewhere else. Where ``doc``'s text also changed a stretch that
+    ours changed, ours goes in beside it and deletes nothing of it."""
+    for section in sorted(set(base) | set(ours)):
+        was, mine = base.get(section, ""), ours.get(section, "")
+        if was == mine:
+            continue
+        at, changed = mapping(was, doc.text(section))
+        edits = []
+        for i1, i2, j1, j2 in hunks(was, mine):
+            start = at(i1)
+            touched = any(b1 < i2 and i1 < b2 for b1, b2 in changed)
+            edits.append((start, 0 if touched else max(at(i2) - start, 0), mine[j1:j2]))
+        for start, length, text in reversed(edits):
+            doc.replace(section, start, length, text)
 
 
 def drop(db: DB, doc_id: str) -> bool:
@@ -213,4 +303,5 @@ def drop(db: DB, doc_id: str) -> bool:
         # Its link to the relay goes with it: its unsent edits (the outbox) and the numbers it held.
         c.execute("DELETE FROM live_docs WHERE doc_id=?", (doc_id,))
         c.execute("DELETE FROM live_doc_peers WHERE doc_id=?", (doc_id,))
+        c.execute("DELETE FROM live_doc_offline WHERE doc_id=?", (doc_id,))
         return c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,)).rowcount > 0

@@ -7,6 +7,7 @@ import asyncio
 import base64
 import json
 import secrets
+import sqlite3
 
 import loro
 import pytest
@@ -16,12 +17,13 @@ from wsproto.events import AcceptConnection, CloseConnection, Request, TextMessa
 from brindle import plans, visual_offers
 from brindle.crdt import SharedDoc
 from brindle.db import DB
-from brindle.plan_drafts import DraftReplica
+from brindle.plan_drafts import DraftReplica, retype
 from brindle.pro import live_docs
 from test_plans import session  # noqa: F401 - fixture
 
 SEED_PEER = 1               # the relay's own replica: the revision's text
 LOCK_HOLDS = 24 * 3600      # analysis_drafts.AUTHOR_OFFLINE_TTL
+NO_WAIT = 0                 # a connection that meets a held write lock fails at once
 REVISION = {"lede": "# Design\n\nHello", "body": "World"}
 
 
@@ -90,6 +92,7 @@ class FakeRelay:
         self.ledger: dict[int, str] = {}
         self.retired: set[int] = set()
         self.lock: dict | None = None
+        self.frozen: int | None = None      # a version out for sign-off (freeze and reopen are REST calls)
         self.pipes: list[Pipe] = []
         self.closes: list[tuple[str, int]] = []
         self.refusals: list[str] = []
@@ -145,7 +148,7 @@ class FakeRelay:
         self.pipes.append(pipe)
         pipe.deliver({"type": "state", "conn": str(id(pipe)), "replicas": sorted(writers),
                       "snapshot": base64.b64encode(self.doc.export(loro.ExportMode.Snapshot())).decode(),
-                      "seq": 0, "version": "", "rev": 1, "frozen": None, "author": self.author,
+                      "seq": 0, "version": "", "rev": 1, "frozen": self.frozen, "author": self.author,
                       "author_offline": self._lock_view(), "present": []})
 
     def _refuse(self, pipe: Pipe, said: dict, error: str, **extra) -> None:
@@ -154,6 +157,8 @@ class FakeRelay:
 
     def _update(self, pipe: Pipe, said: dict) -> None:
         blob = base64.b64decode(said["batch"])
+        if self.frozen:
+            return self._refuse(pipe, said, "frozen", rev=self.frozen)
         lock = self._lock_view()
         if lock and not pipe.author:
             return self._refuse(pipe, said, "author_offline", **lock)
@@ -210,7 +215,7 @@ class Machine:
     def __init__(self, relay: FakeRelay, path, sub: str) -> None:
         self.path = None if path is None else str(path)
         self.manager = live_docs.Manager(relay.transport(sub), db_factory=self.db, available=lambda: True,
-                                         drive=False)
+                                         drive=False, clock=relay.clock)
 
     def db(self) -> DB:
         return DB(self.path)
@@ -245,7 +250,7 @@ async def settle(*links: live_docs.DocLink) -> None:
 
 def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay_issued(tmp_path):
     async def run():
-        relay = FakeRelay(Clock())
+        relay = FakeRelay(Clock(), author="bob")
         a, b = Machine(relay, tmp_path / "a.db", "alice"), Machine(relay, tmp_path / "b.db", "bob")
         await b.link.connect()
         await b.type_in("lede", 0, ">")
@@ -273,7 +278,91 @@ def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay
 
         assert relay.refusals == []
         assert a.sections() == b.sections() == relay.sections() == {"lede": "#># Design\n\nHello", "body": "World here!"}
-        assert any("update" in f for f in window.frames)     # B's change reached A's window
+
+        relay.drop("alice")                                   # A is away a while; its window stays open
+        await b.type_in("body", 0, "Remote ")
+        await settle(b.link)
+        await a.link.connect()                                # the relay replays nothing to a returning machine
+        await settle(a.link, b.link)
+        for frame in window.frames:
+            if "update" in frame:
+                app.import_updates(base64.b64decode(frame["update"]))
+        assert app.sections() == relay.sections() == {"lede": "#># Design\n\nHello", "body": "Remote World here!"}
+
+    asyncio.run(run())
+
+
+def test_a_window_edit_racing_the_first_join_is_carried_onto_the_relays_draft(tmp_path, monkeypatch):
+    async def run():
+        relay = FakeRelay(Clock(), author="bob")
+        a = Machine(relay, tmp_path / "a.db", "alice")
+        seeded = a.db()
+        DraftReplica.open(seeded, "doc1", SharedDoc.new(REVISION).export_snapshot())
+        live_docs.note_seed(seeded, "doc1", REVISION)
+        # A window opened before this machine had relay numbers writes under its own, through
+        # the local socket's connection to the database.
+        window = DraftReplica.open(a.db(), "doc1")
+        window.db.conn.execute(f"PRAGMA busy_timeout={NO_WAIT}")
+        app = SharedDoc.load(window.export_bootstrap()[0])
+        before = app.version()
+        app.insert("body", 5, " saved locally")
+        edit = app.export_updates(before)
+        blocked = []
+        loop = asyncio.get_running_loop()
+
+        async def frame_arrives():
+            try:
+                window.apply_remote(edit)
+            except sqlite3.OperationalError:
+                blocked.append(True)                          # the rebuild holds the write lock
+
+        def racing(doc, base, ours):
+            # The window's frame arrives (on the socket's own thread) while the first join rebuilds the replica.
+            asyncio.run_coroutine_threadsafe(frame_arrives(), loop).result()
+            retype(doc, base, ours)
+
+        monkeypatch.setattr(live_docs, "retype", racing)
+        await a.link.connect()
+        assert blocked                                        # it couldn't land between the read and the write
+        window.apply_remote(edit)                             # so it lands after, on the new replica
+        await a.manager.changed("doc1")
+        await settle(a.link)
+
+        assert relay.refusals == []
+        assert a.sections()["body"] == relay.sections()["body"] == "World saved locally"
+
+    asyncio.run(run())
+
+
+def test_a_held_outbox_goes_once_the_author_lock_lapses_and_once_a_frozen_version_is_reopened(tmp_path):
+    async def run():
+        clock = Clock()
+        relay = FakeRelay(clock, author="alice")
+        a, b = Machine(relay, tmp_path / "a.db", "alice"), Machine(relay, tmp_path / "b.db", "bob")
+        window = Window()
+        await b.manager.open_window("doc1", window)
+        await a.link.connect()
+        await b.link.connect()
+        await a.type_in("body", 5, " now")
+        await settle(a.link, b.link)
+        relay.drop("alice")                                   # mid-edit: the draft is locked to its author
+        await b.type_in("lede", 0, "> ")
+        await settle(b.link)
+        assert relay.refusals == ["author_offline"] and window.frames[-1]["state"]["lock"] == "author_offline"
+
+        clock.now += LOCK_HOLDS + 1                           # it lapses; the relay says so to nobody
+        await b.link.reconcile()
+        await settle(b.link)
+        assert relay.sections()["lede"] == "> # Design\n\nHello" and window.frames[-1]["state"]["lock"] is None
+
+        relay.frozen = 2                                      # the author froze a version over REST
+        await b.type_in("body", 0, "Draft: ")
+        await settle(b.link)
+        assert window.frames[-1]["state"]["lock"] == "sign_off"
+        relay.frozen = None                                   # and reopened it, over REST too
+        await b.link.reconcile()
+        await settle(b.link)
+        assert relay.sections()["body"] == "Draft: World now" and window.frames[-1]["state"]["lock"] is None
 
     asyncio.run(run())
 
@@ -317,33 +406,44 @@ def shared_plan(db, session):
     return pid
 
 
-def test_offline_edits_refused_as_stale_after_the_lock_lapsed_become_suggestions(db, shared_plan, tmp_path):
+def test_offline_edits_refused_as_stale_after_the_lock_lapsed_are_kept_until_they_stand_as_suggestions(
+        db, shared_plan, tmp_path):
     async def run():
         clock = Clock()
         relay = FakeRelay(clock, author="alice")
         a, b = Machine(relay, None, "alice"), Machine(relay, tmp_path / "b.db", "bob")
-        b_window = Window()
-        await b.manager.open_window("doc1", b_window)
         await a.link.connect()
         await b.link.connect()
-        await a.type_in("body", 5, " now")
+        await a.type_in("body", 5, " now")                   # in the live draft, not in the plan's revision
         await settle(a.link, b.link)
 
-        relay.drop("alice")                                   # mid-edit, no clean close
-        await settle(b.link)
-        assert b_window.frames[-1]["state"]["lock"] == "author_offline"
-        a.replica().insert("body", 0, "Late ")               # typed offline
+        relay.drop("alice")                                   # mid-edit, no clean close: the author-offline lock
+        a.replica().replace("body", 6, 3, "later")            # typed offline: "now" becomes "later"
         clock.now += LOCK_HOLDS + 1                           # the lock lapsed: A's numbers are retired
+        state = db.conn.execute("SELECT state FROM plans WHERE id=?", (shared_plan,)).fetchone()["state"]
+        with db.tx() as c:                                    # the plan can't take a suggestion just now
+            c.execute("UPDATE plans SET state='approved' WHERE id=?", (shared_plan,))
         await a.link.connect()
         await settle(a.link, b.link)
         assert relay.refusals == ["stale_offline"]
+        assert live_docs.docs_with_offline(db) == ["doc1"]    # kept, not dropped with the replica
 
         await a.link.connect()                                # starts again under new numbers
         await settle(a.link, b.link)
         assert a.sections() == relay.sections() == {"lede": REVISION["lede"], "body": "World now"}
-        thread = db.conn.execute("SELECT anchor, after, status FROM plan_threads WHERE plan_id=? AND kind='suggestion'",
-                                 (shared_plan,)).fetchone()
-        assert (json.loads(thread["anchor"])["section"], thread["after"], thread["status"]) == ("body", "Late ", "open")
+
+        with db.tx() as c:
+            c.execute("UPDATE plans SET state=? WHERE id=?", (state, shared_plan))
+        await a.manager.sweep()
+        with db.tx() as c:                                    # as if a restart came before it was forgotten
+            c.execute("INSERT INTO live_doc_offline (doc_id, section, base, start, before, after)"
+                      " VALUES ('doc1', 'body', 'World now', 6, 'now', 'later')")
+        await a.manager.sweep()
+        threads = db.conn.execute("SELECT anchor, after, status FROM plan_threads WHERE plan_id=? AND kind='suggestion'",
+                                  (shared_plan,)).fetchall()
+        # The revision has no "now": "later" goes where it would stand in the revision's text, once.
+        assert [(json.loads(t["anchor"])["start"], t["after"], t["status"]) for t in threads] == [(5, "later", "open")]
+        assert live_docs.docs_with_offline(db) == []
 
     asyncio.run(run())
 

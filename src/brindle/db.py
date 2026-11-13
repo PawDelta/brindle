@@ -1188,6 +1188,18 @@ CREATE TABLE IF NOT EXISTS live_doc_peers (
     role TEXT NOT NULL,            -- 'replica' | 'window'
     PRIMARY KEY (doc_id, peer)
 );
+-- Edits typed offline that the relay refused as stale (the author-offline
+-- lock lapsed): each kept here, with the text it was made against, until it
+-- stands on the plan as a suggestion or comment (brindle.pro.live_docs).
+CREATE TABLE IF NOT EXISTS live_doc_offline (
+    n INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id TEXT NOT NULL,
+    section TEXT NOT NULL,
+    base TEXT NOT NULL,            -- the section's live text the edit was made against
+    start INTEGER NOT NULL,        -- where in base
+    before TEXT NOT NULL,          -- what it replaced there ('' for an insertion)
+    after TEXT NOT NULL            -- what it wrote ('' for a deletion)
+);
 -- Documents whose owner chose Stop sharing while the Library was out of reach:
 -- their teams and org lose access at the next pass that reaches it.
 CREATE TABLE IF NOT EXISTS plan_unshares (
