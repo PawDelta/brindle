@@ -49,13 +49,14 @@ def assign(db, repo, task: str, files: list[str]) -> tasks.Task:
     return t
 
 
-def edit_line(db, t: tasks.Task, line: int) -> None:
-    """Commit a change to ``big.py``'s ``line`` on task ``t``'s branch."""
+def edit_line(db, t: tasks.Task, line: int, commit: bool = True) -> None:
+    """Change ``big.py``'s ``line`` on task ``t``'s branch (``commit``: and commit it)."""
     path = Path(db.get_workspace(db.get_agent(t.agent_id).workspace_id).path)
     text = (path / "big.py").read_text().splitlines(keepends=True)
     text[line - 1] = f"changed {line}\n"
     (path / "big.py").write_text("".join(text))
-    sh(f"git commit -qam edit-{line}", path)
+    if commit:
+        sh(f"git commit -qam edit-{line}", path)
 
 
 @pytest.mark.parametrize("granularity, second, starts", [
@@ -79,10 +80,40 @@ def test_parts_of_one_file_start_in_parallel_only_on_disjoint_regions(db, repo, 
         assert other.state == "pending" and tasks._loads(other.depends_on) == [first.agent_id]
 
 
+def test_uncommitted_changes_hold_a_region_like_committed_ones(db, repo, supervisor):
+    """A worker's edits it hasn't committed yet are as much its work as its
+    commits: a committed hunk elsewhere in the file must not hide them."""
+    supervisor("hunk")
+    first = assign(db, repo, "part 1", ["big.py:1-10"])
+    edit_line(db, first, 5)
+    edit_line(db, first, 65, commit=False)
+    second = assign(db, repo, "part 2", ["big.py:60-70"])
+    assert second.state == "pending" and tasks._loads(second.depends_on) == [first.agent_id]
+
+
+def test_regions_are_compared_after_the_base_moves(db, repo, supervisor):
+    """Another part merging shifts every line under the running worker's
+    regions: a new task's line numbers, read after that merge, still meet
+    the worker's change where the code is the same, and miss it where not."""
+    supervisor("hunk")
+    first = assign(db, repo, "part 1", ["big.py:1-10"])
+    edit_line(db, first, 65)
+    # Another part lands 100 lines at the top of the file on the supervisor's branch.
+    text = (repo / "big.py").read_text()
+    (repo / "big.py").write_text("".join(f"new {n}\n" for n in range(100)) + text)
+    sh("git commit -qam landed", repo)
+    second = assign(db, repo, "part 2", ["big.py:160-170"])   # old lines 60-70, which first changed
+    assert second.state == "pending" and tasks._loads(second.depends_on) == [first.agent_id]
+    third = assign(db, repo, "part 3", ["big.py:120-130"])    # old lines 20-30: nobody's
+    assert third.state == "started"
+
+
 def test_changed_hunks_that_drift_into_a_region_queue_it_and_warn_at_merge(db, repo, supervisor):
     """Declared regions are a promise, the branch's hunks are the fact: a
     worker that strays into another part's lines queues new work on them,
-    and its merge warns the part it drifted into."""
+    and its automatic merge warns the part it drifted into."""
+    from brindle import gates, pipeline
+
     supervisor("hunk")
     first = assign(db, repo, "part 1", ["big.py:1-10"])
     second = assign(db, repo, "part 2", ["big.py:60-70"])
@@ -94,6 +125,11 @@ def test_changed_hunks_that_drift_into_a_region_queue_it_and_warn_at_merge(db, r
     assert third.state == "started"      # nothing changed there
     fourth = assign(db, repo, "part 4", ["big.py:84-86"])   # only first's actual hunk meets it
     assert fourth.state == "pending" and tasks._loads(fourth.depends_on) == [first.agent_id]
+    # first reports, is approved, and the pipeline merges it on its own.
     first_ws = db.get_workspace(db.get_agent(first.agent_id).workspace_id)
-    warning = tasks.merge_hunk_warning(db, first_ws)
-    assert warning and second.agent_id in warning and third.agent_id not in warning
+    db.update_agent(first.agent_id, result="done", status="done", pipeline="ready")
+    db.add_review(first_ws.id, gates.head(first_ws), "reviewer", True, "Approved")
+    out = pipeline._finish_locked(db, db.get_agent(first.agent_id), first_ws, None)
+    assert out.startswith("Merged") and "Warning" in out, out
+    warning = out.split("Warning", 1)[1]
+    assert second.agent_id in warning and third.agent_id not in warning
