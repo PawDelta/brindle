@@ -118,7 +118,10 @@ if (scene === "session" || scene === "new") {
   daemon.data.sessions[0].goal = longGoal;
   daemon.data.sessions[1].name = "Investigate terminal rendering and preserve shell state across project switches and application restarts";
   daemon.data.sessions[3].name = "Prepare comprehensive release notes covering desktop improvements, command line changes, and migration guidance";
-  if (daemon.data.goal) daemon.data.goal.goal = longGoal;
+  if (daemon.data.goal) {
+    daemon.data.goal.goal = longGoal;
+    daemon.data.goal.note = "The latest audit found that the implementation covers the primary desktop workflow, but several details still need review: project navigation, session recovery, provider status, keyboard shortcuts, and the final checks for each milestone. Keep the full audit available while leaving enough room to see completed work and the active session tree.";
+  }
 }
 if (scene === "new-conflict") daemon.data.sessions[0].name = "Desktop polish";
 if (scene.startsWith("sidebar-foot-")) {
