@@ -1,0 +1,10 @@
+{
+  "name": "backlog",
+  "url": "https://github.com/pallets/click.git",
+  "commit": "e38188e9e205005d5af5f9e59df51904c984586a",
+  "setup": [
+    "uv venv -q --python 3.12 .venv",
+    "uv pip install -q --python .venv/bin/python -e . 'pytest~=9.0'"
+  ],
+  "test_cmd": ".venv/bin/python -m pytest -q -p no:cacheprovider tests"
+}
