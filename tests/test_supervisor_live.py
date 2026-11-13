@@ -52,14 +52,23 @@ def test_a_sentence_added_after_the_supervisor_read_is_still_there_after_its_rev
     assert lib.draft._doc.oplog_vv.get_last(row["supervisor_peer"]) is not None
 
 
-def test_a_supervisor_change_to_words_someone_also_changed_arrives_as_its_suggestion(db, session, sent_back):
+@pytest.mark.parametrize("sections, after", [
+    (HOSTS, HOSTS[0]["markdown"]),
+    ([{"id": "later", "title": "Later", "markdown": "Pick a region."}], ""),
+], ids=["it rewrites the same words", "it drops the section"])
+def test_a_supervisor_change_to_words_someone_also_changed_arrives_as_its_suggestion(
+        db, session, sent_back, sections, after):
     boss, _ = session
     pid, lib, net, base = sent_back
     lib.draft.replace("summary", 0, len("Workers"), "Agents")      # a teammate rewrites the same word
     sd.sync(db, pid, **net)
 
-    p = plans.propose(db, boss, "# Cloud workers", sections=HOSTS, plan_id=pid, base=base)
+    p = plans.propose(db, boss, "# Cloud workers", sections=sections, plan_id=pid, base=base)
     theirs = SUMMARY.replace("Workers", "Agents")
     assert (_text(db, pid), p["draft_write"]["applied"]) == (theirs, 0)
     [s] = [t for t in plans.to_dto(db, plans.get(db, pid))["threads"] if t["kind"] == "suggestion"]
-    assert (s["author"], s["before"], s["after"]) == ("supervisor", theirs, HOSTS[0]["markdown"])
+    assert (s["author"], s["before"], s["after"]) == ("supervisor", theirs, after)
+    # Teammates wrote those words: the suggestion reaches the Library, once.
+    sd.sync(db, pid, **net)
+    sd.sync(db, pid, **net)
+    assert [(t["kind"], t["anchor"]["quote"], t["after"]) for t in lib.threads] == [("suggestion", theirs, after)]

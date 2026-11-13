@@ -67,6 +67,9 @@ MAX_THREADS = 500            # threads and replies on one plan
 MAX_SNIPPET = 200            # quoted text in the supervisor's message
 CONTEXT = 32                 # text kept either side of an insertion point, to find it again
 MAX_BASES = 5                # draft texts handed to the supervisor kept per plan (hand_over)
+# The note on the supervisor's suggestion in a live draft: the Library takes
+# no supervisor mark on a suggestion, so its text says whose it is.
+SUPERVISED = "From the supervisor's revision: these words changed here since it read them."
 # Section ids the comment anchors already use for something else.
 RESERVED = {"ask", "lede", "split"}
 # What an SVG diagram may hold: drawing elements and presentation attributes
@@ -743,7 +746,14 @@ def supervise(c, p: dict, replica, base: Any, was: dict, lede: str, sections: li
     old = {s["id"]: s for s in was["sections"]}
     mine = {LEDE: lede, **{s["id"]: s["markdown"] for s in sections}}
     missed = [f"added {s['title']}" for s in sections if s["id"] not in old]
-    missed += [f"removed {s['title']}" for sid, s in old.items() if sid not in mine]
+    # A draft keeps its sections: a removal is its text going, by the same
+    # rule as any change, so text someone wrote there since the base stays
+    # and its removal is the supervisor's suggestion.
+    for sid, s in old.items():
+        if sid not in mine:
+            missed.append(f"removed {s['title']} (a live draft keeps the section: its text is cleared where "
+                          "nobody changed it since, else suggested for removal)")
+            mine[sid] = ""
     missed += [old[s["id"]]["title"] for s in sections if s["id"] in old
                and any(old[s["id"]].get(k) != s.get(k) for k in ("title", "kind", "caption"))]
     missed += changed
@@ -773,7 +783,11 @@ def supervise(c, p: dict, replica, base: Any, was: dict, lede: str, sections: li
         anchor = {"kind": "text", "section": sid, "start": s.start, "end": s.end, "quote": s.before}
         if not s.before:
             anchor.update(_context(replica.text(sid), s.start))
-        file_thread(c, p["id"], p["rev"], "suggestion", _with_cursor(replica, anchor), SUPERVISOR, "", after=s.after)
+        tid = file_thread(c, p["id"], p["rev"], "suggestion", _with_cursor(replica, anchor), SUPERVISOR,
+                          SUPERVISED, after=s.after)
+        # Unlike its other threads, this goes up to the Library (shared_docs._unsent):
+        # teammates wrote the words it would change.
+        c.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (tid,))
     missed = list(dict.fromkeys(missed))
     if missed:
         note = ("The supervisor's revision also changed these, which a live draft can't hold, so they weren't "
