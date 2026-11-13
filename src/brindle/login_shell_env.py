@@ -14,9 +14,11 @@ only the names in ALLOWED, and of those only the ones whose values pass
 kept: never ``PATH``, ``NODE_OPTIONS``, ``DYLD_*``, ``LD_*`` or a
 ``*_PRELOAD``. A shell that hangs, fails or exits non-zero gives nothing.
 
-What was read stays in this process's memory. It is never logged, stored,
-put in a message or shown: this module has no logger, and nothing it raises
-or returns outside ``for_launch`` carries a value.
+What was read stays in this process's memory, and leaves it only for the
+environment of a provider CLI: one the daemon launches, or one whose pane
+asks for its own (below). It is never logged, stored, put in a message or
+shown: this module has no logger, and nothing it raises or returns outside
+``for_launch`` and ``fetch`` carries a value.
 
 A launch by the daemon (agents._window_environment: a session's own CLI, and
 every agent of a session it brings back) adds those settings to the provider
@@ -27,7 +29,16 @@ launched by a helper under its supervisor's CLI, whose environment an agent
 can set (``HTTPS_PROXY=... brindle ...`` from its shell): proxy and CA
 settings taken from there, or from a login shell started there, would let an
 agent route another agent's traffic, and its credentials, through a proxy of
-its choosing. So those launches add nothing.
+its choosing. So such a launch adds nothing itself, and its helper never
+holds a value. Instead the pane asks the daemon as it starts: its command
+runs through a shim (``shim``, ``start_pane``) that asks over the daemon's
+Unix socket (``fetch``), sets what it is given and becomes the command. The
+daemon knows the pane by the calling process (brindle.daemon.launch_env) and
+answers only that agent's own pane, with only what its own launch of that
+agent would have added. The shim takes only allowed names with valid values
+from the answer, and never one its environment has already. With no daemon,
+a refusal, or no answer within FETCH_SECONDS, the command starts as it did
+before: without them.
 
 ``login_shell_env: "off"`` in ~/.brindle/config.json turns all of it off.
 """
@@ -36,6 +47,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import threading
 from typing import Callable, Mapping
 from urllib.parse import urlsplit
@@ -43,6 +55,9 @@ from urllib.parse import urlsplit
 SETTING = "login_shell_env"
 LIMIT = 5.0             # seconds the login shell gets to print its environment
 MAX_VALUE = 4096        # bytes: longer than any proxy URL or path
+FETCH_PATH = "/v1/launch-env"   # where a pane asks the daemon (brindle.daemon.launch_env)
+FETCH_SECONDS = 10.0    # how long a pane waits for the daemon's answer before it starts without
+SHIM = "_launch-env"    # ``brindle _launch-env <agent> -- <command>``: see brindle.entry
 
 PROXIES = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
 HOST_LISTS = ("NO_PROXY", "no_proxy")
@@ -181,18 +196,23 @@ def read(run: Callable | None = None, environ: Mapping[str, str] | None = None) 
 # What the daemon's one read found: in memory only, for this process's launches.
 _values: dict[str, str] = {}
 _loading: threading.Thread | None = None
+# Whether this process is the one that reads (the daemon): its own launches add
+# the settings, so their panes have nothing to ask for (asks_daemon).
+_reader = False
 
 
 def load(run: Callable | None = None) -> None:
     """The daemon's start: read the login shell's settings once, unless turned off."""
-    global _values
+    global _values, _reader
+    _reader = True
     _values = read(run) if enabled() else {}
 
 
 def load_in_background() -> None:
     """``load`` off the daemon's way, so a slow profile never holds up its
     start. A launch waits for it (for_launch), at most the shell's limit."""
-    global _loading
+    global _loading, _reader
+    _reader = True
     _loading = threading.Thread(target=load, name="brindle-login-shell-env", daemon=True)
     _loading.start()
 
@@ -220,3 +240,57 @@ def kept(provider: str) -> frozenset[str]:
     if provider != "claude" or not enabled():
         return frozenset()
     return frozenset({"CLAUDE_CODE_CLIENT_KEY", PASSPHRASE})
+
+
+# -- a pane no daemon launched: it asks the daemon itself ----------------------------------------
+
+
+def asks_daemon() -> bool:
+    """Whether the pane of a launch by this process should ask the daemon for
+    the settings (``shim``): not in the daemon, whose own launch adds them,
+    not when turned off, and not with no daemon's socket to ask at."""
+    if _reader or not enabled():
+        return False
+    from brindle.daemon import lifecycle
+
+    return lifecycle.socket_path().exists()
+
+
+def shim(agent_id: str, argv: list[str]) -> list[str]:
+    """``argv`` as ``agent_id``'s pane starts it when it asks the daemon first:
+    this same brindle (the one launching, whatever ``brindle`` is on the
+    pane's PATH), which becomes ``argv``. It names the agent and the command
+    only: no value is ever on a command line."""
+    return [sys.executable, "-P", "-m", "brindle", SHIM, agent_id, "--", *argv]
+
+
+def fetch(agent_id: str) -> dict[str, str]:
+    """What the daemon would have added to ``agent_id``'s pane, asked by that
+    pane's own process over the daemon's Unix socket. {} when there is no
+    daemon, it refuses (the caller isn't that agent's pane), or it doesn't
+    answer within FETCH_SECONDS. Of the answer, only allowed names with valid
+    values are kept, as of the login shell's own output."""
+    from brindle.daemon import holds
+
+    got = holds.call(FETCH_PATH, {"agent_id": agent_id}, FETCH_SECONDS)
+    found = got.get("env") if got else None
+    if not isinstance(found, dict):
+        return {}
+    return {n: v for n, v in found.items() if isinstance(n, str) and isinstance(v, str) and valid(n, v)}
+
+
+def start_pane(agent_id: str, argv: list[str]) -> None:
+    """The shim, as the pane's own process: ask the daemon, set what it gives
+    where this environment has nothing, and become ``argv``. Whatever goes
+    wrong with the asking, ``argv`` starts all the same; what went wrong is
+    not reported, and nothing asked for is printed or kept anywhere else."""
+    try:
+        found = fetch(agent_id)
+    except Exception:  # noqa: BLE001 - no answer is no reason not to start
+        found = {}
+    for name, value in found.items():
+        if not os.environ.get(name):
+            os.environ[name] = value
+    from brindle import spawn
+
+    spawn.become(argv)
