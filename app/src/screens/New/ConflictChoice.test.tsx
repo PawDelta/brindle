@@ -34,7 +34,7 @@ async function openConflict() {
   return screen.findByRole("group", { name: "Session already running" });
 }
 
-it("shows a single running session's context without an identifier or selector, and opens it by default", async () => {
+it("shows a single running session's context without an identifier or selector, and opens the current candidate after replacement", async () => {
   const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], goal: {
     root_id: session.id, enabled: true, state: "running", progress: 99,
     milestones: [{ id: 1, position: 1, title: "Repair", status: "passed" }, { id: 2, position: 2, title: "Verify", status: "running" }],
@@ -50,12 +50,18 @@ it("shows a single running session's context without an identifier or selector, 
     const progress = await within(prompt).findByRole("progressbar");
     expect(progress.getAttribute("aria-valuenow")).toBe("1");
     expect(progress.getAttribute("aria-valuemax")).toBe("2");
+    const replacement = { ...session, id: "replacement-session-id", name: "Cache fix", goal: "Repair stale cache entries" };
+    daemon.data.sessions = [replacement];
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(prompt.textContent).toContain(replacement.name));
+    expect(screen.getByRole("group", { name: "Session already running" })).toBe(prompt);
+    expect(within(prompt).queryByRole("radio")).toBeNull();
     const primary = prompt.querySelector<HTMLButtonElement>(".btn-primary")!;
     expect(document.activeElement).toBe(primary);
     expect(primary.getAttribute("aria-describedby")).toBeTruthy();
     fireEvent.click(primary);
     const opened = await screen.findByLabelText("Opened session");
-    expect(opened.getAttribute("data-root")).toBe(session.id);
+    expect(opened.getAttribute("data-root")).toBe(replacement.id);
     expect(opened.getAttribute("data-repo")).toBe(REPO);
     expect(daemon.data.sessions).toHaveLength(1);
   } finally {
@@ -83,6 +89,11 @@ it("cancels by keyboard or button, and applies a choice to the selected session 
     expect(radios[1]).toHaveProperty("checked", true);
     expect(prompt.textContent).toContain(other.goal);
     expect(prompt.textContent).not.toContain(other.id);
+    const updatedGoal = "Verify cache repair";
+    daemon.data.sessions = [session, { ...other, goal: updatedGoal }];
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(prompt.textContent).toContain(updatedGoal));
+    expect(within(prompt).getAllByRole("radio")[1]).toHaveProperty("checked", true);
     const choices = within(prompt).getAllByRole("button").filter((b) => b.hasAttribute("aria-describedby"));
     expect(choices).toHaveLength(3);
     choices.forEach((choice) => expect(document.getElementById(choice.getAttribute("aria-describedby")!)?.textContent).toBeTruthy());
