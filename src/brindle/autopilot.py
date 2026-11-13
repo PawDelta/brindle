@@ -902,9 +902,6 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if effective_ceiling:
         order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:
-        if not cfg.routing_allows(name, task):
-            skipped.append(f"Fable is reserved for design tasks, skipped {name}")
-            continue
         why = _unavailable(name, cfg, repo_root, gate, weight)
         if why:
             skipped.append(why)
@@ -1152,7 +1149,6 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 candidates = [cfg.default_agent]
                 if ceiling and weight_order[profile_weight(cfg.default_agent, cfg, repo_root)] > weight_order[ceiling]:
                     candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
-                candidates = [n for n in candidates if cfg.routing_allows(n, task)]
                 fallback = next((n for n in candidates if not _excluded(n, cfg, repo_root)), None)
                 if not fallback and candidates:
                     raise AutopilotError(f"no agent profile left for a {weight} task: every candidate runs on a "
@@ -1168,13 +1164,6 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                                    default=cfg.default_agent) or ""
             learned = bool(name)
             name = name or cfg.default_agent
-            if not cfg.routing_allows(name, task):
-                name, learned, note = _route_by_weight(
-                    db, cfg, repo_root, weight or "advanced", task, files, routed, ceiling=ceiling)
-                if not name:
-                    raise AutopilotError("no available agent for a non-design task")
-                if why is not None:
-                    why.append(note)
             if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
                 candidates = cfg.routing.get(ceiling, [cfg.default_agent])
                 orig_name = name
@@ -1215,7 +1204,6 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         tier = weight or profile_weight(name, cfg, repo_root)
         alternatives = list(dict.fromkeys([*cfg.routing.get(tier, []), *selected.fallback]))
         replacement = next((n for n in alternatives if n != name and
-                            cfg.routing_allows(n, task) and
                             (not ceiling or weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]) and
                             not _unavailable(n, cfg, repo_root, weight=tier)), None)
         if replacement is None:

@@ -62,16 +62,6 @@ tiers you leave out keep theirs:
 `brindle doctor` shows the list in effect for each tier and the file it came
 from.
 
-To reserve Fable for design work, set `"fable_for_design_only": true` in one
-of those config files. It defaults to `false`, preserving the routing above.
-Mark a design task by starting its brief with `[design]`, for example
-`assign(weight="advanced", task="[design] Design the settings screen")`.
-The marker is case-insensitive and may follow leading whitespace; mentioning
-design elsewhere in a brief does not mark it. An unmarked advanced task skips
-`developer-fable` and tries `developer-heavy` next in the default list.
-Hosted learning also excludes `developer-fable` for unmarked tasks, including
-tasks without a weight. Explicit agent and milestone profile choices still win.
-
 ## Profiles (custom agents)
 
 A **profile** is a markdown file that defines an agent: a model (and effort),

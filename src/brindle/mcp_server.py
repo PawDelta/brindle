@@ -914,9 +914,6 @@ async def handoff(
     architecture, broad refactoring; advanced = complex, long-running
     system-design and implementation tasks.
 
-    With fable_for_design_only enabled, start the task brief with [design] to
-    allow automatic routing to developer-fable (for example with weight advanced).
-
     Replies at once with the task id (or the worker id, if it started that
     fast): the worker starts in the background, once the machine has room.
     Then call wait_for_worker with that id to wait for its result (up to its
@@ -1072,8 +1069,6 @@ async def assign(
     system-design and implementation tasks.
 
     When it finishes, its result arrives in your conversation as a message.
-    With fable_for_design_only enabled, start the task brief with [design] to
-    allow automatic routing to developer-fable (for example with weight advanced).
     Isolation works as for handoff. Use this to run several workers in parallel.
     Pass a short descriptive branch (e.g. "feat/ls-json") to name the worker's branch.
     done_when is a finish line the worker can verify (e.g. "uv run pytest
