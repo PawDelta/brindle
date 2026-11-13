@@ -184,6 +184,10 @@ class RepoConfig:
     # A task whose files overlap a running one: "block", "warn" or "queue" (wait
     # for it to merge). None: block within a session, queue behind another session's.
     overlap: str | None = None
+    # What counts as an overlap: "file" (default: any shared file) or "hunk"
+    # (a shared file only when the regions the tasks declare, "path:120-180",
+    # or the hunks the running one has changed, meet).
+    overlap_granularity: str | None = None
     coordinator: bool | None = None    # None: on when the plan includes it; False: off, including after coordinator stop
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
@@ -477,7 +481,8 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
-                "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
+                "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "overlap",
+                "overlap_granularity", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "auto_merge_session_prs", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
