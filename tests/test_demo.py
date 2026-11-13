@@ -107,6 +107,7 @@ def test_app_demo_starts_workers_and_reviewer(db, monkeypatch, only, probed):
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     # The machine's own CLI setup (is codex installed here?) is preflight's job, not this test's.
     monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "preflight", lambda *a, **k: [])
     launched = []
 
     def launch(db, agent, ws, **kwargs):
