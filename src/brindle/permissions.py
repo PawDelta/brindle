@@ -5196,6 +5196,7 @@ class _PartReader:
         self.unread = False   # the splitter couldn't read the whole command (parts are what scan() found)
         self.named: list[str] = []    # assignment values and loop lists, resolved (_Flattener.named)
         self.wrote = False    # an earlier part may have made files a later pattern would match
+        self.glob_options = False    # an inner shell's options may change pattern expansion
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
         # The subshell the part being read runs in (_Flattener.scopes), and dotglob as each
         # subshell last left it: one starts from its parent's, and its changes stay in it.
@@ -5502,7 +5503,14 @@ class _PartReader:
             if source is None and fed:
                 raise _Unverifiable(f"{name} runs what it is fed")
             if code:
-                self.inner(source)
+                # nullglob drops unmatched words instead of passing them literally.
+                # Keep pattern proofs conservative inside that shell.
+                previous = self.glob_options
+                self.glob_options |= "nullglob" in args[:args.index(source)]
+                try:
+                    self.inner(source)
+                finally:
+                    self.glob_options = previous
         elif name == "sqlite3" and len(args) > 1 and not any(arg.startswith("-") for arg in args):
             return    # a database and its SQL: it reads nothing it's fed
         elif fed and (name in _RUNS_ITS_INPUT or name in _COMMAND_READERS):
@@ -5553,7 +5561,11 @@ class _PartReader:
             self.expanded = self.tilde = True    # bash may expand it (path=~/x) or not
         if names and re.search(r"[*?]|\[.+\]", bare):    # an unclosed [ (test's) is literal
             names = self.expand(value)
-            # One that matches nothing stays as written (--include=*.py): the program gets it as is.
+            # One that matches nothing stays literal (an API URL's ? too).
+            # Keep only actual or unresolved expansions marked as patterns;
+            # otherwise read_parts demands a glob proof for an unchanged word.
+            if names == []:
+                return [value], True, None
             self.expanded |= names != []
             return ([raw], False, value) if names is None else (names or [value], True, value)
         return [value], True, None
@@ -5561,6 +5573,8 @@ class _PartReader:
     def expand(self, pattern: str) -> list[str] | None:
         """The names ``pattern`` matches where it runs, None when brindle
         can't know them before it runs."""
+        if self.glob_options:
+            raise _Unverifiable("a shell option may remove unmatched words")
         if self.wrote or self.cwd is None and not os.path.isabs(pattern):
             return None
         if "[:" in pattern or "[=" in pattern or "[." in pattern:
