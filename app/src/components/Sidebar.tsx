@@ -537,7 +537,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
             navigate({ screen: "session", root, repo, agent: root });
           }}
         >
-          <span data-testid="session-title" className="min-w-0 flex-1 truncate text-[13px] font-medium leading-[1.35] text-ink">{session.name || goal?.summary || session.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}</span>
+          <span data-testid="session-title" title={session.name || goal?.goal || session.goal || undefined} className="min-w-0 flex-1 truncate text-[13px] font-medium leading-[1.35] text-ink">{session.name || goal?.summary || session.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}</span>
           <span className="shrink-0 text-[11px] text-ink-3" data-testid="session-model">{tree ? modelOf(tree.agent) : modelOf({ profile: session.profile, provider: "", model: null })}</span>
           <SessionStatus word={word} />
         </SessionGoal>
@@ -626,7 +626,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
       >
         <Dot tone="paused" className={`mt-[6px] ${sessionStageClass(word)}`} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.name || session.goal || <span className="italic">No goal set</span>}</span>
+          <span title={session.name || session.goal || undefined} className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.name || session.goal || <span className="italic">No goal set</span>}</span>
           <span className="block truncate text-[11.5px] text-ink-3">
             <span className="font-mono text-[11px]">{root}</span> · {session.status}
             {age !== "just now" && ` ${age}`}
