@@ -56,11 +56,13 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -223,8 +225,29 @@ def place_link(dest: Path, rel: str, target: str, checkout: Path, words=()) -> N
         if resolved == ".." or resolved.startswith("../") or os.path.isabs(resolved):
             return
         target = redact(target, words)
-    link.parent.mkdir(parents=True, exist_ok=True)
+    if not real_dirs(dest, link.parent):
+        raise BenchError(f"{link.relative_to(dest)}'s directory is not a plain directory in the tree")
     os.symlink(target, link)
+
+
+def real_dirs(root: Path, path: Path) -> bool:
+    """Whether every component from ``root`` down to ``path`` exists as a
+    plain directory (never a link), checked without following links."""
+    cur = root
+    for part in path.relative_to(root).parts:
+        cur = cur / part
+        try:
+            if not stat.S_ISDIR(os.lstat(cur).st_mode):
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def path_key(path: str) -> str:
+    """``path`` as a case-insensitive, normalization-insensitive filesystem
+    (macOS's default) sees it: two paths with one key are one file there."""
+    return unicodedata.normalize("NFC", path).casefold()
 
 
 def confine_links(root: Path) -> None:
@@ -264,26 +287,28 @@ def write_tree(dest: Path, files: list, links: list, checkout: Path, words=()) -
     ``confine_links`` checks them all together. Nothing is written once a
     link exists."""
     final = [redact(rel, words) for rel, _, _ in files] + [redact(rel, words) for rel, _ in links]
-    taken: set[str] = set()
+    taken: dict[str, str] = {}   # path_key -> path: compared as the filesystem may compare them
     for out in final:
         parts = Path(out).parts
         if not parts or os.path.isabs(out) or ".." in parts:
             raise BenchError(f"a path outside the tree: {out!r}")
-        if out in taken:
-            raise BenchError(f"two paths become {out!r} once redacted")
-        taken.add(out)
-    for out in taken:
+        if path_key(out) in taken:
+            raise BenchError(f"{taken[path_key(out)]!r} and {out!r} are one path once redacted")
+        taken[path_key(out)] = out
+    for out in taken.values():
         parts = Path(out).parts
         for i in range(1, len(parts)):
-            if str(Path(*parts[:i])) in taken:
+            if path_key(str(Path(*parts[:i]))) in taken:
                 raise BenchError(f"{out!r} would sit under {str(Path(*parts[:i]))!r} once redacted")
+    # every directory, for files and links alike, is made while the tree still has no link
+    for rel in [r for r, _, _ in files] + [r for r, _ in links]:
+        (dest / redact(rel, words)).parent.mkdir(parents=True, exist_ok=True)
     for rel, mode, read in files:
         out = dest / redact(rel, words)
-        out.parent.mkdir(parents=True, exist_ok=True)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         with os.fdopen(os.open(out, flags, 0o755 if mode & 0o111 else 0o644), "wb") as f:
             f.write(redact_bytes(read(), words))
-    for rel, target in links:
+    for rel, target in links:   # each checks that no directory on its way is a link
         place_link(dest, rel, target, checkout, words)
     confine_links(dest)
 

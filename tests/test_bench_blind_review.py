@@ -132,26 +132,32 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     assert rec["review_cost_usd"] > 0 and "cost_usd" not in solo
 
 
-def test_redacting_a_base_snapshot_never_writes_through_a_link(tmp_path):
+@pytest.mark.parametrize("files, links", [
     # Every link resolves inside on its own, but redacting "zbrindle" turns
     # "[redacted] -> zbrindle/../OUT" into a link out of the tree (through
     # "z[redacted] -> ."), and "brindle/data" redacts onto that same path.
-    base, dest = tmp_path / "base", tmp_path / "tree"
-    for d in ("OUT", "deep", "brindle"):
-        (base / d).mkdir(parents=True)
-    (base / "OUT" / "keep").write_text("in")
-    (base / "deep" / "keep").write_text("in")
-    (base / "brindle" / "data").write_text("brindle payload")
-    (base / "zbrindle").symlink_to("deep")
-    (base / "z[redacted]").symlink_to(".")
-    (base / "[redacted]").symlink_to("zbrindle/../OUT")
+    ({"OUT/keep": "in", "deep/keep": "in", "brindle/data": "brindle payload"},
+     {"zbrindle": "deep", "z[redacted]": ".", "[redacted]": "zbrindle/../OUT"}),
+    # "Xbrindle" redacts to "X[redacted]", a link out of the tree (through
+    # "Bridge -> ."), which a case-insensitive filesystem takes for the
+    # directory "x[redacted]" another link is installed under.
+    ({}, {"Bridge": ".", "Xbrindle": "Bridge/../OUT", "x[redacted]/created/payload": "inside"}),
+])
+def test_redacting_a_base_snapshot_never_writes_through_a_link(tmp_path, files, links):
+    base, dest, outside = tmp_path / "base", tmp_path / "tree", tmp_path / "OUT"
+    for rel, text in files.items():
+        (base / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / rel).write_text(text)
+    for rel, target in links.items():
+        (base / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / rel).symlink_to(target)
     sh(f"git init -q -b main && git add -A && {GIT_ID} commit -qm init", base)
-    (tmp_path / "OUT").mkdir()
-    (tmp_path / "OUT" / "data").write_text("sentinel")   # the tree's sibling, where the escape would land
+    outside.mkdir()   # the tree's sibling, where an escape would land
+    (outside / "data").write_text("sentinel")
     dest.mkdir()
     with pytest.raises(review.BenchError):
         review.blind_tree(base, sh("git rev-parse HEAD", base), dest, dict(os.environ), ["brindle"])
-    assert (tmp_path / "OUT" / "data").read_text() == "sentinel"
+    assert os.listdir(outside) == ["data"] and (outside / "data").read_text() == "sentinel"
     assert os.listdir(dest) == []   # refused before anything was written
 
 
