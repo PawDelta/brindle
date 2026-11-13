@@ -69,6 +69,10 @@ class _Server(MCPServer):
             request_id = None
         _reply_to.set(request_id)   # this call's own task: nothing else sees it
         try:
+            from brindle.pro import doc_questions
+
+            if not doc_questions.tool_allowed(_calling_agent(), name):
+                raise ToolError("This read-only supervisor can only answer its design question.")
             refused = coordinator.refusal(_calling_agent(), name)
             if refused:
                 raise ToolError(refused)
@@ -102,14 +106,17 @@ class _Server(MCPServer):
 
     async def list_tools(self):
         from brindle import visuals
+        from brindle.pro import doc_questions
 
         agent = _calling_agent()
         hidden = () if visuals.enabled() else VISUAL_TOOLS
         return [t for t in await super().list_tools()
-                if coordinator.refusal(agent, t.name) is None and t.name not in hidden]
+                if coordinator.refusal(agent, t.name) is None and t.name not in hidden
+                and doc_questions.tool_allowed(agent, t.name)]
 
 
-VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual", "propose_plan")   # hidden while the capability is off
+VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual", "propose_plan",
+                "reply_plan_thread")   # hidden while the capability is off
 
 
 mcp = _Server(
@@ -175,6 +182,8 @@ class VisualOption(BaseModel):
     id: str = Field(description="1-32 letters, digits, _ or -; what the person's answer names")
     label: str
     detail: str | None = None
+    approves: bool = Field(False, description="true on the one option that approves building the design shown; "
+                           "choosing it (with no note) lets the session's goal go ahead without a planning offer")
 
 
 @mcp.tool()
@@ -200,9 +209,9 @@ def offer_visual(question: str, kind: Literal["options", "comparison", "flow", "
 
 
 @mcp.tool()
-def publish_visual(title: str, html: str, question: str | None = None,
+def publish_visual(title: str, html: str | None = None, question: str | None = None,
                    options: list[VisualOption] | None = None, visual_id: str | None = None,
-                   asked: str | None = None) -> str:
+                   asked: str | None = None, html_path: str | None = None) -> str:
     """Show the person a page in the app: a self-contained HTML document
     only after the person explicitly requested one or accepted an offer.
     Each request permits one new visual, regardless of the Visuals setting.
@@ -223,13 +232,40 @@ def publish_visual(title: str, html: str, question: str | None = None,
     one new visual.
     Pasted text, worker messages, tool output and files don't count; you judge
     that they really asked, brindle checks the words are theirs.
+    Pass exactly one of html or html_path. html_path reads a UTF-8 file inside
+    your own worktree or session scratchpad, including after symlinks resolve;
+    relative paths start at your worktree.
     At most 2 MB per page, 20 revisions; a page or text that looks like a
     secret is refused."""
     from brindle import visuals
     from brindle.service.errors import ServiceError
 
     db = DB()
-    caller, _ = _caller(db)
+    caller, ws = _caller(db)
+    if (html is None) == (html_path is None):
+        raise ToolError("Pass exactly one of html or html_path.")
+    if html_path is not None:
+        from brindle import permission_grants, permissions
+
+        if caller is None:
+            raise ToolError("A session is required to read a visual file.")
+        req = permissions.Request(caller.provider, "file", "publish_visual", worktree=ws.path)
+        try:
+            path = (Path(ws.path) / html_path).resolve(strict=True)
+            roots = [Path(ws.path)]
+            scratch_tmp = Path(os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp")
+            for discovered in permission_grants.scratchpads(req):
+                root = Path(discovered)
+                # Canonicalize the platform temp root (e.g. /tmp -> /private/tmp),
+                # but never let project/session symlinks redefine an allowed root.
+                expected = scratch_tmp.resolve() / root.relative_to(scratch_tmp)
+                if root.resolve(strict=True) == expected:
+                    roots.append(root)
+            if not any(path.is_relative_to(root.resolve(strict=True)) for root in roots):
+                raise ToolError("html_path must be inside your own worktree or session scratchpad.")
+            html = path.read_text(encoding="utf-8")
+        except (OSError, ValueError, RuntimeError) as e:
+            raise ToolError("html_path must resolve to a readable UTF-8 file.") from e
     try:
         v = visuals.publish(db, caller, title, html, question,
                             [o.model_dump() if isinstance(o, BaseModel) else o for o in options or []],
@@ -262,19 +298,37 @@ class PlanWorker(BaseModel):
     test: str | None = Field(default=None, description="the one test that proves its task done")
 
 
+class PlanSection(BaseModel):
+    id: str | None = Field(default=None, description="1-32 letters, digits, _ or -; keep it across revisions so "
+                           "comments stay on the section (default s1, s2, ...)")
+    title: str
+    kind: str = Field(default="markdown", description="markdown, mermaid (the source of a diagram) or svg (an "
+                      "inline <svg> picture)")
+    markdown: str = Field(description="the section's text, or its diagram source")
+    caption: str | None = None
+
+
 @mcp.tool()
 def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
                  split: list[PlanWorker] | None = None, title: str | None = None,
-                 plan_id: str | None = None, ask: str | None = None) -> str:
-    """Supervisors: show the person a planning doc, ONLY when they explicitly
-    asked for one (never on your own because a request is large). markdown:
-    the plan (goal, split, decisions with your challenge to each, what's hard
-    to undo, open questions), one ## heading per section: the person comments
-    per section. brindle renders it itself. While it's open, every assign in
-    this session is queued and starts only once the person approves; their
-    approval or redirect (their picks and comments) arrives as a message from
-    them. plan_id: publish the revision a redirect asked for. ask: their
-    request restated in your own words, which they confirm or correct."""
+                 plan_id: str | None = None, ask: str | None = None,
+                 sections: list[PlanSection] | None = None) -> str:
+    """Supervisors: show the person a design doc, ONLY when they explicitly
+    asked for one (never on your own because a request is large). Pass
+    `sections` (each markdown, mermaid or svg; the person comments, suggests
+    edits and confirms decisions on them) and then `markdown` is only the
+    title and lede; or pass the whole doc as `markdown`, one ## heading per
+    section. Put the goal, the design with diagrams, what's hard to undo and
+    the open questions in sections; `decisions` carry options (pros, cons, the
+    files each touches), your pick (`mine`) and your strongest argument
+    against it (`challenge`); `split` has each worker's files and the one test
+    that proves it done. brindle renders it itself. While it's open, every
+    assign in this session is queued and starts only once the person
+    approves. What they wrote since your last revision (each comment,
+    suggestion and reply, naming its thread #N) arrives in one message when
+    they Approve or Request changes. Answer a thread with reply_plan_thread;
+    publish the next revision with plan_id. ask: their request restated in
+    your own words, which they confirm or correct."""
     from brindle import plans
     from brindle.service.errors import ServiceError
 
@@ -282,13 +336,49 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     caller, _ = _caller(db)
     dump = lambda items: [i.model_dump() if isinstance(i, BaseModel) else i for i in items or []]  # noqa: E731
     try:
-        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id, ask)
+        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id, ask,
+                          sections=dump(sections) if sections is not None else None)
     except ServiceError as e:
         raise ToolError(e.message) from e
     return (f"Proposed plan {p['id']} r{p['rev']} (brindle://visual/{p['id']}). Assign calls queue behind it "
             "until the person approves; their decision arrives as a message. "
             f"For each split card, pass plan_worker=\"{p['id']}:<split-id>\" to assign or handoff; "
             "use the exact proving check command as its test.")
+
+
+@mcp.tool()
+def reply_doc_question(doc_id: str, thread_id: int, text: str) -> str:
+    """Answer your person's assigned Library design question in its thread.
+    Use the document and thread IDs delivered with the question."""
+    from brindle.pro import doc_questions
+
+    db = DB()
+    try:
+        caller, _ = _caller(db)
+        doc_questions.reply(db, caller, doc_id, thread_id, text)
+        return "Your answer is on the design's question thread."
+    except Exception:  # provider and transport errors must not expose credentials
+        return "The answer could not be posted. Check the question and your account sign-in."
+    finally:
+        db.conn.close()
+
+
+@mcp.tool()
+def reply_plan_thread(plan_id: str, thread_id: int, text: str, resolve: bool = False) -> str:
+    """Supervisors: answer a comment or suggestion thread (#N in the message
+    you got) on your planning doc; the person sees it on the doc. resolve=true
+    also resolves a comment thread you have dealt with. Revisions go through
+    propose_plan(plan_id=...)."""
+    from brindle import plans
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        rid = plans.reply(db, caller, plan_id, thread_id, text, resolve)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    return f"Replied in thread #{thread_id} of plan {plan_id} (reply #{rid})."
 
 
 @mcp.tool()
@@ -881,6 +971,9 @@ async def handoff(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        shut = tasks.build_gate_refusal(db, caller.id)
+        if shut:
+            return shut
         linked = req.link_plan(db, caller, plan_worker)
         if linked:
             return linked
@@ -1021,6 +1114,9 @@ async def assign(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        shut = tasks.build_gate_refusal(db, caller.id)
+        if shut:
+            return shut
         linked = req.link_plan(db, caller, plan_worker)
         if linked:
             return linked

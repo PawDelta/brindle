@@ -540,6 +540,31 @@ def _on_report(db: DB, worker: Agent, ws: Workspace, result: str, outbox_id: int
         return False
     if _report_only(worker, ws):
         return False   # nothing to review or merge: the report goes straight to the supervisor
+    review = gates.verdict(db, ws.id, gates.head(ws))
+    if review is not None and not review.approved:
+        # A report without a new commit cannot resolve the review. A delivered
+        # supervisor message since that verdict is already its handoff, even
+        # when the worker reports again with a different explanation.
+        handed_off = db.conn.execute(
+            "SELECT 1 FROM report_outbox WHERE agent_id=? AND head=? AND state='delivered'"
+            " AND delivery LIKE 'message %' AND updated_at>=?",
+            (worker.id, review.sha, review.created_at),
+        ).fetchone()
+        if handed_off:
+            db.outbox_deliver(outbox_id, agent_fields={"pipeline": None})
+            return True
+        findings = "\n\n".join(r.summary for r in gates.standing_reviews(db, ws.id, review.sha)
+                                  if not r.approved)
+        text = agents.condense(
+            f"[brindle pipeline] `{ws.branch}` reported without a new commit after review "
+            "requested changes. This needs you: decide what to do.",
+            f"Open review findings:\n{findings}",
+            f"Worker's reason:\n{result}")
+        if db.outbox_deliver(outbox_id, message=agents._report_message(db, parent, text, worker.id),
+                             agent_fields={"pipeline": None}):
+            _escalate(db, ws, worker)
+            agents._notify_supervisor(db, parent)
+        return True
     dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
     if dirty:
         shown = ", ".join(dirty[:5]) + (f" and {len(dirty) - 5} more" if len(dirty) > 5 else "")

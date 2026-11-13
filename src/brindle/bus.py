@@ -92,22 +92,20 @@ def record_stage(c, day: str, repo: str, stage: str, new: list[float]) -> None:
                _percentile(sorted(values), 0.9), json.dumps(values)))
 
 
-def _rollup(c, cutoff: float) -> None:
-    """Fold the pipeline stage durations of events older than ``cutoff`` into
-    ``stage_timings`` (median and p90 per UTC day and repo), so they outlive
-    :func:`prune`. Stages: report to reviewer start, review duration (per
-    reviewer), fix round (a rejection to the next report) and final report to
-    merge; each counts on the day it ended. A stage still open when its start
-    event is pruned waits in ``stage_open`` for its end. Runs inside the
-    caller's transaction."""
+def stage_samples(c, cutoff: float) -> tuple[dict, dict]:
+    """Read unrolled stage durations and remaining open stages before cutoff.
+
+    Replay retained events over ``stage_open`` without mutating either. The
+    estimator and pruning therefore measure the same stages, including a run
+    whose start event has already been pruned. Each sample belongs to the day
+    its stage ended; rolled-up samples are absent from these retained events.
+    """
     kinds = ("pipeline.reported", "review.started", "pipeline.review", "pipeline.merged",
              "pipeline.removed")
     rows = c.execute(
         f"SELECT ts, kind, repo_root, workspace_id, agent_id, payload FROM events WHERE ts < ? AND kind IN"
         f" ({','.join('?' * len(kinds))}) AND workspace_id IS NOT NULL ORDER BY id",
         (cutoff, *kinds)).fetchall()
-    if not rows:
-        return
     # (workspace, stage, reviewer or "") -> start ts
     open_at = {(r[0], r[1], r[2]): r[3] for r in c.execute(
         "SELECT workspace_id, stage, who, ts FROM stage_open")}
@@ -136,6 +134,12 @@ def _rollup(c, cutoff: float) -> None:
             end(r, "report_to_merge")
         if kind in ("pipeline.merged", "pipeline.removed"):
             open_at = {k: v for k, v in open_at.items() if k[0] != ws}
+    return samples, open_at
+
+
+def _rollup(c, cutoff: float) -> None:
+    """Persist stage samples before their events are pruned, atomically."""
+    samples, open_at = stage_samples(c, cutoff)
     for (day, repo, stage), new in samples.items():
         record_stage(c, day, repo, stage, new)
     c.execute("DELETE FROM stage_open")

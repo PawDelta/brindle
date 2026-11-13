@@ -293,11 +293,15 @@ class VisualDTO(_DTO):
 
 
 class PlanSectionDTO(_DTO):
-    """One ``##`` section of a plan's markdown: what a comment anchors to."""
+    """One section of a plan's revision: what a comment anchors to.
+    ``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or
+    SVG source, and ``caption`` its figure caption)."""
 
     id: str
     title: str
+    kind: Literal["markdown", "mermaid", "svg"] = "markdown"
     markdown: str
+    caption: str | None = None
 
 
 class PlanOptionDTO(VisualOptionDTO):
@@ -317,6 +321,10 @@ class PlanDecisionDTO(_DTO):
     options: list[PlanOptionDTO]
     mine: str | None = None
     challenge: str | None = None
+    # Who voted for which option ({option: [voter]}), and the person's own
+    # confirmed pick, which their verdict starts from.
+    votes: dict[str, list[str]] = {}
+    confirmed: str | None = None
 
 
 class PlanWorkerDTO(_DTO):
@@ -346,6 +354,175 @@ class PlanVerdictDTO(_DTO):
     note: str | None = None
     at: float
     rev: int
+    attachments: list[str] = []
+
+
+class PlanAnchorDTO(_DTO):
+    """Where a thread is anchored (brindle.plan_docs): a text range of a
+    section (``text``: ``quote`` between ``start`` and ``end``), a diagram
+    section, a decision (optionally one option) or a whole section, the
+    ask, the lede or the split. ``state``: where it is in the current
+    revision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone)."""
+
+    kind: Literal["text", "diagram", "decision", "section"]
+    section: str | None = None
+    start: int | None = None
+    end: int | None = None
+    quote: str | None = None
+    decision: str | None = None
+    option: str | None = None
+    state: Literal["current", "moved", "detached"] = "current"
+
+
+class PlanReplyDTO(_DTO):
+    id: int
+    author: str
+    text: str
+    attachments: list[str] = []
+    at: float
+    sent: bool = False
+    from_supervisor: bool = False
+
+
+class PlanThreadDTO(_DTO):
+    """A comment thread, or a suggestion (``before`` becomes ``after`` when
+    the author accepts it). ``sent``: a verdict carried it to the supervisor."""
+
+    id: int
+    kind: Literal["comment", "suggestion"]
+    rev: int
+    author: str
+    text: str
+    anchor: PlanAnchorDTO
+    before: str | None = None
+    after: str | None = None
+    attachments: list[str] = []
+    status: Literal["open", "resolved", "accepted", "rejected"]
+    sent: bool = False
+    at: float
+    replies: list[PlanReplyDTO] = []
+    question: bool = False
+
+
+class PlanRevisionDTO(_DTO):
+    """One revision of a plan: the supervisor's proposal, the person's edit
+    or accepted suggestion, or a teammate's text from the Library (``author``
+    is teammate:<sub>); ``changed``, the sections it changed."""
+
+    rev: int
+    author: str
+    source: Literal["proposal", "edit", "suggestion"]
+    changed: list[str] = []
+    at: float
+
+
+class PlanRevisionDetailDTO(PlanRevisionDTO):
+    """An earlier revision's content: GET /v1/plans/{id}/revisions/{n}."""
+
+    lede: str
+    sections: list[PlanSectionDTO]
+    markdown: str
+    decisions: list[PlanDecisionDTO]
+    split: list[PlanWorkerDTO]
+    ask: str | None = None
+
+
+class PlanGateRowDTO(_DTO):
+    """One row of a plan's build gate: a reviewer (``sub``) or an org review
+    rule no one on the list meets (``name``). ``meets``: the rules this
+    reviewer's sign-off also counts for. ``met_by``: who met a rule.
+    ``changes_by``: the rule's signers who have since asked for changes."""
+
+    sub: str | None = None
+    name: str | None = None
+    required: bool
+    status: Literal["signed_off", "changes_requested", "waiting", "waived"]
+    met_by: list[str] = []
+    changes_by: list[str] = []
+    meets: list[str] = []
+    you: bool = False
+
+
+class PlanPolicyWaiverDTO(_DTO):
+    """An org admin's waiver of a review rule, for the revision on screen."""
+
+    by: str
+    at: float | None = None
+    reason: str
+
+
+class PlanPolicyStandInDTO(_DTO):
+    """Someone an org admin named to sign for a review rule until ``until``."""
+
+    stand_in: str
+    until: float
+    by: str | None = None
+    at: float | None = None
+
+
+class PlanPolicyOpenDTO(_DTO):
+    """Someone a review rule counts who has read the doc, and when they last did."""
+
+    sub: str
+    at: float | None = None
+
+
+class PlanGatePolicyDTO(_DTO):
+    """An org review rule covering a shared plan, which nobody on the doc can
+    remove. ``when``: paths, label or any; ``matched``: what in this revision
+    set it off; ``needs_kind``: team, role or person; ``eligible``: how many
+    people can meet it today; ``asked_at``: the last Ask again; ``opened_by``:
+    who the rule counts has read the doc."""
+
+    org_id: str
+    policy: str
+    name: str
+    note: str | None = None
+    when: str | None = None
+    label: str | None = None
+    paths: list[str] = []
+    matched: list[str] = []
+    needs_kind: str | None = None
+    needs_name: str | None = None
+    approvals: int
+    eligible: int | None = None
+    status: Literal["signed_off", "changes_requested", "waiting", "waived"]
+    met_by: list[str] = []
+    changes_by: list[str] = []
+    waiver: PlanPolicyWaiverDTO | None = None
+    stand_ins: list[PlanPolicyStandInDTO] = []
+    asked_at: float | None = None
+    opened_by: list[PlanPolicyOpenDTO] = []
+    set_by: str | None = None
+    set_at: float | None = None
+
+
+class PlanUnconfirmedDTO(_DTO):
+    """Why the Library couldn't confirm a shared plan's review when the person
+    tried to approve it. ``approval_held``: their Approve applies by itself
+    once it can; ``can_stop_sharing``: they may make it a personal doc instead."""
+
+    reason: Literal["offline", "sign_in", "key_unavailable", "library_error", "other_account"]
+    message: str
+    approval_held: bool = False
+    can_stop_sharing: bool = False
+
+
+class PlanGateDTO(_DTO):
+    """A shared plan's build gate (brindle.plans.gate). ``reason``: why it
+    can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
+    every org review rule covering it, including those a listed reviewer meets.
+    ``approval_refused``: why an Approve held for the Library wasn't applied."""
+
+    state: Literal["waiting", "changes_requested", "conflict", "ready", "closed"]
+    reason: str | None = None
+    required: int
+    signed: int
+    waiting_on: list[str] = []
+    reviewers: list[PlanGateRowDTO] = []
+    policies: list[PlanGatePolicyDTO] = []
+    unconfirmed: PlanUnconfirmedDTO | None = None
+    approval_refused: str | None = None
 
 
 class PlanDTO(_DTO):
@@ -370,6 +547,29 @@ class PlanDTO(_DTO):
     verdict: PlanVerdictDTO | None = None
     queued: int
     created_at: float
+    revisions: list[PlanRevisionDTO] = []
+    threads: list[PlanThreadDTO] = []
+    # The person may change the text now (direct edits, accepting suggestions): only while open.
+    can_edit: bool = False
+    # Set once the plan is shared for team review (brindle.pro.shared_docs).
+    gate: PlanGateDTO | None = None
+    # The Team plan it was shared under has ended: a personal doc, with no gate, until it comes back.
+    team_ended: bool = False
+
+
+class SharedDesignDTO(PlanDTO):
+    """A design someone else shared, as the person reviewing it reads it
+    (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
+    plan on this machine. ``can_*``: what the Library lets this account do,
+    ``can_sign_off`` false only when it can't be one of the signers.
+    ``author``: who wrote it, ``person`` if that is this account."""
+
+    me: str
+    author: str | None = None
+    can_comment: bool = False
+    can_suggest: bool = False
+    can_sign_off: bool = False
+    signed_off: bool = False
 
 
 class KeptVisualDTO(_DTO):

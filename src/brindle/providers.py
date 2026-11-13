@@ -257,18 +257,21 @@ def _codex_sandbox(ctx: LaunchContext) -> list[str]:
     config files changes."""
     from brindle import codex_hook
 
-    roots = _codex_writable_roots(ctx)
+    document = ctx.mode == "doc_question"
+    roots = [] if document else _codex_writable_roots(ctx)
     plain = ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"] if roots else []
     codex_hook.skip_policy(ctx.cwd, None)   # decided afresh each launch: the config may have changed
-    if not (ctx.cwd and codex_hook.policy_on(ctx.cwd)):
+    if not document and not (ctx.cwd and codex_hook.policy_on(ctx.cwd)):
         return plain
     try:
         base = codex_sandbox_base(ctx.cwd)
     except CodexSandboxRefused as e:
-        if codex_hook.policy_chosen(ctx.cwd):
+        if document or codex_hook.policy_chosen(ctx.cwd):
             raise
         codex_hook.skip_policy(ctx.cwd, e)
         return plain
+    if document:
+        base = ":read-only"
     entries ={**{root: "write" for root in roots}, **{path: "deny" for path in _codex_denied_reads()}}
     table = "{" + ",".join(f"{json.dumps(k)}={json.dumps(v)}" for k, v in entries.items()) + "}"
     return ["-c", f"default_permissions={json.dumps(CODEX_PROFILE)}",
@@ -1231,6 +1234,8 @@ class ClaudeCode(Provider):
         # keeps the --mcp-config servers (brindle) and ignores all others.
         if p.strict_mcp:
             argv.append("--strict-mcp-config")
+        if ctx.mode == "doc_question":
+            argv += ["--tools", ""]
         if p.setting_sources:
             argv += ["--setting-sources", ",".join(p.setting_sources)]
         if p.effort:
@@ -2173,7 +2178,8 @@ class Codex(Provider):
         # a trusted hook with the policy off too (#241).
         from brindle import codex_hook
 
-        argv += codex_hook.launch_flags(ctx.cwd, review=ctx.mode == "review")
+        argv += (codex_hook.launch_flags(ctx.cwd, required=True) if ctx.mode == "doc_question"
+                 else codex_hook.launch_flags(ctx.cwd, review=ctx.mode == "review"))
         if ctx.mode in ("handoff", "handoff_detached", "assign", "review"):
             # Supported by Codex 0.162.1. Workers cannot act on an update
             # notice; omit this extra startup UI from automated launches.
@@ -2284,7 +2290,7 @@ class Antigravity(Provider):
             # agy has no mode that refuses instead of prompting, so under
             # dontAsk (nobody watches, e.g. a reviewer) brindle's hook decides
             # every call, as under agy_approvals "brindle" (unset, for workers).
-            strict = ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
+            strict = ctx.mode == "doc_question" or ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
             antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
             antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]

@@ -473,7 +473,19 @@ def tell_skipped(db, agent, cwd: str | None) -> bool:
     return _tell_once(db, agent, POLICY_SKIPPED, f"{POLICY_SKIPPED}: {why.problem}. {why.fix} to have them cover Codex.")
 
 
-def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
+def launch_flags(cwd: str | None, review: bool = False, *, required: bool = False) -> list[str]:
+    """Document supervisors cannot launch without verified permission hooks.
+
+    With policy off, use only an already trusted hook, as for reviewers;
+    never turn a hook back on against the person's choice.
+    """
+    flags = _optional_launch_flags(cwd, review=review or required)
+    if required and not flags:
+        raise CodexHookError("the read-only document supervisor requires a trusted Codex permission hook")
+    return flags
+
+
+def _optional_launch_flags(cwd: str | None, review: bool = False) -> list[str]:
     """The flags a Codex agent in ``cwd`` launches with: brindle's hook when the
     repo's policy is on and the person trusted the hook; else none. A reviewer
     gets it with the policy off too (nobody watches its prompts; the hook only

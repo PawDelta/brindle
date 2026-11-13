@@ -158,7 +158,7 @@ Treat every input that crosses a trust boundary as hostile until validated...
 Save a pack as `.brindle/rules/<name>.md` (shared with the repo) or
 `~/.brindle/rules/<name>.md` (yours); `team/api.md` is used as `team/api`. Then
 name it in a profile's `rules:` line. In the desktop app you can add a rule
-from **Knowledge**. A pack a profile names but that can't be found stops the
+from the **Library**. A pack a profile names but that can't be found stops the
 launch, so a rule never silently stops applying; `brindle profile lint`
 catches this earlier.
 

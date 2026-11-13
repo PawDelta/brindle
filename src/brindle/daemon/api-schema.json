@@ -5554,6 +5554,108 @@
       "title": "PermissionRuleDTO",
       "type": "object"
     },
+    "PlanAnchorDTO": {
+      "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
+      "properties": {
+        "decision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decision"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "kind": {
+          "enum": [
+            "text",
+            "diagram",
+            "decision",
+            "section"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "option": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Option"
+        },
+        "quote": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quote"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "state": {
+          "default": "current",
+          "enum": [
+            "current",
+            "moved",
+            "detached"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "PlanAnchorDTO",
+      "type": "object"
+    },
     "PlanCommentDTO": {
       "properties": {
         "section": {
@@ -5574,6 +5676,108 @@
     },
     "PlanDTO": {
       "$defs": {
+        "PlanAnchorDTO": {
+          "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
+          "properties": {
+            "decision": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Decision"
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End"
+            },
+            "kind": {
+              "enum": [
+                "text",
+                "diagram",
+                "decision",
+                "section"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "option": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Option"
+            },
+            "quote": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Quote"
+            },
+            "section": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Section"
+            },
+            "start": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Start"
+            },
+            "state": {
+              "default": "current",
+              "enum": [
+                "current",
+                "moved",
+                "detached"
+              ],
+              "title": "State",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "PlanAnchorDTO",
+          "type": "object"
+        },
         "PlanCommentDTO": {
           "properties": {
             "section": {
@@ -5607,6 +5811,18 @@
               "default": null,
               "title": "Challenge"
             },
+            "confirmed": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Confirmed"
+            },
             "id": {
               "title": "Id",
               "type": "string"
@@ -5633,6 +5849,17 @@
             "title": {
               "title": "Title",
               "type": "string"
+            },
+            "votes": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "title": "Votes",
+              "type": "object"
             }
           },
           "required": [
@@ -5641,6 +5868,381 @@
             "options"
           ],
           "title": "PlanDecisionDTO",
+          "type": "object"
+        },
+        "PlanGateDTO": {
+          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
+          "properties": {
+            "approval_refused": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Approval Refused"
+            },
+            "policies": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanGatePolicyDTO"
+              },
+              "title": "Policies",
+              "type": "array"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            },
+            "required": {
+              "title": "Required",
+              "type": "integer"
+            },
+            "reviewers": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanGateRowDTO"
+              },
+              "title": "Reviewers",
+              "type": "array"
+            },
+            "signed": {
+              "title": "Signed",
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "waiting",
+                "changes_requested",
+                "conflict",
+                "ready",
+                "closed"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "unconfirmed": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanUnconfirmedDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "waiting_on": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Waiting On",
+              "type": "array"
+            }
+          },
+          "required": [
+            "state",
+            "required",
+            "signed"
+          ],
+          "title": "PlanGateDTO",
+          "type": "object"
+        },
+        "PlanGatePolicyDTO": {
+          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today; ``asked_at``: the last Ask again; ``opened_by``:\nwho the rule counts has read the doc.",
+          "properties": {
+            "approvals": {
+              "title": "Approvals",
+              "type": "integer"
+            },
+            "asked_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Asked At"
+            },
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "eligible": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "matched": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Matched",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "needs_kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Kind"
+            },
+            "needs_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Name"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "opened_by": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyOpenDTO"
+              },
+              "title": "Opened By",
+              "type": "array"
+            },
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Paths",
+              "type": "array"
+            },
+            "policy": {
+              "title": "Policy",
+              "type": "string"
+            },
+            "set_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set At"
+            },
+            "set_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set By"
+            },
+            "stand_ins": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyStandInDTO"
+              },
+              "title": "Stand Ins",
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "waiver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanPolicyWaiverDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "when": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "When"
+            }
+          },
+          "required": [
+            "org_id",
+            "policy",
+            "name",
+            "approvals",
+            "status"
+          ],
+          "title": "PlanGatePolicyDTO",
+          "type": "object"
+        },
+        "PlanGateRowDTO": {
+          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
+          "properties": {
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "meets": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Meets",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "required": {
+              "title": "Required",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "sub": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sub"
+            },
+            "you": {
+              "default": false,
+              "title": "You",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "required",
+            "status"
+          ],
+          "title": "PlanGateRowDTO",
           "type": "object"
         },
         "PlanOptionDTO": {
@@ -5698,11 +6300,221 @@
           "title": "PlanOptionDTO",
           "type": "object"
         },
-        "PlanSectionDTO": {
-          "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
+        "PlanPolicyOpenDTO": {
+          "description": "Someone a review rule counts who has read the doc, and when they last did.",
           "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PlanPolicyOpenDTO",
+          "type": "object"
+        },
+        "PlanPolicyStandInDTO": {
+          "description": "Someone an org admin named to sign for a review rule until ``until``.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "By"
+            },
+            "stand_in": {
+              "title": "Stand In",
+              "type": "string"
+            },
+            "until": {
+              "title": "Until",
+              "type": "number"
+            }
+          },
+          "required": [
+            "stand_in",
+            "until"
+          ],
+          "title": "PlanPolicyStandInDTO",
+          "type": "object"
+        },
+        "PlanPolicyWaiverDTO": {
+          "description": "An org admin's waiver of a review rule, for the revision on screen.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "title": "By",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "reason"
+          ],
+          "title": "PlanPolicyWaiverDTO",
+          "type": "object"
+        },
+        "PlanReplyDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "from_supervisor": {
+              "default": false,
+              "title": "From Supervisor",
+              "type": "boolean"
+            },
             "id": {
               "title": "Id",
+              "type": "integer"
+            },
+            "sent": {
+              "default": false,
+              "title": "Sent",
+              "type": "boolean"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "author",
+            "text",
+            "at"
+          ],
+          "title": "PlanReplyDTO",
+          "type": "object"
+        },
+        "PlanRevisionDTO": {
+          "description": "One revision of a plan: the supervisor's proposal, the person's edit\nor accepted suggestion, or a teammate's text from the Library (``author``\nis teammate:<sub>); ``changed``, the sections it changed.",
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "changed": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changed",
+              "type": "array"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "source": {
+              "enum": [
+                "proposal",
+                "edit",
+                "suggestion"
+              ],
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "rev",
+            "author",
+            "source",
+            "at"
+          ],
+          "title": "PlanRevisionDTO",
+          "type": "object"
+        },
+        "PlanSectionDTO": {
+          "description": "One section of a plan's revision: what a comment anchors to.\n``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or\nSVG source, and ``caption`` its figure caption).",
+          "properties": {
+            "caption": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Caption"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "markdown",
+              "enum": [
+                "markdown",
+                "mermaid",
+                "svg"
+              ],
+              "title": "Kind",
               "type": "string"
             },
             "markdown": {
@@ -5722,6 +6534,150 @@
           "title": "PlanSectionDTO",
           "type": "object"
         },
+        "PlanThreadDTO": {
+          "description": "A comment thread, or a suggestion (``before`` becomes ``after`` when\nthe author accepts it). ``sent``: a verdict carried it to the supervisor.",
+          "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "After"
+            },
+            "anchor": {
+              "$ref": "#/$defs/PlanAnchorDTO"
+            },
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "before": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Before"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "comment",
+                "suggestion"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "question": {
+              "default": false,
+              "title": "Question",
+              "type": "boolean"
+            },
+            "replies": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanReplyDTO"
+              },
+              "title": "Replies",
+              "type": "array"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "sent": {
+              "default": false,
+              "title": "Sent",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "open",
+                "resolved",
+                "accepted",
+                "rejected"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "rev",
+            "author",
+            "text",
+            "anchor",
+            "status",
+            "at"
+          ],
+          "title": "PlanThreadDTO",
+          "type": "object"
+        },
+        "PlanUnconfirmedDTO": {
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "properties": {
+            "approval_held": {
+              "default": false,
+              "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_stop_sharing": {
+              "default": false,
+              "title": "Can Stop Sharing",
+              "type": "boolean"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "offline",
+                "sign_in",
+                "key_unavailable",
+                "library_error",
+                "other_account"
+              ],
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "message"
+          ],
+          "title": "PlanUnconfirmedDTO",
+          "type": "object"
+        },
         "PlanVerdictDTO": {
           "properties": {
             "approved": {
@@ -5731,6 +6687,14 @@
             "at": {
               "title": "At",
               "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
             },
             "comments": {
               "default": [],
@@ -5881,6 +6845,11 @@
           "default": null,
           "title": "Ask"
         },
+        "can_edit": {
+          "default": false,
+          "title": "Can Edit",
+          "type": "boolean"
+        },
         "created_at": {
           "title": "Created At",
           "type": "number"
@@ -5891,6 +6860,17 @@
           },
           "title": "Decisions",
           "type": "array"
+        },
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanGateDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "id": {
           "title": "Id",
@@ -5911,6 +6891,14 @@
         "rev": {
           "title": "Rev",
           "type": "integer"
+        },
+        "revisions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanRevisionDTO"
+          },
+          "title": "Revisions",
+          "type": "array"
         },
         "sections": {
           "items": {
@@ -5938,6 +6926,19 @@
           ],
           "title": "State",
           "type": "string"
+        },
+        "team_ended": {
+          "default": false,
+          "title": "Team Ended",
+          "type": "boolean"
+        },
+        "threads": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanThreadDTO"
+          },
+          "title": "Threads",
+          "type": "array"
         },
         "title": {
           "title": "Title",
@@ -6044,6 +7045,18 @@
           "default": null,
           "title": "Challenge"
         },
+        "confirmed": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmed"
+        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -6070,6 +7083,17 @@
         "title": {
           "title": "Title",
           "type": "string"
+        },
+        "votes": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "title": "Votes",
+          "type": "object"
         }
       },
       "required": [
@@ -6078,6 +7102,906 @@
         "options"
       ],
       "title": "PlanDecisionDTO",
+      "type": "object"
+    },
+    "PlanGateDTO": {
+      "$defs": {
+        "PlanGatePolicyDTO": {
+          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today; ``asked_at``: the last Ask again; ``opened_by``:\nwho the rule counts has read the doc.",
+          "properties": {
+            "approvals": {
+              "title": "Approvals",
+              "type": "integer"
+            },
+            "asked_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Asked At"
+            },
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "eligible": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "matched": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Matched",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "needs_kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Kind"
+            },
+            "needs_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Name"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "opened_by": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyOpenDTO"
+              },
+              "title": "Opened By",
+              "type": "array"
+            },
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Paths",
+              "type": "array"
+            },
+            "policy": {
+              "title": "Policy",
+              "type": "string"
+            },
+            "set_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set At"
+            },
+            "set_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set By"
+            },
+            "stand_ins": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyStandInDTO"
+              },
+              "title": "Stand Ins",
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "waiver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanPolicyWaiverDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "when": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "When"
+            }
+          },
+          "required": [
+            "org_id",
+            "policy",
+            "name",
+            "approvals",
+            "status"
+          ],
+          "title": "PlanGatePolicyDTO",
+          "type": "object"
+        },
+        "PlanGateRowDTO": {
+          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
+          "properties": {
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "meets": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Meets",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "required": {
+              "title": "Required",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "sub": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sub"
+            },
+            "you": {
+              "default": false,
+              "title": "You",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "required",
+            "status"
+          ],
+          "title": "PlanGateRowDTO",
+          "type": "object"
+        },
+        "PlanPolicyOpenDTO": {
+          "description": "Someone a review rule counts who has read the doc, and when they last did.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PlanPolicyOpenDTO",
+          "type": "object"
+        },
+        "PlanPolicyStandInDTO": {
+          "description": "Someone an org admin named to sign for a review rule until ``until``.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "By"
+            },
+            "stand_in": {
+              "title": "Stand In",
+              "type": "string"
+            },
+            "until": {
+              "title": "Until",
+              "type": "number"
+            }
+          },
+          "required": [
+            "stand_in",
+            "until"
+          ],
+          "title": "PlanPolicyStandInDTO",
+          "type": "object"
+        },
+        "PlanPolicyWaiverDTO": {
+          "description": "An org admin's waiver of a review rule, for the revision on screen.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "title": "By",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "reason"
+          ],
+          "title": "PlanPolicyWaiverDTO",
+          "type": "object"
+        },
+        "PlanUnconfirmedDTO": {
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "properties": {
+            "approval_held": {
+              "default": false,
+              "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_stop_sharing": {
+              "default": false,
+              "title": "Can Stop Sharing",
+              "type": "boolean"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "offline",
+                "sign_in",
+                "key_unavailable",
+                "library_error",
+                "other_account"
+              ],
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "message"
+          ],
+          "title": "PlanUnconfirmedDTO",
+          "type": "object"
+        }
+      },
+      "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
+      "properties": {
+        "approval_refused": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approval Refused"
+        },
+        "policies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanGatePolicyDTO"
+          },
+          "title": "Policies",
+          "type": "array"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "required": {
+          "title": "Required",
+          "type": "integer"
+        },
+        "reviewers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanGateRowDTO"
+          },
+          "title": "Reviewers",
+          "type": "array"
+        },
+        "signed": {
+          "title": "Signed",
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "waiting",
+            "changes_requested",
+            "conflict",
+            "ready",
+            "closed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "unconfirmed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanUnconfirmedDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "waiting_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Waiting On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "state",
+        "required",
+        "signed"
+      ],
+      "title": "PlanGateDTO",
+      "type": "object"
+    },
+    "PlanGatePolicyDTO": {
+      "$defs": {
+        "PlanPolicyOpenDTO": {
+          "description": "Someone a review rule counts who has read the doc, and when they last did.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PlanPolicyOpenDTO",
+          "type": "object"
+        },
+        "PlanPolicyStandInDTO": {
+          "description": "Someone an org admin named to sign for a review rule until ``until``.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "By"
+            },
+            "stand_in": {
+              "title": "Stand In",
+              "type": "string"
+            },
+            "until": {
+              "title": "Until",
+              "type": "number"
+            }
+          },
+          "required": [
+            "stand_in",
+            "until"
+          ],
+          "title": "PlanPolicyStandInDTO",
+          "type": "object"
+        },
+        "PlanPolicyWaiverDTO": {
+          "description": "An org admin's waiver of a review rule, for the revision on screen.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "title": "By",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "reason"
+          ],
+          "title": "PlanPolicyWaiverDTO",
+          "type": "object"
+        }
+      },
+      "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today; ``asked_at``: the last Ask again; ``opened_by``:\nwho the rule counts has read the doc.",
+      "properties": {
+        "approvals": {
+          "title": "Approvals",
+          "type": "integer"
+        },
+        "asked_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asked At"
+        },
+        "changes_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changes By",
+          "type": "array"
+        },
+        "eligible": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Eligible"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "matched": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Matched",
+          "type": "array"
+        },
+        "met_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Met By",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "needs_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Needs Kind"
+        },
+        "needs_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Needs Name"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "opened_by": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanPolicyOpenDTO"
+          },
+          "title": "Opened By",
+          "type": "array"
+        },
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Paths",
+          "type": "array"
+        },
+        "policy": {
+          "title": "Policy",
+          "type": "string"
+        },
+        "set_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Set At"
+        },
+        "set_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Set By"
+        },
+        "stand_ins": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanPolicyStandInDTO"
+          },
+          "title": "Stand Ins",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "signed_off",
+            "changes_requested",
+            "waiting",
+            "waived"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "waiver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanPolicyWaiverDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "org_id",
+        "policy",
+        "name",
+        "approvals",
+        "status"
+      ],
+      "title": "PlanGatePolicyDTO",
+      "type": "object"
+    },
+    "PlanGateRowDTO": {
+      "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
+      "properties": {
+        "changes_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changes By",
+          "type": "array"
+        },
+        "meets": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Meets",
+          "type": "array"
+        },
+        "met_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Met By",
+          "type": "array"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "required": {
+          "title": "Required",
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "signed_off",
+            "changes_requested",
+            "waiting",
+            "waived"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "sub": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sub"
+        },
+        "you": {
+          "default": false,
+          "title": "You",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "required",
+        "status"
+      ],
+      "title": "PlanGateRowDTO",
       "type": "object"
     },
     "PlanOfferDTO": {
@@ -6230,11 +8154,579 @@
       "title": "PlanOptionDTO",
       "type": "object"
     },
-    "PlanSectionDTO": {
-      "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
+    "PlanPolicyOpenDTO": {
+      "description": "Someone a review rule counts who has read the doc, and when they last did.",
       "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sub"
+      ],
+      "title": "PlanPolicyOpenDTO",
+      "type": "object"
+    },
+    "PlanPolicyStandInDTO": {
+      "description": "Someone an org admin named to sign for a review rule until ``until``.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At"
+        },
+        "by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "By"
+        },
+        "stand_in": {
+          "title": "Stand In",
+          "type": "string"
+        },
+        "until": {
+          "title": "Until",
+          "type": "number"
+        }
+      },
+      "required": [
+        "stand_in",
+        "until"
+      ],
+      "title": "PlanPolicyStandInDTO",
+      "type": "object"
+    },
+    "PlanPolicyWaiverDTO": {
+      "description": "An org admin's waiver of a review rule, for the revision on screen.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At"
+        },
+        "by": {
+          "title": "By",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "by",
+        "reason"
+      ],
+      "title": "PlanPolicyWaiverDTO",
+      "type": "object"
+    },
+    "PlanReplyDTO": {
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "from_supervisor": {
+          "default": false,
+          "title": "From Supervisor",
+          "type": "boolean"
+        },
         "id": {
           "title": "Id",
+          "type": "integer"
+        },
+        "sent": {
+          "default": false,
+          "title": "Sent",
+          "type": "boolean"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "author",
+        "text",
+        "at"
+      ],
+      "title": "PlanReplyDTO",
+      "type": "object"
+    },
+    "PlanRevisionDTO": {
+      "description": "One revision of a plan: the supervisor's proposal, the person's edit\nor accepted suggestion, or a teammate's text from the Library (``author``\nis teammate:<sub>); ``changed``, the sections it changed.",
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "changed": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changed",
+          "type": "array"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "source": {
+          "enum": [
+            "proposal",
+            "edit",
+            "suggestion"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rev",
+        "author",
+        "source",
+        "at"
+      ],
+      "title": "PlanRevisionDTO",
+      "type": "object"
+    },
+    "PlanRevisionDetailDTO": {
+      "$defs": {
+        "PlanDecisionDTO": {
+          "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
+          "properties": {
+            "challenge": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Challenge"
+            },
+            "confirmed": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Confirmed"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "mine": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Mine"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/$defs/PlanOptionDTO"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "votes": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "title": "Votes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "options"
+          ],
+          "title": "PlanDecisionDTO",
+          "type": "object"
+        },
+        "PlanOptionDTO": {
+          "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
+          "properties": {
+            "cons": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Cons",
+              "type": "array"
+            },
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "pros": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Pros",
+              "type": "array"
+            },
+            "touches": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Touches",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "PlanOptionDTO",
+          "type": "object"
+        },
+        "PlanSectionDTO": {
+          "description": "One section of a plan's revision: what a comment anchors to.\n``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or\nSVG source, and ``caption`` its figure caption).",
+          "properties": {
+            "caption": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Caption"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "markdown",
+              "enum": [
+                "markdown",
+                "mermaid",
+                "svg"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "markdown": {
+              "title": "Markdown",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "markdown"
+          ],
+          "title": "PlanSectionDTO",
+          "type": "object"
+        },
+        "PlanWorkerDTO": {
+          "description": "One worker of the proposed split: the files it expects to change and\nthe one test that proves its task done.",
+          "properties": {
+            "after": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "After",
+              "type": "array"
+            },
+            "agent_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Agent Id"
+            },
+            "files": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Files",
+              "type": "array"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "state": {
+              "default": "queued",
+              "enum": [
+                "queued",
+                "working",
+                "in review",
+                "merged",
+                "cancelled"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Task Id"
+            },
+            "test": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Test"
+            },
+            "test_state": {
+              "default": "not run",
+              "enum": [
+                "not run",
+                "failing",
+                "passing"
+              ],
+              "title": "Test State",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "title": "PlanWorkerDTO",
+          "type": "object"
+        }
+      },
+      "description": "An earlier revision's content: GET /v1/plans/{id}/revisions/{n}.",
+      "properties": {
+        "ask": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ask"
+        },
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "changed": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changed",
+          "type": "array"
+        },
+        "decisions": {
+          "items": {
+            "$ref": "#/$defs/PlanDecisionDTO"
+          },
+          "title": "Decisions",
+          "type": "array"
+        },
+        "lede": {
+          "title": "Lede",
+          "type": "string"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/PlanSectionDTO"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "source": {
+          "enum": [
+            "proposal",
+            "edit",
+            "suggestion"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "split": {
+          "items": {
+            "$ref": "#/$defs/PlanWorkerDTO"
+          },
+          "title": "Split",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rev",
+        "author",
+        "source",
+        "at",
+        "lede",
+        "sections",
+        "markdown",
+        "decisions",
+        "split"
+      ],
+      "title": "PlanRevisionDetailDTO",
+      "type": "object"
+    },
+    "PlanSectionDTO": {
+      "description": "One section of a plan's revision: what a comment anchors to.\n``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or\nSVG source, and ``caption`` its figure caption).",
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "default": "markdown",
+          "enum": [
+            "markdown",
+            "mermaid",
+            "svg"
+          ],
+          "title": "Kind",
           "type": "string"
         },
         "markdown": {
@@ -6252,6 +8744,300 @@
         "markdown"
       ],
       "title": "PlanSectionDTO",
+      "type": "object"
+    },
+    "PlanThreadDTO": {
+      "$defs": {
+        "PlanAnchorDTO": {
+          "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
+          "properties": {
+            "decision": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Decision"
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End"
+            },
+            "kind": {
+              "enum": [
+                "text",
+                "diagram",
+                "decision",
+                "section"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "option": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Option"
+            },
+            "quote": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Quote"
+            },
+            "section": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Section"
+            },
+            "start": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Start"
+            },
+            "state": {
+              "default": "current",
+              "enum": [
+                "current",
+                "moved",
+                "detached"
+              ],
+              "title": "State",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "PlanAnchorDTO",
+          "type": "object"
+        },
+        "PlanReplyDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "from_supervisor": {
+              "default": false,
+              "title": "From Supervisor",
+              "type": "boolean"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "sent": {
+              "default": false,
+              "title": "Sent",
+              "type": "boolean"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "author",
+            "text",
+            "at"
+          ],
+          "title": "PlanReplyDTO",
+          "type": "object"
+        }
+      },
+      "description": "A comment thread, or a suggestion (``before`` becomes ``after`` when\nthe author accepts it). ``sent``: a verdict carried it to the supervisor.",
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After"
+        },
+        "anchor": {
+          "$ref": "#/$defs/PlanAnchorDTO"
+        },
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "comment",
+            "suggestion"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "question": {
+          "default": false,
+          "title": "Question",
+          "type": "boolean"
+        },
+        "replies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanReplyDTO"
+          },
+          "title": "Replies",
+          "type": "array"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "sent": {
+          "default": false,
+          "title": "Sent",
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "resolved",
+            "accepted",
+            "rejected"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "author",
+        "text",
+        "anchor",
+        "status",
+        "at"
+      ],
+      "title": "PlanThreadDTO",
+      "type": "object"
+    },
+    "PlanUnconfirmedDTO": {
+      "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+      "properties": {
+        "approval_held": {
+          "default": false,
+          "title": "Approval Held",
+          "type": "boolean"
+        },
+        "can_stop_sharing": {
+          "default": false,
+          "title": "Can Stop Sharing",
+          "type": "boolean"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "offline",
+            "sign_in",
+            "key_unavailable",
+            "library_error",
+            "other_account"
+          ],
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "message"
+      ],
+      "title": "PlanUnconfirmedDTO",
       "type": "object"
     },
     "PlanVerdictDTO": {
@@ -6283,6 +9069,14 @@
         "at": {
           "title": "At",
           "type": "number"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
         },
         "comments": {
           "default": [],
@@ -8151,6 +10945,1342 @@
       "title": "SessionDTO",
       "type": "object"
     },
+    "SharedDesignDTO": {
+      "$defs": {
+        "PlanAnchorDTO": {
+          "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
+          "properties": {
+            "decision": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Decision"
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End"
+            },
+            "kind": {
+              "enum": [
+                "text",
+                "diagram",
+                "decision",
+                "section"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "option": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Option"
+            },
+            "quote": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Quote"
+            },
+            "section": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Section"
+            },
+            "start": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Start"
+            },
+            "state": {
+              "default": "current",
+              "enum": [
+                "current",
+                "moved",
+                "detached"
+              ],
+              "title": "State",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "PlanAnchorDTO",
+          "type": "object"
+        },
+        "PlanCommentDTO": {
+          "properties": {
+            "section": {
+              "title": "Section",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "text"
+          ],
+          "title": "PlanCommentDTO",
+          "type": "object"
+        },
+        "PlanDecisionDTO": {
+          "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
+          "properties": {
+            "challenge": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Challenge"
+            },
+            "confirmed": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Confirmed"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "mine": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Mine"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/$defs/PlanOptionDTO"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "votes": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "title": "Votes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "options"
+          ],
+          "title": "PlanDecisionDTO",
+          "type": "object"
+        },
+        "PlanGateDTO": {
+          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
+          "properties": {
+            "approval_refused": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Approval Refused"
+            },
+            "policies": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanGatePolicyDTO"
+              },
+              "title": "Policies",
+              "type": "array"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            },
+            "required": {
+              "title": "Required",
+              "type": "integer"
+            },
+            "reviewers": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanGateRowDTO"
+              },
+              "title": "Reviewers",
+              "type": "array"
+            },
+            "signed": {
+              "title": "Signed",
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "waiting",
+                "changes_requested",
+                "conflict",
+                "ready",
+                "closed"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "unconfirmed": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanUnconfirmedDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "waiting_on": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Waiting On",
+              "type": "array"
+            }
+          },
+          "required": [
+            "state",
+            "required",
+            "signed"
+          ],
+          "title": "PlanGateDTO",
+          "type": "object"
+        },
+        "PlanGatePolicyDTO": {
+          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today; ``asked_at``: the last Ask again; ``opened_by``:\nwho the rule counts has read the doc.",
+          "properties": {
+            "approvals": {
+              "title": "Approvals",
+              "type": "integer"
+            },
+            "asked_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Asked At"
+            },
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "eligible": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "matched": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Matched",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "needs_kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Kind"
+            },
+            "needs_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Name"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "opened_by": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyOpenDTO"
+              },
+              "title": "Opened By",
+              "type": "array"
+            },
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Paths",
+              "type": "array"
+            },
+            "policy": {
+              "title": "Policy",
+              "type": "string"
+            },
+            "set_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set At"
+            },
+            "set_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set By"
+            },
+            "stand_ins": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyStandInDTO"
+              },
+              "title": "Stand Ins",
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "waiver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanPolicyWaiverDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "when": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "When"
+            }
+          },
+          "required": [
+            "org_id",
+            "policy",
+            "name",
+            "approvals",
+            "status"
+          ],
+          "title": "PlanGatePolicyDTO",
+          "type": "object"
+        },
+        "PlanGateRowDTO": {
+          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
+          "properties": {
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "meets": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Meets",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "required": {
+              "title": "Required",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "sub": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sub"
+            },
+            "you": {
+              "default": false,
+              "title": "You",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "required",
+            "status"
+          ],
+          "title": "PlanGateRowDTO",
+          "type": "object"
+        },
+        "PlanOptionDTO": {
+          "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
+          "properties": {
+            "cons": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Cons",
+              "type": "array"
+            },
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "pros": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Pros",
+              "type": "array"
+            },
+            "touches": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Touches",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "PlanOptionDTO",
+          "type": "object"
+        },
+        "PlanPolicyOpenDTO": {
+          "description": "Someone a review rule counts who has read the doc, and when they last did.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PlanPolicyOpenDTO",
+          "type": "object"
+        },
+        "PlanPolicyStandInDTO": {
+          "description": "Someone an org admin named to sign for a review rule until ``until``.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "By"
+            },
+            "stand_in": {
+              "title": "Stand In",
+              "type": "string"
+            },
+            "until": {
+              "title": "Until",
+              "type": "number"
+            }
+          },
+          "required": [
+            "stand_in",
+            "until"
+          ],
+          "title": "PlanPolicyStandInDTO",
+          "type": "object"
+        },
+        "PlanPolicyWaiverDTO": {
+          "description": "An org admin's waiver of a review rule, for the revision on screen.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "title": "By",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "reason"
+          ],
+          "title": "PlanPolicyWaiverDTO",
+          "type": "object"
+        },
+        "PlanReplyDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "from_supervisor": {
+              "default": false,
+              "title": "From Supervisor",
+              "type": "boolean"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "sent": {
+              "default": false,
+              "title": "Sent",
+              "type": "boolean"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "author",
+            "text",
+            "at"
+          ],
+          "title": "PlanReplyDTO",
+          "type": "object"
+        },
+        "PlanRevisionDTO": {
+          "description": "One revision of a plan: the supervisor's proposal, the person's edit\nor accepted suggestion, or a teammate's text from the Library (``author``\nis teammate:<sub>); ``changed``, the sections it changed.",
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "changed": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changed",
+              "type": "array"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "source": {
+              "enum": [
+                "proposal",
+                "edit",
+                "suggestion"
+              ],
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "rev",
+            "author",
+            "source",
+            "at"
+          ],
+          "title": "PlanRevisionDTO",
+          "type": "object"
+        },
+        "PlanSectionDTO": {
+          "description": "One section of a plan's revision: what a comment anchors to.\n``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or\nSVG source, and ``caption`` its figure caption).",
+          "properties": {
+            "caption": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Caption"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "markdown",
+              "enum": [
+                "markdown",
+                "mermaid",
+                "svg"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "markdown": {
+              "title": "Markdown",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "markdown"
+          ],
+          "title": "PlanSectionDTO",
+          "type": "object"
+        },
+        "PlanThreadDTO": {
+          "description": "A comment thread, or a suggestion (``before`` becomes ``after`` when\nthe author accepts it). ``sent``: a verdict carried it to the supervisor.",
+          "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "After"
+            },
+            "anchor": {
+              "$ref": "#/$defs/PlanAnchorDTO"
+            },
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "before": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Before"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "comment",
+                "suggestion"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "question": {
+              "default": false,
+              "title": "Question",
+              "type": "boolean"
+            },
+            "replies": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanReplyDTO"
+              },
+              "title": "Replies",
+              "type": "array"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "sent": {
+              "default": false,
+              "title": "Sent",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "open",
+                "resolved",
+                "accepted",
+                "rejected"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "rev",
+            "author",
+            "text",
+            "anchor",
+            "status",
+            "at"
+          ],
+          "title": "PlanThreadDTO",
+          "type": "object"
+        },
+        "PlanUnconfirmedDTO": {
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "properties": {
+            "approval_held": {
+              "default": false,
+              "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_stop_sharing": {
+              "default": false,
+              "title": "Can Stop Sharing",
+              "type": "boolean"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "offline",
+                "sign_in",
+                "key_unavailable",
+                "library_error",
+                "other_account"
+              ],
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "message"
+          ],
+          "title": "PlanUnconfirmedDTO",
+          "type": "object"
+        },
+        "PlanVerdictDTO": {
+          "properties": {
+            "approved": {
+              "title": "Approved",
+              "type": "boolean"
+            },
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "comments": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanCommentDTO"
+              },
+              "title": "Comments",
+              "type": "array"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "picks": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Picks",
+              "type": "object"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "approved",
+            "at",
+            "rev"
+          ],
+          "title": "PlanVerdictDTO",
+          "type": "object"
+        },
+        "PlanWorkerDTO": {
+          "description": "One worker of the proposed split: the files it expects to change and\nthe one test that proves its task done.",
+          "properties": {
+            "after": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "After",
+              "type": "array"
+            },
+            "agent_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Agent Id"
+            },
+            "files": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Files",
+              "type": "array"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "state": {
+              "default": "queued",
+              "enum": [
+                "queued",
+                "working",
+                "in review",
+                "merged",
+                "cancelled"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Task Id"
+            },
+            "test": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Test"
+            },
+            "test_state": {
+              "default": "not run",
+              "enum": [
+                "not run",
+                "failing",
+                "passing"
+              ],
+              "title": "Test State",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "title": "PlanWorkerDTO",
+          "type": "object"
+        }
+      },
+      "description": "A design someone else shared, as the person reviewing it reads it\n(brindle.pro.shared_reader): ``id`` is its Library doc id and it has no\nplan on this machine. ``can_*``: what the Library lets this account do,\n``can_sign_off`` false only when it can't be one of the signers.\n``author``: who wrote it, ``person`` if that is this account.",
+      "properties": {
+        "ask": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ask"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        },
+        "can_comment": {
+          "default": false,
+          "title": "Can Comment",
+          "type": "boolean"
+        },
+        "can_edit": {
+          "default": false,
+          "title": "Can Edit",
+          "type": "boolean"
+        },
+        "can_sign_off": {
+          "default": false,
+          "title": "Can Sign Off",
+          "type": "boolean"
+        },
+        "can_suggest": {
+          "default": false,
+          "title": "Can Suggest",
+          "type": "boolean"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "decisions": {
+          "items": {
+            "$ref": "#/$defs/PlanDecisionDTO"
+          },
+          "title": "Decisions",
+          "type": "array"
+        },
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanGateDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "lede": {
+          "title": "Lede",
+          "type": "string"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        },
+        "me": {
+          "title": "Me",
+          "type": "string"
+        },
+        "queued": {
+          "title": "Queued",
+          "type": "integer"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "revisions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanRevisionDTO"
+          },
+          "title": "Revisions",
+          "type": "array"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/PlanSectionDTO"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "session": {
+          "title": "Session",
+          "type": "string"
+        },
+        "signed_off": {
+          "default": false,
+          "title": "Signed Off",
+          "type": "boolean"
+        },
+        "split": {
+          "items": {
+            "$ref": "#/$defs/PlanWorkerDTO"
+          },
+          "title": "Split",
+          "type": "array"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "redirected",
+            "approved"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "team_ended": {
+          "default": false,
+          "title": "Team Ended",
+          "type": "boolean"
+        },
+        "threads": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanThreadDTO"
+          },
+          "title": "Threads",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanVerdictDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "session",
+        "title",
+        "rev",
+        "state",
+        "markdown",
+        "lede",
+        "sections",
+        "decisions",
+        "split",
+        "queued",
+        "created_at",
+        "me"
+      ],
+      "title": "SharedDesignDTO",
+      "type": "object"
+    },
     "StoppedAgentDTO": {
       "description": "An agent stopped because the provider's credentials were refused (failed_why auth).",
       "properties": {
@@ -8920,6 +13050,10 @@
       "path": "/v1/analysis-docs/{id}/export"
     },
     {
+      "method": "PUT",
+      "path": "/v1/analysis-docs/{id}/folder"
+    },
+    {
       "method": "DELETE",
       "path": "/v1/analysis-docs/{id}/share"
     },
@@ -9124,6 +13258,22 @@
       "path": "/v1/launch-env"
     },
     {
+      "method": "POST",
+      "path": "/v1/library/designs/{id}/question"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/library/folders"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/folders"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/library/people"
+    },
+    {
       "method": "GET",
       "path": "/v1/meta"
     },
@@ -9217,7 +13367,71 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/comments"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/confirm"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/decide"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/edit"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/policy-ask"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/policy-override"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/policy-preview"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/reviewers"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}/revisions/{n}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/share"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/sign-off"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/stop-sharing"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/suggestions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/sync"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/threads/{tid:int}/accept"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/threads/{tid:int}/reject"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/threads/{tid:int}/resolve"
     },
     {
       "method": "GET",
@@ -9321,6 +13535,18 @@
     },
     {
       "method": "GET",
+      "path": "/v1/review-policies"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/review-policies"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/review-policies/draft-impact"
+    },
+    {
+      "method": "GET",
       "path": "/v1/routing"
     },
     {
@@ -9418,6 +13644,30 @@
     {
       "method": "POST",
       "path": "/v1/setup/codex-hook"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared-designs/{doc_id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/comments"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/sign-offs"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/suggestions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/threads/{tid:int}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/votes"
     },
     {
       "method": "GET",

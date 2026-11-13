@@ -2255,7 +2255,7 @@ def learning_seed() -> None:
 
 
 docs_app = typer.Typer(no_args_is_help=True,
-                       help="Your personal library of analysis deliverables (brindle Pro).")
+                       help="Your personal library of deliverables (brindle Pro).")
 app.add_typer(docs_app, name="docs")
 
 
@@ -2276,7 +2276,7 @@ def _docs_call(method: str, path: str, body: dict | None = None) -> dict:
     try:
         return analysis_docs.api(method, path, body)
     except (auth.AuthError, RuntimeError) as e:
-        _fail(f"analysis docs: {e}")
+        _fail(f"library: {e}")
         raise
 
 
@@ -2297,7 +2297,7 @@ def docs_list() -> None:
     try:
         sub = analysis_docs.require_entitlement().sub
     except RuntimeError as e:
-        _fail(f"analysis docs: {e}")
+        _fail(f"library: {e}")
     resp = _docs_call("GET", f"/analysis-docs?scope_kind=user&scope_id={sub}")
     for d in resp.get("docs") or []:
         typer.echo(f"{d.get('doc_id')}  v{d.get('version', 1)}  {d.get('title', '')}")
@@ -2349,9 +2349,9 @@ def docs_export(doc_id: str = typer.Argument(..., help="Document id."),
     d = _docs_call("GET", f"/analysis-docs/{doc_id}/export?format={fmt}&destination=download")
     data = d.get(auth.BINARY_KEY)
     if not isinstance(data, bytes):
-        _fail("analysis docs: the export response was not binary")
+        _fail("library: the export response was not binary")
     if not data:
-        _fail("analysis docs: the export came back empty")
+        _fail("library: the export came back empty")
     name = f"{doc_id}.{fmt}"
     Path(out).mkdir(parents=True, exist_ok=True)
     (Path(out) / name).write_bytes(data)
@@ -2365,9 +2365,9 @@ def _docs_switch(on: bool, name: str) -> None:
     try:
         analysis_docs.set_switch(on, name=name)
     except (auth.AuthError, RuntimeError) as e:
-        _fail(f"analysis docs: {e}")
+        _fail(f"library: {e}")
     state = "on" if on else "off"
-    typer.echo(f"storing analysis deliverables is {state}" if name == "store" else f"analysis docs: {name} is {state}")
+    typer.echo(f"storing library items is {state}" if name == "store" else f"library: {name} is {state}")
 
 
 _SWITCH_HELP = ("Which of your own switches: store (the default), share, assist, prompt_analysis "
@@ -2376,13 +2376,13 @@ _SWITCH_HELP = ("Which of your own switches: store (the default), share, assist,
 
 @docs_app.command("on")
 def docs_on(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
-    """Turn one of your switches on; without --switch, store your analysis deliverables after they merge."""
+    """Turn one of your switches on; without --switch, store approved plans in the Library after they merge."""
     _docs_switch(True, switch)
 
 
 @docs_app.command("off")
 def docs_off(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
-    """Turn one of your switches off; without --switch, stop storing your analysis deliverables."""
+    """Turn one of your switches off; without --switch, stop storing approved plans in the Library."""
     _docs_switch(False, switch)
 
 

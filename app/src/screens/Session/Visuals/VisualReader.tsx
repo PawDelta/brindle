@@ -14,8 +14,8 @@ import { isTauri } from "@tauri-apps/api/core";
 import { clipboardAttachments, listenForDrops, type Attachment } from "../../../api/attachments";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, main, mono } from "../../../components/ui";
-import type { PlansClient, VisualsClient } from "./client";
-import { BackButton, KeepButton, message, useEscBack } from "./chrome";
+import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
+import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { PlanReader } from "./PlanReader";
 import { VisualFrame, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
 import { ExportButton } from "./ExportButton";
@@ -83,7 +83,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   repo?: string;
   /* The engine marked this revision read. */
   onRead?(id: string, rev: number): void;
-  client: VisualsClient & Partial<ExportClient> & Partial<PlansClient> & Partial<Pick<DaemonClient, "attach">>;
+  client: VisualsClient & Partial<ExportClient> & Partial<PlansClient> & Partial<PlanDocClient> & Partial<Pick<DaemonClient, "attach">>;
   /* The visual opened; null when the session has no such visual (gone, or a link to another session's). */
   visual: VisualDTO | null;
   /* The session's visuals aren't read yet. */
@@ -114,7 +114,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   const source: VisualSource | null = visual ? { kind: "session", id: visual.id, rev: visual.rev } : null;
   if (visual?.kind === "plan" && client.plan && client.decidePlan) {
     // A plan is brindle's own page, rendered here from its markdown: no frame.
-    return <PlanReader client={client as VisualsClient & PlansClient & Partial<ExportClient>} visual={visual} repo={repo} onBack={onBack} asking={asking} onChanged={onAnswered} />;
+    return <PlanReader client={client as VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">>} visual={visual} repo={repo} onBack={onBack} asking={asking} onChanged={onAnswered} />;
   }
   return (
     <ReaderChrome
@@ -137,18 +137,6 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
       }} />}
     />
   );
-}
-
-const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
-
-/* A browser File (picker, paste) as the upload body: its bytes, base64. */
-function fileAttachment(file: File): Promise<Attachment> {
-  return new Promise((done, fail) => {
-    const reader = new FileReader();
-    reader.onload = () => done({ name: file.name || "pasted-file", data_base64: String(reader.result).split(",")[1] ?? "" });
-    reader.onerror = () => fail(new Error("couldn't read the file"));
-    reader.readAsDataURL(file);
-  });
 }
 
 /* The question, the options as host buttons, a note, and Send. Answered: what was picked. */

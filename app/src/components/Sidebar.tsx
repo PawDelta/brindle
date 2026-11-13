@@ -20,9 +20,10 @@
    session stays listed under it). Clicking a session opens its
    provider session on the supervisor; clicking an agent opens the session
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
-   jump to a session, ⌘N starts one. At the foot, the profile pill combines
-   initials and usage and opens Account › Usage; the terminal switch sits
-   beside it. Updates live in the Inbox and Settings › About. There is no right-hand panel: this is
+   jump to a session, ⌘N starts one, ⌘L opens the Library. At the foot, the profile pill combines
+   initials and usage and opens Account › Usage; the Library button and the terminal switch sit
+   beside it. Open, the Library takes this column for its own navigation (LibraryRail), as
+   Settings does (SettingsRail), each with "← Sessions". Updates live in the Inbox and Settings › About. There is no right-hand panel: this is
    where brindle's layer lives. The site's surfaces, purple (branch) only
    as the accent (styles.css .side-*). */
 
@@ -31,7 +32,12 @@ import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { AgentDTO, GoalDTO, SessionDTO } from "../api/schema";
-import { inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
+import { inLibrary, inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
+import { LibraryIcon } from "./icons";
+import { LibraryRail, type LibraryCounts } from "./LibraryRail";
+import { useLibraryFolders } from "./useLibraryFolders";
+import { recentEntries, useLibraryDocs } from "./useLibraryDocs";
+import { docStages, stageCounts } from "../screens/Knowledge/libraryStages";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
@@ -51,6 +57,11 @@ import { TerminalToggle } from "./TerminalPanel";
 
 export interface SidebarProps {
   onBackFromSettings?(): void;
+  /* The foot's Library button and ⌘L: opens the Library, or from it, goes back (the app's own;
+     without one the button opens the Library and goes back as "← Sessions" does). */
+  onToggleLibrary?(): void;
+  /* What the open Library holds, for its navigation's counts. */
+  libraryCounts?: LibraryCounts;
   route: Route;
   navigate(route: Route): void;
   /* Fetch the snapshot and inbox again (Sync.refresh), after a decision made here. */
@@ -126,6 +137,31 @@ function AccountButton({ route, navigate, provider, warning, failed }: Pick<Side
     </button>
   );
 }
+
+/* The foot's Library button (icon only): beside the terminal
+   switch on every screen, a dot while designs wait on the person, and on (green) while the
+   Library is open. Pressed again, or ⌘L, it goes back to where the person was. */
+function LibraryButton({ open, waiting, onToggle }: { open: boolean; waiting: number; onToggle(): void }) {
+  const needs = waiting > 0 ? `${waiting} need${waiting === 1 ? "s" : ""} you` : null;
+  return (
+    <button
+      type="button"
+      className={`relative inline-flex h-5 w-[26px] flex-none items-center justify-center rounded-md border ${open ? "border-pass/45 bg-pass-soft text-pass" : "border-line text-ink-3 hover:border-ink-3 hover:text-ink"}`}
+      aria-label={needs ? `Library, ${needs}` : "Library"}
+      aria-pressed={open}
+      title={`Library${needs ? ` · ${needs}` : ""} (⌘L)`}
+      data-testid="library-button"
+      onClick={onToggle}
+    >
+      <LibraryIcon size={14} />
+      {needs && <span className="absolute right-0.5 top-0.5 size-[7px] rounded-full bg-branch ring-2 ring-canvas-2" data-testid="library-dot" aria-hidden />}
+    </button>
+  );
+}
+
+/* Whether a key press came from a terminal, where Ctrl+L clears the screen. */
+const inTerminal = (target: EventTarget | null) => target instanceof Element && target.closest(".xterm") !== null;
+const onMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
 /* The mockup's rows: the keyboard's cursor (a tone, not a box; the branch
    ring comes back while the list has keyboard focus), the repo heading, the
@@ -660,9 +696,26 @@ function Handle({ height, onChange }: { height: number; onChange(next: number): 
 const sheetOnly = (a: Extract<Route, { screen: "session" }>, b: Extract<Route, { screen: "session" }>) =>
   a.root === b.root && a.repo === b.repo && (a.agent ?? a.root) === (b.agent ?? b.root) && JSON.stringify(a.sheet ?? null) !== JSON.stringify(b.sheet ?? null);
 
-export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings }: SidebarProps) {
+export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings, onToggleLibrary, libraryCounts }: SidebarProps) {
   const tab = settingsTab(route);
   const railOpen = inProfileRail(route);
+  const libraryOpen = inLibrary(route);
+  const back = useCallback(() => (onBackFromSettings ? onBackFromSettings() : navigate({ screen: "new" })), [onBackFromSettings, navigate]);
+  const toggleLibrary = useCallback(() => {
+    if (onToggleLibrary) onToggleLibrary();
+    else if (libraryOpen) back();
+    else navigate({ screen: "knowledge" });
+  }, [onToggleLibrary, libraryOpen, back, navigate]);
+  // The Library's folders (see useLibraryFolders); a daemon that can't say shows none.
+  const folderClient = useContext(DaemonContext);
+  const { folders, create: createFolder, move: moveDoc } = useLibraryFolders(folderClient, libraryOpen);
+  // Designs waiting on the person: the plans in the Inbox.
+  const plansWaiting = useAppState((s) => s.inbox.filter((item) => item.kind === "plan").length);
+  // Recent designs, and the designs the Inbox places at a stage (shared docs and the review queue).
+  const libraryDocs = useLibraryDocs(folderClient, libraryOpen);
+  const recentDocs = useMemo(() => recentEntries(libraryDocs.docs), [libraryDocs]);
+  const inbox = useAppState((s) => s.inbox);
+  const docStageCounts = useMemo(() => stageCounts(libraryDocs.docs, docStages(inbox), libraryDocs.designs), [inbox, libraryDocs]);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
   const [folded, setFolded] = useState<Set<string>>(new Set());
@@ -782,10 +835,17 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
     e.preventDefault();
   };
 
-  // ⌘1-9 (Ctrl on Linux and Windows) jump to a live session; ⌘N starts one.
+  // ⌘1-9 (Ctrl on Linux and Windows) jump to a live session; ⌘N starts one; ⌘L opens the Library and,
+  // from it, goes back (Ctrl+L off a Mac, but never from a terminal, where it clears the screen).
   useEffect(() => {
     const jump = (e: globalThis.KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() === "l") {
+        if (e.metaKey ? e.ctrlKey : onMac() || inTerminal(e.target)) return;
+        e.preventDefault();
+        toggleLibrary();
+        return;
+      }
       if (e.key === "n") {
         e.preventDefault();
         navigate({ screen: "new" });
@@ -800,7 +860,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
     };
     window.addEventListener("keydown", jump);
     return () => window.removeEventListener("keydown", jump);
-  }, [live, navigate]);
+  }, [live, navigate, toggleLibrary]);
 
   let index = 0;
   return (
@@ -822,8 +882,9 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
           New session
         </button>
       </div>
-      {railOpen && <SettingsRail tab={tab} page={railPage(route)} onBack={onBackFromSettings ?? (() => navigate({ screen: "new" }))} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} onPage={(page) => navigate({ screen: page })} />}
-      <div hidden={railOpen} className={railOpen ? "hidden" : "contents"}>
+      {railOpen && <SettingsRail tab={tab} page={railPage(route)} onBack={back} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} onPage={(page) => navigate({ screen: page })} />}
+      {route.screen === "knowledge" && <LibraryRail route={route} counts={{ ...libraryCounts, stages: docStageCounts }} recent={recentDocs} folders={folders} onCreateFolder={folderClient ? createFolder : undefined} onMoveDoc={folderClient ? moveDoc : undefined} navigate={navigate} onBack={back} />}
+      <div hidden={railOpen || libraryOpen} className={railOpen || libraryOpen ? "hidden" : "contents"}>
       <InboxEntry route={route} navigate={navigate} />
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
@@ -920,6 +981,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
         <div className="flex h-10 min-w-0 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap" role="group" aria-label="Sidebar foot" data-testid="sidebar-foot-row">
           <AccountButton route={route} navigate={navigate} provider={shown} warning={warning} failed={usageError != null} />
           <span className="flex-1" />
+          <LibraryButton open={libraryOpen} waiting={plansWaiting} onToggle={toggleLibrary} />
           <TerminalToggle />
         </div>
       </div>

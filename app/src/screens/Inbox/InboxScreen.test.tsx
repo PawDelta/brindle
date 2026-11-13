@@ -182,6 +182,20 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it("review requested card opens the shared doc, and the author's cards open it too", async () => {
+    const asked: InboxItemDTO = { kind: "review_requested", reason: "Review requested", detail: "Org presets", doc: "lib-1", request_id: "p1" };
+    const changes: InboxItemDTO = { kind: "changes_requested", reason: "Changes requested", detail: "Other plan", doc: "lib-2", request_id: "p2" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [asked, changes] });
+    const { sync, onNavigate } = mount(daemon);
+    await waitFor(() => expect(card("review_requested")).toBeTruthy());
+    expect(card("changes_requested")).toBeTruthy();
+    fireEvent.click(within(card("review_requested")).getByRole("button", { name: "Open" }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "shared-design", doc: "lib-1", title: "Org presets", repo: REPO });
+    fireEvent.click(within(card("changes_requested")).getByRole("button", { name: "Open" }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: "lib-2" });
+    sync.stop();
+  });
+
   it("groups the queue by session as banner cards, each going to its session and agent; an org notice is a card to read", async () => {
     const daemon = new FakeDaemon({
       repos: [{ repo_root: REPO, name: "proj" }],

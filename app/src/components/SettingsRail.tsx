@@ -37,12 +37,10 @@ export function AccountAvatar() {
 
 const GROUPS: Partial<Record<SettingsTab, string>> = { account: "You", general: "brindle", project: "This project" };
 
-const PAGES: { id: RailPage; label: string; path: string }[] = [
-  { id: "knowledge", label: "Knowledge", path: "M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zM4 19a2 2 0 0 1 2-2h13M9 7h6" },
-  { id: "agents", label: "Agents", path: "M12 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6M5 20v-1a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v1M4 9h2M18 9h2" },
-];
+const AGENTS_ICON = "M12 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6M5 20v-1a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v1M4 9h2M18 9h2";
 
-/* `tab`: the open Settings tab, null while Knowledge or Agents (`page`) is open. */
+/* `tab`: the open Settings tab, null while Agents (`page`) is open. Agents is a page of its
+   own, listed under "brindle" after General. */
 export function SettingsRail({ tab, page = null, onTab, onPage, onBack }: { tab: SettingsTab | null; page?: RailPage | null; onTab(tab: SettingsTab): void; onPage?(page: RailPage): void; onBack(): void }) {
   const account = useAppState((s) => s.account);
   return (
@@ -54,23 +52,6 @@ export function SettingsRail({ tab, page = null, onTab, onPage, onBack }: { tab:
         <AccountAvatar />
         <span className="truncate text-[12.5px] font-medium">{account?.signed_in ? account.name?.trim() || account.email || "Signed in" : "Sign in"}</span>
       </div>
-      <nav aria-label="Knowledge and agents" className="flex flex-col gap-px">
-        <div className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">Library</div>
-        {PAGES.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            aria-current={page === item.id ? "page" : undefined}
-            className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12.5px] hover:bg-surface-2 hover:text-ink ${page === item.id ? "bg-surface-2 font-medium text-ink shadow-[inset_2px_0_0_var(--pass)] [&_svg]:text-pass" : "text-ink-2"}`}
-            onClick={() => onPage?.(item.id)}
-          >
-            <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-              <path d={item.path} />
-            </svg>
-            {item.label}
-          </button>
-        ))}
-      </nav>
       <div role="tablist" aria-label="Settings" aria-orientation="vertical" className="flex flex-col gap-px">
         {SETTINGS_TABS.map((item, index) => (
           <Fragment key={item.id}>
@@ -96,6 +77,19 @@ export function SettingsRail({ tab, page = null, onTab, onPage, onBack }: { tab:
               <Icon id={item.id} />
               {item.label}
             </button>
+            {item.id === "general" && (
+              <button
+                type="button"
+                aria-current={page === "agents" ? "page" : undefined}
+                className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12.5px] hover:bg-surface-2 hover:text-ink ${page === "agents" ? "bg-surface-2 font-medium text-ink shadow-[inset_2px_0_0_var(--pass)] [&_svg]:text-pass" : "text-ink-2"}`}
+                onClick={() => onPage?.("agents")}
+              >
+                <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <path d={AGENTS_ICON} />
+                </svg>
+                Agents
+              </button>
+            )}
           </Fragment>
         ))}
       </div>

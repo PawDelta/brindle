@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from starlette.requests import Request
+from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
@@ -163,8 +164,290 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
     from brindle import plans
 
     p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
-                     body.get("picks"), body.get("comments"), _get(body, "note"), person=True)
+                     body.get("picks"), body.get("comments"), _get(body, "note"), person=True,
+                     attachments=_get(body, "attachments", list))
     return plans.to_dto(db, p)
+
+
+# The design doc (brindle.plan_docs). Like decide, only the person reaches
+# these: each answers with the plan as it is now.
+
+
+def _plan_now(db: DB, plan_id: str) -> Any:
+    from brindle import plans
+
+    return plans.to_dto(db, plans.get(db, plan_id))
+
+
+@_json
+def plan_revision(db: DB, request: Request) -> Any:
+    from brindle import plan_docs
+
+    return plan_docs.revision_dto(db, request.path_params["id"], request.path_params["n"])
+
+
+def plan_comment(db: DB, params: dict, body: dict) -> Any:
+    """A comment anchored on the revision on screen, or (``parent``) a reply."""
+    from brindle import plan_docs
+
+    question = _get(body, "question", bool, default=False)
+    tid = plan_docs.comment(db, params["id"], body.get("rev"), _get(body, "anchor", dict), body.get("text"),
+                           _get(body, "attachments", list), parent=_get(body, "parent", int), question=question)
+    if question:
+        from brindle.pro import doc_questions
+
+        return JSONResponse(_plan_now(db, params["id"]), background=BackgroundTask(
+            doc_questions.after_reply, plan_id=params["id"], thread_id=tid))
+    return _plan_now(db, params["id"])
+
+
+def doc_question(db: DB, params: dict, body: dict) -> Any:
+    """The remote doc reader has saved a question; route it on this machine."""
+    from brindle.pro import doc_questions
+
+    from brindle.pro import shared_docs
+
+    owner = shared_docs._require_team(None).sub
+    if not owner:
+        raise ServiceError("forbidden", "sign in to ask your supervisor", 403)
+    thread = _get(body, "thread", int, required=True)
+    return JSONResponse({"state": "queued"}, background=BackgroundTask(
+        doc_questions.after_reply, doc_id=params["id"], thread_id=thread, owner=owner,
+        repo_root=_get(body, "repo")))
+
+
+def plan_resolve(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.resolve(db, params["id"], params["tid"], _get(body, "resolved", bool, default=True))
+    return _plan_now(db, params["id"])
+
+
+def plan_suggest(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.suggest(db, params["id"], body.get("rev"), body.get("section"), body.get("start"),
+                      body.get("before"), body.get("after"), body.get("text"), _get(body, "attachments", list))
+    return _plan_now(db, params["id"])
+
+
+def plan_accept(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.accept(db, params["id"], params["tid"], body.get("rev"))
+    return _plan_now(db, params["id"])
+
+
+def plan_reject(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.reject(db, params["id"], params["tid"])
+    return _plan_now(db, params["id"])
+
+
+def plan_edit(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.edit(db, params["id"], body.get("rev"), body.get("section"), body.get("start"),
+                   body.get("before"), body.get("after"))
+    return _plan_now(db, params["id"])
+
+
+def plan_confirm(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.confirm(db, params["id"], body.get("rev"), body.get("decision"), body.get("option"))
+    return _plan_now(db, params["id"])
+
+
+# Team review through the Library (brindle.pro.shared_docs). Each answers with
+# the plan as it is now, its build gate included.
+
+
+def _library(db: DB, plan_id: str, work: Callable[[Any], Any]) -> Any:
+    from brindle import redact
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import auth, shared_docs
+
+    try:
+        work(shared_docs)
+    except (RuntimeError, auth.TransportError) as e:    # unreachable or refused: not signed out
+        err = actions.upstream_error(e)
+        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
+    return _plan_now(db, plan_id)
+
+
+def plan_share(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.share(db, params["id"], body.get("scope"),
+                                                          reviewers=body.get("reviewers")))
+
+
+def plan_reviewers(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.set_reviewers(db, params["id"], body.get("reviewers")))
+
+
+def plan_sync(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.sync(db, params["id"]))
+
+
+def plan_stop_sharing(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import shared_docs
+
+    shared_docs.stop_sharing(db, params["id"], body.get("rev"))
+    return _plan_now(db, params["id"])
+
+
+def plan_sign_off(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.sign_off(db, params["id"], body.get("rev")))
+
+
+def plan_policy_override(db: DB, params: dict, body: dict) -> Any:
+    """An org admin's waiver of a review rule, or a stand-in for it. Like
+    decide, only the person reaches this; the Library checks they are an admin."""
+    from brindle.pro import review_policies
+
+    return _library(db, params["id"], lambda sd: review_policies.override(
+        db, params["id"], body.get("rev"), body.get("org_id"), body.get("policy"), body.get("action"),
+        body.get("reason"), stand_in=body.get("stand_in"), until=body.get("until")))
+
+
+def plan_policy_ask(db: DB, params: dict, body: dict) -> Any:
+    """An org admin asks a waiting rule's people again. Only the person reaches this."""
+    from brindle.pro import review_policies
+
+    return _library(db, params["id"], lambda sd: review_policies.ask_again(
+        db, params["id"], body.get("rev"), body.get("org_id"), body.get("policy")))
+
+
+def plan_policy_preview(db: DB, params: dict, body: dict) -> Any:
+    """The org rules that would cover this plan once it is shared, from the
+    files its revision on screen says it will change, for the share panel."""
+    from brindle import plan_docs
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    paths =review_policies.design_paths(plan_docs.revision(db, params["id"]))
+    got = actions.docs_org_api("POST", "review-policies/preview", {"paths": paths, "labels": []}).get("policy_reviewers")
+    return {"policies": [r for r in map(review_policies.preview_row, got if isinstance(got, list) else []) if r]}
+
+
+@_json
+def review_policies_read(db: DB, request: Request) -> Any:
+    """An org admin's settings page: the rules, the teams and roles they can
+    name, and the designs each covers now. The Library checks the permission."""
+    from brindle.daemon import routes_actions as actions
+
+    repo = request.query_params.get("repo") or None
+    rules = actions.docs_org_api("GET", "review-policies", repo=repo)
+    org = rules.get("org_id")      # the rest is of the org the rules were, even if the active one changes meanwhile
+    read = lambda tail: actions.docs_org_api("GET", tail, repo=repo, org_id=org)  # noqa: E731
+    return {**rules, "directory": read("review-policies/directory"), "in_review": read("review-policies/in-review")}
+
+
+def review_policies_save(db: DB, params: dict, body: dict) -> Any:
+    """Replace the org's rules. ``org_id`` is the org the form was loaded for;
+    who may save is the Library's to say, so a custom role with the control
+    permission is accepted."""
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    return actions.docs_org_api("PUT", "review-policies", review_policies.save_body(body), repo=body.get("repo"),
+                                org_id=body["org_id"])
+
+
+def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
+    """What saving a draft list would do to the designs in review. Writes nothing."""
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import review_policies
+
+    return actions.docs_org_api("POST", "review-policies/draft-impact", review_policies.save_body(body, draft=True),
+                                repo=body.get("repo"), org_id=body["org_id"])
+
+
+# A design shared by someone else (brindle.pro.shared_reader), by its Library
+# doc id. Only the person reaches these; each answers with the design as the
+# Library has it now, and nothing is kept here.
+
+
+def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
+    from brindle import redact
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import analysis_docs, auth, shared_reader
+
+    actions._docs_entitlement(repo, analysis_docs._session()[1])   # signed out or not entitled: a 402, and the app drops the doc
+    try:
+        return work(shared_reader)
+    except (RuntimeError, auth.TransportError) as e:    # unreachable or refused
+        if isinstance(e, analysis_docs.Refused) and e.status == 401:      # still refused after a token refresh; a 401 would read as the daemon's
+            raise ServiceError("signed_out", "sign in to brindle again to read this design", 402) from e
+        if isinstance(e, analysis_docs.Refused) and e.code == "key_unavailable":
+            raise ServiceError(e.code, redact.mask(str(e)), 503) from e   # the org's key is revoked: the doc is gone for now
+        err = actions.upstream_error(e)
+        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
+
+
+@_json
+def shared_design(db: DB, request: Request) -> Any:
+    doc = request.path_params["doc_id"]
+    return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc))
+
+
+def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
+    """A comment, a reply (``parent``), or a question for the person's own
+    supervisor, which starts it only once this answer has been written."""
+    doc, repo, parent = params["doc_id"], _get(body, "repo"), _get(body, "parent", int)
+    if parent is not None:
+        return _shared_design(repo, lambda r: r.reply(doc, body.get("rev"), parent, body.get("text")))
+    question = _get(body, "question", bool, default=False)
+    design = _shared_design(repo, lambda r: r.comment(doc, body.get("rev"), _get(body, "anchor", dict), body.get("text"),
+                                                      question=question))
+    if not question:
+        return design
+    from brindle.pro import doc_questions, shared_reader
+
+    thread = shared_reader.asked_thread(design, body.get("text"))
+    if thread is None:
+        log.warning("brindle: a question saved on design %s wasn't found in the Library's answer", doc)
+        return design
+    return JSONResponse(design, background=BackgroundTask(
+        doc_questions.after_reply, doc_id=doc, thread_id=thread, owner=design["me"], repo_root=repo))
+
+
+def shared_design_suggest(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.suggest(
+        params["doc_id"], body.get("rev"), body.get("section"), body.get("start"), body.get("before"), body.get("after"),
+        body.get("text", "")))
+
+
+def shared_design_thread(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.act(params["doc_id"], params["tid"], body.get("rev"), body.get("action")))
+
+
+def shared_design_vote(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.vote(params["doc_id"], body.get("rev"), body.get("decision"),
+                                                               body.get("option")))
+
+
+def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.sign_off(params["doc_id"], body.get("rev")))
+
+
+@_json
+def library_people(db: DB, request: Request) -> Any:
+    """The people of the person's org, to pick reviewers from, leaving out
+    the person (``me``). ``admin_org``: the org whose review rules the doc
+    offers them an override of. Only what to show: the Library decides who may."""
+    from urllib.parse import quote
+
+    from brindle.daemon import routes_actions as actions
+
+    ent = actions._docs_entitlement(request.query_params.get("repo") or None)
+    if not ent.org_id:
+        return {"people": []}
+    members = actions.docs_api("GET", f"/orgs/{quote(ent.org_id, safe='')}/members").get("members")
+    return {"people": [{"sub": m["sub"], "email": m.get("email") or ""} for m in members or []
+                       if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub],
+            "me": ent.sub, "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
 
 
 @_json
@@ -185,6 +468,7 @@ def kept_page(db: DB, request: Request) -> Path:
 
 
 ROUTES = [
+    Route("/v1/library/designs/{id}/question", _endpoint(doc_question), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-input", _endpoint(visual_input), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-offer", session_offer),
     Route("/v1/sessions/{id:path}/visual-offer", _endpoint(resolve_offer), methods=["POST"]),
@@ -198,6 +482,32 @@ ROUTES = [
     Route("/v1/visuals/{id}/snapshot", _endpoint(snapshot), methods=["POST"]),
     Route("/v1/plans/{id}", plan),
     Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
+    Route("/v1/plans/{id}/revisions/{n}", plan_revision),
+    Route("/v1/plans/{id}/comments", _endpoint(plan_comment), methods=["POST"]),
+    Route("/v1/plans/{id}/suggestions", _endpoint(plan_suggest), methods=["POST"]),
+    Route("/v1/plans/{id}/edit", _endpoint(plan_edit), methods=["POST"]),
+    Route("/v1/plans/{id}/confirm", _endpoint(plan_confirm), methods=["POST"]),
+    Route("/v1/plans/{id}/threads/{tid:int}/resolve", _endpoint(plan_resolve), methods=["POST"]),
+    Route("/v1/plans/{id}/threads/{tid:int}/accept", _endpoint(plan_accept), methods=["POST"]),
+    Route("/v1/plans/{id}/threads/{tid:int}/reject", _endpoint(plan_reject), methods=["POST"]),
+    Route("/v1/plans/{id}/share", _endpoint(plan_share), methods=["POST"]),
+    Route("/v1/plans/{id}/reviewers", _endpoint(plan_reviewers), methods=["POST"]),
+    Route("/v1/plans/{id}/sync", _endpoint(plan_sync), methods=["POST"]),
+    Route("/v1/plans/{id}/stop-sharing", _endpoint(plan_stop_sharing), methods=["POST"]),
+    Route("/v1/plans/{id}/sign-off", _endpoint(plan_sign_off), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-override", _endpoint(plan_policy_override), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-ask", _endpoint(plan_policy_ask), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-preview", _endpoint(plan_policy_preview), methods=["POST"]),
+    Route("/v1/review-policies", review_policies_read),
+    Route("/v1/review-policies", _endpoint(review_policies_save), methods=["PUT"]),
+    Route("/v1/review-policies/draft-impact", _endpoint(review_policies_impact), methods=["POST"]),
+    Route("/v1/library/people", library_people),
+    Route("/v1/shared-designs/{doc_id}", shared_design),
+    Route("/v1/shared-designs/{doc_id}/comments", _endpoint(shared_design_comment), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/suggestions", _endpoint(shared_design_suggest), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/threads/{tid:int}", _endpoint(shared_design_thread), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/votes", _endpoint(shared_design_vote), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/sign-offs", _endpoint(shared_design_sign_off), methods=["POST"]),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),
     Route("/v1/kept-visuals/{id}/html", kept_page),

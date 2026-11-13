@@ -11,7 +11,7 @@ import { startSync } from "../../../store/sync";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
-import type { PlansClient, VisualsClient } from "./client";
+import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
@@ -671,15 +671,14 @@ describe("visuals", () => {
       expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
       expect(screen.getByTestId("terminal")).toBe(terminal);
 
-      // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
-      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account › Usage" }));
-      fireEvent.click(within(sidebar()).getByRole("button", { name: "Knowledge" }));
-      fireEvent.click(await screen.findByRole("tab", { name: /Kept visuals/ }));
+      // Library › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+      fireEvent.click(within(sidebar()).getByRole("button", { name: /^Library/ }));
+      fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept visuals/ }));
       fireEvent.click(await screen.findByTestId("kept-k_1"));
       const kept = screen.getByTestId("kept-reader");
       expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");
       expect(within(kept).queryByTestId("visual-send")).toBeNull();
-      // Esc closes the reader and stays in Knowledge; the next Esc, with nothing nested open, leaves it.
+      // Esc closes the reader and stays in the Library; the next Esc, with nothing nested open, leaves it.
       fireEvent.keyDown(window, { key: "Escape" });
       expect(await screen.findByTestId("kept-k_1")).toBeTruthy();
       expect(screen.queryByTestId("kept-reader")).toBeNull();
@@ -1077,7 +1076,7 @@ describe("visuals", () => {
     expect(screen.queryByTestId("visual-send")).toBeNull();
   });
 
-  it("renders a plan itself, sends per-section comments and picks on Redirect, and drops a read older than the verdict", async () => {
+  it("renders a plan itself, sends the note and picks on Request changes, and drops a read older than the verdict", async () => {
     const plan: Plan = {
       id: "v_p1", session: "sup1", title: "Org presets", rev: 1, state: "open", markdown: "…", created_at: now, queued: 2,
       lede: "One page. <img src=x onerror=alert(1)>", split: [{ id: "w1", title: "Schema", after: [] }],
@@ -1100,41 +1099,39 @@ describe("visuals", () => {
     // brindle's own rendering: the agent's raw HTML stays text, and there's no frame.
     expect(screen.getByText(/onerror=alert/)).toBeTruthy();
     expect(document.querySelector("img, iframe")).toBeNull();
-    const redirect = screen.getByRole("button", { name: "Redirect" }) as HTMLButtonElement;
+    const redirect = screen.getByRole("button", { name: "Request changes" }) as HTMLButtonElement;
     expect(redirect.disabled).toBe(true);
-    const next = () => fireEvent.click(screen.getByRole("button", { name: /^Next/ }));
-    next();
     fireEvent.click(screen.getByRole("radio", { name: "A file in each repo" }));
-    next();
-    fireEvent.click(within(screen.getByRole("region", { name: "Goal" })).getByRole("button", { name: "Comment" }));
-    fireEvent.change(screen.getByLabelText("Comment on Goal"), { target: { value: "Repo file first." } });
+    fireEvent.change(screen.getByLabelText("Note for the supervisor"), { target: { value: "Repo file first." } });
     // Another change to the row starts a read that is still out when the verdict lands.
     view.rerender(reader({ ...row, answer: { option: "x", note: "", at: now } }));
     await act(async () => fireEvent.click(redirect));
-    expect(sent).toEqual([{ rev: 1, approved: false, picks: { d1: "repo" }, comments: [{ section: "s1", text: "Repo file first." }], note: "" }]);
+    expect(sent).toEqual([{ rev: 1, approved: false, picks: { d1: "repo" }, comments: [], note: "Repo file first." }]);
     await act(async () => replies[0](redirected));
     await act(async () => reads[1](plan));
     expect(screen.getByTestId("plan-decided").textContent).toContain("Repo file first.");
-    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Request changes" })).toBeNull();
     // The other order: a newer revision is read while an older verdict's reply is still out.
+    // (Every verdict is followed by one more read, so the read to answer is the latest one.)
+    const settled = (rev: number): Plan => ({ ...plan, rev, decisions: plan.decisions.map((d) => ({ ...d, confirmed: "org" })) });
+    const latest = (p: Plan) => act(async () => reads[reads.length - 1](p));
     view.rerender(reader({ ...row, rev: 2 }));
-    await act(async () => reads[2]({ ...plan, rev: 2 }));
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Approve" })));
+    await latest(settled(2));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign off" })));
     view.rerender(reader({ ...row, rev: 3 }));
-    await act(async () => reads[3]({ ...plan, rev: 3 }));
+    await latest(settled(3));
     await act(async () => replies[1]({ ...plan, rev: 2, state: "approved", verdict: { approved: true, at: now, rev: 2 } }));
-    expect(screen.getByText("plan · rev 3")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(screen.getByTestId("plan-rev").textContent).toBe("rev 3");
+    expect(screen.getByRole("button", { name: "Sign off" })).toBeTruthy();
     // Reopened later, a decided plan shows the alternative the person sent, not the supervisor's.
     view.unmount();
     render(reader(row));
-    await act(async () => reads[4](redirected));
-    next();
+    await latest(redirected);
     expect(screen.getByRole("radio", { name: "A file in each repo" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("radio", { name: /Org policy/ }).getAttribute("aria-checked")).toBe("false");
   });
 
-  it("plan reader steps through the ask, decision cards and the split's task cards, then redirects with every step's comments", async () => {
+  it("a design doc's restated ask is corrected with a comment on it, and its Tasks tab flags a file two workers change", async () => {
     const plan: Plan = {
       id: "v_p2", session: "sup1", title: "Cloud workers", rev: 1, state: "open", markdown: "…", created_at: now, queued: 0,
       ask: "Pro users close the laptop and come back to reviewed PRs.", lede: "Three workers.",
@@ -1149,68 +1146,44 @@ describe("visuals", () => {
       ],
     };
     const sent: PlanVerdict[] = [];
-    const fake: VisualsClient & PlansClient = {
+    const anchors: unknown[] = [];
+    let current = plan;
+    const fake: VisualsClient & PlansClient & Pick<PlanDocClient, "commentPlan"> = {
       visuals: async () => [], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => ({}),
-      plan: async () => plan,
-      decidePlan: async (_id, verdict) => { sent.push(verdict); return { ...plan, state: "redirected" }; },
+      plan: async () => current,
+      decidePlan: async (_id, verdict) => { sent.push(verdict); return { ...current, state: "redirected" }; },
+      commentPlan: async (_id, rev, anchor, text) => {
+        anchors.push(anchor);
+        return (current = { ...current, threads: [{ id: 1, kind: "comment", rev, author: "person", text, status: "open", at: now, anchor: { ...anchor, state: "current" } }] });
+      },
     };
     const row: VisualDTO = { ...visual, id: plan.id, kind: "plan", title: plan.title, rev: 1, question: undefined, options: undefined, unread: false };
     render(<VisualReader client={fake} visual={row} onBack={() => {}} onAnswered={() => {}} />);
     await screen.findByText("Three workers.");
-    const progress = () => screen.getByTestId("plan-progress").textContent;
-    const next = () => fireEvent.click(screen.getByRole("button", { name: /^Next/ }));
-    const current = () => within(screen.getByRole("navigation", { name: "Plan steps" })).getByRole("button", { current: "step" }).textContent;
-    // Overview, the decision, Risks, the split, then the verdict: four to settle.
-    expect(progress()).toContain("0 of 4 settled");
-    // The restated ask sits on every step; Correct it is a comment on the ask.
+    // The restated ask sits in the doc's header; Correct it is a comment on the ask.
     fireEvent.click(within(screen.getByTestId("plan-ask")).getByRole("button", { name: "Correct it" }));
-    fireEvent.change(screen.getByLabelText("Comment on What I understood"), { target: { value: "Teams too." } });
-    next();
-    expect(progress()).toContain("1 of 4 settled");
-    expect(current()).toContain("Where should cloud workers run?");
-    expect(screen.getByTestId("plan-ask").textContent).toContain("you corrected it");
-    // One decision on screen as option cards: Recommended on the supervisor's pick, trade-offs, and what each touches.
+    const draft = screen.getByTestId("thread-draft");
+    fireEvent.change(within(draft).getByRole("textbox"), { target: { value: "Teams too." } });
+    await act(async () => fireEvent.click(within(draft).getByRole("button", { name: "Comment" })));
+    expect(anchors).toEqual([{ kind: "section", section: "ask" }]);
+    expect(screen.getByTestId("thread-1").textContent).toContain("Teams too.");
+    // The decision as a table: the supervisor's pick is the one picked, with its trade-offs and what it touches.
     const own = screen.getByRole("radio", { name: "Your own server" });
     expect(own.getAttribute("aria-checked")).toBe("true");
-    expect(within(own).getByText("Recommended")).toBeTruthy();
-    expect(within(screen.getByRole("radio", { name: "PawDelta-hosted" })).queryByText("Recommended")).toBeNull();
-    expect(own.textContent).toContain("+ No compute cost");
-    expect(own.textContent).toContain("− They set up a machine");
-    expect(within(screen.getByTestId("touches-own")).getByText("tmux.py")).toBeTruthy();
-    expect(screen.queryByTestId("touches-hosted")).toBeNull();
+    expect(own.querySelectorAll("[data-tradeoff='pro']").length).toBe(1);
+    expect(own.querySelectorAll("[data-tradeoff='con']").length).toBe(1);
+    expect(within(own).getByText("tmux.py")).toBeTruthy();
     fireEvent.click(screen.getByRole("radio", { name: "PawDelta-hosted" }));
-    fireEvent.click(within(screen.getByRole("region", { name: "Where should cloud workers run?" })).getByRole("button", { name: "Comment" }));
-    fireEvent.change(screen.getByLabelText("Comment on Where should cloud workers run?"), { target: { value: "Ask legal first." } });
-    expect(progress()).toContain("2 of 4 settled");
-    // Scrolled down to Next, the next step still opens at its top.
-    const pane = screen.getByTestId("plan-step-pane");
-    pane.scrollTop = 400;
-    expect(pane.scrollTop).toBe(400);
-    next();
-    expect(pane.scrollTop).toBe(0);
-    expect(screen.getByRole("region", { name: "Risks" }).textContent).toContain("Sign-in rules.");
-    expect(screen.getByTestId("plan-ask")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "← Back" }));
-    expect(current()).toContain("Where should cloud workers run?");
-    expect(screen.getByRole("radio", { name: "PawDelta-hosted" }).getAttribute("aria-checked")).toBe("true");
-    next();
-    next();
-    // The split as task cards: worker, files, the proving test; a file two workers change is flagged before approval.
+    // The split as task cards in the Tasks tab: a file two workers change is flagged before approval.
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
     const w1 = screen.getByTestId("task-w1");
-    expect(w1.textContent).toContain("worker w1");
-    expect(w1.textContent).toContain("proves it: test_remote_spawn");
     expect(within(w1).getByText("tmux.py").getAttribute("data-overlap")).toBeNull();
     expect(within(w1).getByText(/spawn\.py/).getAttribute("data-overlap")).toBe("true");
-    expect(screen.getByTestId("task-w2").textContent).toContain("no test named");
     expect(screen.getByTestId("split-overlaps").textContent).toContain("spawn.py is in w1 and w2");
     expect(screen.getByTestId("plan-verdict").textContent).toContain("1 file is in more than one worker");
-    next();
-    expect(progress()).toContain("4 of 4 settled");
-    expect(screen.queryByRole("button", { name: /^Next/ })).toBeNull();
-    expect(screen.getByRole("region", { name: "Your verdict" }).textContent).toContain("PawDelta-hosted (not the supervisor's pick)");
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Redirect" })));
-    expect(sent).toEqual([{ rev: 1, approved: false, picks: { where: "hosted" }, note: "",
-      comments: [{ section: "ask", text: "Teams too." }, { section: "decision:where", text: "Ask legal first." }] }]);
+    // The comment hasn't reached the supervisor: Request changes carries it, with the other pick.
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Request changes" })));
+    expect(sent).toEqual([{ rev: 1, approved: false, picks: { where: "hosted" }, comments: [], note: "" }]);
   });
 });
 
