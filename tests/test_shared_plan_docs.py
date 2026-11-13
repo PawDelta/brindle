@@ -727,17 +727,19 @@ def test_an_edit_made_here_before_the_live_draft_arrives_is_carried_into_it_as_a
     plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")         # r2, not sent yet
     lib.rev, lib.author = 2, "u_b"                                       # meanwhile a teammate's revision,
     lib.content["sections"][0]["markdown"] = SUMMARY + " It stays on."
-    lib.open_draft()                                                     # then the draft opens on it
+    lib.open_draft()                                                     # then the draft opens on it,
+    lib.draft.insert("summary", 0, "Workers coordinate. ")              # and someone types the same word first
     monkeypatch.setattr(sd, "relays", {DOC: Relay(lib)}, raising=False)
     sd.sync(db, pid, **net)
 
     got = plans.to_dto(db, plans.get(db, pid))
-    assert (got["sections"][0]["markdown"], got["gate"]["state"]) == (SUMMARY + " It stays on.", "ready")
+    assert (got["sections"][0]["markdown"], got["gate"]["state"]) == (
+        "Workers coordinate. " + SUMMARY + " It stays on.", "ready")
     [carried] = got["threads"]
-    assert (carried["kind"], carried["before"], carried["after"], carried["author"]) == (
-        "suggestion", "Workers", "Hosts", "person")
-    # It goes up; a teammate then types the same word before it, and it follows its own.
-    lib.draft.insert("summary", 0, "Workers coordinate. ")
+    assert (carried["kind"], carried["before"], carried["after"], carried["author"], carried["anchor"]["start"]) == (
+        "suggestion", "Workers", "Hosts", "person", len("Workers coordinate. "))
+    # It goes up; a teammate then types the same word before it again, and it follows its own.
+    lib.draft.insert("summary", 0, "Workers agree. ")
     sd.sync(db, pid, **net)
     # Accepted while the relay is away, it is marked accepted only once the relay has its text.
     relay = sd.relays.pop(DOC)
@@ -746,7 +748,8 @@ def test_an_edit_made_here_before_the_live_draft_arrives_is_carried_into_it_as_a
     assert [t["status"] for t in lib.threads] == ["open"] and "Hosts" not in lib.draft.text("summary")
     sd.relays[DOC] = relay
     sd.sync(db, pid, **net)
-    assert lib.draft.text("summary") == "Workers coordinate. Hosts run on a machine the customer controls. It stays on."
+    assert lib.draft.text("summary") == ("Workers agree. Workers coordinate. Hosts run on a machine the customer "
+                                         "controls. It stays on.")
     assert [t["status"] for t in lib.threads] == ["accepted"] and not sent(backend, f"POST {DESIGN}/revisions")
 
 

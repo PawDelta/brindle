@@ -925,11 +925,29 @@ def _hunks(a: str, b: str) -> list[tuple[int, str, str]]:
     return out
 
 
+def _mapped(a: str, b: str, start: int, length: int) -> int | None:
+    """Where the span at ``start`` in ``a`` is in ``b``, by aligning the two
+    word by word: only a span inside a stretch both still share is placed,
+    beside the same words around it, never by its old offset. None if others
+    changed it, or the words around it, since."""
+    ta, tb = _TOKENS.findall(a), _TOKENS.findall(b)
+    at, bt = [0], [0]
+    for t in ta:
+        at.append(at[-1] + len(t))
+    for t in tb:
+        bt.append(bt[-1] + len(t))
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
+        if op == "equal" and at[i1] <= start and start + length <= at[i2]:
+            return bt[j1] + start - at[i1]
+    return None
+
+
 def _carried(new: dict, ours: dict, base: dict) -> tuple[list[tuple[dict, str]], list[str]]:
     """What revision ``ours`` changed since ``base`` (the Library's revision
     it was made on), placed in ``new`` (the Library's head now, with its
-    draft's text): suggestion anchors in ``new`` with their replacements.
-    And the names of what it changed that can't be one: text gone there, sections added,
+    draft's text): suggestion anchors in ``new`` with their replacements,
+    each placed by the words around it (_mapped). And the names of what it
+    changed that can't be one: text changed there since, sections added,
     removed or retitled, decisions, the split, the ask."""
     was, mine = {s["id"]: s for s in base["sections"]}, {s["id"]: s for s in ours["sections"]}
     out, missed = [], []
@@ -943,15 +961,16 @@ def _carried(new: dict, ours: dict, base: dict) -> tuple[list[tuple[dict, str]],
             continue
         if not lede and any(was[sid].get(k) != mine[sid].get(k) for k in ("title", "kind", "caption")):
             missed.append(name)
+        there = plan_docs._body(new, sid)
         for start, before, after in _hunks(a, b):
-            anchor = {"kind": "text", "section": sid, "start": start, "end": start + len(before), "quote": before}
-            if not before:
-                anchor.update(plan_docs._context(a, start))
-            where = plan_docs._where(new, anchor)
-            if where["state"] == "detached" or len(before) > plan_docs.MAX_QUOTE:
+            pos = _mapped(a, there, start, len(before)) if there is not None else None
+            if pos is None or len(before) > plan_docs.MAX_QUOTE:
                 missed.append(name)
                 continue
-            out.append(({k: v for k, v in where.items() if k != "state"}, after))
+            anchor = {"kind": "text", "section": sid, "start": pos, "end": pos + len(before), "quote": before}
+            if not before:
+                anchor.update(plan_docs._context(there, pos))
+            out.append((anchor, after))
     missed += [f"added {s['title']}" for sid, s in mine.items() if sid not in was]
     missed += [name for name in ("decisions", "split", "ask") if ours[name] != base[name]]
     return out, list(dict.fromkeys(missed))
