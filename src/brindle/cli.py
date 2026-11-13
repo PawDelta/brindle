@@ -3372,14 +3372,16 @@ def drain_ready_cmd(repo_root: str, base: Annotated[Optional[str], typer.Option(
 
 
 @app.command("_restart-supervisor", hidden=True)
-def restart_supervisor_cmd(root_id: str, transcript: Annotated[Optional[str], typer.Argument()] = None) -> None:
-    """Restart a supervisor fresh from its goal state (detached by its Stop hook)."""
+def restart_supervisor_cmd(root_id: str, token: str,
+                           transcript: Annotated[Optional[str], typer.Argument()] = None) -> None:
+    """Carry out a supervisor's restart claim ``token``: a fresh session seeded
+    from its goal state (detached by its Stop hook)."""
     import signal
 
     from brindle import supervisor_state
 
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    supervisor_state.restart(_helper_db(), root_id, Path(transcript) if transcript else None)
+    supervisor_state.restart(_helper_db(), root_id, token, Path(transcript) if transcript else None)
 
 
 @app.command("_start-when-room", hidden=True)

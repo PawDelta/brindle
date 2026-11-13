@@ -13,19 +13,23 @@ date. Once the turn's context passes ``supervisor_restart_tokens``, the
 supervisor restarts: its CLI is stopped and a fresh session of it starts with
 an ordinary first prompt (nothing the CLI doesn't already accept), seeded
 with the state and the latest messages instead of the whole chat. A restart
-never clears the state, so no decision or open question is lost across one;
-queued messages stay queued for the fresh session.
+never clears the state, so no decision or open question is lost across one.
+From the claim until the fresh session is launched, the supervisor's queue is
+held (db.RESTART_HOLD), so mail waits for the fresh session; the restart
+itself checks, under the session's resume lock, that the claim is still its
+own and the session hasn't moved on since.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import secrets
 import time
 from pathlib import Path
 
 from brindle import bus
-from brindle.db import DB, Agent
+from brindle.db import DB, RESTART_HOLD, Agent, _restart_holds
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +43,7 @@ MESSAGE_CHARS = 800        # of each latest message
 LATEST_MESSAGES = 8
 KEEP_ANSWERED = 3          # answered questions kept, for the replies in the latest messages
 TAIL_BYTES = 512 * 1024    # of the transcript read for its context size and latest messages
-RESTART_CLAIM = 600.0      # seconds a restart holds its claim before another may start
+RESTART_CLAIM = 600.0      # seconds a restart claim (and its hold on the queue) lasts at most
 RESTART_HEAD = "[brindle] Your context was restarted"
 
 
@@ -129,12 +133,11 @@ def _fold(db: DB, root_id: str, state: dict, ev: dict) -> None:
         }[kind]
         state["branches"][branch] = {"state": where, "worker": ev.get("agent_id")}
     elif kind == "agent.result":
-        a = db.get_agent(ev["agent_id"]) if ev.get("agent_id") else None
-        if a is None or a.mode not in WORKER_MODES or a.result is None:
+        # From the event itself: the worker's row may be gone with its workspace by now.
+        if not ev.get("agent_id") or p.get("mode") not in WORKER_MODES or not p.get("result"):
             return
-        ws = db.get_workspace(a.workspace_id)
-        state["workers"][a.id] = {"profile": a.profile, "branch": ws.branch if ws else None,
-                                  "result": _clip(a.result, RESULT_CHARS)}
+        state["workers"][ev["agent_id"]] = {"profile": p.get("profile"), "branch": p.get("branch"),
+                                            "result": _clip(p["result"], RESULT_CHARS)}
 
 
 # -- what the fresh session is told -------------------------------------------------
@@ -287,11 +290,45 @@ def enabled(db: DB, agent: Agent) -> bool:
         return False
 
 
-def _claim(db: DB, root_id: str, now: float) -> bool:
+def _claim(db: DB, root: Agent, now: float) -> str | None:
+    """Claim session ``root``'s restart for the session it runs now (its
+    ``session_ref``), holding its queue (db.RESTART_HOLD) in the same step.
+    The claim's token, or None while another restart holds it."""
+    token = secrets.token_hex(8)
     with db.tx() as c:
-        return bool(c.execute(
-            "UPDATE supervisor_state SET restarting_at=? WHERE root_id=? "
-            "AND (restarting_at IS NULL OR restarting_at < ?)", (now, root_id, now - RESTART_CLAIM)).rowcount)
+        if _restart_holds(c, root.id, now):
+            return None
+        c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?, ?, ?)"
+                  " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                  (root.id, RESTART_HOLD, json.dumps({"token": token, "ref": root.session_ref,
+                                                       "until": now + RESTART_CLAIM})))
+    return token
+
+
+def _held_claim(db: DB, root_id: str, token: str) -> dict | None:
+    """The restart claim ``token`` names, while it is still the one holding."""
+    row = db.conn.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                          (root_id, RESTART_HOLD)).fetchone()
+    try:
+        claim = json.loads(row["value"]) if row else None
+    except ValueError:
+        return None
+    if not claim or claim.get("token") != token or float(claim.get("until") or 0) <= time.time():
+        return None
+    return claim
+
+
+def _release(db: DB, root_id: str, token: str) -> None:
+    """Give up claim ``token``: the queue is delivered again. Another claim is left alone."""
+    with db.tx() as c:
+        row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                        (root_id, RESTART_HOLD)).fetchone()
+        try:
+            mine = row is not None and json.loads(row["value"]).get("token") == token
+        except ValueError:
+            mine = False
+        if mine:
+            c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=?", (root_id, RESTART_HOLD))
 
 
 def on_turn_end(db: DB, agent: Agent, payload: dict) -> bool:
@@ -310,36 +347,52 @@ def on_turn_end(db: DB, agent: Agent, payload: dict) -> bool:
     tokens = context_tokens(Path(path))
     ws = db.get_workspace(agent.workspace_id)
     limit = load_repo_config(ws.repo_root).supervisor_restart_tokens
-    if tokens is None or not limit or tokens < limit or not _claim(db, agent.id, time.time()):
+    if tokens is None or not limit or tokens < limit:
+        return False
+    agent = db.get_agent(agent.id) or agent    # its session_ref as this hook just recorded it
+    token = _claim(db, agent, time.time())
+    if token is None:
         return False
     from brindle import agents
     from brindle.providers import brindle_invocation
 
     try:
         # Not a child of the supervisor's processes: stopping them must not stop the restart.
-        agents._detach_orphan([*brindle_invocation(), "_restart-supervisor", agent.id, path])
+        agents._detach_orphan([*brindle_invocation(), "_restart-supervisor", agent.id, token, path])
     except OSError:
         log.warning("brindle: couldn't start supervisor %s's restart", agent.id, exc_info=True)
-        with db.tx() as c:
-            c.execute("UPDATE supervisor_state SET restarting_at=NULL WHERE root_id=?", (agent.id,))
+        _release(db, agent.id, token)
         return False
     log.info("brindle: supervisor %s at %d context tokens: restarting it from its state", agent.id, tokens)
     return True
 
 
-def restart(db: DB, root_id: str, transcript: Path | None = None) -> str:
-    """Stop supervisor ``root_id``'s CLI and start a fresh session of it seeded
-    with its state and the latest messages of ``transcript``. Its workers keep
-    running. Returns the seed it was started with."""
+def restart(db: DB, root_id: str, token: str, transcript: Path | None = None) -> str | None:
+    """Carry out restart claim ``token``: stop supervisor ``root_id``'s CLI and
+    start a fresh session of it seeded with its state and the latest messages
+    of ``transcript``. Its workers keep running. Returns the seed, or None
+    when the restart no longer applies and nothing was touched: the claim is
+    gone or another's (a second helper), or since the claim the person paused
+    the session, a new turn began or another session of it started.
+
+    The old ``session_ref`` stays until the fresh session's hooks replace
+    it: if the launch fails, the session stays paused and an ordinary resume
+    picks the full chat back up, so nothing is lost."""
     from brindle import agents
 
-    root = agents.get(db, root_id)
     try:
         with agents.resume_lock(root_id):
+            # Checked under the lock, immediately before the stop.
+            claim = _held_claim(db, root_id, token)
+            if claim is None:
+                return None
+            root = db.get_agent(root_id)
+            if root is None or root.status != "idle" or root.session_ref != claim.get("ref"):
+                log.info("brindle: supervisor %s's restart no longer applies; left as it is", root_id)
+                return None
             # Paused before its CLI stops, so the stop isn't taken for the person closing the chat (agents.ended).
             db.set_status(root_id, "paused")
             agents._stop(db, root)
-            db.update_agent(root_id, session_ref=None)   # never resumed into the long chat again
             refresh(db, root_id)
             seed = seed_prompt(db, root_id, transcript)
             agents.resume(db, root_id, only={root_id}, prompts={root_id: seed})
@@ -348,5 +401,4 @@ def restart(db: DB, root_id: str, transcript: Path | None = None) -> str:
         bus.publish_agent(db, "supervisor.restarted", root_id)
         return seed
     finally:
-        with db.tx() as c:
-            c.execute("UPDATE supervisor_state SET restarting_at=NULL WHERE root_id=?", (root_id,))
+        _release(db, root_id, token)   # the queue is the fresh session's now (or, on failure, the old one's)

@@ -967,7 +967,6 @@ CREATE TABLE IF NOT EXISTS supervisor_state (
     state TEXT NOT NULL,
     last_event INTEGER NOT NULL DEFAULT 0,
     restarts INTEGER NOT NULL DEFAULT 0,
-    restarting_at REAL,            -- a restart is under way (one at a time)
     updated_at REAL NOT NULL
 );
 -- What the sweep reaped (brindle.reap): tmux sessions, stopped supervisors,
@@ -1568,6 +1567,23 @@ def request_subagent(row) -> str | None:
 
 
 WAITER_CLAIM = "waiter-claim:"   # agent_marks kind prefix, then the waiter's pid (DB.pop_pending)
+# agent_marks kind: a supervisor restart under way (brindle.supervisor_state), JSON
+# {token, ref, until}. Until ``until`` it holds the supervisor's queue (DB.pop_pending):
+# mail waits for the fresh session instead of waking the one about to stop.
+RESTART_HOLD = "supervisor-restart"
+RESULT_EVENT_CHARS = 2000   # of a result carried in its "agent.result" event
+
+
+def _restart_holds(c: sqlite3.Connection, agent_id: str, now: float | None = None) -> bool:
+    """Whether a restart that hasn't expired holds ``agent_id``'s queue."""
+    row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                    (agent_id, RESTART_HOLD)).fetchone()
+    if row is None:
+        return False
+    try:
+        return float(json.loads(row["value"])["until"]) > (time.time() if now is None else now)
+    except (ValueError, TypeError, KeyError):
+        return False
 
 
 def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
@@ -2358,8 +2374,22 @@ class DB:
             if won:
                 c.execute("UPDATE agents SET result=? WHERE id=?", (mask(payload), agent_id))
         if won:
-            bus.publish_agent(self, "agent.result", agent_id)
+            self._publish_result(agent_id)
         return won
+
+    def _publish_result(self, agent_id: str) -> None:
+        """The "agent.result" event, carrying what readers need once the
+        agent's row may be gone (brindle.supervisor_state): its mode, profile,
+        branch and (the start of its masked) result."""
+        try:
+            row = self.conn.execute(
+                "SELECT a.mode, a.profile, a.result, w.branch FROM agents a"
+                " LEFT JOIN workspaces w ON w.id = a.workspace_id WHERE a.id=?", (agent_id,)).fetchone()
+        except sqlite3.Error:
+            row = None
+        fields = ({"mode": row["mode"], "profile": row["profile"], "branch": row["branch"],
+                   "result": (row["result"] or "")[:RESULT_EVENT_CHARS]} if row else {})
+        bus.publish_agent(self, "agent.result", agent_id, **fields)
 
     def outbox_deliver(self, row_id: int, *, message: tuple | None = None,
                        agent_fields: dict | None = None, nothing: bool = False) -> bool:
@@ -2645,7 +2675,7 @@ class DB:
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE agents SET result=? WHERE id=?", (mask(result), agent_id))
-        bus.publish_agent(self, "agent.result", agent_id)
+        self._publish_result(agent_id)
 
     def delete_agent(self, agent_id: str) -> None:
         with self.tx() as c:
@@ -2819,9 +2849,10 @@ class DB:
         ``pane_mark``: the claim is a pane delivery's, whose mark (what this
         returns for the message) owns the undelivered row from here on, so a
         process that dies before its first write loses nothing. ``waiter_pid``:
-        the claim is that waiter's, recorded with it (see ``waiter_claims``)."""
+        the claim is that waiter's, recorded with it (see ``waiter_claims``).
+        None too while a supervisor restart holds the queue (RESTART_HOLD)."""
         with self.tx() as c:
-            if _pane_delivery_message(c, agent_id) is not None:
+            if _pane_delivery_message(c, agent_id) is not None or _restart_holds(c, agent_id):
                 return None
             row = c.execute(
                 "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL "
