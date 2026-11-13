@@ -158,6 +158,16 @@ def test_brindle_usage_takes_one_source_per_agent(tmp_path):
     assert out["supervisor_model_observed"] == "claude-fable-5-2"
 
 
+def test_transcript_usage_counts_workflow_agents(tmp_path):
+    main = tmp_path / "s.jsonl"
+    main.write_text("")
+    wf = tmp_path / "s" / "subagents" / "workflows" / "wf_1"
+    wf.mkdir(parents=True)
+    (wf / "agent-a.jsonl").write_text(json.dumps({"type": "assistant", "message": {
+        "id": "a1", "model": "claude-haiku-5-5", "usage": {"input_tokens": 2, "output_tokens": 4}}}) + "\n")
+    assert bench.transcript_usage(str(main))["claude-haiku-5-5"]["output"] == 4
+
+
 class FakeSession:
     """brindle as watch_session sees it, on a fake clock: ``state(fake)`` gives
     the snapshot at ``fake.t``; every probe and CLI call is kept."""

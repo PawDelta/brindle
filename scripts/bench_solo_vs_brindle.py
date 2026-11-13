@@ -249,10 +249,10 @@ def permission_mode(entries: list[dict]) -> str | None:
 
 def transcript_usage(path: str) -> dict[str, dict[str, int]]:
     """A Claude Code transcript's tokens per model, with its subagents' (stored
-    under ``<session>/subagents/``)."""
+    under ``<session>/subagents/``, workflow agents one level deeper)."""
     main = Path(path)
     by_model: dict[str, dict[str, int]] = {}
-    files = [main, *sorted((main.parent / main.stem / "subagents").glob("*.jsonl"))]
+    files = [main, *sorted((main.parent / main.stem / "subagents").rglob("*.jsonl"))]
     for f in files:
         try:
             lines = f.read_text(errors="replace").splitlines()
