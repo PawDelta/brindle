@@ -663,7 +663,7 @@ def test_machine_probe_reads_weekly_plan_limits_and_other_sessions(db, tmp_path,
                            "@1", None, time.time()))
     db.add_agent(Agent("done", "other", "developer", "codex", None, "interactive", "done",
                        "@2", None, time.time()))
-    monkeypatch.setattr(quota, "get", lambda provider: quota.Quota(provider, [
+    monkeypatch.setattr(quota, "get", lambda provider, **kw: quota.Quota(provider, [
         quota.Window(80, 1000, 300), quota.Window(31, 2000, 10080),
         quota.Window(90, 2000, 10080, "Fable")]) if provider == "claude" else None)
     monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
@@ -723,8 +723,12 @@ def test_machine_boundary_reads_codex_rollout_past_a_fresh_cache(tmp_path, monke
     assert ns["main"](args)["limits"]["codex"] is None
 
 
-def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch):
-    from brindle import providers, quota
+@pytest.mark.parametrize("custom_home", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant("Solo must use CLAUDE_CONFIG_DIR rather than the default account")),
+])
+def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch, custom_home):
+    from brindle import providers, quota, subscription_usage
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
@@ -732,8 +736,15 @@ def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch):
     brindle_config = tmp_path / "brindle-claude.json"
     account = {"oauthAccount": {"accountUuid": "brindle-account", "organizationUuid": "org"}}
     brindle_config.write_text(json.dumps(account))
-    solo_config = tmp_path / ".claude.json"
-    solo_config.write_text(json.dumps({"oauthAccount": {"accountUuid": "solo-account", "organizationUuid": "org"}}))
+    solo_home = tmp_path / "solo" if custom_home else tmp_path
+    solo_home.mkdir(exist_ok=True)
+    if custom_home:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(solo_home))
+    else:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    solo_config = solo_home / ".claude.json"
+    solo_account = {"oauthAccount": {"accountUuid": "solo-account", "organizationUuid": "org"}}
+    solo_config.write_text(json.dumps(solo_account))
     monkeypatch.setattr(providers, "claude_global_config", lambda: str(brindle_config))
     quota.record("claude", [quota.Window(31, time.time() + 1000, 10080)])
     ns = {"__name__": "bench_probe"}
@@ -743,6 +754,44 @@ def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch):
         pass
     assert monitor.record()["limits_used"]["claude"] is None
     args = {"op": "machine", "clone": str(tmp_path), "arm": "solo"}
-    assert ns["main"](args)["limits"]["claude"] is None
+    missing = ns["main"](args)
+    assert missing["limits"]["claude"] is None
+    solo_key = subscription_usage.cache_key("claude", who=json.dumps(["solo-account", "org"]))
+    reset = time.time() + 1000
+    quota.record("claude", [quota.Window(42, reset, 10080)], identity_key=solo_key)
+    own = ns["main"](args)
+    assert own["limits"]["claude"]["used"] == 42
+    assert own["limits"]["claude"]["identity"] == solo_key
+    assert "claude" not in own["limits_reason"]
+    assert missing["limits_reason"]["claude"]
+    assert monitor.record()["limits_reason"]["claude"]
+    with bench.RunMonitor(b, 20, "solo") as monitor:
+        quota.record("claude", [quota.Window(46, reset, 10080)], identity_key=solo_key)
+    assert monitor.record()["limits_used"]["claude"] == 4
     solo_config.write_text(json.dumps(account))
     assert ns["main"](args)["limits"]["claude"]["used"] == 31
+
+
+def test_installed_client_prefers_desktop_and_records_its_engine(tmp_path, monkeypatch):
+    desktop = tmp_path / "engine/bin/brindle"
+    desktop.parent.mkdir(parents=True)
+    desktop.touch()
+    python = tmp_path / "engine/python/bin/python3"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setattr(bench, "DESKTOP_BRINDLE", desktop, raising=False)
+    monkeypatch.setattr(bench.shutil, "which", lambda *a, **kw: "/old/bin/brindle")
+    args = SimpleNamespace(brindle=None, brindle_python=None)
+    client = bench.installed_client(args, tmp_path, {})
+    assert client.exe == desktop
+    assert client.python == str(python)
+    assert bench.installed_brindle("/explicit/bin/brindle", {}) == Path("/explicit/bin/brindle")
+    python.unlink()
+    assert bench.installed_brindle(None, {}) == Path("/old/bin/brindle")
+    samples = SimpleNamespace(probe=lambda *a, **kw: {
+        "limits": {}, "other_agents": [], "brindle_file": "/engine/brindle/__init__.py",
+        "brindle_python": str(python), "brindle_executable": str(desktop)})
+    with bench.RunMonitor(samples, 20) as monitor:
+        pass
+    assert monitor.record()["limits_reader"] == {
+        "module": "/engine/brindle/__init__.py", "python": str(python), "executable": str(desktop)}

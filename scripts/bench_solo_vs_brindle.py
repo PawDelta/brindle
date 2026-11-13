@@ -92,7 +92,10 @@ windows per provider (percent used, reset, source and observation time), or null
 when unknown. ``limits_used`` is their difference in percentage points, null
 across resets or account changes. These are shared-machine readings, including
 other sessions' usage. Boundary reads refresh Codex from its latest rollout;
-solo Claude readings require the default CLI account to match the tracked account.
+Solo Claude readings use the identity in the config the solo CLI runs under.
+Unavailable readings include ``limits_reason``; ``limits_reader`` identifies the
+installed executable, Python and module used to read them. The desktop app's
+engine takes precedence over PATH unless ``--brindle`` is explicit.
 ``other_agents`` lists active agents outside the benchmark
 clone observed at the boundaries and every ``--poll`` seconds, with first/last
 observation times; agents entirely between samples may be missed. Both arms need
@@ -824,9 +827,9 @@ def main(args):
     from brindle import autopilot
     from brindle.db import DB
 
-    db = DB()
     op = args["op"]
-    out = {"errors": [], "brindle_file": brindle.__file__}
+    db = None if op == "limits" else DB()
+    out = {"errors": [], "brindle_file": brindle.__file__, "brindle_python": sys.executable}
 
     def real(p):
         return os.path.realpath(p) if p else p
@@ -856,39 +859,46 @@ def main(args):
             out["errors"].append("%s: %r" % (name, e))
             return None
 
-    if op == "machine":
+    if op in ("machine", "limits"):
         from brindle import quota, subscription_usage
 
-        def solo_identity_matches():
-            tracked = subscription_usage.identity()
-            if tracked is None:
-                return False
-            with open(os.path.expanduser("~/.claude.json"), encoding="utf-8") as f:
+        def solo_identity():
+            if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+                return None
+            folder = os.environ.get("CLAUDE_CONFIG_DIR")
+            config = os.path.join(folder, ".claude.json") if folder else os.path.expanduser("~/.claude.json")
+            with open(config, encoding="utf-8") as f:
                 data = json.load(f)
             account = data.get("oauthAccount") if isinstance(data, dict) else None
             if not isinstance(account, dict):
-                return False
+                return None
             parts = [account.get("accountUuid"), account.get("organizationUuid")]
-            return all(isinstance(p, str) and p.strip() for p in parts) and json.dumps(parts) == tracked
+            if all(isinstance(p, str) and p.strip() for p in parts):
+                return subscription_usage.cache_key("claude", who=json.dumps(parts))
 
-        claude_matches = (guarded("solo Claude identity", solo_identity_matches)
-                          if args.get("arm") == "solo" else True)
+        claude_key = (guarded("solo Claude identity", solo_identity)
+                      if args.get("arm") == "solo" else subscription_usage.cache_key("claude"))
         # Polling may have just filled the shared cache. Boundaries must read
         # the available rollout again, and must not reuse a cache if that fails.
         codex_current = (guarded("Codex boundary refresh", quota.refresh_codex)
                          if args.get("boundary") else True)
         out["limits"] = {}
+        out["limits_reason"] = {}
         for provider in quota.PROVIDERS:
-            q = guarded(provider + " quota", lambda: quota.get(provider)) if (
-                provider != "native" and not quota._key_billed(provider) and
-                (provider != "claude" or claude_matches) and
-                (provider != "codex" or codex_current)) else None
+            key = claude_key if provider == "claude" else subscription_usage.cache_key(provider)
+            reason = ("local models have no subscription window" if provider == "native" else
+                      "API key billing has no subscription window" if quota._key_billed(provider) else
+                      "Claude config identity unavailable" if provider == "claude" and key is None else
+                      "Codex boundary refresh unavailable" if provider == "codex" and not codex_current else None)
+            q = guarded(provider + " quota", lambda: quota.get(provider, identity_key=key)) if not reason else None
             weekly = [w for w in q.windows if w.minutes == 10080 and w.name is None] if q else []
             w = weekly[0] if len(weekly) == 1 else None
             out["limits"][provider] = ({"used": w.used, "resets_at": w.resets_at,
                                         "updated_at": q.updated_at, "source": q.source,
-                                        "identity": subscription_usage.cache_key(provider)} if w else None)
-        out["other_agents"] = [describe(a) for a in db.list_agents()
+                                        "identity": key} if w else None)
+            if w is None:
+                out["limits_reason"][provider] = reason or "no current weekly quota for this account"
+        out["other_agents"] = [describe(a) for a in (db.list_agents() if db is not None else [])
                                if a.status in ("starting", "processing", "waiting", "idle") and not in_repo(a)]
     elif op == "find_root":
         found = [a for a in db.list_agents() if a.profile == "supervisor" and a.mode == "interactive"
@@ -1032,8 +1042,13 @@ if __name__ == "__main__":
 '''
 
 
+DESKTOP_BRINDLE = Path("/Applications/brindle.app/Contents/Resources/engine/bin/brindle")
+
+
 def installed_brindle(explicit: str | None, env: dict) -> Path:
-    found = explicit or shutil.which("brindle", path=env.get("PATH"))
+    desktop_python = DESKTOP_BRINDLE.parent.parent / "python/bin/python3"
+    found = explicit or (str(DESKTOP_BRINDLE) if DESKTOP_BRINDLE.is_file() and desktop_python.is_file()
+                         else shutil.which("brindle", path=env.get("PATH")))
     if not found:
         raise BenchError("no installed `brindle` on PATH: pass --brindle")
     path = Path(found).resolve()
@@ -1086,6 +1101,7 @@ class Brindle:
             raise BenchError("the probe imported this checkout's brindle, not the installed one")
         for err in out["errors"]:
             print(f"brindle probe {op}: {err}", file=sys.stderr)
+        out["brindle_executable"] = str(self.exe)
         return out
 
 
@@ -1263,6 +1279,9 @@ class RunMonitor:
         self.stopped = threading.Event()
         self.agents: dict[str, dict] = {}
         self.errors: list[str] = []
+        self.reasons: dict[str, str] = {}
+        self.before_reasons: dict[str, str] = {}
+        self.reader: dict[str, str | None] = {}
 
     def sample(self, *, boundary: bool = False) -> dict:
         snap = self.b.probe("machine", boundary=boundary, arm=self.arm)
@@ -1271,6 +1290,9 @@ class RunMonitor:
             old = self.agents.get(agent["id"], {})
             self.agents[agent["id"]] = {**agent, "first_seen": old.get("first_seen", now), "last_seen": now}
         self.errors.extend(snap.get("errors", []))
+        self.reasons = snap.get("limits_reason", {})
+        self.reader = {"module": snap.get("brindle_file"), "python": snap.get("brindle_python"),
+                       "executable": snap.get("brindle_executable")}
         return snap["limits"]
 
     def watch(self) -> None:
@@ -1282,6 +1304,7 @@ class RunMonitor:
 
     def __enter__(self):
         self.before = self.sample(boundary=True)
+        self.before_reasons = self.reasons.copy()
         self.thread = threading.Thread(target=self.watch, daemon=True)
         self.thread.start()
         return self
@@ -1292,8 +1315,12 @@ class RunMonitor:
         self.after = self.sample(boundary=True)
 
     def record(self) -> dict:
+        used = limits_used(self.before, self.after)
         return {"limits_before": self.before, "limits_after": self.after,
-                "limits_used": limits_used(self.before, self.after),
+                "limits_used": used, "limits_reader": self.reader,
+                "limits_reason": {p: self.reasons.get(p) or self.before_reasons.get(p) or
+                                  "window or identity changed, or usage decreased"
+                                  for p, value in used.items() if value is None},
                 "other_agents": list(self.agents.values()), "monitor_errors": self.errors,
                 "limits_scope": "shared machine", "activity_sample_seconds": self.interval}
 
