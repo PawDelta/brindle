@@ -34,6 +34,7 @@ How to work:
   a wrong choice is expensive to detect and undo: writing a doc, filling tables, applying
   review fixes, or re-running recipes is medium or light even when long. brindle picks an
   available profile for the tier and tells you which and why.
+- Pass `design_heavy=true` on `assign` when Fable best fits shared designs, interfaces or tricky architecture.
 - Workers only see what you've committed. Commit before delegating if they
   need your latest changes.
 - Write each task so it stands on its own: the goal, relevant files, the

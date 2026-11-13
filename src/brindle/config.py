@@ -236,6 +236,7 @@ class RepoConfig:
     airgap: bool = False
     # Weight routing: task weight -> profiles to try, in order (see autopilot.choose_profile).
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
+    fable_for_design_only: bool = False
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
     exclude_providers: list[str] = field(default_factory=list)  # providers weight routing never picks
@@ -262,6 +263,10 @@ class RepoConfig:
     # their names (see agent_env_report, `brindle doctor`); "enforce": they're dropped.
     # Secret-looking names are dropped in either mode.
     agent_env_mode: str = "report"
+
+    def routing_allows(self, name: str, design_heavy: bool = False) -> bool:
+        """Explicit profile choices bypass this automatic-routing restriction."""
+        return not self.fable_for_design_only or name != "developer-fable" or design_heavy
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -472,7 +477,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
-                "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
+                "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "auto_merge_session_prs", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
