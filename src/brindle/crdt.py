@@ -171,6 +171,12 @@ class SharedDoc:
     def text(self, section: str) -> str:
         return self._doc.get_text(_section_name(section)).to_string()
 
+    def editors(self, section: str) -> list[int | None]:
+        """For each character of ``section`` (code points), the peer id that
+        typed it (None where Loro can't say)."""
+        t = self._doc.get_text(_section_name(section))
+        return [t.get_editor_at_unicode_pos(i) for i in range(t.len_unicode)]
+
     # -- local edits (code-point offsets) -------------------------------
 
     def insert(self, section: str, offset: int, text: str) -> None:

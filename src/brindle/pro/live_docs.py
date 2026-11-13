@@ -177,22 +177,25 @@ def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int | None, carry: bool
             doc.set_peer_id(peer)
         if carry and current is not None:
             base = _base(current, _link(c, doc_id))
-            retype(doc, doc.sections() if base is None else base, current.sections())
+            ours = current.sections()
+            # Letters the supervisor typed (under its relay number, or one it chose before it had
+            # one) are re-typed under its relay number; the rest under the person's.
+            row = c.execute("SELECT supervisor_peer FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+            theirs = {n for n in (row["supervisor_peer"] if row else None, supervisor) if n is not None}
+            writers = None
+            if supervisor is not None and theirs:
+                writers = {s: [supervisor if e in theirs else doc.peer_id for e in current.editors(s)]
+                           for s in ours}
+            retype(doc, doc.sections() if base is None else base, ours, writers)
         _put_relay_version(c, doc_id, update_version(snapshot))
         return doc
 
     plan_drafts.rebuild(db, doc_id, make, supervisor=supervisor)
 
 
-def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed: list[int],
-                rebase: bool, marks: list[str]) -> tuple[bool, bytes | None]:
-    """A join's answer: record the numbers it issued (``marks``: what it
-    asked for, all for one mark, so a new number's role is known), then bring
-    the replica up to the relay's draft, with the supervisor writing under
-    its own relay number. Returns whether the replica was replaced (app
-    windows on it must load it again) and, if not, what the join brought in
-    that the windows lack (the relay sends nobody what it accepted while this
-    machine was away)."""
+def _record_numbers(db: DB, doc_id: str, issued: list[int], claimed: list[int], marks: list[str]) -> None:
+    """The numbers a join issued, by role (``marks``: what it asked for, all
+    for one mark, so each new number's role is known)."""
     fresh = [n for n in issued if n not in claimed]
     roles = _peers(db, doc_id)
     with db.tx() as c:
@@ -201,13 +204,29 @@ def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed
                     else "window" if "replica" in roles.values() else "replica")
             roles[n] = role
             c.execute("INSERT OR IGNORE INTO live_doc_peers (doc_id, peer, role) VALUES (?, ?, ?)", (doc_id, n, role))
+
+
+def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed: list[int],
+                rebase: bool, marks: list[str]) -> tuple[bool, bytes | None]:
+    """A join's answer: record the numbers it issued (:func:`_record_numbers`),
+    then bring the replica up to the relay's draft, with the supervisor
+    writing under its own relay number. Returns whether the replica was
+    replaced (app windows on it must load it again) and, if not, what the
+    join brought in that the windows lack (the relay sends nobody what it
+    accepted while this machine was away)."""
+    _record_numbers(db, doc_id, issued, claimed, marks)
+    roles = _peers(db, doc_id)
     mine = next((n for n, r in roles.items() if r == "replica"), None)   # None: a reader, nothing to send
     theirs = next((n for n, r in roles.items() if r == "supervisor"), None)
     replica, row = _replica(db, doc_id), _link(db, doc_id)
     if replica is None:
         _rebuild(db, doc_id, snapshot, mine, carry=False, supervisor=theirs)
         return False, None
-    if rebase or row is None or row["relay_version"] is None or (mine is not None and replica.peer_id != mine):
+    stored = db.conn.execute("SELECT supervisor_peer FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+    # A supervisor that wrote under an id of its own: its letters are re-typed under its relay number.
+    other_supervisor = theirs is not None and stored["supervisor_peer"] not in (None, theirs)
+    if rebase or row is None or row["relay_version"] is None or (mine is not None and replica.peer_id != mine) \
+            or other_supervisor:
         _rebuild(db, doc_id, snapshot, mine, carry=mine is not None, supervisor=theirs)
         return True, None
     before = replica.version()
@@ -520,14 +539,16 @@ class DocLink:
         """Join the doc's room: claim this account's numbers, register what
         is missing, bring the replica up to the relay's draft, then send the outbox."""
         async with self.lock:
-            await self._join()
-            if self.conn is not None and not self.reader and await self.manager.work(_missing_supervisor, self.doc_id):
-                # A join registers one mark: the supervisor's number takes a second, before anything is sent.
+            # A join registers one mark: the supervisor's number takes a second, straight after.
+            # Only then is the draft taken, so anything re-typed already has both numbers to go under.
+            later = not self.reader and await self.manager.work(_missing_supervisor, self.doc_id)
+            await self._join(take=not later)
+            if later and self.conn is not None:
                 await self.close()
                 await self._join()
         await self.flush()
 
-    async def _join(self) -> None:
+    async def _join(self, take: bool = True) -> None:
         in_use = {w.peer for w in self.windows if w.peer is not None}
         waiting = sum(1 for w in self.windows if w.peer is None)
         claims, marks = await self.manager.work(_join_numbers, self.doc_id, in_use, waiting, self.reader)
@@ -553,6 +574,9 @@ class DocLink:
         self.author, self.frozen = said.get("author") or "", said.get("frozen")
         self.author_offline = said.get("author_offline")
         self.blocked = bool(self.frozen)
+        if not take:
+            await self.manager.work(_record_numbers, self.doc_id, self.claimed, claims, marks)
+            return
         replaced, missed = await self.manager.work(_take_state, self.doc_id, _unb64(said.get("snapshot")),
                                                    self.claimed, claims, self.rebase, marks)
         self.rebase = False
