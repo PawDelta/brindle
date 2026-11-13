@@ -4326,6 +4326,14 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
         worker = workspace_worker(db, ws)
         pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
         candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
+        if cfg.review_sizing and not cfg.routing_locked.get("reviewer"):
+            from brindle import review_scope
+
+            if review_scope.small_branch(ws, cfg):
+                cheap = load_profile(review_scope.LIGHT_PROFILE, ws.repo_root)
+                # Local overrides must not silently turn a verifier into Haiku.
+                if cheap.provider == "claude" and re.fullmatch(r"(?:claude-)?sonnet(?:[-.\d]+)?", cheap.model or ""):
+                    candidates.insert(0, review_scope.LIGHT_PROFILE)
     first: AgentError | None = None
     for name in candidates:
         try:
@@ -4728,6 +4736,13 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     _review_kill_switch(ws)
     cfg = cfg or workspaces.config_for(db, ws)
     slot = _review_claim_slot(profile, slot)
+    if cfg.review_sizing and slot == "" and not second:
+        from brindle import review_scope
+
+        # Recheck a queued cheap pick against the current branch. Keep explicit
+        # strong profiles, including the pipeline's recovery fallback.
+        if profile == review_scope.LIGHT_PROFILE:
+            profile = None
     profile = _review_profile(db, ws, profile, cfg)
     if second and not slot:
         slot = profile
@@ -4755,9 +4770,11 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     worker = workspace_worker(db, ws)
 
     base = ws.base_branch or "the base branch"
+    diff_instruction = ("start with the scoped context pack below. " if cfg.review_sizing and ws.base_branch else
+                        f"use the brindle workspace_diff tool, or run `git diff {base}...HEAD` (no `$(...)`: "
+                        "it isn't pre-approved). ")
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
-            f"use the brindle workspace_diff tool, or run `git diff {base}...HEAD` (no `$(...)`: "
-            "it isn't pre-approved). "
+            + diff_instruction +
             "Look for correctness bugs, missing tests, security problems and unclear code.")
 
     worker_files = []
@@ -4829,10 +4846,12 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
 
+    pack_base = None
     prev = _prior_round(db, ws, sha, profile if second else "")
     if prev:
         prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
         rb = review_base(ws, prev.sha)
+        pack_base = rb.sha
         if rb.sha == prev.sha:
             task += (prior + f"Review only what changed since then (`git diff {prev.sha}..HEAD`), "
                      "not the whole branch. " + DELTA_SCOPE)
@@ -4855,6 +4874,15 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
             task += ("\n\nA merge commit was edited by hand in these files, so check those edits "
                      "(where a conflict was resolved, the old side of the diff shows git's "
                      "conflict markers): " + ", ".join(rb.edited))
+
+    if cfg.review_sizing and ws.base_branch:
+        from brindle import review_scope
+
+        try:
+            pack_base = pack_base or git.out(["merge-base", ws.base_branch, sha], ws.path)
+            task += review_scope.context_pack(ws, pack_base, sha)
+        except git.GitError:
+            task += f"\n\nContext pack unavailable; read `git diff {base}...HEAD`."
 
     if focus:
         task += f"\n\nFocus: {focus}"

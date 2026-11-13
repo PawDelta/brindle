@@ -324,6 +324,14 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    different model on purpose. With hosted learning on, the learner may
    choose `reviewer-codex` or `reviewer-local` instead when they can run here
    and its evidence says they review this kind of work better.
+   Opt in to `review_sizing` to give reviews a bounded diff, touched-file list
+   and caller context from graphify (or git grep). Re-reviews get only the
+   current round's diff. Automatic reviews of docs/test-only branches, or
+   branches within both `review_small_max_files` and `review_small_max_lines`,
+   use `reviewer-light` (Sonnet, low effort). Binary changes and paths matching
+   `review_risky_paths` keep the usual reviewer. Explicit profile requests and
+   locked reviewer routing take precedence; unavailable Sonnet falls back to
+   the usual reviewer. Sizing uses the whole branch even on later rounds.
 4. **It keeps going.** If the supervisor stops while milestones are still
    unverified and no worker is running, brindle tells it to continue. It stops
    when every check passes, when it needs a decision from you, after three
@@ -740,6 +748,10 @@ Goal driving, merge gates and cleanup:
 | `review` | required for sessions | require a reviewer's approval before merging |
 | `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |
 | `review_profile` | none | force `request_review`'s profile, skipping its automatic cross-model pick (see below) |
+| `review_sizing` | `false` | scoped review context and automatic Sonnet sizing; explicit profile requests still win |
+| `review_small_max_files` | `5` | maximum touched files for a small review |
+| `review_small_max_lines` | `200` | maximum added + deleted lines for a small review; docs/test-only branches also qualify |
+| `review_risky_paths` | `*auth*`, `*permission*`, `*daemon*`, `*concurr*`, `*thread*`, `*lock*`, `*async*` | globs over repo-relative paths that retain the usual reviewer, including deleted paths |
 | `pre_commit` | `true` | run [pre-commit](https://pre-commit.com) over the branch, if the repo uses it |
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
