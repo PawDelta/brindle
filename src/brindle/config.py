@@ -113,6 +113,12 @@ class RepoConfig:
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
+    review_sizing: bool = False       # scoped context and cheaper profiles for small or docs/test-only reviews
+    review_small_max_files: int = 5
+    review_small_max_lines: int = 200  # additions + deletions; binary changes keep the usual reviewer
+    review_risky_paths: list[str] = field(default_factory=lambda: [
+        "*auth*", "*permission*", "*daemon*", "*concurr*", "*thread*", "*lock*", "*async*",
+    ])
     # Weight -> reviewer profile for a second, independent review of work of that weight;
     # the pipeline merges only when both approve. Empty: one review (see brindle.pipeline).
     second_review: dict[str, str] = field(default_factory=dict)
@@ -479,6 +485,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
+                "review_sizing", "review_small_max_files", "review_small_max_lines", "review_risky_paths",
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
                 "usage_limit", "limit_headroom", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",

@@ -914,7 +914,7 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     default = cfg.reviewer or "reviewer"
     if default != "reviewer" or _repo_pins_reviewer(repo_root):
         return default, f"using {default} (pinned by reviewer config)"
-    from brindle import autopilot, pricing, profiles
+    from brindle import autopilot, pricing, profiles, review_scope
 
     allow_local = "reviewer-local" in (
         *cfg.learning_candidates,
@@ -925,6 +925,10 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
         p.name for p in profiles.list_profiles(repo_root)
         if (p.name == "reviewer" or p.name.startswith("reviewer-"))
         and (allow_local or p.name != "reviewer-local")
+        # Built-in sizing profiles need risk/vendor checks. Keep custom profiles
+        # with these names eligible, as they were before sizing was introduced.
+        and not (p.name in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE)
+                 and profiles.profile_source(p.name, repo_root) == f"built-in profile {p.name}")
     ]
     for extra in (*cfg.routing.get("light", ()), *cfg.learning_candidates):
         if extra.startswith("reviewer") and extra not in names and (allow_local or extra != "reviewer-local"):
