@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,7 +42,11 @@ def _python(root: Path, d: Detected) -> None:
     text = pyproject.read_text(encoding="utf-8", errors="replace") if pyproject.is_file() else ""
     uses_pytest = ("pytest" in text or (root / "pytest.ini").is_file() or (root / "conftest.py").is_file()
                    or (root / "tests").is_dir() or (root / "test").is_dir())
-    if (root / "uv.lock").is_file() or "[tool.uv" in text:
+    try:
+        tool = tomllib.loads(text).get("tool")
+    except tomllib.TOMLDecodeError:
+        tool = None
+    if (root / "uv.lock").is_file() or (isinstance(tool, dict) and "uv" in tool):
         d.stacks.append("Python (uv)")
         d.setup.append("uv sync")
         if uses_pytest:
