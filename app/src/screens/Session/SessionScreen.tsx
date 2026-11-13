@@ -35,6 +35,7 @@ import { VisualLinkContext } from "./Visuals/link";
 import { VisualReader } from "./Visuals/VisualReader";
 import { VisualsButton } from "./Visuals/VisualsButton";
 import { OfferChip } from "./Visuals/OfferChip";
+import { PracticeActions, PracticeSteps, usePractice } from "./PracticeRun";
 import { useVisuals } from "./Visuals/useVisuals";
 
 export interface SessionScreenProps {
@@ -56,6 +57,10 @@ export interface SessionScreenProps {
   onOpen?(root: string, repo: string): void;
   /* Closes this whole session and moves the view on (the ⋯'s Close session). */
   onCloseSession?(root: string): void;
+  /* To New session: where a practice run's End practice run goes. */
+  onHome?(): void;
+  /* A finished practice run's Start your own: New session, adding a project that way. */
+  onStartOwn?(add: "open" | "clone"): void;
 }
 
 
@@ -73,7 +78,7 @@ export function findNode(node: AgentNode | null, id: string): AgentNode | null {
   return null;
 }
 
-export function SessionScreen({ client, root, repo, refresh, store, agent, sheet, onSelect, openUrl, onOpen, onCloseSession }: SessionScreenProps) {
+export function SessionScreen({ client, root, repo, refresh, store, agent, sheet, onSelect, openUrl, onOpen, onCloseSession, onHome, onStartOwn }: SessionScreenProps) {
   const workspaces = useAppState((s) => s.workspaces);
   const inbox = useAppState((s) => s.inbox);
   const alive = useAppState((s) => s.alive);
@@ -128,6 +133,8 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     [feed, refresh],
   );
   const recovery = useContinue(client, root, reload);
+  // A practice run (the demo's practice repo): its steps over the terminal, and its own actions in the bar.
+  const practice = usePractice(client, repo, root, tree?.children.length ?? 0);
   // Opening a session the engine hasn't brought back yet asks it to do this one next; no answer matters.
   const comingBack = useContext(PanesReadyContext).pending?.includes(root) === true;
   useEffect(() => {
@@ -235,7 +242,20 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         onOpen={onOpen}
         closeSession={closeSession}
         onChat={showChanges ? closeSheet : undefined}
+        practice={practice && (
+          <PracticeActions
+            client={client}
+            done={practice.done}
+            onStartOwn={onStartOwn}
+            onEnded={async () => {
+              await reload();
+              onHome?.();
+            }}
+          />
+        )}
+        hidePause={practice?.done}
       />
+      {practice && !showChanges && <PracticeSteps step={practice.step} done={practice.done} />}
       {pausedUnder && (
         <div role="status" className="flex items-center gap-s2 border-b border-line px-s2 py-1 text-sm text-ink-2">
           <span>This session was paused</span>
@@ -302,8 +322,12 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
 }
 
 /* The selected agent's status and controls. */
-function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, onChat, visuals }: {
+function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, onChat, visuals, practice, hidePause = false }: {
   client: DaemonClient;
+  /* A practice run's own actions (End practice run; done, Start your own), before Pause. */
+  practice?: ReactNode;
+  /* A finished practice run has nothing left to pause. */
+  hidePause?: boolean;
   /* The header's Visuals N (nothing while the session has none). */
   visuals?: ReactNode;
   root: string;
@@ -374,11 +398,12 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
           ← Chat
         </button>
       )}
+      {practice}
       {paused ? (
         <LoadingButton className={main} data-session-start={root} busy={recovery.busy} disabled={recovery.busy} onClick={() => recovery.resume()}>
           Continue
         </LoadingButton>
-      ) : !resuming && (
+      ) : !resuming && !hidePause && (
         <LoadingButton className={button} busy={busy} disabled={busy} onClick={() => pause()}>
           Pause
         </LoadingButton>

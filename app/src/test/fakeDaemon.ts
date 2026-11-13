@@ -2877,7 +2877,10 @@ export class FakeDaemon {
       if (refused) return refused;
       const running = d.sessions.filter((s) => this.sessionInRepo(s, repo.repo_root) && !PAUSED.has(s.status) && s.status !== "done");
       let workspace = repo.name;
-      if (running.length > 0 && !body.branch && !body.worktree) {
+      // "n" needs no session picked, nor any running (service.sessions.place).
+      if (body.choice === "n" && !body.branch && !body.worktree) {
+        workspace = `${repo.name}/session-${this.nextSession + 1}`;
+      } else if (running.length > 0 && !body.branch && !body.worktree) {
         if (body.choice === undefined) {
           return json(
             {
@@ -2897,12 +2900,11 @@ export class FakeDaemon {
           );
         }
         const picked = running.find((s) => s.id === body.session_id);
-        if (!picked || !["o", "n", "p"].includes(String(body.choice))) {
+        if (!picked || !["o", "p"].includes(String(body.choice))) {
           return error("invalid", `no running session ${JSON.stringify(body.session_id ?? null)} to ${String(body.choice)}`, 400);
         }
         if (body.choice === "o") return json({ opened: picked });
-        if (body.choice === "n") workspace = `${repo.name}/session-${this.nextSession + 1}`;
-        else this.setStatus(picked.id, "paused");
+        this.setStatus(picked.id, "paused");
       } else if (typeof body.branch === "string" && body.branch) {
         workspace = `${repo.name}/${body.branch.replace(/\//g, "-")}`;
       }

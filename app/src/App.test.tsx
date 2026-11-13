@@ -749,7 +749,7 @@ describe("App", () => {
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     expect(await screen.findByRole("region", { name: "New session" })).toBeTruthy();
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     // The view opens on the session's live chat: never "paused", never a card offering to Continue it.
     expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
@@ -788,7 +788,7 @@ describe("App", () => {
       renderApp(<App store={store} client={client} refresh={sync.refresh} />);
       fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
       await act(async () => { await sync.idle(); });
-      fireEvent.click(screen.getByRole("button", { name: "Start" }));
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
       await reading;
       // A slow read can miss the early row altogether. Exercise both orders without waiting
       // for that transient row in the store: only the running session after the ack matters.
@@ -1288,12 +1288,12 @@ describe("the sign-in gate", () => {
     start(daemon);
     await gate();
     expect(screen.getByText("Step 1 of 3")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Watch brindle work on a practice repo" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Practice run" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
     expect(await screen.findByRole("radiogroup", { name: "Permission preset" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
     expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Watch brindle work on a practice repo" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Practice run" })).toBeTruthy();
     expect(localStorage.getItem(ONBOARDED_KEY)).toBe("1");
     expect(daemon.demos).toEqual([]);
   });

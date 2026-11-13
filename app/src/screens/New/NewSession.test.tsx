@@ -24,7 +24,7 @@ function setup(daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj"
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
 
 // Start stays disabled until the repo's usable CLIs are known; a click before then does nothing.
-const startButton = () => screen.findByRole("button", { name: "Start" }).then((b) => waitFor(() => expect(b).toHaveProperty("disabled", false)).then(() => b));
+const startButton = () => screen.findByRole("button", { name: "Send" }).then((b) => waitFor(() => expect(b).toHaveProperty("disabled", false)).then(() => b));
 
 describe("NewSession", () => {
   it("asks for a git identity when the repo has none", async () => {
@@ -89,8 +89,8 @@ describe("NewSession", () => {
     const { onOpen } = setup(daemon);
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
     // Start stays disabled until the usable CLIs are known.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     const card = await screen.findByTestId("preflight");
     expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
     if (key) {
@@ -157,8 +157,8 @@ describe("NewSession", () => {
     };
     const { onOpen, stop } = setup(daemon);
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     const card = await screen.findByTestId("preflight");
     expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
     if (instead === "race") {
@@ -178,8 +178,8 @@ describe("NewSession", () => {
     }
     if (instead === "switch") {
       usableLookup = "hold";
-      fireEvent.focus(screen.getByRole("combobox", { name: "Repo" }));
-      fireEvent.mouseDown(screen.getByRole("option", { name: "other" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Project:/ }));
+      fireEvent.click(screen.getByRole("menuitemradio", { name: /^other/ }));
       await waitFor(() => expect(failLookup).not.toBeNull());
       expect(screen.queryByRole("button", { name: "Start on Codex instead" })).toBeNull();
       usableLookup = "fail";
@@ -216,28 +216,28 @@ describe("NewSession", () => {
     // Branch, CLI and session name wait behind Options.
     fireEvent.click(screen.getByRole("button", { name: /Options/ }));
     expect(screen.queryByLabelText("Autopilot")).toBeNull();
-    fireEvent.click(await startButton());
-    // sup1 is running here: the engine asks what to do with it first.
-    const ask = await screen.findByRole("group", { name: "Session already running" });
-    expect(ask.textContent).toContain("sup1");
-    fireEvent.click(within(ask).getByRole("button", { name: "Pause it and start fresh" }));
+    fireEvent.change(screen.getByLabelText("Branch"), { target: { value: "feat/cache" } });
+    await startButton();
+    // sup1 is running here: the chevron's other way pauses it and starts here, in this checkout, whatever Branch says.
+    fireEvent.click(screen.getByRole("button", { name: "Other ways to start" }));
+    fireEvent.click(within(screen.getByRole("menu")).getAllByRole("menuitemradio", { checked: false })[0]);
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
     expect(posts(daemon).map((r) => r.body)).toEqual([
       { repo: REPO, autopilot: true, prompt: "Add a cache" },
       { repo: REPO, autopilot: true, prompt: "Add a cache", choice: "p", session_id: "sup1" },
     ]);
+    expect(daemon.data.sessions.find((s) => s.id === "sup1")?.status).toBe("paused");
+    expect(daemon.data.sessions.find((s) => s.id === "new1")?.workspace_id).toBe("proj");
   });
 
-  it("lists a named session by its name in the running chooser, and a name given at creation goes in the start request and is kept", async () => {
+  it("sends past a named running session onto a new worktree without asking, and a name given at creation goes in the start request and is kept", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...live, name: "Login fix" }], workspaces: [root, worker] });
     const { onOpen } = setup(daemon);
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Add a cache" } });
     fireEvent.click(screen.getByRole("button", { name: /Options/ }));
     fireEvent.change(screen.getByLabelText("Session name"), { target: { value: "Cache" } });
+    expect(screen.getByTestId("send-hint").textContent).toContain("Login fix");
     fireEvent.click(await startButton());
-    const ask = await screen.findByRole("group", { name: "Session already running" });
-    expect(ask.textContent).toContain("Login fix");
-    fireEvent.click(within(ask).getByRole("button", { name: "New session in its own worktree" }));
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
     // The chosen start carries the name too, and the engine lists the new session by it.
     expect(posts(daemon).at(-1)!.body).toMatchObject({ choice: "n", name: "Cache" });
@@ -247,42 +247,35 @@ describe("NewSession", () => {
   it("hides the demo repo from the project options", async () => {
     const demo = { repo_root: "/home/u/.brindle/demo/textkit-1", name: "textkit-1", demo: true };
     setup(new FakeDaemon({ repos: [demo, { repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [live], workspaces: [root, worker] }));
-    const repo = await screen.findByRole("combobox", { name: "Repo" });
-    expect((repo as HTMLInputElement).value).toBe("proj");
-    fireEvent.focus(repo);
-    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["proj", "other"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Project: proj" }));
+    const items = screen.getAllByRole("menuitemradio");
+    expect(items).toHaveLength(2);
+    expect(items[0].textContent).toMatch(/^proj/);
+    expect(items[1].textContent).toMatch(/^other/);
   });
 
-  it("filters the project list as you type, picks with the keyboard, and closes on an outside click or Escape", async () => {
+  it("picks a project from its menu with the keyboard, and closes the menu on an outside click, Escape or Tab", async () => {
     setup();
-    const repo = await screen.findByRole("combobox", { name: "Repo" });
-    fireEvent.focus(repo);
-    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["proj", "other"]);
-    fireEvent.change(repo, { target: { value: "oth" } });
-    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["other"]);
-    fireEvent.keyDown(repo, { key: "Enter" });
-    expect(screen.queryByRole("listbox")).toBeNull();
-    expect((repo as HTMLInputElement).value).toBe("other");
+    fireEvent.click(await screen.findByRole("button", { name: "Project: proj" }));
+    expect(within(screen.getByRole("menu", { name: "Project" })).getAllByRole("menuitemradio")).toHaveLength(2);
+    // Opened on the picked project: one down is the other, and Enter picks it.
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Enter" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    const chip = screen.getByRole("button", { name: "Project: other" });
 
-    fireEvent.focus(repo);
-    fireEvent.keyDown(repo, { key: "ArrowUp" });
-    fireEvent.keyDown(repo, { key: "ArrowDown" });
-    fireEvent.keyDown(repo, { key: "ArrowDown" });
-    fireEvent.keyDown(repo, { key: "Enter" });
-    expect((repo as HTMLInputElement).value).toBe("other");
-
-    fireEvent.focus(repo);
-    expect(screen.getByRole("listbox")).toBeTruthy();
+    fireEvent.click(chip);
+    expect(screen.getByRole("menu")).toBeTruthy();
     fireEvent.mouseDown(document.body);
-    expect(screen.queryByRole("listbox")).toBeNull();
-    fireEvent.focus(repo);
-    fireEvent.keyDown(repo, { key: "Escape" });
-    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.click(chip);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
 
     // Tabbing away closes it.
-    fireEvent.focus(repo);
-    fireEvent.blur(repo, { relatedTarget: screen.getByRole("button", { name: "Add a project…" }) });
-    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.click(chip);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Tab" });
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("says a start is under way the moment Start is pressed, and until its session opens", async () => {
@@ -363,7 +356,8 @@ describe("NewSession", () => {
       preflight: { claude: [{ id: "consent", kind: "consent", label: "Agree to Claude Code's terms", done: false }] },
     });
     const { onOpen } = setup(daemon);
-    fireEvent.click(await screen.findByRole("button", { name: "Watch brindle work on a practice repo" }));
+    const practice = await screen.findByRole("region", { name: "Practice run" });
+    fireEvent.click(within(practice).getByRole("button"));
     const card = await screen.findByTestId("preflight");
     expect(daemon.demos).toEqual([]);
     fireEvent.click(within(card).getByRole("checkbox", { name: /Agree to Claude Code's terms/ }));
@@ -374,7 +368,7 @@ describe("NewSession", () => {
     fireEvent.click(launch);
     fireEvent.click(launch);
     await waitFor(() => expect(launch).toHaveProperty("disabled", true));
-    expect(screen.getByRole("button", { name: "Starting the demo…" })).toHaveProperty("disabled", true);
+    expect(within(practice).getAllByRole("button")[0]).toHaveProperty("disabled", true);
     await waitFor(() => expect(posts(daemon).filter((r) => r.path === "/demo")).toHaveLength(2));
     daemon.finishLaunch();
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", "/home/u/.brindle/demo/textkit-1"));
@@ -395,7 +389,7 @@ describe("NewSession", () => {
     cleanup();
 
     const { stop: stop2 } = setup(new FakeDaemon());
-    expect((await screen.findByRole("region", { name: "Welcome" })).textContent).toContain("No repo is set up yet");
+    expect(await screen.findByRole("region", { name: "Welcome" })).toBeTruthy();
     expect(screen.queryByLabelText("What should brindle work on?")).toBeNull();
     stop2();
   });
@@ -414,24 +408,24 @@ describe("NewSession", () => {
     expect(daemon.opened).toEqual([REPO]);
 
     // Another, cloned: it is listed and selected.
-    fireEvent.click(screen.getByRole("button", { name: "Add a project…" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Project:/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Clone a repository…" }));
     const adding = screen.getByRole("region", { name: "Add a project" });
     fireEvent.change(within(adding).getByRole("textbox", { name: "Repository URL" }), { target: { value: "git@github.com:sam/site.git" } });
     fireEvent.click(within(adding).getByRole("button", { name: "Clone" }));
-    await waitFor(() => expect((screen.getByRole("combobox", { name: "Repo" }) as HTMLInputElement).value).toBe("site"));
+    await screen.findByRole("button", { name: "Project: site" });
     expect(screen.queryByRole("region", { name: "Add a project" })).toBeNull();
     // Switch away, then reopen the same project: each pick is a fresh selection.
-    const repo = screen.getByRole("combobox", { name: "Repo" });
-    fireEvent.focus(repo);
-    fireEvent.mouseDown(screen.getByRole("option", { name: "proj" }));
-    expect((repo as HTMLInputElement).value).toBe("proj");
+    fireEvent.click(screen.getByRole("button", { name: /^Project:/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /^proj/ }));
+    expect(screen.getByRole("button", { name: "Project: proj" })).toBeTruthy();
     pickFolder.mockResolvedValue("~/Projects/site");
-    fireEvent.click(screen.getByRole("button", { name: "Add a project…" }));
-    fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
-    await waitFor(() => expect((repo as HTMLInputElement).value).toBe("site"));
+    fireEvent.click(screen.getByRole("button", { name: /^Project:/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open a folder…" }));
+    await screen.findByRole("button", { name: "Project: site" });
     // Start waits for the new project's usable CLIs.
-    await waitFor(() => expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ repo: "~/Projects/site" }));
   });
 
@@ -439,18 +433,21 @@ describe("NewSession", () => {
     localStorage.clear();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root], providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1" }, antigravity: { path: "/bin/agy", version: "1", signed_in: false } }) });
     const { onSignIn } = setup(daemon);
-    const select = (await screen.findByRole("combobox", { name: "Supervisor CLI" })) as HTMLSelectElement;
-    expect([...select.options].map((o) => o.textContent)).toEqual(["Pick a CLI", "Claude Code", "Codex"]);
-    expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(true);
+    const cli = await screen.findByRole("button", { name: /^Supervisor CLI:/ });
+    await waitFor(() => expect(cli).toHaveProperty("disabled", false));
+    fireEvent.click(cli);
+    const clis = within(screen.getByRole("menu", { name: "Supervisor CLI" })).getAllByRole("menuitemradio");
+    expect(clis.map((o) => [o.textContent?.startsWith("Claude Code") || o.textContent?.startsWith("Codex"), o.getAttribute("aria-checked")])).toEqual([[true, "false"], [true, "false"]]);
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
     // ⌘↵ in the prompt doesn't get past the pick either.
     fireEvent.keyDown(screen.getByRole("textbox", { name: "What should brindle work on?" }), { key: "Enter", metaKey: true });
     expect(posts(daemon)).toHaveLength(0);
-    fireEvent.click(screen.getByRole("button", { name: "Sign in to more…" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Sign in to more…/ }));
     expect(onSignIn).toHaveBeenCalled();
     fireEvent.click(within(screen.getByText("Which CLI should run your sessions?").parentElement!).getByRole("button", { name: "Codex" }));
-    expect(select.value).toBe("codex");
+    expect(screen.getByRole("button", { name: "Supervisor CLI: Codex" })).toBeTruthy();
     expect(screen.queryByText("Which CLI should run your sessions?")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ provider: "codex" }));
     expect(localStorage.getItem("brindle.supervisorCli")).toBe("codex");
   });
@@ -465,13 +462,12 @@ describe("NewSession", () => {
       return fetch(input, init);
     };
     setup(daemon);
-    const start = () => screen.getByRole("button", { name: "Start" }) as HTMLButtonElement;
+    const start = () => screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
     await waitFor(() => expect(start().disabled).toBe(false));
     hold = true;
-    const repo = screen.getByRole("combobox", { name: "Repo" });
     for (const name of ["other", "proj"]) {
-      fireEvent.focus(repo);
-      fireEvent.mouseDown(screen.getByRole("option", { name }));
+      fireEvent.click(screen.getByRole("button", { name: /^Project:/ }));
+      fireEvent.click(screen.getByRole("menuitemradio", { name: new RegExp(`^${name}`) }));
     }
     // Back on the first repo, whose earlier answer is gone: nothing starts until it is asked again.
     await waitFor(() => expect(held).toHaveLength(2));
@@ -493,7 +489,7 @@ describe("NewSession", () => {
     expect(posts(daemon)).toHaveLength(0);
     down = false;
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
   });
 
   it("with no usable CLI, shows Finish setting up in place of the composer", async () => {
