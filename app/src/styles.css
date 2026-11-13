@@ -273,6 +273,27 @@ body {
   .onb-bar i { animation: none; width: 100%; opacity: 0.5; }
 }
 
+/* The first run's replay of a practice run (screens/New/FirstRun.tsx): the
+   four steps light one after another as the scrubber crosses them. Still
+   (reduced motion), the first step stays lit. */
+@keyframes replay-step {
+  0%, 22% { border-color: var(--branch); background: color-mix(in srgb, var(--branch) 8%, transparent); }
+  25%, 100% { border-color: var(--line); background: transparent; }
+}
+@keyframes replay-scrub {
+  from { width: 0; }
+  to { width: 100%; }
+}
+.replay-step { animation: replay-step 8s infinite; }
+.replay-step:nth-child(2) { animation-delay: 2s; }
+.replay-step:nth-child(3) { animation-delay: 4s; }
+.replay-step:nth-child(4) { animation-delay: 6s; }
+.replay-scrub i { animation: replay-scrub 8s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .replay-step, .replay-scrub i { animation: none; }
+  .replay-step:first-child { border-color: var(--branch); }
+}
+
 /* A pane is drawn at its own size, never reflowed to the view's
    (components/Terminal.tsx): xterm fills its host at the least, and a pane
    bigger than the view scrolls in it instead of being cut off. */
