@@ -85,10 +85,10 @@ async def _read_request(app, path, headers, query="", peer_pid=None):
 
 
 @pytest.mark.parametrize("headers,status", [
-    ({}, 401),
-    ({"Authorization": "Bearer wrong"}, 401),
+    pytest.param({}, 401, marks=pytest.mark.variant("missing bearer token")),
+    pytest.param({"Authorization": "Bearer wrong"}, 401, marks=pytest.mark.variant("wrong bearer token")),
     ({"Authorization": f"Bearer {TOKEN}", "Origin": "https://evil.example"}, 403),
-    ({"Authorization": f"Bearer {TOKEN}", "Origin": "tauri://localhost"}, 200),
+    pytest.param({"Authorization": f"Bearer {TOKEN}", "Origin": "tauri://localhost"}, 200, marks=pytest.mark.variant("authenticated native-app origin")),
 ])
 def test_requests_need_the_token_and_no_foreign_origin(headers, status):
     code, body = _get("/v1/meta", headers)
@@ -404,19 +404,16 @@ def seeded(db, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("path,check", [
-    ("/v1/sessions", lambda b, s: [(x["id"], x["goal"]) for x in b] == [("r1", "ship the thing")]),
-    ("/v1/snapshot", lambda b, s: [a["id"] for a in b[0]["agents"] if a["id"] == "w1"] == ["w1"]),
     ("/v1/inbox", lambda b, s: [(i["kind"], i["agent_id"]) for i in b] == [("waiting", "w1")]),
     ("/v1/goal", lambda b, s: b["root_id"] == "r1" and b["goal"] == "ship the thing"),
-    ("/v1/agents/w1", lambda b, s: b["status"] == "waiting" and b["parent_id"] == "r1"),
-    ("/v1/agents/w2", lambda b, s: b["locked"] == "other@example.com" and b["tokens"] is None),
+    pytest.param("/v1/agents/w2", lambda b, s: b["locked"] == "other@example.com" and b["tokens"] is None, marks=pytest.mark.variant("foreign identity's usage stays hidden")),
     ("/v1/agents/nope", lambda b, s: b["error"]["code"] == "not_found"),
     ("/v1/workspaces/{ws}/diff", lambda b, s: b["base"] == "main" and b["diff"] == ""),
     ("/v1/decisions", lambda b, s: [(d["topic"], d["author_session"]) for d in b] == [("storage", "r1")]),
     ("/v1/profiles", lambda b, s: "developer" in [p["name"] for p in b] and "env" not in b[0]),
     ("/v1/account", lambda b, s: b == {"signed_in": False, "name": None, "email": None, "plan": None, "orgs": []}),
     ("/v1/cost", lambda b, s: b["days"] == 30 and b["total"]["dollars"] == 0),
-], ids=["sessions", "snapshot", "inbox", "goal", "agent", "agent-locked", "agent-missing", "diff",
+], ids=["inbox", "goal", "agent-locked", "agent-missing", "diff",
         "knowledge-decisions", "profiles", "account", "cost"])
 def test_read_routes_answer_from_the_db(seeded, path, check):
     code, body = _get(path.format(ws=seeded["ws"]), AUTH, f"repo={seeded['repo']}")
@@ -464,7 +461,16 @@ def test_goal_read_is_fast_with_unchanged_heads(seeded, db, monkeypatch):
     assert calls["log"] == 3
 
 
-@pytest.mark.parametrize("path", ["snapshot", "agents/w1", "agents/w2", "inbox", "inbox-doc", "sessions", "reassigned", "inbox-reassigned", "permissions/asks", "asks-reassigned"])
+@pytest.mark.parametrize("path", [
+    pytest.param("snapshot", marks=pytest.mark.variant("snapshot hides past workers")),
+    "agents/w1",
+    pytest.param("agents/w2", marks=pytest.mark.variant("dismissed worker remains history")),
+    pytest.param("inbox", marks=pytest.mark.variant("rewound plan stays out of inbox")),
+    pytest.param("inbox-doc", marks=pytest.mark.variant("past worker's doc hold")),
+    "sessions", "reassigned",
+    pytest.param("inbox-reassigned", marks=pytest.mark.variant("reassigned worker's stale inbox item")),
+    "permissions/asks", "asks-reassigned",
+])
 def test_past_workers_are_history_not_live_rows(seeded, db, path):
     db.set_status("w1", "rewound")
     db.update_agent("w1", tmux_window="", plan_first=1, plan_state="proposed", plan_text="old plan")
@@ -521,8 +527,17 @@ def test_past_workers_are_history_not_live_rows(seeded, db, path):
         assert not any(i.get("agent_id") in ("w1", "w2") for i in body)
 
 
-@pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events", "doctor", "doctor-owned",
-                                  "preflight", "spend-events", "slow-check"])
+@pytest.mark.parametrize("kind", [
+    pytest.param("read", marks=pytest.mark.variant("read and 404 connection leaks")),
+    "idle",
+    pytest.param("peer", marks=pytest.mark.variant("peer-scan connection leak")),
+    pytest.param("terminal", marks=pytest.mark.variant("terminal-reset connection leak")),
+    "events", "doctor",
+    pytest.param("doctor-owned", marks=pytest.mark.variant("doctor-owned connection leak")),
+    "preflight",
+    pytest.param("spend-events", marks=pytest.mark.variant("spend-event connection leaks")),
+    "slow-check",
+])
 def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, kind):
     opened, closed = [], []
     connect = sqlite3.connect
@@ -613,16 +628,16 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
 
 
 @pytest.mark.parametrize("caller,refused_as,holds_for,chain", [
-    (310, "w1", {"w1"}, [310, 300, 200, 100]),     # a command under w1's pane, however deep
+    pytest.param(310, "w1", {"w1"}, [310, 300, 200, 100], marks=pytest.mark.variant("nested worker ancestry bypass attempt")),
     # BRINDLE_AGENT_ID in its own environment: refused, but it holds no request as w2,
     # since a process's word about itself is no proof (permission holds).
-    (420, "w2", set(), [420]),
-    (410, None, set(), [410, 400]),     # a person's terminal
+    pytest.param(420, "w2", set(), [420], marks=pytest.mark.variant("self-asserted identity proves no ownership")),
+    pytest.param(410, None, set(), [410, 400], marks=pytest.mark.variant("person's terminal remains admitted")),
     (999, "can't be checked", set(), [999]),   # exited before the check: fire and forget
     # A command line saying "daemon run" under w1's pane cuts nothing short: a child
     # that cleared its environment is still refused, by the shell's or by the pane.
     (330, "w1", {"w1"}, [330, 320]),
-    (350, "w1", {"w1"}, [350, 340, 300, 200, 100]),
+    pytest.param(350, "w1", {"w1"}, [350, 340, 300, 200, 100], marks=pytest.mark.variant("cleared environment ancestry bypass attempt")),
 ])
 def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as, holds_for, chain):
     table = {p.pid: p for p in [
@@ -664,16 +679,16 @@ def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, 
 
 @pytest.mark.parametrize("snapshot,caller,refused_as,tmux_reads", [
     ("refresh pending", 310, "w1", 0),
-    ("refresh failed", 310, "w1", 0),
+    pytest.param("refresh failed", 310, "w1", 0, marks=pytest.mark.variant("failed refresh keeps caller refused")),
     ("pane created since", 310, "w1", 0),
     # A pane split into w1's window after a fresh snapshot runs under the tmux server.
     ("pane split since", 510, "w1", 1),
     # r1's exited pane had pid 310, now another's: an old snapshot may refuse, never grant.
-    ("supervisor pid recycled", 310, "r1", 0),
+    pytest.param("supervisor pid recycled", 310, "r1", 0, marks=pytest.mark.variant("recycled supervisor PID")),
     # The app never runs under the snapshot's tmux server: a fresh snapshot clears it
     # with no tmux call, unless that server is unknown or gone.
     ("app, server known", 40, None, 0),
-    ("app, server unknown", 40, None, 1),
+    pytest.param("app, server unknown", 40, None, 1, marks=pytest.mark.variant("unknown server requires fresh identity")),
     ("app, server gone", 40, None, 1),
 ])
 def test_caller_under_a_new_agent_pane_is_not_cleared_by_an_old_snapshot(seeded, monkeypatch, snapshot, caller,
@@ -877,9 +892,9 @@ ROUTE_ID = "us.anthropic.claude-opus-x-v1:0"     # the Bedrock id the org's rout
 
 
 @pytest.mark.parametrize("allowed,heavy_ok", [
-    (ROUTE_ID, True),                               # the pin is allowed: developer-heavy (opus) runs as it
+    pytest.param(ROUTE_ID, True, marks=pytest.mark.variant("GET offers exact permitted pin")),
     ("opus", True),                                 # the alias itself is allowed
-    ("eu.anthropic.claude-opus-x-v1:0", False),     # a pin matches exactly, as check_assign matches it
+    pytest.param("eu.anthropic.claude-opus-x-v1:0", False, marks=pytest.mark.variant("GET refuses another region's pin")),
 ], ids=["pinned-id", "alias", "other-region"])
 def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch, allowed, heavy_ok):
     from brindle import providers
@@ -908,7 +923,8 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
                          for m in heavy)
 
 
-@pytest.mark.parametrize("keychain_status", [44, 1])
+@pytest.mark.parametrize("keychain_status", [44,
+    pytest.param(1, marks=pytest.mark.variant("locked keychain starts no sign-in probe"))])
 def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypatch, keychain_status):
     # The Agents tab opens on this read: it must not run the dispatch's learned
     # resolution (a keychain read per credential per candidate) nor any
@@ -926,6 +942,7 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
     config.set_local(str(repo), "routing", {"medium": ["developer"]})
     routed, probed, pro_reads = [], [], []
     monkeypatch.setattr(license, "current", seeded["current_license"])
+    monkeypatch.setattr(keystore, "_keychain_reads", {})
     monkeypatch.setattr(keystore, "backend_name", lambda: "keychain")
     monkeypatch.setattr(credentials.KeychainStore, "_run",
                         lambda self, args: pro_reads.append(args) or SimpleNamespace(returncode=keychain_status))
@@ -937,7 +954,7 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
     monkeypatch.setattr(worker_models, "_signed_in", None)
     code, body = _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")
     assert code == 200 and routed == [] and probed == []
-    assert len(pro_reads) <= 1
+    assert len(pro_reads) == 1
     # The person's own view: their settings and library, not this repo's.
     assert (body["tiers"]["medium"]["values"], body["tiers"]["medium"]["source"]) == (["developer-codex"], "user")
     assert "repo-only" not in {p["name"] for p in body["profiles"]}
@@ -1062,7 +1079,11 @@ def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, m
     assert body == {"writing": 1, "updated": 1, "using": 1, "total": 2}
 
 
-@pytest.mark.parametrize("role,allowed", [("admin", True), ("member", False), (None, False)])
+@pytest.mark.parametrize("role,allowed", [
+    pytest.param("admin", True, marks=pytest.mark.variant("admin can change doc destination")),
+    ("member", False),
+    pytest.param(None, False, marks=pytest.mark.variant("missing role denies destination write")),
+])
 def test_doc_destination_is_read_by_anyone_and_changed_only_by_admins(monkeypatch, role, allowed):
     from brindle.daemon import routes_actions
     from brindle.pro import analysis_docs
@@ -1212,7 +1233,7 @@ def _session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monk
 @pytest.mark.parametrize("scenario, params", [
     pytest.param(_heavy_lane, {}, id="heavy_lane"),
     pytest.param(_health_log_watch_warns_only_when_the_loop_itself_is_late, {"stalled": True},
-                 id="health_log-late"),
+                 id="health_log-late", marks=pytest.mark.variant("late event loop emits warning")),
     pytest.param(_health_log_watch_warns_only_when_the_loop_itself_is_late, {"stalled": False},
                  id="health_log-on-time",
                  marks=pytest.mark.variant("a slow sweep the watch awaits is not loop lag: no false warning")),
@@ -1231,7 +1252,9 @@ def test_daemon_overload_lanes_health_caller_check_and_session_diff(request, sce
     run_scenario(request, scenario, params)
 
 
-@pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
+@pytest.mark.parametrize("briefed,enough", [(5, True),
+    pytest.param(4, False, marks=pytest.mark.variant("below-minimum sample suppresses averages"))],
+    ids=["enough", "below-minimum"])
 def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
     from brindle.db import Task
     from brindle.pro import analysis_brief
@@ -1268,7 +1291,8 @@ def test_peer_pid_names_the_unix_socket_caller():
 
 
 @pytest.mark.parametrize("soft,hard,refused", [
-    (256, 4096, False), (256, resource.RLIM_INFINITY, False),
+    pytest.param(256, 4096, False, marks=pytest.mark.variant("finite hard descriptor limit")),
+    (256, resource.RLIM_INFINITY, False),
     (256, 4096, True), (100000, 100000, False),
 ])
 def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, refused):

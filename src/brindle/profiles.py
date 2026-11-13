@@ -175,7 +175,7 @@ class RulePack:
         name: security/backend
         description: No shell-outs, no evals, no secrets in code
         deny_deps: [pickle]              # imports/dependencies that may not be added
-        require_tests_for: [src/**/*.py] # changing these needs a test file in the diff
+        require_tests_for: [tests/conftest.py] # opt-in: require a test file in the diff
         deny_patterns:                   # regexes no added line may match
           - shell=True
           - eval\\(

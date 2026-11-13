@@ -1,6 +1,7 @@
 import asyncio
 import time
 
+import pytest
 from typer.testing import CliRunner
 
 from brindle import cli, agents, autopilot, cull, history, mcp_server, sessions, workspaces
@@ -241,6 +242,7 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
 # -- /clear and other transcript resets ---------------------------------------
 
 
+@pytest.mark.variant("a larger transcript after /clear must not subtract the previous transcript's usage")
 def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db):
     """After /clear a brand-new, larger transcript has nothing to do with the old mark."""
     history.record(db, "/r", "worker_result", agent_id="a1", transcript_path="/t/old.jsonl",

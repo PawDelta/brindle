@@ -8,7 +8,7 @@ import pytest
 from brindle import agents, antigravity, company_identity, company_login, doctor, providers, workspaces
 from brindle.db import Agent
 from brindle.pro.team_policy import (AgentSetup, AwsFederation, AwsSetup, AzureFederation, AzureSetup,
-                                     ClaudeSetup, CodexSetup, GatewaySetup, GcpFederation, GcpSetup)
+                                     ClaudeSetup, GatewaySetup, GcpFederation, GcpSetup)
 
 ORG = "acme"
 CLAUDE_ORG = "11111111-2222-3333-4444-555555555555"
@@ -101,6 +101,7 @@ def test_other_claude_org_warns_with_the_fix(monkeypatch):
     ({}, {"aws"}, "isn't installed", "couldn't run"),
     ({("aws", "sts"): (124, "timed out")}, set(), "couldn't run", "isn't installed"),
 ])
+@pytest.mark.variant("failure path: missing and failed identity CLIs warn without falsely declaring an identity mismatch")
 def test_missing_cli_warns_without_a_mismatch(monkeypatch, rc, missing, said, not_said):
     Fake(monkeypatch, rc, missing=missing)
     policy(monkeypatch, claude_setup("bedrock", aws=AWS))
@@ -165,6 +166,7 @@ def test_enforce_blocks_with_the_enterprise_entitlement(monkeypatch):
     assert company_identity.launch_problem("claude")
 
 
+@pytest.mark.variant("identity: a mismatch cannot become a reusable successful launch check")
 def test_a_mismatch_is_never_cached_and_is_probed_again(monkeypatch, launch_cache):
     _, path = launch_cache
     fake = Fake(monkeypatch, WRONG_AWS)
@@ -205,6 +207,7 @@ def touch(path, content="x"):
     return path
 
 
+@pytest.mark.variant("identity: credential presence invalidates cached AWS identity without storing secret values")
 def test_aws_credential_env_vars_reprobe_without_being_stored(monkeypatch):
     name = "AWS_SESSION_TOKEN"
     monkeypatch.delenv(name, raising=False)
@@ -218,6 +221,7 @@ def test_aws_credential_env_vars_reprobe_without_being_stored(monkeypatch):
     assert company_identity._fingerprint("bedrock") == a
 
 
+@pytest.mark.variant("security: identity cache fingerprints must work without reading private credential file contents")
 def test_the_fingerprint_never_reads_file_contents(monkeypatch, tmp_path):
     import os
 
@@ -243,6 +247,7 @@ def test_launch_refuses_the_agent(db, repo, monkeypatch):
 
 # -- what is checked is what runs ----------------------------------------------------------
 
+@pytest.mark.variant("bypass: a personal org display name cannot impersonate the required org ID")
 def test_an_org_name_never_stands_in_for_the_org_id():
     # a personal org named after the company's id
     assert not company_identity.matches("org:org-1", "claude org Me (org-1) (org-9)")
@@ -274,6 +279,7 @@ PROFILE_LINES = {"AWS_PROFILE": "personal", "AWS_ACCESS_KEY_ID": "AKIAPERSONAL",
                  "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1", "https_proxy": "http://mitm", "EDITOR": "vi"}
 
 
+@pytest.mark.variant("bypass: profile environment cannot override an enforced organization route")
 def test_enforced_route_beats_a_profiles_env_lines(db, repo, monkeypatch):
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
     env = _env_of(db, repo, monkeypatch, PROFILE_LINES)
@@ -285,6 +291,7 @@ def test_enforced_route_beats_a_profiles_env_lines(db, repo, monkeypatch):
     assert env["EDITOR"] == "vi"
 
 
+@pytest.mark.variant("bypass: inherited credentials cannot escape the enforced route and federation retains only its own hook")
 def test_enforced_route_takes_inherited_and_stored_credentials_out_of_the_pane(monkeypatch):
     from brindle import pane_auth
 
@@ -349,6 +356,7 @@ def test_federated_aws_identity_is_read_from_the_exchange_cache_without_the_cli(
     assert company_identity.matches(expected, ident) == (level == doctor.OK)
 
 
+@pytest.mark.variant("identity: changing the Azure account profile invalidates the cached launch check")
 def test_azure_profile_change_reprobes(monkeypatch, tmp_path):
     f = touch(tmp_path / "home" / ".azure" / "azureProfile.json", "{}")
     fake = cloud_cache_case(monkeypatch, "foundry", azure=AZURE)
@@ -409,12 +417,6 @@ def test_undetermined_identity_never_blocks(monkeypatch):
     assert company_identity.launch_check("claude") == (None, "identity_undetermined", "bedrock")
     Fake(monkeypatch, {("aws", "sts"): (124, "timed out")})
     assert company_identity.launch_problem("claude") is None
-
-
-def test_codex_is_never_blocked(monkeypatch):
-    Fake(monkeypatch)
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), codex=CodexSetup("chatgpt"), enforce=True)
-    assert company_identity.launch_problem("codex") is None
 
 
 def test_a_probe_is_cached_within_one_run(monkeypatch):

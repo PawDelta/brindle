@@ -34,7 +34,9 @@ ERRORS = [
 ]
 
 
-@pytest.mark.parametrize("text, key, cause_words, fix_words", [ERRORS[1], ERRORS[5], ERRORS[6]],
+@pytest.mark.parametrize("text, key, cause_words, fix_words", [
+    pytest.param(*ERRORS[1], marks=pytest.mark.variant("Bedrock use-case denial needs classification distinct from quota or provider-data errors")),
+    ERRORS[5], ERRORS[6]],
                          ids=["bedrock_use_case", "foundry_quota", "foundry_provider_data"])
 def test_each_error_is_classified_with_a_cause_and_a_fix(text, key, cause_words, fix_words):
     cause = model_access.classify(text)
@@ -176,6 +178,7 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
     route_health.reset()
 
 
+@pytest.mark.variant("security: model-access cooldown fingerprints track account changes without storing secret keys")
 def test_the_fingerprint_names_the_account_never_a_key(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
     monkeypatch.setenv("AWS_REGION", "us-east-1")

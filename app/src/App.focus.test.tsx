@@ -1,11 +1,10 @@
+import { connectDaemon } from "./test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { ONBOARDED_KEY } from "./api/providers";
 import { PtyViewsProvider } from "./api/ptyView";
 import { Sheet } from "./components/Sheet";
-import { createAppStore } from "./store/store";
-import { startSync } from "./store/sync";
 import { FakeDaemon } from "./test/fakeDaemon";
 import { REPO, question, root, worker } from "./test/fixtures";
 import { standInViews } from "./test/panes";
@@ -43,9 +42,7 @@ function mount(initialRoute: Route = { screen: "inbox" }, overlay = false) {
     workspaces: [root, worker],
     inbox: [question, { ...question, agent_id: "w1" }],
   });
-  const store = createAppStore();
-  const client = daemon.client();
-  const sync = startSync({ client, store, connect: daemon.connect });
+  const { client, store, sync } = connectDaemon(daemon);
   const view = render(
     <PtyViewsProvider value={standInViews}>
       <App store={store} client={client} refresh={sync.refresh} initialRoute={initialRoute} />
@@ -70,63 +67,53 @@ async function openInboxItem(agent: string) {
 }
 
 it.each(["sup1", "w1"])("focus from inbox: opens the item's agent %s with keyboard focus in its terminal", async (agent) => {
-  const { sync } = mount();
-  try {
-    await openInboxItem(agent);
-    await waitFor(() => expect(document.activeElement).toBe(textarea()));
-    expect(screen.getByTestId("terminal").getAttribute("data-target")).toContain(`:${agent}`);
-  } finally { sync.stop(); }
+  mount();
+  await openInboxItem(agent);
+  await waitFor(() => expect(document.activeElement).toBe(textarea()));
+  expect(screen.getByTestId("terminal").getAttribute("data-target")).toContain(`:${agent}`);
 });
 
 it("focus from inbox: the session heading link focuses a textarea that mounts later", async () => {
   let ready!: () => void;
   terminal.mount = new Promise<void>((resolve) => { ready = resolve; });
-  const { sync } = mount();
-  try {
-    fireEvent.click(await screen.findByRole("button", { name: "Open the session ›" }));
-    await screen.findByTestId("terminal");
-    expect(screen.queryByRole("textbox", { name: "Terminal input" })).toBeNull();
-    await act(async () => ready());
-    await waitFor(() => expect(document.activeElement).toBe(textarea()));
-  } finally { sync.stop(); }
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Open the session ›" }));
+  await screen.findByTestId("terminal");
+  expect(screen.queryByRole("textbox", { name: "Terminal input" })).toBeNull();
+  await act(async () => ready());
+  await waitFor(() => expect(document.activeElement).toBe(textarea()));
 });
 
 it("focus from inbox: sidebar agent navigation focuses the new pane without stealing focus on refresh", async () => {
   const { sync } = mount();
-  try {
-    await openInboxItem("sup1");
-    await waitFor(() => expect(document.activeElement).toBe(textarea()));
-    fireEvent.click(sidebar().querySelector<HTMLButtonElement>('[data-tree-agent="w1"]')!);
-    await waitFor(() => expect(document.activeElement).toBe(textarea()));
-    expect(screen.getByTestId("terminal").getAttribute("data-target")).toContain(":w1");
-    const inboxButton = within(sidebar()).getByRole("button", { name: /^Inbox/ });
-    inboxButton.focus();
-    await act(async () => { await sync.refresh(); });
-    expect(document.activeElement).toBe(inboxButton);
-  } finally { sync.stop(); }
+  await openInboxItem("sup1");
+  await waitFor(() => expect(document.activeElement).toBe(textarea()));
+  fireEvent.click(sidebar().querySelector<HTMLButtonElement>('[data-tree-agent="w1"]')!);
+  await waitFor(() => expect(document.activeElement).toBe(textarea()));
+  expect(screen.getByTestId("terminal").getAttribute("data-target")).toContain(":w1");
+  const inboxButton = within(sidebar()).getByRole("button", { name: /^Inbox/ });
+  inboxButton.focus();
+  await act(async () => { await sync.refresh(); });
+  expect(document.activeElement).toBe(inboxButton);
 });
 
 it("focus from inbox: an open review sheet keeps focus until dismissed", async () => {
-  const { sync } = mount({ screen: "session", root: "sup1", repo: REPO, sheet: { kind: "review" } });
-  try {
-    const dialog = await screen.findByRole("dialog");
-    await screen.findByRole("textbox", { name: "Terminal input" });
-    expect(document.activeElement).toBe(dialog);
-    fireEvent.click(within(dialog).getByRole("button", { name: "Close sheet" }));
-    await waitFor(() => expect(document.activeElement).toBe(textarea()));
-  } finally { sync.stop(); }
+  mount({ screen: "session", root: "sup1", repo: REPO, sheet: { kind: "review" } });
+  const dialog = await screen.findByRole("dialog");
+  await screen.findByRole("textbox", { name: "Terminal input" });
+  expect(document.activeElement).toBe(dialog);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Close sheet" }));
+  await waitFor(() => expect(document.activeElement).toBe(textarea()));
 });
 
 it("focus from inbox: a dialog outside the session keeps focus when a delayed terminal mounts", async () => {
   let ready!: () => void;
   terminal.mount = new Promise<void>((resolve) => { ready = resolve; });
-  const { sync } = mount({ screen: "inbox" }, true);
-  try {
-    const dialog = screen.getByRole("dialog", { name: "Other dialog" });
-    await openInboxItem("sup1");
-    await screen.findByTestId("terminal");
-    await act(async () => ready());
-    expect(textarea()).toBeTruthy();
-    expect(document.activeElement).toBe(dialog);
-  } finally { sync.stop(); }
+  mount({ screen: "inbox" }, true);
+  const dialog = screen.getByRole("dialog", { name: "Other dialog" });
+  await openInboxItem("sup1");
+  await screen.findByTestId("terminal");
+  await act(async () => ready());
+  expect(textarea()).toBeTruthy();
+  expect(document.activeElement).toBe(dialog);
 });

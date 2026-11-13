@@ -144,7 +144,9 @@ def test_each_branchs_clash_goes_to_the_supervisor_to_reconcile(db, remote, told
     assert states(db) == {("feat/a", "d1"): "clash"}
 
 
-@pytest.mark.parametrize("how", ["published here", "changed elsewhere"])
+@pytest.mark.parametrize("how", [pytest.param("published here", marks=pytest.mark.variant(
+    "publishing locally must notify only sessions that read the doc and deduplicate the same revision")),
+    "changed elsewhere"])
 def test_a_changed_doc_tells_only_the_session_that_read_it(how, db, remote, told, tmp_path, monkeypatch):
     sup, reader, ws = session(db, tmp_path)
     if how == "published here":

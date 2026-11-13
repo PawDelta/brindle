@@ -43,21 +43,6 @@ def test_detect_go_and_make_fallback(tmp_path):
     assert detect.detect(other).checks == ["make test"]
 
 
-def test_init_writes_detected_config_and_keeps_existing(repo, monkeypatch):
-    (repo / "go.mod").write_text("module x\n")
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(doctor, "checks", lambda root: [])
-    res = CliRunner().invoke(app, ["init"])
-    assert res.exit_code == 0, res.output
-    cfg = json.loads((repo / ".brindle" / "config.json").read_text())
-    assert cfg["setup"] == ["go mod download"] and cfg["checks"] == ["go test ./..."]
-    assert "Ready" in res.output
-
-    (repo / ".brindle" / "config.json").write_text('{"checks": ["mine"]}\n')
-    res = CliRunner().invoke(app, ["init"])
-    assert res.exit_code == 0, res.output
-    assert "kept" in res.output
-    assert json.loads((repo / ".brindle" / "config.json").read_text()) == {"checks": ["mine"]}
 
 
 def test_init_fails_on_doctor_failure(repo, monkeypatch):

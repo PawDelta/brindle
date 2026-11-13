@@ -8,7 +8,7 @@
     "if [ -z \"$BRINDLE_BASE_BRANCH\" ] || ! git diff --quiet \"$BRINDLE_BASE_BRANCH\"...HEAD -- app; then cd app && { test -d node_modules || npm ci --silent; } && npx vitest run && npx tsc -b; fi"
   ],
   "rules": [
-    "Tests must earn their place (see .brindle/rules/learned.md): ask workers for the fewest tests that would fail without the change, and treat padded, duplicate or wording-only tests in a review as blockers."
+    "Full coverage is not a goal. Features need a main-path test, plus a failure path only when it matters; bug fixes need one regression test that fails on base and passes after. Refactors, renames, docs, config, wording and pure glue need no new tests. Extend existing tests or tables first. Never test wording, constants, defaults or mock arguments. Missing feature or regression tests and added tests catching no distinct bug are blockers."
   ],
   "setup": [
     "cd app && npm ci --no-audit --no-fund"

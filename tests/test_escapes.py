@@ -173,7 +173,7 @@ def test_second_review_needs_both_approvals_before_it_merges(db, repo, piped):
 
 
 @pytest.mark.parametrize("slot", [
-    None,
+    pytest.param(None, marks=pytest.mark.variant("a second review arriving first cannot bypass the primary approval")),
     pytest.param("", marks=pytest.mark.variant("#216 fallback race: two profiles approve only the primary slot")),
 ])
 def test_the_second_reviewer_approving_first_still_waits_for_the_other(db, repo, piped, slot):
@@ -257,6 +257,7 @@ def test_a_commit_during_review_gets_no_approval(db, repo, piped):
     assert not merged(repo)
 
 
+@pytest.mark.variant("parallel review requests must not deduplicate away the other required review slot")
 def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     from brindle import knowledge
     from brindle.pro import analysis_brief

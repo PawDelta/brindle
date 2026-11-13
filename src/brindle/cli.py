@@ -282,11 +282,16 @@ def demo(
     files and a two-milestone goal, then starts the supervisor there to
     verify the goal. Takes a few minutes; nothing is created where you run it."""
     from brindle import demo as demo_mod
+    from brindle.service import sessions as svc
 
-    root = demo_mod.create(local=local)
+    # Pick before writing the worker/reviewer profiles: a Codex-only first
+    # run must not inherit demo.create's Claude workers. --local still wins
+    # for workers and reviewers inside the demo config.
+    provider = _group_supervisor or svc.default_provider(None)
+    root = demo_mod.create(local=local, provider=provider)
     typer.echo(f"demo repo: {root}")
     os.chdir(root)
-    start(prompt=None, provider=None, attach=attach, watch=True,
+    start(prompt=None, provider=provider, attach=attach, watch=True,
           autopilot=None, branch=None, worktree=None, demo=True)
 
 

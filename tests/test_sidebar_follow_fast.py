@@ -10,8 +10,9 @@ from brindle.db import Agent, Workspace
 
 @pytest.mark.parametrize(
     ("reported_window", "reported_tag", "should_skip"),
-    [("@window", "root", True), ("@other", "root", False),
-     ("@window", "different-root", False)],
+    [("@window", "root", True),
+     pytest.param("@other", "root", False, marks=pytest.mark.variant("a sidebar in another window cannot use the fast skip")),
+     pytest.param("@window", "different-root", False, marks=pytest.mark.variant("a sidebar owned by another root cannot use the fast skip"))],
 )
 def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
     monkeypatch, reported_window, reported_tag, should_skip,

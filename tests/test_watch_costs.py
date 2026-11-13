@@ -1,3 +1,4 @@
+import pytest
 
 from brindle import budget, watch_costs
 from brindle.watch_costs import Local, Org, Remote
@@ -99,6 +100,7 @@ def test_admin_calls_spend_and_member_never_does(monkeypatch):
     assert calls == ["org_1", "org_1"]
 
 
+@pytest.mark.variant("a signed-out cost snapshot must survive license lookup failure without an organization")
 def test_offline_collect_has_no_org(monkeypatch):
     from brindle.pro import license
 

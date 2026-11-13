@@ -135,6 +135,7 @@ def test_not_entitled_sends_and_spools_nothing(brindle_home):
     assert sink.records == [] and not ex.store.spool_path.exists()
 
 
+@pytest.mark.variant("security: audit and team entitlements alone cannot authorize audit export")
 def test_the_real_gate_fails_closed_and_needs_audit_export(brindle_home, signing_key):
     from brindle.pro import license
 
@@ -153,6 +154,7 @@ def test_the_real_gate_fails_closed_and_needs_audit_export(brindle_home, signing
     assert ex.flush()["fake"].sent == 1
 
 
+@pytest.mark.variant("security: air gap suppresses both export traffic and new spool entries")
 def test_air_gap_mode_sends_nothing(brindle_home, monkeypatch):
     write_chain(brindle_home, 1)
     sink = FakeSink()
@@ -174,6 +176,7 @@ def test_emit_never_raises(brindle_home):
 # -- the Team feed ----------------------------------------------------------------------------
 
 
+@pytest.mark.variant("failure path: one failed sink holds the spool even after another sink succeeds")
 def test_the_spool_is_trimmed_once_every_sink_has_it(brindle_home):
     a, b = FakeSink("a"), FakeSink("b", fail="retry")
     ex = exporter(brindle_home, [a, b], team_payload=lambda e: {"kind": "merge", "at": 1.0})
@@ -204,6 +207,7 @@ RECORDS = [{"source": "audit_chain", "log": "x.jsonl", "seq": 1, "ts": "2026-10-
             "event": {"kind": "merge"}, "prev_hash": "0" * 64, "hash": "h" * 64, "sig": "s"}]
 
 
+@pytest.mark.variant("security: webhook authentication signs the actual serialized body")
 def test_webhook_signs_the_body_with_hmac(monkeypatch):
     monkeypatch.setenv("WH_SECRET", "s3cret")
     t = FakeTransport()
@@ -229,12 +233,14 @@ def test_secrets_come_from_the_environment_never_the_config(monkeypatch):
 
 
 @pytest.mark.parametrize("url", ["http://siem.example.com/in", "siem.example.com"])
+@pytest.mark.variant("security: plaintext and schemeless webhook destinations must both be refused")
 def test_urls_must_be_https(url, monkeypatch):
     monkeypatch.setenv("WH_SECRET", "x")
     with pytest.raises(NotConfigured, match="https"):
         audit_export.build_sink({"type": "webhook", "url": url, "secret_env": "WH_SECRET"}, "w")
 
 
+@pytest.mark.variant("failure path: permanent malformed-batch errors must drop while authentication and transient server errors preserve pending records")
 def test_http_statuses_map_to_retry_or_drop(monkeypatch):
     monkeypatch.setenv("WH_SECRET", "x")
     t = FakeTransport(500)
@@ -406,6 +412,7 @@ def test_a_log_that_doesnt_verify_is_not_pruned(brindle_home):
     assert path.read_bytes() == b"\n".join(ls) + b"\n"
 
 
+@pytest.mark.variant("failure path: failed delivery must preserve unshipped records through retention and restart")
 def test_retention_never_prunes_what_a_sink_has_not_received(brindle_home):
     write_chain(brindle_home, 4, age_days=100)
     settings = {"audit_export": {"retention_days": 30}}
