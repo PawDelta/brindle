@@ -413,7 +413,11 @@ def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db
     assert set(statuses(db).values()) == {"paused"}
 
 
-@pytest.mark.parametrize("prompt_ready", [True, False])
+@pytest.mark.parametrize("prompt_ready", [
+    pytest.param(True, marks=pytest.mark.variant(
+        "the other half of the owner's report: once Claude's prompt is up, the session leaves Resuming")),
+    False,
+])
 def test_recovery_waits_for_claude_prompt_after_session_start(db, monkeypatch, prompt_ready):
     from types import SimpleNamespace
 
