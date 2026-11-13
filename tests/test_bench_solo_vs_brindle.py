@@ -574,7 +574,8 @@ def test_checkout_env_uses_a_temp_home_and_leaves_provider_homes_unchanged(tmp_p
     root = tmp_path / "bench"
     root.mkdir()
     homes = {"claude": {"path": str(claude), "isolated": True}, "codex": {"path": str(codex), "isolated": True}}
-    env = bench.checkout_env({"BRINDLE_HOME": str(person / ".brindle"), "PATH": "/usr/bin"},
+    env = bench.checkout_env({"BRINDLE_HOME": str(person / ".brindle"), "PATH": "/usr/bin",
+                              "CLAUDE_CONFIG_DIR": str(person / "inherited")},   # brindle's own home wins
                              root, homes, bench.bench_socket(root))
     real = root.resolve()
     assert env["BRINDLE_HOME"] == str(real / "home")

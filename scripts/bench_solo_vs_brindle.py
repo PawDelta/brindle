@@ -1162,7 +1162,7 @@ def provider_writes(env: dict) -> list[dict]:
     ours = env.get("BRINDLE_CLAUDE_CONFIG_HOME")
     if ours and Path(ours).is_relative_to(temp):   # brindle's own folder unused: the person's Claude home
         ours = None
-    claude = env.get("CLAUDE_CONFIG_DIR") or ours or str(Path.home() / ".claude")
+    claude = ours or env.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")   # as provider_homes picks
     out = [{"provider": "claude", "path": claude,
             "writes": "transcripts and trust entries, as an installed-brindle run makes"}]
     link = Path(env.get("BRINDLE_CODEX_CONFIG_HOME", "")) / "auth.json"
