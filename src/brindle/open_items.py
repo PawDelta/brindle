@@ -333,9 +333,12 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
                      f"What it was stuck on: {item.detail})")
     if worker.result:
         unmerged_note += f"\n\nPrevious worker's report:\n{worker.result}"
+    # Held bodies remain genuine notes after notification and reading. Prefer
+    # them to the later condensed pointers recorded by push delivery.
     note = db.conn.execute(
-        "SELECT body FROM inbox WHERE sender_id=? AND agent_id=? AND noticed_at IS NULL "
-        "ORDER BY id DESC LIMIT 1", (worker.id, supervisor.id)).fetchone()
+        "SELECT body FROM inbox WHERE sender_id=? AND agent_id=? "
+        "AND (held=1 OR noticed_at IS NULL) "
+        "ORDER BY COALESCE(held,0) DESC, id DESC LIMIT 1", (worker.id, supervisor.id)).fetchone()
     if note:
         unmerged_note += f"\n\nPrevious worker's latest note:\n{note['body']}"
     pipeline.note_removed_unmerged(db, ws, actor=actor)

@@ -55,9 +55,14 @@ def test_restaffed_worker_continues_commits_and_notes(db, repo, boss, told, monk
                              done_when=None, files=["progress.py"], depends_on=[])
     db.update_task(old_task.id, agent_id="old", state="started")
     report = "Parser implemented; integration remains"
-    note = "The remaining integration must preserve identity checks"
+    note = "Integration remains.\nThe remaining integration must preserve identity checks"
     db.update_agent("old", result=report, pipeline="fixing")
-    db.enqueue(boss.id, note, sender_id="old")
+    note_id = db.enqueue_held(boss.id, note, sender_id="old")
+    db.claim_notice(boss.id)
+    db.read_held(boss.id)
+    # Push delivery also keeps a full held body, followed by a condensed pointer.
+    pointer = db.enqueue(boss.id, agents.one_line(db, note_id, note, "old"), sender_id="old")
+    db.mark_delivered(pointer)
     open_items.track(db, db.get_agent("old"), "worker died during fixes", T0)
 
     item = db.get_open_item("old")
