@@ -75,6 +75,7 @@ it("cancels by keyboard or button, and applies a choice to the selected session 
   const { stop } = setup(daemon);
   try {
     let prompt = await openConflict();
+    await waitFor(() => expect(prompt.contains(document.activeElement)).toBe(true));
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("group", { name: "Session already running" })).toBeNull());
     expect(daemon.data.sessions.map((s) => s.status)).toEqual(["processing", "processing"]);
