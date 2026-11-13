@@ -1209,8 +1209,7 @@ CREATE TABLE IF NOT EXISTS live_doc_offline (
     start INTEGER NOT NULL,        -- where in base
     before TEXT NOT NULL,          -- what it replaced there ('' for an insertion)
     after TEXT NOT NULL,           -- what it wrote ('' for a deletion)
-    filing_after INTEGER           -- the newest plan_threads id when filing it began: only a
-                                   -- newer thread can be the one it made before a crash
+    key TEXT NOT NULL UNIQUE       -- its identity: the plan_threads.origin of what it is filed as
 );
 -- Documents whose owner chose Stop sharing while the Library was out of reach:
 -- their teams and org lose access at the next pass that reaches it.
@@ -1672,6 +1671,12 @@ class DB:
         for flag in ("question", "from_supervisor"):
             if flag not in thread_cols:
                 self.conn.execute(f"ALTER TABLE plan_threads ADD COLUMN {flag} INTEGER NOT NULL DEFAULT 0")
+        if "origin" not in thread_cols:
+            # What made a thread, when that must be found again (an offline edit filed by
+            # brindle.pro.live_docs): one thread per origin, written in the thread's own insert.
+            self.conn.execute("ALTER TABLE plan_threads ADD COLUMN origin TEXT")
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS plan_threads_origin ON plan_threads(origin)"
+                          " WHERE origin IS NOT NULL")
         merge_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(session_pr_merges)")}
         if "owner" not in merge_cols:
             self.conn.execute("ALTER TABLE session_pr_merges ADD COLUMN owner TEXT")

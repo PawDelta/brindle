@@ -411,24 +411,27 @@ def _thread(db: DB, p: dict, thread_id: Any) -> dict:
 
 
 def _add(db: DB, p: dict, rev: int, kind: str, anchor: dict | None, author: str, text: str,
-         attachments: list[dict], parent: int | None = None, after: str | None = None, question: bool = False) -> int:
+         attachments: list[dict], parent: int | None = None, after: str | None = None, question: bool = False,
+         origin: str | None = None) -> int:
     now = time.time()
     with db.tx() as c:
         if c.execute("SELECT COUNT(*) FROM plan_threads WHERE plan_id=?", (p["id"],)).fetchone()[0] >= MAX_THREADS:
             raise ServiceError("too_many", f"a plan may have at most {MAX_THREADS} comments and replies", 400)
         tid = int(c.execute(
             "INSERT INTO plan_threads (plan_id, parent_id, rev, kind, anchor, author, body, after, attachments,"
-            " status, created_at, updated_at, question) VALUES (?,?,?,?,?,?,?,?,?,'open',?,?,?)",
+            " status, created_at, updated_at, question, origin) VALUES (?,?,?,?,?,?,?,?,?,'open',?,?,?,?)",
             (p["id"], parent, rev, kind, json.dumps(anchor) if anchor else None, author, text, after,
-             json.dumps(attachments), now, now, question)).lastrowid)
+             json.dumps(attachments), now, now, question, origin)).lastrowid)
     _changed(db, p, p["rev"])
     return tid
 
 
 def comment(db: DB, plan_id: str, rev: Any = None, anchor: Any = None, text: Any = None,
-            attachments: Any = None, *, parent: Any = None, author: str = PERSON, question: bool = False) -> int:
+            attachments: Any = None, *, parent: Any = None, author: str = PERSON, question: bool = False,
+            origin: str | None = None) -> int:
     """A comment anchored in revision ``rev`` (the one on screen), or, with
-    ``parent``, a reply to that thread. Returns the new thread or reply's id."""
+    ``parent``, a reply to that thread. Returns the new thread or reply's id.
+    ``origin``: what made it, kept with it so it can be found again (unique)."""
     p = _plan(db, plan_id)
     text = visuals._text(text, "a comment", visuals.MAX_NOTE, required=True)
     visuals._refuse_secrets([("your comment", text)])
@@ -439,10 +442,11 @@ def comment(db: DB, plan_id: str, rev: Any = None, anchor: Any = None, text: Any
         if thread["parent_id"] is not None:
             raise ServiceError("invalid", "reply to the thread, not to a reply", 400)
         return _add(db, p, p["rev"], "reply", None, author, text, _attachments(db, p, attachments),
-                    parent=thread["id"])
+                    parent=thread["id"], origin=origin)
     _on_screen(p, rev)
     where = _anchor(p, revision(db, p["id"]), anchor)
-    return _add(db, p, p["rev"], "comment", where, author, text, _attachments(db, p, attachments), question=question)
+    return _add(db, p, p["rev"], "comment", where, author, text, _attachments(db, p, attachments), question=question,
+                origin=origin)
 
 
 def resolve(db: DB, plan_id: str, thread_id: Any, resolved: bool = True) -> None:
@@ -461,7 +465,7 @@ def resolve(db: DB, plan_id: str, thread_id: Any, resolved: bool = True) -> None
 
 
 def suggest(db: DB, plan_id: str, rev: Any, section: Any, start: Any, before: Any, after: Any,
-            text: Any = None, attachments: Any = None, *, author: str = PERSON) -> int:
+            text: Any = None, attachments: Any = None, *, author: str = PERSON, origin: str | None = None) -> int:
     """Suggest replacing ``before`` (at ``start`` in ``section`` of revision
     ``rev``; empty to insert there) with ``after``. Returns the thread's id."""
     p = _plan(db, plan_id)
@@ -479,7 +483,8 @@ def suggest(db: DB, plan_id: str, rev: Any, section: Any, start: Any, before: An
     anchor = {"kind": "text", "section": sid, "start": pos, "end": pos + len(before), "quote": before}
     if not before:
         anchor.update(_context(_body(cur, sid), pos))
-    return _add(db, p, p["rev"], "suggestion", anchor, author, note, _attachments(db, p, attachments), after=after)
+    return _add(db, p, p["rev"], "suggestion", anchor, author, note, _attachments(db, p, attachments), after=after,
+                origin=origin)
 
 
 def _target(p: dict, cur: dict, section: Any, start: Any, before: str) -> tuple[str, int]:

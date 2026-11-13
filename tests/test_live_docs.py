@@ -458,23 +458,27 @@ def test_offline_edits_refused_as_stale_after_the_lock_lapsed_are_kept_until_the
     asyncio.run(run())
 
 
-def test_each_offline_edit_is_filed_once_deletions_included_and_a_crash_files_nothing_twice(db, shared_plan, monkeypatch):
+def test_each_offline_edit_is_filed_once_whole_deletions_included_and_a_crash_files_nothing_twice(
+        db, shared_plan, monkeypatch):
     from brindle import plan_docs
 
     def keep(base, start, before, after, section="body"):
         with db.tx() as c:
-            c.execute("INSERT INTO live_doc_offline (doc_id, section, base, start, before, after) VALUES ('doc1', ?, ?, ?, ?, ?)",
-                      (section, base, start, before, after))
+            n = c.execute("SELECT COUNT(*) FROM live_doc_offline").fetchone()[0]
+            c.execute("INSERT INTO live_doc_offline (doc_id, section, base, start, before, after, key)"
+                      " VALUES ('doc1', ?, ?, ?, ?, ?, ?)", (section, base, start, before, after, f"edit-{n}-{after}"))
 
     def threads():
-        return [(t["kind"], (json.loads(t["anchor"]).get("quote"), json.loads(t["anchor"]).get("section")), t["after"])
-                for t in db.conn.execute("SELECT * FROM plan_threads WHERE plan_id=? ORDER BY id", (shared_plan,))]
+        return [(t["kind"], json.loads(t["anchor"]).get("quote"), json.loads(t["anchor"]).get("section"), t["after"])
+                for t in db.conn.execute("SELECT * FROM plan_threads WHERE plan_id=? AND parent_id IS NULL ORDER BY id",
+                                         (shared_plan,))]
 
     async def run():
         machine = Machine(FakeRelay(Clock()), None, "alice")
+        long_text = " ".join(f"word{i}" for i in range(500))  # past what one comment holds
         keep("World now", 0, "World", "")                    # removes words the revision has
         keep("World now", 6, "now", "")                      # removes words only the live draft had
-        keep("World now", 6, "now", "later", section="gone")  # in a section the revision doesn't have
+        keep("World now", 6, "now", long_text, section="gone")  # in a section the revision doesn't have
         keep("World now", 6, "now", "later")
         forget = live_docs._forget_offline
         crashed = []
@@ -488,19 +492,26 @@ def test_each_offline_edit_is_filed_once_deletions_included_and_a_crash_files_no
         monkeypatch.setattr(live_docs, "_forget_offline", crash_once)
         with pytest.raises(RuntimeError):
             await machine.manager.sweep()                     # filed the first, then crashed before forgetting it
-        await machine.manager.sweep()                         # the same edit again: already filed
-        assert threads() == [("suggestion", ("World", "body"), ""),
-                             ("comment", (None, "body"), None),
-                             ("comment", (None, "lede"), None),
-                             ("suggestion", ("", "body"), "later")]
+        p = plans.get(db, shared_plan)                        # meanwhile the plan moves on
+        plan_docs.edit(db, shared_plan, p["rev"], "body", 0, "", "Prefix ")
+        await machine.manager.sweep()                         # the same edit again: already filed, nothing remapped
+        assert threads() == [("suggestion", "World", "body", ""),
+                             ("comment", None, "body", None),
+                             ("comment", None, "lede", None),
+                             ("suggestion", "", "body", "later")]
         assert live_docs.docs_with_offline(db) == []
+        # The edit in a missing section is there whole, across its comment and replies.
+        head = db.conn.execute("SELECT id FROM plan_threads WHERE json_extract(anchor, '$.section')='lede'").fetchone()
+        parts = [r["body"] for r in db.conn.execute(
+            "SELECT body FROM plan_threads WHERE id=? OR parent_id=? ORDER BY id", (head["id"], head["id"]))]
+        assert len(parts) > 1 and long_text in "".join(part[part.index("«") + 1:-1] for part in parts)
 
         # A later recovery makes the very same change at the same place: a different edit, filed anew.
         plan_docs.reject(db, shared_plan, db.conn.execute(
             "SELECT id FROM plan_threads WHERE after='later'").fetchone()["id"])
         keep("World now", 6, "now", "later")
         await machine.manager.sweep()
-        assert [t for t in threads() if t[2] == "later"] == [("suggestion", ("", "body"), "later")] * 2
+        assert [t for t in threads() if t[3] == "later"] == [("suggestion", "", "body", "later")] * 2
 
     asyncio.run(run())
 
