@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import errno
 import importlib.util
 import io
 import json
@@ -205,8 +206,9 @@ def redact_file(path: Path, words) -> None:
 
 
 def place_link(dest: Path, rel: str, target: str, checkout: Path, words=()) -> None:
-    """Create the symlink ``rel`` -> ``target`` in ``dest`` only if it stays
-    inside ``dest``: an absolute target inside ``checkout`` is rebased onto
+    """Create the symlink ``rel`` -> ``target`` in ``dest`` only if, on its
+    own, it stays inside ``dest`` (``confine_links`` then checks chains
+    through other links): an absolute target inside ``checkout`` is rebased onto
     its copy in ``dest``; any other target outside the tree (absolute, or
     climbing out with ``..``) leaves the link out, so nothing read through a
     link in ``dest`` comes from the original checkout or anywhere else."""
@@ -228,6 +230,33 @@ def place_link(dest: Path, rel: str, target: str, checkout: Path, words=()) -> N
     os.symlink(target, link)
 
 
+def confine_links(root: Path) -> None:
+    """Remove every symlink under ``root`` (``.git`` aside) that, resolved the
+    way the filesystem resolves it (through any other links on the way),
+    ends outside ``root`` or loops. Removing one can change how another
+    resolves, so it repeats until nothing changes. A link that only dangles
+    inside ``root`` stays: reading it fails, it leaks nothing."""
+    top = os.path.realpath(root)
+    changed = True
+    while changed:
+        changed = False
+        for here, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = [d for d in dirs if not (here == str(root) and d == ".git")]
+            for name in [*dirs, *files]:
+                p = os.path.join(here, name)
+                if not os.path.islink(p):
+                    continue
+                try:
+                    os.stat(p)
+                    loops = False
+                except OSError as e:
+                    loops = e.errno == errno.ELOOP
+                real = os.path.realpath(p)
+                if loops or (real != top and not real.startswith(top + os.sep)):
+                    os.unlink(p)
+                    changed = True
+
+
 def extract_base(archive: bytes, dest: Path, checkout: Path, words=()) -> None:
     """Unpack ``git archive``'s tar into ``dest``: regular files first (no
     member may leave ``dest``), then its symlinks through ``place_link``."""
@@ -244,6 +273,7 @@ def extract_base(archive: bytes, dest: Path, checkout: Path, words=()) -> None:
         for m in members:
             if m.issym():
                 place_link(dest, m.name, m.linkname, checkout)
+    confine_links(dest)
 
 
 def blind_tree(checkout: Path, base: str, dest: Path, env: dict, words=()) -> str:
@@ -251,7 +281,10 @@ def blind_tree(checkout: Path, base: str, dest: Path, env: dict, words=()) -> st
     staged diff against the base commit. With ``words``, they are redacted in
     every text file's content, every path and every link before anything is
     committed or staged, so neither the working tree, the index nor the
-    history holds them. Symlinks never point outside ``dest`` (``place_link``)."""
+    history holds them. Symlinks never resolve outside ``dest``: each is
+    placed by ``place_link``, and ``confine_links`` then checks them all
+    together (chains included) before the base is committed and again
+    before the tree is staged."""
     extract_base(git(checkout, "archive", "--format=tar", base, env=env, binary=True), dest, checkout)
     base_paths = set(git(checkout, "ls-tree", "-r", "-z", "--name-only", base, env=env).split("\0")) - {""}
     if words:
@@ -267,6 +300,7 @@ def blind_tree(checkout: Path, base: str, dest: Path, env: dict, words=()) -> st
             if clean != p and p.exists():
                 clean.parent.mkdir(parents=True, exist_ok=True)
                 p.rename(clean)
+        confine_links(dest)   # the redacted links, again as a whole, before the base is committed
     ident = ["-c", "user.name=review", "-c", "user.email=review@localhost", "-c", "commit.gpgsign=false"]
     git(dest, "init", "-q", "-b", "review", env=env)
     git(dest, "add", "-A", env=env)
@@ -276,16 +310,20 @@ def blind_tree(checkout: Path, base: str, dest: Path, env: dict, words=()) -> st
         if rel and (p.is_symlink() or p.is_file()):
             p.unlink()
     files = git(checkout, "ls-files", "-z", "-co", "--exclude-standard", env=env).split("\0")
-    for rel in sorted({f for f in files if f}):
+    links = []
+    for rel in sorted({f for f in files if f}):   # regular files first: no copy goes through a link
         src, dst = checkout / rel, dest / redact(rel, words)
         if not kept(rel, base_paths) or not (src.is_symlink() or src.is_file()):
             continue
         if src.is_symlink():
-            place_link(dest, rel, os.readlink(src), checkout, words)
+            links.append((rel, os.readlink(src)))
         else:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             redact_file(dst, words)
+    for rel, target in links:
+        place_link(dest, rel, target, checkout, words)
+    confine_links(dest)   # chains of links resolved as a whole, before anyone reads the tree
     git(dest, "add", "-A", env=env)
     return git(dest, "diff", "--cached", "--no-color", "--no-ext-diff", env=env)
 

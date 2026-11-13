@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,8 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     (base / "lib.py").write_text("def upsert(rows):\n    return rows\n")
     (tmp_path / "note.txt").write_text("brindle base note")
     (base / "note_link").symlink_to(tmp_path / "note.txt")   # the base snapshot's own link out of the tree
+    (base / "bridge").symlink_to(".")
+    (base / "base_chain.txt").symlink_to("bridge/../note.txt")   # out only through another link
     sh(f"git init -q -b main && git add -A && {GIT_ID} commit -qm init", base)
     commit = sh("git rev-parse HEAD", base)
     checkouts = {}
@@ -41,6 +45,7 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     (co / "alias.py").symlink_to(co / "helper.py")   # absolute, into the original checkout
     (tmp_path / "outside.txt").write_text("Brindle outside")
     (co / "up.txt").symlink_to("../outside.txt")   # relative, climbing out of the checkout
+    (co / "chain.py").symlink_to("bridge/../outside.txt")   # out through the base's bridge link
     sh(f"git checkout -q -b brindle/session-7 && git add -A && {GIT_ID} commit -qm 'brindle: worker merge'", co)
     kit = tmp_path / "kit"
     kit.mkdir()
@@ -60,12 +65,23 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
                 ("OTHER", "A"): "bug", ("OTHER", "A2"): "ok", ("OTHER", "B"): "bug"}
     seen, ran_on, aliases = [], [], []
 
+    def walk(root):   # every path under root, links not followed, .git left out
+        return [Path(h, n) for h, ds, fs in os.walk(root) for n in ds + fs if ".git" not in Path(h, n).parts]
+
+    def escaping(root):   # links that resolve (through any other links) outside root
+        top = os.path.realpath(root)
+        return [p for p in walk(root) if p.is_symlink()
+                and os.path.commonpath([top, os.path.realpath(p)]) != top]
+
     def readable(workdir):   # what a reviewer can read there: files, the index and the history
-        files = [p.read_text(errors="ignore") + str(p) for p in workdir.rglob("*") if p.is_file() and ".git" not in p.parts]
+        files = [p.read_text(errors="ignore") + str(p) for p in walk(workdir) if p.is_file()]
         return "\n".join([*files, sh("git grep -i brindle HEAD; git grep -i --cached brindle; true", workdir),
                           sh("git log --format=%s%d", workdir)])
 
     def fake_reviewer(name, model, prompt, workdir, scratch, env, seconds):
+        snapshot = Path(tempfile.mkdtemp(prefix="base-snapshot-", dir=tmp_path))   # the committed base
+        sh(f"git archive HEAD | tar -x -C {snapshot}", workdir)
+        assert escaping(workdir) == [] and escaping(snapshot) == []
         seen.append((prompt, readable(workdir), sh("git log --format=%s%d", workdir)))
         if (workdir / "alias.py").is_symlink():
             aliases.append((workdir / "alias.py").read_text())
