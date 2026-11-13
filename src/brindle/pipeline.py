@@ -457,12 +457,26 @@ def _escalate(db: DB, ws: Workspace, worker: Agent | None) -> None:
 # -- stage 1: a worker reported ---------------------------------------------------
 
 
+FAST_PATH_REVIEW = (
+    "a light review of a small fast-path request. Judge the change against its task and finish "
+    "line: raise only blockers (a correctness bug, a broken or missing test for the finish line, "
+    "a security problem). Leave style, naming and suggestions as minor findings, and don't explore "
+    "beyond the diff.")
+
+
+def fast_path(db: DB, cfg: RepoConfig, worker: Agent) -> bool:
+    """Whether ``worker`` runs a fast-path task while its repo's ``fast_path``
+    setting is on: then its branch gets one light review (no second review)."""
+    return cfg.fast_path and tasks.fast_path_worker(db, worker.id)
+
+
 def second_profile(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> str | None:
     """The reviewer profile of the second review ``cfg.second_review`` asks
     for on ``worker``'s branch, by the weight its task was sized at. None when
     it's unset, the task has no weight there, or it names the profile that
-    does the first review anyway (one reviewer per profile and commit)."""
-    if not cfg.second_review:
+    does the first review anyway (one reviewer per profile and commit), or
+    the branch is on the fast path (one light review)."""
+    if not cfg.second_review or fast_path(db, cfg, worker):
         return None
     weight = next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
     profile = cfg.second_review.get(weight or "")
@@ -668,7 +682,8 @@ def _start_report_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, 
         # With a second review both calls carry a concrete profile, so the
         # reviewer dedupe compares profiles and neither can swallow the other.
         first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
-        started = agents.start_review(db, parent, ws, first, None, cfg, slot="", report=report)
+        focus = FAST_PATH_REVIEW if fast_path(db, cfg, worker) else None
+        started = agents.start_review(db, parent, ws, first, focus, cfg, slot="", report=report)
         if second:
             try:
                 agents.start_review(db, parent, ws, second, None, cfg, second=True, report=report)

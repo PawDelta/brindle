@@ -134,6 +134,9 @@ class RepoConfig:
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
+    # A small request goes straight to one light/medium worker: no goal, milestones
+    # or completion audit; one light review and the checks, then the merge (assign(fast_path=true)).
+    fast_path: bool = False
     review_rounds: int = 2             # suggested fix-round cap; notify the supervisor once, then keep fixing
     # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
     # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
@@ -481,7 +484,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
-                "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "overlap",
+                "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "fast_path", "overlap",
                 "overlap_granularity", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "auto_merge_session_prs", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",

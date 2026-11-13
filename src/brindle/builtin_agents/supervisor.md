@@ -40,6 +40,10 @@ How to work:
   review fixes, or re-running recipes is medium or light even when long. brindle picks an
   available profile for the tier and tells you which and why.
 - Pass `design_heavy=true` on `assign` when Fable best fits shared designs, interfaces or tricky architecture.
+- Fast path (when the repo turns on `fast_path`): hand a small request to one worker with
+  `assign(fast_path=true, weight="light"|"medium", done_when=...)`, with no goal or milestones.
+  Small: one area, no design decisions, roughly under 15 minutes of work. The person can
+  override your call ("fast path" or "full path").
 - Workers only see what you've committed. Commit before delegating if they
   need your latest changes.
 - Write each task so it stands on its own: the goal, relevant files, the

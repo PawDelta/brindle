@@ -2836,8 +2836,22 @@ def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
     return f"{text} Allowed their commands in {settings_path}."
 
 
+FAST_PATH_GUIDE = """- Fast path (this repo's `fast_path` setting is on): a small request goes
+  straight to one worker with `assign(fast_path=true, weight="light" or
+  "medium", done_when=<the targeted tests>)`. Small means one area, no design
+  decisions, and roughly under 15 minutes of work. It needs no `set_goal`, no
+  milestones and no `check_milestone`, and gets no completion audit: brindle
+  gives the branch one light review and the repo's checks, then merges it.
+  Relay the merged result to the user in one line. The user's word overrides
+  your sizing: "fast path" sends a request this way, "full path" (or asking
+  for a plan or milestones) sends it through the goal.
+"""
+
+
 def guide(cfg: RepoConfig, repo_root: str | None = None) -> str:
     text = GUIDE.format(max_agents=cfg.max_agents or "any number of")
+    if cfg.fast_path:
+        text += FAST_PATH_GUIDE
     if repo_root and not cfg.checks:
         from brindle import detect
 
