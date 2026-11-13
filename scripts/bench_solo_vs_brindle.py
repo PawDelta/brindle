@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Benchmark: brindle vs. a single Claude Code session, on one task.
+"""Benchmark: brindle vs. a single Claude Code session, per task kit.
 
     python3 scripts/bench_solo_vs_brindle.py run --arm solo --run-id 1
     python3 scripts/bench_solo_vs_brindle.py run --arm brindle --run-id 1
     python3 scripts/bench_solo_vs_brindle.py report --require-runs 5
 
-The task kit lives in bench/solo_vs_brindle/task/: ``repo.json`` ({"url",
+The default task kit lives in bench/solo_vs_brindle/task/; ``run --task-dir``
+selects another kit: ``repo.json`` ({"name", "url",
 "commit", "setup": [cmds], "test_cmd"}), ``spec.md`` (the prompt) and
 ``grade.sh <checkout>``, which prints {"passed", "failed", "per_part"}.
 
@@ -44,15 +45,18 @@ recommendation", or the Inbox item's own answer) so the run keeps going.
 
 Then ``grade.sh`` runs on the final checkout (brindle: the session branch's
 worktree) and one JSON record is appended to
-``.brindle/bench/solo_vs_brindle.jsonl``.
+``.brindle/bench/solo_vs_brindle.jsonl``. Each record's ``task`` is the kit's
+``name``, defaulting to ``tinydb`` when omitted. Legacy records without a
+``task`` also belong to ``tinydb``.
 
 A run that hits an interruption the runner can't automate (an expired login,
 an Inbox item the supervisor doesn't resolve), or that gives up, is recorded
 with ``"valid": false`` and why.
 
-``report`` prints, per arm, the median and min-max of wall time, total tokens,
+``report`` prints, per task and arm, the median and min-max of wall time, total tokens,
 cost, hidden-test pass rate and interruptions over the valid runs; with
 ``--require-runs N`` it exits non-zero when an arm has fewer than N of them.
+``--task NAME`` limits both the summary and that check to one task.
 """
 
 from __future__ import annotations
@@ -129,6 +133,12 @@ class UnknownModel(BenchError):
 
 
 # -- tokens and dollars -----------------------------------------------------------------------------
+
+
+# The solo arm's opt-in to Claude Code's own multi-agent tools: its Workflow tool runs only when
+# the person asks for orchestration in their own words, so the person's permission is passed here.
+SOLO_NOTE = ("You may use subagents and multi-agent orchestration (including running a workflow) "
+             "if you judge that it helps; whether to is up to you.")
 
 
 def normalize_model(model: str) -> str:
@@ -239,10 +249,10 @@ def permission_mode(entries: list[dict]) -> str | None:
 
 def transcript_usage(path: str) -> dict[str, dict[str, int]]:
     """A Claude Code transcript's tokens per model, with its subagents' (stored
-    under ``<session>/subagents/``)."""
+    under ``<session>/subagents/``, workflow agents one level deeper)."""
     main = Path(path)
     by_model: dict[str, dict[str, int]] = {}
-    files = [main, *sorted((main.parent / main.stem / "subagents").glob("*.jsonl"))]
+    files = [main, *sorted((main.parent / main.stem / "subagents").rglob("*.jsonl"))]
     for f in files:
         try:
             lines = f.read_text(errors="replace").splitlines()
@@ -445,17 +455,22 @@ def _fmt(metric: str, v: float) -> str:
 
 
 def cmd_report(args) -> int:
-    summary = summarize(load_records(Path(args.results)))
+    records = load_records(Path(args.results))
+    tasks = ([args.task] if args.task is not None
+             else sorted({r.get("task", "tinydb") for r in records} or {"tinydb"}))
     short = []
-    for arm, s in summary.items():
-        print(f"{arm} ({s['runs']} runs" + (f", {s['invalid']} invalid left out)" if s["invalid"] else ")"))
-        for metric in METRICS:
-            m = s[metric]
-            shown = "-" if m is None else (f"{_fmt(metric, m['median'])} "
-                                           f"({_fmt(metric, m['min'])} - {_fmt(metric, m['max'])})")
-            print(f"  {metric:<14} {shown}")
-        if s["runs"] < args.require_runs:
-            short.append(arm)
+    for task in tasks:
+        print(f"task: {task}")
+        summary = summarize([r for r in records if r.get("task", "tinydb") == task])
+        for arm, s in summary.items():
+            print(f"{arm} ({s['runs']} runs" + (f", {s['invalid']} invalid left out)" if s["invalid"] else ")"))
+            for metric in METRICS:
+                m = s[metric]
+                shown = "-" if m is None else (f"{_fmt(metric, m['median'])} "
+                                               f"({_fmt(metric, m['min'])} - {_fmt(metric, m['max'])})")
+                print(f"  {metric:<14} {shown}")
+            if s["runs"] < args.require_runs:
+                short.append(f"{task}/{arm}")
     if short:
         print(f"fewer than {args.require_runs} runs: {', '.join(short)}", file=sys.stderr)
         return 1
@@ -607,11 +622,12 @@ def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict) -> dict:
         entries = iter_json(text.splitlines())
         return entries + ([{"type": "result", "gave_up": True}] if state["finished"] == "gave_up" else [])
 
-    entries = solo_session(run_turn, spec, args.max_answers)
+    prompt = f"{args.solo_note}\n\n{spec}" if args.solo_note else spec
+    entries = solo_session(run_turn, prompt, args.max_answers)
     stop = time.time()
     by_model = stream_usage(entries)
     return {"finished": state["finished"], "valid": state["finished"] in VALID_FINISHES, "why": None,
-            "permission_mode": permission_mode(entries),
+            "permission_mode": permission_mode(entries), "solo_note": args.solo_note,
             "wall_seconds": round(stop - t0, 1), "by_model": by_model,
             "by_role": {"solo": by_model}, "rates": {}, "free": set(),
             "prompts": solo_prompts(entries, iter_json(approvals.read_text().splitlines())),
@@ -1111,7 +1127,8 @@ def cmd_run(args) -> int:
     out = run_solo(args, clone, spec, scratch, env) if args.arm == "solo" else run_brindle(args, clone, spec, env)
     graded = grade(grade_sh, out["checkout"], env)
     prompts = out["prompts"]
-    record = {"arm": args.arm, "run_id": args.run_id, "started_at": started, "finished": out["finished"],
+    record = {"task": kit.get("name", "tinydb"),
+              "arm": args.arm, "run_id": args.run_id, "started_at": started, "finished": out["finished"],
               "valid": out["valid"], "why": out["why"], "needs_person": out.get("needs_person", False),
               "permission_mode": out.get("permission_mode"),
               "wall_seconds": out["wall_seconds"], "supervisor_model": out["supervisor_model"],
@@ -1136,7 +1153,7 @@ def cmd_run(args) -> int:
     record.update(cost_usd=cost, cost_by_model=per_model, unpriced=unpriced)
     with results_path.open("a") as f:
         f.write(json.dumps(record) + "\n")
-    print(json.dumps({k: record[k] for k in ("arm", "run_id", "finished", "wall_seconds", "tokens_total",
+    print(json.dumps({k: record[k] for k in ("task", "arm", "run_id", "finished", "wall_seconds", "tokens_total",
                                              "cost_usd", "prompts_total", "pass_rate")}))
     return 0
 
@@ -1176,6 +1193,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--permission-mode", default="default",
                      help="solo: the CLI's --permission-mode ('' for the person's own setting); "
                           "the mode it ran in is recorded either way")
+    run.add_argument("--solo-note", default=SOLO_NOTE,
+                     help="solo: a line put before the spec ('' for none); recorded in the record")
     run.add_argument("--max-answers", type=int, default=5,
                      help="solo: how many closing questions to answer by resuming the session")
     run.add_argument("--supervisor-model", default=SUPERVISOR_MODEL,
@@ -1199,8 +1218,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--max-hours", type=float, default=6.0, help="give up after this long")
     run.add_argument("--leave-running", action="store_true",
                      help="brindle: don't close the session's agents afterwards")
-    rep = sub.add_parser("report", help="per arm: median and min-max of each metric")
+    rep = sub.add_parser("report", help="per task and arm: median and min-max of each metric")
     rep.add_argument("--results", default=str(RESULTS))
+    rep.add_argument("--task", help="report only this task (legacy records belong to tinydb)")
     rep.add_argument("--require-runs", type=int, default=0,
                      help="exit non-zero if any arm has fewer runs than this")
     appr = sub.add_parser("approver", help="(internal) the solo arm's permission prompt MCP server")

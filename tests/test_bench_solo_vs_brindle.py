@@ -41,14 +41,28 @@ def test_solo_cost_prices_one_hour_cache_writes_at_twice_input():
     assert abs(total - u["costUSD"]) < 0.01
 
 
-def test_load_kit_resolves_a_relative_task_dir(tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", [
+    pytest.param(None, marks=pytest.mark.variant("Unnamed kits must still produce tinydb records")),
+    "large",
+])
+def test_load_kit_resolves_a_relative_task_dir(tmp_path, monkeypatch, name):
     kit = tmp_path / "kit"
     kit.mkdir()
-    (kit / "repo.json").write_text("{}")
+    (kit / "repo.json").write_text(json.dumps({"name": name} if name is not None else {}))
     (kit / "spec.md").write_text("spec")
     (kit / "grade.sh").write_text("")
     monkeypatch.chdir(tmp_path)
     assert bench.load_kit(Path("kit"))[2] == kit.resolve() / "grade.sh"   # grade.sh runs from the clone
+    monkeypatch.setattr(bench, "prepare_clone", lambda kit, scratch, env: scratch)
+    monkeypatch.setattr(bench, "run_solo", lambda args, clone, spec, scratch, env: {
+        "finished": "exit", "valid": True, "why": "", "wall_seconds": 1,
+        "supervisor_model": None, "supervisor_model_observed": None,
+        "by_model": {}, "by_role": {}, "prompts": {}, "checkout": clone, "rates": {}, "free": set()})
+    monkeypatch.setattr(bench, "grade", lambda path, checkout, env: {"passed": 1, "failed": 0})
+    results = tmp_path / "results.jsonl"
+    assert bench.main(["run", "--arm", "solo", "--run-id", "1", "--task-dir", "kit",
+                       "--scratch", str(tmp_path / "scratch"), "--results", str(results)]) == 0
+    assert bench.load_records(results)[0]["task"] == (name if name is not None else "tinydb")
 
 
 def test_solo_cost_from_a_recorded_stream():
@@ -142,6 +156,16 @@ def test_brindle_usage_takes_one_source_per_agent(tmp_path):
                                "claude-opus-5-5": {**bench.empty(), "input": 4, "output": 6}}
     assert set(out["by_role"]) == {"supervisor", "worker", "unseen"}
     assert out["supervisor_model_observed"] == "claude-fable-5-2"
+
+
+def test_transcript_usage_counts_workflow_agents(tmp_path):
+    main = tmp_path / "s.jsonl"
+    main.write_text("")
+    wf = tmp_path / "s" / "subagents" / "workflows" / "wf_1"
+    wf.mkdir(parents=True)
+    (wf / "agent-a.jsonl").write_text(json.dumps({"type": "assistant", "message": {
+        "id": "a1", "model": "claude-haiku-5-5", "usage": {"input_tokens": 2, "output_tokens": 4}}}) + "\n")
+    assert bench.transcript_usage(str(main))["claude-haiku-5-5"]["output"] == 4
 
 
 class FakeSession:
@@ -282,7 +306,7 @@ def test_probe_lists_the_sessions_pr_in_its_inbox(db, tmp_path, opened, kinds):
     assert session_review.open_pr_for_head is lookup   # its GitHub stub doesn't outlive the probe
 
 
-def test_report_medians_and_require_runs(tmp_path):
+def test_report_medians_and_require_runs(tmp_path, capsys):
     results = tmp_path / "results.jsonl"
     rows = [{"arm": "solo", "wall_seconds": w, "tokens_total": t, "cost_usd": c, "prompts_total": p,
              "grade": {"passed": g, "failed": 4 - g}}
@@ -298,3 +322,21 @@ def test_report_medians_and_require_runs(tmp_path):
     assert solo["prompts_total"] == {"median": 1, "min": 0, "max": 2}
     assert bench.main(["report", "--results", str(results), "--require-runs", "1"]) == 0
     assert bench.main(["report", "--results", str(results), "--require-runs", "2"]) == 1
+    rows[0]["task"] = "tinydb"   # explicit and legacy records belong to the same task
+    rows.extend({"task": "large", "arm": "solo", "wall_seconds": 900} for _ in range(2))
+    results.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    capsys.readouterr()
+    assert bench.main(["report", "--results", str(results), "--task", "tinydb", "--require-runs", "1"]) == 0
+    tinydb = capsys.readouterr().out
+    assert "solo (3 runs, 1 invalid" in tinydb
+    assert "3.3m (1.7m - 5.0m)" in tinydb
+    assert "large" not in tinydb
+    assert bench.main(["report", "--results", str(results), "--task", "tinydb", "--require-runs", "2"]) == 1
+    assert bench.main(["report", "--results", str(results), "--task", "large", "--require-runs", "1"]) == 1
+    large = capsys.readouterr().out.split("task: large\n")[-1]
+    assert "solo (2 runs)" in large
+    assert "brindle (0 runs)" in large
+    assert bench.main(["report", "--results", str(results), "--require-runs", "1"]) == 1
+    grouped = capsys.readouterr().out
+    assert "task: tinydb\n" + tinydb.split("task: tinydb\n")[-1] in grouped
+    assert "task: large\n" + large in grouped
