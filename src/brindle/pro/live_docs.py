@@ -240,8 +240,9 @@ def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed
     theirs = next((n for n, r in roles.items() if r == "supervisor"), None)
     replica, row = _replica(db, doc_id), _link(db, doc_id)
     if replica is None:
+        # The first text here (a teammate's window waits on it, holding nothing): windows load it.
         _rebuild(db, doc_id, snapshot, mine, carry=False, supervisor=theirs)
-        return False, None
+        return True, None
     stored = db.conn.execute("SELECT supervisor_peer FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
     # A supervisor that wrote under an id of its own: its letters are re-typed under its relay number.
     other_supervisor = theirs is not None and stored["supervisor_peer"] not in (None, theirs)
@@ -851,6 +852,20 @@ class Manager:
         if link is not None:
             await link.awareness(lease, section, data)
 
+    async def freeze(self, doc_id: str, reopen: bool = False) -> None:
+        """An app window's Freeze (or Reopen): the Library makes the draft's
+        text a version out for sign-off (or withdraws it), for the author only.
+        The relay tells nobody of either, so this machine's windows are told
+        here; a refusal leaves the state as it was, and they are told that."""
+        link = self.link(doc_id)
+        try:
+            link.frozen = await asyncio.to_thread(_library_freeze, doc_id, reopen)
+        except Exception as e:  # noqa: BLE001 - refused or unreachable: the windows keep the state they had
+            log.warning("brindle: couldn't %s %s: %s", "reopen" if reopen else "freeze", doc_id, e)
+        link.blocked = bool(link.frozen or link.author_offline)
+        await link._to_windows(link.state_frame())
+        await link.flush()
+
     async def sweep(self) -> None:
         """File edits typed offline that aren't on their plan yet, and start a
         link for every doc whose replica holds unsent edits."""
@@ -891,6 +906,26 @@ class Manager:
 
         await asyncio.get_running_loop().run_in_executor(self._pool, close_db)
         self._pool.shutdown(wait=False)
+
+
+def _library_freeze(doc_id: str, reopen: bool) -> Any:
+    """Freeze the draft as it stands at the Library (its ``rev`` on screen
+    being the draft's), or reopen the version out for sign-off. Returns the
+    frozen revision, or None once it is open. Raises with the Library's refusal."""
+    from brindle.pro import analysis_docs as ad
+
+    def ask(method: str, tail: str, body: dict | None = None) -> dict:
+        status, got = ad._call(method, ad._doc_path(doc_id, "/design" + tail), body)
+        if status != 200:
+            raise RelayError(f"the Library refused it: {got.get('error') or f'HTTP {status}'}", got.get("error"))
+        return got
+
+    draft = ask("GET", "/draft")
+    if reopen and draft.get("frozen"):
+        ask("POST", "/reopen", {"rev": draft["frozen"]})
+    elif not reopen and not draft.get("frozen"):
+        ask("POST", "/freeze", {"rev": draft["rev"]})
+    return ask("GET", "/draft").get("frozen")
 
 
 def _signed_in_to_a_team() -> bool:

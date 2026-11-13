@@ -206,3 +206,97 @@ def test_an_app_window_edit_reaches_another_machine_under_the_number_its_socket_
         client.portal.call(here.stop)
     assert relay.refusals == []
     assert there.sections() == {"lede": "# Design\n\nHello", "body": "World!"}
+
+
+def test_the_authors_freeze_and_reopen_frames_lock_the_draft_for_sign_off_and_open_it_again(db, live_doc, monkeypatch):
+    """DocPresence's Freeze and Reopen buttons send {"freeze": true} and
+    {"reopen": true} on the live socket: the Library makes and withdraws the
+    version, and the channel stays open showing the lock."""
+    from brindle.pro import live_docs
+    from test_live_docs import Clock, FakeRelay
+
+    relay = FakeRelay(Clock(), author="owner")
+    sent = threading.Event()
+    receive = relay.receive
+    at_reopen: list[str] = []
+
+    def library(doc_id, reopen):                        # what the Library's freeze and reopen do to the relay
+        if reopen:
+            at_reopen.append(relay.sections()["body"])  # the socket handles frames in turn: the edit came first
+        relay.frozen = None if reopen else 2
+        return relay.frozen
+
+    def receive_and_note(pipe, text):
+        receive(pipe, text)
+        sent.set()
+
+    monkeypatch.setattr(live_docs, "_library_freeze", library, raising=False)
+    here = live_docs.Manager(relay.transport("owner"), available=lambda: True, drive=False)
+    app = build_app(TOKEN)
+    app.state.live_docs = here
+    with TestClient(app) as client:
+        client.portal.call(here.link("doc1").connect)
+        with client.websocket_connect(f"/v1/visuals/{live_doc}/live") as window:
+            window.send_text(TOKEN)
+            peer = window.receive_json()["peer"]
+            window.receive_json()
+            doc = SharedDoc.load(base64.b64decode(window.receive_json()["update"]))
+            doc.set_peer_id(int(peer))
+            window.send_json({"freeze": True})
+            assert window.receive_json()["state"]["lock"] == "sign_off"
+            before = doc.version()
+            doc.insert("body", 5, "!")
+            window.send_json({"update": encoded(doc.export_updates(before))})
+            relay.receive = receive_and_note
+            window.send_json({"reopen": True})
+            assert window.receive_json()["state"]["lock"] is None
+            assert sent.wait(FIRST_FRAME_TIMEOUT)               # the held edit goes once it is open again
+        client.portal.call(here.stop)
+    assert at_reopen == ["World"]                           # held back while frozen
+    assert relay.refusals == []
+    assert relay.sections()["body"] == "World!"
+
+
+def test_a_teammate_opens_a_design_shared_with_them_by_its_library_id_and_writes_in_it(db):
+    """The app's shared-design reader opens the live socket on the Library doc
+    id: no plan here, so the window waits for the relay's text, opens again on
+    it, and its edit goes up under the number the socket lent."""
+    from brindle.pro import live_docs
+    from test_live_docs import REVISION, Clock, FakeRelay
+
+    relay = FakeRelay(Clock(), author="alice")
+    heard = threading.Event()
+    receive = relay.receive
+
+    def receive_and_note(pipe, text):
+        receive(pipe, text)
+        heard.set()
+
+    here = live_docs.Manager(relay.transport("bob"), available=lambda: True, drive=False)
+    app = build_app(TOKEN)
+    app.state.live_docs = here
+    path = "/v1/visuals/ad_shared1/live"
+    with TestClient(app) as client:
+        with client.websocket_connect(path) as waiting:
+            waiting.send_text(TOKEN)
+            assert waiting.receive_json() == {"peer": None}
+            assert waiting.receive_json()["state"]["lock"] is None
+            client.portal.call(here.link("ad_shared1").connect)     # the link's first join stores the relay's text
+            with pytest.raises(WebSocketDisconnect) as closed:
+                waiting.receive_json()
+            assert closed.value.code == live_docs.RELOAD
+        with client.websocket_connect(path) as window:
+            window.send_text(TOKEN)
+            peer = window.receive_json()["peer"]
+            assert window.receive_json()["state"]["lock"] is None
+            doc = SharedDoc.load(base64.b64decode(window.receive_json()["update"]))
+            assert doc.sections() == REVISION
+            doc.set_peer_id(int(peer))
+            before = doc.version()
+            doc.insert("body", 5, "!")
+            relay.receive = receive_and_note
+            window.send_json({"update": encoded(doc.export_updates(before))})
+            assert heard.wait(FIRST_FRAME_TIMEOUT)
+        client.portal.call(here.stop)
+    assert relay.refusals == []
+    assert relay.sections() == {"lede": "# Design\n\nHello", "body": "World!"}
