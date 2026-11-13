@@ -467,6 +467,7 @@ def test_viewed_session_comes_back_first(db, root, monkeypatch, case):
         assert waiting == [2, 2] and all(done for _, done in began)     # none begun beside it
 
 
+@pytest.mark.variant("real incident: after an update the person's sessions each waited ~3 s for room on a busy CPU")
 def test_on_a_busy_cpu_the_persons_sessions_come_back_viewed_first_without_waiting_for_room(db, monkeypatch):
     """Reported: after an update every session sat 3 s waiting for room on a
     loaded machine before it even began. The person's own sessions only wait

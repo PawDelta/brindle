@@ -3,6 +3,8 @@
 import contextlib
 import json
 
+import pytest
+
 from brindle import provider_homes, providers
 
 MINE = {"type": "stdio", "command": "brindle-own"}
@@ -59,6 +61,7 @@ def test_a_linked_home_config_is_never_written_through(tmp_path, monkeypatch):
     assert elsewhere.read_text() == '{"mcpServers": {}}'
 
 
+@pytest.mark.variant("race: two launches switch homes at once; the second must not copy again")
 def test_a_copy_finished_while_waiting_for_the_lock_is_not_repeated(tmp_path, monkeypatch):
     ours = _homes(tmp_path, monkeypatch)
     before = json.dumps({"mcpServers": {"local": MINE}})
