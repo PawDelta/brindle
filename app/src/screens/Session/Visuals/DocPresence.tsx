@@ -1,14 +1,16 @@
 /* Document-wide awareness and the author's version controls. Section editors own their carets. */
 import { useEffect, useRef, useState } from "react";
-import { EphemeralStore } from "loro-crdt";
-import type { EphemeralState, UserState } from "loro-codemirror";
+import { EphemeralStore, LoroDoc } from "loro-crdt";
+import { getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
 import type { LiveChannel, LiveDocState } from "../../../api/client";
 import { quiet } from "../../../components/ui";
 import type { LiveClient } from "./DocEditor";
 import { Avatar } from "./PlanCards";
+import { PRESENCE_TTL, peerClass } from "./docAwareness";
 
-export function DocPresence({ client, visual, isAuthor, name }: {
+export function DocPresence({ client, visual, isAuthor, name, onState }: {
   client: LiveClient; visual: string; isAuthor: boolean; name: string;
+  onState?(state: LiveDocState | null): void;
 }) {
   const channel = useRef<LiveChannel | null>(null);
   const [state, setState] = useState<LiveDocState | null>(null);
@@ -16,6 +18,9 @@ export function DocPresence({ client, visual, isAuthor, name }: {
   const [peers, setPeers] = useState<UserState[]>([]);
   useEffect(() => {
     const stores = new Map<string, EphemeralStore<EphemeralState>>();
+    const identity = new LoroDoc();
+    const userKey = getUserEphemeralKey(identity);
+    const own = new EphemeralStore<EphemeralState>(PRESENCE_TTL);
     const refresh = () => {
       const people = new Map<string, UserState>();
       for (const store of stores.values()) for (const [key, value] of Object.entries(store.getAllStates())) {
@@ -24,29 +29,40 @@ export function DocPresence({ client, visual, isAuthor, name }: {
       setPeers([...people.values()]);
     };
     setState(null);
+    onState?.(null);
     setConnected(false);
     setPeers([]);
+    let stopRefresh = () => {};
     const live = client.visualLive(visual, {
       onUpdate() {},
-      onState(next) { setState(next); setConnected(true); },
+      onState(next) { setState(next); onState?.(next); setConnected(true); },
       onAwareness(section, bytes) {
         let store = stores.get(section);
         if (!store) {
-          store = new EphemeralStore<EphemeralState>(30_000);
+          store = new EphemeralStore<EphemeralState>(PRESENCE_TTL);
           stores.set(section, store);
           store.subscribe(refresh);
         }
         store.apply(bytes);
       },
-      onClose() { setConnected(false); },
+      onClose() { setConnected(false); onState?.(null); stopRefresh(); },
     });
+    const off = own.subscribeLocalUpdates((bytes) => live.sendAwareness("__document__", bytes));
+    const announce = () => own.set(userKey, { name, colorClassName: peerClass(name) });
+    announce();
+    const refreshing = setInterval(announce, PRESENCE_TTL / 3);
+    stopRefresh = () => clearInterval(refreshing);
     channel.current = live;
     return () => {
       channel.current = null;
+      stopRefresh();
+      own.delete(userKey);
+      off();
+      own.destroy();
       live.close();
       for (const store of stores.values()) store.destroy();
     };
-  }, [client, visual, name]);
+  }, [client, visual, name, onState]);
   return (
     <section aria-label="Live document" className="grid gap-2 rounded-md border border-line p-2.5 font-sans text-xs" data-state={state?.lock ?? "editing"}>
       <ul aria-label="Others in this document" className="m-0 flex list-none flex-wrap gap-3 p-0">

@@ -398,6 +398,8 @@ export type SharedDesign = SharedDesignDTO;
 /* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
 export interface PlanVerdict {
   rev: number;
+  /* The frozen live version being built, when this is a live doc. */
+  version?: number;
   approved: boolean;
   picks: Record<string, string>;
   comments: PlanComment[];
@@ -1328,6 +1330,8 @@ export interface LiveDocState {
   author: string;
   lock: "sign_off" | "author_offline" | null;
   version: { id: number; writers: string[]; signOffs: string[]; snapshot: string } | null;
+  /* The gate for this live version, including any org policy checks. */
+  gate?: Plan["gate"];
 }
 
 /* What a shared design doc's live channel delivers (DaemonClient.visualLive). */
@@ -1854,7 +1858,12 @@ export class DaemonClient {
        changes. `author` is the author's display name. `lock` is null, "sign_off" (read only
        for everyone), or "author_offline" (read only for others; comments and suggestions
        remain available). Locked channels stay open for reading, awareness and state changes.
-       A version contains an increasing id, credited writers, signOffs and a base64 snapshot.
+       A version contains an increasing id, credited writers, signOffs (account subjects) and
+       a base64 snapshot. `gate` is the associated review gate; reopening invalidates its
+       sign-offs too. Sign-off and build HTTP requests include `version`, so an old request
+       cannot sign or build a withdrawn version. No version means sign-off/build are disabled.
+       Readers publish their user awareness in section "__document__", refresh it while open,
+       and delete it on departure. Section editors continue to own their own caret awareness.
      - author → daemon: {"freeze": true} snapshots the text and credits its writers, then
        locks it for sign-off; {"reopen": true} withdraws that version and its sign-offs.
        The daemon authorizes these commands and rejects text updates while locked.
@@ -1976,8 +1985,8 @@ export class DaemonClient {
   }
 
   /* The person's own sign-off, as one of the plan's reviewers, on the revision on screen. */
-  signOffPlan(id: string, rev: number) {
-    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sign-off`, { rev });
+  signOffPlan(id: string, rev: number, version?: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sign-off`, { rev, ...(version === undefined ? {} : { version }) });
   }
 
   /* An org admin's waiver of a review rule, or a stand-in for it. The Library checks they are an admin. */

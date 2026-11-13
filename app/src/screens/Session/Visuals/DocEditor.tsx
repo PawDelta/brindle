@@ -20,11 +20,9 @@ import { EphemeralStore, LoroDoc, UndoManager } from "loro-crdt";
 import { LoroEphemeralPlugin, getCursorEphemeralKey, getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
 import { useEffect, useRef, useState } from "react";
 import type { DaemonClient } from "../../../api/client";
+import { PEER_COLOURS, PRESENCE_TTL, peerClass } from "./docAwareness";
 
 export type LiveClient = Pick<DaemonClient, "visualLive">;
-
-/* How long a writer's caret and name last on others' screens unless written again (ms). */
-const PRESENCE_TTL = 30_000;
 
 /* A change that came from Loro (another writer's, or an undo): already in the document. */
 const fromLoro = Annotation.define<boolean>();
@@ -72,8 +70,6 @@ function loroSync(doc: LoroDoc, section: string): Extension {
 }
 
 /* Each writer's caret in a colour of their own, from the app's group colours. */
-const PEER_COLOURS = 9;
-const peerClass = (name: string) => `loro-peer-${[...name].reduce((h, c) => (h * 31 + c.codePointAt(0)!) >>> 0, 7) % PEER_COLOURS}`;
 const peerTheme = EditorView.theme(
   Object.fromEntries(
     Array.from({ length: PEER_COLOURS }, (_, i) => [

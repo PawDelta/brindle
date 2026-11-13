@@ -54,6 +54,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack }: {
   const allowed = (m: Mode) => m === "viewing" || (!!shown?.can_suggest && m === "suggesting");
   const current = allowed(mode) ? mode : "viewing";
   const teammate: Teammate | undefined = shown ? {
+    me: shown.me,
     rights: { comment: shown.can_comment ?? false, suggest: shown.can_suggest ?? false, signOff: shown.can_sign_off ?? false },
     signedOff: shown.signed_off ?? false,
     author: shown.author ?? null,

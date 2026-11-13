@@ -21,7 +21,8 @@
    who publishes a new revision. A write names the revision on screen: a newer one is a 409. */
 
 import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
-import { DaemonError, type DaemonClient, type DocScope, type LibraryPerson, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { DaemonError, type DaemonClient, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { liveReviewGate } from "../../../api/liveReview";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { PaperclipIcon } from "../../../components/icons";
@@ -245,13 +246,14 @@ function LibrarySignIn() {
 /* Someone reviewing a design another person shared: what the Library lets them do, and who wrote it.
    No plan here, so nothing to approve or build. */
 export interface Teammate {
+  me?: string;
   rights: { comment: boolean; suggest: boolean; signOff: boolean };
   signedOff: boolean;
   author: string | null;
   directory: LibraryPerson[];
 }
 
-export function DesignDoc({ source, author, teammate, plan, mode, writes, liveClient }: {
+export function DesignDoc({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode, writes, liveClient }: {
   source: DocSource;
   /* The doc's author, on this machine: sharing, the verdict and the build. */
   author?: { client: Client; visual: VisualDTO };
@@ -262,6 +264,12 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes, liveCl
   liveClient?: LiveClient;
 }) {
   const client = author?.client;
+  const docLive = liveClient ?? (receivedPlan.gate && client?.visualLive ? (client as LiveClient) : null);
+  const [liveState, setLiveState] = useState<LiveDocState | null>(null);
+  const plan = docLive ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
+  const teammate = receivedTeammate && docLive ? { ...receivedTeammate, signedOff: !!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me) } : receivedTeammate;
+  const reviewVersion = liveState?.version?.id;
+  const reviewBlocked = !!docLive && reviewVersion === undefined;
   const visual = author?.visual;
   const canComment = !teammate || teammate.rights.comment;
   const canSuggest = !teammate || teammate.rights.suggest;
@@ -523,9 +531,9 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes, liveCl
   const canRequest = said;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
   const decide = async (approved: boolean) => {
-    if (!client) return;
+    if (!client || (approved && reviewBlocked)) return;
     setSending(approved ? "approve" : "changes");
-    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(attached.length ? { attachments: attached } : {}) }));
+    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(reviewVersion === undefined ? {} : { version: reviewVersion }), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
     setSending(null);
     if (now) {
@@ -550,9 +558,9 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes, liveCl
     if (alive.current) setSending(null);
   };
   const signOff = async () => {
-    if (!source.signOff) return;
+    if (!source.signOff || reviewBlocked) return;
     setSending("approve");
-    await write(() => source.signOff!(plan.rev));
+    await write(() => source.signOff!(plan.rev, reviewVersion));
     if (alive.current) setSending(null);
   };
   const nextOption = next?.options.find((o) => o.id === chosen(next));
@@ -579,7 +587,6 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes, liveCl
   );
   // A doc in team review, in Editing mode, is edited live with everyone writing in it: its text
   // is the daemon's live document (DocEditor), each change going out as it is typed.
-  const docLive = liveClient ?? (shared && client?.visualLive ? (client as LiveClient) : null);
   const live = mode === "editing" ? docLive : null;
   const textBody = (section: string, title: string) => editing?.section === section && live ? (
     <div className="grid gap-2 font-sans" data-testid="plan-live-box">
@@ -643,7 +650,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes, liveCl
           <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">{plan.title}</h1>
-              {docLive && <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={teammate ? "" : me ? nameOf(me) : "Author"} />}
+              {docLive && <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={teammate?.me ? nameOf(teammate.me) : me ? nameOf(me) : "Author"} onState={setLiveState} />}
               <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
                 <dt className="text-ink-3">Status</dt>
                 <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state} data-held={policyHeld ? "policy" : undefined}>
@@ -679,7 +686,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes, liveCl
                 )}
                 <dt className="text-ink-3">{teammate ? "Author" : "Authors"}</dt>
                 <dd className="m-0">{teammate ? (teammate.author ? personName(nameOf(teammate.author)) : "Unknown") : "You and the supervisor"}</dd>
-                <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />
+                <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} reviewVersion={reviewVersion} reviewBlocked={reviewBlocked} />
                 {plan.ask && (
                   <>
                     <dt className="text-ink-3">Understood</dt>
@@ -745,7 +752,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes, liveCl
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               {next ? nextOptionConfirm : teammate.rights.signOff && !teammate.signedOff && (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy} data-testid="plan-sign-off" onClick={() => void signOff()}>Sign off</LoadingButton>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>Sign off</LoadingButton>
               )}
             </div>
           </>
@@ -769,7 +776,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes, liveCl
               </LoadingButton>
               {/* One main action at a time: the next decision's confirmation, then the sign-off. */}
               {next ? nextOptionConfirm : (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
+                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
                   data-testid="plan-build" data-gate={gate?.state} onClick={() => void decide(true)}>
                   {gate ? "Start building" : "Sign off"}
                 </LoadingButton>

@@ -2,14 +2,15 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { LoroDoc } from "loro-crdt";
-import { afterEach, expect, it } from "vitest";
-import { fromBase64, type SharedDesign } from "../../../api/client";
+import { afterEach, expect, it, vi } from "vitest";
+import { fromBase64, type Plan, type SharedDesign, type VisualDTO } from "../../../api/client";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { DocEditor } from "./DocEditor";
 import { DocPresence } from "./DocPresence";
 import { SharedDesignReader } from "./SharedDesignReader";
+import { PlanReader } from "./PlanReader";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 const settle = async () => {
   for (let i = 0; i < 10; i++) await act(async () => {});
@@ -24,6 +25,89 @@ it("requires the author to freeze a teammate's document", async () => {
   const panel = screen.getByRole("region", { name: "Live document" });
   expect(panel.querySelector('[role="status"][data-state="author-required"]')).toBeTruthy();
   expect(within(panel).queryByRole("button")).toBeNull();
+});
+
+it("keeps two readers present without section editors and removes a departing reader", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+  const daemon = new FakeDaemon();
+  daemon.seedLive("doc", { lede: "Text" });
+  const live = daemon.client();
+  const reader = (me: string) => {
+    const design: SharedDesign = { id: "doc", session: "", title: "Readers", rev: 1, state: "open", markdown: "Text", lede: "Text", sections: [], decisions: [], split: [], queued: 0, created_at: 1, me, author: "Ann" };
+    const client = { visualLive: live.visualLive.bind(live), libraryPeople: async () => ({ people: [] }), sharedDesign: async () => design, writeSharedDesign: async () => design };
+    return render(<SharedDesignReader client={client} docId="doc" onBack={() => {}} />);
+  };
+  const bo = reader("Bo");
+  const cy = reader("Cy");
+  await settle();
+  const boPeers = within(bo.container).getByRole("list", { name: "Others in this document" });
+  const cyPeers = within(cy.container).getByRole("list", { name: "Others in this document" });
+  expect(boPeers.querySelector('[data-peer="Cy"]')).toBeTruthy();
+  expect(cyPeers.querySelector('[data-peer="Bo"]')).toBeTruthy();
+  expect(document.querySelector(".cm-editor")).toBeNull();
+  await act(async () => void vi.advanceTimersByTime(45_000));
+  await settle();
+  const dee = reader("Dee");
+  await settle();
+  const deePeers = within(dee.container).getByRole("list", { name: "Others in this document" });
+  expect(deePeers.querySelector('[data-peer="Bo"]')).toBeTruthy();
+  expect(deePeers.querySelector('[data-peer="Cy"]')).toBeTruthy();
+  await act(async () => void vi.advanceTimersByTime(1_000));
+  dee.unmount();
+  cy.unmount();
+  await settle();
+  expect(within(boPeers).queryByRole("listitem")).toBeNull();
+});
+
+it("withdraws the rendered review and build gate when a signed live version is reopened", async () => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "doc", session: "boss", title: "Review", by: "supervisor", kind: "plan", rev: 7, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "doc", session: "boss", title: "Review", rev: 7, state: "open", markdown: "Text", lede: "Text", sections: [], decisions: [], split: [], queued: 0, created_at: 1,
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["Bo"], reviewers: [{ sub: "Bo", you: true, required: true, status: "waiting" }] } };
+  daemon.seedLive("doc", { lede: "Text" }, { plan, me: "Bo", author: "Ann" });
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: live.plan.bind(live), decidePlan: live.decidePlan.bind(live),
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+    sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: live.syncPlan.bind(live), overridePlanPolicy: async () => plan,
+    docScopes: async () => ({ scopes: [] }), libraryPeople: async () => ({ people: [], me: "Bo" }),
+    signOffPlan: live.signOffPlan.bind(live),
+  };
+  const author = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const authorUI = within(author.container);
+  await settle();
+  fireEvent.click(authorUI.getByRole("button", { name: "Freeze" }));
+  await settle();
+  const firstVersion = daemon.liveState("doc").version!.id;
+  fireEvent.click(within(authorUI.getByTestId("plan-reviewer-Bo")).getByRole("button", { name: "Sign off" }));
+  await settle();
+  expect(authorUI.getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
+  expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
+  const reviewer = render(<SharedDesignReader client={live} docId="doc" onBack={() => {}} />);
+  const reviewerUI = within(reviewer.container);
+  await settle();
+  expect(reviewerUI.queryByTestId("plan-sign-off")).toBeNull();
+  fireEvent.click(authorUI.getByRole("button", { name: "Reopen" }));
+  await settle();
+  expect(authorUI.getByTestId("plan-reviewer-Bo").dataset.status).toBe("waiting");
+  expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(true);
+  expect((reviewerUI.getByTestId("plan-sign-off") as HTMLButtonElement).disabled).toBe(true);
+  expect((await live.plan("doc")).gate?.reviewers?.[0].status).toBe("waiting");
+  expect((await live.sharedDesign("doc")).signed_off).toBe(false);
+  fireEvent.click(authorUI.getByRole("button", { name: "Freeze" }));
+  await settle();
+  // A delayed request for the withdrawn version cannot sign the replacement or build it.
+  await expect(live.signOffPlan("doc", 7, firstVersion)).rejects.toMatchObject({ status: 409 });
+  await expect(live.decidePlan("doc", { rev: 7, version: firstVersion, approved: true, picks: {}, comments: [], note: "" })).rejects.toMatchObject({ status: 409 });
+  fireEvent.click(reviewerUI.getByTestId("plan-sign-off"));
+  await settle();
+  expect(reviewerUI.queryByTestId("plan-sign-off")).toBeNull();
+  expect(authorUI.getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
+  expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(authorUI.getByTestId("plan-build"));
+  await settle();
+  expect((await live.plan("doc")).state).toBe("approved");
 });
 
 it("shows awareness colours, freezes credited text for everyone and withdraws sign-offs on reopen", async () => {
