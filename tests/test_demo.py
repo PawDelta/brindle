@@ -105,6 +105,8 @@ def test_app_demo_starts_workers_and_reviewer(db, monkeypatch, only, probed):
                         None if provider == only else "CLI not installed")
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: [only] if probed else [])
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    # The machine's own CLI setup (is codex installed here?) is preflight's job, not this test's.
+    monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
     launched = []
 
     def launch(db, agent, ws, **kwargs):
