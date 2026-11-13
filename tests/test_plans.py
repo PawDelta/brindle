@@ -382,17 +382,19 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     assert started == ["build the preset schema"]
 
 
-@pytest.mark.parametrize("answer, goal_first", [
-    pytest.param({"option": "build"}, True, marks=pytest.mark.variant(
+@pytest.mark.parametrize("answer, goal_first, assigned_first", [
+    pytest.param({"option": "build"}, True, False, marks=pytest.mark.variant(
         "the ordinary approval: goal first, then an approving option starts the plan")),
-    pytest.param({"option": "build"}, False, marks=pytest.mark.variant(
+    pytest.param({"option": "build"}, False, False, marks=pytest.mark.variant(
         "the design is approved before the session has a goal: the goal that follows claims it")),
-    pytest.param({"option": "back"}, True, marks=pytest.mark.variant(
+    pytest.param({"option": "build"}, True, True, marks=pytest.mark.variant(
+        "review: approving a design after work was assigned must still record approval independently of offer suppression")),
+    pytest.param({"option": "back"}, True, False, marks=pytest.mark.variant(
         "a redirect option ('Go back and revise') is not an approval, whatever its words: the offer must still open")),
-    pytest.param({"option": "build", "note": "change the split first"}, True, marks=pytest.mark.variant(
+    pytest.param({"option": "build", "note": "change the split first"}, True, False, marks=pytest.mark.variant(
         "an approving option with a redirect note is not an approval: the offer must still open")),
 ])
-def test_approved_design_counts_as_the_plan(answer, goal_first, db, session, monkeypatch):
+def test_approved_design_counts_as_the_plan(answer, goal_first, assigned_first, db, session, monkeypatch):
     from brindle import autopilot, visuals
     from brindle.service import inbox
 
@@ -403,17 +405,22 @@ def test_approved_design_counts_as_the_plan(answer, goal_first, db, session, mon
         visual_offers._grant(c, "boss")
     if goal_first:      # goal A starts small, so it has no offer yet; its design is approved while it runs
         mcp_server.set_goal("Org presets", [{"title": "M0", "check": "true"}])
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    if assigned_first:
+        asyncio.run(mcp_server.assign("developer", "start the schema"))
+        assert started == ["start the schema"]
     shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
                             [{"id": "build", "label": "Build", "approves": True},
                              {"id": "back", "label": "Go back and revise"}])
-    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
     visuals.answer(db, shown["id"], 1, **answer)
 
     mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(5)])
+    assert visuals.has_approved_design(db, "boss", "Org presets") is (answer == {"option": "build"})
     offers = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
     asyncio.run(mcp_server.assign("developer", "build the preset schema"))
     if answer == {"option": "build"}:
-        assert offers == [] and started == ["build the preset schema"] and plans.holding(db, "boss") is None
+        expected = ["start the schema", "build the preset schema"] if assigned_first else ["build the preset schema"]
+        assert offers == [] and started == expected and plans.holding(db, "boss") is None
         # The approval belonged to that goal: a later, unrelated goal gets the normal offer.
         mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(5)], new_goal=True)
         assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
