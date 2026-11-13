@@ -751,11 +751,21 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     from brindle import inbox
 
     argv = inbox.without_launcher_inbox(argv)
+    # A launch that isn't the daemon's (a worker, started by its supervisor's
+    # helper) can't add the login shell's proxy and certificate settings: the
+    # pane asks the daemon for them itself, through a shim, before the CLI starts.
+    from brindle import login_shell_env
+
+    asks = login_shell_env.asks_daemon()
+    if asks:
+        argv = login_shell_env.shim(agent.id, argv)
     # The sidebar splits the window after the CLI's pane exists: hold the CLI
     # until then, or a resumed chat drew its conversation at the full width
     # and was resized under it, which Claude Code shows as a blank screen (#264).
+    # A pane that asks the daemon is held too: the daemon answers only a pane
+    # recorded as this agent's, which it is by the time the gate opens.
     gate = None
-    if watch_pane:
+    if watch_pane or asks:
         argv, gate = tmux.gated(argv)
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
     try:
@@ -893,6 +903,22 @@ def _effective_window_env(agent: Agent, ws: Workspace, m=_UNREAD) -> dict[str, s
                                    deny=secrets.pane_deny(deny, env), agent_env=agent_env,
                                    enforce=enforce)
     return {k: v for k, v in {**inherited, **env}.items() if k not in unset}
+
+
+def login_shell_additions(agent: Agent, ws: Workspace) -> dict[str, str]:
+    """The login shell's proxy and certificate settings that a launch of
+    ``agent`` by this process (the daemon, which read them) would leave in its
+    pane: the ones for its provider that its real launch environment ends up
+    with, so never one the pane has anyway (set by the launch, or handed down
+    by tmux) or one its environment rules take out. What the daemon gives a
+    pane it didn't launch itself (brindle.daemon.launch_env)."""
+    from brindle import login_shell_env
+
+    found = login_shell_env.for_launch(agent.provider)
+    if not found:
+        return {}       # nothing read (the usual case): no need to work the pane's environment out
+    effective = _effective_window_env(agent, ws)
+    return {n: v for n, v in found.items() if effective.get(n) == v}
 
 
 def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = None,
