@@ -159,6 +159,9 @@ async def visual_live(socket: WebSocket) -> None:
 
     try:
         doc_id = await work(open_doc)
+        if relay is not None and not await relay.prepare(doc_id):
+            # Initial 4404, before any live frame, selects the reader's HTTP path.
+            raise ServiceError("not_found", "no live text for this design here", 404)
         room = rooms.setdefault(doc_id, _LiveRoom())
         room.users += 1
         async with room.lock:
