@@ -8,7 +8,8 @@
    screen, then what it prints, and tmux's "Pane is dead" once its command
    has exited. */
 
-import { DaemonClient, type GithubConnection } from "../api/client";
+import { EphemeralStore, LoroDoc } from "loro-crdt";
+import { DaemonClient, fromBase64, toBase64, type GithubConnection } from "../api/client";
 import type { BusEvent, StreamMessage, WebSocketLike } from "../api/events";
 import { WS_UNAUTHORIZED } from "../api/events";
 import type { PtyStatus, PtyViewHandlers, PtyViewOpener, PtyViews, PtyViewTarget } from "../api/ptyView";
@@ -612,6 +613,50 @@ export class FakeSocket implements WebSocketLike {
   }
 }
 
+/* A client on WS /v1/visuals/{id}/live (DaemonClient.visualLive): the token as its first frame,
+   then its update and awareness frames, which the daemon keeps and relays to the visual's other
+   clients (FakeDaemon.joinLive, relayLive). */
+export class FakeLiveSocket implements WebSocketLike {
+  onopen: WebSocketLike["onopen"] = null;
+  onmessage: WebSocketLike["onmessage"] = null;
+  onclose: WebSocketLike["onclose"] = null;
+  onerror: WebSocketLike["onerror"] = null;
+  readonly frames: string[] = [];
+  authed = false;
+  closed = false;
+  readonly visual: string;
+  private readonly daemon: FakeDaemon;
+
+  constructor(daemon: FakeDaemon, visual: string) {
+    this.daemon = daemon;
+    this.visual = visual;
+    queueMicrotask(() => {
+      if (!this.closed) this.onopen?.({});
+    });
+  }
+
+  send(data: string): void {
+    if (this.closed) return;
+    this.frames.push(data);
+    if (this.frames.length === 1) this.daemon.joinLive(this, data);
+    else if (this.authed) this.daemon.relayLive(this, data);
+  }
+
+  close(code = 1000): void {
+    if (this.closed) return;
+    this.closed = true;
+    queueMicrotask(() => this.onclose?.({ code }));
+  }
+
+  push(frame: object): void {
+    if (this.closed) return;
+    const text = JSON.stringify(frame);
+    queueMicrotask(() => {
+      if (!this.closed) this.onmessage?.({ data: text });
+    });
+  }
+}
+
 const TOOLS_MESSAGE = "git needs Apple's Command Line Developer Tools, which aren't installed. Install them with `xcode-select --install` (or `brew install git`), then try again.";
 
 export class FakeDaemon {
@@ -757,6 +802,9 @@ export class FakeDaemon {
   /* The session roots POST /recovery/viewed said were on screen, in order. */
   readonly viewed: string[] = [];
   readonly sockets: FakeSocket[] = [];
+  /* Each visual's live text (seedLive), and the clients on it. */
+  private readonly live = new Map<string, { doc: LoroDoc; presence: Map<string, EphemeralStore> }>();
+  readonly liveSockets: FakeLiveSocket[] = [];
   private nextId = 1;
   private nextSession = 1;
   private nextJob = 1;
@@ -2295,7 +2343,7 @@ export class FakeDaemon {
   }
 
   client(token = this.token): DaemonClient {
-    return new DaemonClient({ baseUrl: BASE_URL, token, fetch: this.fetch });
+    return new DaemonClient({ baseUrl: BASE_URL, token, fetch: this.fetch, connect: this.connect });
   }
 
   /* The live /v1/events sockets that passed the guard. */
@@ -2404,7 +2452,62 @@ export class FakeDaemon {
     for (const s of this.sockets) s.close(code);
   }
 
-  connect = (url: string): FakeSocket => {
+  /* A visual's live text, seeded with each section's text as the daemon seeds it from the doc's
+     current revision (DaemonClient.visualLive). */
+  seedLive(visual: string, sections: Record<string, string>): LoroDoc {
+    const doc = new LoroDoc();
+    for (const [section, text] of Object.entries(sections)) doc.getText(section).insert(0, text);
+    doc.commit();
+    this.live.set(visual, { doc, presence: new Map() });
+    return doc;
+  }
+
+  /* A section's live text as the daemon holds it. */
+  liveText(visual: string, section: string): string {
+    return this.live.get(visual)?.doc.getText(section).toString() ?? "";
+  }
+
+  /* A section's presence as the daemon holds it (what a client joining now is sent): key → value. */
+  livePresence(visual: string, section: string): Record<string, unknown> {
+    return (this.live.get(visual)?.presence.get(section)?.getAllStates() ?? {}) as Record<string, unknown>;
+  }
+
+  joinLive(socket: FakeLiveSocket, frame: string): void {
+    if (frame !== this.token) {
+      socket.close(WS_UNAUTHORIZED);
+      return;
+    }
+    const live = this.live.get(socket.visual);
+    if (!live) {
+      socket.close(4404);
+      return;
+    }
+    socket.authed = true;
+    socket.push({ update: toBase64(live.doc.export({ mode: "snapshot" })) });
+    for (const [section, store] of live.presence) socket.push({ awareness: toBase64(store.encodeAll()), section });
+  }
+
+  relayLive(from: FakeLiveSocket, frame: string): void {
+    const live = this.live.get(from.visual);
+    if (!live) return;
+    const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string };
+    if (said.update !== undefined) live.doc.import(fromBase64(said.update));
+    else if (said.awareness !== undefined && said.section !== undefined) {
+      const store = live.presence.get(said.section) ?? new EphemeralStore(30_000);
+      live.presence.set(said.section, store);
+      store.apply(fromBase64(said.awareness));
+    } else return;
+    for (const s of this.liveSockets) if (s !== from && s.authed && !s.closed && s.visual === from.visual) s.push(said);
+  }
+
+  connect = (url: string): FakeSocket | FakeLiveSocket => {
+    const live = /^\/v1\/visuals\/([^/]+)\/live$/.exec(new URL(url).pathname);
+    if (live) {
+      const socket = new FakeLiveSocket(this, decodeURIComponent(live[1]));
+      this.liveSockets.push(socket);
+      if (this.dead) socket.close(1006);
+      return socket;
+    }
     const socket = new FakeSocket(this, url);
     this.sockets.push(socket);
     // Dead: the connection is refused (closed before it opens, as the shell's 1006 says).

@@ -11,7 +11,8 @@
 
    Three modes, in the header. Viewing reads. Suggesting and Editing put an Edit control on each
    text section: its markdown in a box, saved as a suggestion to accept, or as a direct edit (a
-   new revision). In any mode, highlighting text offers Comment, Suggest edit and Ask the
+   new revision). A doc in team review is edited live instead, in Editing mode: the section's
+   text in DocEditor.tsx, shared with everyone writing in it as they type. In any mode, highlighting text offers Comment, Suggest edit and Ask the
    supervisor; what the person writes lands in the review column, tied to that text.
 
    The next decision to take is led by the bottom bar, and marked in the doc by a green divider.
@@ -19,7 +20,7 @@
    live board; Request changes sends the person's picks, threads and note back to the supervisor,
    who publishes a new revision. A write names the revision on screen: a newer one is a 409. */
 
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type DocScope, type LibraryPerson, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { LoadingButton } from "../../../components/LoadingButton";
@@ -32,16 +33,20 @@ import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack }
 import { Diagram } from "./DocDiagram";
 import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
+import type { LiveClient } from "./DocEditor";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient> & Partial<LiveClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
+/* The live editor brings CodeMirror and Loro's WebAssembly: loaded when a section is first edited live. */
+const DocEditor = lazy(() => import("./DocEditor").then((m) => ({ default: m.DocEditor })));
+
 const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
 const noSubscribe = () => () => {};
 
@@ -570,7 +575,19 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
       {mode === "editing" ? "Edit" : "Suggest an edit"}
     </button>
   );
-  const textBody = (section: string, title: string) => editing?.section === section ? (
+  // A doc in team review, in Editing mode, is edited live with everyone writing in it: its text
+  // is the daemon's live document (DocEditor), each change going out as it is typed.
+  const live = mode === "editing" && shared && client?.visualLive ? (client as LiveClient) : null;
+  const textBody = (section: string, title: string) => editing?.section === section && live ? (
+    <div className="grid gap-2 font-sans" data-testid="plan-live-box">
+      <Suspense fallback={<p className="text-xs text-ink-3" role="status">Opening the live text…</p>}>
+        <DocEditor client={live} visual={plan.id} section={section} name={me ? nameOf(me) : "Author"} label={`Text of ${title}`} />
+      </Suspense>
+      <div className="flex items-center gap-1.5">
+        <button type="button" className={`${quiet} text-xs`} onClick={() => setEditing(null)}>Done</button>
+      </div>
+    </div>
+  ) : editing?.section === section ? (
     <div className="grid gap-2 font-sans" data-testid="plan-edit-box" data-stale={editStale || undefined}>
       <textarea className={`${field} w-full resize-y font-mono text-[12.5px] leading-[1.6]`} aria-label={`Text of ${title}`} autoFocus rows={Math.min(24, editing.text.split("\n").length + 2)}
         value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} />
