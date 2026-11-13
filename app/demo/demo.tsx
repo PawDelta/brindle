@@ -179,7 +179,7 @@ const PLAN_ACCOUNT: Record<Plan, () => typeof base> = {
 };
 const policy = structuredClone(daemon.data.routingPolicy);
 
-/* Each provider's usage: near a limit to start, so the sidebar's reading shows. */
+/* Each provider's usage, as design/usage drew it: near a limit to start, so the sidebar's reading shows. */
 daemon.data.usage = RECORDING ? recordingUsage() : usageScenario("near");
 
 function Demo() {

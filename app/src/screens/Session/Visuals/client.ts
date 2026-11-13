@@ -1,5 +1,5 @@
 /* What the visuals' screens ask of the daemon: the slice of DaemonClient they use, so a test hands
-   them a typed fake of just this. */
+   them a typed fake of just this (design/visualizer-build-plan.html §4, the wave-1 contract). */
 
 import type { DaemonClient } from "../../../api/client";
 

@@ -1,5 +1,6 @@
-/* "Review & open PR": one sheet over the supervisor session, per session,
-   with the file list down the left and no worker attribution anywhere. It exists only
+/* "Review & open PR": one sheet over the supervisor session, per session
+   (design/options-v2/V2-stepped-sheet's single calm sheet, with V1's file
+   list down the left, and no worker attribution anywhere). It exists only
    once the engine says the session is ready for a PR (review.ts): nothing
    of it shows before.
 

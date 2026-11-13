@@ -1,6 +1,6 @@
 /* The Terminal: a plain shell of the person's own in the open repo, docked
-   at the foot of the main column, under the session.
-   Closed, only the sidebar status line's ">_ Terminal ⌃`"
+   at the foot of the main column, under the session (design/terminal,
+   option A). Closed, only the sidebar status line's ">_ Terminal ⌃`"
    (TerminalToggle) says it is there; ⌃` does the same. Open, a grip above
    it resizes it (its height kept per repo, about a third to start), and
    its bar is the tab strip: shells keyed by their starting folder, + for

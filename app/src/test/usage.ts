@@ -1,5 +1,5 @@
 /* GET /usage as the engine serves it (routes_read.get_usage), in the
-   usage scenarios: normal (nothing near), near (Claude's 5-hour
+   readings design/usage drew: normal (nothing near), near (Claude's 5-hour
    window at 88%), several (Claude at 88%, Codex's week at 82%, Antigravity
    refusing work until 7:18pm) and reset (Claude at 94% resetting in 12
    minutes, Codex's 5-hour window in 25, Antigravity back in 6). Times are

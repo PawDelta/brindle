@@ -1,4 +1,4 @@
-/* The Account page's Usage section:
+/* The Account page's Usage section (design/usage/U2-account-usage.html):
    one card per provider brindle runs, each window it reports as a bar with
    its percent used and the clock time it resets, a one-model cap in small
    print, and what brindle does about it past 80% and 90%. A provider that

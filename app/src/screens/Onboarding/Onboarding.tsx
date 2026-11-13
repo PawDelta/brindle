@@ -1,4 +1,5 @@
-/* The first launch: its own full-window screens, no sidebar, from a clean
+/* The first launch (design/connect/, owner-approved, with the owner's final
+   provider model): its own full-window screens, no sidebar, from a clean
    Mac to a first project. Starting brindle (Starting.tsx, while the app
    asks the engine) → Sign in to brindle (one button; the browser does it:
    POST /account/login) → Connect your providers (a section each: a CLI
@@ -540,7 +541,7 @@ function Ready({ client, rows, installed, via, connections, done, methodOf, onCo
   );
 }
 
-/* ---- Permissions: how much the agents do on their own. ---- */
+/* ---- Permissions: how much the agents do on their own (design/setup-presets.html). ---- */
 
 interface PresetCopy {
   preset: PermissionPreset;

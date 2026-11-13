@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Button loading states</title>
+<style>
+  /* Tokens copied from app/src/styles.css (dark default, light override). */
+  .theme-dark {
+    --canvas: #080d0b; --surface-2: #121a16;
+    --line: rgba(120,150,135,.16); --line-strong: rgba(130,160,145,.28);
+    --ink: #e8f0eb; --ink-2: #afbfb6; --ink-3: #889a90;
+    --pass: #34d399; --pass-soft: rgba(52,211,153,.12);
+  }
+  .theme-light {
+    --canvas: #f4f6f6; --surface-2: #e9eded;
+    --line: rgba(20,40,36,.11); --line-strong: rgba(20,40,36,.22);
+    --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+    --pass: #046e50; --pass-soft: rgba(4,110,80,.1);
+  }
+  :root { --ease: cubic-bezier(.22,1,.36,1); }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #1b1f1d; color: #e8f0eb;
+    font-family: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px; line-height: 1.5; padding: 32px 16px 64px;
+  }
+  main { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -.015em; margin: 0 0 4px; }
+  .lede { color: #afbfb6; margin: 0 0 32px; }
+  section { margin-bottom: 40px; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+  .pitch { color: #afbfb6; margin: 0 0 12px; font-size: 13px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .pair { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--canvas); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 20px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  }
+  .panel small { flex-basis: 100%; color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; font-weight: 500; }
+
+  /* Base buttons: the app's `button` and `main` looks. */
+  .btn {
+    position: relative; overflow: hidden; font: inherit;
+    display: inline-flex; align-items: center; gap: 4px;
+    border-radius: 4px; border: 1px solid var(--line-strong); background: transparent;
+    padding: 4px 12px; font-size: 14px; font-weight: 500; color: var(--ink); cursor: pointer;
+    transition: background .15s var(--ease), opacity .2s var(--ease);
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn.main {
+    border-color: color-mix(in srgb, var(--pass) 55%, transparent);
+    background: color-mix(in srgb, var(--pass) 4%, transparent);
+    font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px; letter-spacing: -.01em; color: var(--pass);
+  }
+  .btn.main:hover { background: var(--pass-soft); }
+  .btn:focus-visible { outline: 2px solid var(--pass); outline-offset: 2px; }
+  .btn[aria-busy="true"] { cursor: progress; }
+  .btn .ico { width: 14px; height: 14px; flex: none; display: inline-block; }
+
+  /* Shared spinner: a quiet arc, currentColor. */
+  .spin {
+    width: 14px; height: 14px; flex: none; border-radius: 50%;
+    border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-top-color: currentColor; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 1: spinner replaces the icon; width stays put because the slot is fixed. */
+  .o1 .slot { width: 14px; height: 14px; display: inline-grid; place-items: center; }
+  .o1 .slot .spin { display: none; }
+  .o1[aria-busy="true"] .slot .ico { display: none; }
+  .o1[aria-busy="true"] .slot .spin { display: block; }
+
+  /* 2: label swaps to "Starting" + animated dots. Min-width avoids a jump. */
+  .o2 .busy-label { display: none; }
+  .o2[aria-busy="true"] .idle-label { display: none; }
+  .o2[aria-busy="true"] .busy-label { display: inline; }
+  .dots span { animation: dot 1.2s infinite both; }
+  .dots span:nth-child(2) { animation-delay: .2s; }
+  .dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes dot { 0%, 80%, 100% { opacity: .15; } 40% { opacity: 1; } }
+
+  /* 3: thin shimmer along the bottom edge; button itself stays unchanged. */
+  .o3::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: linear-gradient(90deg, transparent 0, currentColor 50%, transparent 100%);
+    background-size: 40% 100%; background-repeat: no-repeat; background-position: -40% 0;
+    opacity: 0; transition: opacity .2s var(--ease);
+  }
+  .o3[aria-busy="true"]::after { opacity: .85; animation: shimmer 1.2s var(--ease) infinite; }
+  @keyframes shimmer { to { background-position: 140% 0; } }
+
+  /* 4: only after 300ms (JS adds .show) the button dims and a spinner appears. */
+  .o4 .spin { display: none; }
+  .o4.show { opacity: .6; pointer-events: none; }
+  .o4.show .spin { display: block; }
+  .o4.show .ico { display: none; }
+
+  .note { font-size: 12px; color: #889a90; margin-top: 6px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spin { animation: none; border-top-color: currentColor; border-right-color: currentColor; }
+    .dots span { animation: none; opacity: .7; }
+    .o3[aria-busy="true"]::after { animation: none; background-size: 100% 100%; background-position: 0 0; opacity: .5; }
+    .btn { transition: none; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Button loading states</h1>
+  <p class="lede">Click any button: it enters the loading state for ~2s, ignores further clicks, then returns. Tokens match the app (hairline button, mono green main button). Reduced motion swaps animation for static cues.</p>
+
+  <section data-opt="1">
+    <h2>1. Spinner replaces the icon</h2>
+    <p class="pitch">Label never moves; the leading icon turns into a small spinner, so the button keeps its exact width.</p>
+    <div class="pair" data-tpl="o1"></div>
+  </section>
+
+  <section data-opt="2">
+    <h2>2. Label becomes “Starting…”</h2>
+    <p class="pitch">Plain words do the work: the label says what is happening, with three softly pulsing dots and no layout jump.</p>
+    <div class="pair" data-tpl="o2"></div>
+  </section>
+
+  <section data-opt="3">
+    <h2>3. Shimmer along the bottom edge</h2>
+    <p class="pitch">The button looks untouched; a thin light runs along its lower edge. Quietest option, works for any label.</p>
+    <div class="pair" data-tpl="o3"></div>
+  </section>
+
+  <section data-opt="4">
+    <h2>4. Dim + spinner after a 300ms delay</h2>
+    <p class="pitch">Fast actions never flicker: nothing changes until 300ms in. Try “Quick” (200ms, no visible change) next to the slow one.</p>
+    <div class="pair" data-tpl="o4"></div>
+  </section>
+</main>
+
+<script>
+  const PLAY = '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.5v9l7-4.5z"/></svg>';
+  const SPIN = '<span class="spin" aria-hidden="true"></span>';
+
+  const variants = {
+    o1: (main, label) => `<button class="btn o1 ${main}"><span class="slot">${PLAY}${SPIN}</span>${label}</button>`,
+    o2: (main, label) => `<button class="btn o2 ${main}" style="min-width:104px;justify-content:center"><span class="idle-label">${label}</span><span class="busy-label">Starting<span class="dots"><span>.</span><span>.</span><span>.</span></span></span></button>`,
+    o3: (main, label) => `<button class="btn o3 ${main}">${label}</button>`,
+    o4: (main, label, ms) => `<button class="btn o4 ${main}" data-ms="${ms || 2000}">${PLAY}${SPIN}${label}</button>`,
+  };
+
+  document.querySelectorAll('[data-tpl]').forEach(pair => {
+    const t = pair.dataset.tpl;
+    ['light', 'dark'].forEach(theme => {
+      const p = document.createElement('div');
+      p.className = 'panel theme-' + theme;
+      let html = `<small>${theme}</small>` + variants[t]('main', 'Start session') + variants[t]('', 'New session');
+      if (t === 'o4') html += variants[t]('', 'Quick (200ms)', 200);
+      p.innerHTML = html;
+      pair.appendChild(p);
+    });
+  });
+
+  document.addEventListener('click', e => {
+    const b = e.target.closest('.btn');
+    if (!b || b.getAttribute('aria-busy') === 'true') return;
+    const ms = +(b.dataset.ms || 2000);
+    b.setAttribute('aria-busy', 'true');
+    // Option 4 only shows the loading look if the action outlasts 300ms.
+    const show = b.classList.contains('o4') ? setTimeout(() => b.classList.add('show'), 300) : null;
+    setTimeout(() => {
+      clearTimeout(show);
+      b.classList.remove('show');
+      b.removeAttribute('aria-busy');
+    }, ms);
+  });
+</script>
+</body>
+</html>

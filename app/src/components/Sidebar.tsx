@@ -1,4 +1,5 @@
-/* The merged sidebar, with one entry for what needs a person:
+/* The merged sidebar (design/options-v2/M3b-multi's layout, with
+   design/options-v3/C2b-inbox-only's one entry for what needs a person):
    brindle's whole layer in one column beside the provider's session. From
    the top: the logo (and New session); "Inbox · N", the one place anything
    about attention shows in the sidebar (the Inbox page, in the main area,
@@ -600,7 +601,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
   );
 }
 
-/* "Inbox · N" at the very top: the one
+/* "Inbox · N" at the very top (design/options-v3/C2b-inbox-only): the one
    entry about what needs a person, everything else about attention being
    the Inbox page's. "empty" when nothing waits. The app's own update item
    counts too (store/appUpdates.ts). */

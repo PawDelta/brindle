@@ -1,7 +1,7 @@
 /* Where a visual's page renders: one interface, and the component behind it.
 
-   The page runs in a separate child webview on the brindle-visual:// scheme,
-   so a hung page can't freeze the app's own webview.
+   The page runs in a separate child webview on the brindle-visual:// scheme (owner amendment 8:
+   design/visualizer-build-plan-amendments.md), so a hung page can't freeze the app's own webview.
    The shell's side is app/src-tauri/src/visual_scheme.rs. Browser development uses a placeholder.
 
    The host, not the page, says which visual a message came from (the child webview's label), and

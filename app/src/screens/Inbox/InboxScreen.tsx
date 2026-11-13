@@ -1,4 +1,4 @@
-/* The Inbox page: every decision across
+/* The Inbox page (design/options-v3/C2b-inbox-only): every decision across
    every session, each item a banner card (the kind, one readable line of
    what is asked, its detail, the agent and branch, the session, the age),
    grouped by the session it concerns (org notices at the end), each group

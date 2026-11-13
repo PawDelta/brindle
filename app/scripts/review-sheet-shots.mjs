@@ -2,7 +2,7 @@ import { chromium } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 
 const browser = await chromium.launch({ executablePath: process.argv[2], headless: true });
-const out = new URL("../shots/out/review-sheet-pr-first/", import.meta.url);
+const out = new URL("../../design/review-sheet-pr-first/", import.meta.url);
 await mkdir(out, { recursive: true });
 try {
   /** @type {Array<"light" | "dark">} */
