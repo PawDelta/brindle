@@ -9120,6 +9120,10 @@
       "path": "/v1/keys/{name}/test"
     },
     {
+      "method": "POST",
+      "path": "/v1/launch-env"
+    },
+    {
       "method": "GET",
       "path": "/v1/meta"
     },
