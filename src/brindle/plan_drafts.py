@@ -119,6 +119,9 @@ class DraftReplica:
     def export_updates(self, since: bytes | None = None) -> bytes:
         return self._doc.export_updates(since)
 
+    def export_snapshot(self) -> bytes:
+        return self._doc.export_snapshot()
+
     # -- writing --------------------------------------------------------
 
     def insert(self, section: str, offset: int, text: str) -> bytes:
