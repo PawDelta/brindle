@@ -129,6 +129,7 @@ class RepoConfig:
     room_wait_max: int = 300           # seconds a worker waits for room before its supervisor is told once (it never starts early)
     check_concurrency: int = 4         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
+    limit_headroom: float = 10         # percentage points reserved for a heavy task; medium uses half, light a quarter
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
     graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
@@ -486,7 +487,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "review_sizing", "review_small_max_files", "review_small_max_lines", "review_risky_paths",
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
-                "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
+                "usage_limit", "limit_headroom", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
                 "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "overlap",
                 "overlap_granularity", "coordinator", "local_models", "merge_into",

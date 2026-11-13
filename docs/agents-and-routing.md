@@ -37,9 +37,13 @@ lists agents in the order brindle tries them. These are the defaults:
 ```
 
 An agent is skipped when its CLI isn't installed or signed in, a local model
-server isn't answering, or its provider is at your `usage_limit` (90% of your
-usage limit by default; `limit_cooldown_minutes` sets how long a provider that
-hit its limit counts as unavailable). The first agent left runs. If every
+server isn't answering, or its provider lacks room to finish the task below
+your `usage_limit` (90% by default). `limit_headroom` reserves 10 percentage
+points by default for heavy, advanced and unknown task weights, half that for
+medium tasks and a quarter for light tasks. Set it to 0 to route up to
+`usage_limit`. Local servers keep their availability check without a usage
+margin. `limit_cooldown_minutes` sets how long a provider that hit its limit
+counts as unavailable. The first agent left runs. If every
 candidate is out, the repo's `default_agent` runs. The reply to the supervisor
 says what was picked and why, for example
 `weight medium -> developer (Codex at 93%, skipped developer-codex)`.

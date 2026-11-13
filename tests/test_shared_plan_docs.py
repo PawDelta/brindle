@@ -2,16 +2,20 @@
 of the API in pawdelta-web's docs/shared-designs-api.md."""
 
 import asyncio
+import base64
 import copy
 import dataclasses
 import functools
+import json
 import time
 
+import loro
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.testclient import TestClient
 
 from brindle import identity_lock, mcp_server, plan_docs, plans, tasks, visual_offers
+from brindle.crdt import SharedDoc
 from brindle.daemon import holds
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
@@ -41,8 +45,10 @@ class Library:
         self.lose_answer, self.lose_create, self.list_status, self.plan = False, False, 200, None
         self.sign_offs, self.author, self.refuse_accept = [], "u_e", False
         self.answer_status, self.refuse_suggest = 200, False     # once committed, answer this; refuse before committing
-        self.refuse_vote = False
+        self.refuse_vote, self.draft = False, None
         remote.routes.update({
+            f"GET {DESIGN}/draft": lambda f, h: (200, {"rev": self.rev, "frozen": None, "snapshot": base64.b64encode(
+                self.draft.export_snapshot()).decode()}),
             **{f"POST {DESIGN}/threads/{n}": functools.partial(self.act, n) for n in range(1, 12)},
             f"POST {DESIGN}/comments": self.comment, f"POST {DESIGN}/suggestions": self.suggest,
             f"POST {DESIGN}/votes": self.vote,
@@ -55,7 +61,7 @@ class Library:
 
     def view(self):
         out = {**copy.deepcopy(self.content), "rev": self.rev, "author": self.author,
-               "threads": copy.deepcopy(self.threads),
+               "threads": copy.deepcopy(self.threads), "draft": self.draft and {"base_rev": self.rev, "frozen": None},
                "permissions": dict(self.permissions), "reviewers": list(self.reviewers),
                "sign_offs": list(self.sign_offs), "policy_reviewers": [],
                "pending_reviewers": [r["sub"] for r in self.reviewers if r["required"] and not any(
@@ -96,7 +102,7 @@ class Library:
                              "rev": form["rev"], "status": "open", "replies": [], "after": form["after"], "at": 9.0,
                              "anchor": {"kind": "text", "section": form["section"], "start": form["start"],
                                         "end": form["start"] + len(form["before"]), "quote": form["before"],
-                                        "state": "current"}})
+                                        "state": "current", **({"cursor": form["cursor"]} if "cursor" in form else {})}})
         return self.answer()
 
     def vote(self, form, headers):
@@ -119,6 +125,10 @@ class Library:
             t["status"] = "resolved" if action == "resolve" else "open"
         elif action == "reject":
             t["status"] = "rejected"
+        elif self.draft is not None:      # its text is in the draft already, or it is refused
+            if not form.get("in_draft"):
+                return 409, {"error": "live_draft"}
+            t["status"] = "accepted"
         else:
             if self.refuse_accept:
                 return 409, {"error": "stale", "rev": self.rev}
@@ -146,6 +156,8 @@ class Library:
         return self.share_status, {"id": DOC} if self.share_status == 200 else {"error": "too_many_scopes"}
 
     def revise(self, form, headers):
+        if self.draft is not None:
+            return 409, {"error": "live_draft"}
         if form["rev"] != self.rev:
             return 409, {"error": "stale", "rev": self.rev}
         self.rev, self.content = self.rev + 1, {k: copy.deepcopy(v) for k, v in form.items() if k != "rev"}
@@ -153,6 +165,18 @@ class Library:
         if self.lose_answer:
             raise auth.AuthError("offline", code="network")
         return 200, self.view()
+
+    def open_draft(self):
+        """As the relay: the head's text, seeded once, becomes the live draft."""
+        self.draft = SharedDoc.new({"lede": self.content["lede"],
+                                    **{s["id"]: s["markdown"] for s in self.content["sections"]}})
+
+    def freeze(self):
+        """The author freezes the draft: its text is the next version."""
+        self.content["lede"] = self.draft.text("lede")
+        for s in self.content["sections"]:
+            s["markdown"] = self.draft.text(s["id"])
+        self.rev, self.votes = self.rev + 1, {}
 
     def set_permissions(self, form, headers):
         self.permissions = dict(form["permissions"])
@@ -629,6 +653,158 @@ def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(d
     plans.decide(db, pid, 3, False, person=True)
     said = messages(db)[-1]
     assert "Name the VM rule." in said and "u_a" in said and "Yes." in said and "u_b" in said
+
+
+class Relay:
+    """The relay a live draft's Loro updates travel on, over the Library's draft."""
+
+    def __init__(self, lib):
+        self.lib = lib
+
+    def pull(self, doc_id, since):
+        return self.lib.draft.export_updates(since), self.lib.draft.version()
+
+    def push(self, doc_id, updates):
+        self.lib.draft.import_updates(updates)
+
+
+def test_two_writers_in_one_shared_section_both_land_in_the_live_draft_and_only_versions_count(
+        db, parts, backend, monkeypatch):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a"}], **net)
+    lib.sign_offs.append({"rev": 1, "sub": "u_a", "at": 9.0})
+    lib.open_draft()
+    monkeypatch.setattr(sd, "relays", {DOC: Relay(lib)}, raising=False)
+    sd.sync(db, pid, **net)
+    dto = lambda: plans.to_dto(db, plans.get(db, pid))  # noqa: E731
+
+    # A teammate adds a sentence while the person rewrites the first one, neither seeing the other's.
+    lib.draft.insert("summary", len(SUMMARY), " It stays on.")
+    plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")
+    sd.sync(db, pid, **net)
+    both = "Hosts run on a machine the customer controls. It stays on."
+    assert lib.draft.text("summary") == dto()["sections"][0]["markdown"] == both
+    # No revision is made or sent, so r1's sign-off still counts and nothing is in conflict.
+    assert not sent(backend, f"POST {DESIGN}/revisions")
+    assert (dto()["rev"], dto()["gate"]["state"]) == (1, "ready")
+
+    # A comment on words only the draft has reaches the Library.
+    plan_docs.comment(db, pid, 1, {"kind": "text", "section": "summary", "start": both.index("It"),
+                                   "quote": "It stays"}, "Says who?")
+    # A suggestion on the last "on" follows its words as a teammate types before them, and is
+    # accepted before the Library has it: it goes up, then is marked accepted, its text applied once.
+    plan_docs.suggest(db, pid, 1, "summary", both.rindex("on"), "on", "put")
+    lib.draft.insert("summary", 0, "The team agreed, after a call: ")
+    # A teammate suggests an insertion in words only the draft has: its cursor alone places it.
+    stays = lib.draft.text("summary").rindex(" on")
+    lib.threads.append({"id": 1, "kind": "suggestion", "rev": 1, "author": "u_b", "text": "", "after": " always",
+                        "status": "open", "replies": [], "at": 9.0, "anchor": {
+                            "kind": "text", "section": "summary", "start": stays, "end": stays, "quote": "",
+                            "state": "current",
+                            "cursor": base64.b64encode(lib.draft.cursor("summary", stays)).decode()}})
+    lib.refuse_suggest = True
+    sd.sync(db, pid, **net)
+    for who in ("person", "teammate:u_b"):
+        plan_docs.accept(db, pid, next(t["id"] for t in dto()["threads"]
+                                       if t["kind"] == "suggestion" and t["author"] == who), 1)
+    lib.refuse_suggest = False
+    sd.sync(db, pid, **net)
+    agreed = "The team agreed, after a call: Hosts run on a machine the customer controls. It stays always put."
+    assert lib.draft.text("summary") == dto()["sections"][0]["markdown"] == agreed
+    assert dto()["rev"] == 1
+    assert [(t["kind"], t["anchor"]["quote"], t["status"]) for t in lib.threads] == [
+        ("suggestion", "", "accepted"), ("comment", "It stays", "open"), ("suggestion", "on", "accepted")]
+
+    # Only a version frozen in the Library counts: it comes in, and r1's sign-off isn't on it.
+    lib.freeze()
+    sd.sync(db, pid, **net)
+    got = dto()
+    assert (got["rev"], got["sections"][0]["markdown"], got["gate"]["state"]) == (2, agreed, "waiting")
+
+
+def test_a_comment_follows_its_words_through_edits_and_detaches_only_when_they_are_deleted(
+        db, parts, backend, monkeypatch):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a"}], **net)
+    lib.open_draft()
+    monkeypatch.setattr(sd, "relays", {DOC: Relay(lib)}, raising=False)
+    sd.sync(db, pid, **net)
+    quote = "customer"
+    plan_docs.comment(db, pid, 1, {"kind": "text", "section": "summary", "start": SUMMARY.index(quote),
+                                   "quote": quote}, "Which customer?")
+    thread = lambda: plans.to_dto(db, plans.get(db, pid))["threads"][0]["anchor"]  # noqa: E731
+
+    # Another writer types before the words, an emoji among it: the comment stays on the same words.
+    lib.draft.insert("summary", 0, "🙂 Note: ")
+    sd.sync(db, pid, **net)
+    text = lib.draft.text("summary")
+    a = thread()
+    assert (a["state"], text[a["start"]:a["end"]]) == ("current", quote)
+    assert a["start"] == text.index(quote)
+
+    # A reply (which has no anchor of its own) doesn't stop it being pinned again before the
+    # server compacts, and it still follows the words, now with a letter typed inside them.
+    plan_docs.comment(db, pid, parent=plans.to_dto(db, plans.get(db, pid))["threads"][0]["id"], text="Acme")
+    assert plan_docs.reanchor(db, pid, lib.draft) == 1
+    lib.draft.insert("summary", lib.draft.text("summary").index(quote) + 4, "😀")
+    sd.sync(db, pid, **net)
+    a = thread()
+    assert (a["state"], lib.draft.text("summary")[a["start"]:a["end"]]) == ("current", "cust😀omer")
+
+    # Deleting the words detaches it, even though the same word is typed elsewhere, and it
+    # stays detached once the draft is compacted to a shallow snapshot.
+    at = lib.draft.text("summary").index("cust")
+    lib.draft.delete("summary", at, len("cust😀omer"))
+    lib.draft.insert("summary", 0, quote)
+    sd.sync(db, pid, **net)
+    assert thread()["state"] == "detached"
+    assert plan_docs.reanchor(db, pid, lib.draft) == 1
+    raw = lib.draft._doc
+    compacted = SharedDoc.load(raw.export(loro.ExportMode.ShallowSnapshot(raw.state_frontiers)))
+    stored = json.loads(db.conn.execute("SELECT anchor FROM plan_threads WHERE anchor IS NOT NULL").fetchone()[0])
+    cur = plan_docs.current(db, plans.get(db, pid))
+    assert plan_docs._where(cur, plan_docs._followed(compacted, stored))["state"] == "detached"
+
+
+@pytest.mark.parametrize("changed_too", [False, True], ids=["same word typed first", "and the word itself changed"])
+def test_an_edit_made_here_before_the_live_draft_arrives_is_carried_into_it_as_a_suggestion(
+        db, parts, backend, monkeypatch, changed_too):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")         # r2, not sent yet
+    lib.rev, lib.author = 2, "u_b"                                       # meanwhile a teammate's revision,
+    lib.content["sections"][0]["markdown"] = SUMMARY + " It stays on."
+    lib.open_draft()                                                     # then the draft opens on it,
+    lib.draft.insert("summary", 0, "Workers coordinate. ")              # and someone types the same word first
+    if changed_too:                                                      # and changes the very word edited here
+        lib.draft.replace("summary", len("Workers coordinate. "), len("Workers"), "Machines")
+    monkeypatch.setattr(sd, "relays", {DOC: Relay(lib)}, raising=False)
+    sd.sync(db, pid, **net)
+
+    got = plans.to_dto(db, plans.get(db, pid))
+    if changed_too:     # the word typed first doesn't stand in for it: the change is named, not placed
+        assert [t["kind"] for t in got["threads"]] == ["comment"]
+        assert got["sections"][0]["markdown"] == "Workers coordinate. Machines run on a machine the customer " \
+                                                 "controls. It stays on."
+        return
+    assert (got["sections"][0]["markdown"], got["gate"]["state"]) == (
+        "Workers coordinate. " + SUMMARY + " It stays on.", "ready")
+    [carried] = got["threads"]
+    assert (carried["kind"], carried["before"], carried["after"], carried["author"], carried["anchor"]["start"]) == (
+        "suggestion", "Workers", "Hosts", "person", len("Workers coordinate. "))
+    # It goes up; a teammate then types the same word before it again, and it follows its own.
+    lib.draft.insert("summary", 0, "Workers agree. ")
+    sd.sync(db, pid, **net)
+    # Accepted while the relay is away, it is marked accepted only once the relay has its text.
+    relay = sd.relays.pop(DOC)
+    plan_docs.accept(db, pid, carried["id"], got["rev"])
+    sd.sync(db, pid, **net)
+    assert [t["status"] for t in lib.threads] == ["open"] and "Hosts" not in lib.draft.text("summary")
+    sd.relays[DOC] = relay
+    sd.sync(db, pid, **net)
+    assert lib.draft.text("summary") == ("Workers agree. Workers coordinate. Hosts run on a machine the customer "
+                                         "controls. It stays on.")
+    assert [t["status"] for t in lib.threads] == ["accepted"] and not sent(backend, f"POST {DESIGN}/revisions")
 
 
 def test_a_teammates_edit_comes_in_as_a_revision_and_later_sends_go_on_it(db, parts, backend):

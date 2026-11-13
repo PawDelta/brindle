@@ -21,7 +21,7 @@ const STATUS: Record<PlanGateRowDTO["status"], { text: string; tone: string }> =
 const people = (plan: Plan): PlanReviewerChoice[] =>
   (plan.gate?.reviewers ?? []).flatMap((r) => (r.sub ? [{ sub: r.sub, required: r.required }] : []));
 
-export function Reviewers({ plan, client, directory, adminOrg, me, scopes, busy, nameOf, write }: {
+export function Reviewers({ plan, client, directory, adminOrg, me, scopes, busy, nameOf, write, reviewVersion, reviewBlocked }: {
   plan: Plan;
   client?: PlanSharingClient;
   directory: LibraryPerson[];
@@ -29,6 +29,8 @@ export function Reviewers({ plan, client, directory, adminOrg, me, scopes, busy,
   me: string | null;
   scopes: DocScope[];
   busy: boolean;
+  reviewVersion?: number;
+  reviewBlocked?: boolean;
   nameOf(sub: string): string;
   /* One write to the doc (the reader keeps them in order); true once it landed. */
   write(work: () => Promise<Plan>): Promise<boolean>;
@@ -88,7 +90,7 @@ export function Reviewers({ plan, client, directory, adminOrg, me, scopes, busy,
                   <span className={STATUS[r.status].tone}>{r.changes_by?.length ? `changes requested by ${r.changes_by.map(nameOf).join(", ")}` : r.met_by?.length ? `✓ met by ${r.met_by.map(nameOf).join(", ")}` : STATUS[r.status].text}</span>
                   {(r.meets?.length ?? 0) > 0 && <span className="text-[11px] text-ink-3">{`also counts for ${r.meets!.join(", ")}`}</span>}
                   {r.you && r.status !== "signed_off" && !closed && client && (
-                    <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} onClick={() => void write(() => client.signOffPlan(plan.id, plan.rev))}>Sign off</button>
+                    <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy || reviewBlocked} onClick={() => void write(() => client.signOffPlan(plan.id, plan.rev, reviewVersion))}>Sign off</button>
                   )}
                 </span>
               );
