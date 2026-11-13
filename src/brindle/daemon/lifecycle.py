@@ -432,7 +432,7 @@ LAUNCH_WAIT = 8.0      # and in all, launches under way included (within daemon.
 RESUME_STALL = 120.0   # seconds with no session finished after which a start stops waiting (a resume that hangs)
 RESUME_TRIES = 2       # starts that may fail to bring one session back before it is left paused
 RESUME_PARALLEL = 4    # sessions a start brings back at once (resume_after_start)
-RESUME_BUSY_WAIT = 3.0  # seconds a session coming back waits on a machine short of CPU only: the person is waiting for it
+RESUME_BUSY_WAIT = 3.0  # seconds a session other than the person's own waits on a machine short of CPU only
 VIEWED_HEAD_START = 8.0     # seconds the session on screen comes back alone before the others start, if it hangs
 
 
@@ -706,7 +706,10 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
 
     Up to RESUME_PARALLEL sessions come back at once, the one last at work
     first (_most_recent_first), each when the machine has room for it
-    (spawn.wait_for_room); sessions sharing a tmux session go one after
+    (spawn.wait_for_room): for the person's own (interactive) sessions,
+    only critical memory pressure holds them, a machine short of CPU doesn't
+    (the person is waiting for them; workers keep their gate, spawn.no_room);
+    sessions sharing a tmux session go one after
     another (_lanes). A session that fails doesn't hold up the others.
     The session the app showed last (record_viewed) goes before all of them,
     alone, so it is back sooner: the others start once it is, or after
@@ -770,7 +773,10 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                         return
                     for entry in lane:
                         waiting = time.monotonic()
-                        spawn.wait_for_room(recovery.stopping, busy_limit=RESUME_BUSY_WAIT)
+                        root = db.get_agent(entry["id"])
+                        # The person's own session: they are waiting for it, so only critical memory holds it.
+                        busy = 0.0 if root is not None and root.mode == "interactive" else RESUME_BUSY_WAIT
+                        spawn.wait_for_room(recovery.stopping, busy_limit=busy)
                         waited = time.monotonic() - waiting
                         if recovery.stopping.is_set():
                             return
