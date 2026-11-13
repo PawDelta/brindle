@@ -1,6 +1,24 @@
 from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
 
 from brindle import permissions
+
+
+@pytest.mark.parametrize("decision, profile", [
+    pytest.param("deny", False, id="deny"),
+    pytest.param("ask", False, id="ask", marks=pytest.mark.variant("ask rules also bind possible expansions")),
+    pytest.param("deny", True, id="profile", marks=pytest.mark.variant("profile glob denies also bind possible expansions")),
+])
+def test_unmatched_glob_cannot_bypass_an_overlapping_restriction(tmp_path, decision, profile):
+    here = str(tmp_path)
+    req = permissions.Request("claude", "bash", "Bash", here, here, here, command="gh api bl?cked?")
+    rules = (permissions.profile_rules(SimpleNamespace(permission_denies=["bash glob gh api blocked*"]))
+             if profile else [permissions.Rule("bash", "gh api blocked*", "glob", decision)])
+    # No file matches yet, but blockedX could appear before the shell runs.
+    assert permissions.rule_matches(rules[0], replace(req, command="gh api blockedX"))
+    assert permissions.decide(req, rules=rules, unmatched="allow", saved=[], groups={}).decision in ("ask", "deny")
 
 
 def test_unmatched_query_glob_keeps_the_prompted_api_read_literal(tmp_path):

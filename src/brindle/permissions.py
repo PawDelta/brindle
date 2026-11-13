@@ -5708,6 +5708,52 @@ def _without_pattern(part: ShellPart, *, scripts: bool = False) -> list[str]:
     return [*words[:at], "pattern", *words[at + 1:]]
 
 
+def _glob_patterns_overlap(left: str, right: str) -> bool:
+    """Whether two * / ? patterns may share a string. Unsupported classes
+    and a proof too large to finish are overlap, never proof of disjointness.
+    Stars may also consume spaces and slashes: this overestimates shell globs."""
+    if "[" in left or "[" in right:
+        return True
+    pending = [(0, 0)]
+    seen = set()
+    while pending:
+        i, j = pending.pop()
+        if (i, j) in seen:
+            continue
+        seen.add((i, j))
+        if len(seen) > 4096:
+            return True
+        if i == len(left) and j == len(right):
+            return True
+        a, b = left[i:i + 1], right[j:j + 1]
+        if a == "*":
+            pending.append((i + 1, j))
+        if b == "*":
+            pending.append((i, j + 1))
+        if a and b and (a == b or a in "*?" or b in "*?"):
+            pending.append((i if a == "*" else i + 1, j if b == "*" else j + 1))
+    return False
+
+
+def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
+    """Only exclude a restriction when a required literal fragment cannot
+    occur in any argument. Multiple glob matches add spaces between words,
+    so cannot create a missing fragment. Ignore order and word boundaries
+    deliberately: possible overlap keeps the existing conservative proof."""
+    # Classes and shell quoting need more than this fragment proof. Quoting
+    # introduced when joining arguments may itself match a textual rule.
+    if rule.match_type in _LISTING_SAFE:
+        literals = ["rm" if rule.match_type == "rm-destructive" else "git"]
+    elif rule.match_type not in MATCH_TYPES or any(c in rule.match for c in "[\\\"'"):
+        return True
+    else:
+        literals = re.split(r"[*?]", rule.match) if rule.match_type == "glob" else [rule.match]
+    words = [*zip(part.written, part.patterned), *((path, False) for path in [*part.writes, *part.reads])]
+    return all(any(_glob_patterns_overlap(word, f"*{fragment}*") if patterned else fragment in word
+                   for word, patterned in words)
+               for literal in literals for fragment in literal.split())
+
+
 def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                why: list[ValueError] | None = None) -> tuple[list[ShellPart], Decision | None] | None:
     """``req``'s shell command as ShellParts with the deny (else ask) a rule
@@ -5750,7 +5796,7 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
         # bounded matcher does not prove recursive ** forms unmatched: shells
         # can expand **/ across zero directories as well as several levels.
         literal_patterns = (not part.expanded and not part.unknown and matched is None
-                            and not any(_may_restrict(rule, part.line) for rule in restrictions)
+                            and not any(_patterns_may_restrict(rule, part) for rule in restrictions)
                             and not any("**" in word for word in part.written))
         if restrictions and (part.redirect_glob or part.globs and not literal_patterns and not (places and (
                 _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
