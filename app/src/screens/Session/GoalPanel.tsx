@@ -323,10 +323,10 @@ const CHEV = (
   </svg>
 );
 
-/* The milestones under their phase folds: a done phase is one line with its green count, the active one lists
-   every row (passed ones too, as they look today), an upcoming one is folded with its count. Any fold opens or
+/* The milestones under their phase folds: completed phases stay open in the sidebar and fold to their green
+   count in the full view; active phases list every row, and upcoming ones fold to a count. Any fold opens or
    closes on a click. The full panel's fold line carries a tiny bar, one segment per milestone. */
-function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, rows, finishedOpen, onFinishedToggle }: {
+function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, rows }: {
   folds: PhaseFold[];
   open: Record<number, boolean>;
   onToggle(key: number, next: boolean): void;
@@ -335,26 +335,20 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
   rowsClass: string;
   row(m: MilestoneDTO): ReactNode;
   rows?(milestones: MilestoneDTO[], key: number): ReactNode;
-  /* The sidebar's finished rows: the phase's count toggles them (absent in the full view, where every row shows). */
-  finishedOpen?: Record<number, boolean>;
-  onFinishedToggle?(key: number, next: boolean): void;
 }) {
   return (
     <ul className={`ms-folds${large ? " lg" : ""}`} aria-label="Milestones">
       {folds.map((f) => {
         const children = () => rows ? rows(f.milestones, f.key) : f.milestones.map(row);
         if (f.name === null) return <li key={f.key}><ul className={rowsClass}>{children()}</ul></li>;
-        const isOpen = open[f.key] ?? f.state === "active";
+        const isOpen = open[f.key] ?? (f.state === "active" || (!large && f.state === "done"));
         const passed = f.milestones.filter(isDone).length;
         const n = f.milestones.length;
         const count = f.state === "done" ? `✓ ${n} of ${n}` : f.state === "todo" ? `${n} upcoming` : `${passed} of ${n}`;
-        const toggles = !!onFinishedToggle && passed > 0;
-        // Finished rows show only while the phase is open too: the count reads as expanded only when they do.
-        const finished = (finishedOpen?.[f.key] ?? false) && isOpen;
         return (
           <li key={f.key} data-st={f.state}>
-            <div className={toggles ? "flex min-w-0 items-center" : undefined}>
-              <button type="button" className={`ms-fold${toggles ? " min-w-0 flex-1" : ""}`} data-st={f.state} data-testid="phase-fold" data-phase-key={f.key} aria-expanded={isOpen} onClick={() => onToggle(f.key, !isOpen)}>
+            <div>
+              <button type="button" className="ms-fold" data-st={f.state} data-testid="phase-fold" data-phase-key={f.key} aria-expanded={isOpen} onClick={() => onToggle(f.key, !isOpen)}>
                 {CHEV}
                 <span className="n">{f.name}</span>
                 {large && (
@@ -364,26 +358,8 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
                     ))}
                   </span>
                 )}
-                {!toggles && <span className="k">{count}</span>}
+                <span className="k">{count}</span>
               </button>
-              {toggles && (
-                <button
-                  type="button"
-                  data-testid="phase-done-toggle"
-                  aria-expanded={finished}
-                  aria-label={`${count}: ${finished ? "hide" : "show"} finished milestones in ${f.name}`}
-                  onClick={() => {
-                    // Showing opens the phase too; hiding only clears the finished rows.
-                    if (!finished) {
-                      if (!isOpen) onToggle(f.key, true);
-                      onFinishedToggle!(f.key, true);
-                    } else onFinishedToggle!(f.key, false);
-                  }}
-                  className={`ms-count shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10.5px] hover:text-ink ${f.state === "done" ? "text-pass" : "text-ink-3"}`}
-                >
-                  {count}
-                </button>
-              )}
             </div>
             {isOpen && <ul className={`${rowsClass} ms-kids`}>{children()}</ul>}
           </li>
@@ -612,13 +588,11 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
   // Beside a terminal the milestones fold away by default (it wants the room); in the sidebar they show.
   const [open, setOpen] = useState(compact);
   const [fullGoalOpen, setFullGoalOpen] = useState(false);
-  // The phase folds the person opened or closed, by fold key; the rest keep their default (only the active phase open).
+  // The phase folds the person opened or closed, by fold key; the sidebar also keeps completed phases open.
   const [foldOpen, setFoldOpen] = useState<Record<number, boolean>>({});
   // Pending rows fold independently within each phase (key 0 is the list without phases).
   const [pendingOpen, setPendingOpen] = useState<Record<number, boolean>>({});
-  const [doneOpen, setDoneOpen] = useState<Record<number, boolean>>({});
   const toggleFold = useCallback((key: number, next: boolean) => setFoldOpen((o) => ({ ...o, [key]: next })), []);
-  const toggleDone = useCallback((key: number, next: boolean) => setDoneOpen((o) => ({ ...o, [key]: next })), []);
   const frame = compact ? "flex min-w-0 flex-1 flex-col gap-1.5 overflow-hidden px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
   const session = useMemo(() => ({ client, repo, root }), [client, repo, root]);
 
@@ -628,7 +602,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
     setFullGoalOpen(false);
     setFoldOpen({});
     setPendingOpen({});
-    setDoneOpen({});
   }, [session]);
 
   useEffect(() => {
@@ -791,9 +764,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
     // The stage the active step is at; none once the goal is finished or while nothing runs.
     const barStages = [...activeStage.values()].filter((s): s is Stage => s !== null);
     const activity = finished ? null : activityLine(goal);
-    // The fold whose finished rows the goal count toggles: the list without phases (key 0), or the leading unnamed
-    // group when phases exist. Undefined when that group has no finished row, so the count is plain.
-    const countKey = folds ? folds.find((f) => f.name === null && f.milestones.some(isDone))?.key : passed > 0 ? 0 : undefined;
     const stateOf = (m: MilestoneDTO): "done" | "now" | "pending" => (isDone(m) ? "done" : isPending(m) ? "pending" : "now");
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
@@ -817,10 +787,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
       const done = items.filter(isDone);
       const pending = items.filter(isPending);
       const expanded = pendingOpen[key] ?? false;
-      const doneExpanded = doneOpen[key] ?? false;
       return (
         <>
-          {doneExpanded && done.map(sideRow)}
+          {done.map(sideRow)}
           {items.filter((m) => !isDone(m) && !isPending(m)).map(sideRow)}
           {pending.length > 0 && (
             <li>
@@ -846,22 +815,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
         <div className="flex shrink-0 flex-col gap-1.5" data-testid="goal-header">
         <div data-testid="goal-line" className={`flex min-w-0 flex-nowrap items-center gap-s1 px-0.5 text-[13px] font-medium ${finished ? "text-pass" : "text-ink"}`}>
           {contextTitle ?? <SessionGoal text={goal.goal} className="block w-full truncate text-left" onOpen={() => setFullGoalOpen((o) => !o)}>{goal.summary || goal.goal}</SessionGoal>}
-          {countKey !== undefined && total > 0 ? (
-            <button
-              type="button"
-              data-testid="goal-count"
-              aria-expanded={doneOpen[countKey] ?? false}
-              aria-label={`${passed} of ${total} milestones: ${doneOpen[countKey] ? "hide" : "show"} finished milestones`}
-              onClick={() => setDoneOpen((o) => ({ ...o, [countKey]: !(o[countKey] ?? false) }))}
-              className="shrink-0 cursor-pointer whitespace-nowrap rounded font-mono text-[11px] font-normal text-ink-3 hover:text-ink"
-            >
-              {`${passed} of ${total}`}
-            </button>
-          ) : (
-            <span data-testid="goal-count" className="shrink-0 whitespace-nowrap font-mono text-[11px] font-normal text-ink-3">
-              {total > 0 ? `${passed} of ${total}` : ""}
-            </span>
-          )}
+          <span data-testid="goal-count" className="shrink-0 whitespace-nowrap font-mono text-[11px] font-normal text-ink-3">
+            {total > 0 ? `${passed} of ${total}` : ""}
+          </span>
         </div>
         <div className="side-bar" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(donePct)} title={goal.detail ?? undefined}>
           <span className="d" style={{ width: `${donePct}%` }} />
@@ -881,7 +837,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
         </div>}
         {fullGoal}
         {total > 0 && folds ? (
-          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} rows={sideRows} finishedOpen={doneOpen} onFinishedToggle={toggleDone} />
+          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} rows={sideRows} />
         ) : total > 0 ? (
           <ul className="side-ms" aria-label="Milestones">
             {sideRows(milestones, 0)}
@@ -892,8 +848,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
         {docsLine}
         {closeSession}
         {step}
-        {shownError && <p className={`${alert} text-xs`}>{shownError}</p>}
-        {goal.note && <p className="px-0.5 text-[11px] text-ink-3">{goal.note}</p>}
+        {shownError && <p className={`${alert} line-clamp-2 break-words text-xs`} title={shownError}>{shownError}</p>}
+        {goal.note && <p className="line-clamp-2 break-words px-0.5 text-[11px] text-ink-3" title={goal.note}>{goal.note}</p>}
         </PhaseScroll>
       </section>
     );
