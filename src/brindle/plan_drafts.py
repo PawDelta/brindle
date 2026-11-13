@@ -12,10 +12,15 @@ same as old, and replicas would disagree about both. So:
 
 - the peer id is set only after the stored state is loaded into the document;
 - the id and the state are read and written together, in one row;
-- every write happens inside a transaction against the latest stored state:
-  a holder that missed another's write (two processes, one replica) reloads
-  first instead of writing over it;
+- every write happens inside a transaction against the latest stored state,
+  never over it; an edit by a holder that missed another's write (two
+  processes, one replica) is refused with :class:`StaleDraft`, since its
+  offsets were counted in text that has since changed;
 - :func:`drop` deletes the row, and a replica made later gets a new id.
+
+An update that arrives before the changes it builds on is left out of Loro's
+snapshot, so it is kept in ``plan_draft_pending`` and imported again on every
+load until what it waits on arrives.
 """
 
 from __future__ import annotations
@@ -36,6 +41,12 @@ class DraftGone(LookupError):
     """The replica was dropped (or replaced) while this holder had it open."""
 
 
+class StaleDraft(RuntimeError):
+    """Another holder changed the draft since this one last read it, so the
+    edit's offsets no longer name the text they were counted in. Nothing was
+    written; the holder now has the latest text: read it and edit again."""
+
+
 def _fresh_peer(doc: SharedDoc) -> int:
     while True:
         peer = secrets.randbelow(_PEER_ID_SPACE) + 1
@@ -43,10 +54,24 @@ def _fresh_peer(doc: SharedDoc) -> int:
             return peer
 
 
+def _read(c: sqlite3.Connection, doc_id: str) -> tuple[sqlite3.Row, SharedDoc, list[bytes]] | None:
+    """The stored row, its document with the waiting updates imported, and those updates."""
+    row = c.execute("SELECT peer_id, state, seq FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+    if row is None:
+        return None
+    doc = SharedDoc.load(row["state"])
+    pending = [r["data"] for r in c.execute(
+        "SELECT data FROM plan_draft_pending WHERE doc_id=? ORDER BY n", (doc_id,))]
+    for data in pending:
+        doc.import_updates(data)
+    doc.set_peer_id(row["peer_id"])     # only now that its own earlier changes are in
+    return row, doc, pending
+
+
 class DraftReplica:
     """A shared doc's draft as this machine holds it. Edits take code-point
-    offsets and are stored before they return; each returns the Loro update
-    it made, for sending to the other replicas."""
+    offsets into the text as this holder last read it, and are stored before
+    they return; each returns the Loro update it made, for the other replicas."""
 
     def __init__(self, db: DB, doc_id: str, peer_id: int, doc: SharedDoc, seq: int) -> None:
         self.db = db
@@ -60,10 +85,11 @@ class DraftReplica:
         """The stored replica of ``doc_id``, or a new one starting from
         ``initial`` (a snapshot from the Library) under a fresh peer id."""
         while True:
-            row = db.conn.execute("SELECT peer_id, state, seq FROM plan_drafts WHERE doc_id=?",
-                                  (doc_id,)).fetchone()
-            if row is not None:
-                return cls(db, doc_id, row["peer_id"], cls._load(row["state"], row["peer_id"]), row["seq"])
+            with db.snapshot() as c:
+                got = _read(c, doc_id)
+            if got is not None:
+                row, doc, _ = got
+                return cls(db, doc_id, row["peer_id"], doc, row["seq"])
             doc = SharedDoc.load(initial) if initial else SharedDoc.new()
             peer = _fresh_peer(doc)
             doc.set_peer_id(peer)
@@ -78,12 +104,6 @@ class DraftReplica:
             if added:
                 return cls(db, doc_id, peer, doc, 0)
             # Another process made it first: use theirs.
-
-    @staticmethod
-    def _load(state: bytes, peer: int) -> SharedDoc:
-        doc = SharedDoc.load(state)
-        doc.set_peer_id(peer)     # only now that its own earlier changes are in
-        return doc
 
     # -- reading --------------------------------------------------------
 
@@ -102,41 +122,53 @@ class DraftReplica:
     # -- writing --------------------------------------------------------
 
     def insert(self, section: str, offset: int, text: str) -> bytes:
-        return self._write(lambda d: d.insert(section, offset, text))
+        return self._write(lambda d: d.insert(section, offset, text))[0]
 
     def delete(self, section: str, offset: int, length: int) -> bytes:
-        return self._write(lambda d: d.delete(section, offset, length))
+        return self._write(lambda d: d.delete(section, offset, length))[0]
 
     def replace(self, section: str, offset: int, length: int, text: str) -> bytes:
-        return self._write(lambda d: d.replace(section, offset, length, text))
+        return self._write(lambda d: d.replace(section, offset, length, text))[0]
 
     def apply_remote(self, data: bytes) -> bool:
-        """Merge another replica's updates; False if some wait on others."""
-        done: list[bool] = []
-        self._write(lambda d: done.append(d.import_updates(data)))
-        return done[0]
+        """Merge another replica's updates; False while they wait on changes
+        not yet received (they are kept, and merged once those arrive). Not
+        positional, so another holder's writes since do not refuse it."""
+        return data not in self._write(lambda d: d.import_updates(data), incoming=data)[1]
 
-    def _write(self, change: Callable[[SharedDoc], object]) -> bytes:
+    def _write(self, change: Callable[[SharedDoc], object],
+               incoming: bytes | None = None) -> tuple[bytes, list[bytes]]:
+        """Apply ``change`` to the stored draft; the update it made, and the
+        updates still waiting on changes not yet received."""
         with self.db.tx() as c:
-            row = c.execute("SELECT peer_id, state, seq FROM plan_drafts WHERE doc_id=?",
-                            (self.doc_id,)).fetchone()
-            if row is None or row["peer_id"] != self.peer_id:
+            got = _read(c, self.doc_id)
+            if got is None or got[0]["peer_id"] != self.peer_id:
                 raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
-            # Always from the stored state: another holder may have written
-            # under this peer id since this one last read (seq moved on).
-            doc = self._load(row["state"], self.peer_id)
+            row, doc, pending = got
+            if incoming is None and row["seq"] != self._seq:
+                self._doc, self._seq = doc, row["seq"]
+                raise StaleDraft(f"the draft of {self.doc_id} changed since this holder read it")
             before = doc.version()
             change(doc)
+            waiting = pending
+            if incoming is not None:
+                # Importing again is a no-op once merged, so what still says
+                # "pending" is exactly what still waits.
+                waiting = [d for d in [*pending, incoming] if not doc.import_updates(d)]
+                c.execute("DELETE FROM plan_draft_pending WHERE doc_id=?", (self.doc_id,))
+                c.executemany("INSERT INTO plan_draft_pending (doc_id, data) VALUES (?, ?)",
+                              [(self.doc_id, d) for d in waiting])
             seq = row["seq"] + 1
             c.execute("UPDATE plan_drafts SET state=?, seq=?, updated_at=? WHERE doc_id=?",
                       (doc.export_snapshot(), seq, time.time(), self.doc_id))
         # Only once it is stored does this holder see it: a refused edit changes nothing.
         self._doc, self._seq = doc, seq
-        return doc.export_updates(before)
+        return doc.export_updates(before), waiting
 
 
 def drop(db: DB, doc_id: str) -> bool:
     """Delete this machine's replica of ``doc_id`` (access was cut, or the
-    doc stopped being shared). A replica made later writes under a new id."""
+    doc stopped being shared), with any updates it held back. A replica made
+    later writes under a new id."""
     with db.tx() as c:
         return c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,)).rowcount > 0

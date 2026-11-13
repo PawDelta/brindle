@@ -4,7 +4,7 @@ import pytest
 
 from brindle.crdt import SharedDoc
 from brindle.db import DB
-from brindle.plan_drafts import DraftGone, DraftReplica, drop
+from brindle.plan_drafts import DraftGone, DraftReplica, StaleDraft, drop
 
 LIBRARY = SharedDoc.new({"intro": "Hello"}).export_snapshot()
 
@@ -34,13 +34,27 @@ def test_replica_reloaded_after_restart_keeps_its_peer_id_and_merges(db, tmp_pat
     assert written_by(b, a.peer_id) == 7
 
 
-def test_a_holder_that_missed_a_write_builds_on_it_and_a_dropped_replica_is_not_reused(db):
+def test_updates_received_out_of_order_merge_across_a_restart(db, tmp_path):
+    a = DraftReplica.open(db, "doc1", LIBRARY)
+    first, second = a.insert("intro", 5, "1"), a.insert("intro", 6, "2")
+    other = str(tmp_path / "other-machine.db")
+
+    assert DraftReplica.open(DB(other), "doc1", LIBRARY).apply_remote(second) is False
+    assert DraftReplica.open(DB(other), "doc1").apply_remote(first) is True    # after a restart
+
+    assert DraftReplica.open(DB(other), "doc1").text("intro") == "Hello12"
+
+
+def test_a_holder_that_missed_a_write_edits_only_what_it_read_and_a_dropped_replica_is_not_reused(db):
     first = DraftReplica.open(db, "doc1", LIBRARY)
     second = DraftReplica.open(DB(), "doc1")             # another process, same replica
-    first.insert("intro", 5, "!")
-    second.insert("intro", 0, ">")                       # its copy predates "!"
+    first.insert("intro", 0, ">")
+    with pytest.raises(StaleDraft):
+        second.delete("intro", 1, 1)                     # "e" in the "Hello" it read
+    assert second.text("intro") == ">Hello"              # nothing written; it has the latest now
+    second.delete("intro", 2, 1)
 
-    assert DraftReplica.open(DB(), "doc1").text("intro") == ">Hello!"
+    assert DraftReplica.open(DB(), "doc1").text("intro") == ">Hllo"
     assert written_by(second, first.peer_id) == 2
 
     assert drop(db, "doc1")

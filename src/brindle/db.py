@@ -1161,6 +1161,14 @@ CREATE TABLE IF NOT EXISTS plan_drafts (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+-- Updates a replica received before the changes they build on: a snapshot
+-- leaves them out, so they wait here and are imported again on every load.
+CREATE TABLE IF NOT EXISTS plan_draft_pending (
+    n INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id TEXT NOT NULL REFERENCES plan_drafts(doc_id) ON DELETE CASCADE,
+    data BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_draft_pending_doc ON plan_draft_pending(doc_id, n);
 -- Documents whose owner chose Stop sharing while the Library was out of reach:
 -- their teams and org lose access at the next pass that reaches it.
 CREATE TABLE IF NOT EXISTS plan_unshares (
