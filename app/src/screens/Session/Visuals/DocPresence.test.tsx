@@ -27,6 +27,40 @@ it("requires the author to freeze a teammate's document", async () => {
   expect(within(panel).queryByRole("button")).toBeNull();
 });
 
+it("preserves HTTP review and build controls when the document has no live text", async () => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "http-doc", session: "boss", title: "Review", by: "supervisor", kind: "plan", rev: 7, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "http-doc", session: "boss", title: "Review", rev: 7, state: "open", markdown: "Text", lede: "Text", sections: [], decisions: [], split: [], queued: 0, created_at: 1,
+    gate: { state: "ready", required: 1, signed: 1, waiting_on: [], reviewers: [{ sub: "Bo", you: true, required: true, status: "signed_off" }] } };
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: async () => plan, decidePlan: async () => plan,
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+    sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, overridePlanPolicy: async () => plan, signOffPlan: async () => plan,
+    docScopes: async () => ({ scopes: [] }), libraryPeople: async () => ({ people: [], me: "Bo" }),
+  };
+  const author = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  let signedOff = true;
+  const design = (): SharedDesign => ({ ...plan, me: "Bo", author: "Ann", signed_off: signedOff, can_sign_off: true });
+  const reviewerClient = { visualLive: client.visualLive, libraryPeople: client.libraryPeople, sharedDesign: async () => design(), writeSharedDesign: async () => { signedOff = true; return design(); } };
+  const reviewer = render(<SharedDesignReader client={reviewerClient} docId="http-doc" onBack={() => {}} />);
+  await settle();
+  expect(within(author.container).getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
+  expect((within(author.container).getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
+  expect(within(reviewer.container).queryByTestId("plan-sign-off")).toBeNull();
+  expect(screen.queryByRole("region", { name: "Live document" })).toBeNull();
+  reviewer.unmount();
+  signedOff = false;
+  const unsigned = render(<SharedDesignReader client={reviewerClient} docId="http-doc" onBack={() => {}} />);
+  await settle();
+  const signOff = within(unsigned.container).getByTestId("plan-sign-off") as HTMLButtonElement;
+  expect(signOff.disabled).toBe(false);
+  fireEvent.click(signOff);
+  await settle();
+  expect(within(unsigned.container).queryByTestId("plan-sign-off")).toBeNull();
+});
+
 it("keeps two readers present without section editors and removes a departing reader", async () => {
   vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
   const daemon = new FakeDaemon();
@@ -84,6 +118,15 @@ it("withdraws the rendered review and build gate when a signed live version is r
   await settle();
   expect(authorUI.getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
+  // Losing a confirmed live channel cannot restore the HTTP gate, even for a 4404 close.
+  const beforeDisconnect = daemon.liveSockets.length;
+  const disconnected = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await settle();
+  expect((within(disconnected.container).getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
+  await act(async () => { for (const socket of daemon.liveSockets.slice(beforeDisconnect)) socket.close(4404); });
+  await settle();
+  expect((within(disconnected.container).getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(true);
+  disconnected.unmount();
   const reviewer = render(<SharedDesignReader client={live} docId="doc" onBack={() => {}} />);
   const reviewerUI = within(reviewer.container);
   await settle();

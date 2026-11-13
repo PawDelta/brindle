@@ -1864,6 +1864,9 @@ export class DaemonClient {
        cannot sign or build a withdrawn version. No version means sign-off/build are disabled.
        Readers publish their user awareness in section "__document__", refresh it while open,
        and delete it on departure. Section editors continue to own their own caret awareness.
+       An initial 4404 means the document has no live text: keep its HTTP review controls.
+       Other connection failures, and any loss after live text/state was received, keep live
+       review controls blocked until the channel is available again.
      - author → daemon: {"freeze": true} snapshots the text and credits its writers, then
        locks it for sign-off; {"reopen": true} withdraws that version and its sign-offs.
        The daemon authorizes these commands and rejects text updates while locked.

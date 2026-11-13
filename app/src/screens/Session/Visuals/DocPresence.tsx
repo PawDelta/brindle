@@ -8,15 +8,22 @@ import type { LiveClient } from "./DocEditor";
 import { Avatar } from "./PlanCards";
 import { PRESENCE_TTL, peerClass } from "./docAwareness";
 
-export function DocPresence({ client, visual, isAuthor, name, onState }: {
+export type LiveCapability = "unknown" | "live" | "unsupported";
+
+export function DocPresence({ client, visual, isAuthor, name, onState, onCapability }: {
   client: LiveClient; visual: string; isAuthor: boolean; name: string;
   onState?(state: LiveDocState | null): void;
+  onCapability?(capability: LiveCapability): void;
 }) {
   const channel = useRef<LiveChannel | null>(null);
   const [state, setState] = useState<LiveDocState | null>(null);
   const [connected, setConnected] = useState(false);
   const [peers, setPeers] = useState<UserState[]>([]);
+  const [unsupported, setUnsupported] = useState(false);
+  const known = useRef({ client, visual, live: false });
   useEffect(() => {
+    if (known.current.client !== client || known.current.visual !== visual) known.current = { client, visual, live: false };
+    const confirm = () => { known.current.live = true; onCapability?.("live"); };
     const stores = new Map<string, EphemeralStore<EphemeralState>>();
     const identity = new LoroDoc();
     const userKey = getUserEphemeralKey(identity);
@@ -30,12 +37,14 @@ export function DocPresence({ client, visual, isAuthor, name, onState }: {
     };
     setState(null);
     onState?.(null);
+    onCapability?.(known.current.live ? "live" : "unknown");
+    setUnsupported(false);
     setConnected(false);
     setPeers([]);
     let stopRefresh = () => {};
     const live = client.visualLive(visual, {
-      onUpdate() {},
-      onState(next) { setState(next); onState?.(next); setConnected(true); },
+      onUpdate() { confirm(); },
+      onState(next) { confirm(); setState(next); onState?.(next); setConnected(true); },
       onAwareness(section, bytes) {
         let store = stores.get(section);
         if (!store) {
@@ -45,7 +54,16 @@ export function DocPresence({ client, visual, isAuthor, name, onState }: {
         }
         store.apply(bytes);
       },
-      onClose() { setConnected(false); onState?.(null); stopRefresh(); },
+      onClose(code) {
+        setConnected(false);
+        onState?.(null);
+        stopRefresh();
+        // A missing initial document is definitive. A known live document stays locked on loss.
+        if (code === 4404 && !known.current.live) {
+          setUnsupported(true);
+          onCapability?.("unsupported");
+        }
+      },
     });
     const off = own.subscribeLocalUpdates((bytes) => live.sendAwareness("__document__", bytes));
     const announce = () => own.set(userKey, { name, colorClassName: peerClass(name) });
@@ -62,7 +80,8 @@ export function DocPresence({ client, visual, isAuthor, name, onState }: {
       live.close();
       for (const store of stores.values()) store.destroy();
     };
-  }, [client, visual, name, onState]);
+  }, [client, visual, name, onState, onCapability]);
+  if (unsupported) return null;
   return (
     <section aria-label="Live document" className="grid gap-2 rounded-md border border-line p-2.5 font-sans text-xs" data-state={state?.lock ?? "editing"}>
       <ul aria-label="Others in this document" className="m-0 flex list-none flex-wrap gap-3 p-0">

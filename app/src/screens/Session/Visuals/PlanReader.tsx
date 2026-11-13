@@ -35,7 +35,7 @@ import { Diagram } from "./DocDiagram";
 import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
 import type { LiveClient } from "./DocEditor";
-import { DocPresence } from "./DocPresence";
+import { DocPresence, type LiveCapability } from "./DocPresence";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
@@ -266,10 +266,12 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   const client = author?.client;
   const docLive = liveClient ?? (receivedPlan.gate && client?.visualLive ? (client as LiveClient) : null);
   const [liveState, setLiveState] = useState<LiveDocState | null>(null);
-  const plan = docLive ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
-  const teammate = receivedTeammate && docLive ? { ...receivedTeammate, signedOff: !!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me) } : receivedTeammate;
-  const reviewVersion = liveState?.version?.id;
-  const reviewBlocked = !!docLive && reviewVersion === undefined;
+  const [liveCapability, setLiveCapability] = useState<LiveCapability>("unknown");
+  const useLiveReview = !!docLive && liveCapability !== "unsupported";
+  const plan = useLiveReview ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
+  const teammate = receivedTeammate && useLiveReview ? { ...receivedTeammate, signedOff: !!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me) } : receivedTeammate;
+  const reviewVersion = useLiveReview ? liveState?.version?.id : undefined;
+  const reviewBlocked = useLiveReview && reviewVersion === undefined;
   const visual = author?.visual;
   const canComment = !teammate || teammate.rights.comment;
   const canSuggest = !teammate || teammate.rights.suggest;
@@ -587,7 +589,7 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   );
   // A doc in team review, in Editing mode, is edited live with everyone writing in it: its text
   // is the daemon's live document (DocEditor), each change going out as it is typed.
-  const live = mode === "editing" ? docLive : null;
+  const live = mode === "editing" && useLiveReview ? docLive : null;
   const textBody = (section: string, title: string) => editing?.section === section && live ? (
     <div className="grid gap-2 font-sans" data-testid="plan-live-box">
       <Suspense fallback={<p className="text-xs text-ink-3" role="status">Opening the live text…</p>}>
@@ -650,7 +652,7 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
           <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">{plan.title}</h1>
-              {docLive && <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={teammate?.me ? nameOf(teammate.me) : me ? nameOf(me) : "Author"} onState={setLiveState} />}
+              {docLive && <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={teammate?.me ? nameOf(teammate.me) : me ? nameOf(me) : "Author"} onState={setLiveState} onCapability={setLiveCapability} />}
               <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
                 <dt className="text-ink-3">Status</dt>
                 <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state} data-held={policyHeld ? "policy" : undefined}>
