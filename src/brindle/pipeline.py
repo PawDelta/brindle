@@ -1944,9 +1944,17 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
     conflicts, the conflicting files are appended to ``conflicts_out``.
     ``waiting_on_checks(sha)`` is called before checks with no passing
     result for the commit yet start to run.
-    One merge into a base at a time (see ``base_lock``)."""
+    One merge into a base at a time (see ``base_lock``). Under
+    ``overlap_granularity`` "hunk", a merge whose changes meet a running
+    worker's says so (``tasks.merge_hunk_warning``), read before it lands."""
+    from brindle import tasks
+
     with merge_lock(ws.id), base_lock(ws.repo_root, ws.base_branch):
-        return _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
+        drift = tasks.merge_hunk_warning(db, ws)
+        text = _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
+    if drift and text.startswith("Merged"):
+        text += f" Warning: {drift}."
+    return text
 
 
 # Files whose change in the base can change any check's outcome, wherever

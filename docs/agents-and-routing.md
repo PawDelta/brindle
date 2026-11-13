@@ -62,6 +62,18 @@ tiers you leave out keep theirs:
 `brindle doctor` shows the list in effect for each tier and the file it came
 from.
 
+To reserve Fable for design-heavy work, set `"fable_for_design_only": true`
+in one of those config files. It defaults to `false`, preserving today's
+routing. The supervisor marks tasks where Fable best fits shared designs,
+interfaces or tricky architecture with `assign(design_heavy=true, ...)`.
+This flag is independent of task size: it makes `developer-fable` eligible
+within the task's routing tier without changing its weight. For example,
+`assign(weight="advanced", design_heavy=true, task="Design the shared interfaces")`
+can use Fable; an unmarked advanced task skips it and tries `developer-heavy`
+next in the default list. Hosted learning cannot choose Fable for unmarked
+tasks, including tasks without a weight. Explicit agent and milestone profile
+choices still win. Queued assignments retain the profile selected at assignment.
+
 ## Profiles (custom agents)
 
 A **profile** is a markdown file that defines an agent: a model (and effort),

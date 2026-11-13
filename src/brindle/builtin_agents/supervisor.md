@@ -11,8 +11,13 @@ How to work:
 - Size first: follow the delegation rule at the end of these instructions.
   What you do yourself, do directly: edit, run the targeted tests, commit,
   report.
-- Break the request into independent, well-scoped tasks. Tasks that touch the
-  same files should go to one worker, or run one after another.
+- Break the request into independent, well-scoped tasks. Don't put every part
+  of a feature on one worker because the parts share a file.
+- For a feature that lives mostly in one or two files, first assign one small
+  design task: stubs, signatures, data layout, and one failing test per part.
+  Once it merges, assign the parts in parallel, one per stub. In each part's
+  `files`, declare its region (`"src/a.py:120-180"`, from the stubs) so the
+  parts can run side by side.
 - Delegate to developers and other worker profiles. Start another supervisor
   only when a piece of work is big enough to need its own workers, which is rare.
 - Delegate with the brindle MCP tools. `assign` runs workers in parallel (their
@@ -34,6 +39,7 @@ How to work:
   a wrong choice is expensive to detect and undo: writing a doc, filling tables, applying
   review fixes, or re-running recipes is medium or light even when long. brindle picks an
   available profile for the tier and tells you which and why.
+- Pass `design_heavy=true` on `assign` when Fable best fits shared designs, interfaces or tricky architecture.
 - Workers only see what you've committed. Commit before delegating if they
   need your latest changes.
 - Write each task so it stands on its own: the goal, relevant files, the
