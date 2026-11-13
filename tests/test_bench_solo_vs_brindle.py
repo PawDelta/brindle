@@ -54,15 +54,38 @@ def test_load_kit_resolves_a_relative_task_dir(tmp_path, monkeypatch, name):
     monkeypatch.chdir(tmp_path)
     assert bench.load_kit(Path("kit"))[2] == kit.resolve() / "grade.sh"   # grade.sh runs from the clone
     monkeypatch.setattr(bench, "prepare_clone", lambda kit, scratch, env: scratch)
-    monkeypatch.setattr(bench, "run_solo", lambda args, clone, spec, scratch, env: {
-        "finished": "exit", "valid": True, "why": "", "wall_seconds": 1,
-        "supervisor_model": None, "supervisor_model_observed": None,
-        "by_model": {}, "by_role": {}, "prompts": {}, "checkout": clone, "rates": {}, "free": set()})
+
+    def fake_run(args, clone, spec, *unused):
+        return {
+            "finished": "exit", "valid": True, "why": "", "wall_seconds": 1,
+            "supervisor_model": None, "supervisor_model_observed": None,
+            "by_model": {}, "by_role": {}, "prompts": {}, "checkout": clone, "rates": {}, "free": set()}
+
+    monkeypatch.setattr(bench, "run_solo", fake_run)
+    monkeypatch.setattr(bench, "run_brindle", fake_run)
     monkeypatch.setattr(bench, "grade", lambda path, checkout, env: {"passed": 1, "failed": 0})
+    phase = {"after": False}
+
+    def machine(op, **kw):
+        after = phase["after"]
+        phase["after"] = True
+        return {"limits": {"claude": {"used": 34.5 if after else 31, "resets_at": 1000},
+                           "codex": None, "antigravity": None},
+                "other_agents": [{"id": "other", "provider": "claude", "status": "processing"}]}
+
+    monkeypatch.setattr(bench, "installed_client", lambda *a: SimpleNamespace(probe=machine))
     results = tmp_path / "results.jsonl"
-    assert bench.main(["run", "--arm", "solo", "--run-id", "1", "--task-dir", "kit",
-                       "--scratch", str(tmp_path / "scratch"), "--results", str(results)]) == 0
-    assert bench.load_records(results)[0]["task"] == (name if name is not None else "tinydb")
+    arm = "solo" if name is None else "brindle"
+    assert bench.main(["run", "--arm", arm, "--run-id", "1", "--task-dir", "kit",
+                       "--scratch", str(tmp_path / "scratch"), "--results", str(results),
+                       *(["--only-workers", "developer-codex"] if arm == "brindle" else [])]) == 0
+    record = bench.load_records(results)[0]
+    assert record["task"] == (name if name is not None else "tinydb")
+    assert record["limits_before"]["claude"]["used"] == 31
+    assert record["limits_after"]["claude"]["used"] == 34.5
+    assert record["limits_used"] == {"claude": 3.5, "codex": None, "antigravity": None}
+    assert [a["id"] for a in record["other_agents"]] == ["other"]
+    assert record["only_workers"] == (["developer-codex"] if arm == "brindle" else None)
 
 
 def test_solo_cost_from_a_recorded_stream():
@@ -340,6 +363,17 @@ def test_report_medians_and_require_runs(tmp_path, capsys):
     grouped = capsys.readouterr().out
     assert "task: tinydb\n" + tinydb.split("task: tinydb\n")[-1] in grouped
     assert "task: large\n" + large in grouped
+    rows = [{"arm": "brindle", "only_workers": ["developer-codex"], "limits_used": {"codex": 3.5}},
+            {"arm": "brindle", "only_workers": ["developer-fable"], "limits_used": {"codex": None}},
+            {"arm": "brindle", "excluded_workers": ["developer-fable"], "limits_used": {"codex": 1}}]
+    results.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    summary = bench.summarize(rows)
+    assert summary["brindle [only=developer-codex]"]["limits_used.codex"] == {
+        "median": 3.5, "min": 3.5, "max": 3.5}
+    assert summary["brindle [only=developer-fable]"]["limits_used.codex"] is None
+    assert summary["brindle [exclude=developer-fable]"]["runs"] == 1
+    assert bench.main(["report", "--results", str(results)]) == 0
+    assert "3.5%" in capsys.readouterr().out
 
 
 def test_capped_routing_drops_excluded_workers_from_every_tier(tmp_path):
@@ -348,3 +382,76 @@ def test_capped_routing_drops_excluded_workers_from_every_tier(tmp_path):
     bench.configure_clone(tmp_path, "claude-opus-5-5", None, routing)
     cfg = json.loads((tmp_path / ".brindle" / "config.local.json").read_text())
     assert cfg["routing"] == {"heavy": ["developer-heavy"], "advanced": ["developer-heavy"]}
+
+
+def test_only_workers_cli_writes_every_tier(tmp_path, monkeypatch):
+    client = SimpleNamespace(
+        python="python", cli=lambda *a, **kw: SimpleNamespace(returncode=0),
+        probe=lambda *a, **kw: {"root": {"id": "root"}})
+    monkeypatch.setattr(bench, "installed_client", lambda *a: client)
+    monkeypatch.setattr(bench, "sh", lambda *a, **kw: SimpleNamespace(stdout=json.dumps({
+        "heavy": ["developer-heavy"], "advanced": ["developer-fable"]})))
+    monkeypatch.setattr(bench, "watch_session", lambda *a: {
+        "seen": {"root": {}}, "transcripts": {}, "outside": {}, "snap": {}, "finished": "goal",
+        "valid": True, "why": None, "needs_person": False, "stop": time.time(), "rates": {}, "events": []})
+    monkeypatch.setattr(bench, "brindle_usage", lambda *a: {})
+    runs = []
+
+    def run(args):
+        runs.append(bench.run_brindle(args, tmp_path, "spec", {}))
+        return 0
+
+    monkeypatch.setattr(bench, "cmd_run", run)
+    assert bench.main(["run", "--arm", "brindle", "--run-id", "1",
+                       "--only-workers", "developer-codex,developer-fable"]) == 0
+    cfg = json.loads((tmp_path / ".brindle/config.local.json").read_text())
+    assert cfg["routing"] == {tier: ["developer-codex", "developer-fable"] for tier in ("heavy", "advanced")}
+    assert runs[0]["only_workers"] == ["developer-codex", "developer-fable"]
+    assert bench.main(["run", "--arm", "brindle", "--run-id", "2",
+                       "--only-workers", "developer-codex,developer-fable",
+                       "--exclude-worker", "developer-fable"]) == 0
+    cfg = json.loads((tmp_path / ".brindle/config.local.json").read_text())
+    assert cfg["routing"] == {tier: ["developer-codex"] for tier in ("heavy", "advanced")}
+
+
+def test_machine_probe_reads_weekly_plan_limits_and_other_sessions(db, tmp_path, monkeypatch):
+    from brindle import quota, subscription_usage
+
+    repo = str(tmp_path)
+    for wid, path in (("own", repo), ("other", "/other")):
+        db.add_workspace(Workspace(wid, path, "s", "worktree", "branch", "main", path, None, "t", time.time()))
+        db.add_agent(Agent(wid, wid, "supervisor", "claude", None, "interactive", "processing",
+                           "@1", None, time.time()))
+    db.add_agent(Agent("done", "other", "developer", "codex", None, "interactive", "done",
+                       "@2", None, time.time()))
+    monkeypatch.setattr(quota, "get", lambda provider: quota.Quota(provider, [
+        quota.Window(80, 1000, 300), quota.Window(31, 2000, 10080),
+        quota.Window(90, 2000, 10080, "Fable")]) if provider == "claude" else None)
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    monkeypatch.setattr(subscription_usage, "cache_key", lambda provider: provider)
+    ns = {"__name__": "bench_probe"}
+    exec(bench.PROBE, ns)
+    out = ns["main"]({"op": "machine", "clone": repo})
+    assert out["limits"]["claude"]["used"] == 31  # neither the short window nor the model cap
+    assert out["limits"]["codex"] is None
+    assert [a["id"] for a in out["other_agents"]] == ["other"]
+    before = out["limits"]
+    after = {**before, "claude": {**before["claude"], "used": 35}}
+    assert bench.limits_used(before, after)["claude"] == 4
+    assert bench.limits_used(before, {**after, "codex": {"used": 10}})["codex"] is None
+    after["claude"]["resets_at"] += 1
+    assert bench.limits_used(before, after)["claude"] is None
+    after["claude"] = {**before["claude"], "identity": "new-account", "used": 40}
+    assert bench.limits_used(before, after)["claude"] is None
+
+
+def test_monitor_keeps_agents_seen_only_during_the_run():
+    samples = iter([[], [{"id": "midrun", "status": "processing"}], []])
+    b = SimpleNamespace(probe=lambda op: {"limits": {}, "other_agents": next(samples)})
+    monitor = bench.RunMonitor(b, 20)
+    ticks = iter([False, True])
+    monitor.stopped = SimpleNamespace(wait=lambda interval: next(ticks))
+    monitor.before = monitor.sample()
+    monitor.watch()
+    monitor.after = monitor.sample()
+    assert [a["id"] for a in monitor.record()["other_agents"]] == ["midrun"]
