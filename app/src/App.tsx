@@ -205,7 +205,7 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
         />
       );
     case "new":
-      return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} onSignIn={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })} />;
+      return <NewSession key={`${route.repo ?? ""}|${route.add ?? ""}|${route.add ? visit : ""}`} client={client} onOpen={openSession} initialRepo={route.repo} add={route.add} pickFolder={pickFolder} refresh={refresh} onSignIn={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })} />;
     case "inbox":
       return <InboxScreen client={client} refresh={refresh} onOpen={openSession} onNavigate={navigate} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} onOpenRule={(rule) => navigate({ screen: "settings", section: "permissions", rule, ask: ++providerAsks })} appUpdates={appUpdates} openUrl={openUrl} />;
     case "session":
@@ -223,6 +223,8 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           openUrl={openUrl}
           onOpen={openSession}
           onCloseSession={closeSession}
+          onHome={() => navigate({ screen: "new" })}
+          onStartOwn={(add) => navigate({ screen: "new", add })}
         />
       );
   }
