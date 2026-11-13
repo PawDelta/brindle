@@ -133,6 +133,7 @@ def test_carets_are_relayed_and_replayed_without_any_sqlite_write(db, live_doc):
             assert list(db.conn.iterdump()) == before
 
 
+@pytest.mark.variant("A competing SQLite writer must not block unrelated work on the daemon event loop")
 def test_a_contended_draft_write_keeps_the_daemon_event_loop_responsive(db, live_doc, monkeypatch):
     entered = threading.Event()
     progressed = threading.Event()
