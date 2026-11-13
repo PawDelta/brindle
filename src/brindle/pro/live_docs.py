@@ -279,13 +279,20 @@ def _origin(db: DB, origin: str) -> int | None:
     return None if row is None else row["id"]
 
 
-def _parts(edit) -> list[str]:
-    """The whole of an offline edit as text, in parts a comment or reply each
-    holds; «» keep the edges of each part's slice from being trimmed."""
+def _recovery_text(edit) -> str:
+    """The whole of an offline edit as a note says it."""
     text = f"{OFFLINE} It changed {edit['section']} in the live draft, and has no place in this revision as it is."
     if edit["before"]:
         text += f"\n\nIt replaced:\n\n{edit['before']}"
-    text += f"\n\nIt wrote:\n\n{edit['after']}" if edit["after"] else "\n\n(It wrote nothing in its place.)"
+    return text + (f"\n\nIt wrote:\n\n{edit['after']}" if edit["after"] else "\n\n(It wrote nothing in its place.)")
+
+
+def _parts(edit) -> list[str]:
+    """:func:`_recovery_text` in parts a comment or reply each holds; «» keep
+    the edges of each part's slice from being trimmed. Each part alone is
+    scanned for secrets as it is written, so the whole is scanned first
+    (:func:`_file_one`): a secret split across two parts passes neither."""
+    text = _recovery_text(edit)
     chunks = [text[i:i + PART] for i in range(0, len(text), PART)]
     return [f"({i}/{len(chunks)}) «{chunk}»" for i, chunk in enumerate(chunks, 1)]
 
@@ -306,7 +313,7 @@ def _file_one(db: DB, plan_id: str, edit) -> None:
       the revision still has it, else on the overview or the first part it has.
 
     Raises ServiceError when the plan won't take it now."""
-    from brindle import plan_docs, plans
+    from brindle import plan_docs, plans, visuals
     from brindle.service.errors import ServiceError
 
     key, section, before, after = edit["key"], edit["section"], edit["before"], edit["after"]
@@ -326,6 +333,9 @@ def _file_one(db: DB, plan_id: str, edit) -> None:
                 return
     elif db.conn.execute("SELECT kind FROM plan_threads WHERE id=?", (head,)).fetchone()["kind"] == "suggestion":
         return
+    # The whole text, before any part of it is written (a resumed filing too): a
+    # secret across a part boundary would pass each part's own scan.
+    visuals._refuse_secrets([("an edit typed offline", _recovery_text(edit))])
     parts = _parts(edit)
     if head is None:
         places = plans.anchors(p)

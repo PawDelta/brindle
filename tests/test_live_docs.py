@@ -513,6 +513,15 @@ def test_each_offline_edit_is_filed_once_whole_deletions_included_and_a_crash_fi
         await machine.manager.sweep()
         assert [t for t in threads() if t[3] == "later"] == [("suggestion", "", "body", "later")] * 2
 
+        # A secret across the boundary between two parts passes each part's own scan: none is written.
+        lead = len(live_docs._recovery_text({"section": "gone", "before": "now", "after": "x"})) - 1
+        token = "ghp_" + "A1b2C3d4E5" * 4                 # a made-up token in GitHub's format
+        keep("World now", 6, "now", "x" * (live_docs.PART - lead - 20) + " " + token + " end", section="gone")
+        before = db.conn.execute("SELECT COUNT(*) FROM plan_threads").fetchone()[0]
+        await machine.manager.sweep()
+        assert db.conn.execute("SELECT COUNT(*) FROM plan_threads").fetchone()[0] == before
+        assert live_docs.docs_with_offline(db) == ["doc1"]    # kept, for its writer to take out
+
     asyncio.run(run())
 
 
