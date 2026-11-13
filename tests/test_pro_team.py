@@ -112,6 +112,7 @@ def test_a_broken_credential_store_allows_everything(backend, monkeypatch):
 # -- policy rules ------------------------------------------------------------------------------------
 
 
+@pytest.mark.variant("bypass: an undeclared model cannot bypass an organization model allowlist")
 def test_undeclared_model_is_denied_when_a_list_is_set(team):
     d = plugin(team).check_assign(assign(model=None))
     assert not d.allowed and "no declared model" in d.reason
@@ -154,7 +155,8 @@ def test_model_refusal_points_at_the_org_to_change(team, monkeypatch, path):
 
 @pytest.mark.parametrize("body", [
     {"version": "3", "policy": POLICY},
-    {"org_id": "org_other", "version": 3, "policy": POLICY},
+    pytest.param({"org_id": "org_other", "version": 3, "policy": POLICY},
+                 marks=pytest.mark.variant("identity: a policy belonging to another organization must fail closed")),
 ])
 def test_malformed_policy_fails_closed(team, body):
     team.policy_body = body
@@ -202,6 +204,7 @@ def events_plugin(backend, **kw):
                      start_thread=kw.pop("start_thread", False), **kw)
 
 
+@pytest.mark.variant("privacy: serialized team events must hash identities and reject unsafe profile, provider and model values")
 def test_event_payload_has_exactly_the_contract_keys(team):
     p = events_plugin(team)
     p.emit(ev("review", approved=True))

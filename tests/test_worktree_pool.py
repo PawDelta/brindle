@@ -145,6 +145,7 @@ def test_claim_skipped_when_the_branch_exists(db, repo, tmp_path, where):
     assert db.count_pool_entries(str(repo), "main") == 1  # entry left untouched
 
 
+@pytest.mark.variant("Two independent connections racing for one pool entry must never both claim it")
 def test_two_concurrent_claims_only_one_wins(db, repo):
     """take_pool_entry uses BEGIN IMMEDIATE, so two connections racing to
     claim the same entry must never both succeed."""

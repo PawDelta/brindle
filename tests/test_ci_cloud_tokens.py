@@ -139,7 +139,10 @@ def test_scrub_job_drops_the_actions_endpoint_but_gives_agents_the_cloud_env(mon
 # -- panes ----------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
+@pytest.mark.parametrize("name", [
+    pytest.param("ACTIONS_ID_TOKEN_REQUEST_URL", marks=pytest.mark.variant("an OIDC endpoint cannot be kept as a provider credential")),
+    pytest.param("ACTIONS_ID_TOKEN_REQUEST_TOKEN", marks=pytest.mark.variant("an OIDC bearer token cannot be kept as a provider credential")),
+])
 @pytest.mark.brindle_ci_guard
 def test_the_actions_endpoint_stays_out_of_panes_whatever_is_kept(name):
     keep = secrets.provider_credentials("claude", name)

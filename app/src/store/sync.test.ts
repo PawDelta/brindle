@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { createAppStore } from "./store";
 import { startSync } from "./sync";
 import { BASE_URL, FakeDaemon, flush } from "../test/fakeDaemon";
@@ -10,6 +10,7 @@ function setup() {
   const store = createAppStore();
   const client = new DaemonClient({ baseUrl: BASE_URL, token: daemon.token, fetch: (input, init) => daemon.fetch(input, init) });
   const sync = startSync({ client, store, repo: REPO, connect: daemon.connect, backoff: () => 0 });
+  onTestFinished(() => sync.stop());
   const snapshots = () => daemon.requests.filter((r) => r.path === "/snapshot").length;
   return { daemon, client, store, sync, snapshots };
 }
@@ -17,40 +18,34 @@ function setup() {
 describe("startSync", () => {
   it.each(["plan offer", "visual answer", "visual dismiss", "visual read", "plan verdict"])("does not restore a settled %s from an older refresh", async (action) => {
     const { daemon, client, store, sync } = setup();
-    try {
-      await flush();
-      await sync.idle();
-      vi.spyOn(daemon, "fetch").mockResolvedValue(new Response("{}"));
-      let finish!: (items: typeof daemon.data.inbox) => void;
-      vi.spyOn(client, "snapshot").mockResolvedValue([root]);
-      vi.spyOn(client, "inbox").mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue([]);
-      const read = sync.refresh();
-      if (action === "plan offer") await client.resolvePlanOffer("sup1", "o1", false);
-      else if (action === "visual answer") await client.answerVisual("v1", 1, "yes", "");
-      else if (action === "visual dismiss") await client.dismissVisual("v1", 1);
-      else if (action === "plan verdict") await client.decidePlan("v1", { rev: 1, approved: true, picks: {}, comments: [], note: "" });
-      else await client.markVisualRead("v1", 1);
-      finish([question]);
-      await read;
-      expect(store.getState().inbox).toEqual([]);
-    } finally { sync.stop(); }
+    await flush();
+    await sync.idle();
+    vi.spyOn(daemon, "fetch").mockResolvedValue(new Response("{}"));
+    let finish!: (items: typeof daemon.data.inbox) => void;
+    vi.spyOn(client, "snapshot").mockResolvedValue([root]);
+    vi.spyOn(client, "inbox").mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue([]);
+    const read = sync.refresh();
+    if (action === "plan offer") await client.resolvePlanOffer("sup1", "o1", false);
+    else if (action === "visual answer") await client.answerVisual("v1", 1, "yes", "");
+    else if (action === "visual dismiss") await client.dismissVisual("v1", 1);
+    else if (action === "plan verdict") await client.decidePlan("v1", { rev: 1, approved: true, picks: {}, comments: [], note: "" });
+    else await client.markVisualRead("v1", 1);
+    finish([question]);
+    await read;
+    expect(store.getState().inbox).toEqual([]);
   });
 
   it("answered visual leaves the inbox through a repo-scoped event without an Inbox screen mounted", async () => {
     const { daemon, store, sync } = setup();
-    try {
-      await flush();
-      await sync.idle();
-      expect(store.getState().inbox).toEqual([question]);
-      daemon.data.inbox = [];
-      // Engine publishers carry repo context (covered by test_visual_offers.py).
-      daemon.publish("visual.offer_resolved", { repo_root: REPO, root_id: "sup1", payload: { offer: "o_1" } });
-      await flush();
-      await sync.idle();
-      expect(store.getState().inbox).toEqual([]);
-    } finally {
-      sync.stop();
-    }
+    await flush();
+    await sync.idle();
+    expect(store.getState().inbox).toEqual([question]);
+    daemon.data.inbox = [];
+    // Engine publishers carry repo context (covered by test_visual_offers.py).
+    daemon.publish("visual.offer_resolved", { repo_root: REPO, root_id: "sup1", payload: { offer: "o_1" } });
+    await flush();
+    await sync.idle();
+    expect(store.getState().inbox).toEqual([]);
   });
 
   it.each(["agent.closed", "rewound"])("discards a snapshot started before %s even if the queued refresh fails", async (kind) => {

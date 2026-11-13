@@ -623,6 +623,7 @@ def test_plan_verification_failures(plan, signing_key):  # noqa: F811
 
 
 @pytest.mark.brindle_ci_guard
+@pytest.mark.variant("CI plan validation errors cannot expose the signed plan token")
 def test_plan_errors_never_quote_the_token(plan):
     bad = plan(repo="other/repo")
     with pytest.raises(CIError) as e:
@@ -672,6 +673,7 @@ def test_an_escalation_plan_cannot_drop_the_orgs_limits(plan, ci_repo, tmp_path)
 
 
 @pytest.mark.brindle_ci_guard
+@pytest.mark.variant("a run exhausting the organization budget must stop before dispatching another task")
 def test_a_run_stops_at_the_orgs_dollar_budget(plan, ci_repo, tmp_path, monkeypatch):
     from brindle import pricing
 

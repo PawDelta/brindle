@@ -153,7 +153,8 @@ REFUSED = {"stale": "version_conflict", "rejected": "invalid_request", "unsuppor
     ("stale", 409), ("rejected", 422), ("unsupported", 422),
     pytest.param("token", 401, marks=pytest.mark.variant("tokenless attempt to write account policy")),
     pytest.param("agent", 403, marks=pytest.mark.variant("agent attempts the new person-only bridge")),
-    ("signed_out", 401), ("changed_role", 409), ("roles_forbidden", 403), ("offline", 503),
+    ("signed_out", 401), ("changed_role", 409), pytest.param("roles_forbidden", 403,
+                 marks=pytest.mark.variant("role inventory forbidden while editing a role must fail closed")), ("offline", 503),
     ("identity", 409), ("team", 403), ("control", 403), ("unknown_role", 422), ("version", 400)])
 def test_org_permissions_bridge(account, monkeypatch, case, expected):
     if case in FLOWS:

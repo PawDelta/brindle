@@ -320,7 +320,8 @@ def _file_one(db: DB, plan_id: str, edit) -> None:
     head = _origin(db, key)
     p = plan_docs._plan(db, plan_id)
     if head is None:
-        body = plan_docs._body(plan_docs.revision(db, plan_id), section)
+        # What suggest checks against: the live draft's text if this machine holds one, else the revision.
+        body = plan_docs._body(plan_docs.current(db, p), section)
         if body is not None:
             at, _ = plan_drafts.mapping(edit["base"], body)
             start, end = at(edit["start"]), at(edit["start"] + len(before))

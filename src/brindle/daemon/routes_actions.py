@@ -349,8 +349,11 @@ def cancel_demo(db: DB, params: dict, body: Body) -> Any:
 def demo_provider() -> str | None:
     """The CLI the demo runs on: the person's last supervisor pick, else the
     first the demo has profiles for, that this Mac is signed in to and the org
-    allows. None when none is (the supervisor profile's own: its preflight
-    then asks for the sign-in)."""
+    allows; else the first such a supervisor could start on (the one a start
+    with none asked for would pick), so the workers and reviewer run on the
+    supervisor's CLI even when no sign-in probe is cached (a fresh account,
+    or one answered over providers.SIGNED_IN_TTL ago). None when none is (the
+    supervisor profile's own: its preflight then asks for the sign-in)."""
     from brindle import demo as demo_mod
     from brindle import doctor
     from brindle.config import supervisor_pick
@@ -361,7 +364,7 @@ def demo_provider() -> str | None:
     for p in (supervisor_pick(), *demo_mod.PROFILES):
         if p in demo_mod.PROFILES and p in signed and acc.allows(p):
             return p
-    return None
+    return next((p for p in svc.usable_providers(None) if p in demo_mod.PROFILES), None)
 
 
 @dataclass

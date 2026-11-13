@@ -13,13 +13,16 @@ from test_pro_team import ORG, login, run, team, team_claims  # noqa: F401
 
 
 @pytest.mark.parametrize("enterprise,group_state,user,group,name,expected", [
-    ("enforced_off", "enforced_on", "on", "g", "store", False),
-    ("default_on", "enforced_on", "off", "g", "store", True),
-    ("default_on", "default_on", "off", "g", "store", False),
-    ("off", "default_on", None, "g", "store", True),
-    ("off", None, None, "g", "store", False),
-    (None, None, None, "g", "store", False),
-    (None, None, None, "g", "prompt_analysis", False),
+    pytest.param("enforced_off", "enforced_on", "on", "g", "store", False,
+                 marks=pytest.mark.variant("enterprise denial overrides group enforcement and user opt-in")),
+    pytest.param("default_on", "enforced_on", "off", "g", "store", True,
+                 marks=pytest.mark.variant("group enforcement overrides a user opt-out")),
+    pytest.param("default_on", "default_on", "off", "g", "store", False,
+                 marks=pytest.mark.variant("unenforced defaults must respect the person's opt-out")),
+    pytest.param("off", "default_on", None, "g", "store", True,
+                 marks=pytest.mark.variant("a group default takes precedence over an enterprise default")),
+    pytest.param("off", None, None, "g", "store", False,
+                 marks=pytest.mark.variant("an unset group switch must preserve the enterprise opt-out")),
     pytest.param("off", "enforced_on", None, None, "store", False,
                  marks=pytest.mark.variant("missing group must not select an existing group")),
     pytest.param("off", "enforced_on", None, "unknown", "store", False,

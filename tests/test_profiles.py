@@ -16,6 +16,7 @@ def test_frontmatter_list_grammar(raw, expected):
     assert _list(meta["rules"]) == expected
 
 
+@pytest.mark.variant("path regression: repository add_dirs must expand home paths before resolving relative to the repository")
 def test_repo_add_dirs_expand_a_leading_tilde(tmp_path, monkeypatch):
     """``~/cache`` means the home directory's cache, not ``<repo>/~/cache``."""
 

@@ -27,12 +27,26 @@ current one (``current``, ``moved`` or, when the text is gone, ``detached``).
 Changes are made only while the plan is open: a redirected plan is the
 supervisor's to revise, an approved one is building. Comments and votes are
 recorded in any state. Request changes carries the open threads the person
-wrote since their last verdict, and their edits, to the supervisor."""
+wrote since their last verdict, and their edits, to the supervisor.
+
+A shared plan whose Library document has a live draft (this machine holds its
+replica, :mod:`brindle.plan_drafts`) is edited there instead: a direct edit or
+an accepted suggestion changes the draft's text and makes no revision, so two
+people writing at once merge letter by letter. Revisions stay the versions
+frozen in the Library (``shared_docs._import``), and only they count for the
+build gate. What the person reads, edits and anchors in is the draft's text
+(``current``); a text anchor made on it also carries Loro cursors, which follow
+the words as others type around them. The supervisor writes there too
+(:func:`hand_over`, :func:`supervise`): against the text it was handed, so
+what others typed since stays, and a change to words they changed meanwhile
+becomes its suggestion."""
 
 from __future__ import annotations
 
+import base64
 import json
 import re
+import secrets
 import time
 from typing import Any
 
@@ -52,6 +66,10 @@ MAX_QUOTE = 4000             # the anchored text of a comment or suggestion
 MAX_THREADS = 500            # threads and replies on one plan
 MAX_SNIPPET = 200            # quoted text in the supervisor's message
 CONTEXT = 32                 # text kept either side of an insertion point, to find it again
+MAX_BASES = 5                # draft texts handed to the supervisor kept per plan (hand_over)
+# The note on the supervisor's suggestion in a live draft: the Library takes
+# no supervisor mark on a suggestion, so its text says whose it is.
+SUPERVISED = "From the supervisor's revision: these words changed here since it read them."
 # Section ids the comment anchors already use for something else.
 RESERVED = {"ask", "lede", "split"}
 # What an SVG diagram may hold: drawing elements and presentation attributes
@@ -230,6 +248,36 @@ def revision(db: DB, plan_id: str, rev: int | None = None) -> dict:
             "stored": False}
 
 
+def draft(db: DB, p: dict):
+    """The live draft replica plan ``p`` is edited in, or None: only a shared
+    plan whose Library document has a draft this machine holds, while its
+    Team plan hasn't ended (a lapsed plan is a personal doc again), and only
+    once its current revision is the Library's, which the draft continues
+    (revisions made here before are carried over by shared_docs._carry_over)."""
+    from brindle import plan_drafts
+    from brindle.pro import shared_docs
+
+    row = db.conn.execute("SELECT * FROM plan_shares WHERE plan_id=? AND doc_id IS NOT NULL",
+                          (p["id"],)).fetchone()
+    if row is None or row["local_rev"] != p["rev"] or shared_docs.lapse_stands(row, p) or not db.conn.execute(
+            "SELECT 1 FROM plan_drafts WHERE doc_id=?", (row["doc_id"],)).fetchone():
+        return None
+    return plan_drafts.DraftReplica.open(db, row["doc_id"])
+
+
+def current(db: DB, p: dict, replica=None) -> dict:
+    """What the person reads and writes on: the current revision, with the
+    live draft's text in place of its lede and sections when it has one."""
+    cur = revision(db, p["id"])
+    replica = replica or draft(db, p)
+    if replica is None:
+        return cur
+    texts = replica.sections()
+    lede = texts.get(LEDE, cur["lede"])
+    sections = [{**s, "markdown": texts.get(s["id"], s["markdown"])} for s in cur["sections"]]
+    return {**cur, "lede": lede, "sections": sections, "markdown": render(lede, sections), "draft": True}
+
+
 def keep(c, cur: dict) -> None:
     """In the transaction that replaces revision ``cur``: if it is a plan's
     from before revisions were kept (read from the plans row), store it
@@ -337,10 +385,37 @@ def _anchor(p: dict, cur: dict, raw: Any) -> dict:
     raise ServiceError("invalid", "an anchor's kind is text, diagram, decision or section", 400)
 
 
+def _with_cursor(replica, anchor: dict) -> dict:
+    """A text anchor made on the live draft, with a Loro cursor at its start."""
+    if replica is None or anchor["kind"] != "text" or anchor["section"] not in replica.sections():
+        return anchor
+    return {**anchor, "cursor": base64.b64encode(replica.cursor(anchor["section"], anchor["start"])).decode()}
+
+
+def _followed(replica, anchor: dict) -> dict:
+    """``anchor`` where its cursor stands in the draft now: the cursor follows
+    the words as others type around them, so they are looked for there first.
+    An insertion point has no words: the cursor alone places it, so its
+    context is taken from the draft there, never from an older text."""
+    from brindle.crdt import CrdtError
+
+    if replica is None or not anchor.get("cursor"):
+        return anchor
+    try:
+        start = replica.resolve(base64.b64decode(anchor["cursor"]))
+    except (CrdtError, ValueError):
+        return anchor
+    out = {**anchor, "start": start, "end": start + anchor["end"] - anchor["start"]}
+    if anchor["kind"] == "text" and not anchor["quote"]:
+        out.update(_context(replica.text(anchor["section"]), start))
+    return out
+
+
 def _where(cur: dict, anchor: dict) -> dict:
     """``anchor`` in revision ``cur``: where its text is now, and whether
     it is still ``current``, has ``moved`` or is ``detached`` (gone)."""
-    out = dict(anchor, state="current")
+    out = {k: v for k, v in anchor.items() if k != "cursor"}
+    out["state"] = "current"
     if anchor["kind"] == "text" and not anchor["quote"]:
         return _insertion(cur, anchor, out)
     if anchor["kind"] == "text":
@@ -413,17 +488,26 @@ def _thread(db: DB, p: dict, thread_id: Any) -> dict:
 def _add(db: DB, p: dict, rev: int, kind: str, anchor: dict | None, author: str, text: str,
          attachments: list[dict], parent: int | None = None, after: str | None = None, question: bool = False,
          origin: str | None = None) -> int:
-    now = time.time()
     with db.tx() as c:
-        if c.execute("SELECT COUNT(*) FROM plan_threads WHERE plan_id=?", (p["id"],)).fetchone()[0] >= MAX_THREADS:
-            raise ServiceError("too_many", f"a plan may have at most {MAX_THREADS} comments and replies", 400)
-        tid = int(c.execute(
-            "INSERT INTO plan_threads (plan_id, parent_id, rev, kind, anchor, author, body, after, attachments,"
-            " status, created_at, updated_at, question, origin) VALUES (?,?,?,?,?,?,?,?,?,'open',?,?,?,?)",
-            (p["id"], parent, rev, kind, json.dumps(anchor) if anchor else None, author, text, after,
-             json.dumps(attachments), now, now, question, origin)).lastrowid)
+        tid = file_thread(c, p["id"], rev, kind, anchor, author, text, attachments, parent=parent, after=after,
+                          question=question, origin=origin)
     _changed(db, p, p["rev"])
     return tid
+
+
+def file_thread(c, plan_id: str, rev: int, kind: str, anchor: dict | None, author: str, text: str,
+                attachments: list[dict] | None = None, *, parent: int | None = None, after: str | None = None,
+                question: bool = False, origin: str | None = None) -> int:
+    """Add a thread or reply in transaction ``c``. Returns its id. ``origin``:
+    what made it, kept with it so it can be found again (unique)."""
+    if c.execute("SELECT COUNT(*) FROM plan_threads WHERE plan_id=?", (plan_id,)).fetchone()[0] >= MAX_THREADS:
+        raise ServiceError("too_many", f"a plan may have at most {MAX_THREADS} comments and replies", 400)
+    now = time.time()
+    return int(c.execute(
+        "INSERT INTO plan_threads (plan_id, parent_id, rev, kind, anchor, author, body, after, attachments,"
+        " status, created_at, updated_at, question, origin) VALUES (?,?,?,?,?,?,?,?,?,'open',?,?,?,?)",
+        (plan_id, parent, rev, kind, json.dumps(anchor) if anchor else None, author, text, after,
+         json.dumps(attachments or []), now, now, question, origin)).lastrowid)
 
 
 def comment(db: DB, plan_id: str, rev: Any = None, anchor: Any = None, text: Any = None,
@@ -444,7 +528,8 @@ def comment(db: DB, plan_id: str, rev: Any = None, anchor: Any = None, text: Any
         return _add(db, p, p["rev"], "reply", None, author, text, _attachments(db, p, attachments),
                     parent=thread["id"], origin=origin)
     _on_screen(p, rev)
-    where = _anchor(p, revision(db, p["id"]), anchor)
+    replica = draft(db, p)
+    where = _with_cursor(replica, _anchor(p, current(db, p, replica), anchor))
     return _add(db, p, p["rev"], "comment", where, author, text, _attachments(db, p, attachments), question=question,
                 origin=origin)
 
@@ -472,7 +557,8 @@ def suggest(db: DB, plan_id: str, rev: Any, section: Any, start: Any, before: An
     if p["state"] == "approved":
         _editable(p)
     _on_screen(p, rev)
-    cur = revision(db, p["id"])
+    replica = draft(db, p)
+    cur = current(db, p, replica)
     before = _body_text(before, "the text to change", MAX_QUOTE)
     after = _body_text(after, "the replacement", MAX_SECTION)
     if before == after:
@@ -483,6 +569,7 @@ def suggest(db: DB, plan_id: str, rev: Any, section: Any, start: Any, before: An
     anchor = {"kind": "text", "section": sid, "start": pos, "end": pos + len(before), "quote": before}
     if not before:
         anchor.update(_context(_body(cur, sid), pos))
+    anchor = _with_cursor(replica, anchor)
     return _add(db, p, p["rev"], "suggestion", anchor, author, note, _attachments(db, p, attachments), after=after,
                 origin=origin)
 
@@ -499,30 +586,39 @@ def _target(p: dict, cur: dict, section: Any, start: Any, before: str) -> tuple[
 
 def edit(db: DB, plan_id: str, rev: Any, section: Any, start: Any, before: Any, after: Any) -> dict:
     """The person's direct edit: ``before`` at ``start`` in ``section``
-    becomes ``after``, as a new revision. Returns that revision."""
+    becomes ``after``, as a new revision, or in the live draft of a shared
+    plan that has one. Returns the revision, or the text with the draft's."""
     p = _plan(db, plan_id)
     _editable(p)
     _on_screen(p, rev)
-    cur = revision(db, p["id"])
+    replica = draft(db, p)
+    cur = current(db, p, replica)
     before = _body_text(before, "the text to change", MAX_SECTION)
     after = _body_text(after, "the replacement", MAX_SECTION)
     sid, pos = _target(p, cur, section, start, before)
+    if replica is not None:
+        return _apply_draft(db, p, replica, sid, pos, before, after)
     return _apply(db, p, cur, sid, pos, before, after, "edit")
 
 
 def accept(db: DB, plan_id: str, thread_id: Any, rev: Any) -> dict:
     """The author accepts a suggestion: its change, made to the revision on
-    screen (``rev``), is a new revision. Returns that revision."""
+    screen (``rev``), is a new revision, or goes into the live draft of a
+    shared plan that has one, where the suggestion's words are now."""
     p = _plan(db, plan_id)
     _editable(p)
     _on_screen(p, rev)
     thread = _thread(db, p, thread_id)
     if thread["kind"] != "suggestion" or thread["status"] != "open":
         raise ServiceError("invalid", "that isn't an open suggestion", 409)
-    cur = revision(db, p["id"])
-    where = _where(cur, json.loads(thread["anchor"]))
+    replica = draft(db, p)
+    cur = current(db, p, replica)
+    where = _where(cur, _followed(replica, json.loads(thread["anchor"])))
     if where["state"] == "detached":
         raise ServiceError("stale", "the text this suggestion changes is gone; reject it or suggest again", 409)
+    if replica is not None:
+        return _apply_draft(db, p, replica, where["section"], where["start"], where["quote"], thread["after"],
+                            thread["id"])
     return _apply(db, p, cur, where["section"], where["start"], where["quote"], thread["after"], "suggestion",
                   thread["id"])
 
@@ -580,6 +676,131 @@ def _apply(db: DB, p: dict, cur: dict, sid: str, pos: int, before: str, after: s
         _editable(now_p)
     _changed(db, p, rev)
     return revision(db, p["id"], rev)
+
+
+def _apply_draft(db: DB, p: dict, replica, sid: str, pos: int, before: str, after: str,
+                 thread_id: int | None = None) -> dict:
+    """``_apply`` on a shared plan's live draft: the change goes into the
+    draft's text, merged with whatever others type, and makes no revision
+    (the Library freezes versions). A suggestion it accepts is marked in the
+    same transaction. Diagram sources are checked at the freeze, not here:
+    a draft's diagram is often half written."""
+    from brindle.plan_drafts import DraftGone, StaleDraft
+
+    if sid not in replica.sections():
+        raise ServiceError("stale", "that section isn't in the live draft; read the plan again", 409, rev=p["rev"])
+    if len(replica.text(sid)) - len(before) + len(after) > MAX_SECTION:
+        raise ServiceError("too_big", f"a section may be at most {MAX_SECTION // 1024} KB", 400)
+    visuals._refuse_secrets([("your edit", after)])
+    now = time.time()
+
+    def answer(c) -> None:
+        if thread_id is not None and not c.execute(
+                "UPDATE plan_threads SET status='accepted', updated_at=? WHERE id=? AND status='open'",
+                (now, thread_id)).rowcount:
+            raise ServiceError("invalid", "that suggestion was answered meanwhile", 409)
+
+    try:
+        replica.replace(sid, pos, len(before), after, also=answer)
+    except (StaleDraft, DraftGone):
+        raise ServiceError("stale", "the live draft changed meanwhile; read the plan again", 409,
+                           rev=p["rev"]) from None
+    _changed(db, p, p["rev"])
+    return current(db, p, replica)
+
+
+# -- the supervisor in a live draft ------------------------------------------------------
+
+
+def hand_over(db: DB, p: dict, replica) -> tuple[str, dict]:
+    """The live draft as the supervisor is given it: its text is kept as a
+    base, by the id the supervisor's write names (:func:`supervise`), so its
+    changes are worked out against what it read. Only the newest MAX_BASES
+    are kept; an older one is refused and the supervisor reads again.
+    Returns the base's id and what it was given."""
+    cur = current(db, p, replica)
+    texts = replica.sections()
+    base = secrets.token_hex(8)
+    with db.tx() as c:
+        c.execute("INSERT INTO plan_draft_bases (id, plan_id, doc_id, texts, created_at) VALUES (?,?,?,?,?)",
+                  (base, p["id"], replica.doc_id, json.dumps(texts), time.time()))
+        c.execute("DELETE FROM plan_draft_bases WHERE plan_id=? AND rowid NOT IN"
+                  " (SELECT rowid FROM plan_draft_bases WHERE plan_id=? ORDER BY rowid DESC LIMIT ?)",
+                  (p["id"], p["id"], MAX_BASES))
+    return base, cur
+
+
+def supervise(c, p: dict, replica, base: Any, was: dict, lede: str, sections: list[dict],
+              changed: list[str]) -> dict:
+    """The supervisor's revision of a shared plan with a live draft, in
+    transaction ``c``: each section's change since ``base`` (the text it was
+    handed) is set against what others wrote there since (plan_rebase). What
+    nobody else touched goes into the draft under the supervisor's own peer
+    id; a change to words someone else changed meanwhile never overwrites
+    them: it is filed as the supervisor's suggestion. A draft holds only text,
+    so what else it changed (``changed`` names its decisions, split or ask;
+    sections added, removed or retitled against ``was``) is named in one
+    comment. Returns what was applied, suggested and left out."""
+    from brindle import plan_rebase
+
+    row = c.execute("SELECT texts FROM plan_draft_bases WHERE id=? AND plan_id=? AND doc_id=?",
+                    (base, p["id"], replica.doc_id)).fetchone() if isinstance(base, str) else None
+    if row is None:
+        raise ServiceError("stale_base", "that base isn't one brindle holds for this plan's live draft: "
+                           "read it again with read_plan and revise from what it gives", 409)
+    texts = json.loads(row["texts"])
+    old = {s["id"]: s for s in was["sections"]}
+    mine = {LEDE: lede, **{s["id"]: s["markdown"] for s in sections}}
+    missed = [f"added {s['title']}" for s in sections if s["id"] not in old]
+    # A draft keeps its sections: a removal is its text going, by the same
+    # rule as any change, so text someone wrote there since the base stays
+    # and its removal is the supervisor's suggestion.
+    for sid, s in old.items():
+        if sid not in mine:
+            missed.append(f"removed {s['title']} (a live draft keeps the section: its text is cleared where "
+                          "nobody changed it since, else suggested for removal)")
+            mine[sid] = ""
+    missed += [old[s["id"]]["title"] for s in sections if s["id"] in old
+               and any(old[s["id"]].get(k) != s.get(k) for k in ("title", "kind", "caption"))]
+    missed += changed
+    todo = [sid for sid in [LEDE, *old] if sid in mine and sid in texts and mine[sid] != texts[sid]]
+    missed += [old[sid]["title"] for sid in old if sid in mine and sid not in texts]
+    applied, filed = 0, []
+
+    def change(doc) -> None:
+        nonlocal applied
+        present = doc.sections()
+        for sid in todo:
+            if sid not in present:
+                missed.append("the overview" if sid == LEDE else old[sid]["title"])
+                continue
+            result = plan_rebase.rebase(texts[sid], mine[sid], present[sid])
+            if len(result.text) > MAX_SECTION:
+                raise ServiceError("too_big", f"a section may be at most {MAX_SECTION // 1024} KB", 400)
+            for h in sorted(result.applied, key=lambda h: h.start, reverse=True):
+                doc.replace(sid, h.start, h.end - h.start, h.text)
+            applied += len(result.applied)
+            for collision in result.collisions:
+                result = plan_rebase.apply_resolution(result, collision.id, "suggestion")
+            filed.extend((sid, s) for s in result.suggestions if s.before != s.after)
+
+    replica.supervise(c, change)
+    for sid, s in filed:
+        anchor = {"kind": "text", "section": sid, "start": s.start, "end": s.end, "quote": s.before}
+        if not s.before:
+            anchor.update(_context(replica.text(sid), s.start))
+        tid = file_thread(c, p["id"], p["rev"], "suggestion", _with_cursor(replica, anchor), SUPERVISOR,
+                          SUPERVISED, after=s.after)
+        # Unlike its other threads, this goes up to the Library (shared_docs._unsent):
+        # teammates wrote the words it would change.
+        c.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (tid,))
+    missed = list(dict.fromkeys(missed))
+    if missed:
+        note = ("The supervisor's revision also changed these, which a live draft can't hold, so they weren't "
+                f"applied: {', '.join(missed)}.")
+        file_thread(c, p["id"], p["rev"], "comment", {"kind": "section", "section": was["sections"][0]["id"]},
+                    SUPERVISOR, note[:visuals.MAX_NOTE])
+    return {"applied": applied, "suggested": len(filed), "not_applied": missed}
 
 
 # -- decisions ---------------------------------------------------------------------------
@@ -700,9 +921,9 @@ def mark_sent(c, ids: list[int], rev: int) -> None:
 # -- what the app shows -----------------------------------------------------------------
 
 
-def _thread_dto(t: dict, cur: dict, replies: list[dict]) -> dict:
+def _thread_dto(t: dict, cur: dict, replies: list[dict], replica=None) -> dict:
     out = {"id": t["id"], "kind": t["kind"], "rev": t["rev"], "author": t["author"], "text": t["body"],
-           "anchor": _where(cur, json.loads(t["anchor"])), "attachments": [f["name"] for f in
+           "anchor": _where(cur, _followed(replica, json.loads(t["anchor"]))), "attachments": [f["name"] for f in
                                                                           json.loads(t["attachments"])],
            "status": t["status"], "sent": t["sent_rev"] is not None, "at": t["created_at"],
            "question": bool(t["question"]),
@@ -734,8 +955,10 @@ def revision_dto(db: DB, plan_id: str, rev: Any) -> dict:
 
 def fields(db: DB, p: dict) -> dict:
     """The doc's part of a plan's DTO: the current revision's lede and
-    sections, its decisions with their votes, every revision, the threads."""
-    cur = revision(db, p["id"])
+    sections (the live draft's text, when it has one), its decisions with
+    their votes, every revision, the threads."""
+    replica = draft(db, p)
+    cur = current(db, p, replica)
     votes = _votes(db, p)
     decisions = []
     for d in p["decisions"]:
@@ -751,5 +974,6 @@ def fields(db: DB, p: dict) -> dict:
             replies.setdefault(r["parent_id"], []).append(r)
     return {"lede": cur["lede"], "sections": cur["sections"], "decisions": decisions,
             "revisions": [_revision_dto(r) for r in _history(db, p)],
-            "threads": [_thread_dto(t, cur, replies.get(t["id"], [])) for t in rows if t["parent_id"] is None],
+            "threads": [_thread_dto(t, cur, replies.get(t["id"], []), replica) for t in rows
+                        if t["parent_id"] is None],
             "can_edit": p["state"] == "open"}

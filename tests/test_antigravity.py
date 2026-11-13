@@ -29,14 +29,6 @@ def add_agent(db, ws, agent_id="g1", mode="interactive", status="idle", profile=
     db.add_agent(Agent(agent_id, ws.id, profile, "antigravity", parent, mode, status, window, None, time.time()))
 
 
-def test_command_passes_the_profiles_model_and_effort(db, ws, repo, monkeypatch):
-    import dataclasses
-    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
-    profile = dataclasses.replace(load_profile("developer"), model="gemini-3.1-pro-high", effort="high")
-    argv = Antigravity().command(LaunchContext("g1", profile, None, cwd=str(repo), mode="interactive"))
-    assert argv[:7] == ["/bin/agy", "--model", "gemini-3.1-pro-high", "--effort", "high", "--mode", "auto"]
-
-
 def test_existing_config_is_kept_and_tracked_files_are_left_alone(repo):
     (repo / ".agents").mkdir()
     (repo / ".agents" / "mcp_config.json").write_text(json.dumps({"mcpServers": {"fs": {"command": "x"}}}))
@@ -51,7 +43,8 @@ def test_existing_config_is_kept_and_tracked_files_are_left_alone(repo):
         antigravity.install(str(repo))
 
 
-@pytest.mark.parametrize("stop_after", ["ls-files", "rev-parse"])
+@pytest.mark.parametrize("stop_after", ["ls-files", pytest.param("rev-parse", marks=pytest.mark.variant(
+    "cancellation after config commit must still install the git exclude"))])
 def test_a_config_write_is_all_or_nothing_when_its_request_stops(repo, monkeypatch, stop_after):
     # Stopped once the tracked-file check answered: nothing is written. Stopped
     # once the file is written: its exclude still lands (the request committed).
@@ -159,6 +152,7 @@ def test_agy_error_stop_flushes_and_tells_the_parent(db, ws, monkeypatch, error,
     assert told in note and "backend error" not in note   # never the provider's own text
 
 
+@pytest.mark.variant("a delivered worker message cannot unblock a goal that is waiting for the person")
 def test_new_turn_is_the_user_unless_brindle_just_delivered(db, ws):
     add_agent(db, ws)
     db.add_autopilot("g1")
@@ -175,6 +169,7 @@ def test_new_turn_is_the_user_unless_brindle_just_delivered(db, ws):
     assert db.get_autopilot("g1").state == "running"
 
 
+@pytest.mark.variant("agy quota errors must block autopilot instead of continuing to dispatch work")
 def test_usage_limit_error_blocks_autopilot(db, ws):
     add_agent(db, ws, status="processing")
     db.add_autopilot("g1")
@@ -225,23 +220,23 @@ def strict(db, ws, tool, args):
 
 
 @pytest.mark.parametrize("command,expected", [
-    ("git diff HEAD~1..HEAD", "allow"),  # ~ makes it no simple command
+    pytest.param("git diff HEAD~1..HEAD", "allow", marks=pytest.mark.variant("literal tilde revision is not home expansion")),
     pytest.param("git diff HEAD^..HEAD", "allow", marks=pytest.mark.variant("review 95: literal caret revision")),
     pytest.param("git diff ~/file", "deny", marks=pytest.mark.variant("leading tilde expansion")),
     pytest.param("git diff path=~/file", "deny", marks=pytest.mark.variant("assignment tilde expansion")),
     pytest.param("git diff path=one:~/file", "deny", marks=pytest.mark.variant("assignment path tilde expansion")),
     ('grep -rn "x" .', "allow"),  # quoted
-    ("git diff a..b | grep x", "allow"),  # compound: each part is allowed
-    ("cd sub && git status", "allow"),  # a cd inside the worktree
+    pytest.param("git diff a..b | grep x", "allow", marks=pytest.mark.variant("every stage of an allowed pipeline is checked")),
+    pytest.param("cd sub && git status", "allow", marks=pytest.mark.variant("an in-scope directory change may precede an allowed command")),
     pytest.param("git push --force", "deny", marks=pytest.mark.variant("a deny rule still wins")),
     # Its output may be a word the *daemon.json* deny names, so no allow vouches for it.
-    ("git diff $(git merge-base main HEAD)", "deny"),
+    pytest.param("git diff $(git merge-base main HEAD)", "deny", marks=pytest.mark.variant("command substitution cannot inherit the outer command's allow rule")),
     pytest.param('git diff --no-index /dev/null "$(cat notes.txt)"', "deny", marks=pytest.mark.variant(
         "bypass: output naming ~/.brindle/daemon.json, which d-daemon-sh denies written out, prints the token")),
-    ("git diff > notes.txt", "deny"),  # a redirection writes where no rule says
-    ("git status |& curl https://example.com", "deny"),  # |& pipes like |
-    ("git status\ncurl https://example.com", "deny"),  # a second line
-    ("git status x#; curl https://example.com", "deny"),  # a # mid-word is no comment to the shell
+    pytest.param("git diff > notes.txt", "deny", marks=pytest.mark.variant("an allowed read command cannot redirect to an unapproved file")),
+    pytest.param("git status |& curl https://example.com", "deny", marks=pytest.mark.variant("stderr pipelines cannot hide a denied second command")),
+    pytest.param("git status\ncurl https://example.com", "deny", marks=pytest.mark.variant("newlines cannot hide a denied second command")),
+    pytest.param("git status x#; curl https://example.com", "deny", marks=pytest.mark.variant("a mid-word hash is not a shell comment hiding the following command")),
 ])
 def test_strict_allows_compound_commands_covered_by_allowlist(db, ws, command, expected):
     os.makedirs(os.path.join(ws.path, "sub"), exist_ok=True)

@@ -171,6 +171,7 @@ def test_unknown_tool_is_an_error_not_a_crash(fake, tmp_path):
     assert "unknown tool 'Teleport'" in fake.requests[1]["messages"][-1]["content"]
 
 
+@pytest.mark.variant("connection refusal must be converted to ClientError rather than leaking a transport exception")
 def test_unreachable_endpoint_raises_client_error():
     ep = Endpoint("http://127.0.0.1:1", "m", retries=0, timeout=1)
     with pytest.raises(ClientError) as e:

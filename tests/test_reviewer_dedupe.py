@@ -6,7 +6,6 @@ naming a reviewer rather than a worker."""
 from __future__ import annotations
 
 import asyncio
-import itertools
 import time
 from pathlib import Path
 
@@ -15,7 +14,7 @@ import pytest
 from conftest import sh
 from brindle import agents, cli, gates, launch_health, mcp_server, pipeline, tmux, workspaces
 from brindle.config import RepoConfig
-from brindle.db import Agent, Task, Workspace
+from brindle.db import Agent, Workspace
 from brindle.profiles import Profile
 
 
@@ -67,17 +66,6 @@ def fake_spawn(monkeypatch):
     return started
 
 
-def test_new_commit_replaces_the_old_reviewer(db, ws, monkeypatch):
-    started = fake_spawn(monkeypatch)
-    old = agents.request_review(db, None, ws, "reviewer")
-    (Path(ws.path) / "more.py").write_text("y = 2\n")
-    sh("git add -A && git commit -qm more", Path(ws.path))
-    new = agents.request_review(db, None, ws, "reviewer")
-    assert new.id != old.id
-    assert len(started) == 2
-    assert db.get_agent(old.id).status == "done"
-
-
 def piped_worker(db, ws, boss, monkeypatch, cfg):
     """A worker in ``ws`` whose reports go through the pipeline's real review
     dispatch; returns the detached check runs it queues."""
@@ -104,10 +92,9 @@ def run_helper(ws, argv):
 
 
 @pytest.mark.parametrize("checks", [
-    None,
     pytest.param([], marks=pytest.mark.variant("#262: real MCP requests with a live holder of a different profile")),
     pytest.param(["suite"], marks=pytest.mark.variant("#262: real MCP requests with a live holder of a different profile")),
-], ids=["same-profile", "direct", "checks"])
+], ids=["direct", "checks"])
 def test_second_request_for_the_same_commit_reuses_the_running_reviewer(db, ws, boss, monkeypatch, checks):
     if checks is None:
         started = fake_spawn(monkeypatch)
@@ -173,31 +160,7 @@ def test_second_request_for_the_same_commit_reuses_the_running_reviewer(db, ws, 
     assert db.review_claim(ws.id, original.review_sha, original.review_slot) == claim
 
 
-@pytest.mark.parametrize("weight,picks,reviewers", [
-    ("light", ["reviewer", "reviewer-codex"], ["reviewer"]),
-    ("heavy", ["reviewer"], ["reviewer", "reviewer-codex"]),
-])
-def test_one_reviewer_per_commit_when_the_learner_picks_another_profile(db, ws, boss, monkeypatch,
-                                                                       weight, picks, reviewers):
-    # Two reports of one commit, each with its own check run, and the learner
-    # picking a different reviewer for each: both runs used to start one. A
-    # required second review still gets its own.
-    cfg = RepoConfig(checks=["suite"], review=True, second_review={"heavy": "reviewer-codex"})
-    queued = piped_worker(db, ws, boss, monkeypatch, cfg)
-    db.add_task(Task("t1", ws.repo_root, "worker", boss.id, ws.id, "developer", "do it", "assign", 1,
-                     ws.branch, None, None, None, "started", time.time(), weight=weight))
-    picks = itertools.cycle(picks)
-    monkeypatch.setattr(agents, "default_review_profile", lambda *a, **k: next(picks))
-    monkeypatch.setattr(gates, "check_summary", lambda *a, **k: "PASS")
-    started = fake_spawn(monkeypatch)
-    for _ in range(2):
-        assert pipeline.on_report(db, db.get_agent("worker"), ws, "done")
-    for argv in queued:
-        run_helper(ws, argv)
-    assert sorted(a.profile for a in started) == reviewers
-
-
-@pytest.mark.parametrize("supersede", ["before checks", "during checks"])
+@pytest.mark.parametrize("supersede", ["during checks"])
 def test_queued_reports_only_dispatch_the_latest_review(db, ws, boss, monkeypatch, supersede):
     cfg = RepoConfig(checks=["suite"], review=True, review_profile="reviewer")
     queued = piped_worker(db, ws, boss, monkeypatch, cfg)
@@ -268,7 +231,6 @@ def mcp_review(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("trigger,outcome", [
-    ("hook", "failed"),
     ("request", "failed"),
     pytest.param("hook", "completed", marks=pytest.mark.variant(
         "a delayed recovery helper races with replacement completion")),

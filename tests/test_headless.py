@@ -103,6 +103,7 @@ def headless_agent(db, ws, *, status="idle", mode="assign", agent_id="h1", windo
     return a
 
 
+@pytest.mark.variant("a second headless turn must resume the first session instead of allocating a new one")
 def test_runner_starts_a_session_then_resumes_it(db, ws, claude_turns, monkeypatch):
     headless_agent(db, ws, status="processing")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "h1")
@@ -147,6 +148,7 @@ def test_runner_stops_when_claude_fails(db, ws, claude_turns, monkeypatch, capfd
         assert "exited with code 3" in capfd.readouterr().out
 
 
+@pytest.mark.variant("idle and busy headless workers must receive queued messages without pane typing")
 def test_messages_to_a_headless_worker_go_through_its_inbox(db, ws, monkeypatch):
     headless_agent(db, ws, status="idle")
     monkeypatch.setattr(agents, "is_alive", lambda a: True)

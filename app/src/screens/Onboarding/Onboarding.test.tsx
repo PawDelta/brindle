@@ -1,10 +1,9 @@
+import { connectDaemon, renderApp, trackedSync as startSync } from "../../test/harness";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
 import { createAppStore } from "../../store/store";
-import { startSync, type Sync } from "../../store/sync";
 import { DaemonClient } from "../../api/client";
-import { PtyViewsProvider } from "../../api/ptyView";
 import { BASE_URL, FakeDaemon, TOKEN, flush, freshProviders } from "../../test/fakeDaemon";
 import { ONBOARDED_KEY } from "../../api/providers";
 import { DaemonContext } from "../../api/context";
@@ -18,27 +17,17 @@ const PROJECT = "/home/u/Projects/proj";
 const SIGNED_IN = { signed_in: true, name: "sam@example.com", plan: "pro" };
 const SIGNED_OUT = { signed_in: false };
 
-let syncs: Sync[] = [];
 beforeEach(() => localStorage.clear());
 afterEach(() => {
-  for (const s of syncs) s.stop();
-  syncs = [];
   cleanup();
 });
 
 function launch(daemon: FakeDaemon, extra: { pickFolder?: (title: string) => Promise<string | null> } = {}) {
-  const store = createAppStore();
-  const client = daemon.client();
-  const sync = startSync({ client, store, connect: daemon.connect });
-  syncs.push(sync);
+  const { client, store, sync } = connectDaemon(daemon);
   const openUrl = vi.fn(() => Promise.resolve());
   const pickFolder = extra.pickFolder ?? vi.fn(() => Promise.resolve(PROJECT));
   // The panes (a sign-in's CLI) through the fake daemon's pty views, as the shell's show them.
-  render(
-    <PtyViewsProvider value={daemon.ptyViews()}>
-      <App store={store} client={client} refresh={sync.refresh} openUrl={openUrl} pickFolder={pickFolder} />
-    </PtyViewsProvider>,
-  );
+  renderApp(<App store={store} client={client} refresh={sync.refresh} openUrl={openUrl} pickFolder={pickFolder} />, daemon.ptyViews());
   return { openUrl, pickFolder };
 }
 
@@ -345,12 +334,7 @@ describe("Onboarding", () => {
       },
     });
     const sync = startSync({ client, store, connect: daemon.connect });
-    syncs.push(sync);
-    render(
-      <PtyViewsProvider value={daemon.ptyViews()}>
-        <App store={store} client={client} refresh={sync.refresh} />
-      </PtyViewsProvider>,
-    );
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />, daemon.ptyViews());
   }
   const refusal = (status: number, code: string, message: string) => new Response(JSON.stringify({ error: { code, message } }), { status, headers: { "Content-Type": "application/json" } });
 
@@ -408,12 +392,7 @@ describe("Onboarding", () => {
       fetch: (input, init) => (refuse && String(input).includes("/v1/account/login") ? Promise.resolve(refusal(502, "upstream", "pawdelta.com didn't answer")) : daemon.fetch(input, init)),
     });
     const sync = startSync({ client, store, connect: daemon.connect });
-    syncs.push(sync);
-    render(
-      <PtyViewsProvider value={daemon.ptyViews()}>
-        <App store={store} client={client} refresh={sync.refresh} openUrl={vi.fn(() => Promise.resolve())} />
-      </PtyViewsProvider>,
-    );
+    renderApp(<App store={store} client={client} refresh={sync.refresh} openUrl={vi.fn(() => Promise.resolve())} />, daemon.ptyViews());
     await step("signin");
     const logins = () => posts(daemon).filter((p) => p === "/account/login").length;
     // An account is required: no way past the step but signing in, and the screen says it's free.
@@ -460,12 +439,7 @@ describe("Onboarding", () => {
       fetch: (input, init) => (holding(String(input)) ? new Promise((ok) => held.push(() => ok(daemon.fetch(input, init)))) : daemon.fetch(input, init)),
     });
     const sync = startSync({ client, store, connect: daemon.connect });
-    syncs.push(sync);
-    render(
-      <PtyViewsProvider value={daemon.ptyViews()}>
-        <App store={store} client={client} refresh={sync.refresh} openUrl={vi.fn(() => Promise.resolve())} />
-      </PtyViewsProvider>,
-    );
+    renderApp(<App store={store} client={client} refresh={sync.refresh} openUrl={vi.fn(() => Promise.resolve())} />, daemon.ptyViews());
     await step("connect");
     fireEvent.click(screen.getByRole("button", { name: "Continue with Claude Code" }));
     fireEvent.click(await screen.findByRole("button", { name: "Continue" }));

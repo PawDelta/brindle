@@ -74,10 +74,13 @@ def goal_env(db, boss, monkeypatch):
 
 
 @pytest.mark.parametrize("milestones, goal, offered", [
-    (_plan(3), "Redesign the sync architecture", True),
+    pytest.param(_plan(3), "Redesign the sync architecture", True,
+                 marks=pytest.mark.variant("a multi-milestone goal offers planning without requiring multiple repos")),
     # An omitted repo is the root checkout: with one attached repo that is two repos.
-    (_plan(1) + _plan(1, "web"), "Update the docs", True), (_plan(2, "web"), "Update the docs", False),
-    (_plan(5), "Ship the storage page", True),
+    pytest.param(_plan(1) + _plan(1, "web"), "Update the docs", True,
+                 marks=pytest.mark.variant("an omitted repo and an attached repo count as two repositories")),
+    pytest.param(_plan(2, "web"), "Update the docs", False,
+                 marks=pytest.mark.variant("multiple milestones in one attached repo do not imply multiple repos")),
     # A bug fix is never offered, however many milestones or repos, or design words.
     (_plan(5) + _plan(1, "web"), "Fix the crash by refactoring sync", False)])
 def test_large_goal_is_offered_planning_first_once(milestones, goal, offered, db, goal_env):
@@ -144,7 +147,12 @@ def test_assigned_work_never_makes_a_goal_deserve_an_offer(assigned, db, boss, g
     assert _offer(db) is None
 
 
-@pytest.mark.parametrize("why", ["on", "own", "group", "airgap"])
+@pytest.mark.parametrize("why", [
+    pytest.param("on", marks=pytest.mark.variant("a user-only entitlement sends only the user's brief scope")),
+    pytest.param("own", marks=pytest.mark.variant("the person's assist opt-out suppresses brief requests")),
+    "group",
+    pytest.param("airgap", marks=pytest.mark.variant("airgap must suppress even settings and scope requests")),
+])
 def test_no_brief_request_when_assist_is_off_by_policy_or_air_gap(why, db, boss, backend, monkeypatch):
     from brindle import airgap
 

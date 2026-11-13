@@ -32,6 +32,7 @@ def helper_cfg(value=ORG_KEY):
 # -- the policy ---------------------------------------------------------------------------------
 
 
+@pytest.mark.variant("bypass: managed organization keys cannot name personal credential variables")
 def test_the_policy_rejects_a_key_env_naming_a_personal_key():
     with pytest.raises(PolicyUnavailable, match="personal"):
         parse_policy(ORG, {"version": 1, "policy": {**POLICY, "provider_config": anthropic(key_env="CODEX_API_KEY")}})
@@ -110,6 +111,7 @@ def test_the_policy_rejects_a_key_env_naming_a_brindle_secret():
         parse_policy(ORG, {"version": 1, "policy": {**POLICY, "provider_config": anthropic(key_env="GITHUB_TOKEN")}})
 
 
+@pytest.mark.variant("injection: shell metacharacters in key-helper arguments must remain literal arguments")
 def test_the_helper_runs_without_a_shell(monkeypatch, tmp_path):
     marker = tmp_path / "pwned"
     cfg = ProviderConfig("anthropic", key_helper=(sys.executable, "-c", "print('k')", f"; touch {marker}"))
@@ -117,6 +119,7 @@ def test_the_helper_runs_without_a_shell(monkeypatch, tmp_path):
     assert not marker.exists()
 
 
+@pytest.mark.variant("security: organization key exemptions must be cleared after launch")
 def test_the_org_key_is_not_kept_after_the_launch(db, repo, monkeypatch, brindle_home):
     pane_script(db, repo, monkeypatch, brindle_home, "developer", m=managed(helper_cfg()))
     assert secrets.org_key_exempt({"ANTHROPIC_API_KEY": ORG_KEY}) == {}

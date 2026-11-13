@@ -184,7 +184,9 @@ def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions
         git.run(["update-ref", "refs/remotes/upstream/review", "HEAD~1"], s2)
 
 
-@pytest.mark.parametrize("newer_schema", [False, True], ids=["older", "newer"])
+@pytest.mark.parametrize("newer_schema", [pytest.param(False, marks=pytest.mark.variant(
+    "a legacy agents table must migrate without losing rows and remain writable after reopening")), True],
+    ids=["older", "newer"])
 def test_old_databases_are_migrated(tmp_path, newer_schema):
     path = tmp_path / "old.db"
     con = sqlite3.connect(path)

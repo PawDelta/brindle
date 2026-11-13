@@ -51,7 +51,8 @@ def test_mcp_transfer_keeps_the_caller_until_the_repo_session_starts(db, repo, m
     assert live == ["scratchsup"]
 
 
-@pytest.mark.parametrize("repo_session", [pytest.param("reposup", id="concurrent_sessions")])
+@pytest.mark.parametrize("repo_session", [pytest.param("reposup", id="concurrent_sessions",
+    marks=pytest.mark.variant("A CLI transfer must pause the scratch supervisor while preserving the already-running repo supervisor"))])
 def test_starting_in_the_repo_pauses_the_scratch_chat_of_a_cli_transfer(db, repo, moved, live, repo_session):
     scratch.transfer(db, moved, str(repo), keep_running="scratchsup")   # as the MCP tool does
     ws = workspaces.adopt_root(db, str(repo))

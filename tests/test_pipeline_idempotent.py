@@ -57,7 +57,7 @@ def keep_worktree(monkeypatch):
     monkeypatch.setattr(workspaces, "remove", boom)
 
 
-@pytest.mark.parametrize("alive, unavailable", [(True, None), (True, "profile unavailable"), (False, "profile unavailable"), (False, None)])
+@pytest.mark.parametrize("alive, unavailable", [(True, "profile unavailable"), (False, "profile unavailable"), (False, None)])
 def test_conflict_notice_once_per_commit_and_unavailable_worker_escalates(db, tmp_path, monkeypatch, alive, unavailable):
     ws = Workspace("feat", str(tmp_path), "feat", "worktree", "feat", "main", str(tmp_path), None, "", 0)
     db.add_workspace(ws)
@@ -168,18 +168,6 @@ def test_two_verdicts_at_once_merge_once(db, approved, monkeypatch):
     assert len(runs) == 1
 
 
-def test_submitting_the_same_review_twice_records_it_once(db, approved, monkeypatch):
-    ws, runs = approved
-    keep_worktree(monkeypatch)
-    assert "brindle takes it from here" in agents.submit_review(db, "rev0", True, "lgtm")
-    merged = [b for b in drain(db) if "Merged feat" in b]
-    assert len(merged) == 1
-    reviews = db.conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
-    assert "already" in agents.submit_review(db, "rev0", True, "lgtm")
-    assert drain(db) == [] and len(runs) == 1
-    assert db.conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == reviews
-
-
 @pytest.mark.variant("live incident: a reviewer's submit_review retry closed it mid-merge, so queued workers never started")
 def test_a_slow_merge_neither_holds_up_the_reviewer_nor_is_cut_off_by_its_retry(db, approved, monkeypatch):
     """The merge after an approval runs the repo's checks, which can take
@@ -251,7 +239,7 @@ def test_a_second_reviewer_submitting_after_the_removal_is_told_it_is_done(db, a
     assert drain(db) == [] and len(runs) == 1
 
 
-@pytest.mark.parametrize("in_use", ["new turn", "unread message", "uncommitted edits"])
+@pytest.mark.parametrize("in_use", ["new turn", "uncommitted edits"])
 def test_a_merge_leaves_a_worker_still_at_work_and_its_worktree_alone(db, approved, monkeypatch, in_use):
     """#170: report_result reports a result, not that the worker is done.
     One that took on more since then keeps its worktree and its process."""

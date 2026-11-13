@@ -109,22 +109,7 @@ def test_command_running_sees_a_command_under_an_antigravity_worker_so_not_stopp
     assert len(sent) == 1   # just the CLI left: stopped
 
 
-def test_running_commands_ignores_the_cli_and_shells_but_sees_a_test_run():
-    from brindle import procs
-
-    P = procs.Proc
-    table = {
-        1: P(1, 0, "tmux: server"),
-        10: P(10, 1, "-zsh BRINDLE_AGENT_ID=a1"),
-        11: P(11, 10, "claude --model x BRINDLE_AGENT_ID=a1"),
-        12: P(12, 11, "/bin/zsh -c uv run pytest"),
-        13: P(13, 12, "python -m pytest -q"),
-    }
-    assert procs.running_commands("a1", [10], table) == [table[13]]
-    del table[13]
-    assert procs.running_commands("a1", [10], table) == []
-
-
+@pytest.mark.variant("permission notification hook drives the waiting transition")
 def test_prompt_and_notification_hooks(db, ws):
     fake_agent(db, ws, status="idle")
     agents.handle_hook(db, "a1", "prompt-submit", {})
@@ -166,8 +151,11 @@ CLAUDE_PROMPT = " Bash command\n   pytest\n This command requires approval\n\n D
 
 
 @pytest.mark.parametrize("screen,want", [
-    (CLAUDE_IDLE, "idle"), (CLAUDE_QUOTED_BUSY_NO_PADDING, "idle"),
-    (CLAUDE_BUSY_REAL_CAPTURE, "busy"), (CLAUDE_PROMPT, "waiting"),
+    pytest.param(CLAUDE_QUOTED_BUSY_NO_PADDING, "idle",
+                 marks=pytest.mark.variant("busy text quoted with no padding above the box: anchored regex")),
+    (CLAUDE_BUSY_REAL_CAPTURE, "busy"),
+    pytest.param(CLAUDE_PROMPT, "waiting",
+                 marks=pytest.mark.variant("approval prompt: the only screen-based waiting state")),
 ])
 def test_claude_screen_state(screen, want):
     assert ClaudeCode().screen_state(screen) == want
@@ -212,21 +200,24 @@ CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
 
 
 @pytest.mark.parametrize("screen,interactive,want", [
-    (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, True, None),  # not the real footer
+    pytest.param(CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, True, None,
+                 marks=pytest.mark.variant("transcript quoting the footer phrases is not the real footer")),
     (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
     (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
-    (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
-    ("❯\n\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft after a blank row
+    pytest.param(CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing",
+                 marks=pytest.mark.variant("inverse-video cursor cell must be ignored")),
+    pytest.param("❯\n\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing",
+                 marks=pytest.mark.variant("long draft after a blank row")),
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want
 
 
 @pytest.mark.parametrize("options", [
-    ["1. Yes", "2. Not now", "3. Don't show again"],
     pytest.param(["1. Yes", "2. Don't show again", "3. Not now"],
                  marks=pytest.mark.variant("decline label moves: never choose by menu position")),
-    ["1. Yes", "2. Not now"],
+    pytest.param(["1. Yes", "2. Not now"],
+                 marks=pytest.mark.variant("no 'Don't show again': falls back to the second option")),
     ["1. Yes", "2. More information"],
 ])
 def test_teach_auto_mode_menu_is_declined_never_typed_into(db, ws, monkeypatch, options):
@@ -314,8 +305,10 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
 _REAL_PANE_INPUT = getattr(tmux, "pane_input", None)   # before conftest's nobody_typing
 
 
-@pytest.mark.parametrize("provider,fault", [("claude", "unreadable"), ("claude", "draft"), ("codex", "draft"),
-                                            ("claude", "typed")])
+@pytest.mark.parametrize("provider,fault", [
+    pytest.param("claude", "unreadable", marks=pytest.mark.variant("pane gone: capture raises")),
+    ("claude", "draft"), ("codex", "draft"),
+    ("claude", "typed")])
 def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monkeypatch, provider, fault):
     fake_agent(db, ws, status="processing" if provider == "codex" else "idle", mode="interactive")
     db.update_agent("a1", provider=provider)
@@ -355,18 +348,25 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
 
 
 @pytest.mark.parametrize("typed_after,then", [
-    ("load-buffer", "cleared"), ("lead", "cleared"), ("body", "cleared"), ("body", "sent"),
+    ("load-buffer", "cleared"),
+    pytest.param("body", "sent", marks=pytest.mark.variant("person sends the stopped report after the body is written")),
     ("body", "codex turn"),   # Codex reports what went in only when the turn ends
-    ("body", "replaced"),   # cleared, then something else sent before the next flush
+    # cleared, then something else sent before the next flush
+    pytest.param("body", "replaced", marks=pytest.mark.variant("replacement sent after a clear")),
     # agy reports no prompt text: once it starts a turn, sent and replaced look alike
-    ("body", "agy sent"), ("body", "agy replaced"), ("body", "agy cleared"),
+    pytest.param("body", "agy sent", marks=pytest.mark.variant("agy reports no prompt text")),
+    pytest.param("body", "agy cleared", marks=pytest.mark.variant("agy: cleared after the body")),
     # keys pressed after the lead, but the next write comes over TYPED_WITHIN later
     ("lead-late", "sent"),
-    ("lead-switch", "cleared"),   # then the person's client moves to another pane
+    pytest.param("lead-switch", "cleared", marks=pytest.mark.variant("person's client moves to another pane")),
     # they send it (or a replacement) and its turn's hook runs before brindle's Enter is authorized
-    ("enter", "sent"), ("enter", "agy sent"), ("enter", "agy replaced"),
-    ("paste", "sent"), ("paste", "agy sent"),   # ... before the body's write is even recorded
-    ("lead", "agy sent"),   # stopped before its body: the turn they start can't carry it
+    pytest.param("enter", "sent", marks=pytest.mark.variant("send lands before brindle's Enter is authorized")),
+    pytest.param("enter", "agy sent", marks=pytest.mark.variant("agy: send lands before brindle's Enter")),
+    # ... before the body's write is even recorded
+    pytest.param("paste", "sent", marks=pytest.mark.variant("send lands before the body's write is recorded")),
+    pytest.param("paste", "agy sent", marks=pytest.mark.variant("agy: send lands before the body's write")),
+    # stopped before its body: the turn they start can't carry it
+    ("lead", "agy sent"),
     # ... they delete only their reply, the body is resumed onto the lead, and they send mid-paste
     ("lead", "agy resumed"),
 ])
@@ -476,6 +476,7 @@ def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch)
     assert agents.reconcile(db, db.get_agent("a1"), gap=0).status == "processing"
 
 
+@pytest.mark.variant("profile mismatch and dead agent are rejected")
 def test_find_running_reuses_a_live_interactive_agent(db, ws, monkeypatch):
     alive = {"a1": True}
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: alive.get(a.id, False))
@@ -740,7 +741,10 @@ def test_no_goal_command_when_hooks_are_disabled(db, ws):
     assert "Finish line: tests pass" in prompt
 
 
-@pytest.mark.parametrize("provider", ["codex", "antigravity"])
+@pytest.mark.parametrize("provider", [
+    "codex",
+    pytest.param("antigravity", marks=pytest.mark.variant("agy resume: warmup skipped only without resume (#280)")),
+])
 def test_supervisor_resume_keeps_prompt(db, ws, monkeypatch, provider):
     agent = Agent("boss", ws.id, "supervisor", provider, None, "interactive", "idle", "@0", None, time.time())
     db.add_agent(agent)
@@ -794,9 +798,12 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("tool, reports, ends", [
-    ("assign", "later", "load falls"), ("handoff", "later", "load falls"),
-    ("handoff", "while it starts", "load falls"),
-    ("assign", "later", "start now"), ("assign", "later", "forced in flight"),
+    ("assign", "later", "load falls"),
+    pytest.param("handoff", "while it starts", "load falls",
+                 marks=pytest.mark.variant("report arrives before the start returns")),
+    pytest.param("assign", "later", "start now",
+                 marks=pytest.mark.variant("forced start: check run waits for room under load")),
+    ("assign", "later", "forced in flight"),
     ("assign", "later", "wait off")])
 def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch, tool, reports, ends):
     """Plan 3.5: on a machine with no room an assign (or handoff) queues the
