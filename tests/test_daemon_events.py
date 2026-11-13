@@ -119,8 +119,14 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     started, lock = [], threading.Lock()
     # Only the merged-PR polling is under test: the checks refresh has its own pool.
     monkeypatch.setattr(review, "refresh_pr_states", lambda db: None)
-    # Wait for both reads to start rather than for a 50ms deadline a loaded host can miss.
-    monkeypatch.setattr(review, "wait", lambda pending, **_: both.wait(1))
+    # Nor do the git sweeps (they touch the fake /repo, and their spawn.read calls would count as gh reads).
+    monkeypatch.setattr(review.session_sync, "refresh_drift_flags", lambda *a, **kw: None)
+    monkeypatch.setattr(review.session_sync, "refresh_idle_sessions", lambda *a, **kw: None)
+    # Module-level state of earlier rows must not decide whether a read is submitted.
+    monkeypatch.setattr(review, "_merge_checks", {})
+    monkeypatch.setattr(review, "_merge_order", {})
+    # Wait for both reads to start (events, with a generous bound only to fail instead of hang).
+    monkeypatch.setattr(review, "wait", lambda pending, **_: both.wait(30))
     def slow(*args, **kwargs):
         assert spawn.current() is not None
         with lock:
@@ -144,14 +150,14 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     worker = threading.Thread(target=sweep)
     worker.start()
     try:
-        assert both.wait(1)
-        assert finished.wait(1)
+        assert both.wait(30)
+        assert finished.wait(30)
         monkeypatch.setattr(review, "_merge_polled", 0)
         review.ReadinessWatch().sweep(db)
         assert len(started) == 2
     finally:
         release.set()
-        worker.join(1)
+        worker.join(30)
 
 
 @pytest.mark.variant("a race from a real incident: the pool thread read gh with no slot (main CI run 42855607818)")
