@@ -34,6 +34,7 @@ import { Diagram } from "./DocDiagram";
 import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
 import type { LiveClient } from "./DocEditor";
+import { DocPresence } from "./DocPresence";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
@@ -250,7 +251,7 @@ export interface Teammate {
   directory: LibraryPerson[];
 }
 
-export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
+export function DesignDoc({ source, author, teammate, plan, mode, writes, liveClient }: {
   source: DocSource;
   /* The doc's author, on this machine: sharing, the verdict and the build. */
   author?: { client: Client; visual: VisualDTO };
@@ -258,6 +259,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
   plan: Plan;
   mode: Mode;
   writes: Writes;
+  liveClient?: LiveClient;
 }) {
   const client = author?.client;
   const visual = author?.visual;
@@ -577,11 +579,12 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
   );
   // A doc in team review, in Editing mode, is edited live with everyone writing in it: its text
   // is the daemon's live document (DocEditor), each change going out as it is typed.
-  const live = mode === "editing" && shared && client?.visualLive ? (client as LiveClient) : null;
+  const docLive = liveClient ?? (shared && client?.visualLive ? (client as LiveClient) : null);
+  const live = mode === "editing" ? docLive : null;
   const textBody = (section: string, title: string) => editing?.section === section && live ? (
     <div className="grid gap-2 font-sans" data-testid="plan-live-box">
       <Suspense fallback={<p className="text-xs text-ink-3" role="status">Opening the live text…</p>}>
-        <DocEditor client={live} visual={plan.id} section={section} name={me ? nameOf(me) : "Author"} label={`Text of ${title}`} />
+        <DocEditor client={live} visual={plan.id} section={section} name={me ? nameOf(me) : "Author"} label={`Text of ${title}`} isAuthor={!!author} />
       </Suspense>
       <div className="flex items-center gap-1.5">
         <button type="button" className={`${quiet} text-xs`} onClick={() => setEditing(null)}>Done</button>
@@ -640,6 +643,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
           <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">{plan.title}</h1>
+              {docLive && <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={teammate ? "" : me ? nameOf(me) : "Author"} />}
               <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
                 <dt className="text-ink-3">Status</dt>
                 <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state} data-held={policyHeld ? "policy" : undefined}>

@@ -9,7 +9,7 @@
    has exited. */
 
 import { EphemeralStore, LoroDoc } from "loro-crdt";
-import { DaemonClient, fromBase64, toBase64, type GithubConnection } from "../api/client";
+import { DaemonClient, fromBase64, toBase64, type GithubConnection, type LiveDocState } from "../api/client";
 import type { BusEvent, StreamMessage, WebSocketLike } from "../api/events";
 import { WS_UNAUTHORIZED } from "../api/events";
 import type { PtyStatus, PtyViewHandlers, PtyViewOpener, PtyViews, PtyViewTarget } from "../api/ptyView";
@@ -617,6 +617,7 @@ export class FakeSocket implements WebSocketLike {
    then its update and awareness frames, which the daemon keeps and relays to the visual's other
    clients (FakeDaemon.joinLive, relayLive). */
 export class FakeLiveSocket implements WebSocketLike {
+  readonly writers = new Set<string>();
   onopen: WebSocketLike["onopen"] = null;
   onmessage: WebSocketLike["onmessage"] = null;
   onclose: WebSocketLike["onclose"] = null;
@@ -803,7 +804,7 @@ export class FakeDaemon {
   readonly viewed: string[] = [];
   readonly sockets: FakeSocket[] = [];
   /* Each visual's live text (seedLive), and the clients on it. */
-  private readonly live = new Map<string, { doc: LoroDoc; presence: Map<string, EphemeralStore> }>();
+  private readonly live = new Map<string, { doc: LoroDoc; presence: Map<string, EphemeralStore>; state: LiveDocState; writers: Set<string>; nextVersion: number; canFreeze: boolean }>();
   readonly liveSockets: FakeLiveSocket[] = [];
   private nextId = 1;
   private nextSession = 1;
@@ -2454,11 +2455,11 @@ export class FakeDaemon {
 
   /* A visual's live text, seeded with each section's text as the daemon seeds it from the doc's
      current revision (DaemonClient.visualLive). */
-  seedLive(visual: string, sections: Record<string, string>): LoroDoc {
+  seedLive(visual: string, sections: Record<string, string>, options: { author?: string; canFreeze?: boolean } = {}): LoroDoc {
     const doc = new LoroDoc();
     for (const [section, text] of Object.entries(sections)) doc.getText(section).insert(0, text);
     doc.commit();
-    this.live.set(visual, { doc, presence: new Map() });
+    this.live.set(visual, { doc, presence: new Map(), state: { author: options.author ?? "Author", lock: null, version: null }, writers: new Set(), nextVersion: 1, canFreeze: options.canFreeze ?? true });
     return doc;
   }
 
@@ -2472,6 +2473,17 @@ export class FakeDaemon {
     return (this.live.get(visual)?.presence.get(section)?.getAllStates() ?? {}) as Record<string, unknown>;
   }
 
+  /* The fake's authenticated account is the author unless seedLive says otherwise. */
+  setLiveState(visual: string, state: Partial<LiveDocState>): void {
+    const live = this.live.get(visual)!;
+    live.state = { ...live.state, ...state };
+    for (const s of this.liveSockets) if (s.authed && !s.closed && s.visual === visual) s.push({ state: live.state });
+  }
+
+  liveState(visual: string): LiveDocState {
+    return this.live.get(visual)!.state;
+  }
+
   joinLive(socket: FakeLiveSocket, frame: string): void {
     if (frame !== this.token) {
       socket.close(WS_UNAUTHORIZED);
@@ -2483,6 +2495,7 @@ export class FakeDaemon {
       return;
     }
     socket.authed = true;
+    socket.push({ state: live.state });
     socket.push({ update: toBase64(live.doc.export({ mode: "snapshot" })) });
     for (const [section, store] of live.presence) socket.push({ awareness: toBase64(store.encodeAll()), section });
   }
@@ -2490,12 +2503,31 @@ export class FakeDaemon {
   relayLive(from: FakeLiveSocket, frame: string): void {
     const live = this.live.get(from.visual);
     if (!live) return;
-    const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string };
-    if (said.update !== undefined) live.doc.import(fromBase64(said.update));
+    const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string; freeze?: boolean; reopen?: boolean };
+    if (said.freeze || said.reopen) {
+      if (!live.canFreeze) return;
+      if (said.freeze && !live.state.lock) this.setLiveState(from.visual, {
+        lock: "sign_off",
+        version: { id: live.nextVersion++, writers: [...live.writers], signOffs: [], snapshot: toBase64(live.doc.export({ mode: "snapshot" })) },
+      });
+      else if (said.reopen && live.state.lock === "sign_off") this.setLiveState(from.visual, { lock: null, version: null });
+      return;
+    }
+    if (said.update !== undefined) {
+      if (live.state.lock === "sign_off" || (live.state.lock === "author_offline" && !live.canFreeze)) return;
+      live.doc.import(fromBase64(said.update));
+      for (const name of from.writers) live.writers.add(name);
+    }
     else if (said.awareness !== undefined && said.section !== undefined) {
       const store = live.presence.get(said.section) ?? new EphemeralStore(30_000);
       live.presence.set(said.section, store);
       store.apply(fromBase64(said.awareness));
+      const sent = new EphemeralStore(30_000);
+      sent.apply(fromBase64(said.awareness));
+      for (const user of Object.values(sent.getAllStates())) {
+        if (user && typeof user === "object" && "name" in user && typeof user.name === "string") from.writers.add(user.name);
+      }
+      sent.destroy();
     } else return;
     for (const s of this.liveSockets) if (s !== from && s.authed && !s.closed && s.visual === from.visual) s.push(said);
   }

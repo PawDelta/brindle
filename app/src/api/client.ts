@@ -1324,14 +1324,21 @@ export interface DaemonConfig {
   connect?: WebSocketFactory;
 }
 
+export interface LiveDocState {
+  author: string;
+  lock: "sign_off" | "author_offline" | null;
+  version: { id: number; writers: string[]; signOffs: string[]; snapshot: string } | null;
+}
+
 /* What a shared design doc's live channel delivers (DaemonClient.visualLive). */
 export interface LiveHandlers {
   /* Loro update bytes to import: the doc as it is first (a snapshot), then each other writer's change. */
   onUpdate(bytes: Uint8Array): void;
   /* Another writer's presence in one section's text: Loro EphemeralStore bytes to apply. */
   onAwareness(section: string, bytes: Uint8Array): void;
-  /* The channel closed: 4401 a wrong token, 4404 no live text for this visual, 4409 the text is
-     locked (a version is out for sign-off), 1006 the connection dropped. */
+  onState?(state: LiveDocState): void;
+  /* The channel closed: 4401 a wrong token, 4404 no live text for this visual,
+     1006 the connection dropped. Locks arrive as state and keep the channel open. */
   onClose?(code: number): void;
 }
 
@@ -1340,6 +1347,8 @@ export interface LiveChannel {
   sendUpdate(bytes: Uint8Array): void;
   /* This writer's caret and name in `section`, as EphemeralStore.subscribeLocalUpdates hands them over. */
   sendAwareness(section: string, bytes: Uint8Array): void;
+  freeze(): void;
+  reopen(): void;
   close(): void;
 }
 
@@ -1838,10 +1847,17 @@ export class DaemonClient {
        {"awareness": base64, "section": id} for this writer's caret and name in a section
        (an EphemeralStore per section, keyed `<peer>-cm-cursor` / `<peer>-cm-user` by
        loro-codemirror).
-     - daemon → client: first {"update": base64}, the whole document (a snapshot); then every
+     - daemon → client: first state, then {"update": base64}, the whole document (a snapshot); then every
        other client's frames as they were sent, update or awareness, and on joining each
-       section's last-known awareness. A visual with no live text closes with 4404; a doc whose
-       version is out for sign-off is locked and closes with 4409.
+       section's last-known awareness. A visual with no live text closes with 4404.
+     - daemon → client: {"state": LiveDocState} on joining and whenever the lock or version
+       changes. `author` is the author's display name. `lock` is null, "sign_off" (read only
+       for everyone), or "author_offline" (read only for others; comments and suggestions
+       remain available). Locked channels stay open for reading, awareness and state changes.
+       A version contains an increasing id, credited writers, signOffs and a base64 snapshot.
+     - author → daemon: {"freeze": true} snapshots the text and credits its writers, then
+       locks it for sign-off; {"reopen": true} withdraws that version and its sign-offs.
+       The daemon authorizes these commands and rejects text updates while locked.
      Importing is idempotent, so a frame relayed twice (or echoed back) changes nothing. */
   visualLive(id: string, handlers: LiveHandlers): LiveChannel {
     const url = new URL(this.url(`/visuals/${encodeURIComponent(id)}/live`));
@@ -1863,7 +1879,7 @@ export class DaemonClient {
     };
     socket.onmessage = (ev) => {
       if (closed || typeof ev.data !== "string") return;
-      let said: { update?: string; awareness?: string; section?: string };
+      let said: { update?: string; awareness?: string; section?: string; state?: LiveDocState };
       try {
         said = JSON.parse(ev.data) as typeof said;
       } catch {
@@ -1871,6 +1887,7 @@ export class DaemonClient {
       }
       if (typeof said.update === "string") handlers.onUpdate(fromBase64(said.update));
       else if (typeof said.awareness === "string" && typeof said.section === "string") handlers.onAwareness(said.section, fromBase64(said.awareness));
+      else if (said.state) handlers.onState?.(said.state);
     };
     socket.onclose = (ev) => {
       if (closed) return;
@@ -1881,6 +1898,8 @@ export class DaemonClient {
     return {
       sendUpdate: (bytes) => send({ update: toBase64(bytes) }),
       sendAwareness: (section, bytes) => send({ awareness: toBase64(bytes), section }),
+      freeze: () => send({ freeze: true }),
+      reopen: () => send({ reopen: true }),
       close() {
         if (closed) return;
         closed = true;

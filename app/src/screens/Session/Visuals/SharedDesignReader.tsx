@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { LibraryPerson, SharedDesign } from "../../../api/client";
 import type { SharedDesignClient } from "./client";
+import type { LiveClient } from "./DocEditor";
 import { BackButton, useEscBack } from "./chrome";
 import { sharedSource } from "./docSource";
 import { DesignDoc, MODES, ModePicker, useDoc, type Mode, type Teammate } from "./PlanReader";
@@ -27,7 +28,7 @@ function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
 }
 
 export function SharedDesignReader({ client, docId, title, repo, onBack }: {
-  client: SharedDesignClient;
+  client: SharedDesignClient & Partial<LiveClient>;
   docId: string;
   /* The card's title, while the first read is out. */
   title?: string;
@@ -68,7 +69,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack }: {
         <span className="flex-1" />
         <ModePicker modes={COLUMN_MODES} current={current} allowed={allowed} onPick={setMode} />
       </header>
-      {shown && teammate ? <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} />
+      {shown && teammate ? <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} liveClient={client.visualLive ? client as LiveClient : undefined} />
         : <p className="p-s3 text-sm text-ink-3" role={error ? "alert" : undefined}>{error ?? "Loading…"}</p>}
     </div>
   );
