@@ -5,7 +5,12 @@ import pytest
 from brindle.plan_rebase import apply_resolution, rebase
 
 
-@pytest.mark.parametrize("choice", ["theirs", "mine", "merged", "suggestion"])
+@pytest.mark.parametrize("choice", [
+    pytest.param("theirs", marks=pytest.mark.variant("Keeping the remote collision must preserve independent local edits")),
+    pytest.param("mine", marks=pytest.mark.variant("Choosing the local collision must preserve independent remote edits")),
+    pytest.param("merged", marks=pytest.mark.variant("Custom replacement must resolve only the collision and preserve independent edits")),
+    pytest.param("suggestion", marks=pytest.mark.variant("Suggesting the local collision must retain remote text and anchor the proposed replacement")),
+])
 def test_overlap_is_held_while_independent_edits_apply(choice):
     base = "Title\n\nBudget: 100 credits. Keep notes.\n\nRemove this.\n\nEnd"
     local = "New title\n\nBudget: 200 credits. Keep my notes.\n\nEnd\n\nAdded"
