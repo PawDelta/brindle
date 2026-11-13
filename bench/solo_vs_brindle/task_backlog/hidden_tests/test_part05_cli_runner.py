@@ -147,6 +147,17 @@ def test_environment_is_restored(monkeypatch):
     assert "LINES" not in os.environ
 
 
+def test_terminal_width_wins_over_env_overrides(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "33")
+    monkeypatch.delenv("LINES", raising=False)
+    sizes = {"COLUMNS": "120", "LINES": "60"}
+    runner = CliRunner(terminal_width=40, env=sizes)
+    assert runner.invoke(size).output == "(40, 24)\n"
+    assert runner.invoke(size, env=sizes, terminal_width=70).output == "(70, 24)\n"
+    assert os.environ["COLUMNS"] == "33"
+    assert "LINES" not in os.environ
+
+
 @pytest.mark.parametrize("width", [0, -1, "80", 1.5, True])
 def test_invalid_width_is_rejected(width):
     with pytest.raises(ValueError):

@@ -104,6 +104,10 @@ and `"1.5ms"` is 1,500 microseconds.
 number of seconds; a negative number is invalid. Anything else (including
 `bool`) is invalid.
 
+A value too large for a `timedelta` (such as `"999999999999999999999s"` or
+`10**30`), or not a finite number (`inf`, `nan`), is invalid too: it fails
+with the same bad-parameter error, never with another exception.
+
 **Errors.** An invalid value fails like any other Click type (`BadParameter`,
 usage error exit code 2), and the message shows the value as its `repr`, for
 example `'soon'`.
@@ -259,8 +263,10 @@ With `tty=False` (the default) nothing changes from today.
 - Help pages are wrapped to `terminal_width` columns instead of the fixed 80.
   A command that sets `terminal_width` in its own `context_settings` still
   gets that width.
-- `shutil.get_terminal_size()` reports `terminal_width` columns and 24 lines.
-  The process environment is restored afterwards, as for the `env` overrides.
+- `shutil.get_terminal_size()` reports `terminal_width` columns and 24 lines,
+  even when the runner's or the call's `env` overrides set `COLUMNS` or
+  `LINES`. The process environment is restored afterwards, as for the `env`
+  overrides.
 
 `terminal_width` must be a positive `int` (not a `bool`). Any other value
 raises `ValueError`, from the constructor or from `invoke()` / `isolation()`.

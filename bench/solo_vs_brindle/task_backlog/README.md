@@ -93,10 +93,10 @@ only its own files applied.
 | Ticket | Source files | Test files (repo suite) | Lines added / removed |
 |--------|--------------|-------------------------|-----------------------|
 | 1. Hyperlinks | `src/click/termui.py`, `src/click/_compat.py` | `tests/test_utils/test_style.py` | 41 / 2 |
-| 2. Duration type | `src/click/types.py`, `src/click/__init__.py` | `tests/test_types/test_Duration.py` (new) | 193 / 0 |
+| 2. Duration type | `src/click/types.py`, `src/click/__init__.py` | `tests/test_types/test_Duration.py` (new) | 201 / 0 |
 | 3. Help lists | `src/click/formatting.py` | `tests/test_formatting.py` | 101 / 10 |
 | 4. App folders | `src/click/utils.py` | `tests/test_utils/test_get_app_dir.py` (new) | 120 / 11 |
-| 5. CliRunner terminal | `src/click/testing.py` | `tests/test_testing.py` | 110 / 5 |
+| 5. CliRunner terminal | `src/click/testing.py` | `tests/test_testing.py` | 113 / 5 |
 
 `_compat.py` holds Click's ANSI-stripping regex, which Ticket 1 needs and no
 other ticket touches. The spec tells both arms not to edit `CHANGES.md` or
@@ -110,16 +110,16 @@ Neither ticket's tests need the other's change.
 
 ## Hidden tests
 
-`hidden_tests/test_partNN_<name>.py`, one file per ticket, 87 test functions
-(155 cases with parametrization):
+`hidden_tests/test_partNN_<name>.py`, one file per ticket, 89 test functions
+(163 cases with parametrization):
 
 | Ticket | File | Tests |
 |--------|------|-------|
 | 1 | `test_part01_hyperlinks.py` | 17 |
-| 2 | `test_part02_duration.py` | 18 |
+| 2 | `test_part02_duration.py` | 19 |
 | 3 | `test_part03_help_lists.py` | 19 |
 | 4 | `test_part04_app_dirs.py` | 15 |
-| 5 | `test_part05_cli_runner.py` | 18 |
+| 5 | `test_part05_cli_runner.py` | 19 |
 
 They test behaviour through public APIs only: `click.style`, `secho`,
 `unstyle`, `echo`, `wrap_text`, `click.Duration` and `ParamType.convert`,
@@ -137,14 +137,14 @@ test files).
 
 ## Reference solution
 
-`reference.patch` solves all five tickets: all 87 hidden tests pass, and the
-repo's own suite passes with it (2,657 passed, 25 skipped), and also with
-each ticket's files applied alone. It is 942 patch lines, 565 lines added and
-28 removed over 12 files: 7 source files (393 added) and 5 test files
-(172 added, one existing test's expectation changed for Ticket 3).
+`reference.patch` solves all five tickets: all 89 hidden tests pass, and the
+repo's own suite passes with it (2,659 passed, 25 skipped), and also with
+each ticket's files applied alone. It is 953 patch lines, 576 lines added and
+28 removed over 12 files: 7 source files (399 added) and 5 test files
+(177 added, one existing test's expectation changed for Ticket 3).
 
 **Expected solo time: about an hour, not measured.** No model was run to
-build this kit. Each ticket is 23 to 145 lines of reference source (plus its
+build this kit. Each ticket is 23 to 150 lines of reference source (plus its
 tests) in one or two files, comparable to the small kit (TinyDB, 7 minutes
 solo) per ticket;
 five of them plus learning five different corners of Click, writing tests for

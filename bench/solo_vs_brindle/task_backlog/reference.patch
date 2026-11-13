@@ -238,7 +238,7 @@ index 8fe0085..5cd66a0 100644
  
  
 diff --git a/src/click/testing.py b/src/click/testing.py
-index ac9a93d..a5b0960 100644
+index ac9a93d..6f9fb31 100644
 --- a/src/click/testing.py
 +++ b/src/click/testing.py
 @@ -192,18 +192,27 @@ class _NamedTextIOWrapper(io.TextIOWrapper):
@@ -370,7 +370,7 @@ index ac9a93d..a5b0960 100644
          bytes_input = make_input_stream(input, self.charset)
          echo_input = None
  
-@@ -465,9 +516,15 @@ class CliRunner:
+@@ -465,9 +516,16 @@ class CliRunner:
          old_stdout = sys.stdout
          old_stderr = sys.stderr
          old_forced_width = formatting.FORCED_WIDTH
@@ -379,16 +379,17 @@ index ac9a93d..a5b0960 100644
  
 -        env = self.make_env(env)
 +        # shutil.get_terminal_size() reads these before asking the real
-+        # terminal, so code under test sees the emulated size.
++        # terminal, so code under test sees the emulated size. They are set
++        # last so env overrides cannot make it disagree with the help width.
 +        env = {
++            **self.make_env(env),
 +            "COLUMNS": str(terminal_width),
 +            "LINES": "24",
-+            **self.make_env(env),
 +        }
  
          stream_mixer = StreamMixer()
  
-@@ -490,6 +547,7 @@ class CliRunner:
+@@ -490,6 +548,7 @@ class CliRunner:
              encoding=self.charset,
              name="<stdout>",
              mode="w",
@@ -396,7 +397,7 @@ index ac9a93d..a5b0960 100644
          )
  
          sys.stderr = _NamedTextIOWrapper(
-@@ -498,6 +556,7 @@ class CliRunner:
+@@ -498,6 +557,7 @@ class CliRunner:
              name="<stderr>",
              mode="w",
              errors="backslashreplace",
@@ -404,7 +405,7 @@ index ac9a93d..a5b0960 100644
          )
  
          @_pause_echo(echo_input)  # type: ignore
-@@ -629,8 +688,10 @@ class CliRunner:
+@@ -629,8 +689,10 @@ class CliRunner:
          input: str | bytes | t.IO[t.Any] | None = None,
          env: cabc.Mapping[str, str | None] | None = None,
          catch_exceptions: bool | None = None,
@@ -416,7 +417,7 @@ index ac9a93d..a5b0960 100644
          **extra: t.Any,
      ) -> Result:
          """Invokes a command in an isolated environment.  The arguments are
-@@ -653,11 +714,18 @@ class CliRunner:
+@@ -653,11 +715,18 @@ class CliRunner:
          :param extra: the keyword arguments to pass to :meth:`main`.
          :param color: whether the output should contain color codes. The
                        application can still override this explicitly.
@@ -435,7 +436,7 @@ index ac9a93d..a5b0960 100644
  
          .. versionchanged:: 8.6.0
              Added the ``context_settings`` parameter.
-@@ -701,7 +769,13 @@ class CliRunner:
+@@ -701,7 +770,13 @@ class CliRunner:
              except OSError:
                  cap_out = cap_err = None
  
@@ -451,7 +452,7 @@ index ac9a93d..a5b0960 100644
              # fd so that C-level consumers like faulthandler keep working
              # while fd 1/2 are redirected to the capture tmpfile.
 diff --git a/src/click/types.py b/src/click/types.py
-index 5d11e9f..d36fca7 100644
+index 5d11e9f..2977d15 100644
 --- a/src/click/types.py
 +++ b/src/click/types.py
 @@ -4,11 +4,13 @@ import abc
@@ -468,7 +469,7 @@ index 5d11e9f..d36fca7 100644
  from gettext import gettext as _
  from gettext import ngettext
  
-@@ -878,6 +880,145 @@ class UUIDParameterType(ParamType[uuid.UUID]):
+@@ -878,6 +880,150 @@ class UUIDParameterType(ParamType[uuid.UUID]):
          return "UUID"
  
  
@@ -571,13 +572,18 @@ index 5d11e9f..d36fca7 100644
 +    def convert(
 +        self, value: t.Any, param: Parameter | None, ctx: Context | None
 +    ) -> timedelta:
-+        if isinstance(value, timedelta):
-+            result: timedelta | None = value
-+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-+            result = timedelta(seconds=value) if value >= 0 else None
-+        elif isinstance(value, str):
-+            result = self._parse(value)
-+        else:
++        result: timedelta | None = None
++
++        # A number too large for a timedelta raises OverflowError, and NaN
++        # raises ValueError: both are invalid input, not a crash.
++        try:
++            if isinstance(value, timedelta):
++                result = value
++            elif isinstance(value, (int, float)) and not isinstance(value, bool):
++                result = timedelta(seconds=value) if value >= 0 else None
++            elif isinstance(value, str):
++                result = self._parse(value)
++        except (OverflowError, ValueError):
 +            result = None
 +
 +        if result is None:
@@ -614,7 +620,7 @@ index 5d11e9f..d36fca7 100644
  class FileInfoDict(ParamTypeInfoDict):
      mode: str
      encoding: str | None
-@@ -1352,6 +1493,9 @@ def convert_type(
+@@ -1352,6 +1498,9 @@ def convert_type(
      if guessed is bool:
          return BOOL
  
@@ -758,10 +764,10 @@ index 4b0d5e2..939c5f6 100644
      @click.command()
      @click.argument("arg")
 diff --git a/tests/test_testing.py b/tests/test_testing.py
-index 95f41d2..81de71a 100644
+index 95f41d2..13d0ce8 100644
 --- a/tests/test_testing.py
 +++ b/tests/test_testing.py
-@@ -966,3 +966,34 @@ def test_capture_pytest_matrix(
+@@ -966,3 +966,36 @@ def test_capture_pytest_matrix(
      # Click output is not leaking into Pytest.
      assert "inside-stdout" not in captured.out
      assert "inside-stderr" not in captured.err
@@ -790,6 +796,8 @@ index 95f41d2..81de71a 100644
 +
 +    runner = CliRunner(terminal_width=30)
 +    assert runner.invoke(cli).output == "(30, 24)\n"
++    env = {"COLUMNS": "120", "LINES": "60"}
++    assert runner.invoke(cli, env=env).output == "(30, 24)\n"
 +    assert runner.invoke(cli, terminal_width=70).output == "(70, 24)\n"
 +    lines = runner.invoke(cli, ["--help"]).output.splitlines()
 +    assert max(map(len, lines)) <= 30
@@ -798,10 +806,10 @@ index 95f41d2..81de71a 100644
 +        CliRunner(terminal_width=0)
 diff --git a/tests/test_types/test_Duration.py b/tests/test_types/test_Duration.py
 new file mode 100644
-index 0000000..5e99230
+index 0000000..7731e54
 --- /dev/null
 +++ b/tests/test_types/test_Duration.py
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,51 @@
 +from datetime import timedelta
 +
 +import pytest
@@ -824,7 +832,10 @@ index 0000000..5e99230
 +    assert click.Duration().convert(value, None, None) == expect
 +
 +
-+@pytest.mark.parametrize("value", ["", "1 h", "30m1h", "1h1h", "-1s", True])
++@pytest.mark.parametrize(
++    "value",
++    ["", "1 h", "30m1h", "1h1h", "-1s", True, "9" * 21 + "s", float("inf")],
++)
 +def test_duration_invalid(value):
 +    with pytest.raises(click.BadParameter):
 +        click.Duration().convert(value, None, None)

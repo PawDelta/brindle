@@ -82,6 +82,9 @@ def test_bare_number_is_seconds(text, expected):
         "1h30",
         "5s5",
         "1,5h",
+        "9" * 21 + "s",
+        "1w" + "9" * 21 + "d",
+        "9" * 30,
     ],
 )
 def test_invalid_input_is_rejected(text):
@@ -113,10 +116,25 @@ def test_numbers_are_seconds(value, expected):
     assert convert(value) == expected
 
 
-@pytest.mark.parametrize("value", [True, -1, -0.5, [1], None])
+@pytest.mark.parametrize(
+    "value", [True, -1, -0.5, [1], None, 10**30, float("inf"), float("nan")]
+)
 def test_other_values_are_rejected(value):
     with pytest.raises(click.BadParameter):
         convert(value)
+
+
+def test_too_large_value_is_a_usage_error_even_with_max(runner):
+    huge = "9" * 21 + "s"
+
+    @click.command()
+    @click.option("--every", type=click.Duration(max=60))
+    def cli(every):
+        pass
+
+    result = runner.invoke(cli, ["--every", huge])
+    assert result.exit_code == 2
+    assert repr(huge) in result.output
 
 
 def test_bounds_are_inclusive():
