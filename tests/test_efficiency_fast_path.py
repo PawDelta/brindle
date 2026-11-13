@@ -15,7 +15,6 @@ from typer.testing import CliRunner
 from conftest import sh
 from fast_repo import repo, repo_template  # noqa: F401
 from brindle import agents, autopilot, cli, mcp_server, pipeline, workspaces
-from brindle.config import load_repo_config
 from test_merge_order import add, fake_spawn, quiet_removal
 
 HELPERS = ("_review-after-checks", "_finish-review", "_drain-ready")
@@ -80,7 +79,8 @@ def assign(db, repo, **kw) -> tuple[str, str]:
 
 @pytest.mark.parametrize("on", [True, False])
 def test_small_request_merges_after_one_light_review_and_the_checks(db, repo, session, detached, on):
-    checks = session(fast_path=on)
+    # On: a second review the repo asks for on light work is skipped too (one light review).
+    checks = session(fast_path=on, **({"second_review": {"light": "reviewer-codex"}} if on else {}))
     reply, worker_id = assign(db, repo, weight="light", done_when="app.py prints hello", fast_path=True)
     assert (autopilot.GOAL_REMINDER in reply) is not on   # off: the full path, which wants a goal
     ws = db.get_workspace(db.get_agent(worker_id).workspace_id)
@@ -100,14 +100,6 @@ def test_small_request_merges_after_one_light_review_and_the_checks(db, repo, se
     ap = db.get_autopilot("boss")
     assert not ap.goal and db.milestones("boss") == [] and ap.auditor_id is None
     assert autopilot.on_stop(db, db.get_agent("boss"), {}) is None   # nothing left to nudge or audit
-
-
-def test_a_fast_path_branch_gets_no_second_review(db, repo, session):
-    session(fast_path=True, second_review={"light": "reviewer-codex"})
-    _reply, worker_id = assign(db, repo, weight="light", done_when="app.py prints hello", fast_path=True)
-    worker = db.get_agent(worker_id)
-    ws = db.get_workspace(worker.workspace_id)
-    assert pipeline.second_profile(db, load_repo_config(str(repo)), worker, ws) is None
 
 
 @pytest.mark.parametrize("kw", [
