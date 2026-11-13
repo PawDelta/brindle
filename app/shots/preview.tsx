@@ -55,6 +55,7 @@ const SCENES: Record<string, Route> = {
   "new-first": { screen: "new" },
   flow: { screen: "new" },
   "new-composer": { screen: "new" },
+  "new-conflict": { screen: "new" },
   "new-codex-only": { screen: "new" },
   inbox: { screen: "inbox" },
   "session-failed": { screen: "session", root: "sup-42", repo: REPO, agent: "e9a0b6c3" },
@@ -104,6 +105,7 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+if (scene === "new-conflict") daemon.data.sessions[0].name = "Desktop polish";
 if (scene.startsWith("sidebar-foot-")) {
   const busy = scene === "sidebar-foot-busy";
   daemon.data.usage = usageScenario(busy ? "several" : "normal");
@@ -271,6 +273,7 @@ const OPENS: Record<string, string> = {
   "agents-make": 'css:button[aria-label="Medium runs on"]',
   "knowledge-record": "Record a decision",
   "new-composer": "Options ▾",
+  "new-conflict": "Start",
   "new-codex-only": "Options ▾",
   "knowledge-add": "Add folder",
   "update-downloading": 'css:[data-testid="app-update-now"]',

@@ -22,10 +22,11 @@ import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
 import { ProjectCombobox } from "../../components/ProjectCombobox";
 import { ProjectPicker } from "../../components/ProjectPicker";
-import { alert, button, card, field, h2, lede, main, mono, quiet, title } from "../../components/ui";
+import { alert, button, card, field, h2, lede, main, quiet, title } from "../../components/ui";
 import { isPaused, providerName } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
 import { WatchDemo } from "../Onboarding/Demo";
+import { ConflictChoice } from "./ConflictChoice";
 
 export interface NewSessionProps {
   client: DaemonClient;
@@ -401,7 +402,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
           <input className={`${field} w-48 font-mono`} placeholder="Branch (its own worktree)" aria-label="Branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
         </div>
       )}
-      {pending && <ConflictChoice conflict={pending.conflict} onChoose={(key, session) => start(pending.fields, { key, session })} onCancel={() => setPending(null)} />}
+      {pending && <ConflictChoice client={client} repo={repo} conflict={pending.conflict} onChoose={(key, session) => start(pending.fields, { key, session })} onCancel={() => setPending(null)} />}
       {starting && <Starting />}
       {error && (
         <p role="alert" className={alert}>
@@ -481,37 +482,5 @@ function Starting() {
     <p role="status" className="text-sm text-ink-2">
       Starting the session…{seconds >= 2 ? ` ${seconds}s` : ""}
     </p>
-  );
-}
-
-function ConflictChoice({ conflict, onChoose, onCancel }: { conflict: SessionConflict; onChoose(key: string, session: string): Promise<boolean>; onCancel(): void }) {
-  const [picked, setPicked] = useState(conflict.sessions[conflict.default]?.id ?? "");
-  const [busy, setBusy] = useState(false);
-  const choose = async (key: string) => {
-    setBusy(true);
-    await onChoose(key, picked);
-    setBusy(false);
-  };
-  return (
-    <div role="group" aria-label="Session already running" className="flex flex-col gap-s1 rounded-md border border-branch bg-branch-soft p-s2 text-sm">
-      <p className="font-medium">{conflict.message}</p>
-      {conflict.sessions.map((s) => (
-        <label key={s.id} className="flex items-center gap-s1">
-          <input type="radio" name="conflict-session" checked={picked === s.id} onChange={() => setPicked(s.id)} />
-          <span className={mono}>{s.id}</span>
-          <span className="text-ink-2">{s.name || s.goal || s.status}</span>
-        </label>
-      ))}
-      <div className="flex flex-wrap gap-s1">
-        {conflict.choices.map((c) => (
-          <button key={c.key} type="button" disabled={busy || !picked} className={button} onClick={() => choose(c.key)}>
-            {c.label[0].toUpperCase() + c.label.slice(1)}
-          </button>
-        ))}
-        <button type="button" className={quiet} onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-    </div>
   );
 }
