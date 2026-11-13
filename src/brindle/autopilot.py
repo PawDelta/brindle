@@ -872,7 +872,11 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
                 else f"{cli} isn't installed, skipped {name}")
     if p.provider in quota.PROVIDERS:
         room = quota.headroom(p.provider, cfg, repo_root)
-        if room <= 100 - cfg.usage_limit:
+        # Reserve enough allowance to finish the expected size of task. Unknown
+        # weights get the full margin; a local server has no usage allowance.
+        margin = (0 if p.provider == "native" else max(0, min(100, cfg.limit_headroom))
+                  * {"light": 0.25, "medium": 0.5}.get(weight, 1))
+        if room <= 100 - cfg.usage_limit + margin:
             label = quota.NAMES.get(p.provider, p.provider)
             if p.provider == "native":
                 return f"local model server not answering, skipped {name}"
