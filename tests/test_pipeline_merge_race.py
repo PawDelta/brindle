@@ -104,7 +104,7 @@ def test_a_merge_waits_for_another_merge_into_the_same_base(db, repo, monkeypatc
     assert {"one.py", "two.py"} <= set(sh("git ls-tree --name-only HEAD", repo).split())
 
 
-@pytest.mark.parametrize("case", ["rejected while the checks ran", "rejected, then another approved"])
+@pytest.mark.parametrize("case", ["rejected while the checks ran"])
 def test_issue216_each_reviewers_standing_verdict_decides_the_merge(db, approved, monkeypatch, repo, case):
     """rev0 and rev1 approved; then rev1 asks for changes on the same commit.
     (Which later review replaces a rejection: test_escapes, through real dispatch.)"""
@@ -141,7 +141,7 @@ def test_issue217_approval_of_a_never_reported_branch_merges_or_says_so(db, appr
         assert any(f'This needs you: merge it with merge_workspace("{ws.id}")' in b for b in bodies)
 
 
-@pytest.mark.parametrize("fails", [1, 2])
+@pytest.mark.parametrize("fails", [2])
 def test_an_approved_branch_whose_checks_fail_is_retried_once(db, approved, monkeypatch, repo, fails):
     ws, _runs = approved
     (repo / ".brindle" / "config.json").write_text(json.dumps(

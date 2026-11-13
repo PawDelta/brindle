@@ -1,3 +1,5 @@
+import pytest
+
 from brindle.events import Event
 from brindle.pro import team_events
 from brindle.pro.orgkey import OrgKey
@@ -71,6 +73,7 @@ def test_remove_event_carries_per_model_tokens_and_usd_for_that_agent_only(monke
                    "mystery-model": {"tokens": 500, "usd": 0.0}}
 
 
+@pytest.mark.variant("usage accounting: costs without transcript history retain a fallback model and can resolve an Antigravity profile model")
 def test_empty_history_with_cost_is_a_single_unknown_entry(monkeypatch, tmp_path):
     from types import SimpleNamespace
 

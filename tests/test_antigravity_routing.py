@@ -192,7 +192,8 @@ def test_provider_latency_agy_warmup_queued_before_task(db, boss, launcher_inbox
     assert launcher_inbox == []
 
 
-@pytest.mark.parametrize("tool", ["assign", "handoff"])
+@pytest.mark.parametrize("tool", ["assign", pytest.param("handoff", marks=pytest.mark.variant(
+    "a failed handoff launch must return its error and remove the unstarted worker"))])
 def test_a_failed_start_says_why(db, boss, monkeypatch, tool):
     def tracked(*a, **k):
         raise antigravity.AntigravityError(".agents/hooks.json is committed in this repo")

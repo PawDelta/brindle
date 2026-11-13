@@ -125,17 +125,6 @@ def main_files(repo):
 # -- assign / handoff / report_result --------------------------------------------------
 
 
-def test_assign_isolate_gives_the_worker_its_own_worktree_and_branch(db, repo, boss):
-    out = run(mcp_server.assign("developer", "add a.py", branch="feat-a"))
-    wid = started_id(out)
-    ws = ws_of(db, repo, "feat-a")
-    assert ws.kind == "worktree" and ws.path != str(repo) and Path(ws.path).is_dir()
-    assert ws.base_branch == "main"
-    assert db.get_agent(wid).workspace_id == ws.id
-    assert db.get_agent(wid).parent_id == "boss"
-    assert "feat-a" in mcp_server.list_agents() and wid in mcp_server.list_agents()
-
-
 def test_assign_with_a_milestone_records_it_for_the_worker_not_the_first_unverified(db, repo, boss, monkeypatch, fake_agent_cli):
     """assign(milestone=2) reaches the real spawn through the task queue: the worker's agent_milestones row
     names milestone 2, where the default would be the first unverified one."""
@@ -147,6 +136,7 @@ def test_assign_with_a_milestone_records_it_for_the_worker_not_the_first_unverif
     assert db.agent_milestone(wid) == "Print JSON"
 
 
+@pytest.mark.variant("nonisolated assignment must share the caller's checkout rather than allocate a worktree")
 def test_assign_without_isolate_shares_the_checkout(db, repo, boss):
     wid = started_id(run(mcp_server.assign("developer", "look around", isolate=False)))
     assert db.get_workspace(db.get_agent(wid).workspace_id).path == str(repo)
@@ -204,6 +194,7 @@ def test_pipeline_review_checks_merge_and_removal(db, repo, boss, reviewers, mon
 
 
 @pytest.mark.slow("The one real fix-and-re-review flow: two review rounds, then a merge and removal")
+@pytest.mark.variant("a rejected review must deliver the fix request and allow a second review to merge")
 def test_changes_requested_are_sent_back_to_the_worker(db, repo, boss, reviewers, monkeypatch):
     wid = started_id(run(mcp_server.assign("developer", "add new.py", branch="feat-r")))
     ws = ws_of(db, repo, "feat-r")

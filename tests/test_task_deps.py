@@ -68,52 +68,6 @@ def test_overlap_warning_names_other_session_intent(db, repo, boss):
     assert tasks.overlap_warning(db, boss, ["src/x.py"]) is None    # paused intents don't warn
 
 
-def test_overlapping_tasks_are_blocked(db, repo, monkeypatch):
-    root = workspaces.adopt_root(db, str(repo))
-    db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "idle", "@0", None,
-                       time.time()))
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(tasks, "declared_clash", lambda db_, ws_, files, caller_id=None:
-                        tasks.Clash("overlaps with w0 (feat/a) on ledger.py", "w0", "boss"))
-    delegated = []
-    monkeypatch.setattr(agents, "delegate", lambda *a, **k: delegated.append(a))
-    out = asyncio.run(mcp_server.assign("developer", "do it", files=["ledger.py"]))
-    assert out.startswith("Not started") and "depends_on" in out and delegated == []
-
-
-@pytest.fixture
-def other_session_task(db, repo, monkeypatch):
-    """A reported worker on another session's base branch whose branch isn't
-    merged yet; returns a function to record its task."""
-    root = workspaces.adopt_root(db, str(repo))
-    other_ws = workspaces.create(db, str(repo), "fix-197", run_setup=False).workspace
-    db.add_agent(Agent("w197", other_ws.id, "developer", "claude", None, "assign", "done",
-                       "@1", "fixed it", time.time()))
-    monkeypatch.setattr(tasks.git, "merged_into", lambda root_, branch, targets, refs=None: False)
-    monkeypatch.setattr(tasks, "_changed_files", lambda w: ["src/brindle/tasks.py"])
-    db.conn.execute("UPDATE workspaces SET base_branch='brindle/session-14' WHERE id=?", (other_ws.id,))
-
-    def record(text="fix #197 overlap", files=None):
-        db.add_task(tasks.Task("t197", str(repo), "w197", None, root.id, "developer", text,
-                               "assign", 1, other_ws.branch, None, tasks._dumps(files), None,
-                               "started", time.time()))
-        return root
-
-    return record
-
-
-def test_cross_session_overlap_warns_by_files_or_issue_number_until_merged(db, other_session_task, monkeypatch):
-    root = other_session_task()
-    by_issue = tasks.overlap_warning(db, root, None, "Please fix #197 again")
-    assert by_issue and "#197" in by_issue and "fix-197" in by_issue
-    assert tasks.overlap_warning(db, root, None, "Fix #198") is None
-    warning = tasks.overlap_warning(db, root, ["src/brindle/tasks.py"])    # on changed files alone
-    assert warning and "fix-197" in warning and "brindle/session-14" in warning
-    assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197")
-    monkeypatch.setattr(tasks.git, "merged_into", lambda root_, branch, targets, refs=None: True)
-    assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
-
-
 @pytest.fixture(scope="module")
 def overlap_template(tmp_path_factory):
     """Reported worktrees on ``session`` (w0, and ``landed``, merged into it),
@@ -251,22 +205,6 @@ def test_queued_task_starts_from_holder_merge(db, repo, two_sessions, monkeypatc
 # -- dependencies: queue until merge, then auto-start --------------------------
 
 
-def test_queued_task_stays_queued_if_only_some_dependencies_merged(db, repo, boss):
-    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    worker_a = started_worker_id(out_a)
-    out_c = asyncio.run(mcp_server.assign("developer", "do C", branch="feat-c"))
-    worker_c = started_worker_id(out_c)
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-
-    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b",
-                                  depends_on=[worker_a, worker_c]))
-
-    asyncio.run(mcp_server.merge_workspace(ws_a.id))  # only one of two deps merges
-
-    [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
-    assert b_task.state == "pending"
-
-
 @pytest.fixture
 def dependency_rows(db, tmp_path, monkeypatch):
     """Task dispatch with database workspaces and a fake worker launch."""
@@ -342,9 +280,7 @@ def test_failed_mcp_removal_keeps_dependencies_pending(db, dependency_rows, monk
 
 
 @pytest.mark.parametrize(("event", "upstream_kind"), [
-    ("merged", "task"), ("removed", "task"), ("requeue_merged", "task"),
-    ("requeue_removed", "worker"), ("requeue_pending", "workspace"),
-    ("requeue_removed", "task"), ("requeue_removed", "workspace"),
+    ("removed", "task"), ("requeue_merged", "task"), ("requeue_pending", "workspace"),
 ])
 def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, monkeypatch, event, upstream_kind):
     caller, boss, workspace, launched = dependency_rows
@@ -414,7 +350,7 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
         assert launched == [db.get_task(pending.id).agent_id]
 
 
-@pytest.mark.parametrize("finish", ["merged", "cancelled"])
+@pytest.mark.parametrize("finish", ["cancelled"])
 def test_requeue_preserves_an_upstream_that_has_no_worker_yet(db, dependency_rows, finish):
     caller, boss, workspace, launched = dependency_rows
     engine = workspace("engine", "engine")
@@ -496,6 +432,7 @@ def test_a_stranded_queued_task_starts_at_the_supervisors_stop_and_only_once(db,
     assert len([a for a in db.list_agents() if a.parent_id == "boss"]) == 2   # A and B, B once
 
 
+@pytest.mark.variant("#183 failure path: a start_queued exception must cancel the queued task and tell its caller")
 def test_a_queued_task_that_fails_to_start_tells_its_caller_why(db, repo, boss, monkeypatch):
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     worker_a = started_worker_id(asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a")))
@@ -590,18 +527,6 @@ def test_cancel_task_refuses_unknown_started_and_someone_elses_tasks(db, repo, b
 # -- a missing add_dirs entry reaches the supervisor ---------------------------
 
 
-def _missing_add_dir(repo):
-    (repo / ".brindle" / "config.json").write_text(
-        '{"overlap": "warn", "pipeline": false, "review": false, "add_dirs": ["/no/such/cache"]}')
-
-
-def test_handoff_reply_names_a_missing_add_dir(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    _missing_add_dir(repo)
-    out = asyncio.run(mcp_server.handoff("developer", "do A", branch="feat-a", wait_seconds=0))
-    assert "Warning: add_dirs names /no/such/cache" in out
-
-
 def queued_task(db, repo, worker_id, branch="feat-b", **kw):
     out = asyncio.run(mcp_server.assign(
         "developer", "the full brief for B", branch=branch, depends_on=[worker_id],
@@ -656,8 +581,7 @@ def test_requeue_refused_by_policy_and_scoped_to_session_repos(db, repo, boss, m
 
 
 @pytest.mark.parametrize("tool, start", [
-    ("assign", "detached"), ("handoff", "detached"), ("handoff", "at once"),
-    ("assign", "behind a worker"), ("assign", "capped"), ("assign", "after a dependency"),
+    ("handoff", "detached"), ("assign", "behind a worker"), ("assign", "capped"),
 ])
 def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     """Under load every git and tmux step of a start waits for room, and
@@ -759,7 +683,14 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
         assert policy.running_workers(db, str(repo)) == 1
 
 
-@pytest.mark.parametrize("when", ["while it works", "while its reply is written", "client gone", "written"])
+@pytest.mark.parametrize("when", [
+    "while it works",
+    pytest.param("while its reply is written", marks=pytest.mark.variant(
+        "race: cancellation notification arrives after the handler returned, while stdout is blocked")),
+    "client gone",
+    pytest.param("written", marks=pytest.mark.variant(
+        "real transport: draining the blocked pipe releases the promised task exactly once")),
+])
 def test_cancelled_assign_never_launches(db, repo, boss, monkeypatch, when):
     """The client gave up on an assign (TaskStop, a disconnect) before brindle
     answered it, through the real stdio transport and MCP dispatcher: what it

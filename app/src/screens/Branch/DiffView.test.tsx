@@ -1,9 +1,9 @@
+import { inTestContext, trackedSync as startSync } from "../../test/harness";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { DaemonContext } from "../../api/context";
 import { createAppStore } from "../../store/store";
-import { startSync, type Sync } from "../../store/sync";
-import { StoreContext, useAppState } from "../../store/useStore";
+import { type Sync } from "../../store/sync";
+import { useAppState } from "../../store/useStore";
 import { FakeDaemon, fakeBlob } from "../../test/fakeDaemon";
 import { worker } from "../../test/fixtures";
 import { BUSY, DiffView, EditPill, useDiff, type EditAccess } from "./DiffView";
@@ -66,11 +66,7 @@ function mount(daemon: FakeDaemon) {
   const store = createAppStore();
   sync = startSync({ client, store, connect: daemon.connect });
   render(
-    <DaemonContext.Provider value={client}>
-      <StoreContext.Provider value={store}>
-        <Harness />
-      </StoreContext.Provider>
-    </DaemonContext.Provider>,
+    inTestContext(<><Harness /></>, { client, store }, { daemon: true }),
   );
 }
 

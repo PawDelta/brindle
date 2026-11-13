@@ -7,6 +7,8 @@ import os
 import stat
 import time
 
+import pytest
+
 from typer.testing import CliRunner
 
 from brindle import agents, doctor, keystore, providers, quota, tmux, workspaces
@@ -30,6 +32,7 @@ def _managed(tmp_path, monkeypatch, content):
 
 # -- approve_api_key -----------------------------------------------------------------------------
 
+@pytest.mark.variant("security: approval files must be private and never contain the full API key")
 def test_approve_writes_only_the_last_20_chars_at_0600(tmp_path):
     path = providers.approve_api_key(KEY)
     assert path == str(_config(tmp_path).resolve())
@@ -135,6 +138,7 @@ def _launch(db, repo, monkeypatch, *profiles):
     return seen
 
 
+@pytest.mark.variant("security: managed Claude settings suppress personal keys without suppressing Codex credentials")
 def test_org_managed_settings_mean_no_claude_key_injection(db, repo, tmp_path, monkeypatch):
     keystore.set_key("ANTHROPIC_API_KEY", "sk-ant-test-stored-9999")
     keystore.set_key("OPENAI_API_KEY", "sk-test-codex-8888")
@@ -147,6 +151,7 @@ def test_org_managed_settings_mean_no_claude_key_injection(db, repo, tmp_path, m
     assert seen["x1"]["OPENAI_API_KEY"] == "sk-test-codex-8888"
 
 
+@pytest.mark.variant("security: managed Claude settings must override organization provider routing")
 def test_org_managed_settings_mean_no_provider_config_env(db, repo, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -165,6 +170,7 @@ def test_org_managed_settings_mean_no_provider_config_env(db, repo, tmp_path, mo
 
 # -- quota and cost ------------------------------------------------------------------------------
 
+@pytest.mark.variant("API key authentication must ignore subscription utilization when calculating headroom")
 def test_quota_says_pay_per_token_for_a_key(monkeypatch):
     from brindle import subscription_usage
 

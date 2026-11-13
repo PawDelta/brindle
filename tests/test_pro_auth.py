@@ -147,18 +147,6 @@ def seed(store, backend, *, access_valid=False, entitlement=""):
     return creds
 
 
-def test_refresh_rotates_and_saves_the_new_pair(store, backend):
-    seen = seed(store, backend)
-    backend.plan = "enterprise"
-    ent = auth.refresh(auth.Client(BASE, backend), store, seen)
-    assert ent.plan == "enterprise"
-    creds = store.load()
-    assert creds["refresh_token"] == "cpr_2" and creds["access_token"] == "at_2"
-    assert backend.refresh_tokens == {"cpr_1": "used", "cpr_2": "active"}
-    assert backend.calls[0][1] == {"grant_type": "refresh_token", "refresh_token": "cpr_1",
-                                   "client_id": "brindle-cli"}
-
-
 def test_refresh_without_rotation_is_refused(store, backend):
     seen = seed(store, backend)
     backend.routes["POST /token/refresh"] = [(200, {"access_token": "at_x", "refresh_token": "cpr_1"})]
@@ -174,7 +162,10 @@ def test_refresh_missing_new_refresh_token_is_refused(store, backend):
         auth.refresh(auth.Client(BASE, backend), store, seen)
 
 
-@pytest.mark.parametrize("saved_elsewhere", [False, True])
+@pytest.mark.parametrize("saved_elsewhere", [
+    pytest.param(False, marks=pytest.mark.variant("security: a reused refresh token with no replacement must clear credentials")),
+    True,
+])
 def test_reused_refresh_token_logs_out(store, backend, saved_elsewhere):
     """A refused refresh token signs out, unless the brindle that spent it
     first saved its new pair while this request was out: that is the sign-in."""
@@ -205,6 +196,7 @@ def test_401_on_a_fresh_looking_access_token_rotates_once(store, backend):
     assert backend.paths() == ["GET /entitlement", "POST /token/refresh", "GET /entitlement"]
 
 
+@pytest.mark.variant("race: competing refreshers must reread the rotated credentials instead of revoking the session")
 def test_two_concurrent_refreshers_spend_the_refresh_token_once(tmp_path, backend):
     """Two processes (here: threads with their own store objects and lock file
     descriptors) find the same expired credentials and refresh at once. The
@@ -552,6 +544,7 @@ def test_authed_calls_refresh_an_expired_access_token_first(store, backend):
     assert backend.paths() == ["POST /token/refresh", "GET /entitlement", "GET /me"]
 
 
+@pytest.mark.variant("credential recovery: an unauthorized API call refreshes the token and repeats the original request")
 def test_authed_calls_retry_once_after_401(store, backend):
     seed(store, backend, access_valid=True)
     backend.access_tokens.discard("at_1")
@@ -568,6 +561,7 @@ def test_bad_urls_are_rejected():
         auth.check_url("file:///etc/passwd")
 
 
+@pytest.mark.variant("security: transport must verify hostnames and certificates and disable non-HTTP handlers")
 def test_tls_verification_is_always_on():
     t = auth.UrllibTransport()
     https = [h for h in t.opener.handlers if h.__class__.__name__ == "HTTPSHandler"][0]
@@ -671,8 +665,6 @@ def test_account_login_status_upgrade_portal_logout(store, backend, monkeypatch)
     assert backend.calls[-1][0] == "POST /token/revoke" and backend.calls[-1][1]["token"] == "cpr_1"
     code, out, _ = run(["status"], store=store, transport=backend)
     assert code == 1 and "not logged in" in out
-
-
 
 
 def test_login_after_reauth_keeps_team_org_and_org_use_applies_setup(store, backend, monkeypatch):

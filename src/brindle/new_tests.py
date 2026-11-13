@@ -148,16 +148,20 @@ def added_tests(root: str | Path, base: str) -> list[str]:
 
 
 def review_section(root: str | Path, base: str) -> str:
-    """The reviewer's brief for the added tests, or "" when the branch adds none."""
+    """Shared test guidance and the branch's added tests for its reviewer."""
+    from brindle.agents import TEST_GUIDANCE
+
+    brief = ("\n\n" + TEST_GUIDANCE
+             + "\nA missing feature test or regression test is a blocker. An added test or row "
+               "that catches no distinct bug is also a blocker.")
     try:
         lines = added_tests(root, base)
     except git.GitError:
-        return ""
+        return brief
     if not lines:
-        return ""
-    return ("\n\nTests this branch adds (each test function and each new parametrize row):\n"
+        return brief
+    return (brief + "\n\nTests this branch adds (each test function and each new parametrize row):\n"
             + "\n".join(f"- {line}" for line in lines)
             + "\n\nFor every item above, say in your summary what bug it would catch that no other "
-              "test catches. A test or row with no answer (it repeats another, checks wording, a "
-              "constant or a mock's own arguments) is a `blocker`; one marked "
+              "test catches. A test or row with no answer is a blocker; one marked "
               "`@pytest.mark.variant(\"why\")` needs its reason to be a real input variant.")

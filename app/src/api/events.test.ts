@@ -22,36 +22,26 @@ function stream(daemon: FakeDaemon, token = daemon.token, since = 0) {
 const ids = (messages: StreamMessage[]) => messages.map((m) => (m.type === "event" ? m.id : m.type));
 
 describe("EventStream", () => {
-  it("sends the token as its first frame, never in the URL, and gets the replay above since", async () => {
+  it("reconnects after a drop, resuming from the last event it saw", async () => {
     const daemon = new FakeDaemon();
     daemon.publish("agent.status");
     daemon.publish("agent.status");
     daemon.publish("agent.result");
     const { s, messages, states } = stream(daemon, daemon.token, 1);
     await flush();
-    const [socket] = daemon.sockets;
-    expect(socket.frames).toEqual([daemon.token]);
-    expect(socket.url.toString()).not.toContain(daemon.token);
     expect(ids(messages)).toEqual([2, 3]);
-    expect(s.since).toBe(3);
     expect(states).toEqual(["connecting", "open"]);
-  });
-
-  it("reconnects after a drop, resuming from the last event it saw", async () => {
-    const daemon = new FakeDaemon();
-    const { s, messages } = stream(daemon);
-    await flush();
-    daemon.publish("agent.status");
-    await flush();
+    expect(daemon.sockets[0].frames).toEqual([daemon.token]);
+    expect(daemon.sockets[0].url.toString()).not.toContain(daemon.token);
     daemon.drop();
     daemon.publish("agent.result"); // while the app is away
     await flush();
-    expect(daemon.sockets.map((sock) => sock.since)).toEqual([0, 1]);
-    expect(ids(messages)).toEqual([1, 2]);
+    expect(daemon.sockets.map((sock) => sock.since)).toEqual([1, 3]);
+    expect(ids(messages)).toEqual([2, 3, 4]);
     daemon.publish("review.submitted");
     await flush();
-    expect(ids(messages)).toEqual([1, 2, 3]);
-    expect(s.since).toBe(3);
+    expect(ids(messages)).toEqual([2, 3, 4, 5]);
+    expect(s.since).toBe(5);
   });
 
   it("is told to resnapshot when the events it missed were pruned", async () => {

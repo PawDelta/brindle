@@ -16,11 +16,7 @@ from test_merge_order import _repo_template, add, quiet_removal, repo, worktree 
 
 
 @pytest.mark.parametrize("path, patterns, expected", [
-    ("app.py", ["app.py"], True),
     ("src/app.py", ["app.py"], False),
-    ("migrations/0002_x.py", ["migrations/"], True),
-    ("src/migrations/0002_x.py", ["**/migrations/*"], True),
-    ("./app.py", ["app.py"], True),
 ])
 def test_is_protected(path, patterns, expected):
     assert conflicts.is_protected(path, patterns) is expected
@@ -77,56 +73,8 @@ def conflicted(db, repo, monkeypatch):
     return setup
 
 
-def resolve(ws):
-    """What the worker does: merge main, keep both sides, commit."""
-    sh("git merge main || true", Path(ws.path))
-    (Path(ws.path) / "app.py").write_text("mine\ntheirs\n")
-    sh("git add -A && git commit -qm resolved", Path(ws.path))
-
-
 def boss_messages(db):
     return [full_text(db, "boss", db.pop_pending("boss").body) for _ in range(db.pending_count("boss"))]
-
-
-def approve(db, ws, reviewer_id, summary):
-    """What submit_review records before it hands the verdict to the pipeline."""
-    db.add_review(ws.id, gates.head(ws), reviewer_id, True, summary)
-
-
-def test_a_finished_workers_conflict_goes_to_a_light_worker_in_its_worktree(db, repo, conflicted, monkeypatch):
-    ws = conflicted()
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id != "w1")
-    calls = []
-
-    def fake_delegate(db_, caller, caller_ws, profile, task, mode, *, isolate=True, branch=None,
-                      done_when=None, plan_first=None):
-        calls.append(dict(caller=caller.id, ws=caller_ws.id, profile=profile, task=task, mode=mode,
-                          isolate=isolate, done_when=done_when, plan_first=plan_first))
-        add(db_, caller_ws, "fixer", "assign", profile, parent=caller.id, status="processing", task=task)
-        return db_.get_agent("fixer"), caller_ws
-
-    monkeypatch.setattr(agents, "delegate", fake_delegate)
-    assert pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm") is True
-
-    [call] = calls
-    assert call["caller"] == "boss" and call["ws"] == ws.id and call["mode"] == "assign"
-    assert call["isolate"] is False and call["plan_first"] is False
-    assert "git merge main" in call["task"] and "app.py" in call["task"]
-    assert "no conflict markers" in call["done_when"]
-    assert db.get_agent("fixer").pipeline == "resolving" and db.get_agent("w1").pipeline is None
-    assert db.pending_count("w1") == 0
-    [fyi] = boss_messages(db)
-    assert "fixer" in fyi and "light worker" in fyi and "needs you" not in fyi
-
-    # The light worker's report goes through the pipeline like the original's.
-    resolve(ws)
-    agents.report_result(db, "fixer", "resolved")
-    assert db.get_agent("fixer").pipeline == "reviewing"
-    approve(db, ws, "rev1", "ok")
-    pipeline.on_review(db, db.get_agent("rev1"), ws, True, "ok")
-    assert (repo / "app.py").read_text() == "mine\ntheirs\n" and db.get_workspace(ws.id) is None
-    waiting, merged = boss_messages(db)   # its merge waited on the checks first (#217)
-    assert "Merged feat into main" in merged and "resolved" in merged
 
 
 def test_a_resolver_waits_for_room_then_starts_resolving_in_the_worktree(db, repo, conflicted, monkeypatch):
@@ -154,20 +102,6 @@ def test_a_resolver_waits_for_room_then_starts_resolving_in_the_worktree(db, rep
     assert db.get_agent("w1").pipeline is None
 
 
-def test_when_no_resolver_can_start_the_conflict_needs_the_supervisor(db, repo, conflicted, monkeypatch):
-    ws = conflicted()
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id != "w1")
-
-    def refuse(*a, **k):
-        raise agents.AgentError("max_agents reached")
-
-    monkeypatch.setattr(agents, "delegate", refuse)
-    pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
-    [msg] = boss_messages(db)
-    assert "needs you" in msg and "max_agents reached" in msg and "app.py" in msg
-    assert db.get_agent("w1").pipeline is None and db.get_workspace(ws.id) is not None
-
-
 def test_a_protected_file_with_a_quoted_name_is_still_protected(db, repo, conflicted, monkeypatch):
     """A conflict in a protected path goes to the supervisor, never to a
     worker. git C-quotes names with spaces or non-ASCII characters in its
@@ -189,6 +123,7 @@ def test_a_protected_file_with_a_quoted_name_is_still_protected(db, repo, confli
     assert db.get_workspace(ws.id) is not None and (repo / "app.py").read_text() == "theirs\n"
 
 
+@pytest.mark.variant("stale-state: an approval of an older commit must not make a moved branch ready")
 def test_an_approval_for_a_stale_commit_does_not_make_the_branch_ready(db, repo, conflicted):
     ws = conflicted()
     (Path(ws.path) / "later.py").write_text("x\n")

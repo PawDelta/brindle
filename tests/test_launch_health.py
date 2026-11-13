@@ -144,6 +144,7 @@ def test_resume_keeps_permission_mode_with_and_without_a_saved_conversation(
     assert len(launches) == 2
 
 
+@pytest.mark.variant("regression: copied profile identity on resume")
 def test_profile_named_differently_inside_still_resumes_with_its_own_permissions(
         db, root, launches, detached):
     """A copied profile whose frontmatter `name:` wasn't changed: the agent
@@ -168,6 +169,7 @@ def test_profile_named_differently_inside_still_resumes_with_its_own_permissions
 # -- worktree pre-trust ------------------------------------------------------------
 
 
+@pytest.mark.variant("race: concurrent folder trust writes")
 def test_concurrent_trusts_all_land(tmp_path, claude_config, monkeypatch):
     """The second writer reaches the lock while the first is between its read and
     its write: only the lock keeps the first from overwriting the second's entry."""
@@ -217,6 +219,7 @@ def test_concurrent_trusts_all_land(tmp_path, claude_config, monkeypatch):
     assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
 
 
+@pytest.mark.variant("failed trust write preserves config")
 def test_trust_cleans_up_its_temp_file_when_the_write_fails(tmp_path, claude_config, monkeypatch):
     config = claude_config / ".claude.json"
     before = config.read_text()
@@ -278,6 +281,7 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     assert not any("ls-remote" in c for c in calls)     # no network probe for the default branch
 
 
+@pytest.mark.variant("#198: old tmux rejects a batch option")
 def test_tmux_batch_falls_back_to_one_by_one_when_a_command_is_rejected(monkeypatch):
     """An older tmux rejecting one option must not drop the ones after it."""
     seen = []
@@ -313,7 +317,7 @@ def screens(monkeypatch):
 
 
 @pytest.mark.parametrize("status,mode", [
-    ("waiting", "assign"),
+    pytest.param("waiting", "assign", marks=pytest.mark.variant("worker stuck at trust dialog")),
 ])
 def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens, monkeypatch, status, mode):
     """The sweep reads only a waiting worker's pane, and forwards its live
@@ -387,7 +391,8 @@ def health(db, root, monkeypatch):
 
 
 @pytest.mark.parametrize("screen,cause,refused", [
-    ("■ unexpected status 403 Forbidden: secret-token https://private", "launch_auth", "provider_403"),
+    pytest.param("■ unexpected status 403 Forbidden: secret-token https://private", "launch_auth", "provider_403",
+                 marks=pytest.mark.variant("provider 403 cooldown without secret leak")),
     ("● API Error: model use case details have not been submitted secret-token", "bedrock_use_case", None),
     ("⏺ The model claude-fable-5-1 is not available on your vertex deployment.", "launch_model", None),
 ])
@@ -618,6 +623,7 @@ def test_health_never_captures_a_reassigned_pane(db, health, monkeypatch):
     assert lh.inspect(db, a.id) is None and reports == []
 
 
+@pytest.mark.variant("race: resume during delivery capture")
 def test_delivery_capture_binds_launch_before_concurrent_resume(db, health, monkeypatch):
     lh, a, _, _, started, _ = health
     fresh = db.get_agent(a.id)  # flush/runner loads an Agent without an in-memory token
@@ -632,6 +638,7 @@ def test_delivery_capture_binds_launch_before_concurrent_resume(db, health, monk
     assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
 
 
+@pytest.mark.variant("stale token cannot bind replacement pane")
 def test_old_launch_cannot_bind_replacement_pane(db, health):
     lh, old, _, _, started, _ = health
     replacement = db.get_agent(old.id)
@@ -738,7 +745,8 @@ def test_health_capture_cannot_report_after_agent_changes(db, health, monkeypatc
 
 
 @pytest.mark.parametrize("provider,screen,cause", [
-    ("claude", "Claude Code v2.1.0\n● Example:\n  API Error: 400 The selected model\n  is not available for this account", None),
+    pytest.param("claude", "Claude Code v2.1.0\n● Example:\n  API Error: 400 The selected model\n  is not available for this account", None,
+                 marks=pytest.mark.variant("quoted provider error in example")),
 ])
 def test_wrapped_provider_blocks_require_provider_context(provider, screen, cause):
     from brindle import launch_health
@@ -746,6 +754,7 @@ def test_wrapped_provider_blocks_require_provider_context(provider, screen, caus
     assert (found.key if found else None) == cause
 
 
+@pytest.mark.variant("race: concurrent refusals and notices")
 def test_concurrent_refusals_and_notices_preserve_every_update(monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from brindle import model_access
@@ -822,9 +831,9 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
 
 
 @pytest.mark.parametrize("output,stale,draft", [
-    ("• Working (4m 15s • esc to interrupt)", False, False),
+    pytest.param("• Working (4m 15s • esc to interrupt)", False, False, marks=pytest.mark.variant("real Codex footer without notify")),
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", True, False),
-    ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, True),
+    pytest.param("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, True, marks=pytest.mark.variant("tool output below unsubmitted draft")),
     ("• Working (6m 26s • esc to interrupt)", False, "collapsed"),
 ])
 def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypatch, output, stale, draft):
@@ -913,7 +922,8 @@ def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, hea
     assert now[0] == 100.0
 
 
-@pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])
+@pytest.mark.parametrize("started,clears", [(True, True), (False, True),
+    pytest.param(False, False, marks=pytest.mark.variant("partial brief never clears"))])
 def test_partial_first_brief_is_retried_and_verified(db, health, monkeypatch, started, clears):
     from brindle import prompt_answer
     lh, a, now, _, _, reports = health

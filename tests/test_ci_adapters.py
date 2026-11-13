@@ -123,7 +123,8 @@ def test_native_profile_may_not_redirect_another_providers_key(repo):
 
 
 @pytest.mark.parametrize("base_url", [
-    "https://api.good.test@evil.test/v1",          # userinfo
+    pytest.param("https://api.good.test@evil.test/v1", marks=pytest.mark.variant(
+        "URL userinfo cannot disguise the host receiving a native API key")),
     "https://api.good.test\\@evil.test/v1",        # backslash
 ])
 @pytest.mark.brindle_ci_guard
@@ -140,6 +141,7 @@ def test_native_key_needs_a_plainly_written_url(repo, base_url):
 
 
 @pytest.mark.brindle_ci_guard
+@pytest.mark.variant("unpaired keys may reach loopback but never private, metadata or public hosts")
 def test_bare_native_key_reaches_loopback_only(repo):
     d = repo / ".brindle" / "agents"
     d.mkdir(parents=True)

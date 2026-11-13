@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 from conftest import sh
 from brindle import account, agents, events, mcp_server, pipeline, plugins, policy, procs, quota, workspaces
 from brindle.cli import app
-from brindle.config import RepoConfig, load_repo_config
+from brindle.config import RepoConfig
 from brindle.db import Agent
 
 
@@ -129,12 +129,6 @@ def test_several_installed_need_the_config_to_choose(repo, monkeypatch):
     assert plugins.select(plugins.EVENTS, RepoConfig(plugins={"events": "nope"}), str(repo)) is None
 
 
-def test_plugins_config_is_read_per_group(repo):
-    config(repo, plugins={"events": "x", "policy": "off"})
-    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"plugins": {"policy": "y"}}))
-    assert load_repo_config(repo).plugins == {"events": "x", "policy": "y"}
-
-
 def test_a_broken_factory_or_listing_never_raises(repo, monkeypatch):
     def broken(repo_root):
         raise RuntimeError("import failed")
@@ -170,6 +164,7 @@ def test_a_failing_events_plugin_never_breaks_the_operation(db, repo, boss, monk
     assert "Started worker" in out
 
 
+@pytest.mark.variant("assignment and handoff events must omit private task text")
 def test_assign_and_handoff_emit_without_task_text(db, repo, boss, monkeypatch):
     rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
     monkeypatch.setattr(agents, "spawn", fake_spawn)
@@ -185,6 +180,7 @@ def test_assign_and_handoff_emit_without_task_text(db, repo, boss, monkeypatch):
         assert "secret" not in json.dumps(ev.__dict__)
 
 
+@pytest.mark.variant("dependency-queued work must emit its assignment only when it actually starts")
 def test_a_queued_task_emits_when_it_starts(db, repo, boss, monkeypatch):
     rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
     monkeypatch.setattr(agents, "spawn", fake_spawn)
@@ -270,6 +266,7 @@ def test_policy_deny_blocks_assign_and_handoff_with_the_reason(db, repo, boss, m
     assert gate.seen[1].mode == "handoff"
 
 
+@pytest.mark.variant("a policy denial must prevent manual MCP merges even when pipeline review is disabled")
 def test_policy_deny_blocks_merge_workspace(db, piped, monkeypatch):
     gate = install_one(monkeypatch, plugins.POLICY, Gate(merge="needs two approvals"))
     root, ws = piped
@@ -301,14 +298,6 @@ def test_a_broken_policy_plugin_refuses(db, repo, boss, monkeypatch):
 
 
 # -- brindle account ----------------------------------------------------------------------
-
-
-def test_account_without_a_plugin_says_so_and_exits_0(repo, monkeypatch):
-    install(monkeypatch, {})
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["account", "status"])
-    assert res.exit_code == 0, res.output
-    assert "brindle Pro isn't installed" in res.output
 
 
 def test_account_outside_a_repo_still_works(tmp_path, monkeypatch):

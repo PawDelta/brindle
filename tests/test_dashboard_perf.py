@@ -27,7 +27,10 @@ def count_calls(monkeypatch, target, name):
     return calls
 
 
-@pytest.mark.parametrize("storage", ["packed", "missing", "cycle"])
+@pytest.mark.parametrize("storage", [
+    pytest.param("packed", marks=pytest.mark.variant("packed worktree refs must update without spawning git")),
+    pytest.param("missing", marks=pytest.mark.variant("a missing worktree ref must return no HEAD instead of stale status")),
+    "cycle"])
 def test_render_head_tracks_worktree_refs(tmp_path, monkeypatch, storage):
     private, common, work = [tmp_path / name for name in ("private", "common", "work")]
     for directory in (private, common, work):
@@ -51,21 +54,6 @@ def test_render_head_tracks_worktree_refs(tmp_path, monkeypatch, storage):
 # -- parity with the old git.status for several scenarios -------------------
 
 
-def test_status_matches_old_status_when_behind(db, repo):
-    ws = make_workspaces(db, repo, ["feature"])[0]
-
-    other = repo.parent / "other"
-    sh(f"git clone -q {repo.parent / 'origin.git'} {other}", repo.parent)
-    (other / "b.txt").write_text("b")
-    sh("git add -A && git commit -qm upstream && git push -q", other)
-    sh("git fetch -q origin main", ws.path)
-
-    old = git.status(ws.path, "main")
-    status_cache.clear()
-    new = status_cache.cached_status(ws.path, "main")
-    assert (new.ahead, new.behind) == (old.ahead, old.behind) == (0, 1)
-
-
 def test_base_ref_recomputed_when_packed_refs_change(db, repo):
     ws = make_workspaces(db, repo, ["feature"])[0]
     wt_gitdir = status_cache._worktree_gitdir(Path(ws.path))
@@ -77,6 +65,8 @@ def test_base_ref_recomputed_when_packed_refs_change(db, repo):
     sh("git add -A && git commit -qm upstream && git push -q", other)
     sh("git fetch -q origin main", ws.path)
 
+    status = status_cache.cached_status(ws.path, "main")
+    assert (status.ahead, status.behind) == (0, 1)
     first = status_cache._cached_base_ref(Path(ws.path), "main", common)
     assert first == "origin/main"
 
@@ -87,6 +77,7 @@ def test_base_ref_recomputed_when_packed_refs_change(db, repo):
     assert second == "main"
 
 
+@pytest.mark.variant("a soft reset changing only logs/HEAD must invalidate cached ahead counts")
 def test_soft_reset_is_caught_by_logs_head_in_fingerprint(db, repo):
     ws = make_workspaces(db, repo, ["feature"])[0]
     with open(os.path.join(ws.path, "f.txt"), "w") as f:

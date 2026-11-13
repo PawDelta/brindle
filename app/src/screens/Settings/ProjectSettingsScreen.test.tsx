@@ -1,13 +1,8 @@
+import { inTestContext, trackedSync as startSync } from "../../test/harness";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
-import { DaemonContext } from "../../api/context";
-import { PtyViewsProvider } from "../../api/ptyView";
-import { ProvidersProvider } from "../../store/providers";
-import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
-import { startSync } from "../../store/sync";
-import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../../test/fakeDaemon";
 import { REPO } from "../../test/fixtures";
 import { SettingsScreen } from ".";
@@ -36,17 +31,7 @@ function setup(data: Partial<DaemonData> = {}) {
   const sync = startSync({ client, store, connect: daemon.connect });
   const views = daemon.ptyViews();
   const ui = (props: { section?: "providers"; ask?: number } = {}) => (
-    <DaemonContext.Provider value={client}>
-      <StoreContext.Provider value={store}>
-        <SessionsProvider client={client}>
-          <ProvidersProvider client={client}>
-            <PtyViewsProvider value={views}>
-              <SettingsScreen client={client} repo={REPO} {...props} />
-            </PtyViewsProvider>
-          </ProvidersProvider>
-        </SessionsProvider>
-      </StoreContext.Provider>
-    </DaemonContext.Provider>
+    inTestContext(<><SettingsScreen client={client} repo={REPO} {...props} /></>, { client, store }, { daemon: true, sessions: true, providers: true, views: views })
   );
   const { rerender } = render(ui());
   return { daemon, failing, stop: () => sync.stop(), goto: (props: { section?: "providers"; ask?: number }) => rerender(ui(props)) };
@@ -56,7 +41,7 @@ const patches = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method =
 
 describe("settings repo view", () => {
   it("opens on the repo side of the switch, draws at once, then fills in the checks (asked for without the stored keys) and saves them to the repo", async () => {
-    const { daemon, stop, goto } = setup();
+    const { daemon, goto } = setup();
     // Before the config has answered: the repo view and its sections are there, each saying it is loading.
     expect(screen.getByTestId("project-settings")).toBeTruthy();
     expect(screen.getByTestId("checks-loading")).toBeTruthy();
@@ -90,12 +75,11 @@ describe("settings repo view", () => {
     // A section asked for (the sidebar's provider problem line) opens its own tab.
     goto({ section: "providers", ask: 1 });
     expect(await screen.findByTestId("providers")).toBeTruthy();
-    stop();
   });
 
   it("'Change just for me' writes a team-set value to the local file, and Clear takes it back out", async () => {
     const shared = { max_agents: 2, base_branch: "main", rules: ["Require review"] };
-    const { daemon, stop } = setup({ config: { user: { plan_first: false }, repo: shared, local: {}, keys: [] } });
+    const { daemon } = setup({ config: { user: { plan_first: false }, repo: shared, local: {}, keys: [] } });
     const status = await screen.findByTestId("status-max_agents");
     expect(status.textContent).toContain("Set by the team");
     fireEvent.click(within(status).getByRole("button", { name: "Change just for me" }));
@@ -130,12 +114,11 @@ describe("settings repo view", () => {
     await waitFor(() => expect(daemon.data.config.local).toMatchObject({ base_branch: "develop" }));
     fireEvent.click(await within(await screen.findByTestId("status-base_branch")).findByRole("button", { name: "Clear" }));
     await waitFor(() => expect(daemon.data.config.local).not.toHaveProperty("base_branch"));
-    stop();
   });
 
   it("never saves one project's checks into another while its config has not loaded", async () => {
     const OTHER = "/home/u/other";
-    const { daemon, failing, stop } = setup({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }] });
+    const { daemon, failing } = setup({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }] });
     const checks = await screen.findByRole("textbox", { name: "Checks" });
     fireEvent.change(checks, { target: { value: "npm test\nmake all" } });
     expect(screen.getByTestId("settings-save")).toBeTruthy();
@@ -151,7 +134,6 @@ describe("settings repo view", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test");
     expect(screen.queryByTestId("settings-save")).toBeNull();
-    stop();
   });
 });
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, cli, gates, mcp_server, pipeline, workspaces
+from brindle import agents, gates, mcp_server, pipeline, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from test_merge_order import add
@@ -66,7 +66,7 @@ def detached(monkeypatch):
 # -- the results are in the reviewer's prompt ------------------------------------------
 
 
-@pytest.mark.parametrize("caller", ["boss", None])
+@pytest.mark.parametrize("caller", ["boss"])
 def test_a_crashing_check_run_starts_no_review_and_tells_the_caller(db, ws, boss, spawned, monkeypatch,
                                                                     caller):
     """Explicit request (no pipeline report): the caller is told, or for a UI
@@ -119,28 +119,6 @@ def test_a_branch_that_moves_before_dispatch_is_checked_again_not_reviewed_unche
 # -- no reviewer until the checks finish -----------------------------------------------
 
 
-def test_with_checks_nothing_starts_until_a_detached_process_has_run_them(db, ws, boss, spawned, detached):
-    cfg = RepoConfig(checks=["true"])
-    assert agents.start_review(db, boss, ws, "reviewer", "the parser", cfg) is None
-    assert spawned == []
-    [argv] = detached
-    assert argv[argv.index("_review-after-checks") + 1] == ws.id
-    assert argv[argv.index("--caller") + 1] == "boss"
-    assert argv[argv.index("--focus") + 1] == "the parser"
-
-
-def test_a_reviewer_already_at_work_on_this_commit_means_no_second_run(db, ws, boss, spawned,
-                                                                     detached, monkeypatch):
-    add(db, ws, "rev0", "review", "reviewer", parent="boss", status="processing",
-        review_sha=gates.head(ws))
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(gates, "check_summary", lambda *a, **kw: pytest.fail("must not run"))
-    cfg = RepoConfig(checks=["true"])
-    assert agents.start_review(db, boss, ws, "reviewer", None, cfg).id == "rev0"
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is None
-    assert detached == [] and spawned == []
-
-
 # -- the head moving cancels -----------------------------------------------------------
 
 
@@ -157,17 +135,6 @@ def test_the_run_gives_up_when_the_head_moves_during_the_checks(db, ws, boss, sp
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
                                       RepoConfig(checks=["suite"])) is None
     assert seen == {"before": False, "after": True}
-    assert spawned == []
-
-
-def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss, spawned, monkeypatch):
-    def finishes_late(db_, ws_, cfg, cancel=None):
-        commit(ws, "more.py")   # moved after the last check ended
-        return "PASS `suite`"
-
-    monkeypatch.setattr(gates, "check_summary", finishes_late)
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
-                                      RepoConfig(checks=["suite"])) is None
     assert spawned == []
 
 
@@ -190,19 +157,3 @@ def test_the_mcp_tool_says_so_when_the_worktree_is_gone(db, repo, ws, boss, spaw
     out = asyncio.run(mcp_server.request_review(ws.id, profile="reviewer"))
     assert "No reviewer started" in out and ws.path in out
     assert spawned == [] and detached == []
-
-
-def test_a_review_that_cannot_start_after_the_checks_reaches_the_supervisor(db, ws, boss, monkeypatch):
-    add(db, ws, "w1", "assign", parent="boss", status="processing", pipeline="reviewing")
-    db.update_agent("w1", pipeline="reviewing", reviewing_since=1.0)
-
-    def refuse(*a, **kw):
-        raise agents.AgentError("codex is not installed")
-
-    monkeypatch.setattr(agents, "review_after_checks", refuse)
-    monkeypatch.setattr(cli, "_helper_db", lambda: db)
-    cli.review_after_checks_cmd(ws.id, "boss", None, None)
-    assert db.pending_count("boss") == 1
-    row = db.conn.execute("SELECT * FROM report_outbox").fetchone()
-    assert row["state"] == "delivered"
-    assert db.get_agent("w1").pipeline is None

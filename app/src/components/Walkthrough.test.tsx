@@ -1,14 +1,11 @@
+import { connectDaemon, renderApp } from "../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { STEPS, WALKTHROUGH_KEY, Walkthrough, openWalkthrough } from "./Walkthrough";
 import App from "../App";
 import { ONBOARDED_KEY } from "../api/providers";
-import { PtyViewsProvider } from "../api/ptyView";
-import { createAppStore } from "../store/store";
-import { startSync } from "../store/sync";
 import { FakeDaemon, flush } from "../test/fakeDaemon";
 import { REPO, root } from "../test/fixtures";
-import { standInViews } from "../test/panes";
 
 vi.mock("./PtyTerminal", () => import("../test/panes"));
 
@@ -28,70 +25,66 @@ it.each([true, false])("navigates every step forward and back, including newly m
     workspaces: hasSession ? [root] : [],
     sessions: hasSession ? [{ id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 1 }] : [],
   });
-  const client = daemon.client();
-  const store = createAppStore();
-  const sync = startSync({ client, store, connect: daemon.connect });
-  try {
-    render(<PtyViewsProvider value={standInViews}><App store={store} client={client} initialRoute={{ screen: "inbox" }} /></PtyViewsProvider>);
-    if (hasSession) {
-      await screen.findByRole("region", { name: "Inbox" });
-      expect(document.querySelector('[data-walkthrough="project-picker"]')).toBeNull();
-      await act(async () => {
-        await flush();
-        openWalkthrough();
-      });
-    } else {
-      // First launch starts the tour itself when setup finishes, overriding the old page.
-      fireEvent.click(await screen.findByRole("button", { name: "Skip for now" }));
-      await screen.findByTestId("walkthrough");
-    }
-    const check = async (target: string) => {
-      expect(screen.getByTestId("walkthrough").getAttribute("data-step")).toBe(target);
-      if (target === "inbox") await screen.findByRole("region", { name: "Inbox" });
-      else if (target === "profile") expect((await screen.findByRole("tab", { name: "Account" })).getAttribute("aria-selected")).toBe("true");
-      else if (target === "session-view" && hasSession) expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
-      else {
-        await screen.findByRole("form", { name: "Start a session" });
-        expect(document.querySelector('[data-walkthrough="project-picker"]')).toBeTruthy();
-      }
-      await waitFor(() => expect(screen.queryByTestId("walkthrough-highlight")).toBeTruthy());
-      if (target === "project-picker") await waitFor(() => expect(screen.getByTestId("walkthrough-highlight").style.width).toBe("48px"));
-    };
-    const press = (name: string) => fireEvent.click(within(screen.getByRole("dialog", { name: "Walkthrough" })).getByRole("button", { name }));
-    for (let i = 0; i < STEPS.length; i++) {
-      if (i === 1) {
-        fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
-        expect(document.querySelector('[data-walkthrough="project-picker"]')).toBeNull();
-      }
-      if (i > 0) press("Next");
-      await check(STEPS[i].target);
-      if (STEPS[i].target === "profile") {
-        fireEvent.click(screen.getByRole("tab", { name: "General" }));
-        const reads = daemon.requests.filter((r) => r.path === "/sessions").length;
-        await act(async () => {
-          daemon.publish("message.queued", { agent_id: "sup1" });
-          await flush();
-        });
-        expect(daemon.requests.filter((r) => r.path === "/sessions").length).toBeGreaterThan(reads);
-        expect(screen.getByRole("tab", { name: "General" }).getAttribute("aria-selected")).toBe("true");
-      }
-    }
-    for (let i = STEPS.length - 2; i >= 0; i--) {
-      press("Back");
-      await check(STEPS[i].target);
-    }
-    // Reopening on the first step must navigate again even though its index hasn't changed.
-    fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
+  const { client, store } = connectDaemon(daemon);
+  renderApp(<App store={store} client={client} initialRoute={{ screen: "inbox" }} />);
+  if (hasSession) {
     await screen.findByRole("region", { name: "Inbox" });
-    act(() => openWalkthrough());
-    await check(STEPS[0].target);
-    for (let i = 1; i < STEPS.length; i++) press("Next");
-    await check(STEPS[STEPS.length - 1].target);
-    press("Done");
-    expect(screen.queryByTestId("walkthrough")).toBeNull();
-    if (hasSession) expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-    else expect(screen.getByRole("form", { name: "Start a session" })).toBeTruthy();
-  } finally { sync.stop(); }
+    expect(document.querySelector('[data-walkthrough="project-picker"]')).toBeNull();
+    await act(async () => {
+      await flush();
+      openWalkthrough();
+    });
+  } else {
+    // First launch starts the tour itself when setup finishes, overriding the old page.
+    fireEvent.click(await screen.findByRole("button", { name: "Skip for now" }));
+    await screen.findByTestId("walkthrough");
+  }
+  const check = async (target: string) => {
+    expect(screen.getByTestId("walkthrough").getAttribute("data-step")).toBe(target);
+    if (target === "inbox") await screen.findByRole("region", { name: "Inbox" });
+    else if (target === "profile") expect((await screen.findByRole("tab", { name: "Account" })).getAttribute("aria-selected")).toBe("true");
+    else if (target === "session-view" && hasSession) expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
+    else {
+      await screen.findByRole("form", { name: "Start a session" });
+      expect(document.querySelector('[data-walkthrough="project-picker"]')).toBeTruthy();
+    }
+    await waitFor(() => expect(screen.queryByTestId("walkthrough-highlight")).toBeTruthy());
+    if (target === "project-picker") await waitFor(() => expect(screen.getByTestId("walkthrough-highlight").style.width).toBe("48px"));
+  };
+  const press = (name: string) => fireEvent.click(within(screen.getByRole("dialog", { name: "Walkthrough" })).getByRole("button", { name }));
+  for (let i = 0; i < STEPS.length; i++) {
+    if (i === 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
+      expect(document.querySelector('[data-walkthrough="project-picker"]')).toBeNull();
+    }
+    if (i > 0) press("Next");
+    await check(STEPS[i].target);
+    if (STEPS[i].target === "profile") {
+      fireEvent.click(screen.getByRole("tab", { name: "General" }));
+      const reads = daemon.requests.filter((r) => r.path === "/sessions").length;
+      await act(async () => {
+        daemon.publish("message.queued", { agent_id: "sup1" });
+        await flush();
+      });
+      expect(daemon.requests.filter((r) => r.path === "/sessions").length).toBeGreaterThan(reads);
+      expect(screen.getByRole("tab", { name: "General" }).getAttribute("aria-selected")).toBe("true");
+    }
+  }
+  for (let i = STEPS.length - 2; i >= 0; i--) {
+    press("Back");
+    await check(STEPS[i].target);
+  }
+  // Reopening on the first step must navigate again even though its index hasn't changed.
+  fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
+  await screen.findByRole("region", { name: "Inbox" });
+  act(() => openWalkthrough());
+  await check(STEPS[0].target);
+  for (let i = 1; i < STEPS.length; i++) press("Next");
+  await check(STEPS[STEPS.length - 1].target);
+  press("Done");
+  expect(screen.queryByTestId("walkthrough")).toBeNull();
+  if (hasSession) expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+  else expect(screen.getByRole("form", { name: "Start a session" })).toBeTruthy();
 });
 
 it("opens once after setup, follows its control as it scrolls, advances step by step, and once dismissed stays closed until reopened", () => {

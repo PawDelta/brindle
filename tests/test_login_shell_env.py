@@ -119,6 +119,7 @@ def pane_rows(db, tmp_path, monkeypatch):
     return db.get_workspace("w-1")
 
 
+@pytest.mark.variant("credential isolation: launch preserves daemon and tmux proxy precedence and shares client keys only with Claude")
 def test_a_launched_cli_gets_the_settings_its_pane_would_start_without(db, pane_rows, tmp_path, monkeypatch):
     """The real launch environment (what the pane's scrub leaves): the login
     shell's settings, never over what the daemon or the pane has already."""
