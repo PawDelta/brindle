@@ -365,11 +365,14 @@ def _gate(c, p: dict) -> dict | None:
     current = (read is not None and not refusal and row["doc_id"] is not None and row["local_rev"] == p["rev"]
                and review.get("rev") == row["remote_rev"])
     signed = _signed(review) if current else {}
+    # Pre-sharing notes stay private. Missing or in-flight links still count:
+    # an objection awaiting upload must not leave the build gate open.
     asked: dict[str, float] = {}
     for r in c.execute(
         "SELECT author, MAX(created_at) AS at FROM plan_threads WHERE plan_id=? AND parent_id IS NULL"
-        " AND status='open' AND question=0 AND (author=? OR author LIKE ?) GROUP BY author",
-        (p["id"], PERSON, TEAMMATE + "%")):
+        " AND status='open' AND question=0 AND (author=? OR author LIKE ?)"
+        " AND id NOT IN (SELECT local_id FROM plan_share_threads WHERE plan_id=? AND remote_id<0 AND status<>?)"
+        " GROUP BY author", (p["id"], PERSON, TEAMMATE + "%", p["id"], shared_docs.SENDING)):
         sub = row["owner"] if r["author"] == PERSON else r["author"][len(TEAMMATE):]
         asked[sub] = max(asked.get(sub, r["at"]), r["at"])
     rows, policies, required, met, unmet, changes = tally(people, rules, signed, asked, current, row["owner"])

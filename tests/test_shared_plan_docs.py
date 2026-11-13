@@ -409,6 +409,9 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
     uploads = []
     monkeypatch.setattr(ad, "on_merged", lambda *a: uploads.append(a))
+    with monkeypatch.context() as clock:
+        clock.setattr(plan_docs.time, "time", lambda: 1000.0)
+        plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Private drafting note.")
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
         post = lambda tail, **body: app.post(f"/v1/plans/{pid}/{tail}", json=body)  # noqa: E731
         got = post("share", scope=TEAM, reviewers=[{"sub": "u_a", "required": True}, {"sub": "user_1", "required": True}])
@@ -420,6 +423,10 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
         assert post("sign-off", rev=1).json()["gate"]["signed"] == 1
         lib.sign_offs.append({"rev": 1, "sub": "u_a", "at": 9.0})
         assert post("sync").json()["gate"]["state"] == "ready"
+        from brindle.pro import shared_reader
+
+        assert lib.threads == []  # the pre-sharing comment stays private, outside the shared review
+        assert shared_reader.read(DOC, **net)["gate"]["state"] == "ready"
 
         # The sharing account is also required. Its later local objection stays
         # authored as "person" after sync, but must revoke its earlier sign-off.
@@ -427,8 +434,13 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
         with monkeypatch.context() as clock:
             clock.setattr(plan_docs.time, "time", lambda: 1000.0)  # the local clock differs from the Library's
             plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Rework the split.")
+        assert plans.gate(db, plans.get(db, pid))["state"] == "changes_requested"  # not sent yet
+        lib.lose_answer = True
+        with pytest.raises(auth.AuthError):
+            sd.sync(db, pid, **net)
+        assert plans.gate(db, plans.get(db, pid))["state"] == "changes_requested"  # send outcome unknown
+        lib.lose_answer = False
         assert post("sync").json()["gate"]["state"] == "changes_requested"
-        from brindle.pro import shared_reader
 
         assert shared_reader.read(DOC, **net)["gate"]["state"] == "changes_requested"
         refused = post("decide", rev=1, approved=True)
@@ -445,7 +457,8 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
         assert sd.sync_open(db, **net) == 1
         assert plans.get(db, pid)["state"] == "open"
 
-        assert post("reviewers", reviewers=[{"sub": "u_a", "required": True}]).json()["gate"]["required"] == 1
+        assert post("reviewers", reviewers=[{"sub": "u_a", "required": True},
+                                            {"sub": "user_1", "required": True}]).json()["gate"]["required"] == 2
         assert post("decide", rev=1, approved=True).json()["state"] == "approved"
         assert not uploads                                          # its one Library entry is the shared document
         assert post("reviewers", reviewers=[]).json()["error"]["code"] == "review_closed"
