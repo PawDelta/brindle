@@ -1,10 +1,14 @@
 """The demo on a brand new account: no git identity anywhere."""
 
+import asyncio
 import os
 import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
+from typer.testing import CliRunner
 
 from brindle import agents, demo, workspaces
 from brindle.db import Agent
@@ -40,6 +44,101 @@ def _last(path, fmt="%an <%ae>"):
 
 def _git(path, *args):
     subprocess.run(["git", *args], cwd=path, check=True)
+
+
+def test_cli_demo_starts_workers_on_the_signed_in_provider(db, repo, monkeypatch):
+    from brindle import autopilot, cli, config, providers
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(providers, "unusable", lambda provider, *a, **k:
+                        None if provider == "codex" else "CLI not installed")
+    for name in ("_preflight", "_trust_codex_hook", "_pause_transferred", "_check_updates",
+                 "_cull_detached", "_local_models_detached", "_settings_sync_detached"):
+        monkeypatch.setattr(cli, name, lambda *a, **k: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+
+    def launch(db, agent, ws, **kwargs):
+        problem = providers.unusable(agent.provider)
+        if problem:
+            raise agents.AgentError(problem)
+        db.update_agent(agent.id, status="processing")
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    result = CliRunner().invoke(cli.app, ["demo", "--no-attach"])
+    assert result.exit_code == 0, result.output
+    supervisor, = db.list_agents()
+    ws = db.get_workspace(supervisor.workspace_id)
+    milestones = db.milestones(supervisor.id)
+    assert len(milestones) == 2
+    for name, milestone in zip(("slug", "wrap"), milestones):
+        profile, _ = autopilot.choose_profile(db, supervisor.id, ws.repo_root,
+                                              task=milestone.title, weight="light")
+        agents.delegate(db, supervisor, ws, profile, milestone.title, "assign",
+                        branch=name, done_when=milestone.check_cmd)
+    workers = [a for a in db.list_agents() if a.parent_id == supervisor.id]
+    assert len(workers) == 2
+    assert all(a.status == "processing" and a.provider == supervisor.provider == "codex"
+               for a in workers)
+    assert len({a.workspace_id for a in workers}) == 2
+    # The review at the end must also run on the only usable CLI.
+    reviewer = config.load_repo_config(ws.repo_root).review_profile
+    review = agents.spawn(db, db.get_workspace(workers[0].workspace_id), reviewer,
+                          parent_id=supervisor.id, mode="review")
+    assert db.get_agent(review.id).status == "processing"
+
+
+def test_app_demo_starts_workers_and_reviewer(db, monkeypatch):
+    """The app's 'Watch brindle work on a practice repo' on a fresh account
+    with one CLI: POST /demo starts the supervisor, its assign for each
+    milestone launches a worker, and the review runs, all on that CLI."""
+    # The daemon's sign-in probe answered more than its TTL ago (or not yet):
+    # demo_provider finds no CLI, and the demo must still run on the usable one.
+    only = "codex"
+    from brindle import config, doctor, mcp_server, providers
+    from brindle.daemon import routes_actions
+
+    monkeypatch.setattr(providers, "unusable", lambda provider, *a, **k:
+                        None if provider == only else "CLI not installed")
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: [])
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    # The machine's own CLI setup (is codex installed here?) is preflight's job, not this test's.
+    monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "preflight", lambda *a, **k: [])
+    launched = []
+
+    def launch(db, agent, ws, **kwargs):
+        problem = providers.unusable(agent.provider)
+        if problem:
+            raise agents.AgentError(problem)
+        launched.append(agent.mode)
+        db.update_agent(agent.id, status="processing")
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    got = routes_actions.start_demo(db, {}, {})
+    assert isinstance(got, dict), got
+    supervisor = db.get_agent(got["id"]) if "id" in got else db.list_agents()[0]
+    assert supervisor.provider == only
+    ws = db.get_workspace(supervisor.workspace_id)
+    assert demo.is_demo_repo(ws.repo_root)
+    milestones = db.milestones(supervisor.id)
+    assert len(milestones) == 2
+
+    # The supervisor delegates as the demo's goal tells it: each milestone to
+    # its own worker, weight "light", through the real MCP tool.
+    monkeypatch.setenv("BRINDLE_AGENT_ID", supervisor.id)
+    for name, m in zip(("slug", "wrap"), milestones):
+        asyncio.run(mcp_server.assign(task=m.title, weight="light", branch=name,
+                                              done_when=m.check_cmd))
+    workers = [a for a in db.list_agents() if a.parent_id == supervisor.id]
+    assert len(workers) == 2
+    assert all(a.status == "processing" and a.provider == only for a in workers)
+    assert len({a.workspace_id for a in workers}) == 2
+
+    reviewer = config.load_repo_config(ws.repo_root).review_profile
+    review = agents.spawn(db, db.get_workspace(workers[0].workspace_id), reviewer,
+                          parent_id=supervisor.id, mode="review")
+    assert review.provider == only and db.get_agent(review.id).status == "processing"
+    assert launched.count("review") == 1 and launched.count("assign") == 2
 
 
 def test_demo_merges_with_no_git_identity(db, repo, monkeypatch, tmp_path):
