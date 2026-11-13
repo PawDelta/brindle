@@ -60,3 +60,18 @@ def test_repeated_paragraphs_resolve_at_their_positions():
                     "Budget: 300.\n\nBudget: 100.\n\nBudget: 100.")
     assert result.text == "Budget: 300.\n\nBudget: 100.\n\nBudget: 200."
     assert not result.collisions
+    base = "\n\n".join(["Budget: 100."] * 5)
+    local = "\n\n".join(f"Budget: {n}." for n in [200, 200, 100, 200, 200])
+    remote = "\n\n".join(f"Budget: {n}." for n in [100, 100, 300, 100, 100])
+    result = rebase(base, local, remote)
+    assert result.text == "\n\n".join(f"Budget: {n}." for n in [200, 200, 300, 200, 200])
+    assert not result.collisions
+
+
+def test_held_insertion_at_deleted_paragraph_boundary_survives_resolution():
+    result = rebase("A\n\nB", "A\n\nMineB", "B")
+    assert result.text == "B"
+    collision, = result.collisions
+    assert "Mine" in collision.mine
+    result = apply_resolution(result, collision.id, "mine")
+    assert result.text == "A\n\nMineB"
