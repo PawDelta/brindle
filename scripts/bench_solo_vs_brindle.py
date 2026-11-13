@@ -66,7 +66,9 @@ profiles from that list or the defaults. Reports separate these worker settings.
 windows per provider (percent used, reset, source and observation time), or null
 when unknown. ``limits_used`` is their difference in percentage points, null
 across resets or account changes. These are shared-machine readings, including
-other sessions' usage. ``other_agents`` lists active agents outside the benchmark
+other sessions' usage. Boundary reads refresh Codex from its latest rollout;
+solo Claude readings require the default CLI account to match the tracked account.
+``other_agents`` lists active agents outside the benchmark
 clone observed at the boundaries and every ``--poll`` seconds, with first/last
 observation times; agents entirely between samples may be missed. Both arms need
 the installed brindle for this read-only monitoring.
@@ -724,10 +726,31 @@ def main(args):
 
     if op == "machine":
         from brindle import quota, subscription_usage
+
+        def solo_identity_matches():
+            tracked = subscription_usage.identity()
+            if tracked is None:
+                return False
+            with open(os.path.expanduser("~/.claude.json"), encoding="utf-8") as f:
+                data = json.load(f)
+            account = data.get("oauthAccount") if isinstance(data, dict) else None
+            if not isinstance(account, dict):
+                return False
+            parts = [account.get("accountUuid"), account.get("organizationUuid")]
+            return all(isinstance(p, str) and p.strip() for p in parts) and json.dumps(parts) == tracked
+
+        claude_matches = (guarded("solo Claude identity", solo_identity_matches)
+                          if args.get("arm") == "solo" else True)
+        # Polling may have just filled the shared cache. Boundaries must read
+        # the available rollout again, and must not reuse a cache if that fails.
+        codex_current = (guarded("Codex boundary refresh", quota.refresh_codex)
+                         if args.get("boundary") else True)
         out["limits"] = {}
         for provider in quota.PROVIDERS:
             q = guarded(provider + " quota", lambda: quota.get(provider)) if (
-                provider != "native" and not quota._key_billed(provider)) else None
+                provider != "native" and not quota._key_billed(provider) and
+                (provider != "claude" or claude_matches) and
+                (provider != "codex" or codex_current)) else None
             weekly = [w for w in q.windows if w.minutes == 10080 and w.name is None] if q else []
             w = weekly[0] if len(weekly) == 1 else None
             out["limits"][provider] = ({"used": w.used, "resets_at": w.resets_at,
@@ -938,14 +961,14 @@ def limits_used(before: dict, after: dict) -> dict[str, float | None]:
 class RunMonitor:
     """Sample shared-machine activity, including agents that start midway through a run."""
 
-    def __init__(self, b: Brindle, interval: float):
-        self.b, self.interval = b, interval
+    def __init__(self, b: Brindle, interval: float, arm: str = "brindle"):
+        self.b, self.interval, self.arm = b, interval, arm
         self.stopped = threading.Event()
         self.agents: dict[str, dict] = {}
         self.errors: list[str] = []
 
-    def sample(self) -> dict:
-        snap = self.b.probe("machine")
+    def sample(self, *, boundary: bool = False) -> dict:
+        snap = self.b.probe("machine", boundary=boundary, arm=self.arm)
         now = time.time()
         for agent in snap["other_agents"]:
             old = self.agents.get(agent["id"], {})
@@ -961,7 +984,7 @@ class RunMonitor:
                 self.errors.append("machine activity sample failed")
 
     def __enter__(self):
-        self.before = self.sample()
+        self.before = self.sample(boundary=True)
         self.thread = threading.Thread(target=self.watch, daemon=True)
         self.thread.start()
         return self
@@ -969,7 +992,7 @@ class RunMonitor:
     def __exit__(self, *exc):
         self.stopped.set()
         self.thread.join()
-        self.after = self.sample()
+        self.after = self.sample(boundary=True)
 
     def record(self) -> dict:
         return {"limits_before": self.before, "limits_after": self.after,
@@ -1248,7 +1271,7 @@ def cmd_run(args) -> int:
     scratch.mkdir(parents=True)
     print(f"scratch: {scratch}", file=sys.stderr)
     clone = prepare_clone(kit, scratch, env)
-    monitor = RunMonitor(installed_client(args, clone, env), args.poll)
+    monitor = RunMonitor(installed_client(args, clone, env), args.poll, args.arm)
     started = time.time()
     with monitor:
         out = run_solo(args, clone, spec, scratch, env) if args.arm == "solo" else run_brindle(args, clone, spec, env)

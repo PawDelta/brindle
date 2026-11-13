@@ -447,7 +447,7 @@ def test_machine_probe_reads_weekly_plan_limits_and_other_sessions(db, tmp_path,
 
 def test_monitor_keeps_agents_seen_only_during_the_run():
     samples = iter([[], [{"id": "midrun", "status": "processing"}], []])
-    b = SimpleNamespace(probe=lambda op: {"limits": {}, "other_agents": next(samples)})
+    b = SimpleNamespace(probe=lambda op, **kw: {"limits": {}, "other_agents": next(samples)})
     monitor = bench.RunMonitor(b, 20)
     ticks = iter([False, True])
     monitor.stopped = SimpleNamespace(wait=lambda interval: next(ticks))
@@ -455,3 +455,55 @@ def test_monitor_keeps_agents_seen_only_during_the_run():
     monitor.watch()
     monitor.after = monitor.sample()
     assert [a["id"] for a in monitor.record()["other_agents"]] == ["midrun"]
+
+
+def test_machine_boundary_reads_codex_rollout_past_a_fresh_cache(tmp_path, monkeypatch):
+    from brindle import quota
+
+    monkeypatch.setattr(quota.time, "time", lambda: 1000)
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    home = tmp_path / "codex"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    rollout = sessions / "rollout-latest.jsonl"
+    monkeypatch.setattr(quota, "codex_home", lambda: home)
+    quota.record("codex", [quota.Window(31, 2000, 10080)])
+    event = {"payload": {"rate_limits": {"secondary": {
+        "used_percent": 31, "resets_at": 2000, "window_minutes": 10080}}}}
+    rollout.write_text(json.dumps(event) + "\n")
+    ns = {"__name__": "bench_probe"}
+    exec(bench.PROBE, ns)
+    b = SimpleNamespace(probe=lambda op, **kw: ns["main"]({"op": op, "clone": str(tmp_path), **kw}))
+    with bench.RunMonitor(b, 20) as monitor:
+        event["payload"]["rate_limits"]["secondary"]["used_percent"] = 35
+        rollout.write_text(json.dumps(event) + "\n")
+        assert quota.get("codex").windows[0].used == 31
+    assert monitor.record()["limits_used"]["codex"] == 4
+    args = {"op": "machine", "clone": str(tmp_path), "boundary": True}
+    rollout.unlink()
+    assert ns["main"](args)["limits"]["codex"] is None
+
+
+def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch):
+    from brindle import providers, quota
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    brindle_config = tmp_path / "brindle-claude.json"
+    account = {"oauthAccount": {"accountUuid": "brindle-account", "organizationUuid": "org"}}
+    brindle_config.write_text(json.dumps(account))
+    solo_config = tmp_path / ".claude.json"
+    solo_config.write_text(json.dumps({"oauthAccount": {"accountUuid": "solo-account", "organizationUuid": "org"}}))
+    monkeypatch.setattr(providers, "claude_global_config", lambda: str(brindle_config))
+    quota.record("claude", [quota.Window(31, time.time() + 1000, 10080)])
+    ns = {"__name__": "bench_probe"}
+    exec(bench.PROBE, ns)
+    b = SimpleNamespace(probe=lambda op, **kw: ns["main"]({"op": op, "clone": str(tmp_path), **kw}))
+    with bench.RunMonitor(b, 20, "solo") as monitor:
+        pass
+    assert monitor.record()["limits_used"]["claude"] is None
+    args = {"op": "machine", "clone": str(tmp_path), "arm": "solo"}
+    assert ns["main"](args)["limits"]["claude"] is None
+    solo_config.write_text(json.dumps(account))
+    assert ns["main"](args)["limits"]["claude"]["used"] == 31
