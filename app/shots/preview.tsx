@@ -112,6 +112,14 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+// Keep the common sidebar shots representative of full requests and descriptive session names.
+if (scene === "session" || scene === "new") {
+  const longGoal = "Update the desktop sidebar so a detailed goal stays readable beside the active session, even when the request describes several milestones, review requirements, project constraints, and the final checks needed before shipping the finished work.";
+  daemon.data.sessions[0].goal = longGoal;
+  daemon.data.sessions[1].name = "Investigate terminal rendering and preserve shell state across project switches and application restarts";
+  daemon.data.sessions[3].name = "Prepare comprehensive release notes covering desktop improvements, command line changes, and migration guidance";
+  if (daemon.data.goal) daemon.data.goal.goal = longGoal;
+}
 if (scene === "new-conflict") daemon.data.sessions[0].name = "Desktop polish";
 if (scene.startsWith("sidebar-foot-")) {
   const busy = scene === "sidebar-foot-busy";
