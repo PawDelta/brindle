@@ -287,7 +287,8 @@ class DraftReplica:
 
 
 def rebuild(db: DB, doc_id: str,
-            make: Callable[[sqlite3.Connection, SharedDoc | None], SharedDoc]) -> DraftReplica:
+            make: Callable[[sqlite3.Connection, SharedDoc | None], SharedDoc],
+            supervisor: int | None = None) -> DraftReplica:
     """Replace this machine's replica of ``doc_id`` with ``make(c, current)``
     (current: the stored replica, its waiting updates in, or None), writing
     under the new document's peer id from now on: the relay's draft with the
@@ -299,7 +300,11 @@ def rebuild(db: DB, doc_id: str,
     replaces it; ``make`` writes what goes with it through ``c``. The result
     is a new replica (a new ``created_at``): an old holder's positional edit
     gets :class:`DraftGone`, and what it receives is translated through the
-    old replica, kept for it here (:meth:`DraftReplica.receive`)."""
+    old replica, kept for it here (:meth:`DraftReplica.receive`).
+
+    ``supervisor``: the peer id the supervisor writes under in the new replica
+    (one the relay issued it, whose earlier changes the new document holds);
+    None: it picks one at its next write."""
     with db.tx() as c:
         got = _read(c, doc_id)
         doc = make(c, None if got is None else got[1])
@@ -315,8 +320,9 @@ def rebuild(db: DB, doc_id: str,
                       (doc_id, doc_id, RETIRED_KEPT))
         seq = 0 if got is None else got[0]["seq"] + 1
         c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,))      # its held-back updates go with it
-        c.execute("INSERT INTO plan_drafts (doc_id, peer_id, state, seq, created_at, updated_at)"
-                  " VALUES (?, ?, ?, ?, ?, ?)", (doc_id, doc.peer_id, doc.export_snapshot(), seq, now, now))
+        c.execute("INSERT INTO plan_drafts (doc_id, peer_id, supervisor_peer, state, seq, created_at, updated_at)"
+                  " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (doc_id, doc.peer_id, supervisor, doc.export_snapshot(), seq, now, now))
     return DraftReplica(db, doc_id, doc.peer_id, doc, seq, now)
 
 

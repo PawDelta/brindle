@@ -90,6 +90,7 @@ class FakeRelay:
             self.doc.get_text(name).insert(0, text)
         self.doc.commit()
         self.ledger: dict[int, str] = {}
+        self.marks: dict[int, str] = {}     # whom each number writes for: "person" or "supervisor"
         self.retired: set[int] = set()
         self.lock: dict | None = None
         self.frozen: int | None = None      # a version out for sign-off (freeze and reopen are REST calls)
@@ -140,9 +141,11 @@ class FakeRelay:
             pipe.end(1008)
             return
         writers = set(said["replicas"])
-        for _ in said["register"]:
+        for mark in said["register"]:
+            assert mark in ("person", "supervisor")
             n = (1 << 16) + secrets.randbelow((1 << 63) - (1 << 16))
             self.ledger[n] = pipe.sub
+            self.marks[n] = mark
             writers.add(n)
         pipe.writers, pipe.author = writers, pipe.sub == self.author
         self.pipes.append(pipe)
@@ -231,9 +234,23 @@ class Machine:
         return self.replica().sections()
 
     async def type_in(self, section: str, offset: int, text: str) -> None:
-        """The supervisor's edit (or any engine write) into the replica."""
+        """A positional edit of the person's into the replica, as the engine makes one."""
         self.replica().insert(section, offset, text)
         await self.manager.changed("doc1")
+
+    async def supervise_in(self, section: str, offset: int, text: str) -> None:
+        """The supervisor's edit, the way plan_docs.supervise writes it: under its own peer id."""
+        db = self.db()
+        replica = DraftReplica.open(db, "doc1")
+        with db.tx() as c:
+            replica.supervise(c, lambda doc: doc.insert(section, offset, text))
+        await self.manager.changed("doc1")
+
+    def supervisor_peer(self) -> int | None:
+        return self.db().conn.execute("SELECT supervisor_peer FROM plan_drafts").fetchone()["supervisor_peer"]
+
+    def generation(self) -> float:
+        return self.db().conn.execute("SELECT created_at FROM plan_drafts").fetchone()["created_at"]
 
 
 async def settle(*links: live_docs.DocLink) -> None:
@@ -390,13 +407,18 @@ def test_edits_made_while_disconnected_are_sent_from_the_outbox_on_reconnect_aft
         await a.link.connect()
         await b.link.connect()
         await a.type_in("body", 5, " now")
+        await a.supervise_in("lede", 0, "Note: ")             # the supervisor writes too, under its own number
         await settle(a.link, b.link)
+        supervisor = a.supervisor_peer()
+        assert (relay.ledger[supervisor], relay.marks[supervisor]) == ("alice", "supervisor")
 
         await a.manager.close_window(lease)
         # The last window closed and nothing is unsent: a clean close, so the author is not locked out.
-        assert relay.closes == [("alice", 1000)] and relay.lock is None and a.link.conn is None
+        assert relay.closes[-1] == ("alice", 1000) and relay.lock is None and a.link.conn is None
 
         a.replica().insert("body", 0, "Offline: ")            # typed while disconnected
+        await a.supervise_in("lede", 0, "Again: ")
+        generation = a.generation()
         await a.manager.stop()                                # the daemon restarts
         assert live_docs.docs_with_unsent(a.db()) == ["doc1"]
         again = Machine(relay, tmp_path / "a.db", "alice")
@@ -404,8 +426,11 @@ def test_edits_made_while_disconnected_are_sent_from_the_outbox_on_reconnect_aft
         await settle(again.link, b.link)
 
         assert relay.refusals == []
-        assert b.sections()["body"] == relay.sections()["body"] == "Offline: World now"
+        assert b.sections() == relay.sections() == {"lede": "Again: Note: # Design\n\nHello", "body": "Offline: World now"}
         assert live_docs.docs_with_unsent(again.db()) == []
+        # Nothing was re-typed: the same replica, and the supervisor's letters are still its own.
+        assert (again.generation(), again.supervisor_peer()) == (generation, supervisor)
+        assert relay.doc.oplog_vv.get_last(supervisor) == len("Note: Again: ") - 1
 
     asyncio.run(run())
 

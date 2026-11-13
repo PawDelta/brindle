@@ -10,7 +10,9 @@ for it, signed in with the account's Library credentials. Over it:
   issued to this account in this doc ("writer" refusal otherwise). The
   replica (:mod:`brindle.plan_drafts`) writes under one, and each app window
   is lent one of its own (a ``{"peer": n}`` frame before the window's
-  snapshot), so two writers never share a number. Every number is claimed
+  snapshot), so two writers never share a number. The session's supervisor
+  writes under one registered for it with the ``supervisor`` mark
+  (``plan_drafts.supervisor_peer``), so the draft credits its letters to it. Every number is claimed
   again on every join; new ones are registered at a join (two at most).
 - **Outbox.** Everything the replica holds past ``live_docs.relay_version``
   (what the relay is known to hold) is unsent: it goes up as one batch at a
@@ -76,7 +78,8 @@ MAX_CLAIMS = 8              # analysis_live.MAX_REPLICAS: numbers one connection
 MAX_REGISTER = 2            # analysis_live: "register" lists at most two marks
 SPARE_WINDOWS = 1           # numbers kept free, so a window opened offline can still type
 MAX_AWARENESS = 4000        # under the relay's 4096-character awareness state
-MARK = "person"             # whom a number writes for (T8 adds the supervisor's)
+MARK = "person"             # whom a number writes for: the person (replica and windows) ...
+SUPERVISOR = "supervisor"   # ... or the session's supervisor (plan_drafts.supervisor_peer)
 
 CLOSE_CLEAN = 1000
 RELOAD = 4205               # to the app: the live text here was replaced; open the channel again
@@ -158,13 +161,15 @@ def docs_with_unsent(db: DB) -> list[str]:
             if unsent(db, r["doc_id"])]
 
 
-def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int | None, carry: bool) -> None:
+def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int | None, carry: bool,
+             supervisor: int | None = None) -> None:
     """The replica becomes the relay's draft, written under ``peer`` (None:
-    a reader's, which writes nothing); with ``carry``, what changed here since
-    the base re-typed onto it. One write transaction from reading the old
-    replica to storing the new one and the relay's version with it, so an
-    edit another holder commits meanwhile lands before (and is carried) or
-    after (and is re-typed onto the new replica: DraftReplica.apply_remote)."""
+    a reader's, which writes nothing) and the supervisor's under
+    ``supervisor``; with ``carry``, what changed here since the base re-typed
+    onto it. One write transaction from reading the old replica to storing
+    the new one and the relay's version with it, so an edit another holder
+    commits meanwhile lands before (and is carried) or after (and is
+    re-typed onto the new replica: DraftReplica.apply_remote)."""
     def make(c: sqlite3.Connection, current: SharedDoc | None) -> SharedDoc:
         doc = SharedDoc.load(snapshot)
         if peer is not None:
@@ -176,13 +181,15 @@ def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int | None, carry: bool
         _put_relay_version(c, doc_id, update_version(snapshot))
         return doc
 
-    plan_drafts.rebuild(db, doc_id, make)
+    plan_drafts.rebuild(db, doc_id, make, supervisor=supervisor)
 
 
 def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed: list[int],
-                rebase: bool) -> tuple[bool, bytes | None]:
-    """A join's answer: record the numbers it issued, then bring the replica
-    up to the relay's draft. Returns whether the replica was replaced (app
+                rebase: bool, marks: list[str]) -> tuple[bool, bytes | None]:
+    """A join's answer: record the numbers it issued (``marks``: what it
+    asked for, all for one mark, so a new number's role is known), then bring
+    the replica up to the relay's draft, with the supervisor writing under
+    its own relay number. Returns whether the replica was replaced (app
     windows on it must load it again) and, if not, what the join brought in
     that the windows lack (the relay sends nobody what it accepted while this
     machine was away)."""
@@ -190,38 +197,58 @@ def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed
     roles = _peers(db, doc_id)
     with db.tx() as c:
         for n in fresh:
-            role = "window" if "replica" in roles.values() else "replica"
+            role = ("supervisor" if marks and marks[0] == SUPERVISOR
+                    else "window" if "replica" in roles.values() else "replica")
             roles[n] = role
             c.execute("INSERT OR IGNORE INTO live_doc_peers (doc_id, peer, role) VALUES (?, ?, ?)", (doc_id, n, role))
     mine = next((n for n, r in roles.items() if r == "replica"), None)   # None: a reader, nothing to send
+    theirs = next((n for n, r in roles.items() if r == "supervisor"), None)
     replica, row = _replica(db, doc_id), _link(db, doc_id)
     if replica is None:
-        _rebuild(db, doc_id, snapshot, mine, carry=False)
+        _rebuild(db, doc_id, snapshot, mine, carry=False, supervisor=theirs)
         return False, None
     if rebase or row is None or row["relay_version"] is None or (mine is not None and replica.peer_id != mine):
-        _rebuild(db, doc_id, snapshot, mine, carry=mine is not None)
+        _rebuild(db, doc_id, snapshot, mine, carry=mine is not None, supervisor=theirs)
         return True, None
     before = replica.version()
     try:
         replica.apply_remote(snapshot)
     except (CrdtError, plan_drafts.DraftGone):     # compacted past what this replica holds, or replaced
-        _rebuild(db, doc_id, snapshot, mine, carry=mine is not None)
+        _rebuild(db, doc_id, snapshot, mine, carry=mine is not None, supervisor=theirs)
         return True, None
-    _set_relay_version(db, doc_id, merge_versions(row["relay_version"], update_version(snapshot)))
+    with db.tx() as c:
+        _put_relay_version(c, doc_id, merge_versions(row["relay_version"], update_version(snapshot)))
+        if theirs is not None:
+            # From now on the supervisor writes under the number the relay issued it. Whatever it
+            # wrote before under one of its own goes as unsent edits, refused and re-typed once.
+            c.execute("UPDATE plan_drafts SET supervisor_peer=? WHERE doc_id=?", (theirs, doc_id))
     return False, (None if replica.holds(before) else replica.export_updates(before))
 
 
-def _join_numbers(db: DB, doc_id: str, in_use: set[int], wanted_windows: int, reader: bool) -> tuple[list[int], int]:
-    """The numbers to claim and how many new ones to register."""
+def _join_numbers(db: DB, doc_id: str, in_use: set[int], wanted_windows: int,
+                  reader: bool) -> tuple[list[int], list[str]]:
+    """The numbers to claim and the marks to register new ones for: the
+    replica's first, then the supervisor's, then windows', never two marks in
+    one join (its answer lists numbers without saying which mark each is)."""
     if reader:
-        return [], 0
+        return [], []
     roles = _peers(db, doc_id)
     replica = [n for n, r in roles.items() if r == "replica"]
+    supervisor = [n for n, r in roles.items() if r == "supervisor"]
     windows = sorted((n for n, r in roles.items() if r == "window"), key=lambda n: n not in in_use)
-    claims = (replica + windows)[:MAX_CLAIMS]
+    claims = (replica + supervisor + windows)[:MAX_CLAIMS]
+    room = MAX_CLAIMS - len(claims)
     free = sum(1 for n in windows if n in claims and n not in in_use)
-    need = (0 if replica else 1) + max(0, wanted_windows + SPARE_WINDOWS - free)
-    return claims, min(need, MAX_REGISTER, MAX_CLAIMS - len(claims))
+    windows_short = max(0, wanted_windows + SPARE_WINDOWS - free)
+    if not replica:
+        return claims, [MARK] * min(1 + windows_short, MAX_REGISTER, room)
+    if not supervisor:
+        return claims, [SUPERVISOR] * min(1, room)
+    return claims, [MARK] * min(windows_short, MAX_REGISTER, room)
+
+
+def _missing_supervisor(db: DB, doc_id: str) -> bool:
+    return "supervisor" not in _peers(db, doc_id).values()
 
 
 def _next_batch(db: DB, doc_id: str) -> tuple[bytes, bytes] | None:
@@ -494,17 +521,20 @@ class DocLink:
         is missing, bring the replica up to the relay's draft, then send the outbox."""
         async with self.lock:
             await self._join()
+            if self.conn is not None and not self.reader and await self.manager.work(_missing_supervisor, self.doc_id):
+                # A join registers one mark: the supervisor's number takes a second, before anything is sent.
+                await self.close()
+                await self._join()
         await self.flush()
 
     async def _join(self) -> None:
         in_use = {w.peer for w in self.windows if w.peer is not None}
         waiting = sum(1 for w in self.windows if w.peer is None)
-        claims, register = await self.manager.work(_join_numbers, self.doc_id, in_use, waiting, self.reader)
+        claims, marks = await self.manager.work(_join_numbers, self.doc_id, in_use, waiting, self.reader)
         conn = await self.manager.transport.connect(self.doc_id)
         self.conn, self.inflight = conn, {}
         try:
-            await self._send({"type": "join", "replicas": claims, "register": [MARK] * register,
-                              "open": not self.reader})
+            await self._send({"type": "join", "replicas": claims, "register": marks, "open": not self.reader})
             text = await conn.recv()
         except BaseException:
             self.conn = None
@@ -524,7 +554,7 @@ class DocLink:
         self.author_offline = said.get("author_offline")
         self.blocked = bool(self.frozen)
         replaced, missed = await self.manager.work(_take_state, self.doc_id, _unb64(said.get("snapshot")),
-                                                   self.claimed, claims, self.rebase)
+                                                   self.claimed, claims, self.rebase, marks)
         self.rebase = False
         if replaced:
             await self._reload_windows()
