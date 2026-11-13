@@ -9,7 +9,7 @@ const actions: Record<string, { label: string; detail: string }> = {
   o: { label: "Open", detail: "Continue the running session with its work intact." },
   n: { label: "New session in its own worktree", detail: "Start alongside it on a separate branch and checkout." },
   a: { label: "Start another here", detail: "Start in this checkout while existing sessions keep running." },
-  p: { label: "Pause it and start fresh", detail: "Pause the selected session, then start in this checkout." },
+  p: { label: "Pause it and start fresh", detail: "Pause the running session, then start in this checkout." },
   r: { label: "Resume", detail: "Continue the paused session with its work intact." },
 };
 
