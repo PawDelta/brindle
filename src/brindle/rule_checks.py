@@ -10,9 +10,10 @@ failed check does:
   naming one in a manifest: pyproject.toml, requirements*.txt, package.json,
   go.mod, Cargo.toml, ...) or imported (an added ``import x`` / ``from x
   import`` / ``require("x")`` line).
-- ``require_tests_for``: globs; a diff that changes a file matching one must
+- ``require_tests_for``: opt-in globs; a diff that changes a file matching one must
   also change a test file (``tests/``, ``test_*``, ``*_test.*``, ``*.test.*``,
   ``*.spec.*``, ``__tests__/``).
+  This explicit file rule does not decide which changes need new tests.
 - ``deny_patterns``: regexes no added line may match.
 - ``direct_spawn_allowed``: globs; once set, an added line of Python that
   starts a process itself (subprocess's run or Popen, ``os.system`` ...)

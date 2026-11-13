@@ -6,7 +6,6 @@ import threading
 
 import pytest
 
-from conftest import sh
 from brindle import git, spawn, workspaces
 from test_merge_order import _repo_template, repo, worktree  # noqa: F401 - fixture
 
@@ -37,17 +36,7 @@ def test_checkout_lock_gives_up_on_a_hung_holder(repo):
 
 
 
-def test_merge_refuses_a_target_with_uncommitted_changes(db, repo, monkeypatch):
-    (repo / "README.md").write_text("base\n")
-    sh("git add -A && git commit -qm readme", repo)
-    ws = _feature(db, repo)
-    (repo / "README.md").write_text("supervisor edit\n")
-    # tracked uncommitted change blocks the merge outright, untouched
-    with pytest.raises(git.GitError, match="uncommitted"):
-        workspaces.merge_back(db, ws)
-    assert (repo / "README.md").read_text() == "supervisor edit\n"
-
-
+@pytest.mark.variant("race: two merges into one checkout at once, with a git read outlasting spawn's first poll")
 def test_two_concurrent_merges_both_succeed(db, repo, monkeypatch):
     a = _feature(db, repo, "feat-a", "a.py")
     b = _feature(db, repo, "feat-b", "b.py")

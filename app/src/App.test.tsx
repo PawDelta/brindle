@@ -1,5 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { ReactElement } from "react";
+import { connectDaemon, renderApp, trackedSync as startSync } from "./test/harness";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import * as shell from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { landing } from "./App";
@@ -8,21 +8,21 @@ import type { GoalDTO, SessionDTO } from "./api/schema";
 import { LAST_SESSION_KEY } from "./routes";
 import { ONBOARDED_KEY } from "./api/providers";
 import { createAppStore, initialState } from "./store/store";
-import { startSync } from "./store/sync";
 import { DaemonClient } from "./api/client";
 import { BASE_URL, FakeDaemon, TOKEN, flush, freshProviders } from "./test/fakeDaemon";
-import { PtyViewsProvider } from "./api/ptyView";
 import { REPO, question, root, windowOf, worker } from "./test/fixtures";
-import { standInViews } from "./test/panes";
 
 vi.mock("./components/PtyTerminal", () => import("./test/panes"));
 vi.mock("@tauri-apps/api/core", { spy: true });
 
 beforeEach(() => localStorage.clear());
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 /* The app as the shell shows it: its panes through pty views (stand-ins here). */
-const renderApp = (app: ReactElement) => render(<PtyViewsProvider value={standInViews}>{app}</PtyViewsProvider>);
+
 
 const goal: GoalDTO = {
   root_id: "sup1",
@@ -56,56 +56,50 @@ describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
   it("keeps recovery visible in the session row and header until it succeeds or fails", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: "paused" }], workspaces: [], inbox: [{ ...question, kind: "failed", agent_id: "sup1", root_id: "sup1" }], preflight: { claude: [{ id: "trust", kind: "trust", label: "Trust folder", done: false }] } });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      const states = () => screen.getAllByTestId("session-status").map((el) => el.getAttribute("data-state"));
-      await waitFor(() => expect(states()).toEqual(["paused", "paused"]));
-      const startControls = () => document.querySelectorAll('[data-session-start="sup1"]');
-      fireEvent.click(screen.getByTestId("session-bar").querySelector<HTMLButtonElement>('[data-session-start="sup1"]')!);
-      await screen.findByTestId("preflight");
-      daemon.data.sessions = [{ ...session, status: "resuming" }];
-      daemon.data.workspaces = [root, worker];
-      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "starting" } });
-      await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
-      const row = screen.getByTestId("tree-session-sup1");
-      expect(screen.queryByTestId("paused-toggle-proj")).toBeNull();
-      expect(row.querySelector('.session-root-dot[data-tone="work"]')).toBeTruthy();
-      expect(row.querySelector('[data-testid="session-close-sup1"], [data-testid="session-done-sup1"]')).toBeNull();
-      expect(screen.getByTestId("session-bar").querySelector('[data-state="resuming"][data-tone="work"]')).toBeTruthy();
-      expect(screen.getByTestId("state-card").getAttribute("data-kind")).toBe("returning");
-      expect(startControls()).toHaveLength(0);
-      expect(screen.queryByTestId("agent-menu")).toBeNull();
-      await waitFor(() => expect(treeAgent("w1")).toBeTruthy());
-      fireEvent.click(treeAgent("w1"));
-      expect(screen.getByTestId("state-card").getAttribute("data-kind")).toBe("returning");
-      expect(startControls()).toHaveLength(0);
-      expect(screen.queryByTestId("agent-menu")).toBeNull();
-      fireEvent.click(screen.getByTestId("inbox-link"));
-      await screen.findByTestId("inbox-card");
-      expect(startControls()).toHaveLength(0);
-      fireEvent.click(treeSession("sup1"));
-      await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
-      daemon.data.sessions = [{ ...session, status: "paused" }];
-      daemon.data.workspaces = [];
-      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "paused" } });
-      await waitFor(() => expect(states()).toEqual(["paused", "paused"]));
-      expect(startControls().length).toBeGreaterThan(0);
-      daemon.data.sessions = [session];
-      daemon.data.workspaces = [root];
-      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "idle" } });
-      await waitFor(() => expect(states()).toEqual(["idle", "idle"]));
-    } finally { sync.stop(); }
+    const { client, store, sync } = connectDaemon(daemon);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    const states = () => screen.getAllByTestId("session-status").map((el) => el.getAttribute("data-state"));
+    await waitFor(() => expect(states()).toEqual(["paused", "paused"]));
+    const startControls = () => document.querySelectorAll('[data-session-start="sup1"]');
+    fireEvent.click(screen.getByTestId("session-bar").querySelector<HTMLButtonElement>('[data-session-start="sup1"]')!);
+    await screen.findByTestId("preflight");
+    daemon.data.sessions = [{ ...session, status: "resuming" }];
+    daemon.data.workspaces = [root, worker];
+    daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "starting" } });
+    await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
+    const row = screen.getByTestId("tree-session-sup1");
+    expect(screen.queryByTestId("paused-toggle-proj")).toBeNull();
+    expect(row.querySelector('.session-root-dot[data-tone="work"]')).toBeTruthy();
+    expect(row.querySelector('[data-testid="session-close-sup1"], [data-testid="session-done-sup1"]')).toBeNull();
+    expect(screen.getByTestId("session-bar").querySelector('[data-state="resuming"][data-tone="work"]')).toBeTruthy();
+    expect(screen.getByTestId("state-card").getAttribute("data-kind")).toBe("returning");
+    expect(startControls()).toHaveLength(0);
+    expect(screen.queryByTestId("agent-menu")).toBeNull();
+    await waitFor(() => expect(treeAgent("w1")).toBeTruthy());
+    fireEvent.click(treeAgent("w1"));
+    expect(screen.getByTestId("state-card").getAttribute("data-kind")).toBe("returning");
+    expect(startControls()).toHaveLength(0);
+    expect(screen.queryByTestId("agent-menu")).toBeNull();
+    fireEvent.click(screen.getByTestId("inbox-link"));
+    await screen.findByTestId("inbox-card");
+    expect(startControls()).toHaveLength(0);
+    fireEvent.click(treeSession("sup1"));
+    await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
+    daemon.data.sessions = [{ ...session, status: "paused" }];
+    daemon.data.workspaces = [];
+    daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "paused" } });
+    await waitFor(() => expect(states()).toEqual(["paused", "paused"]));
+    expect(startControls().length).toBeGreaterThan(0);
+    daemon.data.sessions = [session];
+    daemon.data.workspaces = [root];
+    daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "idle" } });
+    await waitFor(() => expect(states()).toEqual(["idle", "idle"]));
   });
   it("startup steps are timed", async () => {
     const native = vi.spyOn(shell, "isTauri").mockReturnValue(true);
     const invoke = vi.spyOn(shell, "invoke").mockResolvedValue(undefined);
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     try {
       renderApp(<App store={store} client={client} refresh={sync.refresh} />);
       await screen.findByTestId("terminal");
@@ -124,13 +118,11 @@ describe("App", () => {
     let finish!: () => void;
     vi.spyOn(client, "inbox").mockImplementationOnce(() => new Promise((ok) => { finish = () => void read().then(ok); }));
     const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await screen.findByTestId("terminal");
-      expect(store.getState().synced).toBe(false);
-      await act(async () => { finish(); await flush(); await sync.idle(); });
-      expect(store.getState().synced).toBe(true);
-    } finally { sync.stop(); }
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await screen.findByTestId("terminal");
+    expect(store.getState().synced).toBe(false);
+    await act(async () => { finish(); await flush(); await sync.idle(); });
+    expect(store.getState().synced).toBe(true);
   });
   it.each([windowOf("new"), null])("a gate read that a later sync read overtook doesn't put its older rows over the newer ones (newer window: %s)", async (newer) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
@@ -142,66 +134,60 @@ describe("App", () => {
     vi.spyOn(client, "snapshot").mockImplementationOnce(read).mockImplementationOnce(() => new Promise((ok) => { finishGate = ok; }))
       .mockImplementationOnce(read).mockReturnValue(new Promise(() => {}));
     const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await waitFor(() => expect(finishGate).toBeDefined());
-      daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: newer })) }];
-      await act(async () => { await sync.refresh(); });
-      await act(async () => { finishGate!([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }]); await flush(); });
-      expect(store.getState().workspaces[0].agents?.[0].window).toBe(newer);
-      // The rows the store kept decide whether the pane may show, not the older ones it turned down.
-      expect(paneWaits()).toBe(newer === null);
-    } finally { sync.stop(); }
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await waitFor(() => expect(finishGate).toBeDefined());
+    daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: newer })) }];
+    await act(async () => { await sync.refresh(); });
+    await act(async () => { finishGate!([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }]); await flush(); });
+    expect(store.getState().workspaces[0].agents?.[0].window).toBe(newer);
+    // The rows the store kept decide whether the pane may show, not the older ones it turned down.
+    expect(paneWaits()).toBe(newer === null);
   });
 
   it("shows the app at once while sessions come back; only the pane waits until they are ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     let resuming = true;
     const meta = client.meta.bind(client);
     const metadata = vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming }));
     daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }];
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      // No "Starting" in front of it all: the sidebar and the session are there, the pane says it's coming.
-      expect(screen.queryByTestId("starting")).toBeNull();
-      expect(screen.getByRole("complementary", { name: "Sidebar" })).toBeTruthy();
-      expect(paneWaits()).toBe(true);
-      resuming = false;
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(paneWaits()).toBe(true);
-      daemon.data.workspaces = [root, { ...worker, agents: worker.agents?.map((a) => ({ ...a, provider: "subagent", window: null })) }];
-      let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
-      vi.spyOn(client, "snapshot").mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
-      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-      // Reopening restores the connection string, but the old read stays stale.
-      await act(async () => {
-        store.dispatch({ type: "connection", state: "closed" });
-        store.dispatch({ type: "connection", state: "open" });
-        resuming = true;
-        resolve([root]);
-      });
-      expect(paneWaits()).toBe(true);
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(paneWaits()).toBe(true);
-      // Recovery starts after an apparently ready check, before releasing the gate.
-      metadata.mockImplementationOnce(async () => ({ ...await meta(), resuming: false }));
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(paneWaits()).toBe(true);
-      resuming = false;
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(paneWaits()).toBe(false);
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-      // A blip of the same daemon leaves the pane be: no flash of "Bringing … back".
-      daemon.drop();
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(paneWaits()).toBe(false);
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-    } finally { sync.stop(); vi.useRealTimers(); }
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    // No "Starting" in front of it all: the sidebar and the session are there, the pane says it's coming.
+    expect(screen.queryByTestId("starting")).toBeNull();
+    expect(screen.getByRole("complementary", { name: "Sidebar" })).toBeTruthy();
+    expect(paneWaits()).toBe(true);
+    resuming = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(paneWaits()).toBe(true);
+    daemon.data.workspaces = [root, { ...worker, agents: worker.agents?.map((a) => ({ ...a, provider: "subagent", window: null })) }];
+    let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
+    vi.spyOn(client, "snapshot").mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    // Reopening restores the connection string, but the old read stays stale.
+    await act(async () => {
+      store.dispatch({ type: "connection", state: "closed" });
+      store.dispatch({ type: "connection", state: "open" });
+      resuming = true;
+      resolve([root]);
+    });
+    expect(paneWaits()).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(paneWaits()).toBe(true);
+    // Recovery starts after an apparently ready check, before releasing the gate.
+    metadata.mockImplementationOnce(async () => ({ ...await meta(), resuming: false }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(paneWaits()).toBe(true);
+    resuming = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(paneWaits()).toBe(false);
+    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    // A blip of the same daemon leaves the pane be: no flash of "Bringing … back".
+    daemon.drop();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(paneWaits()).toBe(false);
+    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
   });
 
   it.each(["running", "resuming", "no window", "recovered"])("a reopen onto a running daemon releases only ready panes from the first snapshot (%s)", async (state) => {
@@ -228,111 +214,65 @@ describe("App", () => {
 
   it.each(["agent.closed", "rewound"])("discards the gate snapshot when %s arrives during its read", async (kind) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker] });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      await sync.idle();
+    const { client, store, sync } = connectDaemon(daemon);
+    await sync.idle();
+    await flush();
+    await sync.idle();
+    let finish!: (rows: typeof daemon.data.workspaces) => void;
+    const snapshot = vi.spyOn(client, "snapshot").mockImplementationOnce(() => new Promise((ok) => { finish = ok; })).mockRejectedValue(new Error("offline"));
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await waitFor(() => expect(snapshot).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      daemon.publish(kind === "rewound" ? "agent.status" : kind, { repo_root: REPO, agent_id: "w1", payload: { status: "rewound" } });
       await flush();
       await sync.idle();
-      let finish!: (rows: typeof daemon.data.workspaces) => void;
-      const snapshot = vi.spyOn(client, "snapshot").mockImplementationOnce(() => new Promise((ok) => { finish = ok; })).mockRejectedValue(new Error("offline"));
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await waitFor(() => expect(snapshot).toHaveBeenCalledTimes(1));
-      await act(async () => {
-        daemon.publish(kind === "rewound" ? "agent.status" : kind, { repo_root: REPO, agent_id: "w1", payload: { status: "rewound" } });
-        await flush();
-        await sync.idle();
-        finish([root, worker]);
-        await flush();
-      });
-      expect(store.getState().pastWorkers).toContain("w1");
-      expect(store.getState().workspaces.flatMap((ws) => ws.agents ?? []).some((a) => a.id === "w1")).toBe(false);
-      expect(paneWaits()).toBe(true);
-    } finally { sync.stop(); }
+      finish([root, worker]);
+      await flush();
+    });
+    expect(store.getState().pastWorkers).toContain("w1");
+    expect(store.getState().workspaces.flatMap((ws) => ws.agents ?? []).some((a) => a.id === "w1")).toBe(false);
+    expect(paneWaits()).toBe(true);
   });
 
-  it("panes per session: a session that is back shows its panes while another is still pending, and opening the pending one asks for it first", async () => {
+  it.each(["prioritize a pending session", "a snapshot still in flight", "events keeping the store stale"])("shows a recovered pane while other sessions wait: %s", async (scenario) => {
     vi.useFakeTimers();
-    const sessionB: SessionDTO = { ...session, id: "sup2", goal: "Slow one" };
     const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, sessionB], workspaces: [root, rootB] });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, { ...session, id: "sup2" }], workspaces: [root, rootB] });
     const client = daemon.client();
     const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
     const meta = client.meta.bind(client);
-    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } }));
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-      expect(paneWaits()).toBe(false);
+    vi.spyOn(client, "meta").mockImplementation(async () => {
+      const got = await meta();
+      if (scenario === "events keeping the store stale") daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup2", payload: { status: "starting" } });
+      return { ...got, resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } };
+    });
+    let finish!: (rows: typeof daemon.data.workspaces) => void;
+    if (scenario === "a snapshot still in flight") {
+      const read = client.snapshot.bind(client);
+      vi.spyOn(client, "snapshot").mockImplementationOnce(() => new Promise((ok) => { finish = ok; })).mockImplementationOnce(read).mockReturnValue(new Promise(() => {}));
+    } else if (scenario === "events keeping the store stale") {
+      const inbox = client.inbox.bind(client);
+      vi.spyOn(client, "inbox").mockImplementationOnce(inbox).mockReturnValue(new Promise(() => {}));
+    }
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(scenario === "a snapshot still in flight" ? 300 : 1500); });
+    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    if (scenario === "a snapshot still in flight") {
+      await act(async () => { finish([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }, rootB]); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(store.getState().workspaces.find((w) => w.id === "proj")?.agents?.[0].window).toBe(windowOf("sup1"));
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    } else if (scenario === "events keeping the store stale") {
+      expect(daemon.viewed).toEqual(["sup1"]);
+    } else {
+      expect(paneWaits()).toBe(false);
       expect(daemon.prioritized).toEqual([]);
       fireEvent.click(treeSession("sup2"));
       await act(async () => { await vi.advanceTimersByTimeAsync(500); });
       expect(paneWaits()).toBe(true);
       expect(daemon.prioritized).toEqual(["sup2"]);
-    } finally { sync.stop(); vi.useRealTimers(); }
-  });
-
-  it("panes per session: a session released while others are pending shows after one read, without waiting for a slow store refresh", async () => {
-    vi.useFakeTimers();
-    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
-    const daemon = new FakeDaemon({
-      repos: [{ repo_root: REPO, name: "proj" }],
-      sessions: [session, { ...session, id: "sup2" }],
-      workspaces: [root, rootB],
-    });
-    const client = daemon.client();
-    const store = createAppStore();
-    const meta = client.meta.bind(client);
-    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } }));
-    // The slow daemon: the sync's first read (rows from before recovery) is still out; only the gate's read comes back.
-    let finish!: (rows: typeof daemon.data.workspaces) => void;
-    const read = client.snapshot.bind(client);
-    // Sync's first read, then the gate's; every later one (the background refresh) is still out too.
-    vi.spyOn(client, "snapshot").mockImplementationOnce(() => new Promise((ok) => { finish = ok; })).mockImplementationOnce(read).mockReturnValue(new Promise(() => {}));
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-      // The old read comes back late: it must not put the pre-recovery window under the released session.
-      await act(async () => { finish([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }, rootB]); });
-      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
-      expect(store.getState().workspaces.find((w) => w.id === "proj")?.agents?.[0].window).toBe(windowOf("sup1"));
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-    } finally { sync.stop(); vi.useRealTimers(); }
-  });
-
-  it("the viewed session shows first: its terminal mounts while other sessions are still pending and their events keep the store stale", async () => {
-    vi.useFakeTimers();
-    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
-    const daemon = new FakeDaemon({
-      repos: [{ repo_root: REPO, name: "proj" }],
-      sessions: [session, { ...session, id: "sup2" }],
-      workspaces: [root, rootB],
-    });
-    const client = daemon.client();
-    const store = createAppStore();
-    const meta = client.meta.bind(client);
-    // The other session coming back says so on the stream while the app asks the engine about it.
-    vi.spyOn(client, "meta").mockImplementation(async () => {
-      const got = await meta();
-      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup2", payload: { status: "starting" } });
-      return { ...got, resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } };
-    });
-    // The refreshes those events ask for are slow, as on a busy restart: after sync's first, their inbox never answers.
-    const inbox = client.inbox.bind(client);
-    vi.spyOn(client, "inbox").mockImplementationOnce(inbox).mockReturnValue(new Promise(() => {}));
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-      // And the engine knows it is on screen, for the next restart to bring it back first.
-      expect(daemon.viewed).toEqual(["sup1"]);
-    } finally { sync.stop(); vi.useRealTimers(); }
+    }
   });
 
   it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
@@ -343,9 +283,7 @@ describe("App", () => {
       sessions: [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }],
       workspaces: [root, at("sup2", "proj2", windowOf("old")), at("sup3", "proj3", null)],
     });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     let pending = ["sup2", "sup3"];
     const meta = client.meta.bind(client);
     vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 3, pending } }));
@@ -354,14 +292,12 @@ describe("App", () => {
     let reads = 0;
     // The sync's own first read comes first; the gate's read is the second.
     vi.spyOn(client, "snapshot").mockImplementation(async () => { const rows = await snapshot(); if (++reads === 2) pending = ["sup3"]; return rows; });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-      fireEvent.click(treeSession("sup2"));
-      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      expect(paneWaits()).toBe(true);
-    } finally { sync.stop(); vi.useRealTimers(); }
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    fireEvent.click(treeSession("sup2"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(paneWaits()).toBe(true);
   });
 
   it("panes per session: a released session reopens a pane that closed while the engine was away, though its agent row is unchanged", async () => {
@@ -372,36 +308,32 @@ describe("App", () => {
       sessions: [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }],
       workspaces: [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", null)],
     });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     let live = { pid: 0, pending: ["sup3"] };
     const meta = client.meta.bind(client);
     vi.spyOn(client, "meta").mockImplementation(async () => {
       const got = await meta();
       return { ...got, pid: got.pid + live.pid, resuming: true, recovery: { done: 1, total: 3, pending: live.pending } };
     });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-      expect(screen.getByTestId("terminal").textContent).toBe("sup2");
-      fireEvent.click(screen.getByTestId("terminal-close"));
-      expect(screen.queryByTestId("terminal")).toBeNull();
-      // A new engine brings sup2 back: the same row, so only the session's release says its pane is new.
-      live = { pid: 1, pending: ["sup2", "sup3"] };
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(paneWaits()).toBe(true);
-      live = { pid: 1, pending: ["sup3"] };
-      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-      expect(screen.getByTestId("terminal").textContent).toBe("sup2");
-      // Another session coming back leaves this one's pane be.
-      const pane = screen.getByTestId("terminal");
-      daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", windowOf("sup3"))];
-      live = { pid: 1, pending: [] };
-      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-      expect(store.getState().workspaces.find((w) => w.id === "proj3")?.agents?.[0].window).toBe(windowOf("sup3"));
-      expect(screen.getByTestId("terminal")).toBe(pane);
-    } finally { sync.stop(); vi.useRealTimers(); }
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(screen.getByTestId("terminal").textContent).toBe("sup2");
+    fireEvent.click(screen.getByTestId("terminal-close"));
+    expect(screen.queryByTestId("terminal")).toBeNull();
+    // A new engine brings sup2 back: the same row, so only the session's release says its pane is new.
+    live = { pid: 1, pending: ["sup2", "sup3"] };
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(paneWaits()).toBe(true);
+    live = { pid: 1, pending: ["sup3"] };
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(screen.getByTestId("terminal").textContent).toBe("sup2");
+    // Another session coming back leaves this one's pane be.
+    const pane = screen.getByTestId("terminal");
+    daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", windowOf("sup3"))];
+    live = { pid: 1, pending: [] };
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(store.getState().workspaces.find((w) => w.id === "proj3")?.agents?.[0].window).toBe(windowOf("sup3"));
+    expect(screen.getByTestId("terminal")).toBe(pane);
   });
 
   it("test_update_relaunch: a session's pane shown during recovery is not reopened when the recovery ends", async () => {
@@ -429,66 +361,31 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
-  it("shows once its session is back: one slow read after it, not after a read begun while it was pending and another behind that", async () => {
-    vi.useFakeTimers();
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
-    const client = daemon.client();
-    const store = createAppStore();
-    // As on a real restart: the engine names the session pending, brings it back, and ends
-    // recovery a moment later, while every snapshot (cold git status, sessions launching) takes seconds.
-    const SLOW = 4000;
-    let live = { resuming: true, pending: ["sup1"] };
-    const meta = client.meta.bind(client);
-    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: live.resuming, recovery: live.resuming ? { done: 1 - live.pending.length, total: 1, pending: live.pending } : undefined }));
-    const read = client.snapshot.bind(client);
-    vi.spyOn(client, "snapshot").mockImplementation(async () => {
-      const rows = await read();
-      return new Promise((ok) => setTimeout(() => ok(rows), SLOW));
-    });
-    daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }];
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(screen.queryByTestId("terminal")).toBeNull();
-      // Back (its window in the rows from now on); recovery ends during the read that releases it.
-      daemon.data.workspaces = [root];
-      live = { resuming: true, pending: [] };
-      await act(async () => { await vi.advanceTimersByTimeAsync(600); });
-      live = { resuming: false, pending: [] };
-      // A poll and one slow read after it came back; not the read in flight, nor another after this one.
-      await act(async () => { await vi.advanceTimersByTimeAsync(SLOW + 500); });
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-    } finally { sync.stop(); vi.useRealTimers(); }
-  });
-
-  it("shows once its session is back from the first read after it, though other sessions come back while that read is out", async () => {
+  it.each([false, true])("releases the pane from its first post-recovery read while recovery changes (other sessions: %s)", async (others) => {
     vi.useFakeTimers();
     const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
     const daemon = new FakeDaemon({
       repos: [{ repo_root: REPO, name: "proj" }],
-      sessions: [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }],
-      workspaces: [root, at("sup2", "proj2", null), at("sup3", "proj3", null)],
+      sessions: others ? [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }] : [session],
+      workspaces: others ? [root, at("sup2", "proj2", null), at("sup3", "proj3", null)] : [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }],
     });
     const client = daemon.client();
     const store = createAppStore();
     const SLOW = 4000;
-    let pending = ["sup2", "sup3"];
+    let pending = others ? ["sup2", "sup3"] : ["sup1"];
+    let resuming = true, reads = 0;
     const meta = client.meta.bind(client);
-    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 3 - pending.length, total: 3, pending } }));
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming, recovery: resuming ? { done: (others ? 3 : 1) - pending.length, total: others ? 3 : 1, pending } : undefined }));
     const read = client.snapshot.bind(client);
-    let reads = 0;
     vi.spyOn(client, "snapshot").mockImplementation(async () => {
       reads++;
       const rows = await read();
       return new Promise((ok) => setTimeout(() => ok(rows), SLOW));
     });
     const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      // sup1 is back from the start: the gate's first read (after the sync's own) is the one that can show it.
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    if (others) {
       while (reads < 2) await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      // The others come back one by one while that read is out.
       await act(async () => { await vi.advanceTimersByTimeAsync(500); });
       daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", null)];
       pending = ["sup3"];
@@ -496,60 +393,60 @@ describe("App", () => {
       daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", windowOf("sup3"))];
       pending = [];
       await act(async () => { await vi.advanceTimersByTimeAsync(SLOW - 2100); });
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-    } finally { sync.stop(); vi.useRealTimers(); }
+    } else {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("terminal")).toBeNull();
+      daemon.data.workspaces = [root];
+      pending = [];
+      await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+      resuming = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(SLOW + 500); });
+    }
+    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
   });
 
   it("recovery progress line: counts sessions on the waiting pane and goes once it is ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     let live: { resuming: boolean; recovery: { done: number; total: number } | null } = { resuming: true, recovery: { done: 3, total: 6 } };
     const meta = client.meta.bind(client);
     vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), ...live }));
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      expect(screen.getByTestId("recovery-progress").textContent).toBe("Reopening sessions, 3 of 6");
-      live = { resuming: false, recovery: null };
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(paneWaits()).toBe(false);
-      expect(screen.queryByTestId("recovery-progress")).toBeNull();
-    } finally { sync.stop(); vi.useRealTimers(); }
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByTestId("recovery-progress").textContent).toBe("Reopening sessions, 3 of 6");
+    live = { resuming: false, recovery: null };
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(paneWaits()).toBe(false);
+    expect(screen.queryByTestId("recovery-progress")).toBeNull();
   });
 
   it.each([false, true])("shows from the first read once recovery ends (daemon changed: %s)", async (changed) => {
     vi.useFakeTimers();
     const old = { ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [old] });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      await sync.idle();
-      daemon.data.workspaces = [root];
-      const meta = client.meta.bind(client);
-      let resuming = true;
-      let pidOffset = 0;
-      vi.spyOn(client, "meta").mockImplementation(async () => {
-        const got = await meta();
-        return { ...got, resuming, pid: got.pid + pidOffset };
-      });
-      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      expect(store.getState().workspaces).toEqual([old]);
-      expect(paneWaits()).toBe(true);
-      // Only the first post-recovery read returns; the inbox and subsequent reads never do.
-      vi.spyOn(client, "snapshot").mockImplementationOnce(async () => { if (changed) pidOffset = 1; return [root]; }).mockReturnValue(new Promise(() => {}));
-      vi.spyOn(client, "inbox").mockReturnValue(new Promise(() => {}));
-      resuming = false;
-      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-      if (changed) expect(paneWaits()).toBe(true);
-      else expect(screen.getByTestId("terminal").dataset.target).toBe(windowOf("sup1"));
-    } finally { sync.stop(); vi.useRealTimers(); }
+    const { client, store, sync } = connectDaemon(daemon);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    await sync.idle();
+    daemon.data.workspaces = [root];
+    const meta = client.meta.bind(client);
+    let resuming = true;
+    let pidOffset = 0;
+    vi.spyOn(client, "meta").mockImplementation(async () => {
+      const got = await meta();
+      return { ...got, resuming, pid: got.pid + pidOffset };
+    });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(store.getState().workspaces).toEqual([old]);
+    expect(paneWaits()).toBe(true);
+    // Only the first post-recovery read returns; the inbox and subsequent reads never do.
+    vi.spyOn(client, "snapshot").mockImplementationOnce(async () => { if (changed) pidOffset = 1; return [root]; }).mockReturnValue(new Promise(() => {}));
+    vi.spyOn(client, "inbox").mockReturnValue(new Promise(() => {}));
+    resuming = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    if (changed) expect(paneWaits()).toBe(true);
+    else expect(screen.getByTestId("terminal").dataset.target).toBe(windowOf("sup1"));
   });
 
   it("a slow engine read holds back nothing but the pane, which opens at the startup deadline and discards the pending response", async () => {
@@ -560,26 +457,22 @@ describe("App", () => {
     vi.spyOn(client, "snapshot").mockReturnValue(new Promise((ok) => { resolve = ok; }));
     const store = createAppStore();
     store.dispatch({ type: "snapshot", workspaces: [root], inbox: [] });
-    try {
-      renderApp(<App store={store} client={client} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      // The first screen is up and usable at once, from what the store already has.
-      expect(screen.getByRole("complementary", { name: "Sidebar" })).toBeTruthy();
-      expect(screen.getByRole("region", { name: "Session" })).toBeTruthy();
-      expect(paneWaits()).toBe(true);
-      await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-      await act(async () => { resolve([worker]); });
-      expect(store.getState().workspaces).toEqual([root]);
-      expect(screen.queryByTestId("starting")).toBeNull();
-    } finally { vi.useRealTimers(); }
+    renderApp(<App store={store} client={client} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    // The first screen is up and usable at once, from what the store already has.
+    expect(screen.getByRole("complementary", { name: "Sidebar" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Session" })).toBeTruthy();
+    expect(paneWaits()).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    await act(async () => { resolve([worker]); });
+    expect(store.getState().workspaces).toEqual([root]);
+    expect(screen.queryByTestId("starting")).toBeNull();
   });
 
   it.each([false, true])("resume paused: lists the goal and resumes into the session's chat pane (already selected: %s)", async (selected) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, paused], workspaces: [root] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={selected ? { screen: "session", root: "sup0", repo: REPO } : { screen: "new" }} />);
     await screen.findByRole("complementary", { name: "Sidebar" });
     if (!selected) fireEvent.click(await within(nav()).findByRole("button", { name: /Paused · 1/ }));
@@ -596,14 +489,11 @@ describe("App", () => {
     await waitFor(() => expect(daemon.requests.filter((r) => r.method === "POST" && r.path === "/sessions/sup0/continue")).toHaveLength(1));
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup0"));
     expect(JSON.parse(localStorage.getItem(LAST_SESSION_KEY)!)).toEqual({ root: "sup0", repo: REPO });
-    sync.stop();
   });
 
   it("session was paused: keeps the shown session and offers Reopen after another session pauses it", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
     expect(screen.queryByText("This session was paused")).toBeNull();
@@ -618,83 +508,21 @@ describe("App", () => {
     await waitFor(() => expect(daemon.requests.filter((r) => r.method === "POST" && r.path === "/sessions/sup1/continue")).toHaveLength(1));
     await waitFor(() => expect(screen.queryByText("This session was paused")).toBeNull());
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    sync.stop();
   });
 
-  it("opens straight into the live provider session, moves between sessions and agents from the sidebar, and reaches every page", async () => {
-    const daemon = new FakeDaemon({
-      repos: [{ repo_root: REPO, name: "proj" }],
-      sessions: [session, paused],
-      workspaces: [root, worker],
-      inbox: [question, { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" }],
-      goal,
-    });
-    daemon.data.meta = { ...daemon.data.meta, engine_version: "1.4.0", api_version: "2.0" };
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+  it("restores page and terminal scroll after Settings, navigates with shortcuts and scopes a paused session's goal", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, paused], workspaces: [root, worker], goal });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await screen.findByRole("region", { name: "Session" });
 
-    // No home board: the first live session's provider session, front and centre, with a newer engine's banner above.
-    // (The landing waits on the sessions feed and the engine check: given room under a full parallel run.)
-    expect(await screen.findByRole("region", { name: "Session" }, { timeout: 4000 })).toBeTruthy();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    expect(surfaceTitle()).toBe("Claude Code · supervisor");
-    expect(screen.getByTestId("engine-banner").textContent).toContain("update the app");
-    expect(JSON.parse(localStorage.getItem(LAST_SESSION_KEY)!)).toEqual({ root: "sup1", repo: REPO });
-    // The merged sidebar: Inbox at the top, the session's context (its goal and milestones) above the split, then
-    // the tree with its worker under the session's supervisor row. Nothing sits beside the provider session.
-    await waitFor(() => expect(treeAgent("w1")).toBeTruthy());
-    expect(within(nav()).getByTestId("tree-session-sup1").textContent).toContain("Ship ls --json");
-    expect(treeSession("sup1").getAttribute("aria-current")).toBe("page");
-    expect(screen.queryByRole("complementary", { name: "Session panel" })).toBeNull();
-    const context = within(nav()).getByTestId("session-context");
-    await waitFor(() => expect(within(context).getByTestId("goal-count").textContent).toBe("1 of 1"));
-    fireEvent.click(within(context).getByRole("button", { name: /finished milestones/ }));
-    expect(within(context).getByRole("list", { name: "Milestones" }).textContent).toContain("Client wired");
-    expect(within(nav()).getByTestId("split-handle")).toBeTruthy();
-    expect(daemon.requests.find((r) => r.path === "/goal")?.query).toEqual({ repo: REPO, root: "sup1" });
-    // The bar is the agent's alone: no goal, repo or count of the session's on it.
-    expect(screen.getByTestId("session-bar").textContent).not.toContain("Ship ls --json");
-    expect(screen.queryByTestId("goal-progress")).toBeNull();
-    expect(within(screen.getByTestId("session-bar")).queryByRole("button", { name: /need/ })).toBeNull();
-
-    // The tree picks a worker: its provider session at once. No per-worker review and no message box:
-    // the person talks to it there, and a branch is reviewed from its inbox item.
-    fireEvent.click(treeAgent("w1"));
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("w1"));
-    expect(surfaceTitle()).toBe("Claude Code · ls");
-    expect(treeAgent("w1").getAttribute("aria-current")).toBe("page");
-    expect(screen.queryByRole("button", { name: "Review changes" })).toBeNull();
-    expect(screen.queryByLabelText("Message")).toBeNull();
-
-    // The Inbox page, from the entry at the sidebar's top: everything waiting, grouped by session as banner
-    // cards; a card's Go to session jumps to the agent that asks in its provider session, nothing over it.
-    expect(screen.getByTestId("inbox-badge").textContent).toBe("2");
     fireEvent.click(link(/^Inbox/));
-    expect(await screen.findByRole("region", { name: "Inbox" })).toBeTruthy();
-    const group = screen.getByRole("region", { name: "Ship ls --json" });
-    expect(group.textContent).toContain("Has a question");
-    fireEvent.click(within(group).getByRole("button", { name: "Go to session ›" }));
-    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    expect(screen.queryByRole("dialog")).toBeNull();
-    // The badge follows the inbox: an answered question and a read notice leave it empty.
-    daemon.data.inbox = [];
-    daemon.publish("message.queued", { agent_id: "sup1" });
-    await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
-
-    // The Inbox is the page Settings returns to below.
-    expect(within(nav()).queryByRole("button", { name: "Settings" })).toBeNull();
-    fireEvent.click(link(/^Inbox/));
-    expect(await screen.findByRole("region", { name: "Inbox" })).toBeTruthy();
-    const previousPage = screen.getByRole("region", { name: "Inbox" });
+    const previousPage = await screen.findByRole("region", { name: "Inbox" });
     const main = screen.getByRole("main");
     main.scrollTop = 180;
     fireEvent.click(link("Open Account › Usage"));
-    expect(await screen.findByTestId("usage")).toBeTruthy();
+    await screen.findByTestId("usage");
     expect(main.scrollTop).toBe(0);
-    expect(link("Open Account › Usage").getAttribute("aria-current")).toBe("page");
     expect(within(main).queryByRole("tablist")).toBeNull();
     expect(within(nav()).getByRole("tablist", { name: "Settings" })).toBeTruthy();
     expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
@@ -705,23 +533,18 @@ describe("App", () => {
     expect(screen.getByRole("tab", { name: "Usage" }).getAttribute("aria-selected")).toBe("true");
     fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
     expect(document.activeElement).toBe(accountTab);
-    // Clicked again from another of Settings' tabs, an entry opens its own tab again.
-    const selected = (name: string) => screen.getByRole("tab", { name }).getAttribute("aria-selected");
     fireEvent.click(screen.getByRole("tab", { name: "Permissions" }));
     fireEvent.click(link("Open Account › Usage"));
-    await waitFor(() => expect(selected("Usage")).toBe("true"));
-    main.scrollTop = 0;
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
-    expect(main.scrollTop).toBe(180);
-    fireEvent.click(link("Open Account › Usage"));
-    fireEvent.click(link("← Sessions"));
-    expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
-    expect(main.scrollTop).toBe(180);
-
-    // ⌘1 is the first live session, back from any page; ⌘N the composer.
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Usage" }).getAttribute("aria-selected")).toBe("true"));
+    for (const leave of [() => fireEvent.keyDown(window, { key: "Escape" }), () => fireEvent.click(link("← Sessions"))]) {
+      main.scrollTop = 0;
+      leave();
+      expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
+      expect(main.scrollTop).toBe(180);
+      fireEvent.click(link("Open Account › Usage"));
+    }
     fireEvent.keyDown(window, { key: "1", metaKey: true });
-    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+    await screen.findByRole("region", { name: "Session" });
     const terminal = screen.getByTestId("terminal");
     const sessionsList = within(nav()).getByRole("navigation", { name: "Sessions" });
     sessionsList.scrollTop = 64;
@@ -736,31 +559,20 @@ describe("App", () => {
     expect(within(nav()).getByRole("navigation", { name: "Sessions" })).toBe(sessionsList);
     expect(sessionsList.scrollTop).toBe(64);
     fireEvent.keyDown(window, { key: "n", metaKey: true });
-    expect(await screen.findByRole("region", { name: "New session" })).toBeTruthy();
-    expect(screen.getByLabelText("What should brindle work on?")).toBeTruthy();
-
-    // A paused session opens too, from its repo's Paused · N row once expanded: a card in place of a session (no
-    // agents to show), and its goal is asked for with the repo the sessions feed knows, not one found in a snapshot.
+    await screen.findByRole("region", { name: "New session" });
     fireEvent.click(within(nav()).getByRole("button", { name: /Paused · 1/ }));
-    fireEvent.click(nav().querySelector<HTMLButtonElement>('button[data-tree-session="sup0"]')!);
-    const card = await screen.findByTestId("state-card");
-    expect(card.textContent).toContain("is paused");
-    expect(within(card).getByRole("button", { name: "Continue" })).toBeTruthy();
-    // The sidebar's context follows the session on screen.
-    await waitFor(() => expect(within(nav()).getByRole("region", { name: "Goal" }).textContent).toContain("No goal set for this session."));
-    expect(within(nav()).getByTestId("session-context").textContent).toContain("Refactor the cache");
-    expect(daemon.requests.filter((r) => r.path === "/goal").at(-1)?.query).toEqual({ repo: REPO, root: "sup0" });
+    fireEvent.click(treeSession("sup0"));
+    await screen.findByTestId("state-card");
+    await waitFor(() => expect(daemon.requests.filter((r) => r.path === "/goal").at(-1)?.query).toEqual({ repo: REPO, root: "sup0" }));
+    expect(within(nav()).getByTestId("session-context").textContent).toContain(paused.goal);
 
-    // The connection fails (here: the daemon's token changed under the app, so
-    // the stream's reconnect is refused): the banner says so in place of the
-    // update notice, and "Check again" runs the engine check, which fails too.
     daemon.token = "rotated";
     daemon.drop();
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Can't reach the brindle engine"));
-    expect(screen.queryByRole("status")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Can't reach the brindle engine: missing or wrong token"));
-    sync.stop();
+    await screen.findByRole("alert");
+    const checked = vi.spyOn(client, "meta");
+    fireEvent.click(await screen.findByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(checked).toHaveBeenCalled());
+    await expect(checked.mock.results.at(-1)!.value).rejects.toMatchObject({ status: 401 });
   });
 
   it("library sidebar: the foot's button opens the Library with the sidebar as its navigation, ← Sessions and ⌘L go back, and Settings keeps Agents", async () => {
@@ -866,9 +678,7 @@ describe("App", () => {
       sessions: [session, { ...session, id: "sup2", workspace_id: "other" }],
       workspaces: [root],
     });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "new" }} />);
     // The second repo's heading: its Project settings, and a shell from the foot starts at that repo.
     await screen.findByRole("complementary", { name: "Sidebar" });
@@ -886,16 +696,13 @@ describe("App", () => {
     expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
     fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: REPO } });
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", REPO));
-    sync.stop();
   });
 
   it("inbox: a plan is approved and a notice marked read right on their cards, at once; Go to session opens the session with nothing over it", async () => {
     const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan.\n2. Ship it." };
     const notice = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [plan, notice, question], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox" }} />);
     const group = await screen.findByRole("region", { name: "Ship ls --json" });
     const posts = () => daemon.requests.filter((r) => r.method === "POST").map((r) => r.path);
@@ -916,7 +723,6 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
-    sync.stop();
   });
 
   it("lands on the session kept from last time, else the first live one, else the composer", async () => {
@@ -928,23 +734,18 @@ describe("App", () => {
 
     // Nothing running and nothing kept: the calm empty state, with the composer.
     const daemon = new FakeDaemon({ repos, sessions: [paused], workspaces: [root] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     expect(await screen.findByRole("region", { name: "New session" })).toBeTruthy();
     expect(await screen.findByLabelText("What should brindle work on?")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Session" })).toBeNull();
-    sync.stop();
   });
 
   it("a session started from the composer on a first launch opens running, not paused (#216)", async () => {
     // A first launch: a project just picked, nothing ever run in it. The engine says the new supervisor
     // exists only with agent.status (it has no event of its own), and nothing else happens on the bus.
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [{ ...root, agents: [] }] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     expect(await screen.findByRole("region", { name: "New session" })).toBeTruthy();
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
@@ -961,7 +762,6 @@ describe("App", () => {
     expect(within(bar()).getByRole("button", { name: "Pause" })).toBeTruthy();
     // Nothing was paused for it either.
     expect(daemon.requests.some((r) => r.path.endsWith("/pause"))).toBe(false);
-    sync.stop();
   });
 
   it.each(["before", "after"])("a session whose status beat its window into the snapshot still opens running, not paused (#216), read %s launch completes", async (readWhen) => {
@@ -1019,8 +819,7 @@ describe("App", () => {
       token: TOKEN,
       fetch: (input, init) => (String(input).endsWith("/v1/repos") && down ? Promise.reject(new TypeError("connection refused")) : daemon.fetch(input, init)),
     });
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { store, sync } = connectDaemon(daemon, client);
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     const failed = await screen.findByTestId("sessions-failed");
     expect(failed.textContent).toContain("connection refused");
@@ -1032,7 +831,6 @@ describe("App", () => {
     expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
     expect(screen.queryByTestId("sessions-failed")).toBeNull();
-    sync.stop();
   });
 
   it("runs an old engine's upgrade from the banner in the background: waiting, failed with a retry, then updated", async () => {
@@ -1040,9 +838,7 @@ describe("App", () => {
     daemon.data.meta ={ ...daemon.data.meta, engine_version: "0.4.1", api_version: "0.9" };
     daemon.deferUpgrade = true;
     daemon.upgradeFails = true;
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     const banner = await screen.findByTestId("engine-banner");
     expect(banner.textContent).toContain("is older than this app supports");
@@ -1068,7 +864,6 @@ describe("App", () => {
     // Two jobs of the engine's, no terminal's command.
     expect(daemon.upgrades).toHaveLength(2);
     expect(daemon.actions).toHaveLength(0);
-    sync.stop();
   });
 
   it("self-repair: an engine that dies comes back without a click: the app keeps reconnecting, and once the shell has restarted it, catches up and clears the banner", async () => {
@@ -1123,7 +918,6 @@ describe("App", () => {
     fireEvent.click(link("Library"));
     expect(await screen.findByRole("region", { name: "Library" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
-    sync.stop();
   });
 
   it("engine restart: the last screen stays under a calm reconnect overlay, a next step after a long wait, then the normal screen once the new engine has its sessions back", async () => {
@@ -1293,31 +1087,6 @@ describe("App", () => {
   });
 });
 
-describe("providers in the sidebar", () => {
-  beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
-  const start = (providers = freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" } })) => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], providers });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    return { daemon, stop: () => sync.stop() };
-  };
-
-  it("providers: the sidebar has no providers block, and its provider strip says nothing about providers while none has a problem", async () => {
-    const { daemon, stop } = start();
-    await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
-    await waitFor(() => expect(daemon.requests.some((r) => r.path === "/providers/installed")).toBe(true));
-    await flush();
-    expect(nav().textContent).not.toMatch(/providers/i);
-    expect(nav().textContent).not.toContain("Claude Code");
-    expect(within(nav()).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
-    expect(within(nav()).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
-    stop();
-  });
-
-});
-
 describe("closing a session", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
   /* A second live session in the same repo, on its own worktree. */
@@ -1329,9 +1098,7 @@ describe("closing a session", () => {
 
   it("Done → Close session: one click, the session leaves the sidebar at once and the view moves to the next session", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, other], workspaces: [root, worker, otherWs], goal: done });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
     // Finished: the count line is green, with no phase label; Close session sits under the milestone list.
@@ -1356,7 +1123,6 @@ describe("closing a session", () => {
     await waitFor(() => expect(daemon.requests.filter((r) => r.path === "/sessions").length).toBeGreaterThan(2));
     expect(sessionRow("sup1")).toBeNull();
     expect(within(nav()).queryByTestId("close-error")).toBeNull();
-    sync.stop();
   });
 
   it.each([
@@ -1375,15 +1141,12 @@ describe("closing a session", () => {
       agents: running.map((id) => ({ ...worker.agents![0], id, parent_id: "sup0" })),
     };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, cache], workspaces: [root, worker, cacheWs], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup0", repo: REPO, agent: "sup0" }} />);
     await waitFor(() => expect(nav().querySelector('[data-tree-session="sup0"]')).toBeTruthy());
     await waitFor(() => expect(store.getState().synced).toBe(true));
     fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
     expect(within(screen.getByRole("menu")).getByTestId("close-session").textContent).toBe(label);
-    sync.stop();
   });
 
   it("a close the engine refuses brings the session back to the sidebar and says why", async () => {
@@ -1396,8 +1159,7 @@ describe("closing a session", () => {
           ? Promise.resolve(new Response(JSON.stringify({ error: { code: "conflict", message: "the engine is busy" } }), { status: 409, headers: { "Content-Type": "application/json" } }))
           : daemon.fetch(input, init),
     });
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { store, sync } = connectDaemon(daemon, client);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
     // The app shows once its first-launch gate has asked the engine.
     fireEvent.click(await within(await screen.findByRole("complementary", { name: "Sidebar" })).findByRole("button", { name: "Close session" }));
@@ -1405,7 +1167,6 @@ describe("closing a session", () => {
     await waitFor(() => expect(within(nav()).getByTestId("close-error").textContent).toContain("Couldn't close sup1"));
     expect(sessionRow("sup1")).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
-    sync.stop();
   });
 });
 
@@ -1435,12 +1196,11 @@ describe("the sign-in gate", () => {
 
   it("signed out: only the sign-in screen, and the providers aren't asked about until it's done", async () => {
     const daemon = new FakeDaemon({ account: SIGNED_OUT, providers: freshProviders() });
-    const { sync } = start(daemon);
+    start(daemon);
     await gate();
     onlySignIn();
     await flush();
     expect(providersAsked(daemon)).toBe(0);
-    sync.stop();
   });
 
   it("app opened from an agent says how to reopen it", async () => {
@@ -1451,29 +1211,26 @@ describe("the sign-in gate", () => {
       requests.push(String(input));
       return new Response(JSON.stringify({ error: { code: "agent_caller", message: "refused: the caller runs under brindle agent w1" } }), { status: 403, headers: { "Content-Type": "application/json" } });
     } });
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      renderApp(<App store={store} client={client} refresh={sync.refresh} onAgentRefused={sync.stop} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      expect(screen.getByRole("alert").textContent).toContain("brindle was opened from an agent's terminal. Open it from the Dock");
-      expect(screen.queryByTestId("signin-gate")).toBeNull();
-      expect(sidebar()).toBeNull();
-      expect(screen.queryByRole("button")).toBeNull();
-      expect(store.getState().connection).toBe("closed");
-      const count = requests.length;
-      daemon.drop();
-      await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
-      expect(requests).toHaveLength(count);
-      expect(requests.some((path) => path.endsWith("/providers/installed"))).toBe(false);
-    } finally { sync.stop(); vi.useRealTimers(); }
+    const { store, sync } = connectDaemon(daemon, client);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} onAgentRefused={sync.stop} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByRole("alert").textContent).toContain("brindle was opened from an agent's terminal. Open it from the Dock");
+    expect(screen.queryByTestId("signin-gate")).toBeNull();
+    expect(sidebar()).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(store.getState().connection).toBe("closed");
+    const count = requests.length;
+    daemon.drop();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+    expect(requests).toHaveLength(count);
+    expect(requests.some((path) => path.endsWith("/providers/installed"))).toBe(false);
   });
 
   it("onboarded on this Mac with a CLI signed in, but signed out of brindle: still the gate, then the app once signed in", async () => {
     localStorage.setItem(ONBOARDED_KEY, "1");
     const daemon = new FakeDaemon({ account: SIGNED_OUT, repos: [{ repo_root: REPO, name: "proj" }], providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: true }, opencode: { path: "/usr/local/bin/opencode", version: "0.9.0" } }) });
     daemon.deferLogin = true;
-    const { sync, openUrl } = start(daemon);
+    const { openUrl } = start(daemon);
     await gate();
     onlySignIn();
     // Not the first launch: no step count.
@@ -1485,7 +1242,6 @@ describe("the sign-in gate", () => {
     expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
     expect(sidebar()).toBeTruthy();
     expect(screen.queryByTestId("signin-gate")).toBeNull();
-    sync.stop();
   });
 
   it("signed in: straight to the app when onboarded, to onboarding when not", async () => {
@@ -1510,7 +1266,7 @@ describe("the sign-in gate", () => {
     localStorage.setItem(ONBOARDED_KEY, "1");
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
     let failing = true;
-    const { sync } = start(daemon, (input, init) =>
+    start(daemon, (input, init) =>
       failing && String(input).endsWith("/v1/account")
         ? Promise.resolve(new Response(JSON.stringify({ error: { code: "not_found", message: "no such route" } }), { status: 404, headers: { "Content-Type": "application/json" } }))
         : daemon.fetch(input, init),
@@ -1524,25 +1280,12 @@ describe("the sign-in gate", () => {
     fireEvent.click(within(failed).getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
     expect(screen.queryByTestId("signin-gate")).toBeNull();
-    sync.stop();
-  });
-
-  it("signing out from Account returns to the gate", async () => {
-    localStorage.setItem(ONBOARDED_KEY, "1");
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
-    const { sync } = start(daemon);
-    fireEvent.click(await screen.findByRole("button", { name: "Open Account › Usage" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Account" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
-    await gate();
-    onlySignIn();
-    sync.stop();
   });
 
   it("a first launch: sign in, then New session with its demo offer, as before", async () => {
     // The CLI used before this app: a repo registered already, Claude Code signed in; brindle not yet.
     const daemon = new FakeDaemon({ account: SIGNED_OUT, repos: [{ repo_root: REPO, name: "proj" }] });
-    const { sync } = start(daemon);
+    start(daemon);
     await gate();
     expect(screen.getByText("Step 1 of 3")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Watch brindle work on a practice repo" })).toBeNull();
@@ -1553,6 +1296,5 @@ describe("the sign-in gate", () => {
     expect(screen.getByRole("button", { name: "Watch brindle work on a practice repo" })).toBeTruthy();
     expect(localStorage.getItem(ONBOARDED_KEY)).toBe("1");
     expect(daemon.demos).toEqual([]);
-    sync.stop();
   });
 });

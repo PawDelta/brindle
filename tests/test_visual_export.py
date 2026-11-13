@@ -14,28 +14,28 @@ FIXTURES = Path(__file__).parent / "fixtures" / "visuals"
 
 
 @pytest.mark.parametrize("hostile", [
-    "<script>alert(1)</script>",
+    pytest.param("<script>alert(1)</script>", marks=pytest.mark.variant("plain script elements cannot survive a snapshot")),
     pytest.param('<p onclick="alert(1)">bad</p>', marks=pytest.mark.variant("event handler bypass")),
     pytest.param('<a href="javascript:alert(1)">bad</a>', marks=pytest.mark.variant("URL bypass")),
     pytest.param('<div style="background:url(https://evil.test)">bad</div>', marks=pytest.mark.variant("CSS fetch bypass")),
     pytest.param('<svg><script>alert(1)</script></svg>', marks=pytest.mark.variant("SVG script bypass")),
-    '<iframe srcdoc="<script>alert(1)</script>"></iframe>',
+    pytest.param('<iframe srcdoc="<script>alert(1)</script>"></iframe>', marks=pytest.mark.variant("iframe srcdoc cannot smuggle an executable document")),
     pytest.param('<meta http-equiv="refresh" content="0;url=https://evil.test">', marks=pytest.mark.variant("refresh bypass")),
     pytest.param('<html onclick="alert(1)"><head><meta http-equiv="Content-Security-Policy" '
                  'content="default-src *"></head><body onload="alert(1)"></body></html>',
                  marks=pytest.mark.variant("root attributes and metadata bypass")),
     '<img src="https://evil.test/tracker"><img src="data:image/svg+xml;base64,AAAA">',
-    '<svg><path fill="url(https://evil.test)" d="M0 0"></path></svg>',
-    '<style>@import "https://evil.test";</style>',
-    '<style>.selected{background:url(https://evil.test);color:green}</style>',
+    pytest.param('<svg><path fill="url(https://evil.test)" d="M0 0"></path></svg>', marks=pytest.mark.variant("SVG paint URLs cannot fetch another document")),
+    pytest.param('<style>@import "https://evil.test";</style>', marks=pytest.mark.variant("stylesheet imports cannot fetch external resources")),
+    pytest.param('<style>.selected{background:url(https://evil.test);color:green}</style>', marks=pytest.mark.variant("class rules cannot retain a fetching background declaration")),
     pytest.param('<style>.selected{background:u/**/rl(https://evil.test)}</style>',
                  marks=pytest.mark.variant("CSS comment URL bypass")),
     pytest.param('<style>.selected{background:\\75rl(https://evil.test)}</style>',
                  marks=pytest.mark.variant("CSS escape URL bypass")),
-    '<style>[data-secret]{color:red;background:url(https://evil.test)}</style>',
+    pytest.param('<style>[data-secret]{color:red;background:url(https://evil.test)}</style>', marks=pytest.mark.variant("attribute selectors cannot leak document state through CSS fetches")),
     pytest.param('<style>@media screen {.selected{color:red}}</style>',
                  marks=pytest.mark.variant("unsupported nested stylesheet")),
-    '<!--bad--><object><p>bad</p></object>',
+    pytest.param('<!--bad--><object><p>bad</p></object>', marks=pytest.mark.variant("object fallback content and comments cannot survive active-content stripping")),
     pytest.param('<svg><path marker-end="url(https://evil.test/#a)" fill="url(#a) url(https://evil.test)" d="M0 0"></path></svg>',
                  marks=pytest.mark.variant("SVG reference to another document")),
     pytest.param('<style>@media (prefers-color-scheme:dark){.x{background:url(https://evil.test)}'
@@ -72,7 +72,8 @@ def test_snapshot_strips_active_content(db, session, client, hostile):
     assert not any(s in html for s in ("<script", "onclick", "onload", "javascript:", "url(", "srcdoc", "refresh", "evil.test", "bad--"))
 
 
-@pytest.mark.parametrize("layout", ["mixed", "roots"])
+@pytest.mark.parametrize("layout", ["mixed", pytest.param("roots", marks=pytest.mark.variant(
+    "root html and body classes must survive sanitization without nesting duplicate document roots"))])
 def test_snapshot_preserves_safe_class_styling(db, session, client, layout):
     _, boss, _ = session
     v = visuals.publish(db, boss, "Options", "<p>initial</p>")
@@ -179,12 +180,19 @@ def test_export_keeps_how_the_visual_looked():
 
 
 @pytest.mark.parametrize("case,status", [
-    ("answer", 200), ("answer_free_text", 200), ("answer_secret", 400), ("secret", 400), ("stale", 409), ("unknown", 404),
+    pytest.param("answer", 200, marks=pytest.mark.variant("an option answer must be escaped before inclusion in exported HTML")),
+    pytest.param("answer_free_text", 200, marks=pytest.mark.variant("a free-text answer without an option must export safely")),
+    pytest.param("answer_secret", 400, marks=pytest.mark.variant("a stored answer containing a secret must block export")),
+    ("secret", 400), ("stale", 409), ("unknown", 404),
     pytest.param("answer_without_note", 200, id="test_export_answer_without_note",
                  marks=pytest.mark.variant("reported crash: an option picked with no note (review 0.6.3, finding 6)")),
-    ("disabled", 404), ("too_big", 400), ("invalid", 400), ("missing", 400),
-    ("free", 402), ("denied", 403), ("google_docs", 200), ("sharepoint", 200),
-    ("plan", 200), ("plan_disabled", 200), ("wrong_kind", 400),
+    ("disabled", 404), ("too_big", 400), ("invalid", 400),
+    pytest.param("missing", 400, marks=pytest.mark.variant("a snapshot without HTML must fail validation before export")),
+    ("free", 402), ("denied", 403),
+    pytest.param("google_docs", 200, marks=pytest.mark.variant("Google Docs export requires an explicitly allowed destination")),
+    ("sharepoint", 200),
+    pytest.param("plan", 200, marks=pytest.mark.variant("a plan snapshot must export Markdown rather than its HTML rendering")),
+    ("plan_disabled", 200), ("wrong_kind", 400),
 ])
 def test_snapshot_checks_identity_revision_secrets_and_destination(db, session, client, monkeypatch, case, status):
     _, boss, _ = session

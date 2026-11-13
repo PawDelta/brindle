@@ -46,12 +46,14 @@ def client():
 
 
 @pytest.mark.parametrize("caller,html,options,enabled,refused", [
-    ("w1", "<p>ok</p>", OPTIONS, True, None),
+    pytest.param("w1", "<p>ok</p>", OPTIONS, True, None, marks=pytest.mark.variant(
+        "a worker's requested visual must be stored in its supervisor's session")),
     ("w1", "x" * (visuals.MAX_BYTES + 1), None, True, "too_big"),
     ("w1", "<p>ok</p>", [{"id": "A", "label": "a"}, {"id": "A", "label": "b"}], True, "invalid"),
     ("w1", f"<p>{SECRET}</p>", None, True, "secret"),
     (None, "<p>ok</p>", None, True, "invalid"),
-    ("w1", "<p>ok</p>", None, False, "not_enabled"),
+    pytest.param("w1", "<p>ok</p>", None, False, "not_enabled", marks=pytest.mark.variant(
+        "the environment kill switch must refuse publication without leaving a visual row")),
 ])
 def test_publish_refuses_each_bad_page(db, session, monkeypatch, caller, html, options, enabled, refused):
     ws, boss, worker = session
@@ -463,9 +465,9 @@ def test_removing_a_session_deletes_its_visuals_but_not_the_kept_one(db, session
 
 
 @pytest.mark.parametrize("ref,rev,status", [
-    ("own", "1", 200),
-    ("own", "2", 404),                 # a revision the store doesn't have
-    ("v_000000000000", "1", 404),      # another, unknown id
+    pytest.param("own", "1", 200, marks=pytest.mark.variant("serving a stored visual must apply the restrictive CSP")),
+    pytest.param("own", "2", 404, marks=pytest.mark.variant("a nonexistent revision must not serve the latest page")),
+    pytest.param("v_000000000000", "1", 404, marks=pytest.mark.variant("an unknown visual identity must not expose another stored page")),
     pytest.param("%2e%2e", "1", 404, marks=pytest.mark.variant("a path step out of the store")),
     pytest.param("own", "1.html", 404, marks=pytest.mark.variant("a file name instead of a revision")),
 ])
@@ -488,6 +490,7 @@ def test_visuals_are_on_unless_switched_off(monkeypatch):
     assert not visuals.enabled()
 
 
+@pytest.mark.variant("a live MCP connection must receive tool-list changes when visuals are disabled")
 def test_the_visuals_setting_flips_the_feature_and_every_running_agents_tools_live(monkeypatch):
     import asyncio
 

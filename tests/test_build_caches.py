@@ -21,10 +21,13 @@ def global_caches(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("stored, profile_home, enforced, variable, flagged", [
-    (True, None, False, None, False),    # turned on with /chrome, in the agent's stored home
+    pytest.param(True, None, False, None, False,
+                 marks=pytest.mark.variant("a stored /chrome choice must survive worker launch")),
     (False, None, False, "1", False),    # turned on by its own variable
-    (True, False, False, None, True),    # the profile's home is the pane's, and has no choice
-    (False, True, False, None, False),   # turned on in the profile's home
+    pytest.param(True, False, False, None, True,
+                 marks=pytest.mark.variant("the pane's profile home overrides a different stored home")),
+    pytest.param(False, True, False, None, False,
+                 marks=pytest.mark.variant("a profile home's explicit Chrome choice is respected")),
     (False, True, True, None, True),     # an enforced identity drops the profile's home
 ])
 @pytest.mark.usefixtures("fake_agent_cli")
@@ -56,8 +59,11 @@ def test_claude_starts_without_chrome_unless_the_panes_home_chose_it(db, repo, t
     assert ("--no-chrome" in opened[0]) is flagged
 
 
-@pytest.mark.parametrize("who, shared_target", [("worker", True), ("codex", True), ("check", True),
-                                                ("check", False)])
+@pytest.mark.parametrize("who, shared_target", [
+    pytest.param("worker", True, marks=pytest.mark.variant("Claude settings must preserve the shared build cache environment")),
+    pytest.param("codex", True, marks=pytest.mark.variant("Codex must grant sandbox write access to shared cache directories")),
+    pytest.param("check", True, marks=pytest.mark.variant("check dispatch must inherit the same shared cache as workers")),
+    ("check", False)])
 def test_worker_and_check_env_share_build_caches(db, repo, tmp_path, monkeypatch, who, shared_target):
     ws = workspaces.create(db, str(repo), "feat/caches").workspace
     cfg = RepoConfig(checks=["cargo test"], shared_cargo_target=shared_target)
@@ -92,12 +98,14 @@ NPM_CI = "cd app && npm ci --no-audit"
 
 
 @pytest.mark.parametrize("setup, base_lock, platform_clones, events", [
-    ([NPM_CI, "echo done"], "unchanged", True, ["clone", "echo done"]),
+    pytest.param([NPM_CI, "echo done"], "unchanged", True, ["clone", "echo done"],
+                 marks=pytest.mark.variant("a successful clone must still run the following setup command")),
     ([NPM_CI, "echo done"], "changed", True, [NPM_CI, "echo done"]),
     ([NPM_CI, "echo done"], "unchanged", False, [NPM_CI, "echo done"]),
     # Each command in order: the clone happens when its install is reached.
     (["cd app && rm -rf node_modules", NPM_CI], "unchanged", True, ["cd app && rm -rf node_modules", "clone"]),
-    (["exit 1", NPM_CI], "unchanged", True, ["exit 1"]),
+    pytest.param(["exit 1", NPM_CI], "unchanged", True, ["exit 1"],
+                 marks=pytest.mark.variant("a failed setup step must prevent the later node_modules clone")),
     # A flag that changes what or where it installs runs as configured.
     (["cd app && npm ci --prefix=web"], "unchanged", True, ["cd app && npm ci --prefix=web"]),
 ])

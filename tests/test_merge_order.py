@@ -88,6 +88,7 @@ def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle",
 # -- hunks and their overlap -----------------------------------------------------
 
 
+@pytest.mark.variant("past bug: a hunk body line starting `--- ` was read as a file header")
 def test_parse_hunks_does_not_take_a_body_line_for_a_file_header():
     """A removed line starting `-- ` (an SQL comment, a Lua comment, a yaml
     document marker `---`) prints as `--- ...` inside the hunk; the hunks

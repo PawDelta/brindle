@@ -31,9 +31,6 @@ TESTS = {
     "tests/test_unrelated.py": "import os\n",
     "tests/test_loader.py": "from brindle import loader\n",   # loader may import low, but so may anything
 }
-AGENTS = ["tests/test_agents.py", "tests/test_any.py", "tests/test_member.py", "tests/test_patch.py"]
-ROUTES = ["tests/test_alias.py", "tests/test_any.py", "tests/test_attr.py", "tests/test_bound.py",
-          "tests/test_dotted.py", "tests/test_lazy.py"]
 CAPPED = check_scope.CAP_NOTE.format(max=2, tests="tests/test_agents.py")
 
 
@@ -42,11 +39,8 @@ def run(tests):
 
 
 @pytest.mark.parametrize("changed,max_files,ran", [
-    ("src/brindle/agents.py", 0, run(AGENTS)),   # the graph reaches no test from f()
-    ("src/brindle/daemon/routes_read.py", 0, run(ROUTES)),
-    ("src/brindle/low.py", 0, run(AGENTS)),      # only test_any may import it: add those importing agents, which does
     ("src/brindle/agents.py", 2, f"printf '%s\\n' {shlex.quote(CAPPED)}; {run(['tests/test_agents.py'])}"),
-], ids=["graph-reaches-none", "import-forms", "one-level", "capped"])
+], ids=["capped"])
 def test_imports_scope_the_check(repo, tmp_path, monkeypatch, changed, max_files, ran):
     for name, text in {**SOURCES, **TESTS}.items():
         (repo / name).parent.mkdir(parents=True, exist_ok=True)

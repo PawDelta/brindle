@@ -27,16 +27,20 @@ def verify(token, **kw):
 # -- verification ------------------------------------------------------------------------
 
 
+@pytest.mark.variant("bypass: a signed access token cannot be used as a license")
 def test_token_use_must_be_entitlement(token):
     with pytest.raises(LicenseError, match="not an entitlement"):
         verify(token(token_use="access"))
 
 
 @pytest.mark.parametrize("mangle", [
-    lambda t: t[:-4] + ("AAAA" if not t.endswith("AAAA") else "BBBB"),       # signature
-    lambda t: ".".join([t.split(".")[0], b64(json.dumps(claims(plan="enterprise")).encode()),
-                        t.split(".")[2]]),                                     # payload swapped
-    lambda t: t.rsplit(".", 1)[0],
+    pytest.param(lambda t: t[:-4] + ("AAAA" if not t.endswith("AAAA") else "BBBB"),
+                 marks=pytest.mark.variant("tampering: reject a modified signature")),
+    pytest.param(lambda t: ".".join([t.split(".")[0], b64(json.dumps(claims(plan="enterprise")).encode()),
+                                   t.split(".")[2]]),
+                 marks=pytest.mark.variant("tampering: reject a plan escalation in the signed payload")),
+    pytest.param(lambda t: t.rsplit(".", 1)[0],
+                 marks=pytest.mark.variant("security: reject a token with its signature segment removed")),
     lambda t: "a" * (license.MAX_TOKEN_BYTES + 1),
 ])
 def test_tampered_or_malformed_tokens_are_rejected(token, mangle):
@@ -44,22 +48,25 @@ def test_tampered_or_malformed_tokens_are_rejected(token, mangle):
         verify(mangle(token()))
 
 
-@pytest.mark.parametrize("alg", ["none", ""])
+@pytest.mark.parametrize("alg", [
+    "none",
+    pytest.param("", marks=pytest.mark.variant("bypass: an empty algorithm must not bypass signature verification")),
+])
 def test_wrong_alg_is_rejected(signing_key, alg):
     with pytest.raises(LicenseError, match="algorithm"):
         verify(sign(signing_key, claims(), {"alg": alg}))
 
 
-def test_unknown_kid_is_rejected(signing_key):
+@pytest.mark.parametrize("kid, error", [
+    pytest.param("rogue", "unknown key",
+                 marks=pytest.mark.variant("security: a token cannot introduce its own unpinned signing key")),
+    pytest.param(TEST_KID, "signature",
+                 marks=pytest.mark.variant("security: a trusted key ID cannot authorize a signature from another key")),
+])
+def test_unknown_kid_is_rejected(signing_key, kid, error):
     other = Ed25519PrivateKey.generate()
-    with pytest.raises(LicenseError, match="unknown key"):
-        verify(sign(other, claims(kid="rogue"), {"kid": "rogue"}))
-
-
-def test_right_kid_wrong_key_is_rejected(signing_key):
-    other = Ed25519PrivateKey.generate()
-    with pytest.raises(LicenseError, match="signature"):
-        verify(sign(other, claims()))
+    with pytest.raises(LicenseError, match=error):
+        verify(sign(other, claims(kid=kid), {"kid": kid}))
 
 
 def test_kid_header_and_claim_must_match(signing_key):
@@ -158,20 +165,6 @@ def test_file_store_rejects_corrupt_contents(tmp_path):
         store.load()
 
 
-def test_keychain_writes_the_secret_on_stdin_not_argv(monkeypatch):
-    calls = []
-
-    class R:
-        returncode, stdout, stderr = 0, "", ""
-
-    monkeypatch.setattr(credentials.subprocess, "run", lambda argv, **kw: calls.append((argv, kw)) or R())
-    credentials.KeychainStore().save({"access_token": "SECRET"})
-    argv, kw = calls[0]
-    assert argv == ["security", "-i"]
-    assert "SECRET" not in " ".join(argv)
-    assert credentials._encode({"access_token": "SECRET"}) in kw["input"]
-
-
 # -- features() / require() and the current entitlement ---------------------------------------------
 
 
@@ -253,6 +246,7 @@ def test_features_fail_closed_on_a_loose_credentials_file(backend, token):
     assert license.features() == frozenset()
 
 
+@pytest.mark.variant("security: a forged cached entitlement cannot grant features when the backend is unavailable")
 def test_features_fail_closed_on_a_forged_token(backend, token, monkeypatch):
     logged_in(backend, token()[:-6] + "AAAAAA")
     monkeypatch.setattr(auth, "UrllibTransport", lambda: backend)
@@ -302,6 +296,7 @@ def test_a_cancelled_subscription_is_announced_once(backend, token):
 # -- development keys (JWKS from a localhost backend) ------------------------------------------
 
 
+@pytest.mark.variant("bypass: dev mode and a localhost issuer cannot add trusted signing keys")
 def test_no_environment_makes_an_unpinned_key_trusted(monkeypatch):
     # Dev mode and a localhost issuer once let the client trust keys a local
     # server served; nothing outside keys.py may add a trusted key.

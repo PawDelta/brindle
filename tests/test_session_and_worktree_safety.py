@@ -76,7 +76,10 @@ def ended(monkeypatch):
     return killed
 
 
-@pytest.mark.parametrize("damage", [gut, broken_git_link, shutil.rmtree])
+@pytest.mark.parametrize("damage", [
+    pytest.param(gut, marks=pytest.mark.variant("Repairing a fully wiped worktree must preserve its directory inode and live tmux session")),
+    broken_git_link, shutil.rmtree,
+])
 def test_a_wiped_worktree_is_repaired_in_the_same_folder(db, repo, ended, damage):
     """Panes and the tmux server may sit in a wiped worktree: it is filled
     again in place (same inode, session kept); only a folder that is gone
@@ -116,6 +119,7 @@ def test_a_wiped_worktree_something_lives_in_is_never_replaced(db, repo, ended, 
     assert Path(ws.path).is_dir() and ended == []
 
 
+@pytest.mark.variant("Failed git and filesystem removal must preserve the workspace's database record")
 def test_remove_workspace_refuses_to_forget_when_directory_remains(db, repo, monkeypatch):
     ws = workspaces.create(db, str(repo), "feat/failed-rm", reuse_registered=True).workspace
 

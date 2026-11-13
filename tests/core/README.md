@@ -1,0 +1,6 @@
+- Assign → worker worktree and branch → report → review → merge: `test_flows.py::test_assign_report_review_merge`.
+- Queue a dependent task → upstream merge → start exactly once: `test_flows.py::test_dependency_starts_after_merge`.
+- CLI commands resolve the worker workspace and commit without changing base: `test_flows.py::test_cli_resolves_workspace`.
+- Worker permission hook → supervisor escalation → person's answer: `test_flows.py::test_permission_escalates_to_person`.
+- Daemon shutdown pauses the session tree → startup restores it: `test_flows.py::test_daemon_restores_paused_session`.
+- Goal → failed milestone → passing check → completed progress in daemon API: `test_flows.py::test_milestone_progress_reaches_goal`.

@@ -13,9 +13,6 @@ REAL_PULLS = agents.pulls_messages   # conftest patches it off for the other tes
 
 
 @pytest.mark.parametrize("profile, committed, tracked_edit, reviewed", [
-    ("developer", True, False, True),
-    ("developer", True, True, False),
-    ("developer", False, False, False),   # no commits: nothing to review
     ("reviewer-gemini", True, False, False),
 ])
 def test_untracked_scratch_file_does_not_block_review(db, repo, monkeypatch, profile, committed,

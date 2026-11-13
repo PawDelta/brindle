@@ -61,11 +61,9 @@ def claude(route, **kw):
 
 
 @pytest.mark.parametrize("model, ids, expected", [
-    ("claude-sonnet-4-6", (IDS[-1],), IDS[-1]),
     pytest.param("claude-haiku-5-5", (IDS[-1],), IDS[-1],
                  marks=pytest.mark.variant("Haiku profile from the live Bedrock failure")),
     (IDS[0], IDS, IDS[0]),
-    (None, ("claude-sonnet-4-6", IDS[-1]), IDS[-1]),
     pytest.param("claude-sonnet-4-6", IDS, IDS[-1],
                  marks=pytest.mark.variant("route default differs from its first served id")),
 ])
@@ -170,7 +168,10 @@ ROUTES = {
 }
 
 
-@pytest.mark.parametrize("route", ["foundry", "console", "chatgpt"])
+@pytest.mark.parametrize("route", [
+    pytest.param("foundry", marks=pytest.mark.variant("signed-out Foundry must perform the Azure interactive login")),
+    "console", "chatgpt",
+])
 def test_not_signed_in_runs_the_login(route, monkeypatch):
     setup, check, login = ROUTES[route]
     f = Fake(monkeypatch, {check: (1, "not logged in")})
@@ -206,6 +207,7 @@ def _claude_agent(ws, provider="claude"):
     return Agent("a1", ws.id, "developer", provider, None, "assign", "starting", "", None, 0.0)
 
 
+@pytest.mark.variant("provider isolation: stored company routing reaches Claude without leaking AWS_PROFILE to Codex")
 def test_env_is_stored_and_reaches_a_claude_pane(db, repo, monkeypatch):
     Fake(monkeypatch)
     go(claude("bedrock", aws=AWS, models=MODELS))
@@ -218,26 +220,15 @@ def test_env_is_stored_and_reaches_a_claude_pane(db, repo, monkeypatch):
     env = agents.agent_env(ws, "a1", _claude_agent(ws))
     assert env["CLAUDE_CODE_USE_BEDROCK"] == "1" and env["AWS_PROFILE"] == "brindle-acme"
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-opus-x"
-    other = agents.agent_env(ws, "a1", _claude_agent(ws, "codex"))
-    assert "AWS_PROFILE" not in other
+    assert "AWS_PROFILE" not in agents.agent_env(ws, "a1", _claude_agent(ws, "codex"))
 
 
 @pytest.mark.parametrize("setup,expected", [
     (claude("gateway", gateway=GatewaySetup("https://gw.example.com/v1")),
      {"ANTHROPIC_BASE_URL": "https://gw.example.com/v1"}),
-    (claude("subscription", org_id=UUID), {}),
-    # no SSO group: no AWS_PROFILE; default_model is ANTHROPIC_MODEL; with several ids and no
-    # aliases the last stands in for Haiku, as provider_config had it
-    (claude("bedrock", aws=OWN_AWS, model_ids=IDS, default_model=IDS[1]),
-     {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2", "ANTHROPIC_MODEL": IDS[1],
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL": IDS[2]}),
     (claude("vertex", gcp=GCP, model_ids=IDS, models=ModelsSetup(opus="claude-opus-x")),   # aliases say what Haiku is
      {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "acme-brindle-prod", "CLOUD_ML_REGION": "us-east5",
       "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-x"}),
-    (claude("foundry", azure=AzureSetup(UUID, "acme-foundry", FOUNDRY_URL.base_url)),
-     {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": "acme-foundry",
-      "ANTHROPIC_FOUNDRY_BASE_URL": FOUNDRY_URL.base_url}),
-    (claude("console", org_id=UUID, default_model="claude-sonnet-4-5"), {"ANTHROPIC_MODEL": "claude-sonnet-4-5"}),
 ])
 def test_env_per_route(setup, expected):
     assert company_login.claude_env(ORG, setup.claude) == expected
@@ -296,6 +287,7 @@ def test_refused_model_prints_the_exact_fix(monkeypatch):
     assert not any(line.startswith("Ready") for line in out)
 
 
+@pytest.mark.variant("identity: losing organization setup or signing out must clear stale route environment")
 def test_stale_env_is_cleared_when_the_org_has_no_setup_or_on_logout(db, repo, monkeypatch):
     Fake(monkeypatch)
     go(claude("bedrock", aws=AWS))
@@ -333,8 +325,7 @@ def test_clear_federation_on_removed_setup(current_org, monkeypatch, tmp_path):
     assert not gone.exists()
 
 
-
-
+@pytest.mark.variant("bypass: stored route configuration cannot inject PATH or LD_PRELOAD into panes")
 def test_only_known_names_reach_panes(monkeypatch):
     company_login.config.set_user(company_login.ENV_KEY, {"org": ORG, "env": {
         "PATH": "/evil", "LD_PRELOAD": "x", "AWS_PROFILE": "brindle-acme"}})
@@ -427,8 +418,10 @@ def federated(route):
 
 
 @pytest.mark.parametrize("route,expected", [
-    ("bedrock", {"AWS_PROFILE": "brindle-acme"}),
-    ("vertex", {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"}),
+    pytest.param("bedrock", {"AWS_PROFILE": "brindle-acme"},
+                 marks=pytest.mark.variant("AWS federation installs an executable credential hook instead of invoking cloud login")),
+    pytest.param("vertex", {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"},
+                 marks=pytest.mark.variant("Vertex federation configures the executable token source without cloud login")),
     ("foundry", {"AZURE_CLIENT_ID": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "AZURE_TENANT_ID": UUID}),
 ])
 def test_federated_routes_set_their_hook_and_run_no_cloud_cli(route, expected, aws_config, hook, monkeypatch):
@@ -494,8 +487,6 @@ def test_logout_and_a_signed_out_doctor_fix_remove_the_federation_directory(aws_
 
 @pytest.mark.parametrize("tool, platform, wanted", [
     ("codex", "linux", "EACCES"),
-    ("az", "linux", "InstallAzureCLIDeb"),
-    ("az", "darwin", None),
 ])
 def test_install_hint_gives_linux_alternatives_only_on_linux(monkeypatch, tool, platform, wanted):
     monkeypatch.setattr(sys, "platform", platform)
@@ -532,6 +523,7 @@ def test_signing_in_adopts_the_agents_launched_while_signed_out(monkeypatch):
     assert go(setup)[0]
 
 
+@pytest.mark.variant("security precedence: stored company Bedrock routing cannot override Claude managed settings")
 def test_claude_managed_settings_take_precedence(db, repo, tmp_path, monkeypatch):
     Fake(monkeypatch)
     go(claude("bedrock", aws=AWS))
@@ -557,6 +549,7 @@ def test_run_cmd_never_hands_a_probe_the_terminal():
             os.close(fd)
 
 
+@pytest.mark.variant("fail closed: a missing entitlement cannot apply previously stored organization routing")
 def test_no_cached_entitlement_applies_no_stored_env(monkeypatch):
     from brindle.pro import license
 

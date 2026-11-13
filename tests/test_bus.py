@@ -1,8 +1,11 @@
 import json
 
+import pytest
+
 from brindle import bus
 
 
+@pytest.mark.variant("same-kind events from another repository must be excluded from a filtered tail")
 def test_publish_then_tail_since_id_and_filters(db):
     first = bus.publish(db, "agent.started", repo_root="/r", agent_id="a1", note="hi")
     bus.publish(db, "task.done", repo_root="/other", task_id="t1")

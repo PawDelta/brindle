@@ -469,13 +469,18 @@ def _row(scenario, id, why=None, **params):
 
 @pytest.mark.parametrize("scenario, params", [
     _row(_room, "room-pressure-critical", load=2.0, level=4, expected=-1.0),  # nothing but what's running
-    _row(_room, "room-pressure-warn", load=5.5, level=2, expected=1.5),
-    _row(_a_worker_keeps_waiting_past_its_room_wait_limit, "room-wait-limit", maximum=None, disk=False),
+    _row(_room, "room-pressure-warn", "Warning memory pressure must leave room rather than reject every launch",
+         load=5.5, level=2, expected=1.5),
+    _row(_a_worker_keeps_waiting_past_its_room_wait_limit, "room-wait-limit",
+         "A worker without a configured wait limit must remain queued until capacity returns", maximum=None, disk=False),
     _row(_a_worker_keeps_waiting_past_its_room_wait_limit, "room-wait-configured-limit", maximum=60, disk=False),
-    _row(_a_worker_keeps_waiting_past_its_room_wait_limit, "room-wait-not-for-disk", maximum=None, disk=True),
+    _row(_a_worker_keeps_waiting_past_its_room_wait_limit, "room-wait-not-for-disk",
+         "Disk pressure must keep a worker queued independently of CPU admission", maximum=None, disk=True),
     _row(_a_high_load_average_with_idle_cpus_leaves_room, "room-idle-cpu-high-loadavg"),
-    _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline"),
-    _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks"),
+    _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline",
+         "A deadline expiring during CPU sampling must prevent the action from starting"),
+    _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks",
+         "macOS incident: background priority starved foreground checks and setup commands"),
     _row(_with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once, "overload-no-room"),
     _row(_past_its_deadline_nothing_starts_even_with_room, "deadline-passed"),
     _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read",
@@ -484,8 +489,10 @@ def _row(scenario, id, why=None, **params):
     # Quarantined: real processes and signals, so it failed on loaded CI runners. read-tracked-at-start
     # pins the race it kept hitting, without depending on timing.
     pytest.param(_a_hung_up_sidebar_leaves_no_read_running, {}, id="hung-up-sidebar-read",
-                 marks=[pytest.mark.skip("quarantined: flaky on loaded CI runners")]),
-    _row(_a_read_is_tracked_as_it_starts, "read-tracked-at-start"),
+                 marks=[pytest.mark.skip("quarantined: flaky on loaded CI runners"),
+                        pytest.mark.variant("A sidebar hangup must terminate the read process it started")]),
+    _row(_a_read_is_tracked_as_it_starts, "read-tracked-at-start",
+         "An exit between process start and registration must not leave an untracked read running"),
     _row(_an_unreaped_process_is_not_alive, "zombie-not-alive"),
     _row(_a_cancelled_request_stops_the_read_its_thread_left_running, "cancelled-read",
          "a cancelled request stops the read its worker thread left running"),

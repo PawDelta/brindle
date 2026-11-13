@@ -76,6 +76,7 @@ def test_outcomes_reach_the_cloud_learner(db, ws, monkeypatch):
     assert p.events[-1][1].event == "removed_unmerged"
 
 
+@pytest.mark.variant("a learning plugin cannot select a profile outside the allowed candidate set")
 def test_suggestion_must_be_a_candidate(db, ws, monkeypatch):
     cfg = RepoConfig(learning="cloud", learning_candidates=["developer", "developer-local"])
     install(monkeypatch, Recorder(pick="developer-local"))
