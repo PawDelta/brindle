@@ -306,8 +306,8 @@ def test_the_authors_freeze_and_reopen_frames_lock_the_draft_for_sign_off_and_op
 
 def test_a_teammate_opens_a_design_shared_with_them_by_its_library_id_and_writes_in_it(db):
     """The app's shared-design reader opens the live socket on the Library doc
-    id: no plan here, so the window waits for the relay's text, opens again on
-    it, and its edit goes up under the number the socket lent."""
+    id: the relay supplies its text before the window opens, and its edit
+    goes up under the number the socket lent."""
     from brindle.pro import live_docs
     from test_live_docs import REVISION, Clock, FakeRelay
 
@@ -332,32 +332,16 @@ def test_a_teammate_opens_a_design_shared_with_them_by_its_library_id_and_writes
     app.state.live_docs = here
     path = "/v1/visuals/ad_shared1/live"
     with TestClient(app) as client:
-        with client.websocket_connect(path) as waiting:
-            waiting.send_text(TOKEN)
-            assert waiting.receive_json() == {"peer": None}
-            assert waiting.receive_json()["state"]["lock"] is None
-            # DocPresence announces the reader at once, before any text has come.
-            presence = loro.EphemeralStore(30_000)
-            presence.set("123-cm-user", {"name": "Bob"})
-            waiting.send_json({"section": "__document__", "awareness": encoded(presence.encode_all())})
-            assert told.wait(FIRST_FRAME_TIMEOUT)
-            client.portal.call(here.link("ad_shared1").connect)     # the link's first join stores the relay's text
-            with pytest.raises(WebSocketDisconnect) as closed:
-                waiting.receive_json()
-            assert closed.value.code == live_docs.RELOAD
         with client.websocket_connect(path) as window:
             window.send_text(TOKEN)
             peer = window.receive_json()["peer"]
             assert window.receive_json()["state"]["lock"] is None
             doc = SharedDoc.load(base64.b64decode(window.receive_json()["update"]))
             assert doc.sections() == REVISION
-            if peer is None:
-                # The reloaded socket's close came first: the link closed with no window left, and
-                # joins again for this one (its task does; here the test), lending it a number.
-                client.portal.call(here.link("ad_shared1").connect)
-                while "peer" not in (frame := window.receive_json()):
-                    pass
-                peer = frame["peer"]
+            presence = loro.EphemeralStore(30_000)
+            presence.set("123-cm-user", {"name": "Bob"})
+            window.send_json({"section": "__document__", "awareness": encoded(presence.encode_all())})
+            assert told.wait(FIRST_FRAME_TIMEOUT)
             doc.set_peer_id(int(peer))
             before = doc.version()
             doc.insert("body", 5, "!")

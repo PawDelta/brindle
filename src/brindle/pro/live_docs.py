@@ -584,10 +584,12 @@ class DocLink:
             text = await conn.recv()
         except BaseException:
             self.conn = None
+            await conn.close(CLOSE_CLEAN)
             raise
         said = _parse(text) if text is not None else {"type": "error", "error": "closed"}
         if said.get("type") != "state":
             self.conn = None
+            await conn.close(CLOSE_CLEAN)
             error = said.get("error") if isinstance(said.get("error"), str) else "refused"
             if error == "writer":       # a number is no longer this account's: start again under new ones
                 await self.manager.work(_forget_peers, self.doc_id)
@@ -744,10 +746,13 @@ class DocLink:
 
     async def drive(self) -> None:
         """Keep the link up while it is wanted (the manager's task for it)."""
+        if not await self.manager.prepare(self.doc_id):
+            return
         attempt = 0
         while self.wanted() and not self.manager.stopping:
             try:
-                await self.connect()
+                if self.conn is None:
+                    await self.connect()
                 attempt = 0
                 await self.serve()
             except (RelayError, OSError, ValueError) as e:
@@ -795,6 +800,8 @@ class Manager:
         self._available = available or _signed_in_to_a_team
         self._drive = drive
         self.links: dict[str, DocLink] = {}
+        self._probes: dict[str, asyncio.Task[bool]] = {}
+        self._unsupported: set[str] = set()
         self._sweeper: asyncio.Task | None = None
 
     async def work(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -812,11 +819,39 @@ class Manager:
         return self.links[doc_id]
 
     def _ensure(self, link: DocLink) -> None:
-        if self._drive and not self.stopping and (link.task is None or link.task.done()):
+        if (self._drive and not self.stopping and link.doc_id not in self._unsupported
+                and (link.task is None or link.task.done())):
             link.task = asyncio.get_running_loop().create_task(link.drive())
 
     async def available(self) -> bool:
         return await self.work(lambda _db: self._available())
+
+    async def prepare(self, doc_id: str) -> bool:
+        """Confirm the relay before a window advertises live text or state.
+
+        A missing or refusing relay leaves the reader on its HTTP controls.
+        Share one initial probe across windows and remember its failure until
+        the daemon restarts, so opening readers and sweeping cannot hammer an
+        undeployed relay. Once confirmed, ordinary drops keep the live outbox.
+        """
+        if self.stopping or not await self.available():
+            return False
+
+        async def probe() -> bool:
+            link = self.link(doc_id)
+            try:
+                if link.conn is None:
+                    await asyncio.wait_for(link.connect(), DRAIN_FOR)
+                return True
+            except Exception:  # noqa: BLE001 - live capability is optional; HTTP remains available
+                self._unsupported.add(doc_id)
+                await link.close()
+                log.debug("brindle: live unavailable for %s; using HTTP", doc_id, exc_info=True)
+                return False
+
+        if doc_id not in self._probes:
+            self._probes[doc_id] = asyncio.create_task(probe())
+        return await asyncio.shield(self._probes[doc_id])
 
     async def open_window(self, doc_id: str, sink: Sink) -> Lease | None:
         """An app window opened ``doc_id``: its lease, with the number it
@@ -935,6 +970,10 @@ class Manager:
             await link.close()
             if link.task is not None:
                 link.task.cancel()
+        for probe in self._probes.values():
+            if not probe.done():
+                probe.cancel()
+        await asyncio.gather(*self._probes.values(), return_exceptions=True)
 
         def close_db() -> None:
             if self._db is not None:
