@@ -799,7 +799,8 @@ def _stamp(config: str) -> tuple[int, int, int] | None:
     return st.st_ino, st.st_size, st.st_mtime_ns
 
 
-def _update_config(config: str, change, *, create: bool = False, mode: int | None = None) -> None:
+def _update_config(config: str, change, *, create: bool = False, mode: int | None = None,
+                   lock_path: str | None = None, read=None) -> None:
     """Apply ``change`` to Claude Code's global state file ``config`` without
     losing anything Claude Code wrote there. ``change`` edits the parsed file
     in place and only touches brindle's own keys; everything else (the
@@ -827,17 +828,19 @@ def _update_config(config: str, change, *, create: bool = False, mode: int | Non
 
     A missing file is created (0600) with ``create``, else FileNotFoundError;
     ``mode`` sets the file's mode, otherwise kept. ValueError for a file that
-    isn't a JSON object."""
+    isn't a JSON object. ``lock_path`` names the destination's lock when the
+    caller already knows its home (resolving the launch home can itself need
+    an update); ``read`` may enforce stricter file checks than _read_json."""
     import copy
     import stat
 
-    with _claude_lock(claude_global_config()) as lock:
+    with _claude_lock(lock_path if lock_path is not None else claude_global_config()) as lock:
         seen = _stamp(config)
         if seen is None and create:
             data, kept = {}, 0o600
         else:
             kept = stat.S_IMODE(os.stat(config).st_mode)    # FileNotFoundError: not brindle's to create
-            data = _read_json(config)
+            data = (read or _read_json)(config)
         if not isinstance(data, dict):
             raise ValueError(f"{config} doesn't hold a JSON object")
         before = copy.deepcopy(data)
