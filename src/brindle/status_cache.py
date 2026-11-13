@@ -64,6 +64,10 @@ _base_ref_cache: dict[tuple[str, str], tuple[tuple, str]] = {}
 _status_cache: dict[str, _Entry] = {}
 # What _compute_status's git status said besides the Status: (upstream, ignored paths).
 _reported: dict[str, tuple[str | None, list[str]]] = {}
+# A worktree whose base ref names no commit (its base branch was deleted, say):
+# the fingerprint and refs git failed under, and git's message. The failure is
+# a function of the refs alone, so it stands until one of them moves.
+_failed: dict[str, tuple[tuple, tuple, str]] = {}
 
 
 def clear() -> None:
@@ -71,7 +75,11 @@ def clear() -> None:
     _base_ref_cache.clear()
     _status_cache.clear()
     _reported.clear()
+    _failed.clear()
     _sources.clear()
+    _tracked_names.clear()
+    _tracked_dirty.clear()
+    _remotes.clear()
 
 
 def _worktree_gitdir(path: Path) -> Path:
@@ -320,6 +328,76 @@ def _stat(path: str | bytes | Path) -> tuple | None:
     return (s.st_mtime_ns, s.st_ctime_ns, s.st_size, s.st_ino)
 
 
+# What ``git status`` of tracked files alone reads, and what it said: per worktree.
+# The index's paths and the folders they are in, per version of the index.
+_tracked_names: dict[str, tuple[tuple, tuple[list[bytes], list[bytes]] | None]] = {}
+_tracked_dirty: dict[str, tuple[tuple, list[str]]] = {}
+_TRACKED_MAX = 256
+
+
+def _tracked_folders(names: list[bytes]) -> list[bytes]:
+    """Every folder a tracked path is in or under, the worktree's root (``b""``) first."""
+    folders = {b""}
+    for name in names:
+        while (name := os.path.dirname(name)) and name not in folders:
+            folders.add(name)
+    return sorted(folders)
+
+
+def _tracked_stamps(path: Path) -> tuple | None:
+    """Everything the tracked files' status depends on: HEAD's commit, the
+    index, every tracked file, each one stat'ed wherever it is (exact, unlike
+    the shallow fingerprint: git itself judges a file modified by its stat),
+    and what decides how git reads those files: a ``.gitattributes`` in any
+    folder that holds one, there or not yet, tracked or not, and every config
+    and attributes file outside the worktree (``_outside_sources``: includes,
+    the person's and the system's among them). None when that can't be known
+    without git (no commit yet, an index ``index_paths`` doesn't read, a
+    config git couldn't list): then git is asked every time."""
+    try:
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+        head = _resolve(wt_gitdir, common, (wt_gitdir / "HEAD").read_text().strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    index = _stat(wt_gitdir / "index")
+    if head is None or index is None:
+        return None
+    key = str(wt_gitdir)
+    names = _tracked_names.get(key)
+    if names is None or names[0] != index:
+        if len(_tracked_names) >= _TRACKED_MAX:
+            _tracked_names.clear()
+        listed = index_paths(wt_gitdir / "index", _hash_len(common))
+        names = _tracked_names[key] = (index, None if listed is None else (listed, _tracked_folders(listed)))
+    sources = None if names[1] is None else _outside_sources(path, wt_gitdir, common)
+    if names[1] is None or sources is None:
+        return None
+    root = os.fsencode(path)
+    return (head, index, tuple(_watched(p) for p in sources),
+            tuple(_stat(os.path.join(root, folder, b".gitattributes")) for folder in names[1][1]),
+            tuple(_stat(os.path.join(root, name)) for name in names[1][0]))
+
+
+def tracked_dirty(path: str | Path) -> list[str]:
+    """``git.dirty_files(path, tracked_only=True)``, asked of git only when
+    something it reads has moved since it last looked (``_tracked_stamps``,
+    taken before git looks, so a change made meanwhile asks again). For the
+    daemon's sweeps, which judge a session's readiness again whenever one of
+    its workers' rows changes: its own checkout is usually as it was."""
+    path = Path(path)
+    stamps = _tracked_stamps(path)
+    hit = _tracked_dirty.get(str(path))
+    if stamps is not None and hit is not None and hit[0] == stamps:
+        return list(hit[1])
+    dirty = git.dirty_files(path, tracked_only=True)
+    if stamps is not None:
+        if len(_tracked_dirty) >= _TRACKED_MAX:
+            _tracked_dirty.clear()
+        _tracked_dirty[str(path)] = (stamps, dirty)
+    return list(dirty)
+
+
 _SYSTEM_CONFIGS: list[Path] | None = None
 
 
@@ -367,22 +445,24 @@ def _settled_since(stats: tuple, before_ns: int) -> bool:
     return all(s is None or max(s[0], s[1]) < before_ns for pair in stats for s in pair)
 
 
-# Per worktree: (what the list was read against, the list) for _ignore_sources.
-_sources: dict[str, tuple[tuple, list[Path]]] = {}
+# Per worktree: (what the list was read against, the list, git's config listing) for _outside_sources.
+_sources: dict[str, tuple[tuple, list[Path], str]] = {}
 _UNSETTLED = object()       # a list read while one of its files changed: never matches
 
 
-def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | None:
-    """Every file outside the worktree that can change what git ignores
-    there: info/exclude, the default global ignore file, the config files
-    git may read even when they don't exist yet (system, global, the repo's,
-    the worktree's), and, as git itself reads the config (``git config
-    --list --show-origin --includes``: its own parsing, escapes and includes
-    included), every file it read, every include.path or includeIf path
-    whatever its condition, and every core.excludesFile. git is asked again
-    only when one of those files (or the branch, for onbranch: includes)
-    changed: an idle sidebar asks nothing. None when git couldn't say (busy,
-    or the command failed)."""
+def _outside_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | None:
+    """Every file outside the worktree that can change how git reads it:
+    what it ignores (info/exclude, the default global ignore file), how it
+    reads a tracked file (info/attributes, the global and system attributes
+    files), the config files git may read even when they don't exist yet
+    (system, global, the repo's, the worktree's), and, as git itself reads
+    the config (``git config --list --show-origin --includes``: its own
+    parsing, escapes and includes included), every file it read, every
+    include.path or includeIf path whatever its condition, and every
+    core.excludesFile and core.attributesFile. git is asked again only when
+    one of those files (or the branch, for onbranch: includes) changed: an
+    idle sidebar asks nothing. None when git couldn't say (busy, or the
+    command failed)."""
     key = str(path)
     try:
         head = (wt_gitdir / "HEAD").read_text()
@@ -392,7 +472,10 @@ def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | N
     if hit is not None and hit[0] == (head, tuple(_watched(p) for p in hit[1])):
         return hit[1]
     xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "git"
-    found = [common / "info" / "exclude", xdg / "ignore", common / "config", wt_gitdir / "config.worktree"]
+    found = [common / "info" / "exclude", xdg / "ignore", common / "info" / "attributes", xdg / "attributes",
+             common / "config", wt_gitdir / "config.worktree"]
+    if not os.environ.get("GIT_ATTR_NOSYSTEM"):
+        found += [p.with_name("gitattributes") for p in _system_configs()]
     if not os.environ.get("GIT_CONFIG_NOSYSTEM"):
         system = os.environ.get("GIT_CONFIG_SYSTEM")
         found += [Path(system)] if system else _system_configs()
@@ -419,19 +502,56 @@ def _ignore_sources(path: Path, wt_gitdir: Path, common: Path) -> list[Path] | N
         name = name.lower()
         if not value:
             continue
-        if name == "core.excludesfile":
+        if name in ("core.excludesfile", "core.attributesfile"):
             found.append(path / os.path.expanduser(value))       # an absolute value stays as it is
         elif name.endswith(".path") and name.startswith(("include.", "includeif.")):
             found.append((source.parent if source else path) / os.path.expanduser(value))
     found = list(dict.fromkeys(found))
     stats = tuple(_watched(p) for p in found)
-    _sources[key] = ((head if _settled_since(stats, before_ns) else _UNSETTLED, stats), found)
+    # The settings alone, without where each was read from: the same in every checkout that reads the same config.
+    _sources[key] = ((head if _settled_since(stats, before_ns) else _UNSETTLED, stats), found,
+                     "\0".join(fields[1::2]))
     return found
+
+
+_remotes: dict[tuple, frozenset[str]] = {}
+
+
+def remotes(path: str | Path) -> frozenset[str] | None:
+    """The remotes ``git remote`` lists in the checkout at ``path``, asked of
+    git once per repo and per config as git reads it there, includes and
+    conditions resolved (``_outside_sources``: checkouts whose listing is the
+    same share the answer), and again when any file that config depends on,
+    or the ``remotes`` and ``branches`` folders of long ago, changed. None
+    when that can't be known without asking: the caller asks git."""
+    path = Path(path)
+    try:
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+    except (OSError, ValueError, IndexError):
+        return None
+
+    def look() -> tuple | None:
+        if _outside_sources(path, wt_gitdir, common) is None:
+            return None
+        return (str(common), _sources[str(path)][2], _stat(common / "remotes"), _stat(common / "branches"))
+
+    key = look()
+    if key is None:
+        return None
+    if key not in _remotes:
+        names = frozenset(git.out(["remote"], path).split())
+        if look() != key:
+            return names        # the config moved while git read it: this answer is for neither
+        if len(_remotes) >= _TRACKED_MAX:
+            _remotes.clear()
+        _remotes[key] = names
+    return _remotes[key]
 
 
 def _deep_entries(path: Path, wt_gitdir: Path, common: Path, ignored: list[str] | None) -> list | None:
     """What ``git status`` would look at, stat'ed without git: the
-    ``_ignore_sources``, every tracked file (from the index), and every
+    ``_outside_sources``, every tracked file (from the index), and every
     directory (each ``.gitignore`` in it too) but nested repositories, which
     git doesn't enter, and the directories in ``ignored`` (git's last report;
     None: leave none out). A file new anywhere git looks changes its
@@ -439,7 +559,7 @@ def _deep_entries(path: Path, wt_gitdir: Path, common: Path, ignored: list[str] 
     git couldn't say which files decide what is ignored: the safety look is
     a git look then, until it can."""
     paths = index_paths(wt_gitdir / "index", _hash_len(common))
-    sources = None if paths is None else _ignore_sources(path, wt_gitdir, common)
+    sources = None if paths is None else _outside_sources(path, wt_gitdir, common)
     if paths is None or sources is None:
         return None
     root = os.fsencode(path)
@@ -539,7 +659,7 @@ def _compute_status(path: Path, base: str, ref: str,
     return git.Status(branch, base, ahead, behind, dirty, unpushed)
 
 
-def cached_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
+def _cached_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
     """Like ``git.status``, but backed by the module-level cache above."""
     if not base:
         return git.status(path, base)
@@ -598,6 +718,45 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
     return st
 
 
+def _failure_key(path: Path, base: str) -> tuple[str, tuple, tuple] | None:
+    """(key, fingerprint, refs) of ``path`` as ``_cached_status`` sees them,
+    or None when its git files can't be read. Starts no git while the base
+    ref is cached."""
+    try:
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+        ref = _cached_base_ref(path, base, common)
+        fp = _fingerprint(path, wt_gitdir, common, ref)
+    except OSError:
+        return None
+    hit = _status_cache.get(str(path))
+    return str(path), fp, _refs_key(wt_gitdir, common, ref, hit.upstream if hit is not None else None)
+
+
+def cached_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
+    """``_cached_status``, and a worktree whose base ref names no commit (its
+    base branch deleted, say) fails again without git: git can't count
+    against that base until a ref moves, and asking it on every refresh ran
+    git status and a failing rev-list each time."""
+    if not base:
+        return _cached_status(path, base, now)
+    path = Path(path)
+    failed = _failed.get(str(path))
+    if failed is not None and (seen := _failure_key(path, base)) is not None and failed[:2] == seen[1:]:
+        raise git.GitError(failed[2])
+    try:
+        st = _cached_status(path, base, now)
+    except git.GitError as e:
+        _failed.pop(str(path), None)
+        after = _failure_key(path, base)       # git status may have rewritten the index
+        if after is not None and after[2][0] and not after[2][1]:
+            # HEAD reads from the files and the base names nothing there.
+            _failed[after[0]] = (after[1], after[2], str(e))
+        raise
+    _failed.pop(str(path), None)
+    return st
+
+
 def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
     """Bring the cached status of each (path, base) up to date at once, in
     parallel: a cold first look (the app opening) runs one `git status` per
@@ -614,3 +773,22 @@ def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
 
     with ThreadPoolExecutor(max_workers=min(WARM_WORKERS, len(pairs))) as pool:
         list(pool.map(spawn.carry(one), pairs))   # under the request's deadline, if any
+
+
+def cached_any_status(path: str | Path, base: str | None, now: float | None = None) -> git.Status:
+    """``cached_status`` for a checkout with no ``base`` too (the repo's own,
+    where its coordinators run), which ``git.status`` would ask git about on
+    every look: the daemon's events feed looks every 5 s. It is cached against
+    its own branch (read from HEAD, no git) and reported, as ``git.status``
+    does, with no base and nothing counted ahead or behind. A detached HEAD
+    is asked of git."""
+    if base:
+        return cached_status(path, base, now=now)
+    try:
+        head = (_worktree_gitdir(Path(path)) / "HEAD").read_text().strip()
+    except (OSError, ValueError, IndexError):
+        head = ""
+    if not head.startswith("ref: refs/heads/"):
+        return git.status(path, base)
+    st = cached_status(path, head[len("ref: refs/heads/"):], now=now)
+    return git.Status(st.branch, None, 0, 0, st.dirty_files, st.unpushed)

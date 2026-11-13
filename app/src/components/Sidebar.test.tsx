@@ -56,6 +56,42 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
+  it("uses the open session supervisor's provider even before its model is known", async () => {
+    const { sync } = mount({
+      workspaces: [{ ...root, agents: [{ ...root.agents![0], provider: "codex", model: null }] }, worker],
+      usage: usageScenario("near"),
+    }, { screen: "session", root: "sup1", repo: REPO, agent: "w1" });
+    onTestFinished(() => sync.stop());
+    await waitFor(() => expect(screen.getByTestId("profile-usage").dataset.state).toBe("reading"));
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
+    sync.stop();
+    cleanup();
+
+    // A remembered context session does not choose usage outside a session route.
+    const closed = mount({
+      workspaces: [{ ...root, agents: [{ ...root.agents![0], provider: "codex", model: "gpt-5" }] }],
+      usage: usageScenario("near"),
+    });
+    onTestFinished(() => closed.sync.stop());
+    await waitFor(() => expect(screen.getByTestId("profile-usage").dataset.state).toBe("reading"));
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("claude");
+  });
+
+  it("uses the neutral usage state when the session provider has no weekly reading", async () => {
+    const usage = usageScenario("near");
+    usage.providers = usage.providers.map((provider) => provider.provider === "claude"
+      ? { ...provider, windows: provider.windows.filter((window) => window.minutes !== 10080) }
+      : provider);
+    const { sync } = mount({
+      workspaces: [{ ...root, agents: [{ ...root.agents![0], model: "claude-opus-4-7" }] }], usage,
+    }, { screen: "session", root: "sup1", repo: REPO });
+    onTestFinished(() => sync.stop());
+    await act(async () => {});
+    await waitFor(() => expect(screen.getByTestId("usage-warning-dot")).toBeTruthy());
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBeUndefined();
+  });
+
   it("running agents count includes supervisors and workers, describes the count on hover, and hides at zero", async () => {
     const { sync, store } = mount({ workspaces: [{ ...root, agents: [{ ...root.agents![0], mode: "interactive" }] }, worker] });
     onTestFinished(() => sync.stop());
@@ -292,7 +328,10 @@ describe("Sidebar", () => {
     expect(agentRow("w2")!.querySelector("[data-testid=agent-title]")).toBeNull();
     vi.useFakeTimers();
     onTestFinished(() => { vi.useRealTimers(); });
-    await act(async () => fireEvent.dblClick(agentRow("w1")!));
+    await act(async () => {
+      fireEvent.dblClick(agentRow("w1")!);
+      await writeText.mock.results[0].value;
+    });
     expect(writeText).toHaveBeenCalledWith("id: w1\nrole: developer\nprofile: developer-haiku\nbranch: feat/ls\nmilestone: Logo goes Home");
     expect(screen.getByRole("status")).toBeTruthy();
     sync.stop();

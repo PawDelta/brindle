@@ -21,6 +21,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 # rewind and history are imported here, not when they're needed: brindle may
 # be running from the very worktree ``remove`` deletes (a reviewer's `uv run`
@@ -383,6 +384,9 @@ class Created:
     start_point: str
     copied: list[str]
     setup: SetupResult | None
+    # create(defer_setup=True): the services and setup commands still to run, for the
+    # caller to run once what it needs first (a supervisor's launch) is done.
+    finish: Callable[[], SetupResult | None] | None = None
 
 
 def branch_name(repo_root: str, branch: str, apply_prefix: bool = True) -> str:
@@ -405,12 +409,14 @@ def create(
     reuse_registered: bool = False,
     session_root: str | None = None,
     setup_anyway: bool = False,
+    defer_setup: bool = False,
 ) -> Created:
     """``reuse_registered`` (assign/handoff): a branch that already has a
     registered workspace reuses it, or is refused while a worker is live in
     it. Otherwise (``brindle new``) a taken branch is an error from git.
     Setup waits while free disk is low (``setup_admitted``; ``setup_anyway``:
-    run it regardless)."""
+    run it regardless). ``defer_setup``: the worktree's services and setup
+    commands don't run here; the result's ``finish`` runs them."""
     repo_root = git.main_repo_root(repo_path)
     cfg: RepoConfig = load_repo_config(repo_root)
     branch = branch_name(repo_root, branch, apply_prefix)
@@ -492,22 +498,24 @@ def create(
         session_root=session_root,
     )
     db.add_workspace(ws)
-    if run_setup:
-        services.up(ws, cfg)  # before setup, so setup commands can reach them
+    copied = _copy_local_files(repo_root, path, cfg.copy, overwrite_changed=claimed is not None)
 
-    if claimed is not None:
+    def finish() -> SetupResult | None:
+        if run_setup:
+            services.up(ws, cfg)  # before setup, so setup commands can reach them
+        if claimed is None:
+            return run_setup_commands(ws, cfg, anyway=setup_anyway) if run_setup and cfg.setup else None
         from brindle import pool
 
-        copied = _copy_local_files(repo_root, path, cfg.copy, overwrite_changed=True)
+        setup = None
         if cfg.setup and pool.fingerprint(repo_root, start_sha, cfg) != claimed.fingerprint:
             setup = run_setup_commands(ws, cfg, anyway=setup_anyway)
-        else:
-            setup = None
         pool.fill_in_background(repo_root)
-    else:
-        copied = _copy_local_files(repo_root, path, cfg.copy)
-        setup = run_setup_commands(ws, cfg, anyway=setup_anyway) if run_setup and cfg.setup else None
-    return Created(ws, how, start_point, copied, setup)
+        return setup
+
+    if defer_setup:
+        return Created(ws, how, start_point, copied, None, finish)
+    return Created(ws, how, start_point, copied, finish())
 
 
 GH_SECONDS = 60          # a gh call that talks to GitHub
@@ -533,12 +541,14 @@ def gh_pr_view(repo_path: str, number: int) -> dict:
 
 
 def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
-                 worktree: str | None = None) -> Workspace:
+                 worktree: str | None = None,
+                 deferred: list[Callable[[], SetupResult | None]] | None = None) -> Workspace:
     """The checkout a supervisor should run in for ``branch`` and/or
     ``worktree`` (a path): the worktree where it already is, else a new one.
     Created worktrees are brindle's own (like ``brindle new``) unless ``worktree``
     names where to put it. The repo's ``.brindle`` config applies there either
-    way (see ``config.config_root``)."""
+    way (see ``config.config_root``). ``deferred``: a worktree created here
+    leaves its setup (``Created.finish``) on it, for after the supervisor starts."""
     repo_root = git.main_repo_root(repo_path)
     if worktree:
         path = Path(worktree).expanduser().resolve()
@@ -570,8 +580,12 @@ def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
 
         # A new session branch starts from origin's default branch as just fetched.
         new = not git.branch_exists(repo_root, branch) and not git.remote_branch_exists(repo_root, branch)
-        ws = create(db, repo_path, branch, apply_prefix=False,
-                    start=session_sync.fresh_start(repo_root) if new else None).workspace
+        made = create(db, repo_path, branch, apply_prefix=False,
+                      start=session_sync.fresh_start(repo_root) if new else None,
+                      defer_setup=deferred is not None)
+        ws = made.workspace
+        if made.finish is not None and deferred is not None:
+            deferred.append(made.finish)
     from brindle import codemap
     codemap.seed_session(ws.path, ws.repo_root)
     return ws
@@ -680,7 +694,7 @@ def _rescue_sidebar(db: DB, ws: Workspace) -> None:
 
 
 def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | None = None,
-           keep_session: bool = False, stop=()) -> Removed:
+           keep_session: bool = False, stop=None) -> Removed:
     """``delete_branch``: True deletes the branch (only if merged, unless
     ``force``), False keeps it, and None (the default) follows the repo's
     ``delete_merged_branches``: the branch goes once it is fully merged into
@@ -688,11 +702,16 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
     ``keep_session`` leaves the workspace's tmux session running: for a
     caller that itself runs in it (the pipeline's reviewer), which killing
     the session would take down mid-cleanup. ``stop``: agents of it to stop
-    first, once the worktree is known to go: kept, it keeps them."""
-    def stop_them():
-        from brindle import agents
+    first, once the worktree is known to go: kept, it keeps them. None (the
+    default, for a removal someone asked for): every live agent of a
+    worktree's, read just before the check (none with ``keep_session``),
+    whose own CLI and plumbing in the worktree then don't keep it. A sweep
+    that chose the workspace from an earlier look passes ``()``: a worker
+    back at work since then keeps it."""
+    from brindle import agents
 
-        for a in stop:
+    def stop_them():
+        for a in stop or ():
             agents._stop(db, a)
 
     if ws.kind == "main":
@@ -728,6 +747,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             return _forget(db, ws, Removed(
                 False, f"worktree kept (shared with {sharing[0].id})", None))
 
+    if stop is None:   # its agents as they are now, right before the check and the stop
+        stop = [] if keep_session else [a for a in db.list_agents(ws.id) if agents.is_alive(a)]
     exists = os.path.isdir(ws.path)
     if exists and not force:
         dirty = git.dirty_files(ws.path)
@@ -784,14 +805,27 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 pass  # checked out in another worktree, or it moved on since
         note = f"branch {ws.branch} kept"
     elif delete_branch:
-        try:
-            git.delete_branch(ws.repo_root, ws.branch, force=force)
-            deleted = True
-        except git.GitError as e:
-            note = f"kept branch {ws.branch}: {e} (use --force to delete anyway)"
+        deleted, note = _drop_if_merged(ws, force)
     else:
         note = f"branch {ws.branch} kept"
     return _forget(db, ws, Removed(deleted, note, teardown))
+
+
+def _drop_if_merged(ws, force: bool) -> tuple[bool, str | None]:
+    """Delete ``ws.branch`` (archived, restorable) when it is merged into the base
+    it was cut from, or ``force``. Judged against that base, not the checkout's
+    HEAD (``git branch -d`` checks HEAD). The tip is judged and then deleted only
+    while the branch still points at it: drop_branch refuses a moved branch.
+    Returns (deleted, note)."""
+    base = ws.base_branch or git.default_branch(ws.repo_root)
+    sha = disk.tip(ws.repo_root, ws.branch)
+    try:
+        if sha and (force or git.is_ancestor(ws.repo_root, sha, base)):
+            disk.drop_branch(ws.repo_root, ws.branch, sha)
+            return True, None
+        return False, f"kept branch {ws.branch}: not merged into {base} (use --force to delete anyway)"
+    except git.GitError as e:
+        return False, f"kept branch {ws.branch}: {e} (use --force to delete anyway)"
 
 
 def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:

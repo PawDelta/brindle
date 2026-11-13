@@ -14,8 +14,8 @@ from unittest import mock
 
 import pytest
 
-from brindle import (agents, company_identity, git, knowledge, pipeline, procs, providers, sessions, signin_pause,
-                     spawn, tmux, workspaces)
+from brindle import (agents, company_identity, git, knowledge, login_shell_env, pipeline, procs, providers, sessions,
+                     signin_pause, spawn, tmux, workspaces)
 from brindle.daemon import lifecycle
 from brindle.db import DB, Agent
 from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
@@ -166,6 +166,7 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
         go.wait(10)
 
     monkeypatch.setattr(agents, "_open_window", lambda db_, a, *args, **kw: events.append(("launch", a.id)) or "%0")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **kw: "❯ \n? for shortcuts")
     monkeypatch.setattr(agents, "_detach", lambda args: None)
     real_start = spawn.start
     monkeypatch.setattr(spawn, "start", lambda argv, **kw: None if "_after-launch" in argv else real_start(argv, **kw))
@@ -243,7 +244,15 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
         real_close(db_, closings)
 
     monkeypatch.setattr(agents, "close_paused", close_paused)
+    # Its start asks the person's login shell for their proxy settings, once (login_shell_env).
+    # Only this first daemon's shell exports any: the launches further down run without them.
+    mark = login_shell_env.MARK.encode() + b"\0"
+    exported = [b"\0" + mark + b"HTTPS_PROXY=http://proxy.corp.example:8080\0" + mark]
+    monkeypatch.setattr(login_shell_env, "_run", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 0, exported.pop() if exported else b"", b""))
     serve(app_gone=False)
+    assert not exported and login_shell_env.for_launch("codex", environ={}) == {
+        "HTTPS_PROXY": "http://proxy.corp.example:8080"}
     assert stopped_again and lifecycle.read_info() is None, "a second stop cut the way out short"
     assert not swept.is_set(), "the daemon waited for the sweep before it paused and exited"
     assert hook_kept.wait(5), "the Codex hook's trust wasn't looked at when the daemon started"
@@ -420,6 +429,135 @@ def _recorded_sessions(db, root, monkeypatch, sessions):
                         (paused_at - rank - 1, aid))
     lifecycle._record_resume([{"id": aid, "server": here} for aid, _ in reversed(sessions)])
     monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
+    # These lifecycle tests launch stand-in programs that don't draw a CLI prompt.
+    monkeypatch.setattr(tmux, "capture", lambda *a, **kw: "❯ \n? for shortcuts")
+
+
+def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db, monkeypatch):
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from brindle.daemon import routes_read
+    from brindle.db import Workspace
+
+    ws = Workspace("proj", "/proj", "proj", "root", "main", None, "/proj", None, "proj", 1)
+    db.add_workspace(ws)
+    for aid in ("first", "queued", "exhausted", "foreign", "manual"):
+        add(db, ws, aid)
+    db.update_agent("first", created_at=2, status_since=20)
+    db.update_agent("queued", created_at=1, status_since=10)
+    for aid, stopped in (("exhausted", 50), ("foreign", 40), ("manual", 30)):
+        db.update_agent(aid, status_since=stopped)
+    panes = tmux.PaneSnapshot()
+    monkeypatch.setattr(tmux, "current_server", lambda: None)
+    monkeypatch.setattr(tmux, "list_panes", lambda: panes)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
+    monkeypatch.setattr(procs, "stop", lambda *a, **kw: 0)
+    monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
+    monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 1)
+    monkeypatch.setattr(lifecycle, "_read_viewed", lambda: "first")
+    lifecycle._record_resume([{"id": "first", "server": None}, {"id": "queued", "server": None},
+                              {"id": "exhausted", "server": None, "tries": lifecycle.RESUME_TRIES},
+                              {"id": "foreign", "server": "elsewhere"}])
+    recovery = lifecycle.Recovery()
+    request = Request({"type": "http", "query_string": b"repo=/proj",
+                       "app": SimpleNamespace(state=SimpleNamespace(recovery=recovery))})
+
+    def statuses(db_):
+        return {row["id"]: row["status"] for row in routes_read.list_sessions.__wrapped__(db_, request)}
+
+    seen, launching, orders = [], [], []
+
+    def resume(db_, root_id, **kw):
+        seen.append(statuses(db_))
+        transitions = [list(seen[-1])]
+        # During launch it leaves both the paused list and the live-pane list.
+        db_.set_status(root_id, "starting")
+        starting = statuses(db_)
+        launching.append((root_id, starting.get(root_id)))
+        transitions.append(list(starting))
+        # Its position stays the same when tmux can see the pane, too.
+        pane = f"%{root_id}"
+        db_.update_agent(root_id, tmux_window=pane)
+        panes[pane] = True
+        db_.set_status(root_id, "idle")
+        transitions.append(list(statuses(db_)))
+        orders.append(transitions)
+        panes.pop(pane)
+        db_.set_status(root_id, "paused")
+        raise agents.AgentError("launch failed")
+
+    monkeypatch.setattr(agents, "resume", resume)
+    assert lifecycle.resume_after_start(recovery) == []
+    assert seen[0] == {"first": "resuming", "queued": "resuming", "exhausted": "paused",
+                       "foreign": "paused", "manual": "paused"}
+    assert seen[1]["first"] == "paused" and seen[1]["queued"] == "resuming"
+    assert launching == [("first", "resuming"), ("queued", "resuming")]
+    assert orders[0] == [["first", "queued", "exhausted", "foreign", "manual"]] * 3
+    assert set(statuses(db).values()) == {"paused"}
+
+
+@pytest.mark.parametrize("prompt_ready", [
+    pytest.param(True, marks=pytest.mark.variant(
+        "the other half of the owner's report: once Claude's prompt is up, the session leaves Resuming")),
+    False,
+])
+def test_recovery_waits_for_claude_prompt_after_session_start(db, monkeypatch, prompt_ready):
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from brindle.daemon import routes_read
+    from brindle.db import Workspace
+
+    ws = Workspace("proj", "/proj", "proj", "root", "main", None, "/proj", None, "proj", 1)
+    db.add_workspace(ws)
+    add(db, ws, "chat")
+    panes = tmux.PaneSnapshot()
+    monkeypatch.setattr(tmux, "current_server", lambda: None)
+    monkeypatch.setattr(tmux, "list_panes", lambda: panes)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
+    monkeypatch.setattr(agents, "panes_match", lambda *a: True)
+    monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
+    monkeypatch.setattr(lifecycle, "_read_viewed", lambda: None)
+    recovery = lifecycle.Recovery()
+    request = Request({"type": "http", "query_string": b"repo=/proj",
+                       "app": SimpleNamespace(state=SimpleNamespace(recovery=recovery))})
+    clock, seen, active = [0.0], [], []
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def status(db_):
+        return routes_read.list_sessions.__wrapped__(db_, request)[0]["status"]
+
+    def resume(db_, root_id, **kw):
+        active.append(db_)
+        db_.set_status(root_id, "starting")
+        db_.update_agent(root_id, tmux_window="%chat")
+        panes["%chat"] = True
+        agents.handle_hook(db_, root_id, "session-start", {})
+        assert db_.get_agent(root_id).status == "idle"
+
+    def capture(*a, **kw):
+        seen.append(status(active[0]))
+        if clock[0] and not prompt_ready:
+            raise tmux.TmuxError("pane unavailable")
+        return "❯ \n? for shortcuts" if clock[0] else "Loading conversation"
+
+    def advance(seconds):
+        clock[0] += 1 if prompt_ready else 60
+        if not prompt_ready:
+            active[0].set_status("chat", "waiting")
+        return False
+
+    monkeypatch.setattr(agents, "resume", resume)
+    monkeypatch.setattr(tmux, "capture", capture)
+    monkeypatch.setattr(recovery.stopping, "wait", advance)
+    lifecycle._record_resume([{"id": "chat", "server": None}])
+    assert lifecycle.resume_after_start(recovery) == ["chat"]
+    assert len(seen) >= 2 and set(seen) == {"resuming"}
+    assert status(db) == ("idle" if prompt_ready else "waiting")
+    assert not recovery.pending and not recovery.resuming() and lifecycle._read_resume() is None
 
 
 @pytest.mark.variant("concurrent recovery must overlap distinct tmux sessions while serializing chats sharing one session")
@@ -485,6 +623,35 @@ def test_viewed_session_comes_back_first(db, root, monkeypatch, case):
         assert sorted(began) == [("older", False), ("recent", False)]  # begun while it hung
     elif case == "back":
         assert waiting == [2, 2] and all(done for _, done in began)     # none begun beside it
+
+
+@pytest.mark.variant("real incident: after an update the person's sessions each waited ~3 s for room on a busy CPU")
+def test_on_a_busy_cpu_the_persons_sessions_come_back_viewed_first_without_waiting_for_room(db, monkeypatch):
+    """Reported: after an update every session sat 3 s waiting for room on a
+    loaded machine before it even began. The person's own sessions only wait
+    for critical memory: the viewed one first, then the rest at once."""
+    from brindle.daemon import lifecycle
+    from brindle.db import Workspace
+
+    ws = Workspace("proj", "/proj", "proj", "root", "main", None, "/proj", None, "proj", 1)
+    _recorded_sessions(db, ws, monkeypatch, [("recent", "a"), ("older", "b"), ("viewed", "c")])
+    lifecycle.record_viewed("viewed")
+    recovery, checks = lifecycle.Recovery(), []
+    monkeypatch.setattr(lifecycle, "RESUME_BUSY_WAIT", 60)
+    monkeypatch.setattr(spawn, "POLL", 0)
+    monkeypatch.setattr(spawn, "pressure", lambda: 1)
+
+    def has_room(waits=True):   # never any room; a wait that goes round again would hold the session up
+        checks.append(1)
+        if len(checks) > 3:
+            recovery.stopping.set()
+        return False
+
+    monkeypatch.setattr(spawn, "_has_room", has_room)
+    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: None)
+    monkeypatch.setattr(agents, "panes_match", lambda *a, **kw: True)
+    resumed = lifecycle.resume_after_start(recovery)
+    assert resumed[0] == "viewed" and sorted(resumed[1:]) == ["older", "recent"]
 
 
 @pytest.mark.variant("stop racing concurrent recovery must finish an in-flight launch and retain preflight and unstarted sessions")

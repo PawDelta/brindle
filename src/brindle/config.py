@@ -306,14 +306,33 @@ _COMMITTED_MAX = 256
 _COMMITTED_LOCK = threading.Lock()
 
 
-def _committed_text(root: Path, branch: str) -> str | None:
+def _branch_sha(root: Path, branch: str) -> str | None:
+    """The commit ``branch`` names, read from the git files as git would
+    resolve the name (``status_cache._short_ref``), with no git run: the
+    cull reads a session's config every minute. None when it can't be read
+    that way (a tag, which may need peeling; a sha; reftable), then git says."""
+    from brindle import status_cache
+
     try:
-        rev = spawn.read(["git", "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"], cwd=root)
-    except OSError:
+        private = status_cache._worktree_gitdir(root)
+        found = status_cache._short_ref(private, status_cache._common_gitdir(private), branch)
+    except (OSError, ValueError, IndexError):
         return None
-    sha = rev.stdout.strip()
-    if rev.returncode != 0 or not sha:
+    if found is None or not found[0].startswith(("refs/heads/", "refs/remotes/")):
         return None
+    return found[1]
+
+
+def _committed_text(root: Path, branch: str) -> str | None:
+    sha = _branch_sha(root, branch)
+    if sha is None:
+        try:
+            rev = spawn.read(["git", "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"], cwd=root)
+        except OSError:
+            return None
+        sha = rev.stdout.strip()
+        if rev.returncode != 0 or not sha:
+            return None
     key = (str(root), sha)
     with _COMMITTED_LOCK:
         if key in _COMMITTED:
@@ -567,6 +586,13 @@ def visuals_setting() -> str:
 def visuals_enabled_setting() -> bool:
     """The visuals capability as a person setting: on unless set to "off"."""
     return user_settings().get("visuals_enabled") != "off"
+
+
+def login_shell_env_setting() -> bool:
+    """Whether the provider CLIs the daemon launches get the proxy and certificate
+    settings of the person's login shell (brindle.login_shell_env): on unless
+    ``login_shell_env`` is "off"."""
+    return user_settings().get("login_shell_env") != "off"
 
 
 def supervisor_pick() -> str | None:

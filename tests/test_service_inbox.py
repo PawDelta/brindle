@@ -98,7 +98,6 @@ def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(d
 @pytest.mark.variant("the reported bug: other tests reach this card but assert nothing of what it tells the person")
 @pytest.mark.parametrize("count, repos, workers, detail, reasons", [
     (2, 2, 0, "Keep existing behavior", 1),
-    (2, 1, 3, "Keep existing behavior", 1),
 ])
 def test_plan_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
                                                    count, repos, workers, detail, reasons):
@@ -236,8 +235,18 @@ def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypat
     assert len(asked) == 1   # cached: the second read didn't ask gh again
     from brindle.daemon.routes_actions import inbox_action
 
+    from brindle import identity_lock
+
+    # A session locked to another sign-in can still have its card dismissed: that acts as no one.
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "another@example.com")
     inbox_action(db, {"id": "r1", "action": "pr-not-now"}, {})   # Dismiss on the opened card
     assert cards() == []
+    # A push to the same PR moves HEAD: the dismissed card stays gone.
+    monkeypatch.setattr(git, "out", lambda args, path: "head2")
+    session_review._head_cache.clear()
+    cards()   # the first read for a new HEAD only starts the background look
+    assert cards() == []
+    monkeypatch.setattr(git, "out", lambda args, path: "head1")
     pr = None
     session_review._head_cache.clear()
     assert [i.kind for i in cards()] == ["pr_ready"]

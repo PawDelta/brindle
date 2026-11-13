@@ -465,7 +465,8 @@ LAUNCH_WAIT = 8.0      # and in all, launches under way included (within daemon.
 RESUME_STALL = 120.0   # seconds with no session finished after which a start stops waiting (a resume that hangs)
 RESUME_TRIES = 2       # starts that may fail to bring one session back before it is left paused
 RESUME_PARALLEL = 4    # sessions a start brings back at once (resume_after_start)
-RESUME_BUSY_WAIT = 3.0  # seconds a session coming back waits on a machine short of CPU only: the person is waiting for it
+RESUME_BUSY_WAIT = 3.0  # seconds a session other than the person's own waits on a machine short of CPU only
+RESUME_PROMPT_WAIT = 90.0   # seconds to wait for Claude's input box after its pane is launched
 VIEWED_HEAD_START = 8.0     # seconds the session on screen comes back alone before the others start, if it hangs
 
 
@@ -499,6 +500,7 @@ class Recovery:
         self.idle.set()
         self.record: list[dict] = []    # what is on disk: sessions not confirmed back yet
         self.pending: list[dict] = []   # those whose turn in this start isn't over
+        self.returning: set[str] = set()  # eligible sessions queued or launching in this start
         self.lanes: deque[list[dict]] = deque()     # those whose turn hasn't begun, under lock
         self.total = 0                  # how many entries the record had
         self.handed_over = False        # stop has returned: the record is the way out's now
@@ -532,6 +534,12 @@ class Recovery:
         """``entry``'s turn in this start is over, back or not."""
         with self.lock:
             self.pending.remove(entry)
+            self.returning.discard(entry["id"])
+
+    def resuming(self) -> set[str]:
+        """Sessions this start is bringing back, until their attempt ends."""
+        with self.lock:
+            return set() if self.idle.is_set() or self.stopping.is_set() else set(self.returning)
 
     def next_lane(self) -> list[dict] | None:
         with self.lock:
@@ -701,6 +709,34 @@ def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env
         return True
 
 
+def _await_resume_prompt(db, root_id: str, recovery: Recovery) -> None:
+    """Keep the recovery display until Claude can take input. SessionStart
+    marks it idle before a large conversation has finished loading; neither
+    that status nor a live pane means its prompt is up. Read the pane using
+    the provider's existing input detection, outside the resume/launch locks.
+    If it never draws (or can't be read), expose the real status at the bound.
+    Other providers and headless sessions keep their existing readiness path.
+    """
+    from brindle import agents, providers, tmux
+
+    until = time.monotonic() + RESUME_PROMPT_WAIT
+    while not recovery.stopping.is_set():
+        root = db.get_agent(root_id)
+        if (root is None or root.provider != "claude" or root.headless or root.mode != "interactive"
+                or root.status not in ("starting", "idle", "processing", "waiting") or not root.tmux_window):
+            return
+        left = until - time.monotonic()
+        if left <= 0:
+            return
+        try:
+            screen = tmux.capture(root.tmux_window, lines=40, server=agents.server_of(root))
+            if providers.get_provider(root.provider).input_ready(screen):
+                return
+        except tmux.TmuxError:
+            pass   # a transient capture failure must not announce that it is ready
+        recovery.stopping.wait(min(left, 0.5))
+
+
 def _join(threads: list[threading.Thread], recovery: Recovery) -> None:
     """Wait for ``threads``, or until no session has finished for RESUME_STALL
     seconds: what hangs mustn't keep the app waiting or its progress up for
@@ -733,7 +769,10 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
 
     Up to RESUME_PARALLEL sessions come back at once, the one last at work
     first (_most_recent_first), each when the machine has room for it
-    (spawn.wait_for_room); sessions sharing a tmux session go one after
+    (spawn.wait_for_room): for the person's own (interactive) sessions,
+    only critical memory pressure holds them, a machine short of CPU doesn't
+    (the person is waiting for them; workers keep their gate, spawn.no_room);
+    sessions sharing a tmux session go one after
     another (_lanes). A session that fails doesn't hold up the others.
     The session the app showed last (record_viewed) goes before all of them,
     alone, so it is back sooner: the others start once it is, or after
@@ -741,7 +780,7 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
 
     ``recovery``: the daemon's (serve), which may be stopped meanwhile: then
     nothing more is launched, and what is left stays on the record."""
-    from brindle import agents, secrets, tmux
+    from brindle import agents, bus, secrets, signin_pause, tmux
     from brindle.db import DB
 
     recovery = recovery or Recovery()
@@ -764,7 +803,17 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
         env = {k: v for k, v in os.environ.items() if v and not secrets.is_job_secret(k)}
         db = DB()
         try:
+            held = set(signin_pause.paused_for_signin())
+            with recovery.lock:
+                recovery.returning = {
+                    entry["id"] for entry in entries
+                    if entry.get("tries", 0) < RESUME_TRIES and entry.get("server") == server
+                    and (root := db.get_agent(entry["id"])) is not None
+                    and root.status != "done" and agents.same_server(root) and root.id not in held
+                }
             lanes = _lanes(db, _most_recent_first(db, entries))
+            for root_id in recovery.resuming():
+                bus.publish_agent(db, "session.changed", root_id)
         finally:
             db.conn.close()
         # The session the app showed last comes back first, before its lane's others, and alone.
@@ -787,7 +836,10 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                         return
                     for entry in lane:
                         waiting = time.monotonic()
-                        spawn.wait_for_room(recovery.stopping, busy_limit=RESUME_BUSY_WAIT)
+                        root = db.get_agent(entry["id"])
+                        # The person's own session: they are waiting for it, so only critical memory holds it.
+                        busy = 0.0 if root is not None and root.mode == "interactive" else RESUME_BUSY_WAIT
+                        spawn.wait_for_room(recovery.stopping, busy_limit=busy)
                         waited = time.monotonic() - waiting
                         if recovery.stopping.is_set():
                             return
@@ -796,6 +848,7 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                                 log.warning("brindle: session %s couldn't be noted as tried; left to the next start",
                                             entry["id"])
                             elif _resume_session(db, entry, server, recovery, env, waited=waited):
+                                _await_resume_prompt(db, entry["id"], recovery)
                                 resumed.append(entry["id"])
                         except agents.Cancelled:
                             entry["tries"] -= 1     # stopped, it didn't fail
@@ -803,6 +856,7 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                         except Exception:  # noqa: BLE001 - the others still come back
                             log.warning("brindle: couldn't resume session %s", entry["id"], exc_info=True)
                         recovery.finished(entry)
+                        bus.publish_agent(db, "session.changed", entry["id"])
                         if entry["id"] == viewed:
                             alone.set()
             finally:
@@ -1015,6 +1069,10 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     from brindle import spawn
 
     spawn.enable()      # every process the daemon starts waits for room (brindle.spawn)
+    from brindle import login_shell_env
+
+    # The person's proxy and certificate settings, read once, for the CLIs this daemon launches.
+    login_shell_env.load_in_background()
     from brindle.daemon.events import start_poller
 
     poller = start_poller()

@@ -2177,8 +2177,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     config.set_local(lead.repo_root, "checks", ["validate", "lint"])
     assert _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})[0] == 202
     # The sha brindle checked; the Inbox item goes.
-    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1,
-                                                                                  [("pr_opened", "PR opened")])
+    # The person opened it: no "PR opened" card tells them so.
+    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1, [])
     newer = _commit(sess, "a.py", "b\n")
     watch.sweep(db)
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
@@ -2516,10 +2516,12 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     agents_dir = Path(world.repo_root) / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     # (Declaring it as the profile's key name doesn't get it through either.)
-    # The "key" setup: the profile's own key, with a different one in brindle's environment.
+    # The "key" setup: the profile's own value, with a different one in brindle's environment.
+    # A fixed placeholder, not brindle's SECRET: the profile file is plain text on disk.
+    profile_value = "placeholder-profile-value-0000wxyz"
     (agents_dir / "supervisor.md").write_text(
         f"---\nname: supervisor\nprovider: {provider}\napi_key_env: NODE_OPTIONS\n"
-        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + SECRET + chr(10) if setup == 'key' else ''}"
+        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + profile_value + chr(10) if setup == 'key' else ''}"
         "---\nYou supervise.\n")
     if setup == "missing":
         monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(tmp_path / "nowhere" / "claude"))
@@ -2537,7 +2539,8 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     code, items = _send("GET", query)
     assert code == 200, items
     found = next(i for i in items if i["id"] == item)
-    assert SECRET not in json.dumps(items) and configs() == before     # asking changes nothing
+    assert SECRET not in json.dumps(items) and profile_value not in json.dumps(items)
+    assert configs() == before     # asking changes nothing
     assert all("NODE_OPTIONS" not in env for env in probed)
     action = found["action"]
     if action is None or action["name"] == "set_key":
@@ -2555,7 +2558,7 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     assert code == 200, reply
     assert item not in [i["id"] for i in _send("GET", query)[1]]
     if setup == "key":
-        assert providers.api_key_approved(SECRET) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
+        assert providers.api_key_approved(profile_value) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
     if setup == "untrusted":
         assert codex.read_text().startswith('model = "x"\n')
 
@@ -2867,7 +2870,7 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
 
     assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "default",
                                                         "opencode_permission_mode": "ask", "visuals": "off",
-                                                        "visuals_enabled": "on"})
+                                                        "visuals_enabled": "on", "login_shell_env": "on"})
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "yolo"})[0] == 400
     assert _send("PATCH", "/v1/user-settings", {})[0] == 400
     # One bad value refuses the whole change.
@@ -2875,11 +2878,12 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
                                                 "opencode_permission_mode": "default"})[0] == 400
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "auto"})[0] == 200
     assert _send("PATCH", "/v1/user-settings", {"opencode_permission_mode": "autonomous"})[0] == 200
+    assert _send("PATCH", "/v1/user-settings", {"login_shell_env": "off"})[0] == 200
     assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "auto",
                                                         "opencode_permission_mode": "autonomous", "visuals": "off",
-                                                        "visuals_enabled": "on"})
+                                                        "visuals_enabled": "on", "login_shell_env": "off"})
     assert json.loads(path.read_text()) == {"delegation": "fast", "claude_permission_mode": "auto",
-                                            "opencode_permission_mode": "autonomous"}
+                                            "opencode_permission_mode": "autonomous", "login_shell_env": "off"}
     assert not list(path.parent.glob("*.tmp"))
 
 

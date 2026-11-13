@@ -388,7 +388,8 @@ def _preset(kind: str, match: str, match_type: str, decision: str) -> Rule:
     return Rule(kind, match, match_type, decision, "preset", 0.0, "")
 
 
-PRESET_COMMANDS = ("aws", "uv", "pytest", "python", "npm", "pnpm", "yarn", "docker", "cargo", "go", "make", "gh")
+PRESET_COMMANDS = ("aws", "uv", "pytest", "python", "npm", "pnpm", "yarn", "docker", "cargo", "go", "make", "gh",
+                   "brindle baseline")
 # The everyday commands the Standard, Permissive and Autonomous presets allow outright.
 PRESET_RULES = tuple(
     rule
@@ -1192,7 +1193,7 @@ def compound_parts(command: str) -> list[list[str]] | None:
 
 
 def _part_decision(req: Request, words: list[str], checks: list[str] | None,
-                   rules: list[Rule]) -> Decision:
+                   rules: list[Rule], *, unresolved: list[str] | None = None) -> Decision:
     """One part of a compound command. A deny reads the words re-joined at
     every space, so a spaced word can't dodge it. An allow must see the
     words as the shell will run them: ``"./check --safe"`` is one word,
@@ -1200,21 +1201,54 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     re-join to exactly that; a word with spaces can only fall in the
     arguments of a prefix rule whose words come before it. The same holds
     for literal metacharacters: re-parsing them without their quotes would
-    mistake argument text for shell syntax."""
+    mistake argument text for shell syntax. Unknown arguments may follow a
+    literal allowed prefix, but cannot supply any word of that prefix."""
     from brindle.native.permissions import _joined
 
-    denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules, [words])
+    req = replace(req, command=_joined(words))
+    denied = _matching_restriction([req], checks, rules, [words])
     if denied is not None:
         return denied
     # (Not one that hands over code: deciding it reads it part by part, which brought us here.)
-    if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words) and not _hands_code(words):
+    if (not unresolved and all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words)
+            and not _hands_code(words)):
         return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules, unmatched="ask", saved=[])
+    literal = list(itertools.takewhile(lambda word: word not in (unresolved or ()), words))
+    # An allow vouches only for what it can see: where an unknown word (a
+    # $(...)'s output, $x) may be what a deny or ask names, even one that may
+    # match anywhere (*daemon.json*), no rule allows the part.
+    if unresolved and any(_may_match_unknown(rule, req, literal, checks) for rule in rules
+                          if rule.kind == "bash" and rule.decision in ("deny", "ask")
+                          and rule.match_type in MATCH_TYPES):
+        return Decision("ask", "a deny or ask rule could match a word only the run knows")
     for rule in rules:
         head = rule.match.split()
         if (rule.kind == "bash" and rule.decision == "allow" and rule.match_type == "prefix"
-                and head and words[:len(head)] == head and _in_scope(rule, req, checks)):
+                and head and words[:len(head)] == head and _in_scope(rule, req, checks)
+                and len(head) <= len(literal)
+                and not (unresolved and _prefix_may_be_excluded(rule, req, literal, checks))):
             return Decision("allow", f"allowed by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     return Decision("ask", "no rule allows it")
+
+
+def _prefix_may_be_excluded(rule: Rule, req: Request, literal: list[str], checks: list[str] | None) -> bool:
+    """Whether an exclusion could cover the part after its unknown words expand."""
+    return any(_may_match_unknown(excluded, req, literal, checks) for excluded in rule.exclusions)
+
+
+def _may_match_unknown(rule: Rule, req: Request, literal: list[str], checks: list[str] | None) -> bool:
+    """Whether ``rule`` could match a part whose words after ``literal`` only
+    the run knows: unless its fixed leading text and theirs diverge, it might."""
+    # Nested exceptions may depend on unknown words too; don't use them to
+    # dismiss the rule. Its kind, expiry and repository still apply.
+    if not _in_scope(replace(rule, exclusions=()), req, checks):
+        return False
+    if rule.match_type not in MATCH_TYPES:
+        return True
+    known = " ".join(" ".join(literal).split())
+    fixed = re.split(r"[*?\[]", rule.match, maxsplit=1)[0] if rule.match_type == "glob" else rule.match
+    fixed = " ".join(fixed.split())
+    return known.startswith(fixed) or fixed.startswith(known)
 
 
 def _inside(path: str, root: str) -> str | None:
@@ -3834,6 +3868,18 @@ _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 def _unwrapped(words: list[str]) -> list[str] | None:
     """The command a plain wrapper (_PLAIN_WRAPPERS) runs, or None when ``words``
     isn't one, an option isn't known, or nothing is left to run."""
+    if len(words) > 2 and os.path.basename(words[0]) == "brindle" and words[1] == "baseline":
+        at = 2
+        while at < len(words):
+            if words[at] == "--base":
+                at += 2
+            elif words[at].startswith("--base="):
+                at += 1
+            else:
+                break
+        if words[at:at + 1] == ["--"]:
+            at += 1
+        return words[at:] or None
     spec = _PLAIN_WRAPPERS.get(os.path.basename(words[0])) if words else None
     if spec is None:
         return None
@@ -4977,7 +5023,7 @@ _CODE_RUNNERS = _STDIN_RUNNERS | _INTERPRETERS | _COMMAND_READERS
 # Programs that run another program named among their arguments.
 _WRAPPERS = _STDIN_RUNNERS | {"builtin", "stdbuf", "caffeinate", "flock", "unbuffer", "chroot"}
 # ... and that run a project's own tool the same way (uv run python).
-_TOOL_RUNNERS = _WRAPPERS | {"uv", "poetry", "pipenv", "pdm", "hatch", "rye", "conda", "bundle", "npx"}
+_TOOL_RUNNERS = _WRAPPERS | {"uv", "poetry", "pipenv", "pdm", "hatch", "rye", "conda", "bundle", "npx", "brindle"}
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 # Fed a heredoc, these run its lines as commands: brindle doesn't take that for data, whatever
 # the store answers for what no rule covers. (The other _STDIN_RUNNERS only pass it on.)
@@ -5496,6 +5542,7 @@ class _PartReader:
         except ValueError:
             return [raw], False, None
         if re.search(r"\{[^}\s]*,", bare):
+            self.expanded = True
             return [raw], False, None    # a brace expansion
         if bare.startswith("~"):
             if not re.match(r"~(/|$)", raw):
@@ -5581,7 +5628,8 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
     pattern that may match anywhere in a command (``*daemon.json*``) is
     matched against what brindle can read of it (a variable known or not as
     written, a pattern expanded), as it is against what an interpreter's
-    code names: text only the run produces is beyond what text matching sees."""
+    code names; only a person's own such pattern also covers the words only
+    the run knows."""
     program = os.path.basename(part.words[0])
     if rule.match_type in ("git-push", "push", "git-force"):
         if program != "git":
@@ -5600,7 +5648,11 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
     fixed = re.split(r"[*?\[]", rule.match, maxsplit=1)[0] if rule.match_type == "glob" else rule.match
     fixed = " ".join(fixed.split())
     if not fixed:
-        return False
+        # A person's own pattern may match what only the run knows ($x, a
+        # $(...)'s output naming the file): written out, it would be denied.
+        # A preset's (*daemon.json*) is left to the OS sandbox, or no
+        # command with a variable would run unasked.
+        return rule.source != "preset" and part.unknown
     head = []    # the words before the first one only the run knows
     for word in part.words:
         if _unread(word):

@@ -166,6 +166,9 @@ def test_org_managed_settings_mean_no_provider_config_env(db, repo, tmp_path, mo
 # -- quota and cost ------------------------------------------------------------------------------
 
 def test_quota_says_pay_per_token_for_a_key(monkeypatch):
+    from brindle import subscription_usage
+
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
     quota.record("claude", [quota.Window(95.0, time.time() + 3600, 300)], source="status line")
     assert "95%" in quota.note("claude")
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)

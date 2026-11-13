@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonError } from "../../api/client";
 import type { InboxItemDTO } from "../../api/schema";
@@ -19,6 +19,43 @@ function Harness({ daemon, inbox, out, refresh = () => Promise.resolve() }: { da
 }
 
 describe("inbox actions", () => {
+  it("hides a dismissed PR through pending requests and restores it with an error on failure", async () => {
+    const item: InboxItemDTO = { ...plan, kind: "pr_opened" };
+    const key = "pr_opened:sup1:proj";
+    const client = new FakeDaemon().client();
+    let reject!: (error: Error) => void;
+    let finish!: () => void;
+    vi.spyOn(client, "inboxAction")
+      .mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = () => resolve({}); }));
+    const refresh = vi.fn(() => new Promise<void>(() => {}));
+    const { result, rerender } = renderHook(({ inbox }) => useInboxActions(client, refresh, 0, inbox), {
+      initialProps: { inbox: [item] },
+    });
+
+    act(() => result.current.run(item, "pr-not-now"));
+    expect(result.current.hidden.has(key)).toBe(true);
+    // A snapshot received while the POST is pending must not resurrect the card.
+    rerender({ inbox: [{ ...item }] });
+    expect(result.current.hidden.has(key)).toBe(true);
+    await act(async () => reject(new Error("offline")));
+    expect(result.current.hidden.has(key)).toBe(false);
+    expect(result.current.notes[key]?.failed).toBe(true);
+    expect(result.current.notes[key]?.text).toBeTruthy();
+    expect(refresh).not.toHaveBeenCalled();
+
+    act(() => result.current.run(item, "pr-not-now"));
+    expect(result.current.hidden.has(key)).toBe(true);
+    expect(result.current.notes[key]).toBeUndefined();
+    await act(async () => finish());
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(result.current.busy.size).toBe(0);
+    expect(result.current.hidden.has(key)).toBe(true);
+    // Once acknowledged, a fresh inbox is authoritative again.
+    rerender({ inbox: [{ ...item }] });
+    expect(result.current.hidden.has(key)).toBe(false);
+  });
+
   it("rejects changed permission digests and keeps a repeated action attached to its in-flight request", async () => {
     const item: InboxItemDTO = { ...plan, kind: "permission", permission: { via: "hook", request_id: "r", digest: "old" } };
     const daemon = new FakeDaemon({ workspaces: [root], inbox: [item] });

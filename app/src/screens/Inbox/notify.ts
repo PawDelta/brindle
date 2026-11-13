@@ -4,6 +4,8 @@
 
    The inbox reaches the store as snapshots, fetched whenever the event stream
    says something changed; an item whose key wasn't in the previous one is new.
+   Open PRs are remembered by URL and kind for this watch's lifetime: pushes
+   and CI reruns can temporarily remove their cards or change their kind.
    The first snapshot only records what is already waiting: nothing is
    announced for items that were there before the app opened. A session's
    readiness is the bus's session.pr_ready row (daemon/session_review.py
@@ -28,6 +30,7 @@ export const READY_TITLE = "Ready for a pull request";
 
 export function watchInbox(store: AppStore, sink: InboxSink): () => void {
   let seen: Set<string> | null = null;
+  const seenPrs = new Set<string>();
   let last: InboxItemDTO[] | null = null;
   let lastEvent = store.getState().lastEventId;
   let counted: number | null = null;
@@ -46,10 +49,15 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
     if (inbox !== last) {
       last = inbox;
       const keys = new Set(inbox.map(itemKey));
-      if (seen) {
-        for (const item of inbox) {
-          if (!seen.has(itemKey(item))) sink.notify(kindLabel(item), describe(item), item.kind === "pr_opened" ? (item.url ?? undefined) : undefined);
+      for (const item of inbox) {
+        // A failure is remembered with what failed, so a new failure still notifies.
+        const prKey = (item.kind === "pr_opened" || item.kind === "pr_failed") && item.url
+          ? JSON.stringify([item.kind, item.url, item.kind === "pr_failed" ? item.detail ?? "" : ""]) : null;
+        if (seen && (prKey ? !seenPrs.has(prKey) : !seen.has(itemKey(item)))) {
+          sink.notify(kindLabel(item), describe(item), item.kind === "pr_opened" ? (item.url ?? undefined) : undefined);
         }
+        // Seed this history on initial sync too, without announcing old items.
+        if (prKey) seenPrs.add(prKey);
       }
       seen = keys;
     }

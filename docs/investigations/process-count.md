@@ -375,6 +375,245 @@ git writes escaped) is edited through its link) and
 second sidebar due 30 s after the first's sweep doesn't sweep; the
 unmodified code did).
 
+### S4. What S3 left in an idle sidebar's refresh (fixed)
+
+After S3, release.144 still measured about 60 processes a minute per idle
+`brindle watch --sidebar`. One idle refresh (every `IDLE_SECONDS`, 10 s),
+read with `subprocess.Popen.__init__` wrapped against a copy of this
+machine's database (15 workspaces shown), started 41 processes, every time:
+
+- **git, from a cache that never hit**: a worktree whose base branch was
+  deleted (6 here) makes `git rev-list <base>...HEAD` fail. A failure was
+  never cached, so `status_cache.cached_status` ran `git status` and the
+  failing `rev-list` again for each of its three callers in a refresh
+  (`warm`, `retired`, `workspace_entry`): 36 git per refresh.
+- **tmux, re-read every refresh**: `list-panes`; `capture-pane` for each
+  running agent whose status isn't idle (`agents.reconcile`, from
+  `view.agent_entry`); `display` for the terminal showing the pane
+  (`sidebar_logo.viewer`) and two for `agents.sidebar_come_home`; one
+  `display -t <pane> #{pane_dead}` per active worker from the goal line's
+  worker count (`autopilot.working_workers` judged liveness without the
+  refresh's pane snapshot); and, in a terminal that can't show the braid,
+  `display #{client_termfeatures}` every 10 s (`Braid.image`).
+
+Fix:
+
+- `status_cache.cached_status` (a wrapper around the cache, now
+  `_cached_status`) remembers a git failure while HEAD reads from the git
+  files and the base ref names nothing there, and fails again without git
+  while the fingerprint and refs are the very ones git failed under. The
+  base branch coming back (a loose ref, `packed-refs`, `origin/<base>`)
+  changes them, and git is asked again.
+- `watch.TmuxLook` keeps the refresh's pane snapshot while nothing says tmux
+  changed: a key, a database commit or a failed pass take it again, and so
+  does `TMUX_LOOK_SECONDS` (60 s) passing. Screens are read
+  (`view.snapshot(read_screens=...)`), and while quiet the viewer, the
+  sidebar's home and the braid are asked, only with a fresh look.
+- The goal line's worker count and a failed milestone's work state use the
+  refresh's pane snapshot (`autopilot.working_workers(..., panes)`,
+  `autopilot.work_state(..., panes)`).
+
+Test: `tests/test_idle_spawns_sidebar.py` drives `watch._loop` itself
+(a fake screen, a fake `tmux` on PATH, a real repo with a worktree whose
+base branch is gone, a session root with a failed milestone and a worker
+waiting on the person) and
+counts every process started across two unchanged refreshes after the
+first three: 18 on the unmodified code (4 of them git with only the
+status_cache part undone), none with the fix.
+
+What is left: an idle sidebar takes one fresh tmux look a minute
+(`list-panes`, then `display` for the viewer, two for its home, the braid's
+recheck where it can't show, and a `capture-pane` per running non-idle
+agent): about 5 processes a minute instead of 6 refreshes' worth. That look
+is what notices a CLI that died without writing the database, a missed
+follow hook and a status its hooks left stale.
+
+### S5. The daemon's sweep still ran git for sessions S1 didn't settle (fixed)
+
+Live on the owner's machine (release.144, 28 agents, mostly paused or done
+coordinators and supervisors) the daemon started about 145 git a minute
+while idle (a 45 s `ps` sample, a lower bound): `status --porcelain
+--untracked-files=no|all`, `rev-parse HEAD`, `symbolic-ref`, `rev-list
+<sha>..HEAD`, `merge-base --is-ancestor`. A harness counting
+`subprocess.Popen` over an unchanged round found where:
+
+- **Readiness of a reached goal with no base branch.** `ReadinessWatch`
+  caches readiness behind `_state`, which is None for a session on the repo's
+  own checkout (no base branch), so `reasons` ran every sweep: a tracked
+  `git status`, `rev-parse HEAD`, and `merge-base`/`rev-list` for the audit
+  sha, only to say again that there is no branch to open a PR from. Four
+  such sessions on this machine. Now: not ready, no git.
+- **A session whose merge of origin/main conflicts** was merged and aborted
+  every sweep (16 processes). The refs the merge conflicted at are now
+  remembered like synced ones: tried again when HEAD or `origin/<default>` moves.
+- **A session with unsaved work**: `_quiet`'s `git status` every sweep. The
+  sweep's look now uses `status_cache` (git only when the checkout's files
+  moved); the sync still asks git, under its locks, before it merges.
+- **The repo's remote and default branch** are learned once per repo every
+  5 minutes, not once per session.
+- **The app's events feed** ran `git.status` (uncached) every 5 s for each
+  checkout with no base branch; `status_cache.cached_any_status` caches it
+  against its own branch.
+- **The cull** (once a minute) now starts no git while nothing moved:
+  `_last_edit` (an idle worker's latest uncommitted write, for
+  `note_idle_unreported` and `note_unreported_commits`) takes the dirty files
+  from `status_cache` and stats them; `note_unreported_commits` reads HEAD
+  from the git files and checks its "told" mark, or a count of none remembered
+  for the same HEAD, base and reported head, before any git;
+  `login_pause` builds the agent's env without the git identity
+  (`agent_env(identity=False)`: the login and route don't depend on it); and
+  `config._committed_text` reads the branch's sha from the git files instead
+  of `git rev-parse` on every `load_repo_config(branch=…)`.
+
+Test: `tests/test_idle_spawns_daemon.py::test_an_unchanged_sweep_starts_no_process`
+(a round of the daemon sweep and the feed over sessions in each of those
+states, then a whole cull sweep: on the unmodified code the daemon's part
+started 32 processes and the cull git for each live agent; now the daemon's
+none and the cull no git; each fix reverted alone fails it).
+
+- **The cull's screen reads**: `tmux.list_panes`' one listing now carries
+  each pane's `#{window_activity}` (`PaneSnapshot.activity`).
+  `decline_environment_setups`, `note_api_errors` and `note_model_refused`
+  remember (an agent mark per reader, so the sidebars taking turns share it)
+  the last output time a screen was read at with nothing to act on, and don't
+  capture it again until the pane prints; `note_api_errors` takes the time
+  from the listing instead of a `display-message` per worker. A read is
+  remembered only once the output is 2 s old (tmux counts whole seconds).
+- **`tmux.session_infos`** (the cull's `reap`) reads each session's
+  `BRINDLE_HOME` once per session (name and creation time), not every minute.
+
+Still per cull sweep (once a minute), whatever the number of agents: two `ps`
+(the process table), `tmux list-clients` (`login_pause`'s last input) and
+`reap`'s `tmux list-panes`.
+
+### S6. Sessions at work: goal and Inbox reads, and the same repo questions for every checkout (fixed)
+
+Live on the owner's machine (release.148, main 0c07614f) the daemon still
+started about 500 processes a minute while sessions were at work. A 30 s
+sample of git command lines by parent pid (`ps` every 20 ms, a lower bound)
+caught 187 from the daemon: `show-ref --verify --quiet
+refs/remotes/origin/main` (22), `rev-parse HEAD` (19), `merge-base
+--is-ancestor main origin/main` and the reverse (27), `status --porcelain
+--untracked-files=no` (14), `symbolic-ref … refs/remotes/origin/HEAD` (10),
+`for-each-ref refs/heads` (8), `merge-base --is-ancestor <sha> HEAD` (8),
+`rev-list --left-right --count origin/main...HEAD` (7), `git remote` (7),
+`rev-list <sha>..HEAD` (7).
+
+Where it came from: code added after v0.6.3 (the session-PR and landing
+work). v0.6.3 has none of `new_since_merge`, `current_pr`, `_opened_pr`,
+`refresh_idle_sessions`, `refresh_drift_flags` or `land_phase_prs` (checked
+with `git grep` at the tag; v0.6.3 itself was not run here). The largest
+share is not a sweep at all: the open app reads each session's goal
+(`routes_read.goal` → `goal_phase` → `reasons`, `current_pr` →
+`new_since_merge`, `has_pr_target`, `pr_block` → `drift`) and its Inbox
+(`_opened_pr`: `rev-parse HEAD` per session), and the daemon serves those
+reads, so their git shows under the daemon's pid. None of it was cached, so
+it never settled, and it grew with every session and every merged PR.
+
+Three classes:
+
+- **Every read of a goal or the Inbox judged the session with git.** About
+  15 processes per goal read of a session whose goal is reached (table
+  below), the same ones again on the next read.
+- **Questions about the repo, asked per checkout.** Whether `origin/<base>`
+  exists, which of `<base>` and `origin/<base>` is ahead (`git.base_ref`),
+  origin's default branch (`git.default_branch`) and whether there is an
+  origin (`git.has_remote`) are the same in every checkout and change only
+  when a ref or the config does. S1 and S5 cached their callers per session,
+  behind each session's own refs; a session whose row or files change misses
+  that cache every sweep, and when main moves every session does at once.
+- **A reached goal with workers at work.** `ReadinessWatch` reuses a
+  session's readiness while its whole state is unchanged, and that state
+  holds its workers' rows. A worker changing status re-ran `reasons` each
+  sweep: `git status` twice, `rev-parse HEAD`, the audit commit's
+  `merge-base` and `rev-list`, ahead/behind, the merged PR's `rev-list`
+  (and `rev-parse <merge>^{tree}`, `merge-tree` per sync merge), and, for a
+  session behind origin, `session_sync.drift`'s five.
+
+Fix, in `git.py` so every caller has it (`conflicts`, `gates`,
+`rule_checks`, `agents.liveness`, the pipeline, the sidebars):
+
+- `remote_branch_exists`, `default_branch`, `current_branch` and `base_ref`
+  read HEAD, the loose refs and `packed-refs` (parsed once per version of
+  the file) themselves: no process. `base_ref` asks git only which of two
+  different commits is ahead: one `merge-base --is-ancestor`, by sha, once
+  per pair of commits.
+- `has_remote` asks `git remote` once per repo and per config as git reads
+  it in that checkout (`status_cache.remotes`): checkouts whose settings
+  list the same share the answer, and it is asked again when any file the
+  config depends on changes. Those files are S3's (`_outside_sources`, from
+  git's own `config --list --show-origin --includes`): every file git read,
+  every include and includeIf target, there or not yet, the system's and
+  the person's, and the branch for `onbranch:` conditions.
+- `resolve` reads what names point at; `once`, `out_once` and `is_ancestor`
+  keep git's answer to a question that names its commits by sha (it never
+  changes; kept per repo and per version of its `shallow` and `info/grafts`
+  files, and not at all in a repo with replace refs).
+  `ahead_behind` and `merge_base` use them, and so do
+  `session_sync.drift`, `session_review.new_since_merge` and the audit
+  commit's check.
+- Whatever the files can't say (a reftable repo, `GIT_DIR` in the
+  environment, a path that isn't a checkout's root, a name like `main~2`) is
+  asked of git every time, as before.
+- `reasons` and `phase_reasons` take a checkout's uncommitted tracked files
+  from `status_cache.tracked_dirty`: `git status --untracked-files=no` runs
+  only when something it reads moved since it last looked. That is HEAD's
+  commit, the index, every tracked file, each one stat'ed wherever it is
+  (names from the index, read without git), a `.gitattributes` in any
+  folder holding a tracked file (there or not yet, tracked or not), and
+  every config and attributes file outside the worktree
+  (`_outside_sources`, now with `info/attributes`, `core.attributesFile`
+  and the global and system attributes files). The stamps are taken before
+  git looks. An index that can't be read that way (a submodule, a split or
+  sparse index), or a config git couldn't list, asks git every time.
+
+- The Inbox reads each session's HEAD from the git files (`git.head`).
+
+There is one mechanism: names are read from the git files, and git's answer
+about commits is kept per sha. `new_since_merge`, `current_pr`, `reasons` and
+`goal_phase` keep no result of their own; with the same HEAD, pushed commit,
+base and origin commits and squash rows, every question they ask is already
+answered. The repo-level reads are that same mechanism, not an extra one:
+knowing that the inputs haven't moved means reading the refs.
+
+Measured with `subprocess.Popen.__init__` wrapped: three sessions in one
+repo (two with a reached goal and a worker at work, one of them with a
+merged PR and a sync's merge on top; one quiet), `origin/main` moved once.
+A round is the sweep, the app's feed, one Inbox read and one goal read per
+session.
+
+| processes started | sweep | feed | Inbox read | 3 goal reads | round |
+|---|---|---|---|---|---|
+| before, the round that sees main move | 65 | 16 | 3 | 45 | 129 |
+| before, the next round, workers still at work | 40 | 2 | 3 | 46 | 91 |
+| after, the round that sees main move | 29 | 6 | 0 | 1 | 36 |
+| after, the next round, workers still at work | 2 | 2 | 0 | 0 | 4 |
+
+Before, the round that saw main move started, by command, `show-ref` 16,
+`merge-base --is-ancestor` 20, `symbolic-ref` 13, `remote` 6 and
+`for-each-ref` 5 (the `--is-ancestor` and `symbolic-ref` counts include the
+few about a checkout's own HEAD), and the next round much the same; after,
+one repo question (which of main and origin/main is ahead), then none. The
+4 left: the quiet session's sync finding its merge
+synced (2, once), and `git status` for each of the two worktrees a worker
+edited. The 36 are what main moving really changes: one merge, each
+session's drift and status measured once for its new commits.
+
+Test: `tests/test_busy_spawns_daemon.py` (that scenario: each repo question
+at most once on the round that sees the move and nothing asked about the
+sync's merge again; on the next round no repo question, no git at all in the
+checkouts of the sessions whose workers are at work, and `git status` only
+in the two worktrees whose files changed), and
+`test_a_kept_answer_is_asked_again_when_a_file_git_reads_for_it_changes`
+(a remote in a file the config includes goes away; an untracked
+`.gitattributes` makes a tracked file read as modified: neither moves a
+ref, the index or a tracked file, and both kept answers are asked again).
+
+What is left: a worktree an agent is editing still costs one `git status`
+per sweep that sees its files change (the app's feed). Other requests the
+app makes (a session's diff, its PR) were not measured here; they go through
+the same `git.py` functions.
+
 ### Other sources, measured and left as they are
 
 - **gh**: an open session PR costs one `gh pr view` per 90 s

@@ -51,7 +51,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from brindle import agents, git, procs, tmux
+from brindle import agents, config, git, procs, status_cache, tmux
 from brindle.config import CONFIG_DIR, WORKTREES_DIR, brindle_home, load_repo_config, worktrees_dir
 from brindle.db import DB, Agent, Workspace
 from brindle.pro import route_health
@@ -432,9 +432,38 @@ STUCK_AFTER = 90.0
 STARTUP_GRACE = 40.0
 
 
+# How old a window's last output must be before a screen read of it is
+# remembered: tmux counts that time in whole seconds, so an output in the same
+# second as the read would leave it looking unchanged.
+SCREEN_SETTLE = 2.0
+
+
+def _screen_key(a: Agent, panes) -> str | None:
+    """What a read of ``a``'s screen is remembered by: its pane and its window's
+    last output, from the sweep's one pane listing (``PaneSnapshot.activity``).
+    None when that's unknown or too recent to tell a later output apart."""
+    activity = getattr(panes, "activity", {}).get(a.tmux_window)
+    if activity is None or time.time() - activity < SCREEN_SETTLE:
+        return None
+    return f"{a.tmux_window}:{activity:.0f}"
+
+
+def _screen_unchanged(db: DB, a: Agent, reader: str, key: str | None) -> bool:
+    """Whether ``reader`` already read ``a``'s screen as it is (nothing printed
+    since) and found nothing to do: a capture of it would say the same again.
+    Kept in the DB, as the sidebars take turns at the cull."""
+    return key is not None and db.mark(a.id, f"screen:{reader}") == key
+
+
+def _screen_read(db: DB, a: Agent, reader: str, key: str | None) -> None:
+    if key is not None and db.mark(a.id, f"screen:{reader}") != key:
+        db.set_mark(a.id, f"screen:{reader}", key)
+
+
 def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
     """Dismiss Claude's environment upsell even in an interactive supervisor
-    with no queued delivery and no waiting hook."""
+    with no queued delivery and no waiting hook. A screen read once with no
+    upsell on it isn't read again until the pane prints something."""
     from brindle import prompt_answer
 
     owners = agents.pane_owners(db, panes)
@@ -443,6 +472,9 @@ def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
                 or a.status not in ("starting", "idle", "processing", "waiting")
                 or not agents.same_server(a, panes) or not agents.is_alive(a, panes)
                 or not agents.owns_pane(db, a, owners)):
+            continue
+        key = _screen_key(a, panes)
+        if db.mark(a.id, "teach-auto-mode") is None and _screen_unchanged(db, a, "setup", key):
             continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
@@ -455,6 +487,8 @@ def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
                 and provider.screen_state(screen) == "idle"):
             db.set_mark(a.id, "teach-auto-mode", None)
             agents.screen_status(db, a, samples=2, gap=0)
+        if db.mark(a.id, "teach-auto-mode") is None:
+            _screen_read(db, a, "setup", key)
 
 
 def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
@@ -595,7 +629,7 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = _idle_since(db, a, fix_round or 0)
+        since = _idle_since(db, a, fix_round or 0, panes)
         if since is None:
             continue  # no telling whether a later turn is running
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
@@ -615,10 +649,11 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
     return done
 
 
-def _idle_since(db: DB, a: Agent, floor: float = 0) -> float | None:
+def _idle_since(db: DB, a: Agent, floor: float = 0, panes=None) -> float | None:
     """When ``a``, which its hooks report idle, last showed any sign of work, or
     None when there's no telling. A provider with no hook for a turn starting
-    (Codex) stays 'idle' through later turns, so its pane's last output counts;
+    (Codex) stays 'idle' through later turns, so its pane's last output counts
+    (from the sweep's ``panes`` listing, asked of tmux only when it lacks it);
     files changing in its worktree (a script or a background command) count
     too. Commits don't: see _fix_round_since."""
     from brindle.providers import get_provider
@@ -626,7 +661,9 @@ def _idle_since(db: DB, a: Agent, floor: float = 0) -> float | None:
     since = max(a.status_since or a.created_at, floor)
     provider = get_provider(a.provider)
     if not (provider.uses_hooks and provider.announces_turns):
-        last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        last = getattr(panes, "activity", {}).get(a.tmux_window)
+        if last is None:
+            last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
         if last is None:
             return None
         since = max(since, last)
@@ -685,22 +722,35 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = _idle_since(db, a)
-        if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
-            continue
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path) or not ws.base_branch:
             continue
         reported = db.outbox_last_delivered_head(a.id)
+        # HEAD from the git files, and the notice's de-dupe, before any git (the idle
+        # look's status, the count): a worker already told about stays idle for its
+        # whole stale_after, and the cull looks once a minute.
+        # A count of none is remembered by what it was counted from (HEAD, the base,
+        # the reported head): the same commits count none again.
+        head = status_cache.read_head(ws.path)
+        base = config._branch_sha(Path(ws.path), ws.base_branch)
+        counted = f"{head} {base} {reported}" if head and base else None
+        if head is not None and (head == reported or db.mark(a.id, f"commits:{head}") == "told"
+                                 or (counted and db.mark(a.id, "commits-none") == counted)):
+            continue
+        since = _idle_since(db, a, panes=panes)
+        if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
+            continue
         try:
-            head = gates.head(ws)
-            if head == reported:
+            head = head or gates.head(ws)
+            if head == reported or db.mark(a.id, f"commits:{head}") == "told":
                 continue
             span = f"{reported}..HEAD" if reported and git.ok(["merge-base", "--is-ancestor", reported, "HEAD"], ws.path) \
                 else f"{ws.base_branch}..HEAD"
             covered = len(git.run(["rev-list", span], ws.path).stdout.split())
         except git.GitError:
             continue
+        if not covered and counted:
+            db.set_mark(a.id, "commits-none", counted)
         if covered and _tell_once(db, a, f"commits:{head}", (
                 f"{ws.branch} has {covered} unreported commits; the worker may have failed to "
                 f"report (worker {a.id}, workspace {ws.id}). Ask it to call report_result again, "
@@ -710,27 +760,27 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
 
 
 def _last_edit(ws: Workspace | None) -> float:
-    """When a file with uncommitted changes in ``ws`` was last written; 0 if none."""
+    """When a file with uncommitted changes in ``ws`` was last written; 0 if none.
+    Which files are uncommitted comes from ``status_cache`` (git only when the
+    checkout moved; the cull asks once a minute for every idle worker); each
+    one's time is stat'ed now."""
     newest = 0.0
     if ws is None or not os.path.isdir(ws.path):
         return newest
     try:
-        # -z: paths unquoted (git.dirty_files' would be C-quoted past ASCII),
-        # and a rename's source after its destination, as an entry of its own.
-        entries = git.run(["status", "--porcelain", "-z", "--untracked-files=all"],
-                          ws.path).stdout.split("\0")
+        entries = status_cache.cached_any_status(ws.path, ws.base_branch).dirty_files
     except git.GitError:
         return newest
-    source = False
+    root = os.fsencode(ws.path)
     for entry in entries:
-        if source or len(entry) < 4:
-            source = False
-            continue
-        source = entry[0] in "RC"
-        try:
-            newest = max(newest, os.stat(os.path.join(ws.path, entry[3:])).st_mtime)
-        except OSError:
-            pass   # deleted
+        # As porcelain v1 prints them: C-quoted past ASCII, a rename as "old -> new".
+        names = [entry, *(entry.rsplit(" -> ", 1)[1:])]
+        for name in names:
+            try:
+                newest = max(newest, os.stat(os.path.join(root, status_cache._unquote(name))).st_mtime)
+                break
+            except OSError:
+                pass   # deleted, or the rename's destination is the name to look at
     return newest
 
 
@@ -1073,8 +1123,14 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        # The window's last output from the sweep's pane listing; asked of tmux only when it lacks it.
+        activity = getattr(panes, "activity", {}).get(a.tmux_window)
+        if activity is None:
+            activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
         if activity is None or now - activity < API_ERROR_GRACE:
+            continue
+        key = _screen_key(a, panes)
+        if _screen_unchanged(db, a, "api", key):
             continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
@@ -1082,6 +1138,7 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         error = ClaudeCode.api_error(screen)
         if not error or model_access.classify(error):
+            _screen_read(db, a, "api", key)
             continue
         if a.status == "processing":
             db.set_status(a.id, "idle", only_if="processing")
@@ -1118,10 +1175,15 @@ def note_model_refused(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
+        # What a screen says is told once (first_time): one read until the pane prints again.
+        key = _screen_key(a, panes)
+        if _screen_unchanged(db, a, "refused", key):
+            continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
         except tmux.TmuxError:
             continue
+        _screen_read(db, a, "refused", key)
         ws = db.get_workspace(a.workspace_id)
         where = f" on branch `{ws.branch}`" if ws else ""
         error = ClaudeCode.api_error(screen)
@@ -1288,7 +1350,9 @@ def prune_retired(db: DB, now: float | None = None, *, cautious: bool = False) -
             done.append(f"kept {ws.branch}: merged, but {len(dirty)} uncommitted file(s) in {ws.path}")
             continue
         try:
-            removed = workspaces.remove(db, ws)
+            # Chosen from an earlier look: stop nothing, so a worker that is back
+            # at work since keeps it (its CLI is then in use there).
+            removed = workspaces.remove(db, ws, stop=())
         except (workspaces.WorkspaceError, git.GitError) as e:
             done.append(f"kept {ws.branch}: {e}")
             continue

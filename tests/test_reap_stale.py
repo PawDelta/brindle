@@ -16,12 +16,13 @@ from brindle.service import inbox
 
 NOW = time.time()
 OLD = NOW - 30 * 24 * 3600
+SESSION_INFOS = tmux.session_infos      # the real listing, for a test that fakes tmux under it
 
 
 @pytest.fixture
 def fake_tmux(monkeypatch):
     t = SimpleNamespace(sessions=[], panes=tmux.PaneSnapshot(tmux.current_server()), killed=[], stopped=[])
-    monkeypatch.setattr(tmux, "session_infos", lambda prefix="brindle_": t.sessions)
+    monkeypatch.setattr(tmux, "session_infos", lambda prefix="brindle_", fresh=False: t.sessions)
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: t.panes)
     monkeypatch.setattr(tmux, "kill_session", t.killed.append)
     monkeypatch.setattr(tmux, "kill_window", lambda *a, **k: None)
@@ -36,13 +37,23 @@ def test_session_listing_is_parsed(monkeypatch):
     rows = ["brindle_p_a\t1\t100\t200\t%1\t11\t0\t300\tzsh\t/w/a\t", "other\t0\t1\t1\t%2\t12\t0\t1\tzsh\t/x\t",
             "brindle_p_a\t1\t100\t200\t%3\t13\t1\t300\tclaude\t\tclaude --resume"]
     out = {"list-panes": "\n".join(rows) + "\n", "show-environment": "BRINDLE_HOME=/some/home\n"}
-    monkeypatch.setattr(tmux, "_tmux", lambda *args, **k: SimpleNamespace(returncode=0, stdout=out[args[0]]))
+    asked = []
+    monkeypatch.setattr(tmux, "_tmux", lambda *args, **k: asked.append(args[0]) or SimpleNamespace(
+        returncode=0, stdout=out.get(args[0], "")))
+    monkeypatch.setattr(tmux, "_SESSION_HOMES", {})
 
-    [s] = tmux.session_infos()
+    tmux.session_infos()
+    [s] = tmux.session_infos()        # the cull lists them every minute: the home is read once
 
+    assert asked.count("show-environment") == 1
     assert (s.name, s.attached, s.created, s.activity, s.home) == ("brindle_p_a", True, 100, 200, "/some/home")
     assert [(p.id, p.pid, p.path, p.dead, p.idle()) for p in s.panes] == [
         ("%1", 11, "/w/a", False, True), ("%3", 13, "", True, True)]
+
+    out["show-environment"] = "BRINDLE_HOME=/another/home\n"
+    tmux.ensure_session(s.name, "/w/a", {"BRINDLE_HOME": "/another/home"}, size=(171, 54))
+    [s] = tmux.session_infos()
+    assert s.home == "/another/home"
 
 
 def session(name, *panes, attached=False, home=None, activity=OLD):
@@ -237,11 +248,20 @@ def test_leftover_reviewers_and_coordinator_rows(db, repo, fake_tmux, case, gone
 
 
 @pytest.mark.variant("race: a client, uncommitted work or input arriving between planning and the stop keeps the session")
-@pytest.mark.parametrize("change", ["a client attaches", "uncommitted work appears", "input arrives"])
+@pytest.mark.parametrize("change", ["a client attaches", "uncommitted work appears", "input arrives",
+                                    "another home takes it"])
 def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux, monkeypatch, change):
     """Planning (git probes and all) takes a while: a stop acts on the state
-    just before it, not on the plan's snapshot."""
-    if change == "input arrives":
+    just before it, not on the plan's snapshot (a session's home included,
+    which session_infos otherwise reads once per session)."""
+    home = [str(brindle_home())]
+    if change == "another home takes it":
+        row = f"brindle_proj_old\t0\t{OLD:.0f}\t{OLD:.0f}\t%7\t4242\t0\t{OLD:.0f}\tzsh\t{repo}\t"
+        monkeypatch.setattr(tmux, "_tmux", lambda *args, **k: SimpleNamespace(
+            returncode=0, stdout=row + "\n" if args[0] == "list-panes" else f"BRINDLE_HOME={home[0]}\n"))
+        monkeypatch.setattr(tmux, "_SESSION_HOMES", {})
+        monkeypatch.setattr(tmux, "session_infos", SESSION_INFOS)
+    elif change == "input arrives":
         ws = workspaces.adopt_root(db, str(repo))
         add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1")
         live(fake_tmux, "%1")
@@ -252,6 +272,9 @@ def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux
 
     def then_changed(*a, **k):
         out = planned(*a, **k)
+        if change == "another home takes it":     # another brindle's ensure_session, in its own process
+            home[0] = "/another/home"
+            return out
         [s] = fake_tmux.sessions
         if change == "a client attaches":
             s.attached = True

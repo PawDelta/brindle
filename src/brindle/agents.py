@@ -226,7 +226,10 @@ _KEYCHAIN_HELPER_PLATFORM = sys.platform == "darwin"     # where git's default c
 
 
 def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
-              m=_UNREAD) -> dict[str, str]:
+              m=_UNREAD, *, identity: bool = True) -> dict[str, str]:
+    """``identity``: fill a missing git identity (``git.identity_env``, a git
+    run); off for a reader that only looks at the login and route (the cull's
+    login_pause, once a minute per running agent), never for a launch."""
     env = {**workspaces.workspace_env(ws), "BRINDLE_AGENT_ID": agent_id}
     if agent is not None:
         # The profile's ``env.NAME: value`` lines: how a Claude Code profile
@@ -333,7 +336,7 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
     # whose dialog nobody in a pane can answer (see git.pane_git_config).
     if config := git.pane_git_config(gh=_KEYCHAIN_HELPER_PLATFORM):
         env.setdefault("GIT_CONFIG_PARAMETERS", config)
-    if os.path.isdir(ws.path):
+    if identity and os.path.isdir(ws.path):
         # An account with no git identity: fill only what is still missing once
         # the whole environment (a profile's GIT_* lines included) is assembled.
         env.update(git.identity_env(ws.path, env))
@@ -522,8 +525,6 @@ def spawn(
                                unfinished[0] if unfinished else None)
             if current:
                 db.set_agent_milestone(agent_id, current)
-    if session_root and mode in ("handoff", "assign"):
-        pilot.consider_plan_offer(db, session_root)   # another worker may make the goal large
     if person_prompt and raw_task and parent_id is None and mode == "interactive":
         from brindle import visual_offers
 
@@ -761,11 +762,21 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     from brindle import inbox
 
     argv = inbox.without_launcher_inbox(argv)
+    # A launch that isn't the daemon's (a worker, started by its supervisor's
+    # helper) can't add the login shell's proxy and certificate settings: the
+    # pane asks the daemon for them itself, through a shim, before the CLI starts.
+    from brindle import login_shell_env
+
+    asks = login_shell_env.asks_daemon()
+    if asks:
+        argv = login_shell_env.shim(agent.id, argv)
     # The sidebar splits the window after the CLI's pane exists: hold the CLI
     # until then, or a resumed chat drew its conversation at the full width
     # and was resized under it, which Claude Code shows as a blank screen (#264).
+    # A pane that asks the daemon is held too: the daemon answers only a pane
+    # recorded as this agent's, which it is by the time the gate opens.
     gate = None
-    if watch_pane:
+    if watch_pane or asks:
         argv, gate = tmux.gated(argv)
     size = _resume_window_size.get()
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws), **({"size": size} if size else {}))
@@ -878,7 +889,19 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
     # Claude Code's managed settings supply the credential: no stored Claude key.
     no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
     env = {**keystore.pane_keys(credentials - no_stored, {**env, **org_env}), **env, **org_env}
-    result = env, credentials, allow, deny, org_env
+    # The proxy and certificate settings the daemon read from the person's login
+    # shell (it starts without them), only where the pane wouldn't have one anyway.
+    # Claude Code's client key is kept past the scrub; `deny` still takes it out.
+    from brindle import login_shell_env
+
+    if network := login_shell_env.for_launch(agent.provider, env):
+        inherited = tmux.inherited_env(ws.tmux_session)
+        env = {**{k: v for k, v in network.items() if not inherited.get(k)}, **env}
+    credentials = credentials | login_shell_env.kept(agent.provider)
+    # The pane keeps its provider's credentials and, for Claude Code, its TLS
+    # client settings, inherited from the tmux server as much as read from the
+    # login shell: only the credentials are stored keys (pane_keys above).
+    result = env, secrets.pane_keep(agent.provider, credentials), allow, deny, org_env
     # Resolve stored/org keys once for this launch: catalog, health identity
     # and pane must use the same key helper result, without repeated delays.
     agent._pane_environment = m, result
@@ -895,6 +918,22 @@ def _effective_window_env(agent: Agent, ws: Workspace, m=_UNREAD) -> dict[str, s
                                    deny=secrets.pane_deny(deny, env), agent_env=agent_env,
                                    enforce=enforce)
     return {k: v for k, v in {**inherited, **env}.items() if k not in unset}
+
+
+def login_shell_additions(agent: Agent, ws: Workspace) -> dict[str, str]:
+    """The login shell's proxy and certificate settings that a launch of
+    ``agent`` by this process (the daemon, which read them) would leave in its
+    pane: the ones for its provider that its real launch environment ends up
+    with, so never one the pane has anyway (set by the launch, or handed down
+    by tmux) or one its environment rules take out. What the daemon gives a
+    pane it didn't launch itself (brindle.daemon.launch_env)."""
+    from brindle import login_shell_env
+
+    found = login_shell_env.for_launch(agent.provider)
+    if not found:
+        return {}       # nothing read (the usual case): no need to work the pane's environment out
+    effective = _effective_window_env(agent, ws)
+    return {n: v for n, v in found.items() if effective.get(n) == v}
 
 
 def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = None,
@@ -3500,6 +3539,7 @@ def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, firs
         forwarded = f"{result}\n\n{usage_mod.summary_line(u, dollars, free)}"
     else:
         forwarded = result
+    no_commits = False
     if ws and agent.mode in ("handoff", "handoff_detached", "assign"):
         if first:
             pipeline.note_reported(db, ws, agent)
@@ -3507,12 +3547,23 @@ def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, firs
         if forward and pipeline.on_report(db, agent, ws, forwarded, outbox_id=outbox_id):
             return ("result recorded. brindle is having your branch reviewed; it will merge it, "
                     "or send you the review's findings to fix.")
+        if forward:
+            try:
+                no_commits = not git.ahead_behind(ws.path, workspaces.require_base(ws))[1]
+            except (git.GitError, workspaces.WorkspaceError):
+                pass   # an unknown branch state must not be described as empty
     if forward and agent.mode in FORWARDING_MODES and agent.parent_id:
         parent = db.get_agent(agent.parent_id)
         if parent is None:
             return "result recorded"   # no supervisor to tell: the report stays accepted, undelivered
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
-        body = condense(f"Assigned task finished{where}: {first_line(result)}", forwarded)
+        if no_commits:
+            head = (f"{agent.id} reported{where}: the branch has no commits to review or merge. "
+                    f'Close the worker with remove_workspace(id="{ws.id}"), '
+                    f"or keep it for follow-up work. Report: {first_line(result)}")
+        else:
+            head = f"Assigned task finished{where}: {first_line(result)}"
+        body = condense(head, forwarded)
         if outbox_id is None:
             send_message(db, agent.parent_id, body, sender_id=agent.id)
         elif db.outbox_deliver(outbox_id, message=_report_message(db, parent, body, agent.id)):

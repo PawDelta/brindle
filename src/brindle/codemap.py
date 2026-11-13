@@ -25,6 +25,8 @@ update can discard semantic nodes and rewrite the report, HTML and manifest.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import contextlib
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -36,7 +38,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Iterator
 
 from brindle import spawn
 
@@ -379,8 +381,36 @@ def refresh(checkout: str, repo_root: str | None = None) -> None:
 
 
 def refresh_later(checkout: str, repo_root: str | None = None) -> None:
-    """Rebuild the code part of the graph in the background, after a merge."""
+    """Rebuild the code part of the graph in the background, after a merge.
+    Inside ``refreshes_held``, only noted: its caller asks for it later."""
+    held = _held.get()
+    if held is not None:
+        if (checkout, repo_root) not in held:
+            held.append((checkout, repo_root))
+        return
     _request_refresh(checkout, repo_root, background=True)
+
+
+_held: contextvars.ContextVar[list[tuple[str, str | None]] | None] = contextvars.ContextVar(
+    "brindle_codemap_refreshes_held", default=None)
+
+
+@contextlib.contextmanager
+def refreshes_held() -> Iterator[list[tuple[str, str | None]]]:
+    """Hold back the background rebuilds asked for inside (a new session's
+    graph, seeded before its supervisor starts: graphify's workers would take
+    the cores its launch needs). Yields the (checkout, repo_root) pairs held;
+    the caller passes each to refresh_later once its launch is done."""
+    outer = _held.get()
+    if outer is not None:
+        yield outer
+        return
+    held: list[tuple[str, str | None]] = []
+    token = _held.set(held)
+    try:
+        yield held
+    finally:
+        _held.reset(token)
 
 
 def _request_refresh(checkout: str, repo_root: str | None, *, background: bool) -> None:

@@ -267,7 +267,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
               root={root}
               agent={node?.agent ?? null}
               alive={node ? alive[node.agent.id] : undefined}
-              sessionStatus={!node || node.agent.id === root ? session?.status ?? null : null}
+              sessionStatus={session?.status === "resuming" || !node || node.agent.id === root ? session?.status ?? null : null}
               sessionName={session?.name || session?.goal}
               credentials={credentials}
               recovery={recovery}
@@ -341,7 +341,9 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
       await reload();
     }
   };
-  const status = node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
+  const resuming = sessionStatus === "resuming";
+  const status = resuming ? { glyph: "◌", label: "Resuming", style: "dim" as const, needs: false }
+    : node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
   const named = useContext(SessionsContext)?.find(root)?.name;
   const who = node ? (node.agent.id === root ? (named || "supervisor") : agentName(workspaces, node.agent.id)) : named || "supervisor";
   const provider = node ? providerName(node.agent.provider) : "Session";
@@ -357,7 +359,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         <span className={`${mono} hidden text-xs text-ink-3 sm:inline`} data-testid={node ? "agent-id" : "session-id"} title={node?.workspace.branch}>
           {node?.agent.id ?? root}
         </span>
-        <span className={`flex items-center gap-1 text-xs ${status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status">
+        <span className={`flex items-center gap-1 text-xs ${resuming ? "rounded-full bg-branch-soft px-2 py-0.5 text-branch" : status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status" data-state={resuming ? "resuming" : node?.agent.status ?? sessionStatus ?? "paused"} data-tone={resuming ? "work" : undefined}>
           <span className={`font-mono ${CLI_INK[status.style]}`} aria-hidden>
             {status.glyph}
           </span>
@@ -373,21 +375,21 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         </button>
       )}
       {paused ? (
-        <LoadingButton className={main} busy={recovery.busy} disabled={recovery.busy} onClick={() => recovery.resume()}>
+        <LoadingButton className={main} data-session-start={root} busy={recovery.busy} disabled={recovery.busy} onClick={() => recovery.resume()}>
           Continue
         </LoadingButton>
-      ) : (
+      ) : !resuming && (
         <LoadingButton className={button} busy={busy} disabled={busy} onClick={() => pause()}>
           Pause
         </LoadingButton>
       )}
       {/* Not keyed by the agent, and kept when no agent is left to show (a transfer pauses the scratch
           session's root, which leaves the snapshot): a card it opened stays while its job runs and says how it ended. */}
-      {menuNode && (
+      {!resuming && menuNode && (
         <AgentMenu client={client} agent={menuNode.agent} workspace={menuNode.workspace} gone={!node} root={root} repo={repo} refresh={refresh} onAgent={onAgent} onSession={onOpen} closeSession={closeSession} />
       )}
       {/* No agent shown (a paused session's root is in no snapshot): the session's own ⋯, so it can still be closed. */}
-      {!node && closeSession && <SessionMenu closeSession={closeSession} />}
+      {!resuming && !node && closeSession && <SessionMenu closeSession={closeSession} />}
       {notice && <p className={`w-full text-xs ${notice.failed ? "text-sap" : "text-ink-2"}`}>{notice.text}</p>}
     </header>
   );

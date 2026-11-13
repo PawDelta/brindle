@@ -150,6 +150,22 @@ def ambient_brindle_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def no_login_shell(monkeypatch):
+    """No test runs the person's login shell (brindle.login_shell_env, at a
+    daemon's start), and none sees what another read: a test that needs a
+    shell gives ``read`` or ``load`` its own runner."""
+    from brindle import login_shell_env
+
+    def no_shell(argv, **kw):
+        raise OSError("no login shell in tests")
+
+    monkeypatch.setattr(login_shell_env, "_run", no_shell)
+    monkeypatch.setattr(login_shell_env, "_values", {})
+    monkeypatch.setattr(login_shell_env, "_loading", None)
+    monkeypatch.setattr(login_shell_env, "_reader", False)
+
+
 @pytest.fixture
 def real_process_scan():
     """Opts a test out of ``process_scan``: it runs the real ``procs.cwds``

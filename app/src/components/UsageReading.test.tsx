@@ -62,9 +62,9 @@ describe("the sidebar's weekly usage reading", () => {
     await waitFor(() => expect(usageAsked(daemon)).toBeGreaterThan(0));
     await waitFor(() => expect(screen.getByTestId("sidebar-foot-row")).toBeTruthy());
     const reading = await loadedReading();
-    expect(reading.dataset.provider).toBe("codex");
+    expect(reading.dataset.provider).toBe("claude");
     expect(reading.className).toContain(scenario === "normal" ? "text-ink-3" : "text-sap");
-    expect(reading.textContent).toContain(scenario === "normal" ? "41%" : "82%");
+    expect(reading.textContent).toContain(scenario === "normal" ? "9%" : "63%");
     expect(screen.queryByRole("group", { name: "Theme" })).toBeNull();
     const account = screen.getByRole("button", { name: "Open Account › Usage" });
     await waitFor(() => expect(account.firstElementChild!.textContent).toBe("HL"));
@@ -145,7 +145,7 @@ describe("the sidebar's weekly usage reading", () => {
     cleanup();
 
     // Switching sessions moves the provider reading. Antigravity is limited with no weekly window;
-    // keep the warning and show an empty reading.
+    // keep the warning and show the neutral usage state.
     const sup2: SessionDTO = { ...session, id: "sup2", goal: "Other work" };
     const agents = [
       { ...root.agents![0], model: "claude-opus-4-7" },
@@ -172,9 +172,9 @@ describe("the sidebar's weekly usage reading", () => {
     expect(screen.getByTestId("profile-usage").dataset.provider).toBe("claude");
     expect(screen.getByTestId("profile-usage").textContent).toContain("63%");
     view.rerender(tree("sup2"));
-    await waitFor(() => expect(screen.getByTestId("profile-usage").dataset.provider).toBe("antigravity"));
+    await waitFor(() => expect(screen.getByTestId("profile-usage").dataset.state).toBe("none"));
     const second = screen.getByTestId("profile-usage");
-    expect(second.dataset.provider).toBe("antigravity");
+    expect(second.dataset.provider).toBeUndefined();
     expect(second.querySelector("[role=progressbar]")).toBeNull();
     expect(second.className).toContain("text-sap");
     sync.stop();

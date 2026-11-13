@@ -1904,8 +1904,11 @@ def _remove(db: DB, ws: Workspace, keep: Agent | None = None) -> str:
     the other agents are stopped once the worktree is known to go (kept,
     it keeps them), but the session ``keep`` is in is left for its own close."""
     try:
-        others = [a for a in db.list_agents(ws.id)
-                  if keep is not None and a.id != keep.id and agents.is_alive(a)]
+        others = None if keep is None else [   # None: every live agent of it (see workspaces.remove)
+            a for a in db.list_agents(ws.id) if a.id != keep.id and agents.is_alive(a)]
+        in_use = _still_in_use(db, ws)
+        if in_use:
+            return f"(worktree kept: {in_use})"
         removed = workspaces.remove(db, ws, force=False, keep_session=keep is not None, stop=others)
         return f"Worktree removed; {removed.branch_note or 'branch kept'}."
     except workspaces.WorkspaceError as e:

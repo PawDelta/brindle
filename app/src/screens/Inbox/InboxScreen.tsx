@@ -371,7 +371,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     const url = item.url;
     acts = (
       <>
-        {url ? openUrl && <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(url)}>
+        {url ? openUrl && <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => { void openUrl(url); actions.run(item, "pr-not-now", {}); }}>
           Open on GitHub
         </button> : item.kind === "pr_failed" && onReview && <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
           Review &amp; open PR

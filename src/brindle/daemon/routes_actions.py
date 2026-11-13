@@ -274,23 +274,25 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
     nothing, so only that isn't checked."""
     repo, choice, session_id = _get(body, "repo", required=True), _get(body, "choice"), _get(body, "session_id")
     name = _session_name(_get(body, "name"))     # checked with the rest, before anything launches
-    repo_root = workspaces.adopt_root(db, repo).repo_root
-    opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
-               and any(s.root.id == session_id for s in sessions_mod.live(db, repo_root)))
-    provider = _get(body, "provider")
-    if not opening:
-        if git.missing_user_identity(repo_root):
-            raise ServiceError("git_identity_missing", git.IDENTITY_MESSAGE, 409)
-        provider = svc.supervisor_provider(repo_root, provider)
-        blocked = session_blockers(db, repo, provider)
-        if blocked:
-            usable = svc.usable_providers(repo_root) if provider else []
-            return SessionBlocked(blocked.items, [p for p in usable if p != provider])
-    got = svc.start(db, repo, provider=provider,
-                    prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
-                    autopilot=_get(body, "autopilot", bool), branch=_get(body, "branch"),
-                    worktree=_get(body, "worktree"), choice=_get(body, "choice"),
-                    session_id=_get(body, "session_id"))
+    with svc.create_timing():
+        with svc.create_step("checks_s"):
+            repo_root = workspaces.adopt_root(db, repo).repo_root
+            opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
+                       and any(s.root.id == session_id for s in sessions_mod.live(db, repo_root)))
+            provider = _get(body, "provider")
+            if not opening:
+                if git.missing_user_identity(repo_root):
+                    raise ServiceError("git_identity_missing", git.IDENTITY_MESSAGE, 409)
+                provider = svc.supervisor_provider(repo_root, provider)
+                blocked = session_blockers(db, repo, provider)
+                if blocked:
+                    usable = svc.usable_providers(repo_root) if provider else []
+                    return SessionBlocked(blocked.items, [p for p in usable if p != provider])
+        got = svc.start(db, repo, provider=provider,
+                        prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
+                        autopilot=_get(body, "autopilot", bool), branch=_get(body, "branch"),
+                        worktree=_get(body, "worktree"), choice=_get(body, "choice"),
+                        session_id=_get(body, "session_id"))
     if isinstance(got, svc.Opened):
         return {"opened": SessionDTO.from_agent(got.root).to_json()}
     if isinstance(got, svc.Started):
@@ -467,7 +469,7 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         return {"read": status.mark_read([item])}
     a = _agent(db, item)
     if action == "pr-not-now":
-        identity_lock.ensure(a)
+        # Dismissing is the person's own Inbox marker, not acting as the session's sign-in.
         ws = _workspace(db, a.workspace_id)
         sha = inbox.dismiss_marker(db, a.id, ws.branch, ws.path)
         if not sha:
@@ -955,6 +957,9 @@ def open_session_pr(db: DB, params: dict, body: Body) -> Any:
             url = workspaces.compare_url(ws)
         else:
             _record_pr(db, key, url, head)
+            # The person opened it themselves: no "PR opened" card to tell them so.
+            db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES (?, ?, ?)"
+                            " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha", (*key, f"{head}|{url}"))
             # The Inbox's next read already knows it (its look at GitHub may be older than the PR).
             number = re.search(r"/pull/(\d+)", url)
             review.note_head_pr(head, ws.path, {"number": int(number.group(1)) if number else None,
@@ -1530,12 +1535,14 @@ PERMISSION_MODES = ("default", "auto")
 
 
 def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
-    """``visuals`` ("on" or "off", offers only), ``claude_permission_mode`` ("default" or "auto") and/or
-    ``opencode_permission_mode`` ("ask", "auto" or "autonomous") into
+    """``visuals`` ("on" or "off", offers only), ``claude_permission_mode`` ("default" or "auto"),
+    ``opencode_permission_mode`` ("ask", "auto" or "autonomous") and/or ``login_shell_env``
+    ("on" or "off": the login shell's proxy and certificate settings for launched CLIs;
+    "off" applies to the next launch, "on" from the next daemon start) into
     ~/.brindle/config.json; its other keys are kept."""
     from brindle import config
 
-    allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"),
+    allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"), "login_shell_env": ("on", "off"),
                "claude_permission_mode": PERMISSION_MODES,
                "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES}
     changes = {key: _get(body, key) for key in allowed if body.get(key) is not None}
@@ -1553,7 +1560,8 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
             bus.publish(db, "visual.offers_setting", repo_root=row["repo_root"])
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
             "opencode_permission_mode": config.opencode_permission_mode(),
-            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off"}
+            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off",
+            "login_shell_env": "on" if config.login_shell_env_setting() else "off"}
 
 
 def put_debug(db: DB, params: dict, body: Body) -> Any:

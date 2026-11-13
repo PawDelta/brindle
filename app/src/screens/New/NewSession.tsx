@@ -164,6 +164,9 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   const usable = got?.repo === repo ? got.usable : null;
   const lookupFailed = got?.repo === repo && got.usable === null;
   const [busy, setBusy] = useState(false);
+  // A start under way, from the click until its session opens (or it ends without one):
+  // said at once, as a status line, so a slow start never looks like a frozen screen.
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   // A start waiting on the person's choice: what they asked for, and the choices.
@@ -210,6 +213,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   const start = async (fields: StartFields, choice?: { key: string; session: string }): Promise<boolean> => {
     const attempt = ++attempts.current;
     setBusy(true);
+    setStarting(true);
     setError(null);
     setNotes([]);
     let opened: string | null = null;
@@ -241,6 +245,8 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       // Started, the snapshot too: one read on the new chat's status event can predate its window
       // ("exited", no window), and nothing on the bus says when the window lands.
       await Promise.all([reload().catch((e: unknown) => setError(message(e))), opened ? refresh?.() : undefined]);
+      // Only this start's own end: a newer one still under way keeps its line.
+      if (attempt === attempts.current) setStarting(false);
     }
     // Opened once the list and the snapshot have it: a root neither knows yet reads as paused.
     if (opened) onOpen(opened, repo);
@@ -396,6 +402,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         </div>
       )}
       {pending && <ConflictChoice conflict={pending.conflict} onChoose={(key, session) => start(pending.fields, { key, session })} onCancel={() => setPending(null)} />}
+      {starting && <Starting />}
       {error && (
         <p role="alert" className={alert}>
           {error}
@@ -459,6 +466,21 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       </section>
     )}
     </>
+  );
+}
+
+/* Shown from the click on: the start is on its way, and for how long so far. */
+function Starting() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const began = Date.now();
+    const tick = setInterval(() => setSeconds(Math.floor((Date.now() - began) / 1000)), 1000);
+    return () => clearInterval(tick);
+  }, []);
+  return (
+    <p role="status" className="text-sm text-ink-2">
+      Starting the session…{seconds >= 2 ? ` ${seconds}s` : ""}
+    </p>
   );
 }
 

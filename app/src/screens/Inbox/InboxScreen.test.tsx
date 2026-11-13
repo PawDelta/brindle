@@ -103,7 +103,7 @@ describe("inbox", () => {
     fireEvent.click(buttons.getByRole("button", { name: "Open on GitHub" }));
     expect(openUrl).toHaveBeenCalledWith(failed.url);
     expect(onOpen).not.toHaveBeenCalled();
-    fireEvent.click(buttons.getByRole("button", { name: "Dismiss" }));
+    // Opening it on GitHub dismisses the card.
     await waitFor(() => expect(card("pr_failed")).toBeNull());
     sync.stop();
     cleanup();
@@ -251,7 +251,9 @@ describe("inbox", () => {
     expect(card("org_notice").textContent).toContain("from your org's admin");
     expect(within(card("org_notice")).queryByRole("button", { name: "Go to session ›" })).toBeNull();
     fireEvent.click(within(card("org_notice")).getByRole("button", { name: "Mark read" }));
-    await waitFor(() => expect(posts(daemon).filter((p) => p.path.startsWith("/inbox/"))).toEqual([{ method: "POST", path: "/inbox/n-18/read", query: {}, body: {} }]));
+    await waitFor(() => expect(posts(daemon).filter((p) => p.path.startsWith("/inbox/"))).toEqual([
+      { method: "POST", path: "/inbox/sup1/pr-not-now", query: {}, body: {} },   // opening the PR on GitHub dismissed its card
+      { method: "POST", path: "/inbox/n-18/read", query: {}, body: {} }]));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Your org" })).toBeNull());
     sync.stop();
   });

@@ -344,7 +344,7 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     db.add_autopilot("boss")
     grants = lambda: [r["scope"] for r in db.conn.execute(  # noqa: E731
         "SELECT scope FROM visual_grants WHERE root_id='boss' AND remaining > 0")]
-    milestones = [{"title": f"M{i}", "check": "true"} for i in range(4)]
+    milestones = [{"title": f"M{i}", "check": "true"} for i in range(5)]
     if accept == "legacy":
         db.update_autopilot("boss", goal="Org presets")
         with db.tx() as c:
@@ -525,7 +525,7 @@ def test_answered_plan_offer_is_not_asked_again_as_the_goal_grows(how, db, sessi
         assert offers() == []
         visual_offers.person_spoke(db, boss, "Make a planning doc.")
     else:
-        mcp_server.set_goal("Org presets", items(4))
+        mcp_server.set_goal("Org presets", items(5))
         [offer] = offers()
         plans.answer_offer(db, "boss", offer.request_id, how == "approved")
     if how != "declined":
@@ -551,7 +551,7 @@ def test_plan_offer_without_app(db, session, monkeypatch):
     monkeypatch.setattr(holds, "app_connected", APP_CONNECTED)
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     db.add_autopilot(boss.id)
-    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(5)])
     asyncio.run(mcp_server.assign("developer", "build the preset schema"))
     assert started == ["build the preset schema"]
     assert db.get_autopilot(boss.id).plan_offer is None

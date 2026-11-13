@@ -85,15 +85,21 @@ def session(db: DB, root_id: str) -> tuple[Agent, Workspace]:
 def _only_review_edits_since(db: DB, ws: Workspace, sha: str) -> bool:
     """Every commit after ``sha`` (an ancestor of HEAD) is one the daemon
     recorded as a review edit (never judged by a commit's own message)."""
-    if not git.ok(["merge-base", "--is-ancestor", sha, "HEAD"], ws.path):
+    if not git.is_ancestor(ws.path, sha, "HEAD"):
         return False
     recorded = {r["sha"] for r in db.conn.execute(
         "SELECT sha FROM review_edits WHERE workspace_id = ?", (ws.id,))}
-    return set(git.out(["rev-list", f"{sha}..HEAD"], ws.path).split()) <= recorded
+    head = git.resolve(ws.path, "HEAD")      # by commit: the same two commits are listed once
+    listed = (git.out_once(["rev-list", f"{sha}..{head[0]}"], ws.path) if head
+              else git.out(["rev-list", f"{sha}..HEAD"], ws.path))
+    return set(listed.split()) <= recorded
 
 
 def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
-    """What keeps the session from being ready for a PR; none when it is."""
+    """What keeps the session from being ready for a PR; none when it is.
+    Its checkout's uncommitted files come from ``status_cache.tracked_dirty``
+    (git only when the checkout moved): a sweep judges a session again
+    whenever one of its workers' rows changes."""
     out: list[str] = []
     ap = db.get_autopilot(root.id)
     ms = db.milestones(root.id)
@@ -103,7 +109,7 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
         out += [f"milestone {m.position} ({m.title}) hasn't passed its check"
                 for m in ms if m.status != "passed"]
         if not out:
-            head = None if git.dirty_files(ws.path, tracked_only=True) else git.out(["rev-parse", "HEAD"], ws.path)
+            head = None if status_cache.tracked_dirty(ws.path) else git.head(ws.path)
             if head and ap.audit_sha and _only_review_edits_since(db, ws, ap.audit_sha):
                 head = ap.audit_sha     # the person's own edits don't un-audit the work
             if due := autopilot.audit_due(ap, load_repo_config(ws.repo_root), head):
@@ -120,7 +126,7 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
     out += needs_you(db, root, ap)
     if not ws.base_branch or ws.branch in ("", "HEAD"):
         out.append("the session isn't on a branch with a base to open a PR against")
-    elif git.dirty_files(ws.path, tracked_only=True):
+    elif status_cache.tracked_dirty(ws.path):
         out.append("the session's checkout has uncommitted changes")
     elif not git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1]:
         out.append(f"the session's branch has no commits ahead of {ws.base_branch}")
@@ -142,9 +148,9 @@ def phase_reasons(db: DB, root: Agent, ws: Workspace, phase: str, sha: str) -> l
         out.append(f"the goal has no phase {phase!r} any more")
     if not ws.base_branch or ws.branch in ("", "HEAD"):
         out.append("the session isn't on a branch with a base to open a PR against")
-    elif git.dirty_files(ws.path, tracked_only=True):
+    elif status_cache.tracked_dirty(ws.path):
         out.append("the session's checkout has uncommitted changes")
-    elif not git.ok(["merge-base", "--is-ancestor", sha, "HEAD"], ws.path):
+    elif not git.is_ancestor(ws.path, sha, "HEAD"):
         out.append(f"{sha[:12]}, the commit phase {phase!r} passed on, isn't on {ws.branch} any more")
     elif not int(git.out(["rev-list", "--count", f"{git.base_ref(ws.path, ws.base_branch)}..{sha}"], ws.path)):
         out.append(f"{sha[:12]} has no commits ahead of {ws.base_branch}")
@@ -199,30 +205,42 @@ def new_since_merge(db: DB, ws: Workspace, pushed_sha: str | None) -> bool:
     if not pushed_sha:
         return False
     try:
-        excluded = [f"^{pushed_sha}"]
+        bases = [pushed_sha]
         if ws.base_branch:
-            excluded.append(f"^{git.base_ref(ws.path, ws.base_branch)}")
+            bases.append(git.base_ref(ws.path, ws.base_branch))
         if (default := session_sync.upstream(ws)) and git.remote_branch_exists(ws.path, default):
-            excluded.append(f"^origin/{default}")
-        if int(git.out(["rev-list", "--count", "--no-merges", "HEAD", *excluded], ws.path)) > 0:
+            bases.append(f"origin/{default}")
+        # By commit where the git files say which each name is: what git lists for the same
+        # commits never changes, so a session judged on every sweep is counted once.
+        shas = git.resolve(ws.path, "HEAD", *bases)
+        tip, *bases = shas or ["HEAD", *bases]
+        ask = git.out_once if shas else git.out
+        excluded = [f"^{base}" for base in dict.fromkeys(bases)]
+        if int(ask(["rev-list", "--count", "--no-merges", tip, *excluded], ws.path)) > 0:
             return True
         squashes = {r["squash_sha"] for r in db.conn.execute(
             "SELECT squash_sha FROM session_squashes WHERE repo_root = ? AND branch = ?", (ws.repo_root, ws.branch))}
         return any(_merge_adds(ws, line.split(), squashes)
-                   for line in git.out(["rev-list", "--merges", "--parents", "HEAD", *excluded], ws.path).splitlines())
+                   for line in ask(["rev-list", "--merges", "--parents", tip, *excluded], ws.path).splitlines())
     except (git.GitError, ValueError):
         return False
 
 
 def _merge_adds(ws: Workspace, shas: list[str], squashes: set[str]) -> bool:
-    """Whether the merge ``shas[0]`` (parents ``shas[1:]``) carries content of its own."""
+    """Whether the merge ``shas[0]`` (parents ``shas[1:]``) carries content of
+    its own: worked out once per merge commit, which never changes (``git.once``)."""
     merge, parents = shas[0], shas[1:]
     if len(parents) != 2:
         return True
+    squash = parents[1] in squashes
+    return git.once(ws.path, ["merge adds", merge, str(squash)], lambda: _merge_content(ws, merge, parents, squash))
+
+
+def _merge_content(ws: Workspace, merge: str, parents: list[str], squash: bool) -> bool:
     tree = git.out(["rev-parse", f"{merge}^{{tree}}"], ws.path)
     # The sync's `-s ours` record of a squash keeps the branch's tree; a squash with forge-side
     # edits is merged the plain way instead, and its resolution is judged like any other.
-    if parents[1] in squashes and tree == git.out(["rev-parse", f"{parents[0]}^{{tree}}"], ws.path):
+    if squash and tree == git.out(["rev-parse", f"{parents[0]}^{{tree}}"], ws.path):
         return False
     joined = git.run(["merge-tree", "--write-tree", *parents], ws.path, check=False)
     if joined.returncode == 0:
@@ -1399,6 +1417,13 @@ class ReadinessWatch:
             ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
             # Only a reached goal (or one whose every milestone passes) can be ready: skip the git work otherwise.
             if ap is None or not (ap.state == "done" or (ms and all(m.status == "passed" for m in ms))):
+                now[root_id] = False
+                continue
+            # Nor can a session with no branch and base to open a PR from (one on the repo's own
+            # checkout): ``reasons`` would run its git checks every sweep only to say so again.
+            root = db.get_agent(root_id)
+            ws = db.get_workspace(root.workspace_id) if root else None
+            if ws is None or not ws.base_branch or ws.branch in ("", "HEAD"):
                 now[root_id] = False
                 continue
             try:

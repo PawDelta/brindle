@@ -90,7 +90,8 @@ def _env(db: DB, a: Agent) -> dict[str, str]:
     if ws is None:
         return {"BRINDLE_CLOUD_ROUTE": ""}
     try:
-        return agents.agent_env(ws, a.id, a)
+        # The login and route only: no git for the identity, which neither depends on.
+        return agents.agent_env(ws, a.id, a, identity=False)
     except Exception:  # noqa: BLE001 - an unreadable identity cannot borrow the launcher's
         return {"BRINDLE_CLOUD_ROUTE": ""}
 

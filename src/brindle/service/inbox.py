@@ -181,7 +181,7 @@ def _opened_pr(db: DB, root_id: str, branch: str, path: str) -> tuple[str, dict 
     from brindle.daemon import session_review
 
     try:
-        head = git.out(["rev-parse", "HEAD"], path)
+        head = git.head(path)       # from the git files: every Inbox read asks, for every session
         opened = session_review.open_pr_for_head(head, path, root_id)
     except (git.GitError, OSError):
         head, opened = "", None  # An unavailable checkout must not break the rest of the inbox.
@@ -248,9 +248,8 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
         return [InboxItemDTO(kind="pr_failed", reason="PR needs attention", detail=detail,
                              url=url, **link)]
     if opened:
-        gone = db.conn.execute("SELECT 1 FROM session_pr_declined WHERE root_id = ? AND branch = ? AND sha = ?",
-                               (root_id, branch, f"{head}|{opened['url']}")).fetchone()
-        if gone:
+        # Dismissed for this PR at any commit: a push to it doesn't bring the card back.
+        if declined and declined["sha"].endswith(f"|{opened['url']}"):
             return []
         return [InboxItemDTO(kind="pr_opened", reason="PR opened", detail=f"#{opened.get('number')} {opened.get('title') or ''}".strip(),
                              url=opened["url"], **link)]
@@ -266,7 +265,7 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
                 or declined["sha"] != _failure_marker(r["sha"], r["check_cmd"], r["output"])]
     if declined and any(r["state"] == "passed" for r in rows):
         try:
-            if git.out(["rev-parse", "HEAD"], path) == declined["sha"]:
+            if git.head(path) == declined["sha"]:
                 rows = [r for r in rows if r["state"] != "passed"]
         except (git.GitError, OSError):
             pass  # An unavailable checkout must not break the rest of the inbox.

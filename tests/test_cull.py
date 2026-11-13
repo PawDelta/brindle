@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import run_scenario
 
-from brindle import agents, cull, procs, tmux, view, workspaces
+from brindle import agents, cull, procs, status_cache, tmux, view, workspaces
 from brindle.db import Agent, Workspace
 
 SLEEPER = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
@@ -213,6 +213,7 @@ def test_idle_unreported_worker_noticed_without_goal(db, ws, tmp_path, monkeypat
     monkeypatch.setattr(agents, "send_message", original_send)
     monkeypatch.setattr(git, "ok", lambda *a: True)
     monkeypatch.setattr(git, "run", lambda argv, *a: SimpleNamespace(stdout="a b" if argv[0] == "rev-list" else ""))
+    monkeypatch.setattr(status_cache, "cached_any_status", lambda path, base: git.Status(None, base, 0, 0, [], None))
     monkeypatch.setattr(agents, "command_running", lambda db_, a: a.id == "command")
     activity = now
     locked = [True]
