@@ -389,7 +389,29 @@ def _with_cursor(replica, anchor: dict) -> dict:
     """A text anchor made on the live draft, with a Loro cursor at its start."""
     if replica is None or anchor["kind"] != "text" or anchor["section"] not in replica.sections():
         return anchor
-    return {**anchor, "cursor": base64.b64encode(replica.cursor(anchor["section"], anchor["start"])).decode()}
+    enc = lambda off: base64.b64encode(replica.cursor(anchor["section"], off)).decode()  # noqa: E731
+    return {**anchor, "cursor": enc(anchor["start"]), "cursor_end": enc(anchor["end"])}
+
+
+def reanchor(db: DB, plan_id: str, replica) -> int:
+    """Pin every cursor anchor to the draft as it stands now. The server calls
+    this before it compacts the draft to a shallow snapshot: Loro cannot
+    resolve a cursor into history the snapshot drops, so each is re-made from
+    where it resolves today. A detached anchor is left as it is. Returns how
+    many threads were rewritten."""
+    n = 0
+    with db.tx() as c:
+        for row in c.execute("SELECT id, anchor FROM plan_threads WHERE plan_id=?", (plan_id,)).fetchall():
+            anchor = json.loads(row["anchor"])
+            if anchor.get("kind") != "text" or not anchor.get("cursor"):
+                continue
+            now = _followed(replica, anchor)
+            if now.get("gone") or now["section"] not in replica.sections():
+                continue
+            fresh = {k: v for k, v in _with_cursor(replica, {**now, "cursor": None}).items() if k != "gone"}
+            c.execute("UPDATE plan_threads SET anchor=? WHERE id=?", (json.dumps(fresh), row["id"]))
+            n += 1
+    return n
 
 
 def _followed(replica, anchor: dict) -> dict:
@@ -406,6 +428,14 @@ def _followed(replica, anchor: dict) -> dict:
     except (CrdtError, ValueError):
         return anchor
     out = {**anchor, "start": start, "end": start + anchor["end"] - anchor["start"]}
+    if anchor.get("cursor_end") and anchor["quote"]:
+        try:
+            end = replica.resolve(base64.b64decode(anchor["cursor_end"]))
+        except (CrdtError, ValueError):
+            end = None
+        if end is not None:
+            out["end"] = end
+            out["gone"] = end <= start      # both ends met: every one of its words was deleted
     if anchor["kind"] == "text" and not anchor["quote"]:
         out.update(_context(replica.text(anchor["section"]), start))
     return out
@@ -414,8 +444,10 @@ def _followed(replica, anchor: dict) -> dict:
 def _where(cur: dict, anchor: dict) -> dict:
     """``anchor`` in revision ``cur``: where its text is now, and whether
     it is still ``current``, has ``moved`` or is ``detached`` (gone)."""
-    out = {k: v for k, v in anchor.items() if k != "cursor"}
+    out = {k: v for k, v in anchor.items() if k not in ("cursor", "cursor_end", "gone")}
     out["state"] = "current"
+    if anchor.get("gone"):
+        return dict(out, state="detached")
     if anchor["kind"] == "text" and not anchor["quote"]:
         return _insertion(cur, anchor, out)
     if anchor["kind"] == "text":
