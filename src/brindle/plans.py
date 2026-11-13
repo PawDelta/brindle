@@ -535,7 +535,7 @@ def _page(title: str, markdown: str) -> str:
 
 def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, split: Any = None,
             title: str | None = None, plan_id: str | None = None, ask: Any = None,
-            sections: Any = None) -> dict:
+            sections: Any = None, base: Any = None) -> dict:
     """The session's supervisor proposes a plan, or (``plan_id``) a new
     revision of its open or redirected one. Each publication spends the
     person's request: their ask for a planning doc, or their Redirect.
@@ -543,7 +543,12 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     on every step of the reader for them to correct. ``sections``: the doc
     as sections, markdown or diagrams (brindle.plan_docs.parse_sections);
     then ``markdown`` is only the text before them (the title and lede).
-    Without it, the markdown's ``##`` headings make the sections."""
+    Without it, the markdown's ``##`` headings make the sections.
+
+    A shared plan with a live draft takes no revision: the supervisor writes
+    into the draft, against ``base``, the text :func:`read_draft` handed it
+    (plan_docs.supervise), and the plan is open for the person again. The
+    result's ``draft_write`` says what went in and what became suggestions."""
     from brindle import plan_docs
 
     visuals.require_enabled()
@@ -561,6 +566,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         lede, parts = plan_docs.from_markdown(markdown)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
+    given = [name for name, raw in (("decisions", decisions), ("split", split), ("ask", ask)) if raw]
     decisions, split = _decisions(decisions), _split(split)
     ask = visuals._text(ask, "ask", visuals.MAX_NOTE)
     title = visuals._text(title, "title", visuals.MAX_TITLE) or _title(markdown) or "Plan"
@@ -583,6 +589,21 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
     replaced = plan_docs.revision(db, plan_id) if plan_id else None
     previous = {s["id"]: s for s in replaced["sections"]} if replaced else {}
+    replica = plan_docs.draft(db, current) if plan_id else None
+    if replica is not None and not base:
+        raise ServiceError("base_required", "this plan is co-edited in a live draft: read it with "
+                           "read_plan and pass the base it gives, so what others wrote since stays", 409)
+    drafted: dict = {}
+    # A draft holds only text: what else the supervisor changed is named, not applied.
+    off_draft = [name for name, new in (("decisions", decisions), ("split", split), ("ask", ask))
+                 if name in given and replaced and new != replaced[name]]
+
+    def write_draft(c, vid: str, visual_rev: int) -> None:
+        # The draft continues this revision: a freeze since, or an approval, refuses the write.
+        if not c.execute("UPDATE plans SET state='open', decision=NULL, updated_at=? WHERE id=? AND rev=?"
+                         " AND state IN ('open','redirected')", (time.time(), vid, current["rev"])).rowcount:
+            raise ServiceError("stale", "the plan changed meanwhile; read it again with read_plan", 409)
+        drafted.update(plan_docs.supervise(c, current, replica, base, replaced, lede, parts, off_draft))
 
     settled: list[int] = []
 
@@ -617,7 +638,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                   split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now)
 
     try:
-        v = visuals.publish(db, caller, title, _page(title, markdown), visual_id=plan_id, kind="plan", extra=write)
+        v = visuals.publish(db, caller, title, _page(title, markdown), visual_id=plan_id, kind="plan",
+                            extra=write if replica is None else write_draft)
     except ServiceError as e:
         if e.code == "visual_request_required":
             raise ServiceError("plan_request_required", "a plan needs the person to ask for one: propose_plan "
@@ -626,7 +648,35 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         raise
     if any(settled):
         bus.publish_agent(db, "autopilot.goal", root.id)   # the offer's card goes
+    if replica is not None:
+        p = get(db, v["id"])
+        plan_docs._changed(db, p, p["rev"])
+        return {**p, "draft_write": drafted}
     return get(db, v["id"])
+
+
+def read_draft(db: DB, caller: Agent | None, plan_id: str) -> dict:
+    """The session's supervisor reads its shared plan's live draft, once the
+    person has sent it back (Request changes): the text others write there
+    reaches it only then. Returns the doc as propose takes it (lede, sections
+    with their ids, decisions, split, ask) and ``base``, the id its revision
+    names (plan_docs.hand_over)."""
+    from brindle import plan_docs
+
+    visuals.require_enabled()
+    root, _ws = visuals._session(db, caller)
+    p = _row(db, plan_id)
+    if caller.id != root.id or p["root_id"] != root.id:
+        raise ServiceError("not_found", "no such plan in this session", 404)
+    replica = plan_docs.draft(db, p)
+    if replica is None:
+        raise ServiceError("no_draft", "this plan has no live draft: revise it from your last revision", 409)
+    if p["state"] != "redirected":
+        raise ServiceError("not_sent", "the person hasn't sent this plan back to you; wait for Request changes", 409)
+    base, cur = plan_docs.hand_over(db, p, replica)
+    return {"plan_id": p["id"], "rev": p["rev"], "base": base, "lede": cur["lede"], "ask": cur["ask"],
+            "sections": [{k: s[k] for k in ("id", "title", "kind", "markdown", "caption")} for s in cur["sections"]],
+            "decisions": cur["decisions"], "split": cur["split"]}
 
 
 def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any, resolve: bool = False) -> int:
@@ -708,7 +758,7 @@ def _comments(raw: Any, section_ids: set[str]) -> list[dict]:
 
 
 def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: str | None, titles: dict,
-             doc: list[str] = (), files: list[str] = ()) -> str:
+             doc: list[str] = (), files: list[str] = (), drafting: bool = False) -> str:
     verb = "approved" if approved else "redirected"
     lines = [f"The person {verb} plan {p['id']} (r{p['rev']})."]
     for d in p["decisions"]:
@@ -725,6 +775,10 @@ def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: s
         lines.append(" ".join(["Attached to their note:", *files]))
     if approved:
         lines.append("The tasks you assigned behind the plan start now; assign the rest as planned.")
+    elif drafting:
+        lines.append(f"It is co-edited in a live draft: read it with read_plan(plan_id=\"{p['id']}\"), then revise "
+                     f"that text with propose_plan(plan_id=\"{p['id']}\", base=<the base it gives>); what others "
+                     "write meanwhile stays. Nothing starts until they approve.")
     else:
         lines.append(f"Revise it with propose_plan(plan_id=\"{p['id']}\"); nothing starts until they approve.")
     return "\n".join(lines)
@@ -876,7 +930,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     record = json.dumps(verdict)
     answer = json.dumps({"option": "approve" if approved else "redirect", "note": note, "at": at, "rev": rev})
     state = "approved" if approved else "redirected"
-    text = _message(p, approved, picks, comments, note, titles, doc, [f["ref"] for f in files])
+    text = _message(p, approved, picks, comments, note, titles, doc, [f["ref"] for f in files],
+                    drafting=not approved and plan_docs.draft(db, p) is not None)
     with db.tx() as c:
         if approved:
             # In the verdict's own transaction: a sync landing a new reviewer can't slip in between.

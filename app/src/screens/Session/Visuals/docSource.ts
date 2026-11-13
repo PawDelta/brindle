@@ -15,7 +15,7 @@ export interface DocSource<P extends Plan = Plan> {
   suggest(rev: number, change: PlanChange, text?: string): Promise<P>;
   vote(rev: number, decision: string, option: string): Promise<P>;
   /* Reviewing someone else's design: this person's own sign-off. */
-  signOff?(rev: number): Promise<P>;
+  signOff?(rev: number, version?: number): Promise<P>;
   /* Whether a failed read means this person can no longer open the doc, so it leaves the screen. */
   lost?(e: unknown): boolean;
 }
@@ -45,7 +45,7 @@ export function sharedSource(client: SharedDesignClient, id: string, repo?: stri
     resolve: (rev, thread, resolved) => send(`threads/${thread}`, { rev, action: resolved ? "resolve" : "reopen" }),
     suggest: (rev, change, text = "") => send("suggestions", { rev, ...change, text }),
     vote: (rev, decision, option) => send("votes", { rev, decision, option }),
-    signOff: (rev) => send("sign-offs", { rev }),
+    signOff: (rev, version) => send("sign-offs", { rev, ...(version === undefined ? {} : { version }) }),
     lost: accessGone,
   };
 }
