@@ -340,3 +340,11 @@ def test_report_medians_and_require_runs(tmp_path, capsys):
     grouped = capsys.readouterr().out
     assert "task: tinydb\n" + tinydb.split("task: tinydb\n")[-1] in grouped
     assert "task: large\n" + large in grouped
+
+
+def test_capped_routing_drops_excluded_workers_from_every_tier(tmp_path):
+    routing = bench.capped_routing({"heavy": ["developer-heavy"], "advanced": ["developer-fable", "developer-heavy"]},
+                                   ["developer-fable"])
+    bench.configure_clone(tmp_path, "claude-opus-5-5", None, routing)
+    cfg = json.loads((tmp_path / ".brindle" / "config.local.json").read_text())
+    assert cfg["routing"] == {"heavy": ["developer-heavy"], "advanced": ["developer-heavy"]}

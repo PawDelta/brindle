@@ -869,7 +869,13 @@ class Brindle:
         return out
 
 
-def configure_clone(clone: Path, model: str, hold_seconds: int | None) -> None:
+def capped_routing(default: dict[str, list[str]], exclude: list[str]) -> dict[str, list[str]]:
+    """brindle's routing with the ``exclude`` worker profiles taken out of every tier."""
+    return {tier: [n for n in names if n not in exclude] for tier, names in default.items()}
+
+
+def configure_clone(clone: Path, model: str, hold_seconds: int | None,
+                    routing: dict[str, list[str]] | None = None) -> None:
     """A repo profile on ``model`` and ``supervisor_profile`` naming it (a new
     supervisor chat takes its provider, model and effort from there), and,
     when ``hold_seconds`` is given, the app's hold on a permission ask cut to
@@ -885,6 +891,8 @@ def configure_clone(clone: Path, model: str, hold_seconds: int | None) -> None:
     cfg["supervisor_profile"] = PROFILE_NAME
     if hold_seconds is not None:
         cfg["permission_hold_seconds"] = hold_seconds
+    if routing:
+        cfg["routing"] = routing
     local.write_text(json.dumps(cfg, indent=2) + "\n")
 
 
@@ -1048,7 +1056,12 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
     init = b.cli("init", "--yes", check=False)
     if init.returncode != 0:
         print(f"brindle init exited {init.returncode}: {init.stderr.strip()[-500:]}", file=sys.stderr)
-    configure_clone(clone, args.supervisor_model, args.hold_seconds)
+    routing = None
+    if args.exclude_worker:
+        default = sh([b.python, "-c", "import json; from brindle.config import DEFAULT_ROUTING as r; print(json.dumps(r))"],
+                     clone, env, capture_output=True).stdout
+        routing = capped_routing(json.loads(default), args.exclude_worker)
+    configure_clone(clone, args.supervisor_model, args.hold_seconds, routing)
     b.cli("start", "--no-attach", "--no-watch", "--yes", "-p", spec)
     root = None
     while root is None:
@@ -1070,6 +1083,7 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
             "wall_seconds": round(w["stop"] - t0, 1), **usage, "rates": w["rates"],
             "prompts": brindle_prompts(w["snap"].get("permission_asks", []), w["events"]),
             "checkout": checkout, "supervisor_model": args.supervisor_model,
+            "excluded_workers": args.exclude_worker,
             "session_root": rid, "agents": len(w["seen"])}
 
 
@@ -1193,6 +1207,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--permission-mode", default="default",
                      help="solo: the CLI's --permission-mode ('' for the person's own setting); "
                           "the mode it ran in is recorded either way")
+    run.add_argument("--exclude-worker", action="append", default=[],
+                     help="brindle: take this worker profile out of every routing tier (repeatable)")
     run.add_argument("--solo-note", default=SOLO_NOTE,
                      help="solo: a line put before the spec ('' for none); recorded in the record")
     run.add_argument("--max-answers", type=int, default=5,
