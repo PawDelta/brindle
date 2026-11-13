@@ -44,9 +44,14 @@ Then ``grade.sh`` runs on the final checkout (brindle: the session branch's
 worktree) and one JSON record is appended to
 ``.brindle/bench/solo_vs_brindle.jsonl``.
 
+A run that hits an interruption the runner can't automate (a permission ask
+from a worker with no prompt of its own, an expired login, an Inbox item the
+supervisor doesn't resolve), or that gives up, is recorded with ``"valid":
+false`` and why.
+
 ``report`` prints, per arm, the median and min-max of wall time, total tokens,
-cost, hidden-test pass rate and interruptions; with ``--require-runs N`` it
-exits non-zero when an arm has fewer than N runs.
+cost, hidden-test pass rate and interruptions over the valid runs; with
+``--require-runs N`` it exits non-zero when an arm has fewer than N of them.
 """
 
 from __future__ import annotations
@@ -92,9 +97,20 @@ ASK_TOOL = "AskUserQuestion"
 AUTO_RESOLVED = {"policy", "saved_action", "supervisor"}
 # Inbox kinds that put a question to the person; the rest are "other".
 QUESTION_KINDS = {"question", "waiting", "plan", "plan_offer", "proposed_checks", "visual"}
-# Inbox kinds this runner answers with the item's own operation (the probe's
-# "answer"); each keeps the session from counting as done while it is listed.
-ANSWERED_KINDS = {"plan", "plan_offer", "proposed_checks", "visual", "doc"}
+# How the runner handles each Inbox kind, as the person would:
+#   answer    the item's own operation (the probe's "answer"); blocks done while listed
+#   delegate  told to the supervisor to sort out; blocks done while listed, and the
+#             run ends unresolved if it is still listed after --unresolved-after
+#   note      nothing to do (a PR opened, or ready to open: publishing is not the task)
+#   stuck     nothing the runner can do: the run ends there, marked invalid
+# A kind not listed here is delegated.
+HANDLING = {"plan": "answer", "plan_offer": "answer", "proposed_checks": "answer", "visual": "answer",
+            "doc": "answer", "pr_failed": "delegate", "sync_conflict": "delegate", "failed": "delegate",
+            "pr_ready": "note", "pr_opened": "note", "login": "stuck", "idle_stopped": "stuck"}
+# Providers whose permission ask reaches their own prompt once the app's hold
+# ends (service.inbox.PROMPT_AFTER_HOLD); any other's is refused then.
+PROMPT_AFTER_HOLD = {"claude", "codex"}
+VALID_FINISHES = {"goal", "idle", "exit"}
 BUSY = ("processing", "starting")
 TAIL_BYTES = 256 * 1024
 
@@ -353,11 +369,14 @@ METRICS = ("wall_seconds", "tokens_total", "cost_usd", "pass_rate", "prompts_tot
 
 
 def summarize(records: list[dict]) -> dict[str, dict]:
-    """Per arm: the run count, and each metric's median, min and max."""
+    """Per arm: the valid run count, the invalid ones (an interruption the
+    runner couldn't automate, or it gave up), and each metric's median, min
+    and max over the valid runs."""
     out: dict[str, dict] = {}
     for arm in sorted({r.get("arm") for r in records} | set(ARMS)):
-        runs = [r for r in records if r.get("arm") == arm]
-        s: dict = {"runs": len(runs)}
+        mine = [r for r in records if r.get("arm") == arm]
+        runs = [r for r in mine if r.get("valid", True)]
+        s: dict = {"runs": len(runs), "invalid": len(mine) - len(runs)}
         for metric in METRICS:
             values = [r.get(metric) if metric != "pass_rate" or "pass_rate" in r else pass_rate(r.get("grade"))
                       for r in runs]
@@ -382,7 +401,7 @@ def cmd_report(args) -> int:
     summary = summarize(load_records(Path(args.results)))
     short = []
     for arm, s in summary.items():
-        print(f"{arm} ({s['runs']} runs)")
+        print(f"{arm} ({s['runs']} runs" + (f", {s['invalid']} invalid left out)" if s["invalid"] else ")"))
         for metric in METRICS:
             m = s[metric]
             shown = "-" if m is None else (f"{_fmt(metric, m['median'])} "
@@ -507,7 +526,8 @@ def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict) -> dict:
     entries = solo_session(run_turn, spec, args.max_answers)
     stop = time.time()
     by_model = message_usage(entries)
-    return {"finished": state["finished"], "wall_seconds": round(stop - t0, 1), "by_model": by_model,
+    return {"finished": state["finished"], "valid": state["finished"] in VALID_FINISHES, "why": None,
+            "wall_seconds": round(stop - t0, 1), "by_model": by_model,
             "by_role": {"solo": by_model}, "rates": {}, "free": set(),
             "prompts": solo_prompts(entries, iter_json(approvals.read_text().splitlines())),
             "checkout": clone, "supervisor_model": args.model,
@@ -578,28 +598,31 @@ def main(args):
         now, items = time.time(), []
         for a in agents:
             rows = [dict(r) for r in db.permission_requests_of(a.id)]
-            held = any(r["channel"] in ("hook", "supervisor") and (r["hold_until"] or 0) > now for r in rows)
-            if a.status == "waiting" or held:
+            holds = {r["channel"] for r in rows if r["channel"] in ("hook", "supervisor")
+                     and (r["hold_until"] or 0) > now}
+            if a.status == "waiting" or holds:
+                # held_by: the person's (the app's hold), else still its supervisor's to answer first.
                 items.append({"kind": "waiting" if a.status == "waiting" else "permission", "agent_id": a.id,
-                              "held": held, "permission": bool(rows)})
+                              "held": bool(holds), "held_by": "person" if "hook" in holds else "supervisor",
+                              "provider": a.provider, "permission": bool(rows)})
             if a.status == "failed":
                 items.append({"kind": "failed", "agent_id": a.id, "detail": getattr(a, "failed_why", None)})
             if getattr(a, "plan_state", None) == "proposed" and getattr(a, "plan_first", None) and a.parent_id:
                 items.append({"kind": "plan", "agent_id": a.id, "detail": (a.plan_text or "")[:200]})
         if ap is not None and autopilot.proposing(ap):
             items.append({"kind": "proposed_checks", "agent_id": rid, "detail": ap.proposal})
-        # The session's PR, from what brindle recorded (the Inbox's own reading also asks GitHub).
-        for r in db.conn.execute("SELECT state, title, check_cmd, output FROM session_pr_prep"
-                                 " WHERE root_id=? AND state IN ('passed', 'failed')", (rid,)):
-            items.append({"kind": "pr_ready" if r["state"] == "passed" else "pr_failed", "agent_id": rid,
-                          "detail": r["title"] if r["state"] == "passed" else r["check_cmd"]})
-        for r in db.conn.execute("SELECT p.url, m.error FROM session_prs p LEFT JOIN session_pr_merges m"
-                                 " ON m.url = p.url AND m.state = 'failed'"
-                                 " WHERE p.root_id=? AND p.url IS NOT NULL AND p.merged_at IS NULL", (rid,)):
-            items.append({"kind": "pr_failed" if r["error"] else "pr_opened", "agent_id": rid, "detail": r["url"]})
         root = db.get_agent(rid)
         home = db.get_workspace(root.workspace_id) if root else None
         if home is not None:
+            # The Inbox's own PR card (its precedence, dismissals and merges), on what
+            # brindle recorded: in this short-lived process GitHub is never asked.
+            from brindle.daemon import session_review
+            from brindle.service import inbox
+            session_review.open_pr_for_head = lambda *a, **k: None
+            session_review.head_pr_known_none = lambda *a, **k: False
+            link = {"agent_id": rid, "workspace_id": home.id, "root_id": rid}
+            for i in guarded("pr", lambda: inbox._pr_items(db, rid, home.branch, home, link)) or []:
+                items.append({"kind": i.kind, "agent_id": rid, "detail": i.detail or i.url})
             from brindle import session_sync
             stuck = guarded("sync", lambda: session_sync.needs_you(db, home))
             if stuck:
@@ -615,8 +638,12 @@ def main(args):
                          ("idle", lambda: inbox._idle_items(db, repo))):
             for i in guarded(name, fn) or []:
                 if i.root_id == rid:
-                    items.append({"kind": i.kind, "agent_id": i.agent_id, "detail": i.detail,
-                                  "visual_id": i.visual_id, "request_id": i.request_id})
+                    item = {"kind": i.kind, "agent_id": i.agent_id, "detail": i.detail,
+                            "visual_id": i.visual_id, "request_id": i.request_id}
+                    if i.visual_id:   # each revision is its own question
+                        from brindle import visuals
+                        item["rev"] = guarded("visual rev", lambda: visuals.get(db, i.visual_id)["rev"])
+                    items.append(item)
         out["inbox"] = items
         out["outside_usage"] = {}
         out["rates"] = {}
@@ -664,10 +691,11 @@ def main(args):
         elif kind == "visual":
             from brindle import visuals
             v = visuals.get(db, item["visual_id"])
+            rev = item.get("rev") or v["rev"]   # the revision that was on screen
             if v["options"]:
-                visuals.answer(db, v["id"], v["rev"], option=v["options"][0]["id"], note=args["answer"])
+                visuals.answer(db, v["id"], rev, option=v["options"][0]["id"], note=args["answer"])
             else:
-                visuals.mark_read(db, v["id"], v["rev"])
+                visuals.mark_read(db, v["id"], rev)
         elif kind == "plan_offer":
             from brindle import plans
             plans.answer_offer(db, rid, item["request_id"], False)
@@ -781,7 +809,10 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
     answering what waits on the person, and counting each such interruption.
     Done: the goal reached, or the whole session quiet (supervisor idle, no
     agent working, nothing waiting on the person) for ``args.idle_grace``
-    seconds; ``stop`` is when that quiet began."""
+    seconds; ``stop`` is when that quiet began. An interruption the runner
+    can't automate ends the run there (``stuck:<kind>``), and one handed to the
+    supervisor that is still listed after ``args.unresolved_after`` seconds
+    ends it too (``unresolved:<kind>``): both are recorded as invalid runs."""
     seen: dict[str, dict] = {rid: root}            # every session agent ever seen (workers get removed)
     transcripts: dict[str, set[str]] = {}
     outside: dict[str, dict] = {}
@@ -789,9 +820,15 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
     events: list[dict] = []
     counted: set[tuple] = set()
     answered: set[tuple] = set()
+    delegated: dict[tuple, float] = {}
     pressed: dict[str, float] = {}
     quiet_since = None
     snap: dict = {}
+
+    def finish(how: str, at: float, why: str | None = None) -> dict:
+        return {"finished": how, "stop": at, "valid": how in VALID_FINISHES, "why": why, "seen": seen,
+                "transcripts": transcripts, "outside": outside, "rates": rates, "events": events, "snap": snap}
+
     while True:
         snap = b.probe("snapshot", root_id=rid, repo_root=root["repo_root"])
         now = clock()
@@ -809,6 +846,10 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
             kind, aid = item["kind"], item.get("agent_id")
             if item.get("held"):
                 waiting = True   # held for the app: after --hold-seconds it reaches the agent's prompt
+                if item.get("held_by") == "person" and item.get("provider") not in PROMPT_AFTER_HOLD:
+                    # No prompt of its own: the ask would be refused when the hold ends, and
+                    # answering it in the app means acting as the person there.
+                    return finish("stuck:permission", now, f"{item.get('provider')} agent {aid} asks the person")
                 continue
             if kind == "waiting":
                 # A prompt or dialog still on an agent's screen after --answer-after: take its
@@ -825,26 +866,36 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
                 b.probe("press_enter", agent_id=aid)
                 pressed[aid] = now
                 continue
-            key = (kind, aid, item.get("visual_id") or item.get("request_id") or (item.get("detail") or "")[:200])
+            key = (kind, aid, item.get("visual_id") or item.get("request_id") or (item.get("detail") or "")[:200],
+                   item.get("rev"))
             if key not in counted:
                 counted.add(key)
                 events.append({"kind": kind, "agent_id": aid, "at": now})
-            if kind in ANSWERED_KINDS:
+            how = HANDLING.get(kind, "delegate")
+            if how == "stuck":
+                return finish(f"stuck:{kind}", now, item.get("detail"))
+            if how == "answer":
                 waiting = True   # until it leaves the Inbox
                 if key not in answered:
-                    answered.add(key)
                     try:
                         b.probe("answer", root_id=rid, repo_root=root["repo_root"], item=item, answer=ANSWER)
+                        answered.add(key)
                     except BenchError as e:
-                        print(f"couldn't answer {kind}: {e}", file=sys.stderr)
+                        print(f"couldn't answer {kind} (again at the next look): {e}", file=sys.stderr)
+            elif how == "delegate":
+                waiting = True   # until it leaves the Inbox
+                if key not in delegated:
+                    delegated[key] = now
+                    b.cli("send", rid, f"{kind}: {item.get('detail') or ''}\n{ANSWER}", check=False)
+                elif now - delegated[key] >= args.unresolved_after:
+                    return finish(f"unresolved:{kind}", now, item.get("detail"))
         stopped = sup.get("status") == "idle"
         asking = stopped and (ap.get("state") == "blocked" or ends_with_question(
             last_text(sup.get("transcript_path"))))
         if ap.get("state") == "done":
             if asking:
                 events.append({"kind": "question", "agent_id": rid, "at": now})
-            return {"finished": "goal", "stop": now, "seen": seen, "transcripts": transcripts, "outside": outside,
-                    "rates": rates, "events": events, "snap": snap}
+            return finish("goal", now)
         if asking:
             waiting = True
             spell = ("question", rid, sup.get("status_since"))
@@ -856,13 +907,11 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
         if stopped and not busy and not waiting:
             quiet_since = now if quiet_since is None else quiet_since
             if now - quiet_since >= args.idle_grace:
-                return {"finished": "idle", "stop": quiet_since, "seen": seen, "transcripts": transcripts,
-                        "outside": outside, "rates": rates, "events": events, "snap": snap}
+                return finish("idle", quiet_since)
         else:
             quiet_since = None
         if now - t0 > args.max_hours * 3600:
-            return {"finished": "gave_up", "stop": now, "seen": seen, "transcripts": transcripts,
-                    "outside": outside, "rates": rates, "events": events, "snap": snap}
+            return finish("gave_up", now)
         pause(args.poll)
 
 
@@ -890,7 +939,8 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
             if a.get("status") not in ("done", "paused"):
                 b.cli("close", aid, check=False)
     checkout = Path(w["seen"][rid].get("workspace_path") or clone)
-    return {"finished": w["finished"], "wall_seconds": round(w["stop"] - t0, 1), **usage, "rates": w["rates"],
+    return {"finished": w["finished"], "valid": w["valid"], "why": w["why"],
+            "wall_seconds": round(w["stop"] - t0, 1), **usage, "rates": w["rates"],
             "prompts": brindle_prompts(w["snap"].get("permission_asks", []), w["events"]),
             "checkout": checkout, "supervisor_model": args.supervisor_model,
             "session_root": rid, "agents": len(w["seen"])}
@@ -951,7 +1001,7 @@ def cmd_run(args) -> int:
     graded = grade(grade_sh, out["checkout"], env)
     prompts = out["prompts"]
     record = {"arm": args.arm, "run_id": args.run_id, "started_at": started, "finished": out["finished"],
-              "wall_seconds": out["wall_seconds"], "supervisor_model": out["supervisor_model"],
+              "valid": out["valid"], "why": out["why"], "wall_seconds": out["wall_seconds"], "supervisor_model": out["supervisor_model"],
               "supervisor_model_observed": out["supervisor_model_observed"],
               "tokens": {"by_model": out["by_model"], "by_role": out["by_role"]},
               "tokens_total": tokens_total(out["by_model"]),
@@ -1019,6 +1069,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="brindle: seconds the session must stay quiet to count as done")
     run.add_argument("--answer-after", type=float, default=60.0,
                      help="brindle: seconds a question or prompt waits before it is answered")
+    run.add_argument("--unresolved-after", type=float, default=1800.0,
+                     help="brindle: seconds an item handed to the supervisor may stay in the Inbox "
+                          "before the run ends as invalid")
     run.add_argument("--start-grace", type=float, default=120.0,
                      help="brindle: seconds to wait for the supervisor to appear")
     run.add_argument("--max-hours", type=float, default=6.0, help="give up after this long")

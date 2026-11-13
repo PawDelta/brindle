@@ -141,7 +141,7 @@ class FakeSession:
         return [kw for o, kw in self.calls if o == op]
 
 
-ARGS = SimpleNamespace(poll=50, idle_grace=100, answer_after=60, max_hours=1)
+ARGS = SimpleNamespace(poll=50, idle_grace=100, answer_after=60, unresolved_after=300, max_hours=1)
 ROOT = {"id": "root", "repo_root": "/r", "status": "idle", "status_since": 10}
 
 
@@ -157,10 +157,17 @@ def test_watch_waits_for_the_whole_session_to_go_quiet():
 
 
 def test_watch_answers_inbox_items_and_held_asks_before_counting_the_session_quiet():
+    def answered(s, kind, rev=None):
+        return any(kw["item"]["kind"] == kind and kw["item"].get("rev") == rev for kw in s.ops("answer"))
+
     def state(s):
         inbox = []
-        if not s.ops("answer"):     # the plan offer stays until its own answer runs
+        if not answered(s, "plan_offer"):     # the plan offer stays until its own answer runs
             inbox.append({"kind": "plan_offer", "agent_id": "root", "request_id": "o1", "detail": "goal"})
+        for rev in (1, 2):                    # a visual's second revision is a new question
+            if not answered(s, "visual", rev):
+                inbox.append({"kind": "visual", "agent_id": "root", "visual_id": "v1", "rev": rev})
+                break
         worker = {"id": "w1", "status": "idle"}
         if s.t < 100:               # held for the app, then at the worker's own prompt until answered
             inbox.append({"kind": "permission", "agent_id": "w1", "held": True, "permission": True})
@@ -171,14 +178,31 @@ def test_watch_answers_inbox_items_and_held_asks_before_counting_the_session_qui
 
     s = FakeSession(state)
     got = bench.watch_session(s, "root", ROOT, 0, ARGS, s.clock, s.pause)
-    assert [kw["item"]["kind"] for kw in s.ops("answer")] == ["plan_offer"]
+    assert [(kw["item"]["kind"], kw["item"].get("rev")) for kw in s.ops("answer")] == [
+        ("plan_offer", None), ("visual", 1), ("visual", 2)]
     assert s.ops("press_enter") == [{"agent_id": "w1"}]
     # Pressed at t=200 (60s after its prompt appeared); quiet from the next look.
-    assert (got["finished"], got["stop"]) == ("idle", 250)
-    assert [e["kind"] for e in got["events"]] == ["plan_offer"]   # the permission counts from permission_asks
+    assert (got["finished"], got["valid"], got["stop"]) == ("idle", True, 250)
+    # The permission counts from permission_asks, not here.
+    assert [e["kind"] for e in got["events"]] == ["plan_offer", "visual", "visual"]
 
 
-def test_probe_lists_the_sessions_pr_in_its_inbox(db, tmp_path):
+@pytest.mark.parametrize("item, finished, sent", [
+    # Handed to the supervisor once; still listed after --unresolved-after.
+    ({"kind": "pr_failed", "agent_id": "root", "detail": "checks failed"}, "unresolved:pr_failed", 1),
+    # A native worker has no prompt to fall back to: its ask can't be answered here.
+    ({"kind": "permission", "agent_id": "w1", "held": True, "held_by": "person", "provider": "native"},
+     "stuck:permission", 0),
+])
+def test_watch_ends_a_run_it_cannot_complete_as_invalid(item, finished, sent):
+    s = FakeSession(lambda s: ([ROOT, {"id": "w1", "status": "idle"}], [item]))
+    got = bench.watch_session(s, "root", ROOT, 0, ARGS, s.clock, s.pause)
+    assert (got["finished"], got["valid"]) == (finished, False)
+    assert len(s.ops("cli")) == sent
+
+
+@pytest.mark.parametrize("opened, kinds", [(False, ["pr_ready"]), (True, ["pr_opened"])])
+def test_probe_lists_the_sessions_pr_in_its_inbox(db, tmp_path, opened, kinds):
     repo = str(tmp_path)
     ws = Workspace("w", repo, "s", "worktree", "brindle/session-1", "main", repo, None, "t", time.time())
     db.add_workspace(ws)
@@ -186,11 +210,14 @@ def test_probe_lists_the_sessions_pr_in_its_inbox(db, tmp_path):
     with db.tx() as c:
         c.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, title, prepared_at)"
                   " VALUES ('r1', 'brindle/session-1', 'abc', 'passed', 'Add parts', ?)", (time.time(),))
+        if opened:   # opened from that preparation: its row stays, the card is the open PR's
+            c.execute("INSERT INTO session_prs (root_id, branch, url, opened_at)"
+                      " VALUES ('r1', 'brindle/session-1', 'https://github.com/o/r/pull/7', ?)", (time.time(),))
     ns = {"__name__": "bench_probe"}
     exec(bench.PROBE, ns)
     out = ns["main"]({"op": "snapshot", "clone": repo, "root_id": "r1", "repo_root": repo})
     assert out["errors"] == []
-    assert [i["kind"] for i in out["inbox"]] == ["pr_ready"]
+    assert [i["kind"] for i in out["inbox"]] == kinds
 
 
 def test_report_medians_and_require_runs(tmp_path):
@@ -200,9 +227,10 @@ def test_report_medians_and_require_runs(tmp_path):
             for w, t, c, p, g in [(100, 10, 1.0, 0, 4), (300, 30, 3.0, 2, 2), (200, 20, 2.0, 1, 3)]]
     rows.append({"arm": "brindle", "wall_seconds": 50, "tokens_total": 5, "cost_usd": 0.5,
                  "prompts_total": 4, "pass_rate": 1.0})
+    rows.append({"arm": "solo", "valid": False, "wall_seconds": 9999, "pass_rate": 0.0})   # left out
     results.write_text("".join(json.dumps(r) + "\n" for r in rows))
     solo = bench.summarize(bench.load_records(results))["solo"]
-    assert solo["runs"] == 3
+    assert (solo["runs"], solo["invalid"]) == (3, 1)
     assert solo["wall_seconds"] == {"median": 200, "min": 100, "max": 300}
     assert solo["pass_rate"] == {"median": 0.75, "min": 0.5, "max": 1.0}
     assert solo["prompts_total"] == {"median": 1, "min": 0, "max": 2}
