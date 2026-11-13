@@ -31,6 +31,25 @@ class CrdtError(ValueError):
     """An edit, cursor or update Loro refused."""
 
 
+class Presence:
+    """A section's ephemeral caret/name state. Never part of a draft snapshot."""
+
+    def __init__(self) -> None:
+        self._store = loro.EphemeralStore(30_000)
+
+    def apply(self, data: bytes) -> None:
+        try:
+            self._store.apply(data)
+        except BaseException as e:
+            if _refused(e):
+                raise CrdtError("not a Loro awareness update") from None
+            raise
+
+    def encode(self) -> bytes:
+        self._store.remove_outdated()
+        return self._store.encode_all()
+
+
 def _refused(e: BaseException) -> bool:
     # The binding's errors are exactly BaseException: never swallow
     # KeyboardInterrupt, SystemExit or anything more specific.
