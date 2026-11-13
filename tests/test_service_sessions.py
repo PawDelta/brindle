@@ -82,6 +82,7 @@ def test_a_new_worktree_session_launches_before_its_setup_and_code_map_rebuild(d
     assert order == ["launch", "rebuild", "setup"]
 
 
+@pytest.mark.variant("Send beside a paused session only: no running session to pick, and it must not start in the checkout")
 def test_a_new_worktree_is_made_when_asked_with_only_a_paused_session_here(db, repo, running, monkeypatch):
     """The app's Send goes on a new branch beside a paused session too: no
     session runs, so none is picked, and it must not start in the checkout."""

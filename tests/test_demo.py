@@ -27,6 +27,7 @@ def _practice_session(db, root, name):
                            "processing", "", None, 0))
 
 
+@pytest.mark.variant("The whole End practice run press through the route: running and held practice repos go, a second press is a no-op")
 def test_end_practice_run_stops_agents_and_removes_repo(db, brindle_home, tmp_path, monkeypatch):
     from brindle import tmux
     from brindle.daemon import routes_actions
