@@ -1,31 +1,40 @@
 /* The calm empty state, and the New session composer: where the app lands
-   with no session to show, and where "New session" goes. One composer:
-   what brindle should work on, in which repo, and Start (branch, CLI and
-   session name behind Options). A start with sessions already running in the
-   repo answers a conflict, and the person picks what to do (open one, a
-   new worktree, or pause it and start fresh); a start the engine refuses
+   with no session to show, and where "New session" goes. With no project
+   yet, the first run's hero instead (FirstRun: the practice run first, then
+   open a folder or clone). Otherwise one composer: what brindle should work
+   on, a toolbar under it with the project chip (its menu: the projects with
+   their running and paused counts, then Open a folder… and Clone a
+   repository…), the CLI chip (the signed-in CLIs, then Sign in to more…),
+   Options (session name and branch, opening inside the composer) and
+   Send ⌘↵ (SendButton); the practice run's row at the foot. With a session
+   already running (or paused) in the repo, Send starts on a new branch in
+   its own worktree at once, without asking; the
+   chevron inside Send offers pausing it instead, or opening (resuming) a
+   session there; a start the engine refuses
    with 409 {preflight} (the CLI needs a sign-in, a key, a trust or a
    consent first) shows the engine's items as native UI (Preflight) and
    starts again once they are settled. Started, the app opens the new
    session's provider session. A project is added as the first launch adds
-   one (components/ProjectPicker: open a folder, or clone a repository):
-   in place of the composer while there is none, and behind "Add a
-   project…" beside the repo after. Under it, the way to the demo the first
-   launch offers (screens/Onboarding/Demo). */
+   one (components/ProjectPicker, its rows: open a folder, or clone a
+   repository): in the first run's hero while there is none, and from the
+   project menu after. */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { DaemonError, LOGIN_PROVIDERS, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
+import { DaemonError, LOGIN_PROVIDERS, type DaemonClient, type Note, type PreflightDTO, type Repo, type StartSession } from "../../api/client";
 import type { PickFolder } from "../../api/open";
 import type { SessionDTO } from "../../api/schema";
+import { ChipMenu, SEPARATOR } from "../../components/ChipMenu";
+import { BranchIcon, FolderIcon, LinkIcon, PlusIcon, SlidersIcon } from "../../components/icons";
 import { LoadingButton } from "../../components/LoadingButton";
-import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
-import { ProjectCombobox } from "../../components/ProjectCombobox";
 import { ProjectPicker } from "../../components/ProjectPicker";
-import { alert, button, card, field, h2, lede, main, mono, quiet, title } from "../../components/ui";
+import { Dot } from "../../components/Sidebar";
+import { alert, button, card, field, h2, label, lede, main, quiet, title } from "../../components/ui";
 import { isPaused, providerName } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
-import { WatchDemo } from "../Onboarding/Demo";
+import { PracticeRow } from "../Onboarding/Demo";
+import { FirstRun } from "./FirstRun";
+import { SendButton, sessionLabel, type SendHow } from "./SendButton";
 
 export interface NewSessionProps {
   client: DaemonClient;
@@ -39,6 +48,8 @@ export interface NewSessionProps {
   refresh?: () => Promise<void>;
   /* To Settings › Providers, to sign in to a CLI. */
   onSignIn?: () => void;
+  /* Arrived to add a project (a finished practice run's Start your own): the folder picker, or the clone form. */
+  add?: "open" | "clone";
 }
 
 /* The CLI the person picked for their sessions, kept in this app between launches. */
@@ -62,14 +73,18 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 type StartFields = Omit<StartSession, "repo" | "choice" | "session_id">;
 
-export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, onSignIn = () => undefined }: NewSessionProps) {
+export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, onSignIn = () => undefined, add }: NewSessionProps) {
   const { repos: allRepos, sessions, error: loadError, reload } = useSessions();
   /* The practice repo is for the demo flow only: never a project to start in. */
   const repos = useMemo(() => allRepos && allRepos.filter((r) => !r.demo), [allRepos]);
   const [attempt, setAttempt] = useState(0);
   /* The project to start in: as opened, or the one just added. */
   const [chosen, setChosen] = useState(initialRepo);
+  /* The way of adding a project this screen was opened for, until a project is added: the
+     composer that mounts once there is one must not open the picker or the clone form again. */
+  const [intent, setIntent] = useState(add);
   const added = (repo: Repo) => {
+    setIntent(undefined);
     setChosen(repo.repo_root);
     void reload();
   };
@@ -88,55 +103,42 @@ export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, o
     );
   }
 
-  const live = Object.values(sessions).flat().filter((s) => !isPaused(s)).length;
   return (
     <section className="relative flex min-h-0 flex-1" aria-label="New session">
-      <div className="flex min-w-0 flex-1 flex-col items-center gap-s3 overflow-auto px-s4 py-s6">
-        <div className="flex w-full max-w-2xl flex-col gap-s3">
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-s1">
-              <Logo className="text-2xl" />
-            </div>
-            {repos !== null && repos.length > 0 && <h1 className={title}>Start a session</h1>}
-            <p className="text-sm text-ink-2">
-              {repos === null
-                ? "Loading…"
-                : repos.length === 0
-                  ? "No repo is set up yet."
-                  : live === 0
-                    ? "Nothing is running yet. Describe what brindle should work on below, check the project, and press Start: a supervisor plans the work and hands it to agents. Recent sessions are in the sidebar."
-                    : "Start another session below. The ones running are in the sidebar."}
-            </p>
+      <div className="flex min-w-0 flex-1 flex-col overflow-auto px-s4">
+        {repos === null ? (
+          <p className="mx-auto w-full max-w-[672px] pt-s8 text-sm text-ink-3">Loading…</p>
+        ) : repos.length === 0 ? (
+          <div data-walkthrough="project-picker">
+            <FirstRun client={client} pickFolder={pickFolder} refresh={refresh} onStarted={onOpen} onPicked={added} start={intent} />
           </div>
-          {repos === null ? null : repos.length === 0 ? (
-            <FirstRepo client={client} pickFolder={pickFolder} onPicked={added} />
-          ) : (
-            <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} chosen={chosen} onChoose={setChosen} pickFolder={pickFolder} onAdded={added} onSignIn={onSignIn} />
-          )}
-          <WatchDemo client={client} refresh={refresh} onStarted={onOpen} />
-        </div>
+        ) : (
+          <div className="mx-auto flex min-h-full w-full max-w-[672px] flex-col pb-7 pt-s8">
+            <h1 className={title}>Start a session</h1>
+            <p className={`${lede} mt-1.5`}>Say what you want done. The supervisor plans it and hands out the work.</p>
+            <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} chosen={chosen} onChoose={setChosen} pickFolder={pickFolder} onAdded={added} onSignIn={onSignIn} add={intent} />
+            <div className="mt-auto pt-s4">
+              <PracticeRow client={client} refresh={refresh} onStarted={onOpen} />
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );
 }
 
-/* Nothing to show yet: a first project, opened or cloned. */
-function FirstRepo({ client, pickFolder, onPicked }: { client: DaemonClient; pickFolder?: PickFolder; onPicked(repo: Repo): void }) {
-  return (
-    <section className={`${card} flex flex-col gap-s2 px-s3 py-s3`} aria-label="Welcome" data-walkthrough="project-picker">
-      <h1 className="text-xl font-semibold tracking-tight">Welcome to brindle</h1>
-      <p className="max-w-prose text-ink-2">
-        brindle runs coding agents for you, each on its own branch in its own worktree, with a supervisor that hands out the work and a place here to see it all. No repo is set up yet: pick a project to start in.
-      </p>
-      <ProjectPicker client={client} pickFolder={pickFolder} onPicked={onPicked} />
-    </section>
-  );
+/* Running and paused sessions in a repo, as the project menu says them. */
+function counts(sessions: SessionDTO[] | undefined) {
+  const all = sessions ?? [];
+  const running = all.filter((s) => !isPaused(s)).length;
+  return { running, paused: all.length - running };
 }
 
-/* One composer for every repo: the prompt, the repo, Start, and the rest
-   behind Options. A start that conflicts, or that the engine's preflight
-   refuses, asks here what to do. */
-function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, onChoose, pickFolder, onAdded, onSignIn }: {
+/* One composer for every repo: the goal on top, a toolbar under it (the
+   project chip, the CLI chip, Options, Start), name and branch behind
+   Options inside it. A start that conflicts, or that the engine's
+   preflight refuses, asks here what to do. */
+function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, onChoose, pickFolder, onAdded, onSignIn, add }: {
   client: DaemonClient;
   /* To Settings › Providers, where a CLI is signed in. */
   onSignIn(): void;
@@ -149,9 +151,11 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   onChoose(repo: string): void;
   pickFolder?: PickFolder;
   onAdded(repo: Repo): void;
+  add?: "open" | "clone";
 }) {
   const repo = repos.some((r) => r.repo_root === chosen) ? chosen! : (repos[0]?.repo_root ?? "");
-  const [adding, setAdding] = useState(false);
+  // A project being added from the project menu: how, and which ask (each one opens afresh).
+  const [adding, setAdding] = useState<{ how: "open" | "clone"; ask: number } | null>(add ? { how: add, ask: 0 } : null);
   const [prompt, setPrompt] = useState("");
   const [options, setOptions] = useState(false);
   const [branch, setBranch] = useState("");
@@ -169,16 +173,14 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
-  // A start waiting on the person's choice: what they asked for, and the choices.
-  const [pending, setPending] = useState<{ fields: StartFields; conflict: SessionConflict } | null>(null);
   // A start the engine refused until the CLI is set up: what they asked for, and the items.
   // `attempt`: the start it answers. A card's re-check that answers after a newer start (on
   // another CLI, say) began is that older start's, and is dropped.
-  const [preflight, setPreflight] = useState<{ fields: StartFields; items: PreflightDTO; attempt: number } | null>(null);
+  const [preflight, setPreflight] = useState<{ fields: StartFields; how: SendHow; items: PreflightDTO; attempt: number } | null>(null);
   const attempts = useRef(0);
   const currentRepo = useRef(repo);
   currentRepo.current = repo;
-  const [identity, setIdentity] = useState<{ repo: string; fields: StartFields; choice?: { key: string; session: string } } | null>(null);
+  const [identity, setIdentity] = useState<{ repo: string; fields: StartFields; how: SendHow } | null>(null);
   const [gitName, setGitName] = useState("");
   const [gitEmail, setGitEmail] = useState("");
 
@@ -210,7 +212,24 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     rememberPick(p);
   };
 
-  const start = async (fields: StartFields, choice?: { key: string; session: string }): Promise<boolean> => {
+  /* A start with a session already here (running or paused) never asks.
+     Send's way ("n") asks for a new branch in its own worktree outright; a
+     conflict from sessions this screen didn't know of yet is answered at
+     once with `how` ("n", or "p": pause it and start here) for the session
+     the daemon names as the default. */
+  const post = async (fields: StartFields, how: SendHow) => {
+    if (how === "n" && (sessions[repo] ?? []).length > 0) return client.startSession({ repo, ...fields, choice: "n" });
+    try {
+      return await client.startSession({ repo, ...fields });
+    } catch (e) {
+      const conflict = e instanceof DaemonError ? e.conflict : undefined;
+      const target = conflict?.kind === "running" && conflict.choices.some((c) => c.key === how) ? (conflict.sessions[conflict.default] ?? conflict.sessions[0]) : undefined;
+      if (!target) throw e;
+      return client.startSession({ repo, ...fields, choice: how, session_id: target.id });
+    }
+  };
+
+  const start = async (fields: StartFields, how: SendHow = "n"): Promise<boolean> => {
     const attempt = ++attempts.current;
     setBusy(true);
     setStarting(true);
@@ -218,10 +237,9 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     setNotes([]);
     let opened: string | null = null;
     try {
-      const got = await client.startSession({ repo, ...fields, choice: choice?.key, session_id: choice?.session });
+      const got = await post(fields, how);
       if (currentRepo.current !== repo || attempt !== attempts.current) return false;
       setIdentity(null);
-      setPending(null);
       setPreflight(null);
       if ("opened" in got) opened = got.opened.id;
       else {
@@ -231,15 +249,14 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     } catch (e) {
       if (currentRepo.current !== repo || attempt !== attempts.current) return false;
       if (e instanceof DaemonError && e.code === "git_identity_missing") {
-        setIdentity({ repo, fields, choice });
+        setIdentity({ repo, fields, how });
         return false;
       }
-      if (e instanceof DaemonError && e.preflight) setPreflight({ fields, items: e.preflight, attempt });
+      if (e instanceof DaemonError && e.preflight) setPreflight({ fields, how, items: e.preflight, attempt });
       // No card of its own: a card still showing stays usable, as this (now latest) start's,
       // so its re-checks apply again; any asked before this start began are still dropped.
       else setPreflight((cur) => cur && { ...cur, attempt });
-      if (e instanceof DaemonError && e.conflict) setPending({ fields, conflict: e.conflict });
-      else if (!(e instanceof DaemonError && e.preflight)) setError(message(e));
+      if (!(e instanceof DaemonError && e.preflight)) setError(message(e));
     } finally {
       setBusy(false);
       // Started, the snapshot too: one read on the new chat's status event can predate its window
@@ -264,7 +281,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       await client.setRepoGitIdentity(mine.repo, gitName, gitEmail);
       if (currentRepo.current !== mine.repo || attempt !== attempts.current) return;
       setIdentity(null);
-      await start(mine.fields, mine.choice);
+      await start(mine.fields, mine.how);
     } catch (e) {
       if (currentRepo.current === mine.repo && attempt === attempts.current) setError(message(e));
     } finally {
@@ -272,25 +289,67 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     }
   };
 
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    // The same guard as Start's: ⌘↵ in the prompt comes here too.
+  const send = async (how: SendHow) => {
+    // The same guard as Send's: ⌘↵ in the prompt and the chevron's menu come here too.
     if (busy || !repo || usable === null || needsPick) return;
-    const ok = await start({
-      autopilot: true,
-      prompt: prompt.trim() || undefined,
-      branch: branch.trim() || undefined,
-      provider: chosenCli || undefined,
-      name: sessionName.trim() || undefined,
-    });
+    const ok = await start(
+      {
+        autopilot: true,
+        prompt: prompt.trim() || undefined,
+        // Pause it and start here means this checkout: a Branch given in Options would start elsewhere.
+        branch: how === "p" ? undefined : branch.trim() || undefined,
+        provider: chosenCli || undefined,
+        name: sessionName.trim() || undefined,
+      },
+      how,
+    );
     if (ok) {
       setPrompt("");
       setBranch("");
       setSessionName("");
     }
   };
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    void send("n");
+  };
 
-  const running = (sessions[repo] ?? []).filter((s) => !isPaused(s)).length;
+  // A paused session picked from Send's menu: resumed, then opened.
+  const resume = async (session: SessionDTO) => {
+    if (busy) return;
+    const attempt = ++attempts.current;
+    // Still this resume's project and the latest action: another project picked meanwhile keeps the screen.
+    const current = () => currentRepo.current === repo && attempt === attempts.current;
+    setBusy(true);
+    setError(null);
+    let resumed = false;
+    try {
+      await client.continueSession(session.id);
+      resumed = true;
+    } catch (e) {
+      if (current()) setError(message(e));
+    } finally {
+      setBusy(false);
+      await Promise.all([reload().catch((e: unknown) => current() && setError(message(e))), resumed ? refresh?.() : undefined]);
+    }
+    if (resumed && current()) onOpen(session.id, repo);
+  };
+
+  // The sessions running or paused in the project: Send's chevron and the hint beside the chips.
+  const inRepo = sessions[repo] ?? [];
+  const runningHere = inRepo.filter((s) => !isPaused(s));
+  const running = runningHere.length;
+  const pausedCount = inRepo.length - running;
+  // Where Send goes, and what is already here.
+  const hint = `sends on a new branch · ${
+    running > 0
+      ? running === 1
+        ? `${sessionLabel(runningHere[0])} runs here`
+        : `${running} sessions run here`
+      : pausedCount === 1
+        ? `${sessionLabel(inRepo[0])} is paused here`
+        : `${pausedCount} paused sessions here`
+  }`;
   if (usable?.length === 0) {
     return (
       <section className={`${card} flex flex-col gap-s2 px-s2 py-s3`} aria-label="Finish setting up">
@@ -306,74 +365,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       </section>
     );
   }
-  return (
+  const here = repos.find((r) => r.repo_root === repo);
+  // The CLI a start runs on: the one usable, or the person's pick among several.
+  const cli = usable?.length === 1 ? usable[0] : chosenCli;
+  const missing = usable ? LOGIN_PROVIDERS.filter((p) => !usable.includes(p)) : [];
+  const rest = (
     <>
-    <form aria-label="Start a session" onSubmit={submit} className={`${card} flex flex-col gap-s1 px-s2 py-s2`}>
-      <div className="flex items-start gap-s1">
-        <textarea
-          className={`${field} min-h-24 w-full resize-y`}
-          aria-label="What should brindle work on?"
-          placeholder="What should brindle work on? Describe the task; the supervisor plans and hands out the work."
-          value={prompt}
-          rows={3}
-          autoFocus
-          onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit(e);
-          }}
-        />
-      </div>
-      <div className="flex items-start gap-s1">
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-s1">
-        <span className="inline-flex items-center gap-s1" data-walkthrough="project-picker">
-          {repos.length > 1 ? (
-            <ProjectCombobox repos={repos} value={repo} onChange={onChoose} />
-          ) : (
-            <span className="text-sm text-ink-2">
-              in <span className="font-medium text-ink">{repos[0]?.name}</span>
-            </span>
-          )}
-        </span>
-        {usable && usable.length === 1 && (
-          <span className="text-sm text-ink-2">
-            on <span className="font-medium text-ink">{providerName(usable[0])}</span>
-          </span>
-        )}
-        {many && (
-          <>
-            <span className="text-sm text-ink-2">on</span>
-            <select className={field} aria-label="Supervisor CLI" value={chosenCli} onChange={(e) => pickCli(e.target.value)}>
-              <option value="" disabled>
-                Pick a CLI
-              </option>
-              {usable.map((p) => (
-                <option key={p} value={p}>
-                  {providerName(p)}
-                </option>
-              ))}
-            </select>
-          </>
-        )}
-        {usable && !LOGIN_PROVIDERS.every((p) => usable.includes(p)) && (
-          <button type="button" className={quiet} onClick={onSignIn}>
-            Sign in to more…
-          </button>
-        )}
-        <button type="button" className={quiet} aria-expanded={adding} onClick={() => setAdding((a) => !a)}>
-          Add a project…
-        </button>
-        {running > 0 && <span className="text-xs text-ink-3">{running === 1 ? "one session already runs here" : `${running} sessions already run here`}</span>}
-        <button type="button" className={quiet} aria-expanded={options} onClick={() => setOptions((o) => !o)}>
-          Options {options ? "▴" : "▾"}
-        </button>
-        </div>
-        <div className="flex shrink-0 items-center gap-s1">
-          <span className="text-xs text-ink-3">⌘↵</span>
-          <LoadingButton type="submit" busy={busy && !identity} disabled={busy || !repo || usable === null || needsPick} className={main}>
-            Start
-          </LoadingButton>
-        </div>
-      </div>
       {lookupFailed && (
         <p role="alert" className={`${alert} flex items-center gap-s2`}>
           <span>Couldn't check which CLIs can run here.</span>
@@ -383,7 +380,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         </p>
       )}
       {needsPick && (
-        <div className="mt-s1 flex flex-col gap-s1 border-t border-line pt-s2">
+        <div className="flex flex-col gap-s1">
           <div className={h2}>Which CLI should run your sessions?</div>
           <p className={lede}>You're signed in to {usable.length === 2 ? "two" : usable.length}. brindle remembers the one you pick; change it here any time.</p>
           <div className="flex gap-s1 pt-1">
@@ -395,13 +392,6 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
           </div>
         </div>
       )}
-      {options && (
-        <div className="flex flex-wrap items-center gap-s1 border-t border-line pt-s1">
-          <input className={`${field} w-48`} placeholder="Session name (optional)" aria-label="Session name" value={sessionName} onChange={(e) => setSessionName(e.target.value)} />
-          <input className={`${field} w-48 font-mono`} placeholder="Branch (its own worktree)" aria-label="Branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
-        </div>
-      )}
-      {pending && <ConflictChoice conflict={pending.conflict} onChoose={(key, session) => start(pending.fields, { key, session })} onCancel={() => setPending(null)} />}
       {starting && <Starting />}
       {error && (
         <p role="alert" className={alert}>
@@ -417,6 +407,95 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
           ))}
         </ul>
       )}
+    </>
+  );
+  return (
+    <>
+    <form aria-label="Start a session" onSubmit={submit} className={`mt-s3 flex flex-col rounded-md border border-line-strong bg-[color-mix(in_srgb,var(--surface-2)_70%,var(--canvas))]`}>
+      <textarea
+        className="field-sizing-content max-h-[50vh] min-h-[130px] w-full resize-none rounded-t-md bg-transparent px-4 py-3.5 text-[14.5px] leading-[1.55] text-ink placeholder:text-ink-3 focus:outline-none"
+        aria-label="What should brindle work on?"
+        placeholder="What should brindle work on? Describe the task…"
+        value={prompt}
+        rows={3}
+        autoFocus
+        onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(e);
+        }}
+      />
+      <div className="flex items-start gap-2 border-t border-line px-3 py-2.5" role="toolbar" aria-label="Session settings">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+        <span data-walkthrough="project-picker" className="inline-flex">
+          <ChipMenu
+            label="Project"
+            value={here?.name ?? ""}
+            chip={<><FolderIcon />{here?.name}</>}
+            heading="Projects"
+            items={[
+              ...repos.map((r) => {
+                const c = counts(sessions[r.repo_root]);
+                const said = [c.running > 0 && `${c.running} running`, c.paused > 0 && `${c.paused} paused`].filter(Boolean).join(" · ");
+                return { key: r.repo_root, label: r.name, checked: r.repo_root === repo, detail: said || undefined, onSelect: () => onChoose(r.repo_root) };
+              }),
+              SEPARATOR,
+              { key: "open", label: "Open a folder…", icon: <FolderIcon />, onSelect: () => setAdding((a) => ({ how: "open", ask: (a?.ask ?? 0) + 1 })) },
+              { key: "clone", label: "Clone a repository…", icon: <LinkIcon />, onSelect: () => setAdding((a) => ({ how: "clone", ask: (a?.ask ?? 0) + 1 })) },
+            ]}
+          />
+        </span>
+        <ChipMenu
+          label="Supervisor CLI"
+          value={usable === null ? "Checking…" : cli ? providerName(cli) : "Pick a CLI"}
+          chip={usable === null ? <span className="text-ink-3">Checking…</span> : cli ? <><Dot tone="done" className="!size-1.5" />{providerName(cli)}</> : <span className="text-sap">Pick a CLI</span>}
+          tone={needsPick ? "ask" : undefined}
+          disabled={usable === null}
+          heading="Supervisor runs on"
+          width={330}
+          items={[
+            ...(usable ?? []).map((p) => ({ key: p, label: providerName(p), checked: p === cli, detail: p === provider ? "signed in · last used" : "signed in", onSelect: () => pickCli(p) })),
+            ...(missing.length > 0 ? [SEPARATOR, { key: "more", label: "Sign in to more…", icon: <PlusIcon />, detail: missing.map(providerName).join(", "), onSelect: onSignIn }] : []),
+          ]}
+          footer="Workers and reviewers follow your profiles."
+        />
+        <button type="button" className={`${quiet} ${options ? "bg-ink/6 text-ink" : ""}`} aria-expanded={options} onClick={() => setOptions((o) => !o)}>
+          <SlidersIcon />
+          Options <span className="text-[10px] text-ink-3">{options ? "▴" : "▾"}</span>
+        </button>
+        </div>
+        <SendButton
+          client={client}
+          repo={repo}
+          project={here?.name ?? ""}
+          sessions={inRepo}
+          busy={busy && !identity}
+          disabled={busy || !repo || usable === null || needsPick}
+          onSend={(how) => void send(how)}
+          onOpen={(s) => onOpen(s.id, repo)}
+          onResume={(s) => void resume(s)}
+        />
+      </div>
+      {inRepo.length > 0 && (
+        <p className="-mt-1 flex min-w-0 items-center gap-1.5 px-4 pb-2.5 text-xs text-ink-3" data-testid="send-hint" title={hint}>
+          <BranchIcon size={12} className="shrink-0 text-branch" />
+          <span className="truncate">{hint}</span>
+        </p>
+      )}
+      {options && (
+        <div className="grid grid-cols-2 gap-x-5 gap-y-1.5 border-t border-line px-4 pb-3.5 pt-3" data-testid="start-options">
+          <label className="flex flex-col gap-1.5 text-xs text-ink-2">
+            Session name
+            <input className={field} placeholder="Named from the goal" value={sessionName} onChange={(e) => setSessionName(e.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1.5 text-xs text-ink-2">
+            Branch
+            <input className={`${field} font-mono`} placeholder="brindle picks one" value={branch} onChange={(e) => setBranch(e.target.value)} />
+          </label>
+          <span className="text-[11.5px] text-ink-3">Shown in the sidebar. Empty: named from the goal.</span>
+          <span className="text-[11.5px] text-ink-3">Its own worktree. Empty: brindle picks one.</span>
+        </div>
+      )}
+      <div className="flex flex-col gap-s1 border-t border-line px-4 py-3 empty:hidden">{rest}</div>
     </form>
     {identity?.repo === repo && (
       <section aria-label="Git identity" className={`${card} px-s2 py-s2`}>
@@ -440,12 +519,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
           // Only while this card's start is still the latest one, and its card still shows.
           if (mine === attempts.current) setPreflight((cur) => (cur?.attempt === mine ? { ...cur, items } : cur));
         }}
-        onLaunch={() => void start(preflight.fields)}
+        onLaunch={() => void start(preflight.fields, preflight.how)}
         onUseInstead={(other) => {
           // Only a CLI the current repo's lookup says can run.
           if (!usable?.includes(other)) return;
           if (many) setProvider(other);
-          void start({ ...preflight.fields, provider: other });
+          void start({ ...preflight.fields, provider: other }, preflight.how);
         }}
         usable={usable ?? []}
         launchLabel="Start"
@@ -454,12 +533,21 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       />
     )}
     {adding && (
-      <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Add a project">
+      <section className="mt-s3 flex flex-col gap-s1" aria-label="Add a project">
+        <div className="flex items-center justify-between">
+          <span className={label}>Add a project</span>
+          <button type="button" className={quiet} onClick={() => setAdding(null)}>
+            Close
+          </button>
+        </div>
         <ProjectPicker
+          key={adding.ask}
           client={client}
           pickFolder={pickFolder}
+          layout="rows"
+          start={adding.how}
           onPicked={(picked) => {
-            setAdding(false);
+            setAdding(null);
             onAdded(picked);
           }}
         />
@@ -481,37 +569,5 @@ function Starting() {
     <p role="status" className="text-sm text-ink-2">
       Starting the session…{seconds >= 2 ? ` ${seconds}s` : ""}
     </p>
-  );
-}
-
-function ConflictChoice({ conflict, onChoose, onCancel }: { conflict: SessionConflict; onChoose(key: string, session: string): Promise<boolean>; onCancel(): void }) {
-  const [picked, setPicked] = useState(conflict.sessions[conflict.default]?.id ?? "");
-  const [busy, setBusy] = useState(false);
-  const choose = async (key: string) => {
-    setBusy(true);
-    await onChoose(key, picked);
-    setBusy(false);
-  };
-  return (
-    <div role="group" aria-label="Session already running" className="flex flex-col gap-s1 rounded-md border border-branch bg-branch-soft p-s2 text-sm">
-      <p className="font-medium">{conflict.message}</p>
-      {conflict.sessions.map((s) => (
-        <label key={s.id} className="flex items-center gap-s1">
-          <input type="radio" name="conflict-session" checked={picked === s.id} onChange={() => setPicked(s.id)} />
-          <span className={mono}>{s.id}</span>
-          <span className="text-ink-2">{s.name || s.goal || s.status}</span>
-        </label>
-      ))}
-      <div className="flex flex-wrap gap-s1">
-        {conflict.choices.map((c) => (
-          <button key={c.key} type="button" disabled={busy || !picked} className={button} onClick={() => choose(c.key)}>
-            {c.label[0].toUpperCase() + c.label.slice(1)}
-          </button>
-        ))}
-        <button type="button" className={quiet} onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-    </div>
   );
 }

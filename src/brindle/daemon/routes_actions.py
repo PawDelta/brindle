@@ -336,13 +336,11 @@ def start_demo(db: DB, params: dict, body: Body) -> Any:
 
 
 def cancel_demo(db: DB, params: dict, body: Body) -> Any:
-    """The person didn't go on with a demo its preflight held: its practice repo goes."""
+    """End running or held practice runs and remove their repos."""
     from brindle import demo as demo_mod
 
     with _DEMO_LOCK:
-        roots = demo_mod.unused(db)
-        for root in roots:
-            demo_mod.discard(db, root)
+        roots = demo_mod.end(db)
     return {"removed": [str(r) for r in roots]}
 
 

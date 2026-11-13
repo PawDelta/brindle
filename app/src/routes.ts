@@ -44,8 +44,10 @@ export const LIBRARY_STAGES = [
 export type LibraryStage = (typeof LIBRARY_STAGES)[number]["id"];
 
 export type Route =
-  /* `repo`: the project to start in (one just picked, as the first launch ends). */
-  | { screen: "new"; repo?: string }
+  /* `repo`: the project to start in (one just picked, as the first launch ends). `add`: a
+     project to add first, from a finished practice run's Start your own: the folder picker
+     ("open") or the clone form ("clone"). */
+  | { screen: "new"; repo?: string; add?: "open" | "clone" }
   /* `session`: only what waits in that session (its root), from its bar's count. */
   | { screen: "inbox"; session?: string }
   /* The Library. `view`: the designs (the default) or one of its Sources; `stage`: the

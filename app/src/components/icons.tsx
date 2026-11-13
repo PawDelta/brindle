@@ -27,6 +27,17 @@ export const ChevronDownIcon = (p: Props) => (
   </Icon>
 );
 
+/* A new branch: a line forking off another. */
+export const BranchIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="6" cy="5.25" r="2.5" />
+    <circle cx="6" cy="18.75" r="2.5" />
+    <circle cx="18" cy="8.25" r="2.5" />
+    <path d="M6 7.8v8.4" />
+    <path d="M18 10.8c0 3.9-5.4 3.6-9.6 5.4" />
+  </Icon>
+);
+
 export const ChevronRightIcon = (p: Props) => (
   <Icon {...p}>
     <path d="m9 6 6 6-6 6" />
@@ -111,5 +122,67 @@ export const CommentIcon = (p: Props) => (
 export const BookmarkIcon = ({ filled, ...p }: Props & { filled?: boolean }) => (
   <Icon {...p}>
     <path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4.5L5 21V4a1 1 0 0 1 1-1z" fill={filled ? "currentColor" : "none"} />
+  </Icon>
+);
+
+/* A folder on this Mac. */
+export const FolderIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M3 6.5h6.5l2 2H21V19H3z" />
+  </Icon>
+);
+
+/* A link: a repository's URL. */
+export const LinkIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M10 14l4-4" />
+    <path d="M11.5 6.5l1.6-1.6a3.9 3.9 0 0 1 5.5 5.5L17 12" />
+    <path d="M12.5 17.5l-1.6 1.6a3.9 3.9 0 0 1-5.5-5.5L7 12" />
+  </Icon>
+);
+
+/* Play: watch something run. */
+export const PlayIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M7.5 5v14l10.5-7z" />
+  </Icon>
+);
+
+/* A tick: the picked item in a menu. */
+export const CheckIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M4.5 12.5l4.5 4.5 10.5-10.5" />
+  </Icon>
+);
+
+/* Add more. */
+export const PlusIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M12 4.5v15M4.5 12h15" />
+  </Icon>
+);
+
+/* Options: two sliders. */
+export const SlidersIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M3 7h12M19 7h2M3 17h3M10 17h11" />
+    <circle cx="17" cy="7" r="2" />
+    <circle cx="8" cy="17" r="2" />
+  </Icon>
+);
+
+/* The Inbox: a tray. */
+export const InboxIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M3 13.5h4.5l1.5 3h6l1.5-3H21" />
+    <path d="M5.2 5.2h13.6L21 13.5V19H3v-5.5z" />
+  </Icon>
+);
+
+/* Settings: a gear. */
+export const GearIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="12" cy="12" r="3.2" />
+    <path d="M12 2.7v2.4M12 18.9v2.4M2.7 12h2.4M18.9 12h2.4M5.4 5.4l1.7 1.7M16.9 16.9l1.7 1.7M5.4 18.6l1.7-1.7M16.9 7.1l1.7-1.7" />
   </Icon>
 );
