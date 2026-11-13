@@ -1,7 +1,8 @@
-"""The person's MCP servers stay theirs under brindle: brindle's own writes to
-Claude Code's state file never replace one Claude Code just made (a server
-added, a sign-in), and a Claude pane keeps the TLS client settings its
-company's remote MCP servers ask for."""
+"""The person's MCP servers stay theirs under brindle. brindle writes Claude
+Code's state file as seldom as it can and never forces a write: one Claude
+Code makes meanwhile (a server added, a sign-in) is kept, and brindle's is
+made after it or left for the next launch. And a Claude pane keeps the TLS
+client settings its company's remote MCP servers ask for."""
 
 import copy
 import json
@@ -63,49 +64,58 @@ class ClaudeCode:
         removes the lock, makes its own, writes, and is still at work."""
         self.lock.rmdir()
         self.lock.mkdir()
-        later = time.time() + 60
-        os.utime(self.lock, (later, later))
         self.writes_without_its_lock()
 
 
-@pytest.mark.parametrize("there, how, renames, written", [
-    (True, "writes_under_its_lock", 1, True),       # held off by brindle's lock, then works from brindle's file
-    (True, "writes_without_its_lock", 1, True),     # traded back at once; brindle starts over from it
-    (True, "writes_without_its_lock", 99, False),   # ... at every rename: the file stays Claude Code's
-    (True, "takes_the_lock_over", 1, False),        # brindle lost its lease: it writes nothing more
-    (False, "writes_without_its_lock", 1, True),    # no file when brindle looked: created, never written over
+@pytest.mark.parametrize("there, how, when, written", [
+    (True, "writes_under_its_lock", "write", True),     # held off by brindle's lock, then works from brindle's file
+    (True, "writes_without_its_lock", "write", False),  # the file is no longer the one brindle read: left as it is
+    (True, "takes_the_lock_over", "renew", False),      # nor the lock the one brindle made: nothing written, lock left
+    (False, "writes_without_its_lock", "write", False),     # no file when brindle looked: none written over the new one
 ])
-def test_what_claude_code_writes_at_brindles_rename_is_kept(config, tmp_path, monkeypatch, there, how, renames,
-                                                            written):
-    """Claude Code writes at the last instant: after brindle's last look at
-    the file, right before each of its renames."""
+def test_a_write_claude_code_makes_while_brindle_is_writing_is_kept(config, tmp_path, monkeypatch, there, how,
+                                                                    when, written):
+    """Claude Code writes after brindle read the file and changed its copy:
+    as brindle goes to write it, or as it renews the lock it holds. brindle's
+    write is made after Claude Code's or not at all, and the next launch
+    makes it."""
     worktree = tmp_path / "worktree"
     if not there:
         config.unlink()
-    claude, rename, seen = ClaudeCode(config), providers._renamex, []
+    claude, real, seen = ClaudeCode(config), {"write": providers._replace_json, "renew": os.utime}, []
 
-    def claude_code_first(src, dst, *, swap):
-        if len(seen) < renames:
-            seen.append(dst)
-            getattr(claude, how)()
-        rename(src, dst, swap=swap)
+    def claude_code_first(point):
+        def step(*a, **k):
+            if when == point and not seen and (point == "write" or isinstance(a[0], int)):  # an int: the held lock
+                seen.append(point)
+                getattr(claude, how)()
+            return real[point](*a, **k)
+        return step
 
-    monkeypatch.setattr(providers, "_renamex", claude_code_first)
-    try:
-        done = providers.trust_folder(str(worktree)) if there else bool(providers.seed_ci_config([str(worktree)]))
-    except OSError:
-        done = False
-    assert done is written
+    def brindle_writes():
+        try:
+            return providers.trust_folder(str(worktree)) if there else bool(providers.seed_ci_config([str(worktree)]))
+        except OSError:
+            return False
+
+    monkeypatch.setattr(providers, "_replace_json", claude_code_first("write"))
+    monkeypatch.setattr(os, "utime", claude_code_first("renew"))
+    assert brindle_writes() is written
     if claude.waiting:
         claude.writes_under_its_lock()      # its turn, on the file brindle wrote
+    elif how == "takes_the_lock_over":
+        claude.lock.rmdir()                 # still there, and Claude Code's to remove
 
-    after = json.loads(config.read_text())
-    assert len(after["mcpServers"]) > 1 and after["mcpServers"] == claude.memory["mcpServers"]
-    assert after["oauthAccount"] == {"emailAddress": "signed-in@example.com"}
-    assert after["projects"]["/repo"] == STATE["projects"]["/repo"]
-    assert (after["projects"].get(os.path.realpath(worktree)) == {"hasTrustDialogAccepted": True}) is written
-    taken = how == "takes_the_lock_over"    # and that lock is Claude Code's: left alone
-    assert sorted(p.name for p in config.parent.iterdir()) == [".claude.json", *([".claude.json.lock"] * taken)]
+    def state():
+        now = json.loads(config.read_text())
+        return (now["mcpServers"], now["oauthAccount"], now["projects"].get("/repo"),
+                now["projects"].get(os.path.realpath(worktree)) == {"hasTrustDialogAccepted": True})
+
+    kept = (claude.memory["mcpServers"], {"emailAddress": "signed-in@example.com"}, STATE["projects"]["/repo"])
+    assert len(kept[0]) == 2 and state() == (*kept, written)
+    assert brindle_writes() is True         # the next launch, with nothing in its way
+    assert state() == (*kept, True)
+    assert [p.name for p in config.parent.iterdir()] == [".claude.json"]
 
 
 @pytest.mark.parametrize("claude_code, trusted", [
@@ -129,6 +139,21 @@ def test_brindle_writes_claude_codes_state_only_with_its_lock(config, tmp_path, 
 
     assert lock.exists() is not trusted
     assert (json.loads(config.read_text()) == STATE) is not trusted
+
+
+def test_a_worktree_of_a_repo_the_person_trusted_needs_no_write(config, tmp_path):
+    """Claude Code reads a linked worktree's trust from its main checkout's
+    entry, which it wrote itself when the person trusted the repo."""
+    main, worktree = tmp_path / "repo", tmp_path / "worktree"
+    (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    (main / ".git" / "worktrees" / "wt" / "commondir").write_text("../..\n")
+    (worktree / ".git").write_text(f"gitdir: {main}/.git/worktrees/wt\n")
+    config.write_text(json.dumps({**STATE, "projects": {os.path.realpath(main): {"hasTrustDialogAccepted": True}}}))
+    before = os.stat(config)
+
+    assert providers.trust_folder(str(worktree)) is True
+
+    assert (os.stat(config).st_ino, os.stat(config).st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
 
 
 @pytest.mark.parametrize("provider, kept", [

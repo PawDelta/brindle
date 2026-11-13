@@ -221,10 +221,10 @@ def test_trust_cleans_up_its_temp_file_when_the_write_fails(tmp_path, claude_con
     config = claude_config / ".claude.json"
     before = config.read_text()
 
-    def fail(src, dst, *, swap):
+    def fail(src, dst):
         raise OSError("disk full")
 
-    monkeypatch.setattr(providers, "_renamex", fail)     # how the file is put in place
+    monkeypatch.setattr(os, "replace", fail)
     assert trust_folder(str(tmp_path)) is False
     assert config.read_text() == before
     assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
