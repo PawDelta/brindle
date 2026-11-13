@@ -243,13 +243,15 @@ def revision(db: DB, plan_id: str, rev: int | None = None) -> dict:
 def draft(db: DB, p: dict):
     """The live draft replica plan ``p`` is edited in, or None: only a shared
     plan whose Library document has a draft this machine holds, while its
-    Team plan hasn't ended (a lapsed plan is a personal doc again)."""
+    Team plan hasn't ended (a lapsed plan is a personal doc again), and only
+    once its current revision is the Library's, which the draft continues
+    (revisions made here before are carried over by shared_docs._carry_over)."""
     from brindle import plan_drafts
     from brindle.pro import shared_docs
 
     row = db.conn.execute("SELECT * FROM plan_shares WHERE plan_id=? AND doc_id IS NOT NULL",
                           (p["id"],)).fetchone()
-    if row is None or shared_docs.lapse_stands(row, p) or not db.conn.execute(
+    if row is None or row["local_rev"] != p["rev"] or shared_docs.lapse_stands(row, p) or not db.conn.execute(
             "SELECT 1 FROM plan_drafts WHERE doc_id=?", (row["doc_id"],)).fetchone():
         return None
     return plan_drafts.DraftReplica.open(db, row["doc_id"])
@@ -472,17 +474,25 @@ def _thread(db: DB, p: dict, thread_id: Any) -> dict:
 
 def _add(db: DB, p: dict, rev: int, kind: str, anchor: dict | None, author: str, text: str,
          attachments: list[dict], parent: int | None = None, after: str | None = None, question: bool = False) -> int:
-    now = time.time()
     with db.tx() as c:
-        if c.execute("SELECT COUNT(*) FROM plan_threads WHERE plan_id=?", (p["id"],)).fetchone()[0] >= MAX_THREADS:
-            raise ServiceError("too_many", f"a plan may have at most {MAX_THREADS} comments and replies", 400)
-        tid = int(c.execute(
-            "INSERT INTO plan_threads (plan_id, parent_id, rev, kind, anchor, author, body, after, attachments,"
-            " status, created_at, updated_at, question) VALUES (?,?,?,?,?,?,?,?,?,'open',?,?,?)",
-            (p["id"], parent, rev, kind, json.dumps(anchor) if anchor else None, author, text, after,
-             json.dumps(attachments), now, now, question)).lastrowid)
+        tid = file_thread(c, p["id"], rev, kind, anchor, author, text, attachments, parent=parent, after=after,
+                          question=question)
     _changed(db, p, p["rev"])
     return tid
+
+
+def file_thread(c, plan_id: str, rev: int, kind: str, anchor: dict | None, author: str, text: str,
+                attachments: list[dict] | None = None, *, parent: int | None = None, after: str | None = None,
+                question: bool = False) -> int:
+    """Add a thread or reply in transaction ``c``. Returns its id."""
+    if c.execute("SELECT COUNT(*) FROM plan_threads WHERE plan_id=?", (plan_id,)).fetchone()[0] >= MAX_THREADS:
+        raise ServiceError("too_many", f"a plan may have at most {MAX_THREADS} comments and replies", 400)
+    now = time.time()
+    return int(c.execute(
+        "INSERT INTO plan_threads (plan_id, parent_id, rev, kind, anchor, author, body, after, attachments,"
+        " status, created_at, updated_at, question) VALUES (?,?,?,?,?,?,?,?,?,'open',?,?,?)",
+        (plan_id, parent, rev, kind, json.dumps(anchor) if anchor else None, author, text, after,
+         json.dumps(attachments or []), now, now, question)).lastrowid)
 
 
 def comment(db: DB, plan_id: str, rev: Any = None, anchor: Any = None, text: Any = None,

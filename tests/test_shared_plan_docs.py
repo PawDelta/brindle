@@ -100,7 +100,7 @@ class Library:
                              "rev": form["rev"], "status": "open", "replies": [], "after": form["after"], "at": 9.0,
                              "anchor": {"kind": "text", "section": form["section"], "start": form["start"],
                                         "end": form["start"] + len(form["before"]), "quote": form["before"],
-                                        "state": "current"}})
+                                        "state": "current", **({"cursor": form["cursor"]} if "cursor" in form else {})}})
         return self.answer()
 
     def vote(self, form, headers):
@@ -123,6 +123,10 @@ class Library:
             t["status"] = "resolved" if action == "resolve" else "open"
         elif action == "reject":
             t["status"] = "rejected"
+        elif self.draft is not None:      # its text is in the draft already, or it is refused
+            if not form.get("in_draft"):
+                return 409, {"error": "live_draft"}
+            t["status"] = "accepted"
         else:
             if self.refuse_accept:
                 return 409, {"error": "stale", "rev": self.rev}
@@ -150,6 +154,8 @@ class Library:
         return self.share_status, {"id": DOC} if self.share_status == 200 else {"error": "too_many_scopes"}
 
     def revise(self, form, headers):
+        if self.draft is not None:
+            return 409, {"error": "live_draft"}
         if form["rev"] != self.rev:
             return 409, {"error": "stale", "rev": self.rev}
         self.rev, self.content = self.rev + 1, {k: copy.deepcopy(v) for k, v in form.items() if k != "rev"}
@@ -680,21 +686,51 @@ def test_two_writers_in_one_shared_section_both_land_in_the_live_draft_and_only_
     assert not sent(backend, f"POST {DESIGN}/revisions")
     assert (dto()["rev"], dto()["gate"]["state"]) == (1, "ready")
 
-    # A suggestion on the last "on" follows its words as a teammate types before them.
+    # A comment on words only the draft has reaches the Library.
+    plan_docs.comment(db, pid, 1, {"kind": "text", "section": "summary", "start": both.index("It"),
+                                   "quote": "It stays"}, "Says who?")
+    # A suggestion on the last "on" follows its words as a teammate types before them, and is
+    # accepted before the Library has it: it goes up, then is marked accepted, its text applied once.
     plan_docs.suggest(db, pid, 1, "summary", both.rindex("on"), "on", "put")
     lib.draft.insert("summary", 0, "The team agreed, after a call: ")
+    lib.refuse_suggest = True
     sd.sync(db, pid, **net)
     plan_docs.accept(db, pid, dto()["threads"][-1]["id"], 1)
+    lib.refuse_suggest = False
     sd.sync(db, pid, **net)
     agreed = "The team agreed, after a call: Hosts run on a machine the customer controls. It stays put."
     assert lib.draft.text("summary") == dto()["sections"][0]["markdown"] == agreed
     assert (dto()["rev"], dto()["threads"][-1]["status"]) == (1, "accepted")
+    assert [(t["kind"], t["anchor"]["quote"], t["status"]) for t in lib.threads] == [
+        ("comment", "It stays", "open"), ("suggestion", "on", "accepted")]
 
     # Only a version frozen in the Library counts: it comes in, and r1's sign-off isn't on it.
     lib.freeze()
     sd.sync(db, pid, **net)
     got = dto()
     assert (got["rev"], got["sections"][0]["markdown"], got["gate"]["state"]) == (2, agreed, "waiting")
+
+
+def test_an_edit_made_here_before_the_live_draft_arrives_is_carried_into_it_as_a_suggestion(
+        db, parts, backend, monkeypatch):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")         # r2, not sent yet
+    lib.rev, lib.author = 2, "u_b"                                       # meanwhile a teammate's revision,
+    lib.content["sections"][0]["markdown"] = SUMMARY + " It stays on."
+    lib.open_draft()                                                     # then the draft opens on it
+    monkeypatch.setattr(sd, "relays", {DOC: Relay(lib)}, raising=False)
+    sd.sync(db, pid, **net)
+
+    got = plans.to_dto(db, plans.get(db, pid))
+    assert (got["sections"][0]["markdown"], got["gate"]["state"]) == (SUMMARY + " It stays on.", "ready")
+    [carried] = got["threads"]
+    assert (carried["kind"], carried["before"], carried["after"], carried["author"]) == (
+        "suggestion", "Workers", "Hosts", "person")
+    plan_docs.accept(db, pid, carried["id"], got["rev"])
+    sd.sync(db, pid, **net)
+    assert lib.draft.text("summary") == "Hosts run on a machine the customer controls. It stays on."
+    assert [t["status"] for t in lib.threads] == ["accepted"] and not sent(backend, f"POST {DESIGN}/revisions")
 
 
 def test_a_teammates_edit_comes_in_as_a_revision_and_later_sends_go_on_it(db, parts, backend):
