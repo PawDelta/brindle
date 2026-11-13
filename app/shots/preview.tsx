@@ -53,8 +53,16 @@ if (params.get("renderer") === "dom") {
 const SCENES: Record<string, Route> = {
   new: { screen: "new" },
   "new-first": { screen: "new" },
+  // The first run with Clone expanded; the composer with its project or CLI menu open.
+  "new-first-clone": { screen: "new" },
+  "new-projects": { screen: "new" },
+  "new-cli": { screen: "new" },
+  // A practice run under way, and finished: the session's repo is brindle's practice repo.
+  practice: { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
+  "practice-done": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
   flow: { screen: "new" },
   "new-composer": { screen: "new" },
+  "new-conflict": { screen: "new" },
   "new-codex-only": { screen: "new" },
   inbox: { screen: "inbox" },
   "session-failed": { screen: "session", root: "sup-42", repo: REPO, agent: "e9a0b6c3" },
@@ -104,6 +112,7 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+if (scene === "new-conflict") daemon.data.sessions[0].name = "Desktop polish";
 if (scene.startsWith("sidebar-foot-")) {
   const busy = scene === "sidebar-foot-busy";
   daemon.data.usage = usageScenario(busy ? "several" : "normal");
@@ -139,7 +148,9 @@ if (scene === "sidebar-resize" && daemon.data.goal) {
   }));
 }
 // First run: no project yet.
-if (scene === "new-first") daemon.data.repos = [];
+if (scene === "new-first" || scene === "new-first-clone") daemon.data.repos = [];
+if (scene === "practice" || scene === "practice-done") daemon.data.repos = daemon.data.repos.map((r) => (r.repo_root === REPO ? { ...r, demo: true } : r));
+if (scene === "practice-done") daemon.completeGoal("sup-42");
 // Only Codex on this Mac: Claude Code neither installed nor signed in.
 if (scene === "new-codex-only") daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
 // The first-run walk-through: no project yet, only Codex on this Mac, and the folder the picker returns isn't a git repository.
@@ -271,6 +282,10 @@ const OPENS: Record<string, string> = {
   "agents-make": 'css:button[aria-label="Medium runs on"]',
   "knowledge-record": "Record a decision",
   "new-composer": "Options ▾",
+  "new-first-clone": "Clone a repository…",
+  "new-projects": 'css:button[aria-label^="Project:"]',
+  "new-cli": 'css:button[aria-label^="Supervisor CLI:"]',
+  "new-conflict": 'css:button[aria-label="Other ways to start"]',
   "new-codex-only": "Options ▾",
   "knowledge-add": "Add folder",
   "update-downloading": 'css:[data-testid="app-update-now"]',

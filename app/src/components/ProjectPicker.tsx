@@ -4,16 +4,21 @@
    says otherwise; POST /repos/clone, a job whose git lines stream into the
    calm progress card, and whose failure, an auth one among them, shows
    git's own words with Retry). The first launch's last step and New
-   session both use it. Nothing to type but the URL, no popup. */
+   session both use it. Nothing to type but the URL, no popup.
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+   Two layouts: "cards" (the first launch's step, the clone form shown), and
+   "rows" (New session's first run and its project menu: two equal rows,
+   Clone expanding in place into its URL, Into folder and Change…). */
+
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type Repo } from "../api/client";
 import type { OpenUrl, PickFolder } from "../api/open";
 import { plain } from "../api/wording";
 import { useJob } from "../screens/Branch/useJob";
 import { GithubConnectCard, githubReady, useGithub } from "./GithubConnect";
+import { FolderIcon, LinkIcon } from "./icons";
 import { ProgressCard } from "./ProgressCard";
-import { alert, button, card, field, mono } from "./ui";
+import { alert, button, card, field, main, mono, quiet } from "./ui";
 
 export interface ProjectPickerProps {
   client: DaemonClient;
@@ -25,6 +30,12 @@ export interface ProjectPickerProps {
   offerGithub?: boolean;
   /* Opens the token page in the system browser. */
   openUrl?: OpenUrl;
+  /* "rows": two equal rows, the clone form behind "Clone a repository…". */
+  layout?: "cards" | "rows";
+  /* Rows only: begin with the folder picker open, or the clone expanded (a menu's Open a folder… or Clone a repository…). */
+  start?: "open" | "clone";
+  /* Rows only: the clone form opened or closed. */
+  onCloning?(open: boolean): void;
 }
 
 /* Where a clone goes unless the person picks another folder. */
@@ -35,8 +46,10 @@ const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e)
 const nameOf = (path: string) => path.replace(/\/+$/, "").split("/").at(-1) ?? path;
 
 const GITHUB_HTTPS = /^https:\/\/(www\.)?github\.com\//i;
+/* The folder a URL clones into, as git names it. */
+const cloneName = (url: string) => nameOf(url.trim().replace(/\.git$/, "")).replace(/^.*:/, "");
 
-export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = false, openUrl }: ProjectPickerProps) {
+export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = false, openUrl, layout = "cards", start: startWith, onCloning }: ProjectPickerProps) {
   const gh = useGithub(client);
   /* The first-launch card was skipped; a clone failure's Connect GitHub was pressed. */
   const [skipped, setSkipped] = useState(false);
@@ -55,6 +68,14 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
   const { job, busy, start, clear } = useJob();
   /* The clone's URL as it was pressed (Retry clones that again). */
   const cloning = useRef<{ url: string; parent: string } | null>(null);
+  /* Rows: the clone form expanded; the hint's Connect GitHub pressed. */
+  const [cloneOpen, setCloneOpen] = useState(startWith === "clone");
+  const [askGithub, setAskGithub] = useState(false);
+  const toldCloning = useRef(onCloning);
+  toldCloning.current = onCloning;
+  useEffect(() => {
+    if (layout === "rows") toldCloning.current?.(cloneOpen);
+  }, [layout, cloneOpen]);
 
   const open = async (path: string, init = false) => {
     setOpenError(null);
@@ -80,6 +101,14 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
     const path = await pickFolder("Open a folder").catch(() => null);
     if (path) await open(path);
   };
+  // Opened from a menu's Open a folder…: the picker comes up at once, once.
+  const begun = useRef(false);
+  useEffect(() => {
+    if (startWith !== "open" || begun.current) return;
+    begun.current = true;
+    void openFolder();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startWith]);
 
   const changeParent = async () => {
     const got = pickFolder ? await pickFolder("Clone into").catch(() => null) : null;
@@ -115,6 +144,30 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
   };
 
   const ready = githubReady(gh.conn);
+  /* An open that failed: either layout shows it under Open a folder. */
+  const openProblems = (
+    <>
+      {!pickFolder && <p className="text-xs text-ink-3">The folder picker is the app's; this window has none.</p>}
+      {openError && (
+        <p className={alert} role="alert">
+          {openError}
+        </p>
+      )}
+      {plainFolder && (
+        <div className="flex flex-col items-start gap-s1" role="alert">
+          <p className="text-sm text-ink-2">{nameOf(plainFolder)} isn't a git repo yet. brindle needs git to give each agent its own branch.</p>
+          <div className="flex flex-wrap gap-s1">
+            <button type="button" className={button} disabled={opening || busy} onClick={() => void open(plainFolder, true)}>
+              Set it up with git
+            </button>
+            <button type="button" className={button} disabled={opening || busy} onClick={() => void openFolder()}>
+              Pick another
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
   /* A GitHub HTTPS clone that failed (not for want of git's tools) while GitHub isn't connected: offer to connect. */
   const githubFailure = job?.status === "failed" && !missing && GITHUB_HTTPS.test(cloning.current?.url ?? "") && gh.conn !== null && !ready;
 
@@ -135,6 +188,74 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
           GitHub is connected{gh.conn?.login ? ` as @${gh.conn.login}` : ""}.
         </p>
       )}
+      {layout === "rows" ? (
+        <Rows
+          cloneOpen={cloneOpen}
+          openButton={
+            !plainFolder && (
+              <button type="button" className={`${button} ${cloneOpen ? "mt-3" : ""}`} disabled={!pickFolder || opening || busy} onClick={() => void openFolder()}>
+                Open a folder…
+              </button>
+            )
+          }
+          openProblems={openProblems}
+          clone={
+            cloneOpen ? (
+              <form className="flex min-w-0 flex-1 flex-col" aria-label="Clone a repository" onSubmit={submit}>
+                <div className="flex items-baseline justify-between">
+                  <span className="font-medium">Clone a repository</span>
+                  <button type="button" className={`${quiet} -mr-2`} disabled={busy} onClick={() => setCloneOpen(false)}>
+                    Cancel
+                  </button>
+                </div>
+                <div className="mt-2.5 flex items-center gap-2.5">
+                  {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+                  <input className={`${field} min-w-0 flex-1 font-mono`} aria-label="Repository URL" placeholder="https://github.com/you/project" autoFocus value={url} disabled={busy} onChange={(e) => setUrl(e.target.value)} />
+                  <button type="submit" className={main} disabled={!url.trim() || !parent.trim() || busy}>
+                    Clone
+                  </button>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-1 text-xs text-ink-3">
+                  Into
+                  {pickFolder ? (
+                    <>
+                      <span className="font-mono text-ink-2" data-testid="clone-parent">
+                        {parent.replace(/\/+$/, "")}
+                        {cloneName(url) ? `/${cloneName(url)}` : ""}
+                      </span>
+                      ·
+                      <button type="button" className="text-ink-2 underline decoration-line-strong underline-offset-2 hover:text-ink" disabled={busy} onClick={() => void changeParent()}>
+                        Change…
+                      </button>
+                    </>
+                  ) : (
+                    <input className={`${field} min-w-0 flex-1 font-mono text-xs`} aria-label="Clone into" data-testid="clone-parent" value={parent} disabled={busy} onChange={(e) => setParent(e.target.value)} />
+                  )}
+                </div>
+                {gh.conn !== null && !ready && (
+                  <p className="mt-1 text-xs text-ink-3">
+                    A private GitHub repo?{" "}
+                    <button type="button" className="text-ink-2 underline decoration-line-strong underline-offset-2 hover:text-ink" onClick={() => setAskGithub(true)}>
+                      Connect GitHub
+                    </button>{" "}
+                    first, or clone and we'll ask if it's needed.
+                  </p>
+                )}
+              </form>
+            ) : (
+              <div className="min-w-0 flex-1">
+                <div className="font-medium">A repository URL</div>
+                <p className="mb-3 mt-0.5 text-xs text-ink-3">
+                  Cloned into <span className="font-mono">{parent}</span>.
+                </p>
+                <button type="button" className={button} disabled={busy} onClick={() => setCloneOpen(true)}>
+                  Clone a repository…
+                </button>
+              </div>
+            )
+          }
+        />
+      ) : (
       <div className="grid gap-s2 sm:grid-cols-2">
         <section className={`${card} flex flex-col gap-s1 p-s2`} aria-label="Open a folder">
           <p className="font-semibold">Open a folder</p>
@@ -146,25 +267,7 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
               </button>
             </div>
           )}
-          {!pickFolder && <p className="text-xs text-ink-3">The folder picker is the app's; this window has none.</p>}
-          {openError && (
-            <p className={alert} role="alert">
-              {openError}
-            </p>
-          )}
-          {plainFolder && (
-            <div className="flex flex-col items-start gap-s1" role="alert">
-              <p className="text-sm text-ink-2">{nameOf(plainFolder)} isn't a git repo yet. brindle needs git to give each agent its own branch.</p>
-              <div className="flex flex-wrap gap-s1">
-                <button type="button" className={button} disabled={opening || busy} onClick={() => void open(plainFolder, true)}>
-                  Set it up with git
-                </button>
-                <button type="button" className={button} disabled={opening || busy} onClick={() => void openFolder()}>
-                  Pick another
-                </button>
-              </div>
-            </div>
-          )}
+          {openProblems}
         </section>
         <form className={`${card} flex flex-col gap-s1 p-s2`} aria-label="Clone a repository" onSubmit={submit}>
           <p className="font-semibold">Clone a repository</p>
@@ -188,6 +291,10 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
           </div>
         </form>
       </div>
+      )}
+      {askGithub && !ready && (
+        <GithubConnectCard gh={gh} openUrl={openUrl} skipLabel="Not now" onSkip={() => setAskGithub(false)} onConnected={() => setAskGithub(false)} />
+      )}
       {missing !== null && (
         <div className={`${card} flex flex-col items-start gap-s1 p-s2`} role="alert" data-testid="developer-tools-missing">
           <p className="font-semibold">brindle needs git's tools first.</p>
@@ -251,6 +358,28 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
           })()}
         />
       )}
+    </div>
+  );
+}
+
+/* The rows layout: Open a folder and Clone side by side, equal; the clone
+   row widening into its form while the open row narrows to its button. */
+function Rows({ cloneOpen, openButton, openProblems, clone }: { cloneOpen: boolean; openButton: ReactNode; openProblems: ReactNode; clone: ReactNode }) {
+  return (
+    <div className={`grid gap-s2 ${cloneOpen ? "grid-cols-[200px_minmax(0,1fr)]" : "grid-cols-2"}`} data-testid="project-rows" data-state={cloneOpen ? "cloning" : "closed"}>
+      <section className="flex items-start gap-3 border-t border-line p-s2" aria-label="Open a folder">
+        <FolderIcon size={20} className="mt-0.5 shrink-0 text-ink-2" />
+        <div className="flex min-w-0 flex-1 flex-col items-start">
+          <div className="font-medium">A folder on this Mac</div>
+          {!cloneOpen && <p className="mb-3 mt-0.5 text-xs text-ink-3">brindle works in it where it is.</p>}
+          {openButton}
+          <div className="mt-s1 flex flex-col items-start gap-s1 empty:hidden">{openProblems}</div>
+        </div>
+      </section>
+      <section className={`flex items-start gap-3 border-t p-s2 ${cloneOpen ? "border-branch bg-branch/5" : "border-line"}`} aria-label={cloneOpen ? undefined : "A repository URL"}>
+        <LinkIcon size={20} className={`mt-0.5 shrink-0 ${cloneOpen ? "text-branch" : "text-ink-2"}`} />
+        {clone}
+      </section>
     </div>
   );
 }
