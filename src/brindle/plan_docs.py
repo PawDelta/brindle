@@ -389,14 +389,43 @@ def _with_cursor(replica, anchor: dict) -> dict:
     """A text anchor made on the live draft, with a Loro cursor at its start."""
     if replica is None or anchor["kind"] != "text" or anchor["section"] not in replica.sections():
         return anchor
-    return {**anchor, "cursor": base64.b64encode(replica.cursor(anchor["section"], anchor["start"])).decode()}
+    enc = lambda off: base64.b64encode(replica.cursor(anchor["section"], off)).decode()  # noqa: E731
+    return {**anchor, "cursor": enc(anchor["start"]), "cursor_end": enc(anchor["end"])}
 
 
-def _followed(replica, anchor: dict) -> dict:
+def reanchor(db: DB, plan_id: str, replica) -> int:
+    """Pin every cursor anchor to the draft as it stands now. The server calls
+    this before it compacts the draft to a shallow snapshot: Loro cannot
+    resolve a cursor into history the snapshot drops, so each is re-made from
+    where it resolves today. An anchor whose words are gone is stored as
+    detached for good (its cursors would point into dropped history). Returns
+    how many threads were rewritten."""
+    n = 0
+    with db.tx() as c:
+        for row in c.execute("SELECT id, anchor FROM plan_threads WHERE plan_id=? AND anchor IS NOT NULL",
+                             (plan_id,)).fetchall():
+            anchor = json.loads(row["anchor"])
+            if anchor.get("kind") != "text" or not anchor.get("cursor"):
+                continue
+            now = _followed(replica, anchor)
+            if now.get("gone"):
+                fresh = {k: v for k, v in now.items() if k not in ("cursor", "cursor_end")}
+            elif now["section"] not in replica.sections():
+                continue
+            else:
+                fresh = _with_cursor(replica, {k: v for k, v in now.items() if k not in ("gone", "span")})
+            c.execute("UPDATE plan_threads SET anchor=? WHERE id=?", (json.dumps(fresh), row["id"]))
+            n += 1
+    return n
+
+
+def _followed(replica, anchor: dict, span: bool = False) -> dict:
     """``anchor`` where its cursor stands in the draft now: the cursor follows
     the words as others type around them, so they are looked for there first.
     An insertion point has no words: the cursor alone places it, so its
-    context is taken from the draft there, never from an older text."""
+    context is taken from the draft there, never from an older text. With
+    ``span`` (to show a comment) a start and end cursor that both resolve
+    place the range as it is, even where words were typed inside it."""
     from brindle.crdt import CrdtError
 
     if replica is None or not anchor.get("cursor"):
@@ -406,6 +435,15 @@ def _followed(replica, anchor: dict) -> dict:
     except (CrdtError, ValueError):
         return anchor
     out = {**anchor, "start": start, "end": start + anchor["end"] - anchor["start"]}
+    if anchor.get("cursor_end") and anchor["quote"]:
+        try:
+            end = replica.resolve(base64.b64decode(anchor["cursor_end"]))
+        except (CrdtError, ValueError):
+            end = None
+        if end is not None:
+            out["end"] = end
+            out["gone"] = end <= start      # both ends met: every one of its words was deleted
+            out["span"] = span and not out["gone"]
     if anchor["kind"] == "text" and not anchor["quote"]:
         out.update(_context(replica.text(anchor["section"]), start))
     return out
@@ -414,8 +452,12 @@ def _followed(replica, anchor: dict) -> dict:
 def _where(cur: dict, anchor: dict) -> dict:
     """``anchor`` in revision ``cur``: where its text is now, and whether
     it is still ``current``, has ``moved`` or is ``detached`` (gone)."""
-    out = {k: v for k, v in anchor.items() if k != "cursor"}
+    out = {k: v for k, v in anchor.items() if k not in ("cursor", "cursor_end", "gone", "span")}
     out["state"] = "current"
+    if anchor.get("gone"):
+        return dict(out, state="detached")
+    if anchor.get("span"):
+        return out
     if anchor["kind"] == "text" and not anchor["quote"]:
         return _insertion(cur, anchor, out)
     if anchor["kind"] == "text":
@@ -923,7 +965,7 @@ def mark_sent(c, ids: list[int], rev: int) -> None:
 
 def _thread_dto(t: dict, cur: dict, replies: list[dict], replica=None) -> dict:
     out = {"id": t["id"], "kind": t["kind"], "rev": t["rev"], "author": t["author"], "text": t["body"],
-           "anchor": _where(cur, _followed(replica, json.loads(t["anchor"]))), "attachments": [f["name"] for f in
+           "anchor": _where(cur, _followed(replica, json.loads(t["anchor"]), span=True)), "attachments": [f["name"] for f in
                                                                           json.loads(t["attachments"])],
            "status": t["status"], "sent": t["sent_rev"] is not None, "at": t["created_at"],
            "question": bool(t["question"]),
