@@ -153,6 +153,12 @@ class BenchError(Exception):
     pass
 
 
+class ClassifierError(BenchError):
+    def __init__(self, message: str, usage: dict):
+        super().__init__(message)
+        self.usage = usage
+
+
 class UnknownModel(BenchError):
     pass
 
@@ -622,17 +628,19 @@ def solo_session(run_turn, spec: str, max_answers: int) -> list[dict]:
     ``run_turn(prompt, session_id)`` runs one (``session_id`` None: a new
     session) and returns its entries. A turn that ends by asking the person
     something is answered in the same session, up to ``max_answers`` times."""
-    entries = run_turn(spec, None)
+    turn = run_turn(spec, None)
+    entries = list(turn)
     for _ in range(max_answers):
-        last = (results(entries) or [{}])[-1]
-        if last.get("gave_up") or not ends_with_question(last.get("result") if isinstance(
+        last = (results(turn) or [{}])[-1]
+        if last.get("gave_up") or last.get("is_error") or not ends_with_question(last.get("result") if isinstance(
                 last.get("result"), str) else None):
             break
         session = last.get("session_id") or next(
             (e["session_id"] for e in reversed(entries) if isinstance(e.get("session_id"), str)), None)
         if not session:
             break
-        entries += run_turn(ANSWER, session)
+        turn = run_turn(ANSWER, session)
+        entries += turn
     return entries
 
 
@@ -645,15 +653,20 @@ def classify_fixes(claude: str, text: str, cwd: Path, env: dict, remaining: floa
               "--tools", "", "--no-session-persistence"], cwd, env, capture_output=True,
              timeout=remaining)
     result = json.loads(res.stdout)
-    answer = result.get("result", "").strip().lower()
+    if not isinstance(result, dict):
+        raise BenchError("fix classifier did not return a JSON object")
+    usage = stream_usage([{"type": "result", **result}])
+    text = result.get("result")
+    answer = text.strip().lower() if isinstance(text, str) else None
     if result.get("is_error") or answer not in ("yes", "no"):
-        raise BenchError("fix classifier did not return yes or no")
-    return answer == "yes", stream_usage([{"type": "result", **result}])
+        raise ClassifierError("fix classifier did not return yes or no", usage)
+    return answer == "yes", usage
 
 
 def solo_review_followup(run_turn, classify, entries: list[dict], max_fix_rounds: int) -> dict:
     messages, checks, harness = [], [], {}
     rounds, cap_hit = 0, False
+    error = None
     message = "Did you run a code review on this?"
     while True:
         last = (results(entries) or [{}])[-1]
@@ -661,16 +674,25 @@ def solo_review_followup(run_turn, classify, entries: list[dict], max_fix_rounds
         if last.get("gave_up") or last.get("is_error") or not session:
             break
         messages.append(message)
-        entries.extend(run_turn(message, session))
+        turn = run_turn(message, session)
+        entries.extend(turn)
         if message == "Please fix those.":
             rounds += 1
-        last = (results(entries) or [{}])[-1]
-        if last.get("gave_up") or last.get("is_error"):
+        last = (results(turn) or [{}])[-1]
+        if not last or last.get("gave_up") or last.get("is_error"):
+            error = "solo followup turn did not complete successfully"
             break
         text = last.get("result")
         if not isinstance(text, str):
-            raise BenchError("solo turn has no last message to classify")
-        needed, usage = classify(text)
+            error = "solo followup turn has no last message to classify"
+            break
+        try:
+            needed, usage = classify(text)
+        except (BenchError, ValueError, subprocess.SubprocessError, OSError) as exc:
+            merge(harness, getattr(exc, "usage", {}))
+            error = f"fix classifier failed ({type(exc).__name__})"
+            checks.append({"text": text, "fixes_needed": None, "error": error})
+            break
         merge(harness, usage)
         checks.append({"text": text, "fixes_needed": needed})
         if not needed:
@@ -681,7 +703,7 @@ def solo_review_followup(run_turn, classify, entries: list[dict], max_fix_rounds
         message = "Please fix those."
     return {"followup_messages": messages, "review_checks": checks, "fix_rounds": rounds,
             "fix_rounds_cap_hit": cap_hit, "harness_tokens": harness,
-            "harness_cost_usd": price_usage(harness)[0]}
+            "harness_cost_usd": price_usage(harness)[0], "followup_error": error}
 
 
 def run_solo_turn(cmd: list[str], clone: Path, scratch: Path, env: dict, deadline: float) -> tuple[list[dict], str]:
@@ -717,11 +739,22 @@ def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict, grade_first
              *(["--permission-mode", args.permission_mode] if args.permission_mode else [])]
     t0 = time.time()
     deadline = t0 + args.max_hours * 3600
-    state = {"finished": "exit"}
+    state = {"finished": "exit", "why": None}
 
     def run_turn(prompt: str, session: str | None) -> list[dict]:
         cmd = [claude, "-p", prompt, *flags, *(["--resume", session] if session else [])]
-        entries, state["finished"] = run_solo_turn(cmd, clone, scratch, env, deadline)
+        entries, finished = run_solo_turn(cmd, clone, scratch, env, deadline)
+        last = (results(entries) or [{}])[-1]
+        if finished == "exit" and (not last or last.get("is_error") or last.get("gave_up")
+                                   or not isinstance(last.get("result"), str)):
+            finished = "incomplete"
+        if state["finished"] == "exit":
+            state["finished"] = finished
+            if finished != "exit":
+                state["why"] = f"solo turn did not complete successfully ({finished})"
+        if finished != "exit":
+            entries = [{**entry, "is_error": True} if entry.get("type") == "result" else entry
+                       for entry in entries]
         return entries
 
     prompt = f"{args.solo_note}\n\n{spec}" if args.solo_note else spec
@@ -737,14 +770,15 @@ def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict, grade_first
     deadline += overhead
     followup = solo_review_followup(
         run_turn, lambda text: classify_fixes(claude, text, scratch, env, deadline - time.time()),
-        entries, args.max_fix_rounds) if args.review_followup else {
+        entries, args.max_fix_rounds) if args.review_followup and state["finished"] == "exit" else {
             "followup_messages": [], "review_checks": [], "fix_rounds": 0,
             "fix_rounds_cap_hit": False, "harness_tokens": {}, "harness_cost_usd": 0.0}
     stop = time.time()
     by_model = stream_usage(entries)
     prompts = solo_prompts(entries, iter_json(approvals.read_text().splitlines()))
     prompts["followup"] = len(followup["followup_messages"])
-    return {"finished": state["finished"], "valid": state["finished"] in VALID_FINISHES, "why": None,
+    why = state["why"] or followup.get("followup_error")
+    return {"finished": state["finished"], "valid": state["finished"] in VALID_FINISHES and not why, "why": why,
             "permission_mode": permission_mode(entries), "solo_note": args.solo_note,
             "wall_seconds": round(stop - t0 - overhead, 1), "by_model": by_model,
             "wall_seconds_first_pass": round(first_stop - t0, 1),

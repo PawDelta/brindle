@@ -145,13 +145,23 @@ def test_solo_session_answers_a_closing_question_by_resuming_it():
     assert bench.solo_prompts(got, []) == {"permission": 0, "question": 1, "other": 0}
 
 
-@pytest.mark.parametrize("decisions,flags,rounds,cap_hit", [
-    ([True, True, False], [], 2, False),
-    ([True, True, True], ["--max-fix-rounds", "2"], 2, True),
-    ([], ["--no-review-followup"], 0, False),
+@pytest.mark.parametrize("decisions,flags,rounds,cap_hit,failure", [
+    ([True, True, False], [], 2, False, None),
+    ([True, True, True], ["--max-fix-rounds", "2"], 2, True, None),
+    ([], ["--no-review-followup"], 0, False, None),
+    pytest.param([True], [], 1, False, "classifier-expired", marks=pytest.mark.variant(
+        "An expired classifier process must preserve the completed benchmark and earlier usage")),
+    pytest.param([True], [], 1, False, "classifier-json", marks=pytest.mark.variant(
+        "Malformed classifier JSON must preserve a record rather than escape the run lifecycle")),
+    pytest.param([True], [], 1, False, "classifier-ambiguous", marks=pytest.mark.variant(
+        "An ambiguous classifier answer must preserve its billable usage as well as earlier usage")),
+    ([], [], 0, False, "missing-result"),
+    pytest.param([], [], 0, False, "missing-result-success", marks=pytest.mark.variant(
+        "A zero process exit without a result must still invalidate the run")),
+    ([], [], 0, False, "failed-result"),
 ])
 def test_solo_review_followup_records_first_and_final_passes(
-        tmp_path, monkeypatch, decisions, flags, rounds, cap_hit):
+        tmp_path, monkeypatch, decisions, flags, rounds, cap_hit, failure):
     kit = tmp_path / "kit"
     kit.mkdir()
     (kit / "repo.json").write_text('{}')
@@ -176,12 +186,15 @@ def test_solo_review_followup_records_first_and_final_passes(
         calls.append(cmd)
         clock[0] += 10
         (clone / "implementation").write_text(str(len(calls)))
+        if len(calls) == 2 and failure in ("missing-result", "missing-result-success"):
+            return [], "exit" if failure == "missing-result-success" else "exit:1"
         return [{"type": "result", "session_id": "same-session", "result": f"Reply {len(calls)}",
-                 "modelUsage": {"claude-fable-5-2": {"inputTokens": 1000, "outputTokens": 100}}}], "exit"
+                 "modelUsage": {"claude-fable-5-2": {"inputTokens": 1000, "outputTokens": 100}}}], (
+                     "exit:1" if len(calls) == 2 and failure == "failed-result" else "exit")
 
     def classify(claude, text, cwd, env, remaining):
         classified.append(text)
-        return next(answers), {"claude-haiku-5-5": HAIKU}
+        return next(answers, False), {"claude-haiku-5-5": HAIKU}
 
     def grade(path, checkout, env):
         state = int((checkout / "implementation").read_text())
@@ -190,23 +203,49 @@ def test_solo_review_followup_records_first_and_final_passes(
         return {"passed": state, "failed": 0}
 
     monkeypatch.setattr(bench, "run_solo_turn", run_turn)
-    monkeypatch.setattr(bench, "classify_fixes", classify)
+    if failure and failure.startswith("classifier-"):
+        def classifier_cli(cmd, cwd, env, **kw):
+            classified.append(f"Reply {len(calls)}")
+            if len(classified) == 2:
+                if failure == "classifier-expired":
+                    raise bench.subprocess.TimeoutExpired("claude", kw["timeout"])
+                if failure == "classifier-json":
+                    return SimpleNamespace(stdout="invalid JSON")
+            answer = "unclear" if len(classified) == 2 else "yes"
+            return SimpleNamespace(stdout=json.dumps({"result": answer, "modelUsage": {
+                "claude-haiku-5-5": {"inputTokens": 10, "outputTokens": 20, "cacheReadInputTokens": 400}}}))
+
+        monkeypatch.setattr(bench, "sh", classifier_cli)
+    else:
+        monkeypatch.setattr(bench, "classify_fixes", classify)
     monkeypatch.setattr(bench, "grade", grade)
     output = tmp_path / "results.jsonl"
     assert bench.main(["run", "--arm", "solo", "--run-id", "1", "--task-dir", str(kit),
                        "--scratch", str(tmp_path / "scratch"), "--results", str(output),
                        "--solo-note", "", *flags]) == 0
     record = bench.load_records(output)[0]
-    messages = (["Did you run a code review on this?"] + ["Please fix those."] * rounds) if decisions else []
+    messages = (["Did you run a code review on this?"] + ["Please fix those."] * rounds
+                if "--no-review-followup" not in flags else [])
     assert [cmd[2] for cmd in calls] == ["Implement the feature.", *messages]
     assert "--resume" not in calls[0]
     assert all(cmd[-2:] == ["--resume", "same-session"] for cmd in calls[1:])
     assert record["followup_messages"] == messages
     assert record["fix_rounds"] == rounds
     assert record["fix_rounds_cap_hit"] is cap_hit
-    assert record["review_checks"] == [
-        {"text": text, "fixes_needed": needed} for text, needed in zip(classified, decisions)]
-    assert len(classified) == len(decisions)
+    classifier_failed = bool(failure and failure.startswith("classifier-"))
+    expected_checks = [{"text": text, "fixes_needed": needed} for text, needed in zip(classified, decisions)]
+    if classifier_failed:
+        error_check = record["review_checks"][-1]
+        assert error_check["error"]
+        assert error_check["fixes_needed"] is None
+        assert error_check["text"] == f"Reply {len(calls)}"
+        expected_checks.append(error_check)
+    assert record["review_checks"] == expected_checks
+    assert len(classified) == len(decisions) + int(classifier_failed)
+    assert record["valid"] is (failure is None)
+    assert bool(record["why"]) is (failure is not None)
+    if failure and not classifier_failed:
+        assert record["finished"] == ("incomplete" if failure == "missing-result-success" else "exit:1")
     assert record["prompts"]["followup"] == record["prompts_total"] == len(messages)
     assert record["grade_first_pass"] == {"passed": 1, "failed": 0}
     assert record["grade"] == {"passed": len(calls), "failed": 0}
@@ -216,11 +255,13 @@ def test_solo_review_followup_records_first_and_final_passes(
     assert record["wall_seconds_first_pass"] == 10
     assert record["wall_seconds"] == len(calls) * 10
     assert record["cost_first_pass"] == pytest.approx(0.012)
-    assert record["cost_usd"] == pytest.approx(0.012 * len(calls))
-    assert record["tokens_total"] == 1100 * len(calls)
+    completed = len(calls) - int(failure in ("missing-result", "missing-result-success"))
+    assert record["cost_usd"] == pytest.approx(0.012 * completed)
+    assert record["tokens_total"] == 1100 * completed
+    harness_calls = len(decisions) + int(failure == "classifier-ambiguous")
     assert record["harness_tokens"] == ({"claude-haiku-5-5": {
-        k: v * len(decisions) for k, v in HAIKU.items()}} if decisions else {})
-    assert record["harness_cost_usd"] == pytest.approx(0.000015 * len(decisions))
+        k: v * harness_calls for k, v in HAIKU.items()}} if harness_calls else {})
+    assert record["harness_cost_usd"] == pytest.approx(0.000015 * harness_calls)
 
 
 @pytest.mark.parametrize("answer", [
