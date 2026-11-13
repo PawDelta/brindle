@@ -1,11 +1,14 @@
 import importlib.util
 import json
+import os
+import socket
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from brindle import tmux
 from brindle.db import Agent, Workspace
 
 spec = importlib.util.spec_from_file_location(
@@ -522,7 +525,7 @@ def test_capped_routing_drops_excluded_workers_from_every_tier(tmp_path):
 
 def test_only_workers_cli_writes_every_tier(tmp_path, monkeypatch):
     client = SimpleNamespace(
-        python="python", cli=lambda *a, **kw: SimpleNamespace(returncode=0),
+        python="python", env={}, cli=lambda *a, **kw: SimpleNamespace(returncode=0),
         probe=lambda *a, **kw: {"root": {"id": "root"}})
     monkeypatch.setattr(bench, "installed_client", lambda *a: client)
     monkeypatch.setattr(bench, "sh", lambda *a, **kw: SimpleNamespace(stdout=json.dumps({
@@ -539,15 +542,115 @@ def test_only_workers_cli_writes_every_tier(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bench, "cmd_run", run)
     assert bench.main(["run", "--arm", "brindle", "--run-id", "1",
-                       "--only-workers", "developer-codex,developer-fable"]) == 0
+                       "--only-workers", "developer-codex,developer-fable",
+                       "--brindle-setting", "fast_path=true", "--brindle-setting", "review_sizing=small"]) == 0
     cfg = json.loads((tmp_path / ".brindle/config.local.json").read_text())
     assert cfg["routing"] == {tier: ["developer-codex", "developer-fable"] for tier in ("heavy", "advanced")}
+    assert (cfg["fast_path"], cfg["review_sizing"]) == (True, "small")
     assert runs[0]["only_workers"] == ["developer-codex", "developer-fable"]
+    assert runs[0]["brindle_settings"] == {"fast_path": True, "review_sizing": "small"}
     assert bench.main(["run", "--arm", "brindle", "--run-id", "2",
                        "--only-workers", "developer-codex,developer-fable",
                        "--exclude-worker", "developer-fable"]) == 0
     cfg = json.loads((tmp_path / ".brindle/config.local.json").read_text())
     assert cfg["routing"] == {tier: ["developer-codex"] for tier in ("heavy", "advanced")}
+
+
+def snapshot(folder: Path) -> dict[str, tuple[bytes, int]]:
+    return {str(p.relative_to(folder)): (p.read_bytes(), p.stat().st_mtime_ns)
+            for p in sorted(folder.rglob("*")) if p.is_file()}
+
+
+def test_checkout_env_uses_a_temp_home_and_leaves_provider_homes_unchanged(tmp_path, monkeypatch):
+    person = tmp_path / "person"
+    monkeypatch.setenv("HOME", str(person))
+    claude, codex = person / "claude-home", person / "codex-home"
+    for folder, files in ((claude, (".claude.json", "settings.json", "projects/p/s.jsonl")),
+                          (codex, ("auth.json", "config.toml", "sessions/r.jsonl"))):
+        for name in files:
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text(name)
+    before = {f: snapshot(f) for f in (claude, codex)}
+    root = tmp_path / "bench"
+    root.mkdir()
+    homes = {"claude": {"path": str(claude), "isolated": True}, "codex": {"path": str(codex), "isolated": True}}
+    env = bench.checkout_env({"BRINDLE_HOME": str(person / ".brindle"), "PATH": "/usr/bin",
+                              "CLAUDE_CONFIG_DIR": str(person / "inherited")},   # brindle's own home wins
+                             root, homes, bench.bench_socket(root))
+    real = root.resolve()
+    assert env["BRINDLE_HOME"] == str(real / "home")
+    # Its tmux server is out of reach of every brindle's leftover-server sweep.
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    tmux.socket_dir().mkdir()
+    (tmux.socket_dir() / env["BRINDLE_TMUX_SOCKET"]).touch()
+    assert tmux.other_servers() == []
+    assert env["PATH"].startswith(str(real / "bin"))
+    assert env["BRINDLE_CLAUDE_CONFIG_HOME"] == str(claude)   # the Keychain login's path
+    linked = Path(env["BRINDLE_CODEX_CONFIG_HOME"]) / "auth.json"
+    assert linked.is_symlink() and linked.resolve() == (codex / "auth.json").resolve()
+    # The only two writes allowed outside the temp home are the ones the record names.
+    assert [(w["provider"], w["path"]) for w in bench.provider_writes(env)] == [
+        ("claude", str(claude)), ("codex", str(codex / "auth.json"))]
+    for overlapping in (person / ".brindle", person):   # the real home itself, or a folder holding it
+        with pytest.raises(bench.BenchError):
+            bench.checkout_env({"PATH": ""}, overlapping, homes, "s")
+    bench.stop_checkout(None, root)
+    assert not linked.is_symlink()
+    assert {f: snapshot(f) for f in (claude, codex)} == before   # setup and teardown wrote nothing there
+
+
+@pytest.mark.parametrize("fails", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant("A run that fails must still stop the temp home's daemon")),
+])
+def test_checkout_run_records_its_commit_and_stops_its_daemon(tmp_path, monkeypatch, fails):
+    """A fake machine: daemons per BRINDLE_HOME and tmux servers per socket,
+    which the run starts and only the real cleanup path can stop."""
+    monkeypatch.setenv("HOME", str(tmp_path / "person"))
+    monkeypatch.chdir(tmp_path)   # relative socket paths: a Unix socket path must stay short
+    sockets = Path(f"tmux-{os.getuid()}")
+    person_home = str(tmp_path / "person" / ".brindle")
+    daemons, servers = {person_home: "running"}, {"default": "running"}
+    root = tmp_path / "bench"
+    root.mkdir()
+
+    def sh(cmd, cwd, env, check=True, **kw):
+        if cmd[-2:] == ["daemon", "stop"]:
+            daemons[env["BRINDLE_HOME"]] = "stopped"
+        elif cmd[:2] == ["tmux", "-L"] and cmd[3:] == ["kill-server"]:
+            servers[cmd[2]] = "stopped"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def client(args, clone, env, root):
+        return bench.Brindle(Path("brindle"), "python", clone, bench.checkout_env(env, root, {}, "brindle-bench-x"),
+                             argv=["uv", "run", "brindle"], source=tmp_path)
+
+    def drive(args, b, *rest):
+        daemons[b.env["BRINDLE_HOME"]] = servers[b.env["BRINDLE_TMUX_SOCKET"]] = "running"
+        sockets.mkdir()
+        with socket.socket(socket.AF_UNIX) as s:   # what a killed server leaves: its socket file
+            s.bind(str(sockets / b.env["BRINDLE_TMUX_SOCKET"]))
+        if fails:
+            raise bench.BenchError("supervisor never started")
+        return {"finished": "goal"}
+
+    monkeypatch.setattr(bench, "sh", sh)
+    monkeypatch.setattr(bench, "checkout_info", lambda path, env: {"path": str(path), "commit": "abc", "dirty": False})
+    monkeypatch.setattr(bench, "checkout_client", client)
+    monkeypatch.setattr(bench, "drive_brindle", drive)
+    monkeypatch.setattr(bench.tempfile, "mkdtemp", lambda prefix: str(root))
+    args = SimpleNamespace(brindle_checkout=str(tmp_path), brindle_setting=[("fast_path", True)], leave_running=False)
+    if fails:
+        with pytest.raises(bench.BenchError):
+            bench.run_brindle(args, tmp_path, "spec", {"BRINDLE_HOME": person_home, "TMUX_TMPDIR": "."})
+    else:
+        out = bench.run_brindle(args, tmp_path, "spec", {"BRINDLE_HOME": person_home, "TMUX_TMPDIR": "."})
+        assert out["brindle_checkout"]["commit"] == "abc"
+        assert out["brindle_settings"] == {"fast_path": True}
+    temp_home = str(root.resolve() / "home")
+    assert daemons == {person_home: "running", temp_home: "stopped"}   # the person's daemon untouched
+    assert servers == {"default": "running", "brindle-bench-x": "stopped"}
+    assert list(sockets.iterdir()) == []   # nor is its socket file left behind
 
 
 def test_machine_probe_reads_weekly_plan_limits_and_other_sessions(db, tmp_path, monkeypatch):
@@ -560,7 +663,7 @@ def test_machine_probe_reads_weekly_plan_limits_and_other_sessions(db, tmp_path,
                            "@1", None, time.time()))
     db.add_agent(Agent("done", "other", "developer", "codex", None, "interactive", "done",
                        "@2", None, time.time()))
-    monkeypatch.setattr(quota, "get", lambda provider: quota.Quota(provider, [
+    monkeypatch.setattr(quota, "get", lambda provider, **kw: quota.Quota(provider, [
         quota.Window(80, 1000, 300), quota.Window(31, 2000, 10080),
         quota.Window(90, 2000, 10080, "Fable")]) if provider == "claude" else None)
     monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
@@ -620,17 +723,30 @@ def test_machine_boundary_reads_codex_rollout_past_a_fresh_cache(tmp_path, monke
     assert ns["main"](args)["limits"]["codex"] is None
 
 
-def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch):
-    from brindle import providers, quota
+@pytest.mark.parametrize("custom_home", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant("Solo must use CLAUDE_CONFIG_DIR rather than the default account")),
+])
+def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch, custom_home):
+    from brindle import providers, quota, subscription_usage
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    for name in providers._ENV_AUTH["claude"]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: None)
+    monkeypatch.setattr(providers, "_stored_key", lambda name: name == "ANTHROPIC_API_KEY")
     brindle_config = tmp_path / "brindle-claude.json"
     account = {"oauthAccount": {"accountUuid": "brindle-account", "organizationUuid": "org"}}
     brindle_config.write_text(json.dumps(account))
-    solo_config = tmp_path / ".claude.json"
-    solo_config.write_text(json.dumps({"oauthAccount": {"accountUuid": "solo-account", "organizationUuid": "org"}}))
+    solo_home = tmp_path / "solo" if custom_home else tmp_path
+    solo_home.mkdir(exist_ok=True)
+    if custom_home:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(solo_home))
+    else:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    solo_config = solo_home / ".claude.json"
+    solo_account = {"oauthAccount": {"accountUuid": "solo-account", "organizationUuid": "org"}}
+    solo_config.write_text(json.dumps(solo_account))
     monkeypatch.setattr(providers, "claude_global_config", lambda: str(brindle_config))
     quota.record("claude", [quota.Window(31, time.time() + 1000, 10080)])
     ns = {"__name__": "bench_probe"}
@@ -640,6 +756,51 @@ def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch):
         pass
     assert monitor.record()["limits_used"]["claude"] is None
     args = {"op": "machine", "clone": str(tmp_path), "arm": "solo"}
-    assert ns["main"](args)["limits"]["claude"] is None
+    missing = ns["main"](args)
+    assert missing["limits"]["claude"] is None
+    solo_key = subscription_usage.cache_key("claude", who=json.dumps(["solo-account", "org"]))
+    reset = time.time() + 1000
+    quota.record("claude", [quota.Window(42, reset, 10080)], identity_key=solo_key)
+    own = ns["main"](args)
+    assert own["limits"]["claude"]["used"] == 42
+    assert own["limits"]["claude"]["identity"] == solo_key
+    assert "claude" not in own["limits_reason"]
+    assert missing["limits_reason"]["claude"]
+    assert monitor.record()["limits_reason"]["claude"]
+    with bench.RunMonitor(b, 20, "solo") as monitor:
+        quota.record("claude", [quota.Window(46, reset, 10080)], identity_key=solo_key)
+    assert monitor.record()["limits_used"]["claude"] == 4
     solo_config.write_text(json.dumps(account))
     assert ns["main"](args)["limits"]["claude"]["used"] == 31
+    billed = ns["main"]({**args, "arm": "brindle"})
+    assert billed["limits"]["claude"] is None
+    assert billed["limits_reason"]["claude"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "solo-test-key")
+    billed = ns["main"](args)
+    assert billed["limits"]["claude"] is None
+    assert billed["limits_reason"]["claude"]
+
+
+def test_installed_client_prefers_desktop_and_records_its_engine(tmp_path, monkeypatch):
+    desktop = tmp_path / "engine/bin/brindle"
+    desktop.parent.mkdir(parents=True)
+    desktop.touch()
+    python = tmp_path / "engine/python/bin/python3"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setattr(bench, "DESKTOP_BRINDLE", desktop, raising=False)
+    monkeypatch.setattr(bench.shutil, "which", lambda *a, **kw: "/old/bin/brindle")
+    args = SimpleNamespace(brindle=None, brindle_python=None)
+    client = bench.installed_client(args, tmp_path, {})
+    assert client.exe == desktop
+    assert client.python == str(python)
+    assert bench.installed_brindle("/explicit/bin/brindle", {}) == Path("/explicit/bin/brindle")
+    python.unlink()
+    assert bench.installed_brindle(None, {}) == Path("/old/bin/brindle")
+    samples = SimpleNamespace(probe=lambda *a, **kw: {
+        "limits": {}, "other_agents": [], "brindle_file": "/engine/brindle/__init__.py",
+        "brindle_python": str(python), "brindle_executable": str(desktop)})
+    with bench.RunMonitor(samples, 20) as monitor:
+        pass
+    assert monitor.record()["limits_reader"] == {
+        "module": "/engine/brindle/__init__.py", "python": str(python), "executable": str(desktop)}
