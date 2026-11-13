@@ -503,6 +503,8 @@ class DocLink:
     frozen: Any = None
     author_offline: Any = None
     blocked: bool = False       # a lock or freeze holds the outbox back
+    freezing: bool = False      # a Freeze or Reopen is being asked of the Library: hold the outbox (only it clears this)
+    freeze_lock: asyncio.Lock = field(default_factory=asyncio.Lock)    # one Freeze or Reopen at a time
     reader: bool = False        # this account can't write in the doc
     rebase: bool = False        # the next join rebuilds the replica from the relay's draft
     claimed: list[int] = field(default_factory=list)
@@ -633,7 +635,7 @@ class DocLink:
     async def flush(self) -> None:
         """Send the next batch of the outbox, if nothing is in flight."""
         async with self.lock:
-            if self.conn is None or self.inflight or self.blocked or self.reader:
+            if self.conn is None or self.inflight or self.blocked or self.freezing or self.reader:
                 self._unsent = await self.manager.work(unsent, self.doc_id)
                 return
             batch = await self.manager.work(_next_batch, self.doc_id)
@@ -854,27 +856,38 @@ class Manager:
         if link is not None:
             await link.awareness(lease, section, data)
 
-    async def freeze(self, doc_id: str, reopen: bool = False) -> None:
+    async def freeze(self, doc_id: str, reopen: bool = False) -> str | None:
         """An app window's Freeze (or Reopen): the Library makes the draft's
         text a version out for sign-off (or withdraws it), for the author only.
         The relay tells nobody of either, so this machine's windows are told
-        here; a refusal leaves the state as it was, and they are told that.
+        here. Returns why it was refused (for the window that asked), else
+        None; a refusal leaves the state, and every unsent edit, as they were.
 
         A freeze is of what was typed here before it: those edits reach the
-        relay (acknowledged) first, else the Library is never asked. Edits
-        typed while it is asked are held, as on a frozen draft, and go once
-        it is refused or the version is reopened."""
+        relay (acknowledged) first, else the Library is never asked. While it
+        is asked, edits are held (``freezing``: nothing but this clears it, so
+        a reconnect or a lock check can't let one race the freeze), and they go
+        once it is refused or the version is reopened. One Freeze or Reopen
+        runs at a time per doc."""
+        from brindle.redact import mask
+
         link = self.link(doc_id)
-        try:
-            if not reopen and not link.frozen:
-                await self._drain(link)
-                link.blocked = True
-            link.frozen = await asyncio.to_thread(_library_freeze, doc_id, reopen)
-        except Exception as e:  # noqa: BLE001 - refused or unreachable: the windows keep the state they had
-            log.warning("brindle: couldn't %s %s: %s", "reopen" if reopen else "freeze", doc_id, e)
-        link.blocked = bool(link.frozen or link.author_offline)
-        await link._to_windows(link.state_frame())
-        await link.flush()
+        async with link.freeze_lock:
+            refused = None
+            try:
+                if not reopen and not link.frozen:
+                    await self._drain(link)
+                link.freezing = True
+                link.frozen = await asyncio.to_thread(_library_freeze, doc_id, reopen)
+            except Exception as e:  # noqa: BLE001 - refused or unreachable: the windows keep the state they had
+                refused = mask(str(e)) or "the Library couldn't be reached"
+                log.warning("brindle: couldn't %s %s: %s", "reopen" if reopen else "freeze", doc_id, refused)
+            finally:
+                link.freezing = False
+            link.blocked = bool(link.frozen or link.author_offline)
+            await link._to_windows(link.state_frame())
+            await link.flush()
+            return refused
 
     async def _drain(self, link: DocLink) -> None:
         """Until every edit this machine holds of the doc is acknowledged by

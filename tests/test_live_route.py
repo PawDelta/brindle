@@ -214,8 +214,11 @@ def test_the_authors_freeze_and_reopen_frames_lock_the_draft_for_sign_off_and_op
     {"reopen": true} on the live socket: the Library makes and withdraws the
     version, and the channel stays open showing the lock. The version holds
     what was typed before Freeze even while the relay hasn't taken it yet (the
-    freeze goes over HTTP and could overtake it); what is typed once it is
-    frozen waits for Reopen."""
+    freeze goes over HTTP and could overtake it). An edit made here while the
+    Library is being asked waits, even if the link checks its locks meanwhile,
+    and so does one typed once it is frozen, until Reopen. A Freeze that can't
+    reach the relay first is refused to the window that asked: nothing frozen,
+    nothing lost."""
     from brindle.pro import live_docs
     from test_live_docs import Clock, FakeRelay, settle
 
@@ -224,11 +227,19 @@ def test_the_authors_freeze_and_reopen_frames_lock_the_draft_for_sign_off_and_op
     held: list[tuple] = []
     stashed = threading.Event()
     versions: dict[bool, list[str]] = {False: [], True: []}
+    asked, answer = threading.Event(), threading.Event()
 
     def library(doc_id, reopen):                        # the Library's freeze and reopen, and the text each saw
         versions[reopen].append(relay.sections()["body"])
+        if not reopen:
+            asked.set()
+            answer.wait(FIRST_FRAME_TIMEOUT)            # the Library takes its time answering
         relay.frozen = None if reopen else 2
         return relay.frozen
+
+    def engine_types(text):                             # the supervisor or engine writing into the draft here
+        replica = DraftReplica.open(db, "doc1")
+        replica.insert("body", len(replica.text("body")), text)
 
     def slow_socket(pipe, text):                        # the relay takes an update only once time passes
         if json.loads(text)["type"] == "update":
@@ -255,23 +266,41 @@ def test_the_authors_freeze_and_reopen_frames_lock_the_draft_for_sign_off_and_op
             window.receive_json()
             doc = SharedDoc.load(base64.b64decode(window.receive_json()["update"]))
             doc.set_peer_id(int(peer))
-            for text in ("!", "?"):
+
+            def types(text):
                 before = doc.version()
                 doc.insert("body", len(doc.text("body")), text)
                 window.send_json({"update": encoded(doc.export_updates(before))})
-                if text == "!":                             # typed before Freeze, still on its way to the relay
-                    window.send_json({"freeze": True})
-                    assert window.receive_json()["state"]["lock"] == "sign_off"
-                    assert versions[False] == ["World!"]       # the version has it
+
+            types("!")                                      # typed before Freeze, still on its way to the relay
+            window.send_json({"freeze": True})
+            assert asked.wait(FIRST_FRAME_TIMEOUT)
             stashed.clear()
+            engine_types("#")                               # while the Library is being asked
+            client.portal.call(here.changed, "doc1")
+            client.portal.call(here.link("doc1").reconcile)
+            assert not stashed.is_set() and not held        # nothing went to race the freeze
+            answer.set()
+            assert window.receive_json()["state"]["lock"] == "sign_off"
+            assert versions[False] == ["World!"]           # the version has "!", not "#"
+            types("?")
             window.send_json({"reopen": True})
             assert window.receive_json()["state"]["lock"] is None
-            assert stashed.wait(FIRST_FRAME_TIMEOUT)            # the edit typed while frozen goes once it is open
+            assert stashed.wait(FIRST_FRAME_TIMEOUT)        # what waited goes once it is open
             client.portal.call(time_passes, 0)
+            body = relay.sections()["body"]
+            assert versions[True] == ["World!"] and sorted(body[len("World!"):]) == ["#", "?"]
+
+            client.portal.call(here.link("doc1").close)     # the relay can't be reached
+            types("%")
+            window.send_json({"freeze": True})
+            assert window.receive_json()["state"]["lock"] is None
+            assert window.receive_json()["refused"]["action"] == "freeze"
+            assert client.portal.call(here.work, live_docs.unsent, "doc1")     # "%" kept to send
         client.portal.call(here.stop)
-    assert versions[True] == ["World!"]                     # "?" was held while frozen
+    assert len(versions[False]) == 1                        # the refused Freeze never reached the Library
     assert relay.refusals == []
-    assert relay.sections()["body"] == "World!?"
+    assert relay.sections()["body"] == body
 
 
 def test_a_teammate_opens_a_design_shared_with_them_by_its_library_id_and_writes_in_it(db):

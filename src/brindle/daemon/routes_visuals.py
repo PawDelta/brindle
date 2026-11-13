@@ -185,7 +185,10 @@ async def visual_live(socket: WebSocket) -> None:
             if lease is not None and (said.get("freeze") is True or said.get("reopen") is True):
                 # The author's Freeze or Reopen: the Library makes or withdraws the version (it
                 # refuses anyone else); not under the room's lock, so typing here never waits on it.
-                await relay.freeze(doc_id, reopen=said.get("reopen") is True)
+                reopen = said.get("reopen") is True
+                refused = await relay.freeze(doc_id, reopen=reopen)
+                if refused is not None:     # to this window only: its Freeze or Reopen didn't happen
+                    await socket.send_json({"refused": {"action": "reopen" if reopen else "freeze", "reason": refused}})
                 continue
             async with room.lock:
                 if isinstance(said.get("update"), str):
