@@ -11,6 +11,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
@@ -56,6 +57,17 @@ class _WindowSink:
         await self.socket.close(code=code)
 
 
+# A Library doc id, as a teammate's reader (SharedDesignReader) opens a design shared with them by it.
+_LIBRARY_DOC = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _teammate_doc(visual_id: str) -> bool:
+    """Whether the live socket was opened on a design someone else shared,
+    by its Library doc id: there is no plan here, and the relay alone holds
+    its text (pro.live_docs fills the replica at its first join)."""
+    return not visuals.ID.fullmatch(visual_id) and bool(_LIBRARY_DOC.fullmatch(visual_id))
+
+
 def _live_doc(db: DB, visual_id: str) -> tuple[str, dict]:
     from brindle import plan_docs
     from brindle.pro import shared_docs
@@ -86,6 +98,8 @@ async def visual_live(socket: WebSocket) -> None:
     if rooms is None:
         rooms = socket.app.state.visual_live_rooms = {}
     doc_id = None
+    # A design a teammate shared, opened by its Library doc id: no plan here to seed from or to check.
+    teammate = relay is not None and _teammate_doc(socket.path_params["id"])
 
     async def work(fn, *args):
         # Each submission gets its own context, including cancellation/deadline
@@ -95,9 +109,13 @@ async def visual_live(socket: WebSocket) -> None:
     def open_doc():
         nonlocal db
         db = DB()
+        if teammate:
+            return socket.path_params["id"]
         return _live_doc(db, socket.path_params["id"])[0]
 
     def current_plan():
+        if teammate:
+            return None     # the relay checks who may write; presence may come before the text does
         current_id, p = _live_doc(db, socket.path_params["id"])
         if current_id != doc_id:
             raise DraftGone("the visual's shared document changed")
@@ -105,6 +123,13 @@ async def visual_live(socket: WebSocket) -> None:
 
     def bootstrap():
         nonlocal replica
+        if teammate:
+            # Only the relay's draft: until the link's first join stores it there is nothing to
+            # send, and the join closes this window with RELOAD to open it again (pro.live_docs).
+            if db.conn.execute("SELECT 1 FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone() is None:
+                return []
+            replica = DraftReplica.open(db, doc_id)
+            return replica.export_bootstrap()
         p = current_plan()
         # Only the first holder seeds; open prefers an existing stored replica.
         sections = {"lede": p["lede"], **{s["id"]: s["markdown"] for s in p["sections"]
@@ -123,6 +148,8 @@ async def visual_live(socket: WebSocket) -> None:
         onto the new one (DraftReplica.receive); None for nothing yet."""
         current_plan()
         if data is not None:
+            if replica is None:     # a teammate's window before the relay's text: it has nothing to edit
+                raise ValueError("no text to edit yet")
             return replica.receive(data)[1]
         return None
 
@@ -142,6 +169,9 @@ async def visual_live(socket: WebSocket) -> None:
                 if lease is not None:
                     await socket.send_json({"peer": None if lease.peer is None else str(lease.peer)})
                     await socket.send_json(relay.link(doc_id).state_frame())
+            if teammate and lease is None:
+                # Signed out or no Team plan here: a teammate's design has no live text without the relay.
+                raise ServiceError("not_found", "no live text for this design here", 404)
             for update in await work(bootstrap):
                 await socket.send_json({"update": base64.b64encode(update).decode("ascii")})
             for section, presence in room.presence.items():
@@ -149,10 +179,18 @@ async def visual_live(socket: WebSocket) -> None:
             room.clients.add(socket)
         while True:
             frame = await socket.receive_text()
+            said = json.loads(frame)
+            if not isinstance(said, dict):
+                raise ValueError("a live frame must be an object")
+            if lease is not None and (said.get("freeze") is True or said.get("reopen") is True):
+                # The author's Freeze or Reopen: the Library makes or withdraws the version (it
+                # refuses anyone else); not under the room's lock, so typing here never waits on it.
+                reopen = said.get("reopen") is True
+                refused = await relay.freeze(doc_id, reopen=reopen)
+                if refused is not None:     # to this window only: its Freeze or Reopen didn't happen
+                    await socket.send_json({"refused": {"action": "reopen" if reopen else "freeze", "reason": refused}})
+                continue
             async with room.lock:
-                said = json.loads(frame)
-                if not isinstance(said, dict):
-                    raise ValueError("a live frame must be an object")
                 if isinstance(said.get("update"), str):
                     data = base64.b64decode(said["update"], validate=True)
                     forward = await work(apply_update, data)
