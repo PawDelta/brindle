@@ -1,0 +1,9 @@
+{
+  "url": "https://github.com/msiemens/tinydb.git",
+  "commit": "edff96aeb2616402e9489d46e90a592c05565621",
+  "setup": [
+    "uv venv -q --python 3.12 .venv",
+    "uv pip install -q --python .venv/bin/python -e . 'pytest~=9.0' 'pytest-cov~=7.0' 'pyyaml~=6.0'"
+  ],
+  "test_cmd": ".venv/bin/python -m pytest -q -p no:cacheprovider tests"
+}

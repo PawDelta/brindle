@@ -1,0 +1,536 @@
+diff --git a/tests/test_table_features.py b/tests/test_table_features.py
+new file mode 100644
+index 0000000..478256b
+--- /dev/null
++++ b/tests/test_table_features.py
+@@ -0,0 +1,52 @@
++import pytest
++
++from tinydb import TinyDB, UniqueViolation, where
++from tinydb.storages import MemoryStorage
++
++
++@pytest.fixture
++def table():
++    table = TinyDB(storage=MemoryStorage).table('t')
++    table.insert_multiple([
++        {'name': 'a', 'age': 30, 'city': {'name': 'Oslo'}},
++        {'name': 'b', 'age': 20},
++        {'name': 'c', 'age': None, 'city': {'name': 'Alta'}},
++        {'name': 'd', 'age': 20},
++    ])
++    return table
++
++
++def test_find_orders_paginates_and_projects(table):
++    docs = table.find(order_by=['-age', 'name'], skip=1, limit=2,
++                      fields=['name', 'city.name'])
++    assert docs == [{'name': 'b'}, {'name': 'd'}]
++    assert [doc.doc_id for doc in docs] == [2, 4]
++    assert [d['name'] for d in table.find(order_by='age')] == \
++        ['b', 'd', 'a', 'c']
++
++
++def test_aggregation(table):
++    assert table.distinct('age') == [30, 20]
++    assert table.aggregate('age', 'sum') == 70
++    assert table.aggregate('age', 'avg') == pytest.approx(70 / 3)
++    assert list(table.group_by('age')) == [30, 20, None]
++    with pytest.raises(TypeError):
++        table.aggregate('name', 'sum')
++
++
++def test_unique_rejects_without_partial_writes(table):
++    table.ensure_unique('name')
++    with pytest.raises(UniqueViolation):
++        table.update(lambda doc: doc.update(name='x'), where('age') == 20)
++    assert [d['name'] for d in table.all()] == ['a', 'b', 'c', 'd']
++
++
++def test_watch_reports_changes(table):
++    events = []
++    unwatch = table.watch(lambda *event: events.append(event))
++    table.update({'age': 21}, where('name') == 'b')
++    table.update({'age': 21}, where('name') == 'b')
++    unwatch()
++    table.remove(doc_ids=[1])
++    assert events == [('update', 2, {'name': 'b', 'age': 20},
++                       {'name': 'b', 'age': 21})]
+diff --git a/tinydb/__init__.py b/tinydb/__init__.py
+index 4a8941d..b6d579e 100644
+--- a/tinydb/__init__.py
++++ b/tinydb/__init__.py
+@@ -28,6 +28,8 @@ Usage example:
+ from .queries import Query, where
+ from .storages import Storage, JSONStorage
+ from .database import TinyDB
++from .table import UniqueViolation
+ from .version import __version__
+ 
+-__all__ = ('TinyDB', 'Storage', 'JSONStorage', 'Query', 'where')
++__all__ = ('TinyDB', 'Storage', 'JSONStorage', 'Query', 'where',
++           'UniqueViolation')
+diff --git a/tinydb/table.py b/tinydb/table.py
+index 76470aa..5872348 100644
+--- a/tinydb/table.py
++++ b/tinydb/table.py
+@@ -4,7 +4,11 @@ data in TinyDB.
+ """
+ 
+ from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
++from copy import deepcopy
++from functools import cmp_to_key
++from numbers import Real
+ from typing import (
++    Any,
+     NoReturn,
+     Optional,
+     Union,
+@@ -14,9 +18,110 @@ from typing import (
+ 
+ from .queries import QueryLike
+ from .storages import Storage
+-from .utils import LRUCache
++from .utils import LRUCache, MISSING, project_paths, resolve_path
+ 
+-__all__ = ('Document', 'Table')
++__all__ = ('Document', 'Table', 'UniqueViolation')
++
++#: Signature of a change callback: ``callback(op, doc_id, old, new)``
++ChangeCallback = Callable[[str, int, Optional[dict], Optional[dict]], Any]
++
++_AGGREGATE_OPS = ('count', 'sum', 'avg', 'min', 'max')
++
++
++class UniqueViolation(ValueError):
++    """
++    Raised when a write would leave two documents with equal values for a
++    field declared unique with :meth:`Table.ensure_unique`.
++    """
++
++
++def _present(value) -> bool:
++    """
++    Whether a resolved field value is neither missing nor null.
++    """
++    return value is not MISSING and value is not None
++
++
++class _SeenValues:
++    """
++    Remembers values and answers "was an equal value seen before?".
++
++    Hashable values are looked up in a set; unhashable ones (lists, dicts,
++    sets) are compared against every earlier value, since an unhashable
++    value can equal a hashable one (``{1} == frozenset({1})``).
++    """
++
++    def __init__(self):
++        self._hashed: set = set()
++        self._hashable: list = []
++        self._unhashable: list = []
++
++    def add(self, value) -> bool:
++        """
++        Remember ``value``; return whether an equal value was seen before.
++        """
++        try:
++            hash(value)
++        except TypeError:
++            seen = value in self._unhashable or value in self._hashable
++            self._unhashable.append(value)
++            return seen
++
++        seen = value in self._hashed or value in self._unhashable
++        if not seen:
++            self._hashed.add(value)
++            self._hashable.append(value)
++        return seen
++
++
++def _first_duplicate(values: Iterable) -> Any:
++    """
++    Return the first value in ``values`` that equals an earlier one, or
++    :data:`MISSING` if all are distinct. Works for unhashable values too.
++    """
++    seen = _SeenValues()
++    for value in values:
++        if seen.add(value):
++            return value
++    return MISSING
++
++
++def _distinct(values: Iterable) -> list:
++    """
++    The distinct values of ``values`` in first-seen order, by equality.
++    """
++    seen = _SeenValues()
++    return [value for value in values if not seen.add(value)]
++
++
++def _sort_key(keys: list[str]) -> Callable[[tuple[Any, Mapping]], Any]:
++    """
++    A sort key for ``(doc_id, doc)`` pairs ordering by several field paths
++    (``-path`` for descending). Missing or null values sort last in both
++    directions. Keys are compared one at a time, so a later key's values
++    are only compared when all earlier keys tie.
++    """
++    fields = [
++        (key[1:], True) if key.startswith('-') else (key, False)
++        for key in keys
++    ]
++
++    def compare(a: tuple[Any, Mapping], b: tuple[Any, Mapping]) -> int:
++        for path, descending in fields:
++            value_a = resolve_path(a[1], path)
++            value_b = resolve_path(b[1], path)
++            present_a, present_b = _present(value_a), _present(value_b)
++            if not present_a or not present_b:
++                if present_a != present_b:
++                    return -1 if present_a else 1
++                continue
++            if value_a == value_b:
++                continue
++            result = -1 if value_a < value_b else 1
++            return -result if descending else result
++        return 0
++
++    return cmp_to_key(compare)
+ 
+ 
+ class Document(dict):
+@@ -108,6 +213,12 @@ class Table:
+             = self.query_cache_class(capacity=cache_size)
+ 
+         self._next_id: Optional[int] = None
++
++        # Field paths declared unique (see ``ensure_unique``) and change
++        # callbacks (see ``watch``). Both must exist before the first write.
++        self._unique_paths: list[str] = []
++        self._watchers: list[list[ChangeCallback]] = []
++
+         # Only persist a brand-new empty table. Never clear existing documents
+         # when reopen/construct with persist_empty=True (see issue #636).
+         if persist_empty and not self._read_table():
+@@ -715,6 +826,182 @@ class Table:
+ 
+         return len(self.search(cond))
+ 
++    def find(
++        self,
++        cond: Optional[QueryLike] = None,
++        *,
++        order_by: Union[str, Iterable[str], None] = None,
++        skip: int = 0,
++        limit: Optional[int] = None,
++        fields: Optional[Iterable[str]] = None,
++    ) -> list[Document]:
++        """
++        Search with ordering, pagination and projection.
++
++        :param cond: the condition to check against (``None``: all documents)
++        :param order_by: a field path or a list of them; prefix a path with
++                         ``-`` to sort descending. Missing or null values sort
++                         last in both directions.
++        :param skip: how many results to drop from the front
++        :param limit: how many results to return at most (``None``: all)
++        :param fields: field paths to return (``None``: whole documents)
++        :returns: a list of independent document copies
++        """
++        if skip < 0:
++            raise ValueError('skip must not be negative')
++        if limit is not None and limit < 0:
++            raise ValueError('limit must not be negative')
++
++        matches = [
++            (doc_id, doc)
++            for doc_id, doc in self._read_table().items()
++            if cond is None or cond(doc)
++        ]
++
++        if order_by is not None:
++            keys = [order_by] if isinstance(order_by, str) else list(order_by)
++            # list.sort is stable, so full ties keep their table order
++            matches.sort(key=_sort_key(keys))
++
++        end = None if limit is None else skip + limit
++        matches = matches[skip:end]
++
++        paths = None if fields is None else list(fields)
++        return [
++            self.document_class(
++                deepcopy(doc) if paths is None else project_paths(doc, paths),
++                self.document_id_class(doc_id),
++            )
++            for doc_id, doc in matches
++        ]
++
++    def distinct(self, path: str, cond: Optional[QueryLike] = None) -> list:
++        """
++        The distinct non-null values of a field, in first-seen order.
++
++        :param path: the field path
++        :param cond: which documents to consider (``None``: all)
++        """
++        return deepcopy(_distinct(self._field_values(path, cond)))
++
++    def aggregate(
++        self, path: str, op: str, cond: Optional[QueryLike] = None
++    ) -> Any:
++        """
++        Aggregate the non-null values of a field.
++
++        :param path: the field path
++        :param op: one of ``count``, ``sum``, ``avg``, ``min``, ``max``
++        :param cond: which documents to consider (``None``: all)
++        """
++        if op not in _AGGREGATE_OPS:
++            raise ValueError(f'Unknown aggregate operation: {op!r}')
++
++        values = list(self._field_values(path, cond))
++
++        if op == 'count':
++            return len(values)
++
++        if op in ('sum', 'avg'):
++            for value in values:
++                if isinstance(value, bool) or not isinstance(value, Real):
++                    raise TypeError(
++                        f'Cannot compute {op} of non-numeric value {value!r}'
++                    )
++            if op == 'sum':
++                return sum(values)
++            return sum(values) / len(values) if values else None
++
++        if not values:
++            return None
++        return deepcopy(min(values) if op == 'min' else max(values))
++
++    def group_by(
++        self, path: str, cond: Optional[QueryLike] = None
++    ) -> dict[Any, list[Document]]:
++        """
++        Group documents by the value of a field. Documents where the field
++        is missing or null are grouped under ``None``.
++
++        :param path: the field path
++        :param cond: which documents to consider (``None``: all)
++        """
++        groups: dict[Any, list[Document]] = {}
++        for doc_id, doc in self._read_table().items():
++            if cond is not None and not cond(doc):
++                continue
++            value = resolve_path(doc, path)
++            key = value if _present(value) else None
++            groups.setdefault(key, []).append(
++                self.document_class(
++                    deepcopy(doc), self.document_id_class(doc_id)
++                )
++            )
++        return groups
++
++    def ensure_unique(self, path: str) -> None:
++        """
++        Require that no two documents have equal non-null values for a
++        field. Raises :class:`UniqueViolation` if the table already holds
++        such documents; the constraint is then not added.
++
++        :param path: the field path
++        """
++        if path in self._unique_paths:
++            return
++
++        self._check_unique(self._read_table().values(), [path])
++        self._unique_paths.append(path)
++
++    def watch(self, callback: ChangeCallback) -> Callable[[], None]:
++        """
++        Call ``callback(op, doc_id, old, new)`` for every change to this
++        table's documents, after the change has been stored.
++
++        :param callback: the function to call
++        :returns: a function that stops the notifications
++        """
++        # Each registration is its own entry, so unwatching one never
++        # touches another registration of the same callback.
++        registration = [callback]
++        self._watchers.append(registration)
++
++        def unwatch() -> None:
++            for index, entry in enumerate(self._watchers):
++                if entry is registration:
++                    del self._watchers[index]
++                    return
++
++        return unwatch
++
++    def _field_values(
++        self, path: str, cond: Optional[QueryLike]
++    ) -> Iterator[Any]:
++        """
++        Yield the non-null values of a field in matching documents.
++        """
++        for doc in self._read_table().values():
++            if cond is not None and not cond(doc):
++                continue
++            value = resolve_path(doc, path)
++            if _present(value):
++                yield value
++
++    @staticmethod
++    def _check_unique(docs: Iterable[Mapping], paths: Iterable[str]) -> None:
++        """
++        Raise :class:`UniqueViolation` if two of ``docs`` share a non-null
++        value for one of ``paths``.
++        """
++        docs = list(docs)
++        for path in paths:
++            values = (resolve_path(doc, path) for doc in docs)
++            duplicate = _first_duplicate(v for v in values if _present(v))
++            if duplicate is not MISSING:
++                raise UniqueViolation(
++                    f'Duplicate value {duplicate!r} for unique field {path!r}'
++                )
++
+     def clear_cache(self) -> None:
+         """
+         Clear the query cache.
+@@ -831,14 +1118,28 @@ class Table:
+         # This is required as the rest of TinyDB expects the document IDs
+         # to be an instance of ``self.document_id_class`` but the storage
+         # might convert dict keys to strings.
+-        table = {
++        before = {
+             self.document_id_class(doc_id): doc
+             for doc_id, doc in raw_table.items()
+         }
+ 
++        # Updaters may change documents in place. With constraints or
++        # watchers, work on copies: a write rejected by a constraint must
++        # leave the stored documents (which in-memory storages hand out
++        # directly) untouched, and watchers need the old contents.
++        tracking = bool(self._unique_paths or self._watchers)
++        if tracking:
++            table = {doc_id: deepcopy(doc) for doc_id, doc in before.items()}
++        else:
++            table = before
++
+         # Perform the table update operation
+         updater(table)
+ 
++        # Reject the write before anything is stored
++        if self._unique_paths:
++            self._check_unique(table.values(), self._unique_paths)
++
+         # Convert the document IDs back to strings.
+         # This is required as some storages (most notably the JSON file format)
+         # don't support IDs other than strings.
+@@ -852,3 +1153,30 @@ class Table:
+ 
+         # Clear the query cache, as the table contents have changed
+         self.clear_cache()
++
++        if tracking and self._watchers:
++            self._notify(before, table)
++
++    def _notify(self, before: dict, after: dict) -> None:
++        """
++        Tell the watchers about the differences between two table states.
++        """
++        changes: list[tuple[str, Any, Optional[dict], Optional[dict]]] = []
++        for doc_id, doc in after.items():
++            if doc_id not in before:
++                changes.append(('insert', doc_id, None, doc))
++            elif before[doc_id] != doc:
++                changes.append(('update', doc_id, before[doc_id], doc))
++        for doc_id, doc in before.items():
++            if doc_id not in after:
++                changes.append(('remove', doc_id, doc, None))
++
++        # Copy the list: a callback may unwatch while we iterate
++        for (callback,) in list(self._watchers):
++            for op, doc_id, old, new in changes:
++                callback(
++                    op,
++                    doc_id,
++                    None if old is None else deepcopy(dict(old)),
++                    None if new is None else deepcopy(dict(new)),
++                )
+diff --git a/tinydb/utils.py b/tinydb/utils.py
+index 43cad4e..b40a77c 100644
+--- a/tinydb/utils.py
++++ b/tinydb/utils.py
+@@ -3,6 +3,7 @@ Utility functions.
+ """
+ 
+ from collections import OrderedDict, abc
++from copy import deepcopy
+ from collections.abc import Iterator
+ from typing import TypeVar, Generic, Union, Optional, TYPE_CHECKING, cast
+ 
+@@ -11,13 +12,64 @@ V = TypeVar('V')
+ D = TypeVar('D')
+ T = TypeVar('T')
+ 
+-__all__ = ('LRUCache', 'freeze', 'with_typehint')
++__all__ = ('LRUCache', 'freeze', 'with_typehint', 'MISSING', 'resolve_path',
++           'project_paths')
+ 
+ # Used internally by LRUCache to tell "key maps to None" apart from
+ # "key isn't in the cache at all"
+ _missing = object()
+ 
+ 
++class _MissingType:
++    """
++    Marker for a field path that does not resolve in a document.
++    """
++
++    def __repr__(self):
++        return 'MISSING'
++
++
++#: Returned by :func:`resolve_path` when a field path does not resolve
++MISSING = _MissingType()
++
++
++def resolve_path(doc, path: str):
++    """
++    Resolve a dotted field path (``"a.b.c"``) in a document.
++
++    Returns :data:`MISSING` if a key along the path doesn't exist or an
++    intermediate value is not a mapping. Lists are never traversed.
++    """
++    value = doc
++    for key in path.split('.'):
++        if not isinstance(value, abc.Mapping) or key not in value:
++            return MISSING
++        value = value[key]
++    return value
++
++
++def project_paths(doc, paths) -> dict:
++    """
++    Build a new dict holding only the given field paths of ``doc``, keeping
++    their nesting. Paths that don't resolve are left out. Values are deep
++    copies, so the result shares nothing with ``doc``.
++    """
++    result: dict = {}
++    for path in paths:
++        value = resolve_path(doc, path)
++        if value is MISSING:
++            continue
++        keys = path.split('.')
++        target = result
++        for key in keys[:-1]:
++            child = target.get(key)
++            if not isinstance(child, dict):
++                child = target[key] = {}
++            target = child
++        target[keys[-1]] = deepcopy(value)
++    return result
++
++
+ def with_typehint(baseclass: type[T]):
+     """
+     Add type hints from a specified class to a base class:
