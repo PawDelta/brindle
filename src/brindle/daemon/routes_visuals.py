@@ -43,6 +43,19 @@ class _LiveRoom:
         self.presence: dict[str, Any] = {}
 
 
+class _WindowSink:
+    """An app window's socket as the relay link (pro.live_docs) writes to it."""
+
+    def __init__(self, socket: WebSocket) -> None:
+        self.socket = socket
+
+    async def send(self, frame: dict) -> None:
+        await self.socket.send_json(frame)
+
+    async def close(self, code: int) -> None:
+        await self.socket.close(code=code)
+
+
 def _live_doc(db: DB, visual_id: str) -> tuple[str, dict]:
     from brindle import plan_docs
     from brindle.pro import shared_docs
@@ -59,8 +72,11 @@ async def visual_live(socket: WebSocket) -> None:
     """Guard consumed the token. Merge text locally and relay ephemeral carets."""
     from brindle.crdt import CrdtError, Presence, SharedDoc
     from brindle.plan_drafts import DraftGone, DraftReplica
+    from brindle.pro import live_docs
 
     await socket.accept()
+    relay = getattr(socket.app.state, "live_docs", None)    # the daemon's relay links (pro.live_docs)
+    lease = None
     loop = asyncio.get_running_loop()
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brindle-visual-live")
     db = None
@@ -96,6 +112,9 @@ async def visual_live(socket: WebSocket) -> None:
         exists = db.conn.execute("SELECT 1 FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
         initial = None if exists else SharedDoc.new(sections).export_snapshot()
         replica = DraftReplica.open(db, doc_id, initial)
+        if not exists:
+            # Seeded here, not by the relay: its first join re-types local edits from this text.
+            live_docs.note_seed(db, doc_id, sections)
         return replica.export_bootstrap()
 
     def apply_update(data):
@@ -112,6 +131,13 @@ async def visual_live(socket: WebSocket) -> None:
         room = rooms.setdefault(doc_id, _LiveRoom())
         room.users += 1
         async with room.lock:
+            if relay is not None:
+                # The number this window writes under, before its snapshot: the app sets it
+                # once the snapshot is in (as a string: relay numbers pass 2**53).
+                lease = await relay.open_window(doc_id, _WindowSink(socket))
+                if lease is not None:
+                    await socket.send_json({"peer": None if lease.peer is None else str(lease.peer)})
+                    await socket.send_json(relay.link(doc_id).state_frame())
             for update in await work(bootstrap):
                 await socket.send_json({"update": base64.b64encode(update).decode("ascii")})
             for section, presence in room.presence.items():
@@ -125,10 +151,14 @@ async def visual_live(socket: WebSocket) -> None:
                     raise ValueError("a live frame must be an object")
                 if isinstance(said.get("update"), str):
                     await work(apply_update, base64.b64decode(said["update"], validate=True))
+                    if lease is not None:
+                        await relay.changed(doc_id)
                 elif isinstance(said.get("awareness"), str) and isinstance(said.get("section"), str):
                     await work(apply_update, None)
                     presence = room.presence.setdefault(said["section"], Presence())
                     presence.apply(base64.b64decode(said["awareness"], validate=True))
+                    if lease is not None:
+                        await relay.awareness(lease, said["section"], said["awareness"])
                 else:
                     raise ValueError("not a live update or awareness frame")
                 for other in tuple(room.clients):
@@ -147,6 +177,11 @@ async def visual_live(socket: WebSocket) -> None:
     except (CrdtError, ValueError, binascii.Error):
         await socket.close(code=1003)
     finally:
+        if lease is not None:
+            try:
+                await relay.close_window(lease)
+            except Exception:  # noqa: BLE001 - the relay link must never keep the socket from ending
+                log.debug("brindle: the live relay didn't hear a window close", exc_info=True)
         if room is not None:
             room.clients.discard(socket)
             room.users -= 1

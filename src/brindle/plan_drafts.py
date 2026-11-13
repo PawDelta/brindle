@@ -119,6 +119,13 @@ class DraftReplica:
     def export_updates(self, since: bytes | None = None) -> bytes:
         return self._doc.export_updates(since)
 
+    def holds(self, version: bytes) -> bool:
+        """Whether a replica at ``version`` already has every change here."""
+        return self._doc.holds(version)
+
+    def sections_at(self, version: bytes) -> dict[str, str]:
+        return self._doc.sections_at(version)
+
     def export_bootstrap(self) -> list[bytes]:
         """The latest snapshot and every update still waiting on dependencies.
 
@@ -180,9 +187,30 @@ class DraftReplica:
         return doc.export_updates(before), waiting
 
 
+def adopt(db: DB, doc_id: str, doc: SharedDoc) -> DraftReplica:
+    """Make ``doc`` this machine's replica of ``doc_id``, writing under its
+    own peer id from now on: the relay's draft with the local text re-typed
+    onto it (:mod:`brindle.pro.live_docs`). ``doc``'s peer id must be one
+    whose earlier changes ``doc`` already holds. Whatever the replica held
+    before, the updates it held back included, is replaced; a holder of the
+    old replica gets :class:`DraftGone` at its next write."""
+    peer, now = doc.peer_id, time.time()
+    with db.tx() as c:
+        c.execute("DELETE FROM plan_draft_pending WHERE doc_id=?", (doc_id,))
+        row = c.execute("SELECT seq FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+        seq = 0 if row is None else row["seq"] + 1
+        c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,))
+        c.execute("INSERT INTO plan_drafts (doc_id, peer_id, state, seq, created_at, updated_at)"
+                  " VALUES (?, ?, ?, ?, ?, ?)", (doc_id, peer, doc.export_snapshot(), seq, now, now))
+    return DraftReplica(db, doc_id, peer, doc, seq)
+
+
 def drop(db: DB, doc_id: str) -> bool:
     """Delete this machine's replica of ``doc_id`` (access was cut, or the
     doc stopped being shared), with any updates it held back. A replica made
     later writes under a new id."""
     with db.tx() as c:
+        # Its link to the relay goes with it: its unsent edits (the outbox) and the numbers it held.
+        c.execute("DELETE FROM live_docs WHERE doc_id=?", (doc_id,))
+        c.execute("DELETE FROM live_doc_peers WHERE doc_id=?", (doc_id,))
         return c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,)).rowcount > 0

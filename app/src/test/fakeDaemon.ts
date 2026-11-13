@@ -8,7 +8,7 @@
    screen, then what it prints, and tmux's "Pane is dead" once its command
    has exited. */
 
-import { EphemeralStore, LoroDoc } from "loro-crdt";
+import { EphemeralStore, LoroDoc, decodeImportBlobMeta } from "loro-crdt";
 import { DaemonClient, fromBase64, toBase64, type GithubConnection, type LiveDocState, type Plan } from "../api/client";
 import { liveReviewGate } from "../api/liveReview";
 import type { BusEvent, StreamMessage, WebSocketLike } from "../api/events";
@@ -619,6 +619,8 @@ export class FakeSocket implements WebSocketLike {
    clients (FakeDaemon.joinLive, relayLive). */
 export class FakeLiveSocket implements WebSocketLike {
   readonly writers = new Set<string>();
+  /* The number this window was lent to write under (FakeDaemon.joinLive), as a decimal string. */
+  peer: string | null = null;
   onopen: WebSocketLike["onopen"] = null;
   onmessage: WebSocketLike["onmessage"] = null;
   onclose: WebSocketLike["onclose"] = null;
@@ -807,6 +809,20 @@ export class FakeDaemon {
   /* Each visual's live text (seedLive), and the clients on it. */
   private readonly live = new Map<string, { doc: LoroDoc; presence: Map<string, EphemeralStore>; state: LiveDocState; writers: Set<string>; nextVersion: number; canFreeze: boolean; review?: { plan: Plan; gate: Plan["gate"]; me: string } }>();
   readonly liveSockets: FakeLiveSocket[] = [];
+  /* Numbers lent to live windows (joinLive), and writers whose changes were refused for not
+     being under the number their window was lent. holdLivePeers: none free until lendLivePeers. */
+  private nextLivePeer = 2n ** 60n;
+  readonly liveRefused: string[] = [];
+  holdLivePeers = false;
+
+  lendLivePeers(): void {
+    this.holdLivePeers = false;
+    for (const s of this.liveSockets) {
+      if (!s.authed || s.closed || s.peer !== null) continue;
+      s.peer = String(this.nextLivePeer++);
+      s.push({ peer: s.peer });
+    }
+  }
   private nextId = 1;
   private nextSession = 1;
   private nextJob = 1;
@@ -2534,6 +2550,10 @@ export class FakeDaemon {
       return;
     }
     socket.authed = true;
+    // The number this window writes under, as the daemon lends one from the server relay's: past
+    // 2**53, so only a string carries it whole. Held back: {"peer": null} until lendLivePeers().
+    if (!this.holdLivePeers) socket.peer = String(this.nextLivePeer++);
+    socket.push({ peer: socket.peer });
     socket.push({ state: live.state });
     socket.push({ update: toBase64(live.doc.export({ mode: "snapshot" })) });
     for (const [section, store] of live.presence) socket.push({ awareness: toBase64(store.encodeAll()), section });
@@ -2554,7 +2574,14 @@ export class FakeDaemon {
     }
     if (said.update !== undefined) {
       if (live.state.lock === "sign_off" || (live.state.lock === "author_offline" && !live.canFreeze)) return;
-      live.doc.import(fromBase64(said.update));
+      const bytes = fromBase64(said.update);
+      // As the server's relay does: a change under any number but the one lent is refused.
+      const writers = [...decodeImportBlobMeta(bytes, true).partialEndVersionVector.toJSON().keys()];
+      if (writers.some((peer) => peer !== from.peer)) {
+        this.liveRefused.push(...writers.filter((peer) => peer !== from.peer));
+        return;
+      }
+      live.doc.import(bytes);
       for (const name of from.writers) live.writers.add(name);
     }
     else if (said.awareness !== undefined && said.section !== undefined) {

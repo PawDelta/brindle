@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { EphemeralStore, LoroDoc } from "loro-crdt";
 import { getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
-import type { LiveChannel, LiveDocState } from "../../../api/client";
+import { LIVE_RELOAD, type LiveChannel, type LiveDocState } from "../../../api/client";
 import { quiet } from "../../../components/ui";
 import type { LiveClient } from "./DocEditor";
 import { Avatar } from "./PlanCards";
@@ -20,6 +20,8 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
   const [connected, setConnected] = useState(false);
   const [peers, setPeers] = useState<UserState[]>([]);
   const [unsupported, setUnsupported] = useState(false);
+  // Bumped when the daemon replaced the text (LIVE_RELOAD): the channel opens again.
+  const [opened, setOpened] = useState(0);
   const known = useRef({ client, visual, live: false });
   useEffect(() => {
     if (known.current.client !== client || known.current.visual !== visual) known.current = { client, visual, live: false };
@@ -58,6 +60,10 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
         setConnected(false);
         onState?.(null);
         stopRefresh();
+        if (code === LIVE_RELOAD) {
+          setOpened((n) => n + 1);
+          return;
+        }
         // A missing initial document is definitive. A known live document stays locked on loss.
         if (code === 4404 && !known.current.live) {
           setUnsupported(true);
@@ -80,7 +86,7 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
       live.close();
       for (const store of stores.values()) store.destroy();
     };
-  }, [client, visual, name, onState, onCapability]);
+  }, [client, visual, name, onState, onCapability, opened]);
   if (unsupported) return null;
   return (
     <section aria-label="Live document" className="grid gap-2 rounded-md border border-line p-2.5 font-sans text-xs" data-state={state?.lock ?? "editing"}>

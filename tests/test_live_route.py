@@ -169,3 +169,40 @@ def test_a_contended_draft_write_keeps_the_daemon_event_loop_responsive(db, live
                 assert progressed.wait(FIRST_FRAME_TIMEOUT)
             b.import_updates(base64.b64decode(second.receive_json()["update"]))
             assert b.text("body") == "World!"
+
+
+def test_an_app_window_edit_reaches_another_machine_under_the_number_its_socket_lent(db, live_doc, tmp_path):
+    from brindle.pro import live_docs
+    from test_live_docs import Clock, FakeRelay, Machine, settle
+
+    relay = FakeRelay(Clock(), author="owner")
+    heard = threading.Event()
+    receive = relay.receive
+
+    def receive_and_note(pipe, text):
+        receive(pipe, text)
+        heard.set()
+
+    here = live_docs.Manager(relay.transport("owner"), available=lambda: True, drive=False)
+    there = Machine(relay, tmp_path / "there.db", "teammate")
+    app = build_app(TOKEN)
+    app.state.live_docs = here
+    path = f"/v1/visuals/{live_doc}/live"
+    with TestClient(app) as client:
+        client.portal.call(here.link("doc1").connect)
+        client.portal.call(there.link.connect)
+        with client.websocket_connect(path) as window:
+            window.send_text(TOKEN)
+            peer = window.receive_json()["peer"]                # before the snapshot, as a string
+            assert window.receive_json()["state"]["lock"] is None
+            doc = SharedDoc.load(base64.b64decode(window.receive_json()["update"]))
+            doc.set_peer_id(int(peer))
+            before = doc.version()
+            doc.insert("body", 5, "!")
+            relay.receive = receive_and_note
+            window.send_json({"update": encoded(doc.export_updates(before))})
+            assert heard.wait(FIRST_FRAME_TIMEOUT)              # the socket sent it on to the relay
+            client.portal.call(settle, here.link("doc1"), there.link)
+        client.portal.call(here.stop)
+    assert relay.refusals == []
+    assert there.sections() == {"lede": "# Design\n\nHello", "body": "World!"}

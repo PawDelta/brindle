@@ -1341,10 +1341,19 @@ export interface LiveHandlers {
   /* Another writer's presence in one section's text: Loro EphemeralStore bytes to apply. */
   onAwareness(section: string, bytes: Uint8Array): void;
   onState?(state: LiveDocState): void;
+  /* The number this window writes under, a decimal string (relay numbers pass 2**53): set it with
+     LoroDoc.setPeerId once the snapshot is in and before the first edit. null: none is free yet,
+     so the text stays read only until one arrives. Never sent: write under the doc's own number. */
+  onPeer?(peer: `${number}` | null): void;
   /* The channel closed: 4401 a wrong token, 4404 no live text for this visual,
-     1006 the connection dropped. Locks arrive as state and keep the channel open. */
+     1006 the connection dropped, LIVE_RELOAD the daemon replaced the text (open the channel
+     again for the new one). Locks arrive as state and keep the channel open. */
   onClose?(code: number): void;
 }
+
+/* The live channel's close code when the daemon replaced the doc's text with the server relay's:
+   whatever was loaded is gone, so open the channel again (pro/live_docs.py RELOAD). */
+export const LIVE_RELOAD = 4205;
 
 export interface LiveChannel {
   /* A local change, as LoroDoc.subscribeLocalUpdates hands it over. */
@@ -1851,9 +1860,17 @@ export class DaemonClient {
        {"awareness": base64, "section": id} for this writer's caret and name in a section
        (an EphemeralStore per section, keyed `<peer>-cm-cursor` / `<peer>-cm-user` by
        loro-codemirror).
-     - daemon → client: first state, then {"update": base64}, the whole document (a snapshot); then every
+     - daemon → client: first, when the doc is co-edited through the server's relay, {"peer": "n"}:
+       the relay-issued number this window writes under (a decimal string; numbers pass 2**53).
+       The relay refuses a change under any number it did not issue, so the client sets it with
+       LoroDoc.setPeerId after importing the snapshot and before its first edit. {"peer": null}:
+       none is free yet; the text stays read only until a later {"peer": "n"}. No peer frame: the
+       doc is only on this machine, and the client writes under its own number.
+     - daemon → client: then state, then {"update": base64}, the whole document (a snapshot); then every
        other client's frames as they were sent, update or awareness, and on joining each
-       section's last-known awareness. A visual with no live text closes with 4404.
+       section's last-known awareness. A visual with no live text closes with 4404. Closing with
+       LIVE_RELOAD (4205) means the daemon replaced the text (it took the relay's draft): open the
+       channel again and load the new snapshot.
      - daemon → client: {"state": LiveDocState} on joining and whenever the lock or version
        changes. `author` is the author's display name. `lock` is null, "sign_off" (read only
        for everyone), or "author_offline" (read only for others; comments and suggestions
@@ -1891,13 +1908,17 @@ export class DaemonClient {
     };
     socket.onmessage = (ev) => {
       if (closed || typeof ev.data !== "string") return;
-      let said: { update?: string; awareness?: string; section?: string; state?: LiveDocState };
+      let said: { update?: string; awareness?: string; section?: string; state?: LiveDocState; peer?: string | null };
       try {
         said = JSON.parse(ev.data) as typeof said;
       } catch {
         return;
       }
-      if (typeof said.update === "string") handlers.onUpdate(fromBase64(said.update));
+      if ("peer" in said) {
+        const peer = said.peer;
+        if (peer === null) handlers.onPeer?.(null);
+        else if (typeof peer === "string" && /^\d+$/.test(peer)) handlers.onPeer?.(peer as `${number}`);
+      } else if (typeof said.update === "string") handlers.onUpdate(fromBase64(said.update));
       else if (typeof said.awareness === "string" && typeof said.section === "string") handlers.onAwareness(said.section, fromBase64(said.awareness));
       else if (said.state) handlers.onState?.(said.state);
     };

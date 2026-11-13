@@ -50,6 +50,33 @@ class Presence:
         return self._store.encode_all()
 
 
+def _vv(version: bytes | None) -> loro.VersionVector:
+    try:
+        return loro.VersionVector() if not version else loro.VersionVector.decode(version)
+    except BaseException as e:
+        if _refused(e):
+            raise CrdtError(f"not a version: {e}") from None
+        raise
+
+
+def merge_versions(a: bytes | None, b: bytes | None) -> bytes:
+    """A version holding every change either one holds."""
+    vv = _vv(a)
+    vv.merge(_vv(b))
+    return vv.encode()
+
+
+def update_version(data: bytes) -> bytes:
+    """The version a replica reaches once it holds everything in ``data``
+    (updates or a snapshot), read from the bytes' header alone."""
+    try:
+        return loro.LoroDoc.decode_import_blob_meta(data, True).partial_end_vv.encode()
+    except BaseException as e:
+        if _refused(e):
+            raise CrdtError(f"not a Loro update: {e}") from None
+        raise
+
+
 def _refused(e: BaseException) -> bool:
     # The binding's errors are exactly BaseException: never swallow
     # KeyboardInterrupt, SystemExit or anything more specific.
@@ -204,6 +231,18 @@ class SharedDoc:
                 raise CrdtError(f"not a version: {e}") from None
             raise
         return self._doc.export(loro.ExportMode.Updates(vv))
+
+    def holds(self, version: bytes) -> bool:
+        """Whether every change in ``version`` is already here: nothing past it
+        would be exported to a replica at ``version``."""
+        return _vv(version).includes_vv(self._doc.oplog_vv)
+
+    def sections_at(self, version: bytes) -> dict[str, str]:
+        """Every section's text as it stood once the changes in ``version``
+        (those of them this replica holds) were made."""
+        vv = _vv(version).intersection(self._doc.oplog_vv)
+        then = self._doc.fork_at(self._doc.vv_to_frontiers(vv))
+        return {k: v for k, v in then.get_deep_value().items() if isinstance(v, str)}
 
     def import_updates(self, data: bytes) -> bool:
         """Merge a snapshot or updates from another replica. False when some

@@ -1169,6 +1169,25 @@ CREATE TABLE IF NOT EXISTS plan_draft_pending (
     data BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS plan_draft_pending_doc ON plan_draft_pending(doc_id, n);
+-- A replica's link to the server's live relay (brindle.pro.live_docs). The
+-- outbox is every change the replica holds past relay_version, so unsent
+-- edits outlive a restart with the replica itself. seed: the texts a replica
+-- made here before its first join was seeded with, the base its local edits
+-- are re-typed from onto the relay's own seed.
+CREATE TABLE IF NOT EXISTS live_docs (
+    doc_id TEXT PRIMARY KEY,
+    relay_version BLOB,            -- a Loro version vector; NULL until the first join
+    seed TEXT,                     -- JSON {section: text}, until the first join
+    updated_at REAL NOT NULL
+);
+-- Replica numbers the relay issued to this account for a doc: the replica's
+-- own, and those lent to the app's windows. Claimed again on every join.
+CREATE TABLE IF NOT EXISTS live_doc_peers (
+    doc_id TEXT NOT NULL,
+    peer INTEGER NOT NULL,
+    role TEXT NOT NULL,            -- 'replica' | 'window'
+    PRIMARY KEY (doc_id, peer)
+);
 -- Documents whose owner chose Stop sharing while the Library was out of reach:
 -- their teams and org lose access at the next pass that reaches it.
 CREATE TABLE IF NOT EXISTS plan_unshares (
