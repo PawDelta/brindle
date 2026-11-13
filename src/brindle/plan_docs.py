@@ -36,13 +36,17 @@ people writing at once merge letter by letter. Revisions stay the versions
 frozen in the Library (``shared_docs._import``), and only they count for the
 build gate. What the person reads, edits and anchors in is the draft's text
 (``current``); a text anchor made on it also carries Loro cursors, which follow
-the words as others type around them."""
+the words as others type around them. The supervisor writes there too
+(:func:`hand_over`, :func:`supervise`): against the text it was handed, so
+what others typed since stays, and a change to words they changed meanwhile
+becomes its suggestion."""
 
 from __future__ import annotations
 
 import base64
 import json
 import re
+import secrets
 import time
 from typing import Any
 
@@ -62,6 +66,10 @@ MAX_QUOTE = 4000             # the anchored text of a comment or suggestion
 MAX_THREADS = 500            # threads and replies on one plan
 MAX_SNIPPET = 200            # quoted text in the supervisor's message
 CONTEXT = 32                 # text kept either side of an insertion point, to find it again
+MAX_BASES = 5                # draft texts handed to the supervisor kept per plan (hand_over)
+# The note on the supervisor's suggestion in a live draft: the Library takes
+# no supervisor mark on a suggestion, so its text says whose it is.
+SUPERVISED = "From the supervisor's revision: these words changed here since it read them."
 # Section ids the comment anchors already use for something else.
 RESERVED = {"ask", "lede", "split"}
 # What an SVG diagram may hold: drawing elements and presentation attributes
@@ -693,6 +701,100 @@ def _apply_draft(db: DB, p: dict, replica, sid: str, pos: int, before: str, afte
                            rev=p["rev"]) from None
     _changed(db, p, p["rev"])
     return current(db, p, replica)
+
+
+# -- the supervisor in a live draft ------------------------------------------------------
+
+
+def hand_over(db: DB, p: dict, replica) -> tuple[str, dict]:
+    """The live draft as the supervisor is given it: its text is kept as a
+    base, by the id the supervisor's write names (:func:`supervise`), so its
+    changes are worked out against what it read. Only the newest MAX_BASES
+    are kept; an older one is refused and the supervisor reads again.
+    Returns the base's id and what it was given."""
+    cur = current(db, p, replica)
+    texts = replica.sections()
+    base = secrets.token_hex(8)
+    with db.tx() as c:
+        c.execute("INSERT INTO plan_draft_bases (id, plan_id, doc_id, texts, created_at) VALUES (?,?,?,?,?)",
+                  (base, p["id"], replica.doc_id, json.dumps(texts), time.time()))
+        c.execute("DELETE FROM plan_draft_bases WHERE plan_id=? AND rowid NOT IN"
+                  " (SELECT rowid FROM plan_draft_bases WHERE plan_id=? ORDER BY rowid DESC LIMIT ?)",
+                  (p["id"], p["id"], MAX_BASES))
+    return base, cur
+
+
+def supervise(c, p: dict, replica, base: Any, was: dict, lede: str, sections: list[dict],
+              changed: list[str]) -> dict:
+    """The supervisor's revision of a shared plan with a live draft, in
+    transaction ``c``: each section's change since ``base`` (the text it was
+    handed) is set against what others wrote there since (plan_rebase). What
+    nobody else touched goes into the draft under the supervisor's own peer
+    id; a change to words someone else changed meanwhile never overwrites
+    them: it is filed as the supervisor's suggestion. A draft holds only text,
+    so what else it changed (``changed`` names its decisions, split or ask;
+    sections added, removed or retitled against ``was``) is named in one
+    comment. Returns what was applied, suggested and left out."""
+    from brindle import plan_rebase
+
+    row = c.execute("SELECT texts FROM plan_draft_bases WHERE id=? AND plan_id=? AND doc_id=?",
+                    (base, p["id"], replica.doc_id)).fetchone() if isinstance(base, str) else None
+    if row is None:
+        raise ServiceError("stale_base", "that base isn't one brindle holds for this plan's live draft: "
+                           "read it again with read_plan and revise from what it gives", 409)
+    texts = json.loads(row["texts"])
+    old = {s["id"]: s for s in was["sections"]}
+    mine = {LEDE: lede, **{s["id"]: s["markdown"] for s in sections}}
+    missed = [f"added {s['title']}" for s in sections if s["id"] not in old]
+    # A draft keeps its sections: a removal is its text going, by the same
+    # rule as any change, so text someone wrote there since the base stays
+    # and its removal is the supervisor's suggestion.
+    for sid, s in old.items():
+        if sid not in mine:
+            missed.append(f"removed {s['title']} (a live draft keeps the section: its text is cleared where "
+                          "nobody changed it since, else suggested for removal)")
+            mine[sid] = ""
+    missed += [old[s["id"]]["title"] for s in sections if s["id"] in old
+               and any(old[s["id"]].get(k) != s.get(k) for k in ("title", "kind", "caption"))]
+    missed += changed
+    todo = [sid for sid in [LEDE, *old] if sid in mine and sid in texts and mine[sid] != texts[sid]]
+    missed += [old[sid]["title"] for sid in old if sid in mine and sid not in texts]
+    applied, filed = 0, []
+
+    def change(doc) -> None:
+        nonlocal applied
+        present = doc.sections()
+        for sid in todo:
+            if sid not in present:
+                missed.append("the overview" if sid == LEDE else old[sid]["title"])
+                continue
+            result = plan_rebase.rebase(texts[sid], mine[sid], present[sid])
+            if len(result.text) > MAX_SECTION:
+                raise ServiceError("too_big", f"a section may be at most {MAX_SECTION // 1024} KB", 400)
+            for h in sorted(result.applied, key=lambda h: h.start, reverse=True):
+                doc.replace(sid, h.start, h.end - h.start, h.text)
+            applied += len(result.applied)
+            for collision in result.collisions:
+                result = plan_rebase.apply_resolution(result, collision.id, "suggestion")
+            filed.extend((sid, s) for s in result.suggestions if s.before != s.after)
+
+    replica.supervise(c, change)
+    for sid, s in filed:
+        anchor = {"kind": "text", "section": sid, "start": s.start, "end": s.end, "quote": s.before}
+        if not s.before:
+            anchor.update(_context(replica.text(sid), s.start))
+        tid = file_thread(c, p["id"], p["rev"], "suggestion", _with_cursor(replica, anchor), SUPERVISOR,
+                          SUPERVISED, after=s.after)
+        # Unlike its other threads, this goes up to the Library (shared_docs._unsent):
+        # teammates wrote the words it would change.
+        c.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (tid,))
+    missed = list(dict.fromkeys(missed))
+    if missed:
+        note = ("The supervisor's revision also changed these, which a live draft can't hold, so they weren't "
+                f"applied: {', '.join(missed)}.")
+        file_thread(c, p["id"], p["rev"], "comment", {"kind": "section", "section": was["sections"][0]["id"]},
+                    SUPERVISOR, note[:visuals.MAX_NOTE])
+    return {"applied": applied, "suggested": len(filed), "not_applied": missed}
 
 
 # -- decisions ---------------------------------------------------------------------------

@@ -18,6 +18,10 @@ same as old, and replicas would disagree about both. So:
   offsets were counted in text that has since changed;
 - :func:`drop` deletes the row, and a replica made later gets a new id.
 
+The session's supervisor writes under a peer id of its own
+(:meth:`DraftReplica.supervise`), kept in the same row on the same terms, so
+the draft tells its letters from the person's.
+
 An update that arrives before the changes it builds on is left out of Loro's
 snapshot, so it is kept in ``plan_draft_pending`` and imported again on every
 load until what it waits on arrives.
@@ -47,16 +51,17 @@ class StaleDraft(RuntimeError):
     written; the holder now has the latest text: read it and edit again."""
 
 
-def _fresh_peer(doc: SharedDoc) -> int:
+def _fresh_peer(doc: SharedDoc, taken: int | None = None) -> int:
     while True:
         peer = secrets.randbelow(_PEER_ID_SPACE) + 1
-        if doc.written_by(peer) == 0:
+        if peer != taken and doc.written_by(peer) == 0:
             return peer
 
 
 def _read(c: sqlite3.Connection, doc_id: str) -> tuple[sqlite3.Row, SharedDoc, list[bytes]] | None:
     """The stored row, its document with the waiting updates imported, and those updates."""
-    row = c.execute("SELECT peer_id, state, seq FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+    row = c.execute("SELECT peer_id, supervisor_peer, state, seq FROM plan_drafts WHERE doc_id=?",
+                    (doc_id,)).fetchone()
     if row is None:
         return None
     doc = SharedDoc.load(row["state"])
@@ -163,36 +168,63 @@ class DraftReplica:
         positional, so another holder's writes since do not refuse it."""
         return data not in self._write(lambda d: d.import_updates(data), incoming=data)[1]
 
+    def supervise(self, c: sqlite3.Connection, change: Callable[[SharedDoc], object]) -> bytes:
+        """The session's supervisor's edit, in the caller's transaction ``c``,
+        under the supervisor's own peer id (chosen on its first write, kept in
+        the row like the replica's), so the draft says which letters it wrote.
+        ``change`` reads what it edits from the document it is given, the
+        latest stored, so another holder's writes since never refuse it. This
+        holder sees the edit at once; if ``c`` is rolled back, its next write
+        finds the stored draft older and reloads it (:class:`StaleDraft`)."""
+        doc, seq, update, _ = self._stage(c, change, supervisor=True)
+        self._doc, self._seq = doc, seq
+        return update
+
     def _write(self, change: Callable[[SharedDoc], object], incoming: bytes | None = None,
                also: Callable[[sqlite3.Connection], None] | None = None) -> tuple[bytes, list[bytes]]:
         """Apply ``change`` to the stored draft; the update it made, and the
         updates still waiting on changes not yet received."""
         with self.db.tx() as c:
-            got = _read(c, self.doc_id)
-            if got is None or got[0]["peer_id"] != self.peer_id:
-                raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
-            row, doc, pending = got
-            if incoming is None and row["seq"] != self._seq:
-                self._doc, self._seq = doc, row["seq"]
-                raise StaleDraft(f"the draft of {self.doc_id} changed since this holder read it")
-            before = doc.version()
-            change(doc)
-            if also is not None:
-                also(c)
-            waiting = pending
-            if incoming is not None:
-                # Importing again is a no-op once merged, so what still says
-                # "pending" is exactly what still waits.
-                waiting = [d for d in [*pending, incoming] if not doc.import_updates(d)]
-                c.execute("DELETE FROM plan_draft_pending WHERE doc_id=?", (self.doc_id,))
-                c.executemany("INSERT INTO plan_draft_pending (doc_id, data) VALUES (?, ?)",
-                              [(self.doc_id, d) for d in waiting])
-            seq = row["seq"] + 1
-            c.execute("UPDATE plan_drafts SET state=?, seq=?, updated_at=? WHERE doc_id=?",
-                      (doc.export_snapshot(), seq, time.time(), self.doc_id))
+            doc, seq, update, waiting = self._stage(c, change, incoming, also)
         # Only once it is stored does this holder see it: a refused edit changes nothing.
         self._doc, self._seq = doc, seq
-        return doc.export_updates(before), waiting
+        return update, waiting
+
+    def _stage(self, c: sqlite3.Connection, change: Callable[[SharedDoc], object], incoming: bytes | None = None,
+               also: Callable[[sqlite3.Connection], None] | None = None,
+               supervisor: bool = False) -> tuple[SharedDoc, int, bytes, list[bytes]]:
+        got = _read(c, self.doc_id)
+        if got is None or got[0]["peer_id"] != self.peer_id:
+            raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
+        row, doc, pending = got
+        if incoming is None and not supervisor and row["seq"] != self._seq:
+            self._doc, self._seq = doc, row["seq"]
+            raise StaleDraft(f"the draft of {self.doc_id} changed since this holder read it")
+        before = doc.version()
+        writer = None
+        if supervisor:
+            writer = row["supervisor_peer"] or _fresh_peer(doc, taken=row["peer_id"])
+            doc.set_peer_id(writer)     # its earlier changes are loaded with the rest
+            try:
+                change(doc)
+            finally:
+                doc.set_peer_id(row["peer_id"])
+        else:
+            change(doc)
+        if also is not None:
+            also(c)
+        waiting = pending
+        if incoming is not None:
+            # Importing again is a no-op once merged, so what still says
+            # "pending" is exactly what still waits.
+            waiting = [d for d in [*pending, incoming] if not doc.import_updates(d)]
+            c.execute("DELETE FROM plan_draft_pending WHERE doc_id=?", (self.doc_id,))
+            c.executemany("INSERT INTO plan_draft_pending (doc_id, data) VALUES (?, ?)",
+                          [(self.doc_id, d) for d in waiting])
+        seq = row["seq"] + 1
+        c.execute("UPDATE plan_drafts SET state=?, seq=?, updated_at=?, supervisor_peer=COALESCE(supervisor_peer, ?)"
+                  " WHERE doc_id=?", (doc.export_snapshot(), seq, time.time(), writer, self.doc_id))
+        return doc, seq, doc.export_updates(before), waiting
 
 
 def drop(db: DB, doc_id: str) -> bool:
