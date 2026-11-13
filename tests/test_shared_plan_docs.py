@@ -693,16 +693,25 @@ def test_two_writers_in_one_shared_section_both_land_in_the_live_draft_and_only_
     # accepted before the Library has it: it goes up, then is marked accepted, its text applied once.
     plan_docs.suggest(db, pid, 1, "summary", both.rindex("on"), "on", "put")
     lib.draft.insert("summary", 0, "The team agreed, after a call: ")
+    # A teammate suggests an insertion in words only the draft has: its cursor alone places it.
+    stays = lib.draft.text("summary").rindex(" on")
+    lib.threads.append({"id": 1, "kind": "suggestion", "rev": 1, "author": "u_b", "text": "", "after": " always",
+                        "status": "open", "replies": [], "at": 9.0, "anchor": {
+                            "kind": "text", "section": "summary", "start": stays, "end": stays, "quote": "",
+                            "state": "current",
+                            "cursor": base64.b64encode(lib.draft.cursor("summary", stays)).decode()}})
     lib.refuse_suggest = True
     sd.sync(db, pid, **net)
-    plan_docs.accept(db, pid, dto()["threads"][-1]["id"], 1)
+    for who in ("person", "teammate:u_b"):
+        plan_docs.accept(db, pid, next(t["id"] for t in dto()["threads"]
+                                       if t["kind"] == "suggestion" and t["author"] == who), 1)
     lib.refuse_suggest = False
     sd.sync(db, pid, **net)
-    agreed = "The team agreed, after a call: Hosts run on a machine the customer controls. It stays put."
+    agreed = "The team agreed, after a call: Hosts run on a machine the customer controls. It stays always put."
     assert lib.draft.text("summary") == dto()["sections"][0]["markdown"] == agreed
-    assert (dto()["rev"], dto()["threads"][-1]["status"]) == (1, "accepted")
+    assert dto()["rev"] == 1
     assert [(t["kind"], t["anchor"]["quote"], t["status"]) for t in lib.threads] == [
-        ("comment", "It stays", "open"), ("suggestion", "on", "accepted")]
+        ("suggestion", "", "accepted"), ("comment", "It stays", "open"), ("suggestion", "on", "accepted")]
 
     # Only a version frozen in the Library counts: it comes in, and r1's sign-off isn't on it.
     lib.freeze()
@@ -727,9 +736,17 @@ def test_an_edit_made_here_before_the_live_draft_arrives_is_carried_into_it_as_a
     [carried] = got["threads"]
     assert (carried["kind"], carried["before"], carried["after"], carried["author"]) == (
         "suggestion", "Workers", "Hosts", "person")
+    # It goes up; a teammate then types the same word before it, and it follows its own.
+    lib.draft.insert("summary", 0, "Workers coordinate. ")
+    sd.sync(db, pid, **net)
+    # Accepted while the relay is away, it is marked accepted only once the relay has its text.
+    relay = sd.relays.pop(DOC)
     plan_docs.accept(db, pid, carried["id"], got["rev"])
     sd.sync(db, pid, **net)
-    assert lib.draft.text("summary") == "Hosts run on a machine the customer controls. It stays on."
+    assert [t["status"] for t in lib.threads] == ["open"] and "Hosts" not in lib.draft.text("summary")
+    sd.relays[DOC] = relay
+    sd.sync(db, pid, **net)
+    assert lib.draft.text("summary") == "Workers coordinate. Hosts run on a machine the customer controls. It stays on."
     assert [t["status"] for t in lib.threads] == ["accepted"] and not sent(backend, f"POST {DESIGN}/revisions")
 
 

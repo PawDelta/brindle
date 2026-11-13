@@ -798,35 +798,49 @@ def _send_text(db: DB, plan_id: str, head: _Head) -> bool:
     return _send_revisions(db, plan_id, share_["owner"], head, cur["rev"]) or moved
 
 
-def _send_threads(db: DB, plan_id: str, owner: str, head: _Head, replica=None) -> None:
+def _relayed(acked: dict | None, t: Any) -> bool:
+    """Whether the relay holds the draft text thread ``t`` stands on: it took
+    the draft this sync, and ``t`` was as it is now before the draft was read
+    (``acked``), so an edit or an accept made since waits for the next."""
+    return acked is not None and acked.get(t["id"]) == t["status"]
+
+
+def _send_threads(db: DB, plan_id: str, owner: str, head: _Head, replica=None, acked: dict | None = None) -> None:
     """Send the person's new comments, suggestions and replies, whatever has
     happened to them since: a thread closed before its first send goes up,
     then _send_actions closes it. A reply waits for its thread to be in the
     Library (a supervisor's never will be). An accepted suggestion goes up
     with its revision (_send_revisions), never here on text that holds it;
     on a live draft (``replica``) it goes up here too, and is then marked
-    accepted (_send_actions), its text having gone with the draft."""
+    accepted (_send_actions), its text having gone with the draft. A thread
+    on the draft's text (it has a cursor) goes only once the relay has that
+    text (_relayed)."""
     if replica is None:
         cur = plan_docs.revision(db, plan_id)
     else:
         cur = plan_docs.current(db, plans._row(db, plan_id), replica)
     for t in _unsent(db, plan_id):
-        if t["status"] != "accepted" or replica is not None:
+        if replica is None and t["status"] == "accepted":
+            continue
+        on_draft = replica is not None and t["anchor"] is not None and (
+            t["status"] == "accepted" or "cursor" in json.loads(t["anchor"]))
+        if not on_draft or _relayed(acked, t):
             _send_thread(db, plan_id, owner, head, t, cur, replica)
 
 
-def _send_actions(db: DB, plan_id: str, head: _Head, drafting: bool) -> None:
+def _send_actions(db: DB, plan_id: str, head: _Head, drafting: bool, acked: dict | None = None) -> None:
     """Send what the person did to threads the Library has: resolved,
-    reopened, rejected, and on a live draft (``drafting``) accepted."""
+    reopened, rejected, and on a live draft (``drafting``) accepted, once
+    the relay has the accepted text (_relayed)."""
     rows = db.conn.execute(
-        "SELECT t.kind, t.status, s.remote_id FROM plan_threads t JOIN plan_share_threads s"
+        "SELECT t.id, t.kind, t.status, s.remote_id FROM plan_threads t JOIN plan_share_threads s"
         " ON s.plan_id=t.plan_id AND s.local_id=t.id"
         " WHERE t.plan_id=? AND t.parent_id IS NULL AND s.remote_id>0 AND t.status<>s.status", (plan_id,)).fetchall()
     for r in rows:
         action = THREAD_ACTIONS.get((r["kind"], r["status"]))
         body = {"action": action} if action else None
         if drafting and (r["kind"], r["status"]) == ("suggestion", "accepted"):
-            body = DRAFT_ACCEPT
+            body = DRAFT_ACCEPT if _relayed(acked, r) else None
         if body and head.send(f"/threads/{r['remote_id']}", dict(body)):
             with db.tx() as c:
                 c.execute("UPDATE plan_share_threads SET status=? WHERE plan_id=? AND remote_id=?",
@@ -841,10 +855,12 @@ def _send_votes(db: DB, plan_id: str, head: _Head) -> None:
             head.send("/votes", {"decision": decision, "option": option})
 
 
-def _send(db: DB, p: dict, view: dict, client, store, now: float) -> bool:
+def _send(db: DB, p: dict, view: dict, client, store, now: float, acked: dict | None = None) -> bool:
     """Send what was done here: the text first, so what the person wrote on it
-    can be placed. One send at a time: while another holds the plan this one
-    leaves it alone. Returns whether the Library took a new revision."""
+    can be placed (on a live draft, threads on its text wait for ``acked``,
+    the threads as they stood when the relay last took the draft). One send
+    at a time: while another holds the plan this one leaves it alone.
+    Returns whether the Library took a new revision."""
     with db.tx() as c:
         held = c.execute("UPDATE plan_shares SET claimed_at=? WHERE plan_id=? AND (claimed_at IS NULL OR claimed_at<?)",
                          (now, p["id"], now - CLAIM_FOR)).rowcount
@@ -856,8 +872,8 @@ def _send(db: DB, p: dict, view: dict, client, store, now: float) -> bool:
         # With a live draft the text changes only there: the Library refuses revisions.
         drafting = bool(view.get("draft"))
         pushed = not drafting and _send_text(db, p["id"], head)
-        _send_threads(db, p["id"], share_["owner"], head, plan_docs.draft(db, p) if drafting else None)
-        _send_actions(db, p["id"], head, drafting)
+        _send_threads(db, p["id"], share_["owner"], head, plan_docs.draft(db, p) if drafting else None, acked)
+        _send_actions(db, p["id"], head, drafting, acked)
         _send_votes(db, p["id"], head)
         if head.rev != view.get("rev"):        # a new head: votes on the old one no longer count
             local_rev = link(db, p["id"])["local_rev"]
@@ -911,9 +927,9 @@ def _hunks(a: str, b: str) -> list[tuple[int, str, str]]:
 
 def _carried(new: dict, ours: dict, base: dict) -> tuple[list[tuple[dict, str]], list[str]]:
     """What revision ``ours`` changed since ``base`` (the Library's revision
-    it was made on), placed in ``new`` (the Library's head now): suggestion
-    anchors in ``new`` with their replacements. And the names of what it
-    changed that can't be one: text the head no longer has, sections added,
+    it was made on), placed in ``new`` (the Library's head now, with its
+    draft's text): suggestion anchors in ``new`` with their replacements.
+    And the names of what it changed that can't be one: text gone there, sections added,
     removed or retitled, decisions, the split, the ask."""
     was, mine = {s["id"]: s for s in base["sections"]}, {s["id"]: s for s in ours["sections"]}
     out, missed = [], []
@@ -941,22 +957,27 @@ def _carried(new: dict, ours: dict, base: dict) -> tuple[list[tuple[dict, str]],
     return out, list(dict.fromkeys(missed))
 
 
-def _carry_over(db: DB, p: dict, share_: dict, view: dict) -> int:
+def _carry_over(db: DB, p: dict, share_: dict, view: dict, replica: DraftReplica | None) -> int:
     """When the Library's draft reaches an open plan holding revisions the
     Library never took (made here before then, or by the supervisor since):
     the Library's head becomes the plan's revision, as a teammate's would,
-    and what those revisions changed in its text is filed as suggestions on
-    it, so nothing written here is lost, overwritten or left in conflict.
-    What a draft can't hold is named in a comment. Suggestions accepted in
-    those revisions never reached the Library: they are open again. Claimed
-    from the revision read here, in one transaction. Returns 1 if it ran."""
-    if not view.get("draft") or p["state"] != "open" or share_["local_rev"] == p["rev"]:
+    and what those revisions changed is filed as suggestions on the draft's
+    text (``replica``), each with a cursor that follows its words, so nothing
+    written here is lost, overwritten or left in conflict. What can't be
+    placed there is named in a comment. Suggestions accepted in those
+    revisions never reached the Library: they are open again. Claimed from
+    the revision read here, in one transaction. Returns 1 if it ran."""
+    if replica is None or p["state"] != "open" or share_["local_rev"] == p["rev"]:
         return 0
     ours, new = plan_docs.revision(db, p["id"]), _readable(view)
     authors = {r["author"] for r in db.conn.execute(
         "SELECT author FROM plan_revisions WHERE plan_id=? AND rev>?", (p["id"], share_["local_rev"]))}
     by = plan_docs.SUPERVISOR if authors == {plan_docs.SUPERVISOR} else plan_docs.PERSON
-    suggestions, missed = _carried(new, ours, plan_docs.revision(db, p["id"], share_["local_rev"]))
+    texts = replica.sections()
+    onto = {**new, "lede": texts.get(plan_docs.LEDE, new["lede"]),
+            "sections": [{**s, "markdown": texts.get(s["id"], s["markdown"])} for s in new["sections"]]}
+    suggestions, missed = _carried(onto, ours, plan_docs.revision(db, p["id"], share_["local_rev"]))
+    suggestions = [(plan_docs._with_cursor(replica, anchor), text) for anchor, text in suggestions]
     reopened = [t["id"] for t in _pending_accepts(db, p["id"], share_["local_rev"])]
     before = {s["id"]: s for s in ours["sections"]}
     after = {s["id"]: s for s in new["sections"]}
@@ -1039,16 +1060,19 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     _team_active(db, p, store)
     imported = _import(db, p, share_, view)
     share_ = link(db, p["id"])
-    imported += _carry_over(db, p, share_, view)
+    # The draft's updates go before the threads, so what those are anchored on is there.
+    # Threads as they stand before the draft is read: only what the relay then took can go with them.
+    held = {r["id"]: r["status"] for r in db.conn.execute(
+        "SELECT id, status FROM plan_threads WHERE plan_id=?", (p["id"],))}
+    replica = _draft(db, p, share_, view, client, store)
+    live, acked, typed = relays.get(share_["doc_id"]), None, False
+    if replica is not None and live is not None:
+        typed, acked = _trade(replica, live), held
+    imported += _carry_over(db, p, share_, view, replica)
     if imported:
         p, share_ = plan_docs._plan(db, p["id"]), link(db, p["id"])
-    pulled = imported + _pull(db, p, share_, view)
-    # The draft's updates go before the threads, so what those are anchored on is there.
-    replica = _draft(db, p, share_, view, client, store)
-    live = relays.get(share_["doc_id"])
-    typed = replica is not None and live is not None and _trade(replica, live)
-    pulled += typed
-    pushed = _send(db, p, view, client, store, time.time() if now is None else now)
+    pulled = imported + typed + _pull(db, p, share_, view)
+    pushed = _send(db, p, view, client, store, time.time() if now is None else now, acked)
     if pushed or imported or typed:
         plan_docs._changed(db, p, p["rev"])
     return {**link(db, p["id"]), "pulled": pulled, "pushed": pushed}

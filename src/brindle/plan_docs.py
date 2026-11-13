@@ -386,7 +386,9 @@ def _with_cursor(replica, anchor: dict) -> dict:
 
 def _followed(replica, anchor: dict) -> dict:
     """``anchor`` where its cursor stands in the draft now: the cursor follows
-    the words as others type around them, so they are looked for there first."""
+    the words as others type around them, so they are looked for there first.
+    An insertion point has no words: the cursor alone places it, so its
+    context is taken from the draft there, never from an older text."""
     from brindle.crdt import CrdtError
 
     if replica is None or not anchor.get("cursor"):
@@ -395,7 +397,10 @@ def _followed(replica, anchor: dict) -> dict:
         start = replica.resolve(base64.b64decode(anchor["cursor"]))
     except (CrdtError, ValueError):
         return anchor
-    return {**anchor, "start": start, "end": start + anchor["end"] - anchor["start"]}
+    out = {**anchor, "start": start, "end": start + anchor["end"] - anchor["start"]}
+    if anchor["kind"] == "text" and not anchor["quote"]:
+        out.update(_context(replica.text(anchor["section"]), start))
+    return out
 
 
 def _where(cur: dict, anchor: dict) -> dict:
