@@ -11,7 +11,10 @@
    which is the daemon's.
 
    Until the daemon's first snapshot arrives nothing can be typed: a client never seeds the text
-   itself (two would each insert it). When the channel closes the text stays on screen, read only. */
+   itself (two would each insert it). When the doc is co-edited through the server's relay, the
+   daemon lends this window a number of its own to write under ({"peer"}), set right after the
+   snapshot; until one is free the text is read only. When the channel closes the text stays on
+   screen, read only, unless the daemon replaced the text (LIVE_RELOAD): then it opens again. */
 
 import { Annotation, Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, ViewPlugin, keymap } from "@codemirror/view";
@@ -19,7 +22,7 @@ import { defaultKeymap } from "@codemirror/commands";
 import { EphemeralStore, LoroDoc, UndoManager } from "loro-crdt";
 import { LoroEphemeralPlugin, getCursorEphemeralKey, getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
 import { useEffect, useRef, useState } from "react";
-import type { DaemonClient } from "../../../api/client";
+import { LIVE_RELOAD, type DaemonClient } from "../../../api/client";
 import { PEER_COLOURS, PRESENCE_TTL, peerClass } from "./docAwareness";
 
 export type LiveClient = Pick<DaemonClient, "visualLive">;
@@ -97,6 +100,8 @@ export function DocEditor({ client, visual, section, name, label, isAuthor = fal
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<"connecting" | "live" | "closed">("connecting");
+  // Bumped when the daemon replaces the text (LIVE_RELOAD): a new document and channel.
+  const [opened, setOpened] = useState(0);
   // Who is writing is fixed for the editor's life: a new name would be a new caret.
   const named = useRef(name);
   useEffect(() => {
@@ -108,18 +113,24 @@ export function DocEditor({ client, visual, section, name, label, isAuthor = fal
     let view: EditorView | null = null;
     let gone = false;
     let stopRefresh = () => {};
-    let locked = true;
-    const editability = () => [EditorState.readOnly.of(locked), EditorView.editable.of(!locked)];
+    let lockedByState = true;
+    // The number the daemon lent this window ({"peer"}), set once the snapshot is in: the
+    // server's relay refuses a change under any other. Waiting: none free yet, read only.
+    let lent: `${number}` | null = null;
+    let waitingForPeer = false;
+    let loaded = false;
+    const locked = () => lockedByState || waitingForPeer;
+    const editability = () => [EditorState.readOnly.of(locked()), EditorView.editable.of(!locked())];
     const mount = () => {
       if (!host.current) return null;
-      const run = (step: () => boolean) => () => locked || step() || true;
+      const run = (step: () => boolean) => () => locked() || step() || true;
       return new EditorView({
         parent: host.current,
         state: EditorState.create({
           doc: doc.getText(section).toString(),
           extensions: [
             loroSync(doc, section),
-            EditorState.transactionFilter.of((tr) => locked && tr.docChanged && !tr.annotation(fromLoro) ? [] : tr),
+            EditorState.transactionFilter.of((tr) => locked() && tr.docChanged && !tr.annotation(fromLoro) ? [] : tr),
             LoroEphemeralPlugin(doc, presence, user, (d) => d.getText(section)),
             keymap.of([
               { key: "Mod-z", run: run(() => undo.undo()), preventDefault: true },
@@ -138,11 +149,24 @@ export function DocEditor({ client, visual, section, name, label, isAuthor = fal
     };
     const channel = client.visualLive(visual, {
       onState(state) {
-        locked = state.lock === "sign_off" || (state.lock === "author_offline" && !isAuthor);
+        lockedByState = state.lock === "sign_off" || (state.lock === "author_offline" && !isAuthor);
+        view?.dispatch({ effects: editable.reconfigure(editability()) });
+      },
+      onPeer(peer) {
+        waitingForPeer = peer === null;
+        if (peer !== null) {
+          lent = peer;
+          if (loaded) doc.setPeerId(peer);     // locked until now: nothing was written under another
+        }
         view?.dispatch({ effects: editable.reconfigure(editability()) });
       },
       onUpdate(bytes) {
         doc.import(bytes);
+        if (!loaded) {
+          loaded = true;
+          // After the snapshot, so the number goes on from its own earlier changes; before any edit.
+          if (lent !== null) doc.setPeerId(lent);
+        }
         if (view || gone) return;
         view = mount();
         setState("live");
@@ -150,10 +174,15 @@ export function DocEditor({ client, visual, section, name, label, isAuthor = fal
       onAwareness(at, bytes) {
         if (at === section) presence.apply(bytes);
       },
-      onClose() {
+      onClose(code) {
         if (gone) return;
+        if (code === LIVE_RELOAD) {
+          setState("connecting");
+          setOpened((n) => n + 1);
+          return;
+        }
         stopRefresh();
-        locked = true;
+        lockedByState = true;
         setState("closed");
         view?.dispatch({ effects: editable.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
       },
@@ -188,7 +217,7 @@ export function DocEditor({ client, visual, section, name, label, isAuthor = fal
     };
     // `label` only names the box: a new one is not a new editor.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, visual, section, isAuthor]);
+  }, [client, visual, section, isAuthor, opened]);
   return (
     <div className="grid gap-1" data-live={state}>
       <div ref={host} data-testid={`doc-editor-${section}`} className="min-h-24 rounded-md border border-line-strong bg-surface px-2.5" />

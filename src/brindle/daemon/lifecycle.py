@@ -1028,6 +1028,33 @@ def _upgrade_sweep() -> None:
         log.warning("brindle: the one-time disk sweep didn't run", exc_info=True)
 
 
+def start_live_docs(state):
+    """The shared docs' relay links (pro.live_docs), on the running loop, where
+    the local live socket finds them. None if they couldn't start: shared docs
+    still edit together on this machine."""
+    from brindle.pro import live_docs
+
+    try:
+        manager = live_docs.Manager()
+        manager.start()
+    except Exception:  # noqa: BLE001 - co-editing between machines is never worth the daemon
+        log.warning("brindle: the live relay links didn't start", exc_info=True)
+        return None
+    state.live_docs = manager
+    return manager
+
+
+async def stop_live_docs(manager) -> None:
+    """Close every relay link cleanly on the way out: a clean close is not an
+    author dropping mid-edit. Unsent edits wait in the outbox for the next daemon."""
+    if manager is None:
+        return
+    try:
+        await manager.stop()
+    except Exception:  # noqa: BLE001
+        log.warning("brindle: the live relay links didn't close cleanly", exc_info=True)
+
+
 def _exit(sig, frame) -> None:
     raise SystemExit(0)
 
@@ -1106,6 +1133,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
         hook = asyncio.create_task(asyncio.to_thread(_keep_codex_hook))   # an update may have changed it
         # The app's daemon brings back what the last one paused on its way out.
         resumer = asyncio.create_task(resume()) if idle_exit else None
+        live = start_live_docs(activity.state)
         try:
             await server.serve(sockets=socks)
         finally:
@@ -1115,6 +1143,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
             hook.cancel()
             if resumer:
                 resumer.cancel()
+            await stop_live_docs(live)
 
     # uvicorn shuts down gracefully on SIGTERM, then raises it again with the
     # handler it found: make that an exit that still runs the cleanup below.
