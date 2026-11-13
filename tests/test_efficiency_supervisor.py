@@ -148,7 +148,13 @@ def test_restart_seeds_a_fresh_session_and_loses_no_decision_or_question(db, tmp
     assert "Ship on Friday or Monday?" in state.split("## Open questions")[1]
 
 
-@pytest.mark.parametrize("meanwhile", ["paused", "typed", "launch fails"])
+@pytest.mark.parametrize("meanwhile", [
+    "typed",
+    pytest.param("paused", marks=pytest.mark.variant(
+        "a late helper must not undo the person's pause of the session")),
+    pytest.param("launch fails", marks=pytest.mark.variant(
+        "a failed fresh launch must leave the old chat resumable, losing nothing")),
+])
 def test_a_restart_gives_way_to_what_happened_since_its_claim(db, restarting, monkeypatch, meanwhile):
     calls = restarting()
     [argv] = calls.detached
