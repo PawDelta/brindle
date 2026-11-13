@@ -68,8 +68,10 @@ class ClaudeCode:
 
 
 @pytest.mark.parametrize("there, how, when, written", [
-    (True, "writes_under_its_lock", "write", True),     # held off by brindle's lock, then works from brindle's file
-    (True, "writes_without_its_lock", "write", False),  # the file is no longer the one brindle read: left as it is
+    pytest.param(True, "writes_under_its_lock", "write", True, marks=pytest.mark.variant(
+        "race: Claude writes under its lock while brindle writes; held off, then works from brindle's file")),
+    pytest.param(True, "writes_without_its_lock", "write", False, marks=pytest.mark.variant(
+        "race: a lockless Claude write lands mid-write; the file brindle read is gone, so it is left as it is")),
     (True, "takes_the_lock_over", "renew", False),      # nor the lock the one brindle made: nothing written, lock left
     (False, "writes_without_its_lock", "write", False),     # no file when brindle looked: none written over the new one
 ])
@@ -120,7 +122,8 @@ def test_a_write_claude_code_makes_while_brindle_is_writing_is_kept(config, tmp_
 
 @pytest.mark.parametrize("claude_code, trusted", [
     ("left its lock behind", True),
-    ("lets go while brindle waits", True),
+    pytest.param("lets go while brindle waits", True, marks=pytest.mark.variant(
+        "race: Claude releases its lock while brindle waits for it")),
     ("keeps its lock", False),
 ])
 def test_brindle_writes_claude_codes_state_only_with_its_lock(config, tmp_path, monkeypatch, claude_code, trusted):
@@ -141,6 +144,7 @@ def test_brindle_writes_claude_codes_state_only_with_its_lock(config, tmp_path, 
     assert (json.loads(config.read_text()) == STATE) is not trusted
 
 
+@pytest.mark.variant("input from real use: worktrees of a repo whose main checkout is trusted need no write to Claude's config")
 def test_a_worktree_of_a_repo_the_person_trusted_needs_no_write(config, tmp_path):
     """Claude Code reads a linked worktree's trust from its main checkout's
     entry, which it wrote itself when the person trusted the repo."""
@@ -157,7 +161,8 @@ def test_a_worktree_of_a_repo_the_person_trusted_needs_no_write(config, tmp_path
 
 
 @pytest.mark.parametrize("provider, kept", [
-    ("claude", True),
+    pytest.param("claude", True, marks=pytest.mark.variant(
+        "real incident: mTLS key settings were scrubbed from Claude panes, breaking corporate MCP servers")),
     pytest.param("codex", False, marks=pytest.mark.variant(
         "the key's passphrase is Claude Code's: another provider's pane must not get it")),
 ])
