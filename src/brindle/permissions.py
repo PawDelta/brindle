@@ -5561,11 +5561,8 @@ class _PartReader:
             self.expanded = self.tilde = True    # bash may expand it (path=~/x) or not
         if names and re.search(r"[*?]|\[.+\]", bare):    # an unclosed [ (test's) is literal
             names = self.expand(value)
-            # One that matches nothing stays literal (an API URL's ? too).
-            # Keep only actual or unresolved expansions marked as patterns;
-            # otherwise read_parts demands a glob proof for an unchanged word.
-            if names == []:
-                return [value], True, None
+            # An unmatched pattern stays literal to the shell, but a program
+            # may still interpret it (git push's wildcard refspecs).
             self.expanded |= names != []
             return ([raw], False, value) if names is None else (names or [value], True, value)
         return [value], True, None
@@ -5743,7 +5740,15 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             return None
         if part.data and any(_could_cover(rule, " ".join(part.words[:2])) for rule in restrictions):
             return None    # the message may be one a rule names
-        if restrictions and (part.redirect_glob or part.globs and not (places and (
+        # With the files it redirects to too: a deny on a name sees them.
+        spans = [part.words, [*part.words, *part.writes, *part.reads]]
+        texts = [replace(at, command=_joined(words)) for words in spans]
+        matched = _matching_restriction(texts, checks, restrictions, spans)
+        # An unmatched pattern (an API URL's ? too) needs no expansion proof
+        # when its unchanged words match no restriction. Keep that proof when
+        # a rule covers it: the program may interpret the pattern itself.
+        literal_patterns = not part.expanded and not part.unknown and matched is None
+        if restrictions and (part.redirect_glob or part.globs and not literal_patterns and not (places and (
                 _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
                                                         [part.assigned], [("<", path) for path in part.reads])
                                         for place in places)))):
@@ -5760,10 +5765,6 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             if not places or not all(_reads_clear(place, operands, kept) for place in places):
                 covered("it may read a file a deny covers, or where brindle can't tell")
             return None
-        # With the files it redirects to too: a deny on a name sees them.
-        spans = [part.words, [*part.words, *part.writes, *part.reads]]
-        texts = [replace(at, command=_joined(words)) for words in spans]
-        matched = _matching_restriction(texts, checks, restrictions, spans)
         if matched is not None and matched.decision == "deny":
             return parts, matched
         for path in part.reads:
