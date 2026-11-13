@@ -31,6 +31,12 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
     # A preceding command may create a match that does not exist at check time.
     assert permissions.decide(replace(req, command="touch new; gh api missing?match")).decision == "ask"
 
+    # zsh's recursive glob can match zero directories, unlike the bounded matcher.
+    (tmp_path / "blocked").touch()
+    permissions.add_rule("bash", "gh api blocked", "deny", "prefix")
+    assert permissions.decide(replace(req, command="gh api blocked")).decision == "deny"
+    assert permissions.decide(replace(req, command="gh api **/blocked")).decision == "ask"
+
     # nullglob removes an unmatched argument, bringing a denied prefix together.
     permissions.apply_preset("autonomous")
     permissions.add_rule("bash", "gh api blocked", "deny", "prefix")

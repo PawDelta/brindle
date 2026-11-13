@@ -5746,8 +5746,11 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
         matched = _matching_restriction(texts, checks, restrictions, spans)
         # An unmatched pattern (an API URL's ? too) needs no expansion proof
         # when its unchanged words match no restriction. Keep that proof when
-        # a rule covers it: the program may interpret the pattern itself.
-        literal_patterns = not part.expanded and not part.unknown and matched is None
+        # a rule covers it: the program may interpret the pattern itself. The
+        # bounded matcher does not prove recursive ** forms unmatched: shells
+        # can expand **/ across zero directories as well as several levels.
+        literal_patterns = (not part.expanded and not part.unknown and matched is None
+                            and not any("**" in word for word in part.written))
         if restrictions and (part.redirect_glob or part.globs and not literal_patterns and not (places and (
                 _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
                                                         [part.assigned], [("<", path) for path in part.reads])
