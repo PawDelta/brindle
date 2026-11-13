@@ -1,6 +1,8 @@
 """The app's live editor, through the daemon transport and local replica."""
 
+import asyncio
 import base64
+import threading
 
 import loro
 import pytest
@@ -10,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 from brindle import plans, visual_offers
 from brindle.crdt import SharedDoc
 from brindle.daemon.app import build_app
+from brindle.daemon.auth import FIRST_FRAME_TIMEOUT
 from brindle.plan_drafts import DraftReplica
 from test_plans import TOKEN, session  # noqa: F401 - fixture
 
@@ -51,6 +54,27 @@ def test_two_local_sockets_converge_and_rejoin_the_persisted_replica(db, live_do
             b.import_updates(base64.b64decode(second.receive_json()["update"]))
             assert a.sections() == b.sections()
             assert a.text("lede") == "># Design\n\nHello 🌍"
+            before = a.version()
+            a.insert("body", 5, "1")
+            dependency = a.export_updates(before)
+            before = a.version()
+            a.insert("body", 6, "2")
+            first.send_json({"update": encoded(a.export_updates(before))})
+            assert not b.import_updates(base64.b64decode(second.receive_json()["update"]))
+            # Join while the second edit is still waiting on the first.
+            with client.websocket_connect(path) as late:
+                c = joined(late)
+                first.send_json({"update": encoded(dependency)})
+                b.import_updates(base64.b64decode(second.receive_json()["update"]))
+                marker = loro.EphemeralStore(30_000)
+                marker.set("marker", True)
+                first.send_json({"section": "body", "awareness": encoded(marker.encode_all())})
+                # The marker fences bootstrap/relay delivery without assuming
+                # how many update frames the bootstrap needed.
+                while "update" in (frame := late.receive_json()):
+                    c.import_updates(base64.b64decode(frame["update"]))
+                assert a.sections() == b.sections() == c.sections()
+                assert c.text("body") == "World12"
         assert DraftReplica.open(db, "doc1").sections() == a.sections()
         with client.websocket_connect(path) as again:
             rejoined = joined(again)
@@ -107,3 +131,41 @@ def test_carets_are_relayed_and_replayed_without_any_sqlite_write(db, live_doc):
                 assert replay["section"] == "lede"
                 assert got.get_all_states() == presence.get_all_states()
             assert list(db.conn.iterdump()) == before
+
+
+def test_a_contended_draft_write_keeps_the_daemon_event_loop_responsive(db, live_doc, monkeypatch):
+    entered = threading.Event()
+    progressed = threading.Event()
+    apply_remote = DraftReplica.apply_remote
+
+    async def progress():
+        progressed.set()
+
+    def apply_with_trace(replica, data):
+        def trace(statement):
+            if statement == "BEGIN IMMEDIATE":
+                entered.set()
+
+        replica.db.conn.set_trace_callback(trace)
+        try:
+            return apply_remote(replica, data)
+        finally:
+            replica.db.conn.set_trace_callback(None)
+
+    monkeypatch.setattr(DraftReplica, "apply_remote", apply_with_trace)
+    path = f"/v1/visuals/{live_doc}/live"
+    with TestClient(build_app(TOKEN)) as client:
+        with client.websocket_connect(path) as first, client.websocket_connect(path) as second:
+            a, b = joined(first), joined(second)
+            loop = client.portal.call(asyncio.get_running_loop)
+            before = a.version()
+            a.insert("body", 5, "!")
+            # Hold a real competing write transaction until an unrelated task
+            # progresses on the daemon loop while the draft waits in SQLite.
+            with db.tx():
+                first.send_json({"update": encoded(a.export_updates(before))})
+                assert entered.wait(FIRST_FRAME_TIMEOUT)
+                asyncio.run_coroutine_threadsafe(progress(), loop)
+                assert progressed.wait(FIRST_FRAME_TIMEOUT)
+            b.import_updates(base64.b64decode(second.receive_json()["update"]))
+            assert b.text("body") == "World!"

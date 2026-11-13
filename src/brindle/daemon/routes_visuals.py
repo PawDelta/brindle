@@ -12,6 +12,8 @@ import binascii
 import json
 import logging
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -59,39 +61,72 @@ async def visual_live(socket: WebSocket) -> None:
     from brindle.plan_drafts import DraftGone, DraftReplica
 
     await socket.accept()
-    db = DB()
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brindle-visual-live")
+    db = None
+    replica = None
     room = None
     rooms = getattr(socket.app.state, "visual_live_rooms", None)
     if rooms is None:
         rooms = socket.app.state.visual_live_rooms = {}
     doc_id = None
+
+    async def work(fn, *args):
+        # Each submission gets its own context, including cancellation/deadline
+        # tokens belonging to the socket's request.
+        return await loop.run_in_executor(pool, copy_context().run, fn, *args)
+
+    def open_doc():
+        nonlocal db
+        db = DB()
+        return _live_doc(db, socket.path_params["id"])[0]
+
+    def current_plan():
+        current_id, p = _live_doc(db, socket.path_params["id"])
+        if current_id != doc_id:
+            raise DraftGone("the visual's shared document changed")
+        return p
+
+    def bootstrap():
+        nonlocal replica
+        p = current_plan()
+        # Only the first holder seeds; open prefers an existing stored replica.
+        sections = {"lede": p["lede"], **{s["id"]: s["markdown"] for s in p["sections"]
+                                         if s["kind"] == "markdown"}}
+        exists = db.conn.execute("SELECT 1 FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+        initial = None if exists else SharedDoc.new(sections).export_snapshot()
+        replica = DraftReplica.open(db, doc_id, initial)
+        return replica.export_bootstrap()
+
+    def apply_update(data):
+        current_plan()
+        if data is not None:
+            replica.apply_remote(data)
+
+    def close_db():
+        if db is not None:
+            db.conn.close()
+
     try:
-        doc_id, p = _live_doc(db, socket.path_params["id"])
+        doc_id = await work(open_doc)
         room = rooms.setdefault(doc_id, _LiveRoom())
         room.users += 1
         async with room.lock:
-            # Only the first holder seeds; open always prefers the stored replica.
-            sections = {"lede": p["lede"], **{s["id"]: s["markdown"] for s in p["sections"]
-                                             if s["kind"] == "markdown"}}
-            exists = db.conn.execute("SELECT 1 FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
-            initial = None if exists else SharedDoc.new(sections).export_snapshot()
-            replica = DraftReplica.open(db, doc_id, initial)
-            await socket.send_json({"update": base64.b64encode(replica.export_snapshot()).decode("ascii")})
+            for update in await work(bootstrap):
+                await socket.send_json({"update": base64.b64encode(update).decode("ascii")})
             for section, presence in room.presence.items():
                 await socket.send_json({"section": section, "awareness": base64.b64encode(presence.encode()).decode("ascii")})
             room.clients.add(socket)
         while True:
             frame = await socket.receive_text()
             async with room.lock:
-                current_id, _ = _live_doc(db, socket.path_params["id"])
-                if current_id != doc_id:
-                    raise DraftGone("the visual's shared document changed")
                 said = json.loads(frame)
                 if not isinstance(said, dict):
                     raise ValueError("a live frame must be an object")
                 if isinstance(said.get("update"), str):
-                    replica.apply_remote(base64.b64decode(said["update"], validate=True))
+                    await work(apply_update, base64.b64decode(said["update"], validate=True))
                 elif isinstance(said.get("awareness"), str) and isinstance(said.get("section"), str):
+                    await work(apply_update, None)
                     presence = room.presence.setdefault(said["section"], Presence())
                     presence.apply(base64.b64decode(said["awareness"], validate=True))
                 else:
@@ -117,7 +152,12 @@ async def visual_live(socket: WebSocket) -> None:
             room.users -= 1
             if not room.users and rooms.get(doc_id) is room:
                 del rooms[doc_id]
-        db.conn.close()
+        try:
+            # Queue closure behind any in-flight operation, even if the socket
+            # was cancelled before opening or writing finished.
+            await asyncio.shield(work(close_db))
+        finally:
+            pool.shutdown(wait=False)
 
 
 def _page(fn: Callable[[DB, Request], Path]) -> Callable[[Request], Response]:
