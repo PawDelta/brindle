@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def _python(root: Path, d: Detected) -> None:
     text = pyproject.read_text(encoding="utf-8", errors="replace") if pyproject.is_file() else ""
     uses_pytest = ("pytest" in text or (root / "pytest.ini").is_file() or (root / "conftest.py").is_file()
                    or (root / "tests").is_dir() or (root / "test").is_dir())
-    if (root / "uv.lock").is_file():
+    if (root / "uv.lock").is_file() or "[tool.uv" in text:
         d.stacks.append("Python (uv)")
         d.setup.append("uv sync")
         if uses_pytest:
@@ -53,9 +54,17 @@ def _python(root: Path, d: Detected) -> None:
     else:
         d.stacks.append("Python")
         if uses_pytest:
-            d.checks.append("python -m pytest -q")
+            if (root / ".venv" / "bin" / "python").exists():
+                py = ".venv/bin/python"
+            elif shutil.which("python"):
+                py = "python"
+            elif shutil.which("python3"):
+                py = "python3"
+            else:
+                py = "python"
+            d.checks.append(f"{py} -m pytest -q")
             d.notes.append("No uv.lock or poetry.lock: add a `setup` that builds the worktree's "
-                           "environment if `python -m pytest` needs one.")
+                           f"environment if `{py} -m pytest` needs one.")
 
 
 def _node(root: Path, d: Detected) -> None:

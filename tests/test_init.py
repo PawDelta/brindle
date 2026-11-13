@@ -21,6 +21,28 @@ def test_detect_uv_python(tmp_path):
     assert d.setup == ["uv sync"] and d.checks == ["uv run pytest -q"]
 
 
+def test_detect_python_check_runs_without_python_on_path(tmp_path, monkeypatch):
+    """A uv project with a .venv but no `python` on PATH must not get a bare `python`."""
+    repo = tmp_path / "repo"
+    (repo / ".venv" / "bin").mkdir(parents=True)
+    (repo / ".venv" / "bin" / "python").write_text("")
+    (repo / "pyproject.toml").write_text('[project]\nname = "x"\n[dependency-groups]\ndev = ["pytest"]\n')
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    assert detect.detect(repo).checks == [".venv/bin/python -m pytest -q"]
+    # no .venv, no uv: python3 stands in for the missing python
+    (repo / ".venv" / "bin" / "python").unlink()
+    (repo / ".venv" / "bin").rmdir()
+    (repo / ".venv").rmdir()
+    (empty / "python3").write_text("")
+    (empty / "python3").chmod(0o755)
+    assert detect.detect(repo).checks == ["python3 -m pytest -q"]
+    # pyproject that uses uv, no lock
+    (repo / "pyproject.toml").write_text('[tool.uv]\ndev-dependencies = ["pytest"]\n')
+    assert detect.detect(repo).checks == ["uv run pytest -q"]
+
+
 def test_detect_node_picks_package_manager_and_skips_placeholder_test(tmp_path):
     pkg = {"scripts": {"test": 'echo "Error: no test specified" && exit 1', "typecheck": "tsc"}}
     (tmp_path / "package.json").write_text(json.dumps(pkg))
