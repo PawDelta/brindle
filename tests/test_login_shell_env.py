@@ -58,7 +58,8 @@ def shell(found: dict[str, str], fault: str | None = None):
     # valid records or not.
     ({}, "hang"),
     ({}, "exit"),
-    ({}, "cut"),
+    pytest.param({}, "cut", marks=pytest.mark.variant(
+        "guard (c): records with no closing mark (a shell cut short that still exits 0) must not be half-read")),
 ])
 def test_only_allowed_valid_settings_are_read_from_the_login_shell(tmp_path, caplog, extra, fault):
     cert = tmp_path / "corp-ca.pem"
