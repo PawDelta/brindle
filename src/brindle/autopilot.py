@@ -1066,7 +1066,8 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
                    task: str | None = None, files: list[str] | None = None,
                    weight: str | None = None, why: list[str] | None = None,
-                   decision: dict | None = None, *, design_heavy: bool = False) -> tuple[str, bool]:
+                   decision: dict | None = None, *, design_heavy: bool = False,
+                   max_tier: str | None = None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
     ``requested`` if given, else (when no ``weight`` is given) the first
     unverified milestone's profile in the caller's session, else the repo's
@@ -1078,11 +1079,15 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     filled with what ``brindle.savings`` records: the ``profile``, the
     ``baseline`` (the pick without learning), ``learned`` and the ``weight``.
     ``design_heavy`` allows Fable when ``fable_for_design_only`` is enabled;
-    it does not change the task's weight."""
+    it does not change the task's weight. ``max_tier``: a ceiling for this
+    delegation alone (a fast-path task's "medium"), applied like the repo's
+    ``max_weight`` to routing, its fallbacks and the final pick; the tighter wins."""
     cfg = load_repo_config(repo_root)
     options = {"design_heavy": True} if design_heavy else {}
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
+    if max_tier in weight_order and (ceiling is None or weight_order[max_tier] < weight_order[ceiling]):
+        ceiling = max_tier
 
     if requested:
         req = requested.strip()
@@ -2842,7 +2847,8 @@ FAST_PATH_GUIDE = """- Fast path (this repo's `fast_path` setting is on): a smal
   decisions, and roughly under 15 minutes of work. It needs no `set_goal`, no
   milestones and no `check_milestone`, and gets no completion audit: brindle
   gives the branch one light review and the repo's checks, then merges it.
-  Relay the merged result to the user in one line. The user's word overrides
+  That is its finish: don't run the full suite yourself afterwards, relay the
+  merged result to the user in one line. The user's word overrides
   your sizing: "fast path" sends a request this way, "full path" (or asking
   for a plan or milestones) sends it through the goal.
 """

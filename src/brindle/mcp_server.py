@@ -1128,20 +1128,22 @@ async def assign(
             if not (done_when or "").strip():
                 return ("Not started: a fast-path task needs done_when, the targeted tests that "
                         "prove it done.")
+            tier = autopilot.profile_weight(agent_profile.strip(), None, ws.repo_root) if agent_profile.strip() else None
+            if tier and tier not in FAST_PATH_WEIGHTS:
+                return (f"Not started: the fast path runs one light or medium worker, and "
+                        f"{agent_profile.strip()} is {tier}. Pass weight light or medium, or assign "
+                        "it without fast_path.")
             fast, route_weight = True, weight or (None if agent_profile.strip() else "medium")
         why: list[str] = []
         decision: dict = {}
         try:
+            # A fast-path task's routing, fallbacks and final pick all stay at or under medium.
             profile, learned = autopilot.choose_profile(
                 db, caller.id, ws.repo_root, agent_profile, task, files, route_weight, why, decision,
-                **({"design_heavy": True} if design_heavy else {}))
+                **({"design_heavy": True} if design_heavy else {}),
+                **({"max_tier": FAST_PATH_WEIGHTS[-1]} if fast else {}))
         except autopilot.AutopilotError as e:
             return str(e)
-        if (fast and agent_profile.strip()   # weight routing keeps to the tier it was given
-                and autopilot.profile_weight(profile, None, ws.repo_root) not in FAST_PATH_WEIGHTS):
-            return (f"Not started: the fast path runs one light or medium worker, and {profile} is "
-                    f"{autopilot.profile_weight(profile, None, ws.repo_root)}. Pass weight light or "
-                    "medium, or assign it without fast_path.")
         refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, route_weight, branch)
         if refused:
             return refused

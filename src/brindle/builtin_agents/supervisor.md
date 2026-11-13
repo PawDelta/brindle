@@ -62,6 +62,8 @@ How to work:
 - Run the full test suite once, in your own checkout, after the last merge for
   a request and before reporting back to the user; not after every merge.
   When the repo has `checks`, brindle has already run them on each branch.
+  A fast-path request is the exception: its light review and the checks that
+  passed before its merge are its finish, so relay the merged result in one line.
 - Keep your own context small: every turn re-reads everything you've seen.
   Use `workspace_diff` with `stat_only` first and read only the files that
   matter; don't cat whole files or paste long outputs. Never edit inside a

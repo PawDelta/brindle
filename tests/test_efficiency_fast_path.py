@@ -102,9 +102,20 @@ def test_small_request_merges_after_one_light_review_and_the_checks(db, repo, se
     assert autopilot.on_stop(db, db.get_agent("boss"), {}) is None   # nothing left to nudge or audit
 
 
+def test_fast_path_routing_never_falls_through_to_a_heavy_worker(db, repo, session, monkeypatch):
+    """The medium tier's list ends in developer-heavy: with the cheaper
+    candidates out, real routing must still not hand a fast-path task to it."""
+    session(fast_path=True)
+    monkeypatch.setattr(autopilot, "_unavailable",
+                        lambda name, *a, **k: None if name == "developer-heavy" else "not installed")
+    _reply, worker_id = assign(db, repo, weight="medium", done_when="app.py prints hello", fast_path=True)
+    assert autopilot.profile_weight(db.get_agent(worker_id).profile, None, str(repo)) in ("light", "medium")
+
+
 @pytest.mark.parametrize("kw", [
     {"weight": "heavy", "done_when": "app.py prints hello"},
     {"weight": "light"},
+    {"agent_profile": "developer-heavy", "done_when": "app.py prints hello"},
 ])
 def test_fast_path_refuses_big_or_open_ended_work(db, repo, session, kw):
     session(fast_path=True)
