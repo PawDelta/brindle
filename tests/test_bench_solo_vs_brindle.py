@@ -14,12 +14,41 @@ bench = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bench)
 
 STREAM = Path(__file__).resolve().parent / "fixtures/bench/solo_stream.jsonl"
-FABLE = {"input": 105, "output": 80, "cache_creation": 1000, "cache_read": 5000}
-HAIKU = {"input": 10, "output": 20, "cache_creation": 0, "cache_read": 400}
+RUN1 = Path(__file__).resolve().parent / "fixtures/bench/solo_run1_stream.jsonl"   # trimmed from a real run
+FABLE = {"input": 105, "output": 80, "cache_creation": 1000, "cache_read": 5000, "cache_creation_1h": 0}
+HAIKU = {"input": 10, "output": 20, "cache_creation": 0, "cache_read": 400, "cache_creation_1h": 0}
 
 
-def entries():
-    return bench.iter_json(STREAM.read_text().splitlines())
+def entries(path=STREAM):
+    return bench.iter_json(path.read_text().splitlines())
+
+
+def test_solo_usage_takes_the_result_events_totals():
+    # The stream's assistant messages carry output counts from the start of each
+    # message (16 + 16 + 8 here); the result event has the turn's real totals.
+    run = entries(RUN1)
+    assert bench.stream_usage(run) == {"claude-fable-5-2": {
+        "input": 22, "output": 33250, "cache_creation": 87019, "cache_creation_1h": 87019, "cache_read": 672173}}
+    assert bench.permission_mode(run) == "auto"
+
+
+def test_solo_cost_prices_one_hour_cache_writes_at_twice_input():
+    u = entries(RUN1)[-1]["modelUsage"]["claude-fable-5-2"]   # every cache write here was a 1-hour one
+    usage = {"input": u["inputTokens"], "output": u["outputTokens"], "cache_read": u["cacheReadInputTokens"],
+             "cache_creation": u["cacheCreationInputTokens"],
+             "cache_creation_1h": u["cacheCreationEphemeral1hInputTokens"]}
+    total, _, _ = bench.price_usage({"claude-fable-5-2": usage})
+    assert abs(total - u["costUSD"]) < 0.01
+
+
+def test_load_kit_resolves_a_relative_task_dir(tmp_path, monkeypatch):
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "repo.json").write_text("{}")
+    (kit / "spec.md").write_text("spec")
+    (kit / "grade.sh").write_text("")
+    monkeypatch.chdir(tmp_path)
+    assert bench.load_kit(Path("kit"))[2] == kit.resolve() / "grade.sh"   # grade.sh runs from the clone
 
 
 def test_solo_cost_from_a_recorded_stream():
@@ -74,7 +103,8 @@ def test_solo_session_answers_a_closing_question_by_resuming_it():
 
     got = bench.solo_session(run_turn, "the spec", max_answers=3)
     assert calls == [("the spec", None), (bench.ANSWER, "s1")]
-    assert bench.message_usage(got)["claude-fable-5-2"]["output"] == 12
+    # Neither result has the CLI's totals: each turn falls back to its messages.
+    assert bench.stream_usage(got)["claude-fable-5-2"]["output"] == 12
     assert bench.solo_prompts(got, []) == {"permission": 0, "question": 1, "other": 0}
 
 
@@ -99,7 +129,7 @@ def test_brindle_usage_takes_one_source_per_agent(tmp_path):
         "id": "n1", "model": "claude-sonnet-5-5", "usage": {"input_tokens": 1, "output_tokens": 2}}}) + "\n")
     seen = {"root": {"id": "root", "mode": "interactive"}, "w1": {"id": "w1", "mode": "assign"},
             "n1": {"id": "n1", "mode": "assign", "provider": "native"}}
-    sonnet = {"input": 1, "output": 2, "cache_creation": 0, "cache_read": 0}
+    sonnet = {"input": 1, "output": 2, "cache_creation": 0, "cache_read": 0, "cache_creation_1h": 0}
     outside = {"w1": {"model": "gpt-6-sol", "input": 7, "output": 3, "cache_read": 0, "cache_creation": 0},
                "n1": {"model": "claude-sonnet-5-5", **sonnet}}   # the same transcript, read by brindle
     history = [
@@ -108,8 +138,8 @@ def test_brindle_usage_takes_one_source_per_agent(tmp_path):
     ]
     out = bench.brindle_usage("root", seen, {"root": {str(transcript)}, "n1": {str(native)}}, outside, history)
     assert out["by_model"] == {"claude-fable-5-2": FABLE, "claude-haiku-5-5": HAIKU, "claude-sonnet-5-5": sonnet,
-                               "gpt-6-sol": {"input": 7, "output": 3, "cache_creation": 0, "cache_read": 0},
-                               "claude-opus-5-5": {"input": 4, "output": 6, "cache_creation": 0, "cache_read": 0}}
+                               "gpt-6-sol": {**bench.empty(), "input": 7, "output": 3},
+                               "claude-opus-5-5": {**bench.empty(), "input": 4, "output": 6}}
     assert set(out["by_role"]) == {"supervisor", "worker", "unseen"}
     assert out["supervisor_model_observed"] == "claude-fable-5-2"
 

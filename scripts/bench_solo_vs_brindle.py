@@ -80,9 +80,13 @@ APPROVER_SERVER = "benchperm"
 APPROVER_TOOL = "approve"
 PROFILE_NAME = "bench-supervisor"
 
-KINDS = ("input", "output", "cache_creation", "cache_read")
+# cache_creation is every cache write; cache_creation_1h the part of it written
+# with the 1-hour TTL (priced higher), so it isn't added again in totals.
+BASE_KINDS = ("input", "output", "cache_creation", "cache_read")
+KINDS = (*BASE_KINDS, "cache_creation_1h")
 MTOK = 1_000_000
-CACHE_WRITE_FACTOR = 1.25   # a (5-minute) cache write costs 1.25x the input rate
+CACHE_WRITE_FACTOR = 1.25      # a 5-minute cache write costs 1.25x the input rate
+CACHE_WRITE_1H_FACTOR = 2.0    # a 1-hour one, 2x
 # List prices, $ per MTok: input, output, cache read.
 PRICES: dict[str, tuple[float, float, float]] = {
     "claude-fable-5-2": (8.0, 40.0, 0.20),
@@ -185,11 +189,51 @@ def message_usage(entries: list[dict]) -> dict[str, dict[str, int]]:
             anonymous.append((model, usage))
     by_model: dict[str, dict[str, int]] = {}
     for model, u in [*seen.values(), *anonymous]:
+        ttl = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
         add_usage(by_model, normalize_model(model), {
             "input": u.get("input_tokens"), "output": u.get("output_tokens"),
             "cache_creation": u.get("cache_creation_input_tokens"),
+            "cache_creation_1h": ttl.get("ephemeral_1h_input_tokens"),
             "cache_read": u.get("cache_read_input_tokens")})
     return by_model
+
+
+def cli_usage(model_usage: dict) -> dict[str, dict[str, int]]:
+    """A result event's ``modelUsage``: the CLI's own per-model totals."""
+    by_model: dict[str, dict[str, int]] = {}
+    for model, u in model_usage.items():
+        if isinstance(u, dict):
+            add_usage(by_model, normalize_model(model), {
+                "input": u.get("inputTokens"), "output": u.get("outputTokens"),
+                "cache_creation": u.get("cacheCreationInputTokens"),
+                "cache_creation_1h": u.get("cacheCreationEphemeral1hInputTokens"),
+                "cache_read": u.get("cacheReadInputTokens")})
+    return by_model
+
+
+def stream_usage(entries: list[dict]) -> dict[str, dict[str, int]]:
+    """Tokens per model over a ``-p`` stream (one or more turns). Each turn's
+    come from its result event's per-model totals: the stream's assistant
+    messages carry the usage from the start of each message, so their output
+    counts stop short. A turn with no such totals (killed before its result)
+    falls back to its assistant messages."""
+    by_model: dict[str, dict[str, int]] = {}
+    turn: list[dict] = []
+    for entry in entries:
+        turn.append(entry)
+        if entry.get("type") != "result":
+            continue
+        totals = entry.get("model_usage_since_last_result") or entry.get("modelUsage")
+        merge(by_model, cli_usage(totals) if isinstance(totals, dict) and totals else message_usage(turn))
+        turn = []
+    merge(by_model, message_usage(turn))
+    return by_model
+
+
+def permission_mode(entries: list[dict]) -> str | None:
+    """The permission mode the CLI says it ran in (its init event)."""
+    return next((e.get("permissionMode") for e in entries
+                 if e.get("type") == "system" and e.get("subtype") == "init"), None)
 
 
 def transcript_usage(path: str) -> dict[str, dict[str, int]]:
@@ -208,7 +252,7 @@ def transcript_usage(path: str) -> dict[str, dict[str, int]]:
 
 
 def tokens_total(by_model: dict[str, dict[str, int]]) -> int:
-    return sum(sum(k.values()) for k in by_model.values())
+    return sum(k.get(kind, 0) for k in by_model.values() for kind in BASE_KINDS)
 
 
 def price_usage(by_model: dict[str, dict[str, int]], rates: dict[str, list[float]] | None = None,
@@ -221,20 +265,22 @@ def price_usage(by_model: dict[str, dict[str, int]], rates: dict[str, list[float
     rates = rates or {}
     total, per, unpriced = 0.0, {}, []
     for model, k in sorted(by_model.items()):
+        hour = k.get("cache_creation_1h", 0)
         if model in PRICES:
             inp, out, read = PRICES[model]
-            write = inp * CACHE_WRITE_FACTOR
+            write, write_1h = inp * CACHE_WRITE_FACTOR, inp * CACHE_WRITE_1H_FACTOR
         elif model.startswith("claude"):
             raise UnknownModel(f"no price for model {model!r}: add it to PRICES in {SCRIPT.name}")
         elif model in free:
-            inp = out = write = read = 0.0
+            inp = out = write = write_1h = read = 0.0
         elif model in rates:
             inp, out, write, read = rates[model]
+            write_1h = write   # brindle's table has one cache-write rate
         else:
             unpriced.append(model)
             continue
-        dollars = (k["input"] * inp + k["output"] * out + k["cache_creation"] * write
-                   + k["cache_read"] * read) / MTOK
+        dollars = (k["input"] * inp + k["output"] * out + (k["cache_creation"] - hour) * write
+                   + hour * write_1h + k["cache_read"] * read) / MTOK
         per[model] = round(dollars, 6)
         total += dollars
     return round(total, 6), per, unpriced
@@ -439,6 +485,7 @@ def sh(cmd, cwd: Path, env: dict, check: bool = True, **kw) -> subprocess.Comple
 
 
 def load_kit(task_dir: Path) -> tuple[dict, str, Path]:
+    task_dir = task_dir.resolve()   # grade.sh runs from inside the clone
     for name in ("repo.json", "spec.md", "grade.sh"):
         if not (task_dir / name).is_file():
             raise BenchError(f"task kit incomplete: no {task_dir / name}")
@@ -500,7 +547,8 @@ def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict) -> dict:
         "command": sys.executable, "args": [str(SCRIPT), "approver", "--log", str(approvals)]}}}))
     flags = ["--model", args.model, "--output-format", "stream-json", "--verbose",
              "--mcp-config", str(mcp), "--strict-mcp-config",
-             "--permission-prompt-tool", f"mcp__{APPROVER_SERVER}__{APPROVER_TOOL}"]
+             "--permission-prompt-tool", f"mcp__{APPROVER_SERVER}__{APPROVER_TOOL}",
+             *(["--permission-mode", args.permission_mode] if args.permission_mode else [])]
     t0 = time.time()
     deadline = t0 + args.max_hours * 3600
     state = {"finished": "exit"}
@@ -525,8 +573,9 @@ def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict) -> dict:
 
     entries = solo_session(run_turn, spec, args.max_answers)
     stop = time.time()
-    by_model = message_usage(entries)
+    by_model = stream_usage(entries)
     return {"finished": state["finished"], "valid": state["finished"] in VALID_FINISHES, "why": None,
+            "permission_mode": permission_mode(entries),
             "wall_seconds": round(stop - t0, 1), "by_model": by_model,
             "by_role": {"solo": by_model}, "rates": {}, "free": set(),
             "prompts": solo_prompts(entries, iter_json(approvals.read_text().splitlines())),
@@ -595,6 +644,8 @@ def main(args):
         out["agents"] = [describe(a) for a in agents]
         ap = db.get_autopilot(rid)
         out["autopilot"] = {"state": ap.state, "question": ap.question, "goal": ap.goal} if ap else None
+        from brindle import config
+        out["permission_mode"] = guarded("permission mode", config.claude_permission_mode)
         now, items = time.time(), []
         for a in agents:
             rows = [dict(r) for r in db.permission_requests_of(a.id)]
@@ -945,6 +996,7 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
                 b.cli("close", aid, check=False)
     checkout = Path(w["seen"][rid].get("workspace_path") or clone)
     return {"finished": w["finished"], "valid": w["valid"], "why": w["why"],
+            "permission_mode": w["snap"].get("permission_mode"),   # brindle's Claude agents' mode
             "wall_seconds": round(w["stop"] - t0, 1), **usage, "rates": w["rates"],
             "prompts": brindle_prompts(w["snap"].get("permission_asks", []), w["events"]),
             "checkout": checkout, "supervisor_model": args.supervisor_model,
@@ -1006,7 +1058,8 @@ def cmd_run(args) -> int:
     graded = grade(grade_sh, out["checkout"], env)
     prompts = out["prompts"]
     record = {"arm": args.arm, "run_id": args.run_id, "started_at": started, "finished": out["finished"],
-              "valid": out["valid"], "why": out["why"], "wall_seconds": out["wall_seconds"], "supervisor_model": out["supervisor_model"],
+              "valid": out["valid"], "why": out["why"], "permission_mode": out.get("permission_mode"),
+              "wall_seconds": out["wall_seconds"], "supervisor_model": out["supervisor_model"],
               "supervisor_model_observed": out["supervisor_model_observed"],
               "tokens": {"by_model": out["by_model"], "by_role": out["by_role"]},
               "tokens_total": tokens_total(out["by_model"]),
@@ -1061,6 +1114,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--scratch", default=str(Path(tempfile.gettempdir()) / "bench_solo_vs_brindle"),
                      help="where clones go (outside this repo)")
     run.add_argument("--model", default=SOLO_MODEL, help="solo: the session's model")
+    run.add_argument("--permission-mode", default="default",
+                     help="solo: the CLI's --permission-mode ('' for the person's own setting); "
+                          "the mode it ran in is recorded either way")
     run.add_argument("--max-answers", type=int, default=5,
                      help="solo: how many closing questions to answer by resuming the session")
     run.add_argument("--supervisor-model", default=SUPERVISOR_MODEL,
