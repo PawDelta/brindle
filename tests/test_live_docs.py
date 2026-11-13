@@ -304,15 +304,25 @@ def test_a_window_edit_racing_the_first_join_is_carried_onto_the_relays_draft(tm
         window = DraftReplica.open(a.db(), "doc1")
         window.db.conn.execute(f"PRAGMA busy_timeout={NO_WAIT}")
         app = SharedDoc.load(window.export_bootstrap()[0])
+        # Another window's change reaches the replica and this app, but not this socket's holder.
+        other = DraftReplica.open(a.db(), "doc1")
+        twin = SharedDoc.load(other.export_bootstrap()[0])
+        before = twin.version()
+        twin.insert("body", 5, " remote")
+        other.apply_remote(twin.export_updates(before))
+        app.import_updates(twin.export_updates(before))
         before = app.version()
-        app.insert("body", 5, " saved locally")
-        edit = app.export_updates(before)
+        app.insert("body", 12, " local")
+        first = app.export_updates(before)
+        before = app.version()
+        app.insert("body", 18, " again")
+        second = app.export_updates(before)
         blocked = []
         loop = asyncio.get_running_loop()
 
         async def frame_arrives():
             try:
-                window.apply_remote(edit)
+                window.apply_remote(first)
             except sqlite3.OperationalError:
                 blocked.append(True)                          # the rebuild holds the write lock
 
@@ -324,12 +334,16 @@ def test_a_window_edit_racing_the_first_join_is_carried_onto_the_relays_draft(tm
         monkeypatch.setattr(live_docs, "retype", racing)
         await a.link.connect()
         assert blocked                                        # it couldn't land between the read and the write
-        window.apply_remote(edit)                             # so it lands after, on the new replica
+        reloaded = SharedDoc.load(a.replica().export_bootstrap()[0])    # a window on the new replica
+        # Its frames land after, on the new replica, the second first: it waits for the first.
+        assert window.receive(second) == (False, None)
+        merged, forward = window.receive(first)
+        assert merged and reloaded.import_updates(forward)   # what other windows get is the new replica's
         await a.manager.changed("doc1")
         await settle(a.link)
 
         assert relay.refusals == []
-        assert a.sections()["body"] == relay.sections()["body"] == "World saved locally"
+        assert reloaded.text("body") == a.sections()["body"] == relay.sections()["body"] == "World remote local again"
 
     asyncio.run(run())
 
@@ -435,15 +449,58 @@ def test_offline_edits_refused_as_stale_after_the_lock_lapsed_are_kept_until_the
         with db.tx() as c:
             c.execute("UPDATE plans SET state=? WHERE id=?", (state, shared_plan))
         await a.manager.sweep()
-        with db.tx() as c:                                    # as if a restart came before it was forgotten
-            c.execute("INSERT INTO live_doc_offline (doc_id, section, base, start, before, after)"
-                      " VALUES ('doc1', 'body', 'World now', 6, 'now', 'later')")
-        await a.manager.sweep()
         threads = db.conn.execute("SELECT anchor, after, status FROM plan_threads WHERE plan_id=? AND kind='suggestion'",
                                   (shared_plan,)).fetchall()
-        # The revision has no "now": "later" goes where it would stand in the revision's text, once.
+        # The revision has no "now": "later" goes where it would stand in the revision's text.
         assert [(json.loads(t["anchor"])["start"], t["after"], t["status"]) for t in threads] == [(5, "later", "open")]
         assert live_docs.docs_with_offline(db) == []
+
+    asyncio.run(run())
+
+
+def test_each_offline_edit_is_filed_once_deletions_included_and_a_crash_files_nothing_twice(db, shared_plan, monkeypatch):
+    from brindle import plan_docs
+
+    def keep(base, start, before, after, section="body"):
+        with db.tx() as c:
+            c.execute("INSERT INTO live_doc_offline (doc_id, section, base, start, before, after) VALUES ('doc1', ?, ?, ?, ?, ?)",
+                      (section, base, start, before, after))
+
+    def threads():
+        return [(t["kind"], (json.loads(t["anchor"]).get("quote"), json.loads(t["anchor"]).get("section")), t["after"])
+                for t in db.conn.execute("SELECT * FROM plan_threads WHERE plan_id=? ORDER BY id", (shared_plan,))]
+
+    async def run():
+        machine = Machine(FakeRelay(Clock()), None, "alice")
+        keep("World now", 0, "World", "")                    # removes words the revision has
+        keep("World now", 6, "now", "")                      # removes words only the live draft had
+        keep("World now", 6, "now", "later", section="gone")  # in a section the revision doesn't have
+        keep("World now", 6, "now", "later")
+        forget = live_docs._forget_offline
+        crashed = []
+
+        def crash_once(db_, n):
+            if not crashed:
+                crashed.append(n)
+                raise RuntimeError("the daemon stopped here")
+            forget(db_, n)
+
+        monkeypatch.setattr(live_docs, "_forget_offline", crash_once)
+        with pytest.raises(RuntimeError):
+            await machine.manager.sweep()                     # filed the first, then crashed before forgetting it
+        await machine.manager.sweep()                         # the same edit again: already filed
+        assert threads() == [("suggestion", ("World", "body"), ""),
+                             ("comment", (None, "body"), None),
+                             ("comment", (None, "lede"), None),
+                             ("suggestion", ("", "body"), "later")]
+        assert live_docs.docs_with_offline(db) == []
+
+        # A later recovery makes the very same change at the same place: a different edit, filed anew.
+        plan_docs.reject(db, shared_plan, db.conn.execute(
+            "SELECT id FROM plan_threads WHERE after='later'").fetchone()["id"])
+        keep("World now", 6, "now", "later")
+        await machine.manager.sweep()
+        assert [t for t in threads() if t[2] == "later"] == [("suggestion", ("", "body"), "later")] * 2
 
     asyncio.run(run())
 

@@ -272,14 +272,25 @@ def _quote(text: str, limit: int = 300) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+OFFLINE = "Typed offline while the author's lock had lapsed."
+
+
 def _file_one(db: DB, plan_id: str, edit) -> None:
-    """One offline edit onto the plan's revision as it is now: a suggestion
-    replacing the same words where they still stand there, else one inserting
-    the new words where they would go (the note says what they replaced in
-    the live draft), else, for words only removed, a comment saying so.
-    Filing what is already filed changes nothing, so a restart between filing
-    and forgetting the edit makes no second thread. Raises ServiceError."""
-    from brindle import plan_docs
+    """One offline edit onto the plan's revision as it is now:
+
+    - where the words it replaced (or removed) still stand there, a suggestion
+      replacing them with its words (none, for a deletion);
+    - else, if it wrote words, a suggestion inserting them where they would
+      go, its note quoting what they replaced in the live draft;
+    - else (it only removed words the revision doesn't have, or its section
+      is gone), a comment saying what it did, on its section if the revision
+      still has it, else on the overview or the first part it has.
+
+    A thread this very edit filed before a crash (newer than its
+    ``filing_after``, and alike in every part) counts as filed. Raises
+    ServiceError when the plan won't take it now."""
+    from brindle import plan_docs, plans
+    from brindle.service.errors import ServiceError
 
     p = plan_docs._plan(db, plan_id)
     body = plan_docs._body(plan_docs.revision(db, plan_id), edit["section"])
@@ -287,26 +298,43 @@ def _file_one(db: DB, plan_id: str, edit) -> None:
     if body is not None:
         at, _ = plan_drafts.mapping(edit["base"], body)
         start, end = at(edit["start"]), at(edit["start"] + len(before))
-        if not (before and body[start:end] == before):
-            note = (f"Typed offline while the author's lock had lapsed. In the live draft it replaced "
-                    f"“{_quote(before)}”." if before else "Typed offline while the author's lock had lapsed.")
-            start, before = at(edit["start"]), ""
-        else:
-            note = "Typed offline while the author's lock had lapsed."
-        if after:
-            if not _already(db, plan_id, "suggestion", note, after, (section, start)):
-                plan_docs.suggest(db, plan_id, p["rev"], section, start, before, after, note)
+        if before and body[start:end] == before:
+            if not _filed(db, plan_id, edit, "suggestion", OFFLINE, after, (section, start, before)):
+                plan_docs.suggest(db, plan_id, p["rev"], section, start, before, after, OFFLINE)
             return
-    note = f"Typed offline while the author's lock had lapsed: removed “{_quote(edit['before'])}” from {section}."
-    if not _already(db, plan_id, "comment", note, None, None):
-        plan_docs.comment(db, plan_id, p["rev"], None, note)
+        if after:
+            note = f"{OFFLINE} In the live draft it replaced “{_quote(before)}”." if before else OFFLINE
+            if not _filed(db, plan_id, edit, "suggestion", note, after, (section, start, "")):
+                plan_docs.suggest(db, plan_id, p["rev"], section, start, "", after, note)
+            return
+    what = (f"removed “{_quote(before)}”" if not after else
+            f"wrote “{_quote(after)}”" + (f" in place of “{_quote(before)}”" if before else ""))
+    note = f"{OFFLINE} In the live draft it {what} in {section}, which isn't in this revision as it was."
+    places = plans.anchors(p)
+    on = next((s for s in (section, plans.LEDE, *places) if s in places), None)
+    if on is None:
+        raise ServiceError("invalid", "this revision has nothing to note an offline edit on", 409)
+    if not _filed(db, plan_id, edit, "comment", note, None, None):
+        plan_docs.comment(db, plan_id, p["rev"], {"kind": "section", "section": on}, note)
 
 
-def _already(db: DB, plan_id: str, kind: str, body: str, after: str | None, at: tuple[str, int] | None) -> bool:
-    where = "" if at is None else " AND json_extract(anchor, '$.section')=? AND json_extract(anchor, '$.start')=?"
+def _filed(db: DB, plan_id: str, edit, kind: str, body: str, after: str | None,
+           at: tuple[str, int, str] | None) -> bool:
+    """Whether ``edit`` itself made this thread before a crash cut its
+    filing short: a thread newer than the edit's ``filing_after`` and alike
+    in kind, note, words and place. Another edit, filed before this one
+    began (even with the same words at the same place), never counts."""
+    where = "" if at is None else (" AND json_extract(anchor, '$.section')=? AND json_extract(anchor, '$.start')=?"
+                                   " AND json_extract(anchor, '$.quote')=?")
     return db.conn.execute(
-        "SELECT 1 FROM plan_threads WHERE plan_id=? AND kind=? AND body=? AND after IS ? AND parent_id IS NULL" + where,
-        (plan_id, kind, body, after, *(at or ()))).fetchone() is not None
+        "SELECT 1 FROM plan_threads WHERE plan_id=? AND id>? AND kind=? AND body=? AND after IS ?"
+        " AND parent_id IS NULL" + where,
+        (plan_id, edit["filing_after"], kind, body, after, *(at or ()))).fetchone() is not None
+
+
+def _forget_offline(db: DB, n: int) -> None:
+    with db.tx() as c:
+        c.execute("DELETE FROM live_doc_offline WHERE n=?", (n,))
 
 
 def _file_offline(db: DB, doc_id: str) -> int:
@@ -317,19 +345,25 @@ def _file_offline(db: DB, doc_id: str) -> int:
     from brindle.service.errors import ServiceError
 
     share = db.conn.execute("SELECT plan_id FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
-    edits = db.conn.execute("SELECT * FROM live_doc_offline WHERE doc_id=? ORDER BY n", (doc_id,)).fetchall()
+    edits = db.conn.execute("SELECT n FROM live_doc_offline WHERE doc_id=? ORDER BY n", (doc_id,)).fetchall()
     if share is None:
         return len(edits)
     left = 0
-    for edit in edits:
+    for n in (r["n"] for r in edits):
+        with db.tx() as c:
+            # The edit's mark: no thread it makes from here on is older than this.
+            c.execute("UPDATE live_doc_offline SET filing_after=(SELECT COALESCE(MAX(id), 0) FROM plan_threads)"
+                      " WHERE n=? AND filing_after IS NULL", (n,))
+            edit = c.execute("SELECT * FROM live_doc_offline WHERE n=?", (n,)).fetchone()
         try:
             _file_one(db, share["plan_id"], edit)
         except ServiceError as e:
             left += 1
             log.warning("brindle: an edit to %s typed offline isn't on the plan yet: %s", doc_id, e)
+            with db.tx() as c:      # nothing was made: the next attempt marks afresh
+                c.execute("UPDATE live_doc_offline SET filing_after=NULL WHERE n=?", (n,))
             continue
-        with db.tx() as c:
-            c.execute("DELETE FROM live_doc_offline WHERE n=?", (edit["n"],))
+        _forget_offline(db, n)
     return left
 
 

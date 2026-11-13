@@ -136,23 +136,23 @@ def test_carets_are_relayed_and_replayed_without_any_sqlite_write(db, live_doc):
 def test_a_contended_draft_write_keeps_the_daemon_event_loop_responsive(db, live_doc, monkeypatch):
     entered = threading.Event()
     progressed = threading.Event()
-    apply_remote = DraftReplica.apply_remote
+    receive = DraftReplica.receive
 
     async def progress():
         progressed.set()
 
-    def apply_with_trace(replica, data):
+    def receive_with_trace(replica, data):
         def trace(statement):
             if statement == "BEGIN IMMEDIATE":
                 entered.set()
 
         replica.db.conn.set_trace_callback(trace)
         try:
-            return apply_remote(replica, data)
+            return receive(replica, data)
         finally:
             replica.db.conn.set_trace_callback(None)
 
-    monkeypatch.setattr(DraftReplica, "apply_remote", apply_with_trace)
+    monkeypatch.setattr(DraftReplica, "receive", receive_with_trace)
     path = f"/v1/visuals/{live_doc}/live"
     with TestClient(build_app(TOKEN)) as client:
         with client.websocket_connect(path) as first, client.websocket_connect(path) as second:

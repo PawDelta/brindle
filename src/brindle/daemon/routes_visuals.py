@@ -118,9 +118,13 @@ async def visual_live(socket: WebSocket) -> None:
         return replica.export_bootstrap()
 
     def apply_update(data):
+        """The update this machine's other windows need for ``data``: itself,
+        or, if the replica was rebuilt under this window, its change re-typed
+        onto the new one (DraftReplica.receive); None for nothing yet."""
         current_plan()
         if data is not None:
-            replica.apply_remote(data)
+            return replica.receive(data)[1]
+        return None
 
     def close_db():
         if db is not None:
@@ -150,9 +154,14 @@ async def visual_live(socket: WebSocket) -> None:
                 if not isinstance(said, dict):
                     raise ValueError("a live frame must be an object")
                 if isinstance(said.get("update"), str):
-                    await work(apply_update, base64.b64decode(said["update"], validate=True))
+                    data = base64.b64decode(said["update"], validate=True)
+                    forward = await work(apply_update, data)
                     if lease is not None:
                         await relay.changed(doc_id)
+                    if forward is None:
+                        continue
+                    if forward != data:     # this window is on a replaced replica: pass on the translation
+                        frame = json.dumps({"update": base64.b64encode(forward).decode("ascii")})
                 elif isinstance(said.get("awareness"), str) and isinstance(said.get("section"), str):
                     await work(apply_update, None)
                     presence = room.presence.setdefault(said["section"], Presence())

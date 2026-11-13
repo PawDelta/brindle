@@ -25,8 +25,10 @@ load until what it waits on arrives.
 
 from __future__ import annotations
 
+import base64
 import difflib
 import itertools
+import json
 import re
 import secrets
 import sqlite3
@@ -38,6 +40,8 @@ from brindle.db import DB
 
 # Peer ids stay within a JS number's exact range, for the app's loro-crdt.
 _PEER_ID_SPACE = 2**53 - 1
+# Replaced replicas kept for windows still on them (an app window reloads at once).
+RETIRED_KEPT = 3
 
 
 class DraftGone(LookupError):
@@ -162,20 +166,48 @@ class DraftReplica:
         """Merge another replica's updates; False while they wait on changes
         not yet received (they are kept, and merged once those arrive). Not
         positional, so another holder's writes since do not refuse it.
+        See :meth:`receive` for a holder of a replica since rebuilt."""
+        return self.receive(data)[0]
 
-        If the replica was rebuilt since this holder read it (:func:`rebuild`),
-        ``data`` was made against the old one and cannot merge into the new:
-        what it changed in the text this holder read is re-typed onto the new
-        replica instead (:func:`retype`), and this holder goes on with it."""
-        return data not in self._write(lambda d: d.import_updates(data), incoming=data)[1]
+    def receive(self, data: bytes) -> tuple[bool, bytes | None]:
+        """:meth:`apply_remote`, and the update the other holders of this
+        machine's replica need for it (None: nothing yet).
 
-    def _carry(self, data: bytes) -> Callable[[SharedDoc], None]:
-        """``data``'s change to the text this holder last read, as an edit for another replica."""
-        base = self._doc.sections()
-        after = SharedDoc.load(self._doc.export_snapshot())
-        after.import_updates(data)
-        ours = after.sections()
-        return lambda doc: retype(doc, base, ours)
+        A holder stays on the replica it read. If that replica was rebuilt
+        since (:func:`rebuild`), ``data`` was made against its history, not
+        the new one's: it is merged into the old replica's own stored state
+        (kept, with the updates it was holding back, in ``plan_draft_retired``),
+        held there until what it builds on arrives, and what it changed in that
+        text is re-typed onto the current replica (:func:`retype`). The update
+        returned is then that re-typed change, never ``data`` itself."""
+        try:
+            return data not in self._write(lambda d: d.import_updates(data), incoming=data)[1], data
+        except DraftGone:
+            pass
+        with self.db.tx() as c:
+            old = c.execute("SELECT state, pending FROM plan_draft_retired WHERE doc_id=? AND made=?",
+                            (self.doc_id, self._made)).fetchone()
+            got = _read(c, self.doc_id)
+            if old is None or got is None:
+                raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one") from None
+            source = SharedDoc.load(old["state"])
+            held = [base64.b64decode(d) for d in json.loads(old["pending"])]
+            for d in held:
+                source.import_updates(d)
+            before = source.sections()
+            waiting = [d for d in [*held, data] if not source.import_updates(d)]
+            after = source.sections()
+            c.execute("UPDATE plan_draft_retired SET state=?, pending=? WHERE doc_id=? AND made=?",
+                      (source.export_snapshot(), json.dumps([base64.b64encode(d).decode() for d in waiting]),
+                       self.doc_id, self._made))
+            if after == before:
+                return data not in waiting, None
+            _, doc, _ = got
+            version = doc.version()
+            retype(doc, before, after)
+            c.execute("UPDATE plan_drafts SET state=?, seq=seq+1, updated_at=? WHERE doc_id=?",
+                      (doc.export_snapshot(), time.time(), self.doc_id))
+        return data not in waiting, doc.export_updates(version)
 
     def _write(self, change: Callable[[SharedDoc], object],
                incoming: bytes | None = None) -> tuple[bytes, list[bytes]]:
@@ -183,17 +215,8 @@ class DraftReplica:
         updates still waiting on changes not yet received."""
         with self.db.tx() as c:
             got = _read(c, self.doc_id)
-            if got is None or (not self._same(got[0]) and incoming is None):
+            if got is None or not self._same(got[0]):
                 raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
-            if not self._same(got[0]):
-                row, doc, pending = got
-                before = doc.version()
-                self._carry(incoming)(doc)
-                seq = row["seq"] + 1
-                c.execute("UPDATE plan_drafts SET state=?, seq=?, updated_at=? WHERE doc_id=?",
-                          (doc.export_snapshot(), seq, time.time(), self.doc_id))
-                self.peer_id, self._made, self._doc, self._seq = row["peer_id"], row["created_at"], doc, seq
-                return doc.export_updates(before), pending
             row, doc, pending = got
             if incoming is None and row["seq"] != self._seq:
                 self._doc, self._seq = doc, row["seq"]
@@ -228,7 +251,8 @@ def rebuild(db: DB, doc_id: str,
     another holder commits can fall between what ``make`` read and what
     replaces it; ``make`` writes what goes with it through ``c``. The result
     is a new replica (a new ``created_at``): an old holder's positional edit
-    gets :class:`DraftGone`, and its ``apply_remote`` is re-typed onto it."""
+    gets :class:`DraftGone`, and what it receives is translated through the
+    old replica, kept for it here (:meth:`DraftReplica.receive`)."""
     with db.tx() as c:
         got = _read(c, doc_id)
         doc = make(c, None if got is None else got[1])
@@ -236,6 +260,12 @@ def rebuild(db: DB, doc_id: str,
         if got is not None:
             # Strictly newer than the replica it replaces, however coarse the clock.
             now = max(now, got[0]["created_at"] + 1e-6)
+            c.execute("INSERT OR REPLACE INTO plan_draft_retired (doc_id, made, state, pending) VALUES (?, ?, ?, ?)",
+                      (doc_id, got[0]["created_at"], got[0]["state"],
+                       json.dumps([base64.b64encode(d).decode() for d in got[2]])))
+            c.execute("DELETE FROM plan_draft_retired WHERE doc_id=? AND made NOT IN"
+                      " (SELECT made FROM plan_draft_retired WHERE doc_id=? ORDER BY made DESC LIMIT ?)",
+                      (doc_id, doc_id, RETIRED_KEPT))
         seq = 0 if got is None else got[0]["seq"] + 1
         c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,))      # its held-back updates go with it
         c.execute("INSERT INTO plan_drafts (doc_id, peer_id, state, seq, created_at, updated_at)"
@@ -304,4 +334,5 @@ def drop(db: DB, doc_id: str) -> bool:
         c.execute("DELETE FROM live_docs WHERE doc_id=?", (doc_id,))
         c.execute("DELETE FROM live_doc_peers WHERE doc_id=?", (doc_id,))
         c.execute("DELETE FROM live_doc_offline WHERE doc_id=?", (doc_id,))
+        c.execute("DELETE FROM plan_draft_retired WHERE doc_id=?", (doc_id,))
         return c.execute("DELETE FROM plan_drafts WHERE doc_id=?", (doc_id,)).rowcount > 0

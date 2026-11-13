@@ -1169,6 +1169,16 @@ CREATE TABLE IF NOT EXISTS plan_draft_pending (
     data BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS plan_draft_pending_doc ON plan_draft_pending(doc_id, n);
+-- A replica's last generations before plan_drafts.rebuild replaced it: their
+-- state and held-back updates, so an app window still on one has its late
+-- changes translated onto the current replica, never merged into it as is.
+CREATE TABLE IF NOT EXISTS plan_draft_retired (
+    doc_id TEXT NOT NULL,
+    made REAL NOT NULL,            -- the generation (plan_drafts.created_at) it was
+    state BLOB NOT NULL,           -- a Loro snapshot
+    pending TEXT NOT NULL,         -- JSON list of base64 updates still waiting on others
+    PRIMARY KEY (doc_id, made)
+);
 -- A replica's link to the server's live relay (brindle.pro.live_docs). The
 -- outbox is every change the replica holds past relay_version, so unsent
 -- edits outlive a restart with the replica itself. seed: the texts a replica
@@ -1198,7 +1208,9 @@ CREATE TABLE IF NOT EXISTS live_doc_offline (
     base TEXT NOT NULL,            -- the section's live text the edit was made against
     start INTEGER NOT NULL,        -- where in base
     before TEXT NOT NULL,          -- what it replaced there ('' for an insertion)
-    after TEXT NOT NULL            -- what it wrote ('' for a deletion)
+    after TEXT NOT NULL,           -- what it wrote ('' for a deletion)
+    filing_after INTEGER           -- the newest plan_threads id when filing it began: only a
+                                   -- newer thread can be the one it made before a crash
 );
 -- Documents whose owner chose Stop sharing while the Library was out of reach:
 -- their teams and org lose access at the next pass that reaches it.
