@@ -720,8 +720,9 @@ def test_two_writers_in_one_shared_section_both_land_in_the_live_draft_and_only_
     assert (got["rev"], got["sections"][0]["markdown"], got["gate"]["state"]) == (2, agreed, "waiting")
 
 
+@pytest.mark.parametrize("changed_too", [False, True], ids=["same word typed first", "and the word itself changed"])
 def test_an_edit_made_here_before_the_live_draft_arrives_is_carried_into_it_as_a_suggestion(
-        db, parts, backend, monkeypatch):
+        db, parts, backend, monkeypatch, changed_too):
     pid, lib, net = parts
     sd.share(db, pid, TEAM, **net)
     plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")         # r2, not sent yet
@@ -729,10 +730,17 @@ def test_an_edit_made_here_before_the_live_draft_arrives_is_carried_into_it_as_a
     lib.content["sections"][0]["markdown"] = SUMMARY + " It stays on."
     lib.open_draft()                                                     # then the draft opens on it,
     lib.draft.insert("summary", 0, "Workers coordinate. ")              # and someone types the same word first
+    if changed_too:                                                      # and changes the very word edited here
+        lib.draft.replace("summary", len("Workers coordinate. "), len("Workers"), "Machines")
     monkeypatch.setattr(sd, "relays", {DOC: Relay(lib)}, raising=False)
     sd.sync(db, pid, **net)
 
     got = plans.to_dto(db, plans.get(db, pid))
+    if changed_too:     # the word typed first doesn't stand in for it: the change is named, not placed
+        assert [t["kind"] for t in got["threads"]] == ["comment"]
+        assert got["sections"][0]["markdown"] == "Workers coordinate. Machines run on a machine the customer " \
+                                                 "controls. It stays on."
+        return
     assert (got["sections"][0]["markdown"], got["gate"]["state"]) == (
         "Workers coordinate. " + SUMMARY + " It stays on.", "ready")
     [carried] = got["threads"]

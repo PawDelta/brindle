@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import bisect
 import difflib
 import json
 import logging
@@ -101,6 +102,8 @@ THREAD_ACTIONS = {("comment", "resolved"): "resolve", ("comment", "open"): "reop
 DRAFT_ACCEPT = {"action": "accept", "in_draft": True}   # mark it accepted; the Library applies no text
 MAX_CURSOR = 512             # a pulled anchor's Loro cursor, base64
 _TOKENS = re.compile(r"\w+|\W")   # words, and each other character: what changes carried over are made of
+_WORD = re.compile(r"\w")
+CONTEXT_WORDS = 2            # words either side a carried change must still have in the draft to be placed
 
 
 def link(db: DB, plan_id: str) -> dict | None:
@@ -926,18 +929,31 @@ def _hunks(a: str, b: str) -> list[tuple[int, str, str]]:
 
 
 def _mapped(a: str, b: str, start: int, length: int) -> int | None:
-    """Where the span at ``start`` in ``a`` is in ``b``, by aligning the two
-    word by word: only a span inside a stretch both still share is placed,
-    beside the same words around it, never by its old offset. None if others
-    changed it, or the words around it, since."""
+    """Where the span at ``start`` in ``a`` (on word boundaries) is in ``b``,
+    by aligning the two word by word. It is placed only where ``b`` still has
+    it with the words around it: inside one stretch both share, which also
+    holds CONTEXT_WORDS words either side of it (or all ``a`` has, at its
+    start or end). Never by its old offset, nor by a lone matching word: None
+    if others changed it, or the words around it, since."""
     ta, tb = _TOKENS.findall(a), _TOKENS.findall(b)
+    if not ta:                  # an empty text filled here: placed only while it is still empty
+        return 0 if not tb else None
     at, bt = [0], [0]
     for t in ta:
         at.append(at[-1] + len(t))
     for t in tb:
         bt.append(bt[-1] + len(t))
+    k1, k2 = bisect.bisect_left(at, start), bisect.bisect_left(at, start + length)
+    left, words = k1, 0
+    while left > 0 and words < CONTEXT_WORDS:
+        left -= 1
+        words += bool(_WORD.match(ta[left]))
+    right, words = k2, 0
+    while right < len(ta) and words < CONTEXT_WORDS:
+        words += bool(_WORD.match(ta[right]))
+        right += 1
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
-        if op == "equal" and at[i1] <= start and start + length <= at[i2]:
+        if op == "equal" and i1 <= left and right <= i2:
             return bt[j1] + start - at[i1]
     return None
 
