@@ -30,6 +30,7 @@ dependencies = [
     "cryptography>=42; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "cryptography>=42,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "wsproto>=1.2",
+    "loro>=1.17,<2",
 ]
 
 [project.urls]
