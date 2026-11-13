@@ -421,6 +421,24 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
         lib.sign_offs.append({"rev": 1, "sub": "u_a", "at": 9.0})
         assert post("sync").json()["gate"]["state"] == "ready"
 
+        # The sharing account is also required. Its later local objection stays
+        # authored as "person" after sync, but must revoke its earlier sign-off.
+        lib.sign_offs[0]["at"] = 1.0
+        with monkeypatch.context() as clock:
+            clock.setattr(plan_docs.time, "time", lambda: 1000.0)  # the local clock differs from the Library's
+            plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Rework the split.")
+        assert post("sync").json()["gate"]["state"] == "changes_requested"
+        from brindle.pro import shared_reader
+
+        assert shared_reader.read(DOC, **net)["gate"]["state"] == "changes_requested"
+        refused = post("decide", rev=1, approved=True)
+        assert refused.status_code == 409 and refused.json()["error"]["code"] == "gate_closed"
+        assert plans.get(db, pid)["state"] == "open"
+        # Signing again after the comment clears the objection on both views,
+        # comparing Library times rather than the local clock's comment time.
+        assert post("sign-off", rev=1).json()["gate"]["state"] == "ready"
+        assert shared_reader.read(DOC, **net)["gate"]["state"] == "ready"
+
         # A required reviewer added in the Library since the last sync: the approval finds out.
         lib.reviewers = [*lib.reviewers, {"sub": "u_b", "required": True}]
         assert post("decide", rev=1, approved=True).status_code == 409

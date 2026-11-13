@@ -483,7 +483,9 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
     here and not linked yet, oldest first, so it comes back as itself instead
     of as a teammate's, and an answer that was lost doesn't send it twice.
     Only a write actually sent can pair: the same words from this account
-    elsewhere are another thread. Text is compared as sent, secrets masked."""
+    elsewhere are another thread. Text is compared as sent, secrets masked.
+    Linked local threads take the Library's creation time, so review gates
+    compare their objections and sign-offs on the same clock."""
     waiting: dict[tuple, list[int]] = {}
     for r in c.execute("SELECT t.id, t.parent_id, t.kind, t.body, t.after, t.anchor, t.question FROM plan_threads t"
                        " JOIN plan_share_threads s ON s.plan_id=t.plan_id AND s.local_id=t.id"
@@ -506,6 +508,10 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
             pair(t["id"], (None, t.get("kind"), t.get("text") or "", t.get("after"), _place(t.get("anchor")), bool(t.get("question"))),
                  t.get("status"))
         parent = known.get(t["id"])
+        at = t.get("at")
+        if parent and t.get("author") == owner and isinstance(at, (int, float)) and not isinstance(at, bool):
+            c.execute("UPDATE plan_threads SET created_at=? WHERE id=? AND author=? AND created_at<>?",
+                      (at, parent["local_id"], plan_docs.PERSON, at))
         for r in (t.get("replies") or []) if parent else []:
             if isinstance(r, dict) and isinstance(r.get("id"), int) and r.get("author") == owner:
                 pair(r["id"], (parent["local_id"], "reply", r.get("text") or "", None, None, False), "open")

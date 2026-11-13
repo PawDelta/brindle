@@ -348,7 +348,7 @@ def _gate(c, p: dict) -> dict | None:
     signed in (shared_docs.lapse_stands). Sign-offs and rules count only
     while the Library's head is the revision on screen: until a new revision
     is sent they say nothing about it."""
-    from brindle.plan_docs import TEAMMATE
+    from brindle.plan_docs import PERSON, TEAMMATE
 
     row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
     if row is None:
@@ -365,9 +365,13 @@ def _gate(c, p: dict) -> dict | None:
     current = (read is not None and not refusal and row["doc_id"] is not None and row["local_rev"] == p["rev"]
                and review.get("rev") == row["remote_rev"])
     signed = _signed(review) if current else {}
-    asked = {r["author"][len(TEAMMATE):]: r["at"] for r in c.execute(
+    asked: dict[str, float] = {}
+    for r in c.execute(
         "SELECT author, MAX(created_at) AS at FROM plan_threads WHERE plan_id=? AND parent_id IS NULL"
-        " AND status='open' AND question=0 AND author LIKE ? GROUP BY author", (p["id"], TEAMMATE + "%"))}
+        " AND status='open' AND question=0 AND (author=? OR author LIKE ?) GROUP BY author",
+        (p["id"], PERSON, TEAMMATE + "%")):
+        sub = row["owner"] if r["author"] == PERSON else r["author"][len(TEAMMATE):]
+        asked[sub] = max(asked.get(sub, r["at"]), r["at"])
     rows, policies, required, met, unmet, changes = tally(people, rules, signed, asked, current, row["owner"])
     if p["state"] == "approved":
         state, reason = "closed", "The review is closed: this plan is building."
