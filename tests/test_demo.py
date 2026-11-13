@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from typer.testing import CliRunner
+
 from brindle import agents, demo, workspaces
 from brindle.db import Agent
 
@@ -40,6 +42,47 @@ def _last(path, fmt="%an <%ae>"):
 
 def _git(path, *args):
     subprocess.run(["git", *args], cwd=path, check=True)
+
+
+def test_cli_demo_starts_workers_on_the_signed_in_provider(db, repo, monkeypatch):
+    from brindle import autopilot, cli, config, providers
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(providers, "unusable", lambda provider, *a, **k:
+                        None if provider == "codex" else "CLI not installed")
+    for name in ("_preflight", "_trust_codex_hook", "_pause_transferred", "_check_updates",
+                 "_cull_detached", "_local_models_detached", "_settings_sync_detached"):
+        monkeypatch.setattr(cli, name, lambda *a, **k: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+
+    def launch(db, agent, ws, **kwargs):
+        problem = providers.unusable(agent.provider)
+        if problem:
+            raise agents.AgentError(problem)
+        db.update_agent(agent.id, status="processing")
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    result = CliRunner().invoke(cli.app, ["demo", "--no-attach"])
+    assert result.exit_code == 0, result.output
+    supervisor, = db.list_agents()
+    ws = db.get_workspace(supervisor.workspace_id)
+    milestones = db.milestones(supervisor.id)
+    assert len(milestones) == 2
+    for name, milestone in zip(("slug", "wrap"), milestones):
+        profile, _ = autopilot.choose_profile(db, supervisor.id, ws.repo_root,
+                                              task=milestone.title, weight="light")
+        agents.delegate(db, supervisor, ws, profile, milestone.title, "assign",
+                        branch=name, done_when=milestone.check_cmd)
+    workers = [a for a in db.list_agents() if a.parent_id == supervisor.id]
+    assert len(workers) == 2
+    assert all(a.status == "processing" and a.provider == supervisor.provider == "codex"
+               for a in workers)
+    assert len({a.workspace_id for a in workers}) == 2
+    # The review at the end must also run on the only usable CLI.
+    reviewer = config.load_repo_config(ws.repo_root).review_profile
+    review = agents.spawn(db, db.get_workspace(workers[0].workspace_id), reviewer,
+                          parent_id=supervisor.id, mode="review")
+    assert db.get_agent(review.id).status == "processing"
 
 
 def test_demo_merges_with_no_git_identity(db, repo, monkeypatch, tmp_path):
