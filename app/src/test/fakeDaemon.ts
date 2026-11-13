@@ -2467,6 +2467,11 @@ export class FakeDaemon {
     return this.live.get(visual)?.doc.getText(section).toString() ?? "";
   }
 
+  /* A section's presence as the daemon holds it (what a client joining now is sent): key → value. */
+  livePresence(visual: string, section: string): Record<string, unknown> {
+    return (this.live.get(visual)?.presence.get(section)?.getAllStates() ?? {}) as Record<string, unknown>;
+  }
+
   joinLive(socket: FakeLiveSocket, frame: string): void {
     if (frame !== this.token) {
       socket.close(WS_UNAUTHORIZED);

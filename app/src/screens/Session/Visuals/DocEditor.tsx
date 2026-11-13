@@ -17,11 +17,14 @@ import { Annotation, Compartment, EditorState, type Extension } from "@codemirro
 import { EditorView, ViewPlugin, keymap } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
 import { EphemeralStore, LoroDoc, UndoManager } from "loro-crdt";
-import { LoroEphemeralPlugin, getCursorEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
+import { LoroEphemeralPlugin, getCursorEphemeralKey, getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
 import { useEffect, useRef, useState } from "react";
 import type { DaemonClient } from "../../../api/client";
 
 export type LiveClient = Pick<DaemonClient, "visualLive">;
+
+/* How long a writer's caret and name last on others' screens unless written again (ms). */
+const PRESENCE_TTL = 30_000;
 
 /* A change that came from Loro (another writer's, or an undo): already in the document. */
 const fromLoro = Annotation.define<boolean>();
@@ -101,12 +104,13 @@ export function DocEditor({ client, visual, section, name, label }: {
   const named = useRef(name);
   useEffect(() => {
     const doc = new LoroDoc();
-    const presence = new EphemeralStore<EphemeralState>(30_000);
+    const presence = new EphemeralStore<EphemeralState>(PRESENCE_TTL);
     const undo = new UndoManager(doc, { mergeInterval: 500 });
     const editable = new Compartment();
     const user: UserState = { name: named.current, colorClassName: peerClass(named.current) };
     let view: EditorView | null = null;
     let gone = false;
+    let stopRefresh = () => {};
     const mount = () => {
       if (!host.current) return null;
       const run = (step: () => boolean) => () => step() || true;
@@ -144,14 +148,29 @@ export function DocEditor({ client, visual, section, name, label }: {
       },
       onClose() {
         if (gone) return;
+        stopRefresh();
         setState("closed");
         view?.dispatch({ effects: editable.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
       },
     });
     const offUpdates = doc.subscribeLocalUpdates((bytes) => channel.sendUpdate(bytes));
     const offPresence = presence.subscribeLocalUpdates((bytes) => channel.sendAwareness(section, bytes));
+    // Presence lapses after PRESENCE_TTL unless written again, and the plugin writes the name once
+    // and the caret only as it moves: while here and connected, both are written again, so an idle
+    // writer stays on teammates' screens and someone joining later still learns their name.
+    const userKey = getUserEphemeralKey(doc);
+    const cursorKey = getCursorEphemeralKey(doc);
+    const refresh = () => {
+      presence.set(userKey, user);
+      const cursor = presence.get(cursorKey);
+      if (cursor) presence.set(cursorKey, cursor);
+    };
+    refresh();
+    const refreshing = setInterval(refresh, PRESENCE_TTL / 3);
+    stopRefresh = () => clearInterval(refreshing);
     return () => {
       gone = true;
+      stopRefresh();
       // Teammates stop seeing this caret: its removal goes out before the channel closes.
       presence.delete(getCursorEphemeralKey(doc));
       view?.destroy();
