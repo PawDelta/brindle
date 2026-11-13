@@ -1149,6 +1149,81 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
     review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
 );
+-- This machine's replica of a shared doc's live draft (brindle.plan_drafts):
+-- its Loro state and the peer id it writes under, in one row, so the id is
+-- never used without the changes already written under it. seq goes up on
+-- every write, so a holder that missed one reloads before writing.
+CREATE TABLE IF NOT EXISTS plan_drafts (
+    doc_id TEXT PRIMARY KEY,       -- the Library document
+    peer_id INTEGER NOT NULL UNIQUE,
+    state BLOB NOT NULL,           -- a Loro snapshot
+    seq INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    supervisor_peer INTEGER        -- the peer id the session's supervisor writes under; NULL until it first does
+);
+-- The draft text handed to the supervisor (plans.read_draft), by the id its
+-- next write names: its changes are worked out against this, never against
+-- the draft as it is when they land. Gone with the replica.
+CREATE TABLE IF NOT EXISTS plan_draft_bases (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    doc_id TEXT NOT NULL REFERENCES plan_drafts(doc_id) ON DELETE CASCADE,
+    texts TEXT NOT NULL,           -- JSON: section id (or lede) -> the text handed over
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_draft_bases_plan ON plan_draft_bases(plan_id, created_at);
+-- Updates a replica received before the changes they build on: a snapshot
+-- leaves them out, so they wait here and are imported again on every load.
+CREATE TABLE IF NOT EXISTS plan_draft_pending (
+    n INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id TEXT NOT NULL REFERENCES plan_drafts(doc_id) ON DELETE CASCADE,
+    data BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_draft_pending_doc ON plan_draft_pending(doc_id, n);
+-- A replica's last generations before plan_drafts.rebuild replaced it: their
+-- state and held-back updates, so an app window still on one has its late
+-- changes translated onto the current replica, never merged into it as is.
+CREATE TABLE IF NOT EXISTS plan_draft_retired (
+    doc_id TEXT NOT NULL,
+    made REAL NOT NULL,            -- the generation (plan_drafts.created_at) it was
+    state BLOB NOT NULL,           -- a Loro snapshot
+    pending TEXT NOT NULL,         -- JSON list of base64 updates still waiting on others
+    PRIMARY KEY (doc_id, made)
+);
+-- A replica's link to the server's live relay (brindle.pro.live_docs). The
+-- outbox is every change the replica holds past relay_version, so unsent
+-- edits outlive a restart with the replica itself. seed: the texts a replica
+-- made here before its first join was seeded with, the base its local edits
+-- are re-typed from onto the relay's own seed.
+CREATE TABLE IF NOT EXISTS live_docs (
+    doc_id TEXT PRIMARY KEY,
+    relay_version BLOB,            -- a Loro version vector; NULL until the first join
+    seed TEXT,                     -- JSON {section: text}, until the first join
+    seed_version BLOB,             -- the replica's version once seeded (who changed what since), likewise
+    updated_at REAL NOT NULL
+);
+-- Replica numbers the relay issued to this account for a doc: the replica's
+-- own, and those lent to the app's windows. Claimed again on every join.
+CREATE TABLE IF NOT EXISTS live_doc_peers (
+    doc_id TEXT NOT NULL,
+    peer INTEGER NOT NULL,
+    role TEXT NOT NULL,            -- 'replica' | 'window'
+    PRIMARY KEY (doc_id, peer)
+);
+-- Edits typed offline that the relay refused as stale (the author-offline
+-- lock lapsed): each kept here, with the text it was made against, until it
+-- stands on the plan as a suggestion or comment (brindle.pro.live_docs).
+CREATE TABLE IF NOT EXISTS live_doc_offline (
+    n INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id TEXT NOT NULL,
+    section TEXT NOT NULL,
+    base TEXT NOT NULL,            -- the section's live text the edit was made against
+    start INTEGER NOT NULL,        -- where in base
+    before TEXT NOT NULL,          -- what it replaced there ('' for an insertion)
+    after TEXT NOT NULL,           -- what it wrote ('' for a deletion)
+    key TEXT NOT NULL UNIQUE       -- its identity: the plan_threads.origin of what it is filed as
+);
 -- Documents whose owner chose Stop sharing while the Library was out of reach:
 -- their teams and org lose access at the next pass that reaches it.
 CREATE TABLE IF NOT EXISTS plan_unshares (
@@ -1609,6 +1684,12 @@ class DB:
         for flag in ("question", "from_supervisor"):
             if flag not in thread_cols:
                 self.conn.execute(f"ALTER TABLE plan_threads ADD COLUMN {flag} INTEGER NOT NULL DEFAULT 0")
+        if "origin" not in thread_cols:
+            # What made a thread, when that must be found again (an offline edit filed by
+            # brindle.pro.live_docs): one thread per origin, written in the thread's own insert.
+            self.conn.execute("ALTER TABLE plan_threads ADD COLUMN origin TEXT")
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS plan_threads_origin ON plan_threads(origin)"
+                          " WHERE origin IS NOT NULL")
         merge_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(session_pr_merges)")}
         if "owner" not in merge_cols:
             self.conn.execute("ALTER TABLE session_pr_merges ADD COLUMN owner TEXT")
@@ -1639,6 +1720,8 @@ class DB:
             self.conn.execute("ALTER TABLE plan_shares ADD COLUMN review_asked INTEGER NOT NULL DEFAULT 0")
             # What these shares saw before it was kept is unknown: nothing may be assumed unreviewed.
             self.conn.execute("UPDATE plan_shares SET review_asked=1")
+        if "supervisor_peer" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_drafts)")}:
+            self.conn.execute("ALTER TABLE plan_drafts ADD COLUMN supervisor_peer INTEGER")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:

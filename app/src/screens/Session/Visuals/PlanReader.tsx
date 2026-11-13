@@ -11,7 +11,8 @@
 
    Three modes, in the header. Viewing reads. Suggesting and Editing put an Edit control on each
    text section: its markdown in a box, saved as a suggestion to accept, or as a direct edit (a
-   new revision). In any mode, highlighting text offers Comment, Suggest edit and Ask the
+   new revision). A doc in team review is edited live instead, in Editing mode: the section's
+   text in DocEditor.tsx, shared with everyone writing in it as they type. In any mode, highlighting text offers Comment, Suggest edit and Ask the
    supervisor; what the person writes lands in the review column, tied to that text.
 
    The next decision to take is led by the bottom bar, and marked in the doc by a green divider.
@@ -19,8 +20,9 @@
    live board; Request changes sends the person's picks, threads and note back to the supervisor,
    who publishes a new revision. A write names the revision on screen: a newer one is a 409. */
 
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
-import { DaemonError, type DaemonClient, type DocScope, type LibraryPerson, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
+import { DaemonError, type DaemonClient, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { liveReviewGate } from "../../../api/liveReview";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { PaperclipIcon } from "../../../components/icons";
@@ -32,16 +34,21 @@ import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack }
 import { Diagram } from "./DocDiagram";
 import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
+import type { LiveClient } from "./DocEditor";
+import { DocPresence, type LiveCapability } from "./DocPresence";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient> & Partial<LiveClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
+/* The live editor brings CodeMirror and Loro's WebAssembly: loaded when a section is first edited live. */
+const DocEditor = lazy(() => import("./DocEditor").then((m) => ({ default: m.DocEditor })));
+
 const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
 const noSubscribe = () => () => {};
 
@@ -239,13 +246,14 @@ function LibrarySignIn() {
 /* Someone reviewing a design another person shared: what the Library lets them do, and who wrote it.
    No plan here, so nothing to approve or build. */
 export interface Teammate {
+  me?: string;
   rights: { comment: boolean; suggest: boolean; signOff: boolean };
   signedOff: boolean;
   author: string | null;
   directory: LibraryPerson[];
 }
 
-export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
+export function DesignDoc({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode, writes, liveClient }: {
   source: DocSource;
   /* The doc's author, on this machine: sharing, the verdict and the build. */
   author?: { client: Client; visual: VisualDTO };
@@ -253,8 +261,17 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
   plan: Plan;
   mode: Mode;
   writes: Writes;
+  liveClient?: LiveClient;
 }) {
   const client = author?.client;
+  const docLive = liveClient ?? (receivedPlan.gate && client?.visualLive ? (client as LiveClient) : null);
+  const [liveState, setLiveState] = useState<LiveDocState | null>(null);
+  const [liveCapability, setLiveCapability] = useState<LiveCapability>("unknown");
+  const useLiveReview = !!docLive && liveCapability !== "unsupported";
+  const plan = useLiveReview ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
+  const teammate = receivedTeammate && useLiveReview ? { ...receivedTeammate, signedOff: !!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me) } : receivedTeammate;
+  const reviewVersion = useLiveReview ? liveState?.version?.id : undefined;
+  const reviewBlocked = useLiveReview && reviewVersion === undefined;
   const visual = author?.visual;
   const canComment = !teammate || teammate.rights.comment;
   const canSuggest = !teammate || teammate.rights.suggest;
@@ -516,9 +533,9 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
   const canRequest = said;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
   const decide = async (approved: boolean) => {
-    if (!client) return;
+    if (!client || (approved && reviewBlocked)) return;
     setSending(approved ? "approve" : "changes");
-    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(attached.length ? { attachments: attached } : {}) }));
+    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(reviewVersion === undefined ? {} : { version: reviewVersion }), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
     setSending(null);
     if (now) {
@@ -543,9 +560,9 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
     if (alive.current) setSending(null);
   };
   const signOff = async () => {
-    if (!source.signOff) return;
+    if (!source.signOff || reviewBlocked) return;
     setSending("approve");
-    await write(() => source.signOff!(plan.rev));
+    await write(() => source.signOff!(plan.rev, reviewVersion));
     if (alive.current) setSending(null);
   };
   const nextOption = next?.options.find((o) => o.id === chosen(next));
@@ -570,7 +587,19 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
       {mode === "editing" ? "Edit" : "Suggest an edit"}
     </button>
   );
-  const textBody = (section: string, title: string) => editing?.section === section ? (
+  // A doc in team review, in Editing mode, is edited live with everyone writing in it: its text
+  // is the daemon's live document (DocEditor), each change going out as it is typed.
+  const live = mode === "editing" && useLiveReview ? docLive : null;
+  const textBody = (section: string, title: string) => editing?.section === section && live ? (
+    <div className="grid gap-2 font-sans" data-testid="plan-live-box">
+      <Suspense fallback={<p className="text-xs text-ink-3" role="status">Opening the live text…</p>}>
+        <DocEditor client={live} visual={plan.id} section={section} name={me ? nameOf(me) : "Author"} label={`Text of ${title}`} isAuthor={!!author} />
+      </Suspense>
+      <div className="flex items-center gap-1.5">
+        <button type="button" className={`${quiet} text-xs`} onClick={() => setEditing(null)}>Done</button>
+      </div>
+    </div>
+  ) : editing?.section === section ? (
     <div className="grid gap-2 font-sans" data-testid="plan-edit-box" data-stale={editStale || undefined}>
       <textarea className={`${field} w-full resize-y font-mono text-[12.5px] leading-[1.6]`} aria-label={`Text of ${title}`} autoFocus rows={Math.min(24, editing.text.split("\n").length + 2)}
         value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} />
@@ -623,6 +652,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
           <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">{plan.title}</h1>
+              {docLive && <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={teammate?.me ? nameOf(teammate.me) : me ? nameOf(me) : "Author"} onState={setLiveState} onCapability={setLiveCapability} />}
               <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
                 <dt className="text-ink-3">Status</dt>
                 <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state} data-held={policyHeld ? "policy" : undefined}>
@@ -658,7 +688,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
                 )}
                 <dt className="text-ink-3">{teammate ? "Author" : "Authors"}</dt>
                 <dd className="m-0">{teammate ? (teammate.author ? personName(nameOf(teammate.author)) : "Unknown") : "You and the supervisor"}</dd>
-                <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />
+                <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} reviewVersion={reviewVersion} reviewBlocked={reviewBlocked} />
                 {plan.ask && (
                   <>
                     <dt className="text-ink-3">Understood</dt>
@@ -724,7 +754,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               {next ? nextOptionConfirm : teammate.rights.signOff && !teammate.signedOff && (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy} data-testid="plan-sign-off" onClick={() => void signOff()}>Sign off</LoadingButton>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>Sign off</LoadingButton>
               )}
             </div>
           </>
@@ -748,7 +778,7 @@ export function DesignDoc({ source, author, teammate, plan, mode, writes }: {
               </LoadingButton>
               {/* One main action at a time: the next decision's confirmation, then the sign-off. */}
               {next ? nextOptionConfirm : (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
+                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
                   data-testid="plan-build" data-gate={gate?.state} onClick={() => void decide(true)}>
                   {gate ? "Start building" : "Sign off"}
                 </LoadingButton>

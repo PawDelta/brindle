@@ -113,6 +113,12 @@ class RepoConfig:
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
+    review_sizing: bool = False       # scoped context and cheaper profiles for small or docs/test-only reviews
+    review_small_max_files: int = 5
+    review_small_max_lines: int = 200  # additions + deletions; binary changes keep the usual reviewer
+    review_risky_paths: list[str] = field(default_factory=lambda: [
+        "*auth*", "*permission*", "*daemon*", "*concurr*", "*thread*", "*lock*", "*async*",
+    ])
     # Weight -> reviewer profile for a second, independent review of work of that weight;
     # the pipeline merges only when both approve. Empty: one review (see brindle.pipeline).
     second_review: dict[str, str] = field(default_factory=dict)
@@ -123,6 +129,7 @@ class RepoConfig:
     room_wait_max: int = 300           # seconds a worker waits for room before its supervisor is told once (it never starts early)
     check_concurrency: int = 4         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
+    limit_headroom: float = 10         # percentage points reserved for a heavy task; medium uses half, light a quarter
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
     graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
@@ -134,6 +141,9 @@ class RepoConfig:
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
+    # A small request goes straight to one light/medium worker: no goal, milestones
+    # or completion audit; one light review and the checks, then the merge (assign(fast_path=true)).
+    fast_path: bool = False
     review_rounds: int = 2             # suggested fix-round cap; notify the supervisor once, then keep fixing
     # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
     # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
@@ -478,10 +488,11 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
+                "review_sizing", "review_small_max_files", "review_small_max_lines", "review_risky_paths",
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
-                "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
+                "usage_limit", "limit_headroom", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
-                "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "overlap",
+                "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "fast_path", "overlap",
                 "overlap_granularity", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "auto_merge_session_prs", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",

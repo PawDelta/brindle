@@ -106,6 +106,29 @@ def regions_at(db: DB, task_id: str) -> str | None:
     return row["kind"][len(_REGIONS_AT):] if row else None
 
 
+# A small request the supervisor sent down the fast path (the repo's
+# ``fast_path`` setting, assign(fast_path=true)): a task note of this kind.
+FAST_PATH = "fast-path"
+
+
+def mark_fast_path(db: DB, task_id: str) -> None:
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
+                  (task_id, FAST_PATH, time.time()))
+
+
+def fast_path_task(db: DB, task_id: str) -> bool:
+    return db.conn.execute("SELECT 1 FROM task_notes WHERE task_id=? AND kind=?",
+                           (task_id, FAST_PATH)).fetchone() is not None
+
+
+def fast_path_worker(db: DB, agent_id: str) -> bool:
+    """Whether worker ``agent_id`` was started for a fast-path task."""
+    return db.conn.execute(
+        "SELECT 1 FROM tasks JOIN task_notes ON task_notes.task_id=tasks.id "
+        "WHERE tasks.agent_id=? AND task_notes.kind=?", (agent_id, FAST_PATH)).fetchone() is not None
+
+
 def _checkout_head(path: str) -> str | None:
     """The commit the checkout at ``path`` is on, read from its git files
     (no process, so the database-only path may ask); None when they can't say."""
@@ -1339,7 +1362,7 @@ def enqueue(
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
     weight: str | None = None, waiting: str | None = None,
     pipeline: str | None = None, unanswered: bool = False, milestone: str | None = None,
-    regions_from: str | None = None,
+    regions_from: str | None = None, fast_path: bool = False,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
     it takes to start it once its dependencies are merged, or (``waiting``,
@@ -1348,7 +1371,8 @@ def enqueue(
     ``unanswered``: queued by a request that hasn't replied yet, so nothing
     starts it until ``answered`` (or ``drop_unanswered`` cancels it).
     ``regions_from``: the commit its declared regions were read against
-    (``regions_at``); by default the caller's checkout now."""
+    (``regions_at``); by default the caller's checkout now. ``fast_path``:
+    a small request on the repo's fast path (``mark_fast_path``)."""
     t = Task(
         id=new_id(), repo_root=caller_ws.repo_root, agent_id=None,
         caller_id=caller.id if caller else None, caller_ws_id=caller_ws.id,
@@ -1358,6 +1382,8 @@ def enqueue(
         created_at=time.time(), weight=weight,
     )
     db.add_task(t)
+    if fast_path:
+        mark_fast_path(db, t.id)
     if any(_region(f)[1] for f in files or []):
         at = regions_from or _checkout_head(caller_ws.path)
         if at:
@@ -2186,6 +2212,7 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
         branch=old.branch, done_when=old.done_when, files=_loads(old.files), depends_on=deps,
         plan_first=None if old.plan_first is None else bool(old.plan_first), weight=old.weight,
         milestone=db.task_milestone(old.id), regions_from=regions_at(db, old.id),
+        fast_path=fast_path_task(db, old.id),
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
