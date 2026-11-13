@@ -381,7 +381,8 @@ class _NoClientTmux:
 
 
 @pytest.mark.parametrize("session_survives", [
-    True,
+    pytest.param(True, marks=pytest.mark.variant(
+        "a surviving tmux session keeps its stale default size: recovery must resize it before opening the resumed chat")),
     pytest.param(False, marks=pytest.mark.variant(
         "the update also takes the tmux session down: the windows must be rebuilt at the remembered size, not tmux's 80x24")),
 ])
