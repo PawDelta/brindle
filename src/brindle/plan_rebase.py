@@ -131,12 +131,12 @@ def _touches(a: Hunk, b: Hunk) -> bool:
 
 
 def _changes(base: str, text: str) -> list[Hunk]:
-    """Align paragraphs before diffing their characters.
+    """Align paragraphs, then diff contiguous split/join regions together.
 
     Similar replacements cost less than removing and reinserting a paragraph.
     Exact duplicates are therefore paired in order around small edits instead
-    of moving a long matching block. Paragraph boundaries also prevent a
-    deletion from matching stray letters in an unrelated appended paragraph.
+    of moving a long matching block. Unmatched paragraphs that improve an
+    adjacent pair's content alignment belong to that pair's split/join region.
     """
     pattern = r".+?(?:\r?\n[ \t]*\r?\n|\Z)"
     before = re.findall(pattern, base, re.DOTALL)
@@ -168,9 +168,38 @@ def _changes(base: str, text: str) -> list[Hunk]:
         else:
             pairs.append(("", after[j - 1]))
             j -= 1
+    pairs.reverse()
+
+    def similarity(a: str, b: str) -> float:
+        # Separators may themselves be the edit. Compare content to recognize
+        # a split/join without forcing its pieces into unrelated replacements.
+        a = re.sub(r"\s+", " ", a).strip()
+        b = re.sub(r"\s+", " ", b).strip()
+        return SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+    i = 0
+    while i < len(pairs):
+        if all(pairs[i]):
+            i += 1
+            continue
+        candidates = []
+        for neighbor in (i - 1, i + 1):
+            if 0 <= neighbor < len(pairs) and all(pairs[neighbor]):
+                left, right = sorted((i, neighbor))
+                a = pairs[left][0] + pairs[right][0]
+                b = pairs[left][1] + pairs[right][1]
+                gain = similarity(a, b) - similarity(*pairs[neighbor])
+                if gain > 0:
+                    candidates.append((gain, left, right, a, b))
+        if candidates:
+            _, left, right, a, b = max(candidates)
+            pairs[left:right + 1] = [(a, b)]
+            i = max(0, left - 1)
+        else:
+            i += 1
     edits = []
     offset = 0
-    for a, b in reversed(pairs):
+    for a, b in pairs:
         edits.extend(Hunk(h.start + offset, h.end + offset, h.text) for h in _hunks(a, b))
         offset += len(a)
     return edits

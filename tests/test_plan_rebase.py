@@ -66,6 +66,18 @@ def test_repeated_paragraphs_resolve_at_their_positions():
     result = rebase(base, local, remote)
     assert result.text == "\n\n".join(f"Budget: {n}." for n in [200, 200, 300, 200, 200])
     assert not result.collisions
+    # A paragraph break is an independent separator edit, including when the
+    # surrounding content repeats. Joining it again must also retain the edit.
+    split = rebase("Hello world", "Hello\n\nworld", "Hallo world")
+    assert split.text == "Hallo\n\nworld"
+    assert not split.collisions
+    split = rebase("Hello world\n\nHello world", "Hello\n\nworld\n\nHello world",
+                   "Hallo world\n\nHello world")
+    assert split.text == "Hallo\n\nworld\n\nHello world"
+    assert not split.collisions
+    joined = rebase("Hello\n\nbrave\n\nworld", "Hello brave world", "Hallo\n\nbrave\n\nworld")
+    assert joined.text == "Hallo brave world"
+    assert not joined.collisions
 
 
 def test_held_insertion_at_deleted_paragraph_boundary_survives_resolution():
