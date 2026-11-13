@@ -522,7 +522,7 @@ def test_capped_routing_drops_excluded_workers_from_every_tier(tmp_path):
 
 def test_only_workers_cli_writes_every_tier(tmp_path, monkeypatch):
     client = SimpleNamespace(
-        python="python", cli=lambda *a, **kw: SimpleNamespace(returncode=0),
+        python="python", env={}, cli=lambda *a, **kw: SimpleNamespace(returncode=0),
         probe=lambda *a, **kw: {"root": {"id": "root"}})
     monkeypatch.setattr(bench, "installed_client", lambda *a: client)
     monkeypatch.setattr(bench, "sh", lambda *a, **kw: SimpleNamespace(stdout=json.dumps({
@@ -539,15 +539,79 @@ def test_only_workers_cli_writes_every_tier(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bench, "cmd_run", run)
     assert bench.main(["run", "--arm", "brindle", "--run-id", "1",
-                       "--only-workers", "developer-codex,developer-fable"]) == 0
+                       "--only-workers", "developer-codex,developer-fable",
+                       "--brindle-setting", "fast_path=true", "--brindle-setting", "review_sizing=small"]) == 0
     cfg = json.loads((tmp_path / ".brindle/config.local.json").read_text())
     assert cfg["routing"] == {tier: ["developer-codex", "developer-fable"] for tier in ("heavy", "advanced")}
+    assert (cfg["fast_path"], cfg["review_sizing"]) == (True, "small")
     assert runs[0]["only_workers"] == ["developer-codex", "developer-fable"]
+    assert runs[0]["brindle_settings"] == {"fast_path": True, "review_sizing": "small"}
     assert bench.main(["run", "--arm", "brindle", "--run-id", "2",
                        "--only-workers", "developer-codex,developer-fable",
                        "--exclude-worker", "developer-fable"]) == 0
     cfg = json.loads((tmp_path / ".brindle/config.local.json").read_text())
     assert cfg["routing"] == {tier: ["developer-codex"] for tier in ("heavy", "advanced")}
+
+
+def test_checkout_env_uses_a_temp_home_and_links_provider_logins(tmp_path, monkeypatch):
+    person = tmp_path / "person"
+    monkeypatch.setenv("HOME", str(person))
+    codex = person / "codex-home"
+    codex.mkdir(parents=True)
+    (codex / "auth.json").write_text("{}")
+    root = tmp_path / "bench"
+    root.mkdir()
+    homes = {"claude": {"path": str(person / "claude-home"), "isolated": True},
+             "codex": {"path": str(codex), "isolated": True}}
+    env = bench.checkout_env({"BRINDLE_HOME": str(person / ".brindle"), "PATH": "/usr/bin"},
+                             root, homes, "brindle-bench-x")
+    real = root.resolve()
+    assert env["BRINDLE_HOME"] == str(real / "home")
+    assert env["BRINDLE_TMUX_SOCKET"] == "brindle-bench-x"
+    assert env["PATH"].startswith(str(real / "bin"))
+    assert env["BRINDLE_CLAUDE_CONFIG_HOME"] == str(person / "claude-home")   # the Keychain login's path
+    linked = Path(env["BRINDLE_CODEX_CONFIG_HOME"]) / "auth.json"
+    assert linked.is_symlink() and linked.resolve() == (codex / "auth.json").resolve()
+    for overlapping in (person / ".brindle", person):   # the real home itself, or a folder holding it
+        with pytest.raises(bench.BenchError):
+            bench.checkout_env({"PATH": ""}, overlapping, homes, "s")
+    bench.stop_checkout(None, root)
+    assert not linked.is_symlink() and (codex / "auth.json").read_text() == "{}"
+
+
+@pytest.mark.parametrize("fails", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant("A run that fails must still stop the temp home's daemon")),
+])
+def test_checkout_run_records_its_commit_and_stops_its_daemon(tmp_path, monkeypatch, fails):
+    calls = []
+    client = bench.Brindle(Path("brindle"), "python", tmp_path, {"BRINDLE_TMUX_SOCKET": "brindle-bench-x"},
+                           argv=["uv", "run", "brindle"], source=tmp_path)
+
+    def sh(cmd, cwd, env, check=True, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def drive(*a):
+        if fails:
+            raise bench.BenchError("supervisor never started")
+        return {"finished": "goal"}
+
+    monkeypatch.setattr(bench, "sh", sh)
+    monkeypatch.setattr(bench, "checkout_info", lambda path, env: {"path": str(path), "commit": "abc", "dirty": False})
+    monkeypatch.setattr(bench, "checkout_client", lambda *a: client)
+    monkeypatch.setattr(bench, "drive_brindle", drive)
+    monkeypatch.setattr(bench.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+    args =SimpleNamespace(brindle_checkout=str(tmp_path), brindle_setting=[("fast_path", True)], leave_running=False)
+    if fails:
+        with pytest.raises(bench.BenchError):
+            bench.run_brindle(args, tmp_path, "spec", {})
+    else:
+        out = bench.run_brindle(args, tmp_path, "spec", {})
+        assert out["brindle_checkout"]["commit"] == "abc"
+        assert out["brindle_settings"] == {"fast_path": True}
+    assert ["uv", "run", "brindle", "daemon", "stop"] in calls
+    assert ["tmux", "-L", "brindle-bench-x", "kill-server"] in calls
 
 
 def test_machine_probe_reads_weekly_plan_limits_and_other_sessions(db, tmp_path, monkeypatch):

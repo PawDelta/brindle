@@ -37,6 +37,15 @@ runs the setup commands, starts the clock, then runs one arm:
   and reviewer of that session come from their transcripts (Codex and others
   without one: brindle's own usage reader), read through the installed
   brindle's Python.
+  With ``--brindle-checkout PATH`` the arm runs that source checkout's brindle
+  instead (``uv run --project PATH brindle``; the probes on its venv's Python)
+  under a temporary BRINDLE_HOME, never the person's: a branch's CLI migrates
+  the database it opens. It gets its own tmux server and daemon, stopped when
+  the run ends, and reaches the person's provider logins without copying
+  them (see checkout_env). The record's ``brindle_checkout`` names the path,
+  commit and whether it had uncommitted changes. ``--brindle-setting
+  KEY=VALUE`` (either brindle) writes into the clone's
+  ``.brindle/config.local.json``; the record keeps them in ``brindle_settings``.
 
 Person-facing interruptions are counted in both arms. Solo: each request the
 permission tool logged, each AskUserQuestion, and each turn that ends in a
@@ -89,6 +98,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -964,6 +974,14 @@ def main(args):
             "SELECT * FROM permission_asks WHERE repo_root=?", (repo,)).fetchall()]
         out["history"] = [{"agent_id": h.agent_id, "kind": h.kind, "profile": h.profile, "tokens": h.tokens}
                           for h in db.list_history(repo, None, 10_000_000) if h.tokens]
+    elif op == "provider_homes":
+        # Where this brindle runs each CLI with: its own config home once in use, else the person's.
+        from brindle import provider_homes
+        out["homes"] = {}
+        for p in ("claude", "codex"):
+            where = guarded(p + " home", lambda: provider_homes.effective_home(p))
+            out["homes"][p] = {"path": str(where) if where else None,
+                               "isolated": bool(guarded(p + " isolated", lambda: provider_homes.isolated(p)))}
     elif op == "press_enter":
         from brindle import agents as ag, tmux
         a = db.get_agent(args["agent_id"])
@@ -1035,13 +1053,16 @@ def brindle_python(brindle: Path, explicit: str | None) -> str:
 
 
 class Brindle:
-    """The installed brindle, driven from outside."""
+    """A brindle driven from outside: the installed one, or (``source``) one
+    run from a source checkout through ``argv`` under a temporary home."""
 
-    def __init__(self, exe: Path, python: str, clone: Path, env: dict):
+    def __init__(self, exe: Path, python: str, clone: Path, env: dict,
+                 argv: list[str] | None = None, source: Path | None = None):
         self.exe, self.python, self.clone, self.env = exe, python, clone, env
+        self.argv, self.source = argv or [str(exe)], source
 
     def cli(self, *argv: str, check: bool = True) -> subprocess.CompletedProcess:
-        return sh([str(self.exe), *argv], self.clone, self.env, check=check, capture_output=True)
+        return sh([*self.argv, *argv], self.clone, self.env, check=check, capture_output=True)
 
     def probe(self, op: str, **kw) -> dict:
         # -B: nothing written into an app bundle; its bin first, as its launcher does (tmux).
@@ -1051,7 +1072,11 @@ class Brindle:
         if res.returncode != 0:
             raise BenchError(f"brindle probe {op} failed: {res.stderr.strip()[-2000:]}")
         out = json.loads(res.stdout)
-        if Path(out["brindle_file"]).resolve().is_relative_to(REPO):
+        imported = Path(out["brindle_file"]).resolve()
+        if self.source is not None:
+            if not imported.is_relative_to(self.source):
+                raise BenchError(f"the probe imported {imported}, not the checkout's brindle")
+        elif imported.is_relative_to(REPO):
             raise BenchError("the probe imported this checkout's brindle, not the installed one")
         for err in out["errors"]:
             print(f"brindle probe {op}: {err}", file=sys.stderr)
@@ -1061,6 +1086,109 @@ class Brindle:
 def installed_client(args, clone: Path, env: dict) -> Brindle:
     exe = installed_brindle(args.brindle, env)
     return Brindle(exe, brindle_python(exe, args.brindle_python), clone, env)
+
+
+# -- a brindle from a source checkout ---------------------------------------------------------------
+#
+# A feature branch's CLI migrates whatever database it opens, so it never runs
+# with the person's BRINDLE_HOME: it gets a temporary one, and a tmux server
+# and daemon of its own (the daemon's socket lives in BRINDLE_HOME), both
+# stopped when the run ends. Provider logins are reached, never copied:
+# - Claude Code keeps its macOS sign-in in the Keychain, keyed by the config
+#   folder's path, with no credential file to link. So the checkout's brindle
+#   is pointed at the same folder the installed one uses
+#   (BRINDLE_CLAUDE_CONFIG_HOME, path for path); Claude writes its transcripts
+#   there as it does for the installed arm.
+# - Codex gets a temporary CODEX_HOME whose auth.json is a link to the
+#   person's; the link is removed afterwards. Codex writes a refreshed token
+#   through it, which keeps the person's login current.
+# - OpenCode's config is brindle's alone from the start: a temporary folder.
+# - Antigravity has no config folder of brindle's; agy keeps reading ~/.gemini,
+#   and brindle leaves its settings alone under a non-default BRINDLE_HOME.
+
+def real_brindle_homes(env: dict) -> set[Path]:
+    homes = {Path.home() / ".brindle"}
+    if env.get("BRINDLE_HOME"):
+        homes.add(Path(env["BRINDLE_HOME"]))
+    return {Path(os.path.realpath(h)) for h in homes}
+
+
+def checkout_env(env: dict, root: Path, homes: dict[str, dict], socket: str) -> dict[str, str]:
+    """``env`` for a checkout's brindle under the temporary ``root``: its own
+    BRINDLE_HOME, tmux server and provider homes, ``root/bin`` (its brindle)
+    first on PATH. ``homes``: where the installed brindle runs each CLI
+    (the provider_homes probe)."""
+    root = Path(os.path.realpath(root))
+    for real in real_brindle_homes(env):
+        if root == real or root.is_relative_to(real) or real.is_relative_to(root):
+            raise BenchError(f"the temporary brindle home {root} overlaps the real one ({real})")
+    home = root / "home"
+    home.mkdir(mode=0o700, exist_ok=True)
+    out = {**env, "BRINDLE_HOME": str(home), "BRINDLE_TMUX_SOCKET": socket,
+           "PATH": f"{root / 'bin'}{os.pathsep}{env.get('PATH', '')}"}
+    claude = homes.get("claude") or {}
+    if claude.get("isolated") and claude.get("path"):
+        out["BRINDLE_CLAUDE_CONFIG_HOME"] = claude["path"]
+    else:
+        # The person's own Claude home: brindle's (unused) one is an empty folder here.
+        (root / "claude").mkdir(mode=0o700, exist_ok=True)
+        out["BRINDLE_CLAUDE_CONFIG_HOME"] = str(root / "claude")
+        if claude.get("path") and Path(claude["path"]) != Path.home() / ".claude":
+            out["CLAUDE_CONFIG_DIR"] = claude["path"]
+    codex = root / "codex"
+    codex.mkdir(mode=0o700, exist_ok=True)
+    # In use from the start (signed in through the link), with nothing of the person's copied in.
+    for marker in (".brindle-signed-in", ".brindle-setup-copied"):
+        (codex / marker).write_text(f"{time.time()}\n")
+    source = (homes.get("codex") or {}).get("path")
+    if source and (Path(source) / "auth.json").is_file() and not (codex / "auth.json").is_symlink():
+        (codex / "auth.json").symlink_to(Path(source) / "auth.json")
+    out["BRINDLE_CODEX_CONFIG_HOME"] = str(codex)
+    (root / "opencode").mkdir(mode=0o700, exist_ok=True)
+    out["BRINDLE_OPENCODE_CONFIG_HOME"] = str(root / "opencode")
+    return out
+
+
+def checkout_info(path: Path, env: dict) -> dict:
+    head = sh(["git", "rev-parse", "HEAD"], path, env, capture_output=True).stdout.strip()
+    dirty = sh(["git", "status", "--porcelain"], path, env, capture_output=True).stdout.strip()
+    return {"path": str(path), "commit": head, "dirty": bool(dirty)}
+
+
+def checkout_client(args, clone: Path, env: dict, root: Path) -> Brindle:
+    """The brindle in ``args.brindle_checkout``, run as ``uv run --project
+    <checkout> brindle`` with the temporary home in ``root``. Hooks and MCP
+    servers re-enter it through ``root/bin/brindle``, so they never fall back
+    to the installed brindle."""
+    source = Path(args.brindle_checkout).resolve()
+    if not (source / "pyproject.toml").is_file():
+        raise BenchError(f"{source} is not a brindle checkout (no pyproject.toml)")
+    homes = installed_client(args, clone, env).probe("provider_homes")["homes"]
+    tenv = checkout_env(env, root, homes, "brindle-bench-" + root.name.rsplit("-", 1)[-1])
+    run = ["uv", "run", "--project", str(source)]
+    python = sh([*run, "python", "-c", "import sys; print(sys.executable)"],
+                clone, tenv, capture_output=True).stdout.strip().splitlines()[-1]
+    entry = Path(python).parent / "brindle"
+    if not entry.is_file():
+        raise BenchError(f"{source}'s environment has no brindle entry point ({entry})")
+    shim = root / "bin" / "brindle"
+    shim.parent.mkdir(exist_ok=True)
+    shim.write_text(f"#!/bin/sh\nexec {shlex.quote(str(entry))} \"$@\"\n")
+    shim.chmod(0o755)
+    return Brindle(shim, python, clone, tenv, argv=[*run, "brindle"], source=source)
+
+
+def stop_checkout(b: Brindle | None, root: Path) -> None:
+    """End what the checkout's brindle started (``b``: None when it never
+    started): its daemon, its tmux server; and remove the links to the
+    person's credentials."""
+    if b is not None:
+        b.cli("daemon", "stop", check=False)
+        sh(["tmux", "-L", b.env["BRINDLE_TMUX_SOCKET"], "kill-server"], b.clone, b.env,
+           check=False, capture_output=True)
+    for p in Path(root).rglob("*"):
+        if p.is_symlink():
+            p.unlink()
 
 
 def limits_used(before: dict, after: dict) -> dict[str, float | None]:
@@ -1125,12 +1253,13 @@ def capped_routing(default: dict[str, list[str]], exclude: list[str],
 
 
 def configure_clone(clone: Path, model: str, hold_seconds: int | None,
-                    routing: dict[str, list[str]] | None = None) -> None:
+                    routing: dict[str, list[str]] | None = None, settings: dict | None = None) -> None:
     """A repo profile on ``model`` and ``supervisor_profile`` naming it (a new
     supervisor chat takes its provider, model and effort from there), and,
     when ``hold_seconds`` is given, the app's hold on a permission ask cut to
     it: a Claude or Codex agent's ask then reaches its own prompt, where this
-    runner answers it, but any other provider's is refused when the hold ends."""
+    runner answers it, but any other provider's is refused when the hold ends.
+    ``settings`` (--brindle-setting) are written over all of that."""
     agents_dir = clone / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / f"{PROFILE_NAME}.md").write_text(
@@ -1143,6 +1272,7 @@ def configure_clone(clone: Path, model: str, hold_seconds: int | None,
         cfg["permission_hold_seconds"] = hold_seconds
     if routing:
         cfg["routing"] = routing
+    cfg.update(settings or {})
     local.write_text(json.dumps(cfg, indent=2) + "\n")
 
 
@@ -1300,7 +1430,30 @@ def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pau
 
 
 def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
-    b = installed_client(args, clone, env)
+    """The brindle arm: the installed brindle, or with --brindle-checkout the
+    checkout's under a temporary home, whose daemon and tmux server are
+    stopped however the run ends."""
+    settings = dict(getattr(args, "brindle_setting", None) or [])
+    if not getattr(args, "brindle_checkout", None):
+        return {**drive_brindle(args, installed_client(args, clone, env), clone, spec, settings),
+                "brindle_settings": settings}
+    if args.leave_running:
+        raise BenchError("--leave-running can't be used with --brindle-checkout: "
+                         "the temporary home's daemon and tmux server are stopped at the end")
+    info = checkout_info(Path(args.brindle_checkout).resolve(), env)
+    root = Path(tempfile.mkdtemp(prefix="bench-brindle-"))   # short: the daemon's socket goes in here
+    print(f"brindle from {info['path']} at {info['commit'][:12]}{' (uncommitted changes)' if info['dirty'] else ''}, "
+          f"home {root / 'home'}", file=sys.stderr)
+    b = None
+    try:
+        b = checkout_client(args, clone, env, root)
+        out = drive_brindle(args, b, clone, spec, settings)
+    finally:
+        stop_checkout(b, root)
+    return {**out, "brindle_settings": settings, "brindle_checkout": info, "brindle_home": str(root / "home")}
+
+
+def drive_brindle(args, b: Brindle, clone: Path, spec: str, settings: dict) -> dict:
     t0 = time.time()
     init = b.cli("init", "--yes", check=False)
     if init.returncode != 0:
@@ -1308,9 +1461,9 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
     routing = None
     if args.exclude_worker or args.only_workers:
         default = sh([b.python, "-c", "import json; from brindle.config import DEFAULT_ROUTING as r; print(json.dumps(r))"],
-                     clone, env, capture_output=True).stdout
+                     clone, b.env, capture_output=True).stdout
         routing = capped_routing(json.loads(default), args.exclude_worker, args.only_workers)
-    configure_clone(clone, args.supervisor_model, args.hold_seconds, routing)
+    configure_clone(clone, args.supervisor_model, args.hold_seconds, routing, settings)
     b.cli("start", "--no-attach", "--no-watch", "--yes", "-p", spec)
     root = None
     while root is None:
@@ -1409,7 +1562,8 @@ def cmd_run(args) -> int:
     for extra in ("turns", "cli_model_usage", "session_root", "agents", "grade_first_pass",
                   "wall_seconds_first_pass", "cost_first_pass", "fix_rounds", "fix_rounds_cap_hit",
                   "followup_messages", "review_checks", "harness_tokens", "harness_cost_usd",
-                  "first_pass_checkout", "review_followup"):
+                  "first_pass_checkout", "review_followup", "brindle_settings", "brindle_checkout",
+                  "brindle_home"):
         if extra in out:
             record[extra] = out[extra]
     results_path = Path(args.results)
@@ -1445,6 +1599,8 @@ arms:
            recommendation", Inbox items with their own answer, prompts on an agent's
            screen with their default choice. A permission ask only the person can answer
            in the app waits for them (the record says needs_person).
+           --brindle-checkout PATH runs a source checkout's brindle instead, under
+           a temporary BRINDLE_HOME.
 """
 
 
@@ -1453,6 +1609,16 @@ def worker_profiles(value: str) -> list[str]:
     if not all(names):
         raise argparse.ArgumentTypeError("provide a nonempty comma-separated list of profiles")
     return list(dict.fromkeys(names))
+
+
+def brindle_setting(value: str) -> tuple[str, object]:
+    key, sep, raw = value.partition("=")
+    if not sep or not key.strip():
+        raise argparse.ArgumentTypeError("use KEY=VALUE")
+    try:
+        return key.strip(), json.loads(raw)
+    except ValueError:
+        return key.strip(), raw
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1488,6 +1654,13 @@ def main(argv: list[str] | None = None) -> int:
                      help="brindle: the supervisor's model (workers keep default routing)")
     run.add_argument("--brindle", help="brindle: the installed brindle (default: `brindle` on PATH)")
     run.add_argument("--brindle-python", help="brindle: the Python the installed brindle runs on")
+    run.add_argument("--brindle-checkout", metavar="PATH",
+                     help="brindle: run the brindle in this source checkout (`uv run --project PATH brindle`) "
+                          "under a temporary BRINDLE_HOME, with its own daemon and tmux server, both stopped "
+                          "at the end; the record names its commit")
+    run.add_argument("--brindle-setting", metavar="KEY=VALUE", type=brindle_setting, action="append", default=[],
+                     help="brindle: write KEY into the clone's .brindle/config.local.json (VALUE is JSON, "
+                          "else a string); repeatable, recorded in the record")
     run.add_argument("--hold-seconds", type=int, default=None,
                      help="brindle: cut the app's hold on a permission ask to this (default: brindle's own). "
                           "Claude and Codex asks then reach the agent's prompt, which the runner answers; "
