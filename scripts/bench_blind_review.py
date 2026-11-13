@@ -204,23 +204,67 @@ def redact_file(path: Path, words) -> None:
         path.write_text(clean, encoding="utf-8")
 
 
+def place_link(dest: Path, rel: str, target: str, checkout: Path, words=()) -> None:
+    """Create the symlink ``rel`` -> ``target`` in ``dest`` only if it stays
+    inside ``dest``: an absolute target inside ``checkout`` is rebased onto
+    its copy in ``dest``; any other target outside the tree (absolute, or
+    climbing out with ``..``) leaves the link out, so nothing read through a
+    link in ``dest`` comes from the original checkout or anywhere else."""
+    link = dest / redact(rel, words)
+    if os.path.isabs(target):
+        try:
+            inside = Path(os.path.realpath(target)).relative_to(os.path.realpath(checkout))
+        except ValueError:
+            return
+        if str(inside) == ".":
+            return
+        target = os.path.relpath(dest / redact(str(inside), words), link.parent)
+    else:
+        resolved = os.path.normpath(os.path.join(os.path.dirname(rel), target))
+        if resolved == ".." or resolved.startswith("../") or os.path.isabs(resolved):
+            return
+        target = redact(target, words)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(target, link)
+
+
+def extract_base(archive: bytes, dest: Path, checkout: Path, words=()) -> None:
+    """Unpack ``git archive``'s tar into ``dest``: regular files first (no
+    member may leave ``dest``), then its symlinks through ``place_link``."""
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        members = tar.getmembers()
+        for m in members:
+            if os.path.isabs(m.name) or ".." in Path(m.name).parts:
+                raise BenchError(f"the base archive has a path outside the tree: {m.name}")
+        plain = [m for m in members if not (m.issym() or m.islnk())]
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(dest, members=plain, filter="data")
+        else:
+            tar.extractall(dest, members=plain)
+        for m in members:
+            if m.issym():
+                place_link(dest, m.name, m.linkname, checkout)
+
+
 def blind_tree(checkout: Path, base: str, dest: Path, env: dict, words=()) -> str:
     """Build the blinded repo in ``dest`` (see the module doc) and return its
     staged diff against the base commit. With ``words``, they are redacted in
-    every text file's content and every path before anything is committed or
-    staged, so neither the working tree, the index nor the history holds them."""
-    archive = git(checkout, "archive", "--format=tar", base, env=env, binary=True)
-    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        if hasattr(tarfile, "data_filter"):
-            tar.extractall(dest, filter="data")
-        else:
-            tar.extractall(dest)
+    every text file's content, every path and every link before anything is
+    committed or staged, so neither the working tree, the index nor the
+    history holds them. Symlinks never point outside ``dest`` (``place_link``)."""
+    extract_base(git(checkout, "archive", "--format=tar", base, env=env, binary=True), dest, checkout)
     base_paths = set(git(checkout, "ls-tree", "-r", "-z", "--name-only", base, env=env).split("\0")) - {""}
     if words:
         for rel in sorted(base_paths):
-            p, clean = dest / rel, dest / redact(rel, words)
+            p = dest / rel
+            if p.is_symlink():
+                target = os.readlink(p)
+                p.unlink()
+                place_link(dest, rel, target, dest, words)
+                continue
+            clean = dest / redact(rel, words)
             redact_file(p, words)
-            if clean != p and (p.is_symlink() or p.exists()):
+            if clean != p and p.exists():
                 clean.parent.mkdir(parents=True, exist_ok=True)
                 p.rename(clean)
     ident = ["-c", "user.name=review", "-c", "user.email=review@localhost", "-c", "commit.gpgsign=false"]
@@ -236,10 +280,10 @@ def blind_tree(checkout: Path, base: str, dest: Path, env: dict, words=()) -> st
         src, dst = checkout / rel, dest / redact(rel, words)
         if not kept(rel, base_paths) or not (src.is_symlink() or src.is_file()):
             continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_symlink():
-            os.symlink(redact(os.readlink(src), words), dst)
+            place_link(dest, rel, os.readlink(src), checkout, words)
         else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             redact_file(dst, words)
     git(dest, "add", "-A", env=env)
@@ -507,13 +551,20 @@ def _location(loc: str) -> tuple[str, str]:
     return (parts[0] if parts else "", parts[1] if len(parts) > 1 else "")
 
 
+def compatible(a: dict, b: dict) -> bool:
+    """Whether two findings' known locations can be one place: not another
+    file, and not another function in the same file."""
+    (fa, sa), (fb, sb) = _location(a["location"]), _location(b["location"])
+    return not ((fa and fb and fa != fb) or (sa and sb and sa != sb))
+
+
 def same_bug(a: dict, b: dict) -> bool:
     """Whether two confirmed findings report one bug. Reports whose known
     locations differ (another file, or another function in the same file)
     are always kept apart, however alike their titles."""
-    (fa, sa), (fb, sb) = _location(a["location"]), _location(b["location"])
-    if (fa and fb and fa != fb) or (sa and sb and sa != sb):
+    if not compatible(a, b):
         return False
+    (fa, _), (fb, _) = _location(a["location"]), _location(b["location"])
     wa, wb = _words(a["title"]), _words(b["title"])
     overlap = len(wa & wb) / min(len(wa), len(wb)) if wa and wb else 0.0
     ratio = difflib.SequenceMatcher(None, a["title"].lower(), b["title"].lower()).ratio()
@@ -523,22 +574,21 @@ def same_bug(a: dict, b: dict) -> bool:
 
 
 def merge_duplicates(findings: list[dict]) -> list[list[dict]]:
-    parent = list(range(len(findings)))
-
-    def root(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
+    """Group findings that report one bug. Two groups join only if every
+    member of one is location-compatible with every member of the other, so
+    a report naming only a file can't bridge two different functions."""
+    group_of = list(range(len(findings)))
+    groups: dict[int, list[int]] = {i: [i] for i in range(len(findings))}
     for i in range(len(findings)):
         for j in range(i + 1, len(findings)):
-            if same_bug(findings[i], findings[j]):
-                parent[root(j)] = root(i)
-    groups: dict[int, list[dict]] = {}
-    for i, f in enumerate(findings):
-        groups.setdefault(root(i), []).append(f)
-    return list(groups.values())
+            gi, gj = group_of[i], group_of[j]
+            if gi == gj or not same_bug(findings[i], findings[j]):
+                continue
+            if all(compatible(findings[a], findings[b]) for a in groups[gi] for b in groups[gj]):
+                for b in groups.pop(gj):
+                    group_of[b] = gi
+                    groups[gi].append(b)
+    return [[findings[i] for i in sorted(members)] for members in groups.values()]
 
 
 def assess(found: dict[str, list[dict]], reproduce) -> dict[str, dict]:

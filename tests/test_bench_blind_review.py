@@ -21,11 +21,13 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     base = tmp_path / "base"
     base.mkdir()
     (base / "lib.py").write_text("def upsert(rows):\n    return rows\n")
+    (tmp_path / "note.txt").write_text("brindle base note")
+    (base / "note_link").symlink_to(tmp_path / "note.txt")   # the base snapshot's own link out of the tree
     sh(f"git init -q -b main && git add -A && {GIT_ID} commit -qm init", base)
     commit = sh("git rev-parse HEAD", base)
     checkouts = {}
     for arm, marker in (("solo", "SOLO"), ("brindle", "OTHER")):
-        co = tmp_path / arm
+        co = tmp_path / f"checkout-{marker.lower()}"   # a neutral path, so a link into it leaks only content
         sh(f"git clone -q {base} {co}", tmp_path)
         (co / "lib.py").write_text(f"def upsert(rows):\n    return rows[1:]  # {marker}\n")
         (co / ".venv" / "bin").mkdir(parents=True)
@@ -36,6 +38,9 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     (co / ".brindle" / "config.json").write_text("{}")
     (co / "HISTORY_SPEC.md").write_text("plan")
     (co / "helper.py").write_text("# written by Brindle's worker\n")
+    (co / "alias.py").symlink_to(co / "helper.py")   # absolute, into the original checkout
+    (tmp_path / "outside.txt").write_text("Brindle outside")
+    (co / "up.txt").symlink_to("../outside.txt")   # relative, climbing out of the checkout
     sh(f"git checkout -q -b brindle/session-7 && git add -A && {GIT_ID} commit -qm 'brindle: worker merge'", co)
     kit = tmp_path / "kit"
     kit.mkdir()
@@ -53,7 +58,7 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
     }
     outcomes = {("SOLO", "A"): "bug", ("SOLO", "A2"): "bug", ("SOLO", "NOPE"): "ok", ("SOLO", "B"): "inconclusive",
                 ("OTHER", "A"): "bug", ("OTHER", "A2"): "ok", ("OTHER", "B"): "bug"}
-    seen, ran_on = [], []
+    seen, ran_on, aliases = [], [], []
 
     def readable(workdir):   # what a reviewer can read there: files, the index and the history
         files = [p.read_text(errors="ignore") + str(p) for p in workdir.rglob("*") if p.is_file() and ".git" not in p.parts]
@@ -62,6 +67,8 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
 
     def fake_reviewer(name, model, prompt, workdir, scratch, env, seconds):
         seen.append((prompt, readable(workdir), sh("git log --format=%s%d", workdir)))
+        if (workdir / "alias.py").is_symlink():
+            aliases.append((workdir / "alias.py").read_text())
         usage = {"input": 1000, "output": 200, "cache_creation": 0, "cache_read": 0, "cache_creation_1h": 0}
         return {"findings": answers.get((name, "SOLO" if "SOLO" in prompt else "OTHER"), []),
                 "by_model": {"claude-opus-5-5" if name == "opus" else "gpt-5.5": usage}, "error": None}
@@ -86,6 +93,8 @@ def test_review_keeps_reproduced_bugs_merges_them_and_checks_each_in_both_arms(t
             assert "brindle" not in shown.lower() and "session-7" not in shown and "HISTORY_SPEC" not in shown
         assert log == "base (HEAD -> review)"
     assert any("helper.py" in p and "[redacted]" in p for p, _, _ in seen)
+    # a link into the original checkout reads the redacted copy instead
+    assert aliases == ["# written by [redacted]'s worker\n"] * 2
     # reproductions run on the arm's files as written, not on the reviewers' redacted copy
     assert any("Brindle" in helper for helper in ran_on)
 
@@ -141,6 +150,8 @@ def test_a_reproduction_never_writes_or_runs_outside_its_copy(tmp_path, monkeypa
 def test_reports_on_different_functions_stay_apart_and_each_is_checked_in_both_arms():
     found = {"solo": [{**finding("Insert loses rows after a failed write", "high", "I", "db.py:insert"),
                        "reviewer": "opus"},
+                      # names only the file: it may join either one, but must not bridge the two
+                      {**finding("Loses rows after a failed write", "high", "F", "db.py"), "reviewer": "codex"},
                       {**finding("Update loses rows after a failed write", "high", "U", "db.py:update"),
                        "reviewer": "codex"}],
              "brindle": []}
@@ -153,4 +164,4 @@ def test_reports_on_different_functions_stay_apart_and_each_is_checked_in_both_a
     out = review.assess(found, reproduce)
     assert [b["location"] for b in out["solo"]["bugs"]] == ["db.py:insert", "db.py:update"]
     assert [(b["location"], b["how"]) for b in out["brindle"]["bugs"]] == [("db.py:update", "cross-applied")]
-    assert sorted(ran) == [("brindle", "I"), ("brindle", "U"), ("solo", "I"), ("solo", "U")]
+    assert sorted(ran) == [("brindle", c) for c in "FIU"] + [("solo", c) for c in "FIU"]
