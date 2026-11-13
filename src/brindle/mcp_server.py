@@ -1039,6 +1039,7 @@ async def assign(
     depends_on: list[str] | None = None, plan_first: bool | None = None,
     weight: str | None = None, repo: str | None = None, dry_run: bool = False,
     milestone: int | str | None = None, plan_worker: str | None = None,
+    design_heavy: bool = False,
 ) -> str:
     """Start a worker agent on a task and return immediately.
 
@@ -1067,6 +1068,10 @@ async def assign(
     simple tests); medium = normal feature work or bugfixes; heavy = system
     architecture, broad refactoring; advanced = complex, long-running
     system-design and implementation tasks.
+
+    design_heavy: shared designs, interfaces or tricky architecture where Fable
+    is best suited. With fable_for_design_only enabled, this makes Fable eligible
+    in the task's routing tier; it does not change the task's weight.
 
     When it finishes, its result arrives in your conversation as a message.
     Isolation works as for handoff. Use this to run several workers in parallel.
@@ -1105,7 +1110,8 @@ async def assign(
         decision: dict = {}
         try:
             profile, learned = autopilot.choose_profile(
-                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision)
+                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision,
+                **({"design_heavy": True} if design_heavy else {}))
         except autopilot.AutopilotError as e:
             return str(e)
         refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, weight, branch)
