@@ -731,8 +731,10 @@ def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch, custo
     from brindle import providers, quota, subscription_usage
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    for name in providers._ENV_AUTH["claude"]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: None)
+    monkeypatch.setattr(providers, "_stored_key", lambda name: name == "ANTHROPIC_API_KEY")
     brindle_config = tmp_path / "brindle-claude.json"
     account = {"oauthAccount": {"accountUuid": "brindle-account", "organizationUuid": "org"}}
     brindle_config.write_text(json.dumps(account))
@@ -770,6 +772,13 @@ def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch, custo
     assert monitor.record()["limits_used"]["claude"] == 4
     solo_config.write_text(json.dumps(account))
     assert ns["main"](args)["limits"]["claude"]["used"] == 31
+    billed = ns["main"]({**args, "arm": "brindle"})
+    assert billed["limits"]["claude"] is None
+    assert billed["limits_reason"]["claude"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "solo-test-key")
+    billed = ns["main"](args)
+    assert billed["limits"]["claude"] is None
+    assert billed["limits_reason"]["claude"]
 
 
 def test_installed_client_prefers_desktop_and_records_its_engine(tmp_path, monkeypatch):

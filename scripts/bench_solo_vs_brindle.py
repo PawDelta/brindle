@@ -886,8 +886,14 @@ def main(args):
         out["limits_reason"] = {}
         for provider in quota.PROVIDERS:
             key = claude_key if provider == "claude" else subscription_usage.cache_key(provider)
+            # The bare solo CLI inherits this environment, not brindle's stored keys.
+            if provider == "claude" and args.get("arm") == "solo":
+                key_billed = not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") and any(
+                    os.environ.get(name) for name in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"))
+            else:
+                key_billed = quota._key_billed(provider)
             reason = ("local models have no subscription window" if provider == "native" else
-                      "API key billing has no subscription window" if quota._key_billed(provider) else
+                      "API key billing has no subscription window" if key_billed else
                       "Claude config identity unavailable" if provider == "claude" and key is None else
                       "Codex boundary refresh unavailable" if provider == "codex" and not codex_current else None)
             q = guarded(provider + " quota", lambda: quota.get(provider, identity_key=key)) if not reason else None
