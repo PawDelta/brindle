@@ -534,16 +534,17 @@ describe("GoalPanel", () => {
     expect(view.queryByTestId("goal-stage")?.textContent ?? null).toBe(displayed);
   });
 
-  /* One activity line: commits in the last hour, else when the last one landed; the estimate only when brindle
-     has one and something runs. An engine that says nothing of either draws no line. */
+  /* One activity line: commit activity plus the estimate, including queued work
+     and a fallback for older engines or incomplete snapshots. */
   const ago = (s: number) => Date.now() / 1000 - s;
   it.each<[string, Partial<GoalDTO>, string | null, string | null]>([
     ["commits, an estimate", { stage: "working", commits_last_hour: 3, last_commit_at: ago(60), eta_seconds: 1500 }, "3 commits in the last hour", "about 25m left"],
-    ["one commit, no estimate", { stage: "working", commits_last_hour: 1, last_commit_at: ago(60), eta_seconds: null }, "1 commit in the last hour", null],
+    ["one commit, no estimate", { stage: "working", commits_last_hour: 1, last_commit_at: ago(60), eta_seconds: null }, "1 commit in the last hour", "about 40m left"],
     ["no commit this hour", { stage: "checks", commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 240 }, "last commit 15m ago", "about 4m left"],
-    ["nothing running", { stage: null, commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 600 }, "last commit 15m ago", null],
-    ["an older engine", {}, null, null],
-    ["expired estimate", { stage: "working", eta_seconds: -60 }, null, null],
+    ["nothing running", { stage: null, commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 600 }, "last commit 15m ago", "about 10m left"],
+    ["an older engine", {}, null, "about 40m left"],
+    ["expired estimate", { stage: "working", eta_seconds: -60 }, null, "about 40m left"],
+    ["hours of queued work", { stage: null, eta_seconds: 10800 }, null, "about 3h left"],
   ])("says what happened lately: %s", async (_, fields, what, eta) => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), ...fields } });
     const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);

@@ -19,7 +19,7 @@ ENTERPRISE_URL = "https://pawdelta.com/brindle/enterprise"
 
 # The paid features: (entitlement feature, cheapest plan with it, what it is, how to use it).
 FEATURES = (
-    ("analysis_docs", "pro", "analysis deliverables and personal library",
+    ("analysis_docs", "pro", "approved plans and personal library",
      "docs you explicitly request, uploaded when their branch merges"),
     ("analysis_docs_team", "team", "shared team analysis library", "team analysis document scopes"),
     ("analysis_docs_enterprise", "enterprise", "org analysis library and controls",

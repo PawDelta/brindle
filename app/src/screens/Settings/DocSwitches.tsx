@@ -1,4 +1,4 @@
-/* Settings › Analysis docs: the person's own switches for their doc library
+/* Settings › Library: the person's own switches for their Library of approved plans
    (GET /analysis-docs/switches), each set with PUT /analysis-docs/switches.
    A switch their organisation enforces is shown locked, with the org's value,
    and can't be changed here. Without the analysis_docs plan, or an engine

@@ -451,7 +451,8 @@ def spawn(
     agent_id = new_id()
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
     # brindle's own loop (native) has no TUI at all, so it always runs that way.
-    headless = bool(profile.headless and provider.name == "claude") or provider.name == "native"
+    headless = (bool(profile.headless and provider.name == "claude") or provider.name == "native") \
+        and mode != "doc_question"
 
     # Stored as the agent's task: the raw text for a handoff/assign worker (so
     # a reviewer reading it later isn't given WORKER_FOOTER or the /goal
@@ -506,6 +507,10 @@ def spawn(
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    if agent.parent_id is None and agent.profile == SUPERVISOR:
+        from brindle.pro import doc_questions
+
+        doc_questions.remember_session(db, agent)
     if session_root and mode in ("handoff", "assign"):
         # Background launches can overlap after admission: reserve a milestone
         # before another process looks for an unclaimed one in this session.
@@ -670,6 +675,12 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     from brindle.profiles import load_rule_packs, rules_prompt
 
     profile = guardrails.effective(load_profile(agent.profile, ws.repo_root))
+    if agent.mode == "doc_question":
+        return replace(profile, provider=agent.provider, permission_mode="plan", headless=False,
+                       strict_mcp=True, add_dirs=[], read_dirs=[], allowed_tools=[],
+                       prompt="Answer only the supplied design question using reply_doc_question. "
+                       "This session is read-only and scoped to that document. Do not build, "
+                       "edit, delegate, or request broader permissions.")
     if agent.profile == SUPERVISOR and agent.mode == "interactive":
         profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
     profile = _with_kind_overrides(db, profile, agent, ws.repo_root)
@@ -767,7 +778,8 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     gate = None
     if watch_pane or asks:
         argv, gate = tmux.gated(argv)
-    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
+    size = _resume_window_size.get()
+    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws), **({"size": size} if size else {}))
     try:
         env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
         agent_env, enforce = _agent_env_policy(ws)
@@ -1879,7 +1891,7 @@ def resume_lock(root_id: str):
 def resume(db: DB, root_id: str, *, watch_pane: bool = True,
            only: set[str] | list[str] | None = None,
            recovery_env: dict[str, str] | None = None, gate=None, settle: bool = False,
-           unstarted: set[str] | None = None) -> list[Agent]:
+           unstarted: set[str] | None = None, window_size: tuple[int, int] | None = None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task. A
@@ -1904,16 +1916,22 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     chat runs, left as they were for the caller to try again; without it they
     are marked failed and the chat is told.
 
+    ``window_size``: (columns, rows) the windows this resume opens start at
+    when no client is there to size them (a daemon's recovery), so a resumed
+    chat draws once, at the size it will be seen at.
+
     Under resume_lock: the next resume reads what is paused once the first is
     over, so nothing is launched twice."""
     keys = _resume_keys.set({})
     windows = _window_seconds.set([])
     token = _launch_gate.set(gate) if gate is not None else None
+    size = _resume_window_size.set(window_size)
     try:
         with resume_lock(root_id), debuglog.recovery_timings(_launch_gate.get() is not None):
             return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env,
                            settle=settle, unstarted=unstarted)
     finally:
+        _resume_window_size.reset(size)
         if token is not None:
             _launch_gate.reset(token)
         _window_seconds.reset(windows)
@@ -1925,6 +1943,7 @@ RESUME_LOCK_WAIT = 60.0     # seconds a resume waits for another resume of the s
 
 _launch_gate: ContextVar = ContextVar("brindle_launch_gate", default=None)   # resume's gate, for every launch it makes
 _window_seconds: ContextVar[list[float] | None] = ContextVar("brindle_window_seconds", default=None)   # this resume's _open_windows
+_resume_window_size: ContextVar[tuple[int, int] | None] = ContextVar("brindle_resume_window_size", default=None)     # resume's window_size
 # The credentials this resume chose, for its own launches: os.environ is the whole
 # daemon's, and another session resuming beside this one writes its choice there too.
 _resume_keys: ContextVar[dict[str, str] | None] = ContextVar("brindle_resume_keys", default=None)
@@ -5159,6 +5178,10 @@ def codex_pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     call it gets no answer for, so a check that can't finish denies it."""
     from brindle import permissions
 
+    if agent.mode == "doc_question":
+        from brindle.pro import doc_questions
+
+        return permissions.codex_pre_tool_output(doc_questions.codex_decision(payload))
     try:
         from brindle.config import load_repo_config
         from brindle.profiles import profile_rules_for
@@ -5233,6 +5256,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     agent with nothing of its own to ask (opencode.Launch.unasked)."""
     from brindle import opencode
 
+    if provider == "codex" and agent.mode == "doc_question":
+        from brindle import permissions
+        from brindle.pro import doc_questions
+
+        return permissions.codex_output(doc_questions.codex_decision(payload))
     opencode_unasked = provider == "opencode" and os.environ.get(opencode.UNASKED_ENV) == "1"
     try:
         from brindle import permissions

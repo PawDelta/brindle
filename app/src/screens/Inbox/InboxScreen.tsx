@@ -51,7 +51,7 @@ import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { StorageNudge } from "./StorageNudge";
-import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, opensVisual, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
+import { FIXES, KIND_SHORT, REVIEW_KINDS, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, opensVisual, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -365,7 +365,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     acts = <SetupFix item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "setup") {
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
-  } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc") {
+  } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc" || REVIEW_KINDS.includes(item.kind)) {
     acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} onGo={item.kind === "doc" ? onGo : undefined} onNavigate={onNavigate} compact />;
   } else if (item.kind === "pr_opened" || item.kind === "pr_failed") {
     const url = item.url;
@@ -424,7 +424,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       <div className="col-span-2 mt-1 flex flex-wrap items-center gap-1.5">
         {acts}
         <span className="flex-1" />
-        {onGo && item.kind !== "doc" && !opensVisual(item) && (
+        {onGo && item.kind !== "doc" && !REVIEW_KINDS.includes(item.kind) && !opensVisual(item) && (
           <button type="button" className={`${button} text-xs whitespace-nowrap`} onClick={onGo}>
             Go to session ›
           </button>

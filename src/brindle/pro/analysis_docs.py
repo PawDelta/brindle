@@ -317,14 +317,26 @@ def _call(method: str, path: str, body: dict | None = None, *, client=None, stor
     return status, resp if isinstance(resp, dict) else {}
 
 
+class Refused(RuntimeError):
+    """The Library answered with a non-200 status. ``status`` and ``code`` let a
+    route pass a 4xx on (a stale version stays a 409) instead of calling it a 502."""
+
+    def __init__(self, message: str, status: int, code: str | None = None):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
 def api(method: str, path: str, body: dict | None = None, *, client=None, store=None) -> dict:
-    """Call a Bearer endpoint; raises ``RuntimeError`` with a readable reason
-    on a non-200 answer, ``auth.AuthError`` when not logged in or offline."""
+    """Call a Bearer endpoint; raises ``RuntimeError`` (a :class:`Refused`)
+    with a readable reason on a non-200 answer, ``auth.AuthError`` when not
+    logged in or offline."""
     from brindle.pro import auth
 
     status, resp = _call(method, path, body, client=client, store=store)
     if status != 200:
-        raise RuntimeError(resp.get("error") if isinstance(resp, dict) and resp.get("error") else f"HTTP {status}")
+        code = resp.get("error") if isinstance(resp, dict) and isinstance(resp.get("error"), str) else None
+        raise Refused(code or f"HTTP {status}", status, code)
     if isinstance(resp, dict) and auth.BINARY_KEY in resp:
         return resp
     return resp if isinstance(resp, dict) else {}

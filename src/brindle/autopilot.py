@@ -112,6 +112,14 @@ to be asked each step.
 - For a big goal brindle may ask the person whether to plan it first. While
   that question is open, workers you assign queue. If they say yes, you're
   told to write a planning doc with propose_plan before assigning more work.
+  Write it as a design doc: `sections` of markdown with mermaid or svg
+  diagrams, `decisions` with options (pros, cons, files touched), your pick
+  and your strongest argument against it, and a `split` with each worker's
+  files and the one test that proves it done. The person's comments,
+  suggestions and replies reach you as one message when they approve or
+  request changes, each naming its thread #N: answer with
+  reply_plan_thread, then publish the next revision with
+  propose_plan(plan_id=...), keeping section ids so comments stay put.
 - When a worker reports, brindle has its branch reviewed and, once approved and
   the checks pass, merges it and removes the worktree; you get one message
   per branch: merged, or "needs you" with the details. Don't request_review
@@ -734,6 +742,9 @@ def set_goal(db: DB, root_id: str, goal: str,
                                 passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
                                 ever_passed=prev.ever_passed)
         db.bump_progress(root_id)
+    from brindle import visuals
+
+    visuals.claim_approvals(db, root_id, goal.strip())   # a design approved before this goal is its plan
     bus.publish_agent(db, "autopilot.goal", root_id, goal=goal.strip(), milestones=len(milestones))
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,
@@ -775,7 +786,8 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
     """Open the one offer to plan this goal first if it now deserves it: large,
     by milestones or repos (an omitted repo is the root checkout), or
     design-heavy (brindle.pro.analysis_brief.offer_reasons). Never re-offers a
-    goal already offered or answered, and never while a plan is already open
+    goal already offered or answered, never for a goal whose design the person
+    approved in Visuals (``visuals.has_approved_design``), and never while a plan is already open
     or plans can't be answered (visuals off or no app connected). While the
     offer is open the session's tasks queue behind it (brindle.plans.holding); the person
     answers it from the Inbox (brindle.plans.answer_offer). Run when the goal
@@ -787,7 +799,8 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
 
         ap = db.get_autopilot(root_id)
         if ap is None or not ap.goal or ap.plan_offer is not None or not visuals.enabled() \
-                or not holds.app_connected() or plans.open_plan(db, root_id) is not None:
+                or not holds.app_connected() or plans.open_plan(db, root_id) is not None \
+                or visuals.has_approved_design(db, root_id, ap.goal):
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
         queued = db.conn.execute(
@@ -799,6 +812,7 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
                 and db.open_plan_offer(root_id, ap.goal, plans.OFFER_OPEN + secrets.token_hex(4)):
             bus.publish_agent(db, "autopilot.goal", root_id)
+            visuals.settle_offer_for_approval(db, root_id)   # an approval delivered while this was evaluated
     except Exception:  # noqa: BLE001 - an offer is never a reason to fail a goal or a spawn
         log.info("plan offer not evaluated", exc_info=True)
 
@@ -1900,65 +1914,103 @@ def milestone_phases(db: DB, root_id: str) -> dict[int, str]:
 
 
 STAGES = ("working", "checks", "review", "merging")   # a branch's way from its brief to its merge
-ESTIMATE_RUNS = 5        # samples required before the sidebar estimates a duration
+ESTIMATE_RUNS = 5        # samples preferred before falling back across repositories
 ESTIMATE_DAYS = 14
+ESTIMATE_BUILD = 1200.0
+ESTIMATE_MERGE = 1200.0
 
 
-def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float | None:
+def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float:
     """Remaining critical path through workers and queued dependencies, then goal checks/audit."""
     import statistics
-    from brindle import agents, fair_share, tasks
+    from brindle import agents, bus, fair_share, tasks
+    from brindle.db import Task
 
     since = now - ESTIMATE_DAYS * 86400
     day = time.strftime("%Y-%m-%d", time.gmtime(since))
-    medians: dict[tuple[str, str | None], float | None] = {}
+    medians: dict[tuple[str, str | None], float] = {}
+    with db.snapshot():
+        history = list(db.conn.execute("SELECT * FROM stage_timings WHERE day>=?", (day,)))
+        # Recent review/merge events remain on the bus for a day before pruning
+        # persists them. Read both sources in one snapshot so concurrent pruning
+        # cannot move a sample between sources while the estimate reads them.
+        pending_samples, _ = bus.stage_samples(db.conn, now)
+    history.extend({"day": ended, "repo_root": repo, "stage": stage, "samples": json.dumps(samples)}
+                   for (ended, repo, stage), samples in pending_samples.items() if ended >= day)
+    legacy = list(db.conn.execute(
+        "SELECT w.repo_root, a.profile, a.reviewing_since-a.created_at AS duration"
+        " FROM agents a JOIN workspaces w ON w.id=a.workspace_id"
+        " WHERE a.created_at>=? AND a.reviewing_since<=?"
+        " AND a.reviewing_since>a.created_at AND a.result IS NOT NULL"
+        " AND a.mode IN ('assign', 'handoff', 'handoff_detached')", (since, now)))
+    # Compare today's completed work with its usual duration, stage by stage:
+    # a slow machine affects builds and checks in every repository.
+    today = time.strftime("%Y-%m-%d", time.gmtime(now))
+    ratios = []
+    for stage in {r["stage"] for r in history}:
+        usual = [s for r in history if r["stage"] == stage and r["day"] < today
+                 for s in json.loads(r["samples"]) if s > 0]
+        recent = [s for r in history if r["stage"] == stage and r["day"] == today
+                  for s in json.loads(r["samples"]) if s > 0]
+        if len(usual) >= ESTIMATE_RUNS and recent:
+            ratios.append(statistics.median(recent) / statistics.median(usual))
+    load = max(1.0, statistics.median(ratios)) if ratios else 1.0
 
-    def typical(repo: str, profile: str | None = None) -> float | None:
+    def samples_at_usual_speed(row) -> list[float]:
+        # Today's measurements already include the load penalty. Normalize
+        # them before applying that penalty to the final estimate once.
+        factor = load if row["day"] == today else 1.0
+        return [s / factor for s in json.loads(row["samples"]) if s > 0]
+
+    def typical(repo: str, profile: str | None = None) -> float:
         key = (repo, profile)
         if key not in medians:
-            if profile is None:
-                samples = [s for r in db.conn.execute(
-                    "SELECT samples FROM stage_timings WHERE repo_root=? AND stage='report_to_merge' AND day>=?",
-                    (repo, day)) for s in json.loads(r["samples"])]
-            else:
-                history = list(db.conn.execute(
-                    "SELECT stage, samples FROM stage_timings WHERE repo_root=? AND stage GLOB 'build:*' AND day>=?",
-                    (repo, day)))
-                legacy = list(db.conn.execute(
-                    "SELECT a.profile, a.reviewing_since-a.created_at AS duration"
-                    " FROM agents a JOIN workspaces w ON w.id=a.workspace_id"
-                    " WHERE w.repo_root=? AND a.created_at>=? AND a.reviewing_since<=?"
-                    " AND a.reviewing_since>a.created_at AND a.result IS NOT NULL"
-                    " AND a.mode IN ('assign', 'handoff', 'handoff_detached')",
-                    (repo, since, now)))
-                # Prefer durable profile history, then legacy profile rows while
-                # it fills. Never combine them: the same build may be in both.
-                candidates = (
-                    [s for r in history if r["stage"] == f"build:{profile}" for s in json.loads(r["samples"])],
-                    [r["duration"] for r in legacy if r["profile"] == profile],
-                    [s for r in history for s in json.loads(r["samples"])],
-                    [r["duration"] for r in legacy],
-                )
-                samples = next((s for s in candidates if len(s) >= ESTIMATE_RUNS), [])
-            medians[key] = statistics.median(samples) if len(samples) >= ESTIMATE_RUNS else None
+            candidates = []
+            # Prefer repo/profile, then repo-wide, then the same across all
+            # repos. Keep durable and legacy samples separate to avoid counting
+            # the same build twice while durable history fills up.
+            for scope in (repo, None):
+                rows = [r for r in history if scope is None or r["repo_root"] == scope]
+                old = [r for r in legacy if scope is None or r["repo_root"] == scope]
+                if profile is None:
+                    candidates.append([s for r in rows if r["stage"] == "report_to_merge"
+                                       for s in samples_at_usual_speed(r)])
+                else:
+                    candidates.extend((
+                        [s for r in rows if r["stage"] == f"build:{profile}"
+                         for s in samples_at_usual_speed(r)],
+                        [r["duration"] for r in old if r["profile"] == profile],
+                        [s for r in rows if r["stage"].startswith("build:")
+                         for s in samples_at_usual_speed(r)],
+                        [r["duration"] for r in old],
+                    ))
+            samples = next((s for s in candidates if len(s) >= ESTIMATE_RUNS),
+                           next((s for s in candidates if s), []))
+            medians[key] = (statistics.median(samples) if samples else
+                            ESTIMATE_BUILD if profile is not None else ESTIMATE_MERGE) * load
         return medians[key]
 
-    def report_remaining(merge: float, reported: float) -> float:
-        return max(60.0, merge - max(0, now - reported))
+    def progress_remaining(usual: float, began: float, rounds: int = 0) -> float:
+        elapsed = max(0.0, now - began)
+        # Surviving a typical duration means the work is longer than typical.
+        # Extend with observed effort rather than pinning an overdue run at 1m.
+        return max(60.0, usual / (rounds + 1) - elapsed, elapsed / (4 * (rounds + 1)))
+
+    def report_remaining(merge: float, reported: float, worker: Agent | None = None) -> float:
+        if worker is not None and worker.pipeline == "ready":
+            return max(60.0, merge * 0.1, max(0.0, now - reported) * 0.1)
+        return progress_remaining(merge, reported, (worker.pipeline_rounds or 0) if worker else 0)
 
     remaining: dict[str, float] = {}
     for a in live:
         ws = db.get_workspace(a.workspace_id)
-        merge = typical(ws.repo_root) if ws else None
-        if merge is None:
-            return None
+        repo = ws.repo_root if ws else ""
+        merge = typical(repo)
         if a.pipeline in ("ready", "reviewing", "fixing") and a.reviewing_since:
-            remaining[a.id] = report_remaining(merge, a.reviewing_since)
+            remaining[a.id] = report_remaining(merge, a.reviewing_since, a)
         else:
-            build = typical(ws.repo_root, a.profile)
-            if build is None:
-                return None
-            release = max(60.0, build - max(0, now - a.created_at))
+            build = typical(repo, a.profile)
+            release = progress_remaining(build, a.created_at)
             remaining[a.id] = release + merge
 
     ids = {a.id for a in tree}
@@ -1969,16 +2021,16 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
     for t in queued.values():
         ws = db.get_workspace(t.caller_ws_id)
         build, merge = typical(t.repo_root, t.profile), typical(t.repo_root)
-        if ws is None or build is None or merge is None:
-            return None
         durations[t.id] = (build, merge)
         dependencies[t.id] = []
+        if ws is None:
+            continue
         session_repos = tasks._session_repos(db, ws, t.caller_id)
         for dep in json.loads(t.depends_on or "[]"):
             try:
                 _, upstream, branch = tasks._resolve_dependency(db, ws, dep, session_repos, dependent_task_id=t.id)
             except agents.AgentError:
-                return None
+                continue  # unresolved external work still gets a bounded estimate
             if upstream is not None and upstream.id in queued:
                 dependencies[t.id].append(f"task:{upstream.id}")
             elif upstream is not None and upstream.state == "merged":
@@ -1986,67 +2038,87 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
             else:
                 worker = next((a for a in live if a.id == dep or
                                (branch is not None and a.workspace_id == branch.id)), None)
-                if worker is None:
-                    return None
-                dependencies[t.id].append(worker.id)
+                if worker is not None:
+                    dependencies[t.id].append(worker.id)
+    home = db.get_workspace(tree[0].workspace_id)
+    if home is not None:
+        claimed = {db.agent_milestone(a.id) for a in live}
+        claimed.update(db.task_milestone(t.id) for t in queued.values())
+        repos = {r.alias: r.repo_root for r in db.session_repos(tree[0].id)}
+        for m in db.milestones(tree[0].id):
+            if m.status == "passed" or m.title in claimed:
+                continue
+            repo = repos.get(m.repo, home.repo_root)
+            task_id = f"milestone:{m.id}"
+            queued[task_id] = Task(task_id, repo, None, tree[0].id, home.id, m.profile or "", m.title,
+                                   "assign", 1, None, None, None, None, "pending", now + m.position)
+            durations[task_id] = (typical(repo, m.profile or ""), typical(repo))
+            dependencies[task_id] = []
     if queued:
         cap = fair_share.limit()
-        releases: list[float] = []
-        if cap > 0:
-            # Match fair_share.running: all sessions' process workers and unlinked launch claims.
-            with db.snapshot():
-                occupants = [a for a in db.list_agents() if a.mode in fair_share.WORKER_MODES
-                             and a.status in ("starting", "processing") and agents.runs_process(a)]
-                claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
+        # delegate/check_capacity use the owning session's configuration even
+        # when a task or milestone targets an attached repository.
+        session_cap = load_repo_config(home.repo_root).max_agents if home else 0
+        with db.snapshot():
+            occupants = [a for a in db.list_agents() if a.mode in fair_share.WORKER_MODES
+                         and a.status in ("starting", "processing") and agents.runs_process(a)]
+            claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
 
-            def release_at(repo: str | None, profile: str, began: float) -> float:
-                build = typical(repo, profile) if repo is not None else None
-                return max(60.0, build - max(0, now - began)) if build is not None else float("inf")
+        def release_at(repo: str | None, profile: str, began: float) -> float:
+            return progress_remaining(typical(repo or "", profile), began)
 
-            for a in occupants:
-                ws = db.get_workspace(a.workspace_id)
-                if a.pipeline == "fixing" and a.reviewing_since:
-                    merge = typical(ws.repo_root) if ws else None
-                    # Fixing occupies a process slot until its next report;
-                    # report-to-merge history bounds that remaining work.
-                    release = report_remaining(merge, a.reviewing_since) if merge is not None else float("inf")
-                elif a.pipeline in ("ready", "reviewing") and a.reviewing_since:
-                    release = 0.0
-                else:
-                    release = release_at(ws.repo_root if ws else None, a.profile, a.created_at)
-                releases.append(release)
-            for t in claims:
-                release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
-                releases.append(release)
-                if t.id in queued:
-                    # A claimed task already owns its slot; don't schedule it twice.
-                    remaining[f"task:{t.id}"] = release + durations[t.id][1]
-                    del queued[t.id]
-        else:
-            cap = len(queued)
-        # If already over capacity, enough workers must report before a slot opens.
-        slots = sorted(releases, reverse=True)[:cap]
-        slots.extend([0.0] * max(0, cap - len(slots)))
+        def worker_release(a: Agent) -> float:
+            ws = db.get_workspace(a.workspace_id)
+            if a.pipeline == "fixing" and a.reviewing_since:
+                # Fixing occupies a slot until its next report.
+                return report_remaining(typical(ws.repo_root if ws else ""), a.reviewing_since, a)
+            if a.pipeline in ("ready", "reviewing") and a.reviewing_since:
+                return 0.0
+            return release_at(ws.repo_root if ws else None, a.profile, a.created_at)
+
+        releases = [worker_release(a) for a in occupants]
+        session_releases = [worker_release(a) for a in live if a.status not in ("paused", "done")]
+        for t in claims:
+            release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
+            releases.append(release)
+            if t.caller_id in ids:
+                session_releases.append(release)
+            if t.id in queued:
+                # A claimed task already owns both slots; don't schedule it twice.
+                remaining[f"task:{t.id}"] = release + durations[t.id][1]
+                del queued[t.id]
+
+        def slots_for(limit: int, occupied: list[float]) -> list[float]:
+            if limit <= 0:
+                return [0.0] * max(1, len(queued))
+            # If already over capacity, enough workers must report first.
+            slots = sorted(occupied, reverse=True)[:limit]
+            return slots + [0.0] * max(0, limit - len(slots))
+
+        slots = slots_for(cap, releases)
+        session_slots = slots_for(session_cap, session_releases)
         while queued:
             candidates = []
             for t in queued.values():
                 deps = dependencies[t.id]
                 if all(dep in remaining for dep in deps):
                     ready = max((remaining[dep] for dep in deps), default=0.0)
-                    if min(slots) > ready and float("inf") in slots:
-                        return None   # an unknown occupant could determine when the next slot opens
-                    start = max(min(slots), ready)
+                    start = max(min(slots), min(session_slots), ready)
                     candidates.append((start, t.created_at, t.id))
-            if not candidates:   # cyclic dependencies have no estimable launch order
-                return None
+            if not candidates:
+                # A broken dependency graph has no launch order yet. Budget the
+                # unresolved work serially until the supervisor repairs it.
+                start = max(min(slots), min(session_slots), max(remaining.values(), default=0.0))
+                candidates = [(start, t.created_at, t.id) for t in queued.values()]
             start, _, task_id = min(candidates)
             build, merge = durations[task_id]
             # Reporting releases the execution slot; merging releases dependants.
             slots[slots.index(min(slots))] = start + build
+            session_slots[session_slots.index(min(session_slots))] = start + build
             remaining[f"task:{task_id}"] = start + build + merge
             del queued[task_id]
     if not remaining:
-        return None
+        return typical(home.repo_root if home else "")
     home = db.get_workspace(tree[0].workspace_id)
     overhead: dict[str, list[float]] = {"check": [], "audit": []}
     opened: dict[tuple[str, str], float] = {}
@@ -2082,9 +2154,9 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     working), None when nothing runs or the session is paused. Commits made
     since the session started, in its checkout and its live branches'
     worktrees: ``commits_last_hour`` and ``last_commit_at``. ``eta_seconds``:
-    the slowest live branch's remaining build and report-to-merge time,
-    including queued dependencies and known final check/audit overhead;
-    None with fewer than ``ESTIMATE_RUNS`` runs for a required duration."""
+    remaining critical path through live branches, queued dependencies and
+    unclaimed milestones within the worker limit, plus known check/audit
+    overhead. Sparse history falls back across repos, then to fixed durations."""
     from brindle import agents, git, status_cache
 
     now = time.time() if now is None else now
@@ -2138,7 +2210,10 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
             if at.isdigit():
                 commits[sha] = float(at)
 
-    eta = _goal_eta(db, tree, live, now) if stage is not None and home is not None else None
+    unfinished = ap is not None and ap.goal and ap.state != "done"
+    eta = (_goal_eta(db, tree, live, now)
+           if home is not None and (ap is None or ap.state != "done")
+           and (stage is not None or unfinished) else None)
     return {"stage": stage, "commits_last_hour": sum(at > now - 3600 for at in commits.values()),
             "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta,
             "checking": ap is not None and checking(ap), "auditing": ap is not None and ap.state == "auditing"}

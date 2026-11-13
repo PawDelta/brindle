@@ -10,8 +10,9 @@
    overview and brindle's layer, and the Inbox page (screens/Inbox, from
    the sidebar's head) lists every decision across sessions, each row
    jumping to its session with the item's review sheet over it, permission
-   and sign-in items completable in the row. The pages behind the profile button's rail: Knowledge (a repo's
-   decisions and document sources), Agents (which model or custom agent runs
+   and sign-in items completable in the row. The Library (designs, a repo's
+   decisions and document sources) opens from the sidebar foot's button or ⌘L and takes the
+   sidebar for its navigation (components/LibraryRail.tsx). The pages behind the profile button's rail: Agents (which model or custom agent runs
    each kind of work, what takes over at a limit, and making a custom
    agent) and Settings, one place in tabs (the plan, sign-in and spend,
    usage, keys and providers, permission rules, storage, the repo's
@@ -49,14 +50,16 @@ import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
 import Logo from "./components/Logo";
 import { AppCovered, ReconnectOverlay, useReconnect } from "./components/ReconnectOverlay";
+import type { LibraryCounts } from "./components/LibraryRail";
 import { Sidebar } from "./components/Sidebar";
 import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
 import { alert, button } from "./components/ui";
 import { escapeOwned } from "./escape";
-import { HOME, inProfileRail, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
+import { HOME, inLibrary, inProfileRail, inRail, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
+import { SharedDesignReader } from "./screens/Session/Visuals/SharedDesignReader";
 import { NewSession } from "./screens/New";
 import { BrindleSignIn, Onboarding, Permissions, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
 import { AgentsScreen } from "./screens/Agents";
@@ -84,7 +87,7 @@ export interface AppProps {
   initialRoute?: Route;
   /* Opens a page in the system browser; the shell's by default. */
   openUrl?: OpenUrl;
-  /* The native folder picker (Knowledge's Add folder); the shell's in the app, none in a browser tab. */
+  /* The native folder picker (the Library's Add folder); the shell's in the app, none in a browser tab. */
   pickFolder?: PickFolder;
   /* Puts the `brindle` command on the PATH (Settings' "Install command-line
      tool"): the shell's install_cli in the app, none in a browser tab, where
@@ -129,7 +132,9 @@ export function landing(repos: { repo_root: string }[], sessions: Record<string,
 /* Agents' "Connect …" links and the Inbox's rule links: each press asks Settings to scroll (and open the rule) again. */
 let providerAsks = 0;
 
-function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: {
+function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, onLibraryCounts }: {
+  /* The Library's screen says what it holds, for its sidebar's counts. */
+  onLibraryCounts?(counts: LibraryCounts): void;
   route: Route;
   /* Counts the navigations (Shell's), one to the open route included. */
   visit: number;
@@ -158,16 +163,21 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
     case "knowledge":
       return (
         <KnowledgeScreen
-          key={`${route.view ?? ""}|${route.doc ?? ""}|${route.session ?? ""}`}
+          key={`${route.doc ?? ""}|${route.session ?? ""}`}
           client={client}
           pickFolder={pickFolder}
           view={route.view}
+          stage={route.stage}
+          onView={(view) => navigate({ ...route, view })}
+          onCounts={onLibraryCounts}
           doc={route.doc}
           session={route.session}
           fromRepo={docsFrom?.repo}
           onBackToSession={docsFrom && (() => navigate({ screen: "session", root: docsFrom.root, repo: docsFrom.repo, agent: docsFrom.root }))}
         />
       );
+    case "shared-design":
+      return <SharedDesignReader key={route.doc} client={client} docId={route.doc} title={route.title} repo={route.repo} onBack={() => navigate({ screen: "inbox" })} />;
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     /* One Settings, in tabs: the older Account and Project settings routes open it on their tab. */
@@ -265,17 +275,23 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   const routeNow = useRef(route);
   routeNow.current = route;
   const [settingsFrom, setSettingsFrom] = useState<{ route: Route; visit: number; scroll: number } | null>(null);
+  /* What the open Library holds, as its screen read it: the counts in its sidebar. */
+  const [libraryCounts, setLibraryCounts] = useState<LibraryCounts>({});
+  const noteLibraryCounts = useCallback((now: LibraryCounts) => setLibraryCounts((was) => (was.decisions === now.decisions && was.imported === now.imported && was.kept === now.kept ? was : now)), []);
   const visitNow = useRef(visit);
   visitNow.current = visit;
   const restoreScroll = useRef<number | null>(null);
+  /* The Settings page the Library was opened from, if it was: where its button and ⌘L go back to. */
+  const libraryFrom = useRef<Route | null>(null);
   const navigate = useCallback((to: Route) => {
     const from = routeNow.current;
-    if (inProfileRail(to) && (!from || !inProfileRail(from))) {
+    if (inRail(to) && (!from || !inRail(from))) {
       setSettingsFrom({ route: from ?? HOME, visit: visitNow.current, scroll: page.current?.scrollTop ?? 0 });
       restoreScroll.current = 0;
-    } else if (!inProfileRail(to)) {
+    } else if (!inRail(to)) {
       setSettingsFrom(null);
     }
+    if (inLibrary(to) && (!from || !inLibrary(from))) libraryFrom.current = from && inProfileRail(from) ? from : null;
     setVisit((n) => n + 1);
     setRoute(to);
   }, []);
@@ -283,6 +299,13 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
     restoreScroll.current = settingsFrom?.scroll ?? 0;
     navigate(settingsFrom?.route ?? HOME);
   }, [navigate, settingsFrom]);
+  /* The sidebar foot's Library button and ⌘L: open the Library, or from it, go back to where the person was. */
+  const toggleLibrary = useCallback(() => {
+    const now = routeNow.current;
+    if (!now || !inLibrary(now)) navigate({ screen: "knowledge" });
+    else if (libraryFrom.current) navigate(libraryFrom.current);
+    else backFromSettings();
+  }, [navigate, backFromSettings]);
   useLayoutEffect(() => {
     if (restoreScroll.current !== null && page.current) {
       page.current.scrollTop = restoreScroll.current;
@@ -290,7 +313,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
     }
   }, [route]);
   useEffect(() => {
-    if (!route || !inProfileRail(route)) return;
+    if (!route || !inRail(route)) return;
     const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || escapeOwned()) return;
       event.preventDefault();
@@ -369,7 +392,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
       <div className="relative flex h-full bg-canvas text-ink">
         {/* Under the reconnect overlay the app stays on screen but out of reach: no focus, no clicks. */}
         <div className="contents" hidden={reading} inert={held}>
-          <Sidebar route={shown} navigate={navigate} onBackFromSettings={backFromSettings} refresh={refresh ?? noop} openUrl={openUrl} />
+          <Sidebar route={shown} navigate={navigate} onBackFromSettings={backFromSettings} onToggleLibrary={toggleLibrary} libraryCounts={libraryCounts} refresh={refresh ?? noop} openUrl={openUrl} />
         </div>
         <div className="relative flex min-w-0 flex-1 flex-col" inert={held}>
           {/* The sidebar is hidden over a full-window visual: its logo keeps a row of its own above the reader, and still goes Home. */}
@@ -389,9 +412,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
                 <>
                   {/* Keep the previous page mounted so its drafts, terminal and nested scroll survive Settings. */}
                   <div hidden={settingsFrom !== null} className={settingsFrom ? "hidden" : `relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
-                    <Screen route={settingsFrom?.route ?? route} visit={settingsFrom?.visit ?? visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
+                    <Screen route={settingsFrom?.route ?? route} visit={settingsFrom?.visit ?? visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} onLibraryCounts={noteLibraryCounts} />
                   </div>
-                  {settingsFrom && <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />}
+                  {settingsFrom && <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} onLibraryCounts={noteLibraryCounts} />}
                 </>
               ) : feedError ? (
                 // Nothing to land on: the sessions couldn't be read (the engine itself may be fine). Ask again.
@@ -547,7 +570,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       clearTimeout(poll);
       clearTimeout(deadline);
       if (pid !== null) shownFrom.current = pid;
-      setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null }));
+      // `back` stays: a session released ahead of the rest already has its fresh view.
+      setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null, back: p.back }));
     };
     // Per session (an engine that names the sessions still to come back): each one whose own agents have
     // windows in rows read after it came back is released at once, whatever the others are doing.

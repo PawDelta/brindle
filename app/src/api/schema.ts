@@ -50,13 +50,25 @@ export interface ApiSchema {
   PermissionPolicyDTO: PermissionPolicyDTO;
   PermissionPresetDTO: PermissionPresetDTO;
   PermissionRuleDTO: PermissionRuleDTO;
+  PlanAnchorDTO: PlanAnchorDTO;
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
+  PlanGateDTO: PlanGateDTO;
+  PlanGatePolicyDTO: PlanGatePolicyDTO;
+  PlanGateRowDTO: PlanGateRowDTO;
   PlanOfferDTO: PlanOfferDTO;
   PlanOfferMilestoneDTO: PlanOfferMilestoneDTO;
   PlanOptionDTO: PlanOptionDTO;
+  PlanPolicyOpenDTO: PlanPolicyOpenDTO;
+  PlanPolicyStandInDTO: PlanPolicyStandInDTO;
+  PlanPolicyWaiverDTO: PlanPolicyWaiverDTO;
+  PlanReplyDTO: PlanReplyDTO;
+  PlanRevisionDTO: PlanRevisionDTO;
+  PlanRevisionDetailDTO: PlanRevisionDetailDTO;
   PlanSectionDTO: PlanSectionDTO;
+  PlanThreadDTO: PlanThreadDTO;
+  PlanUnconfirmedDTO: PlanUnconfirmedDTO;
   PlanVerdictDTO: PlanVerdictDTO;
   PlanWorkerDTO: PlanWorkerDTO;
   PrStateDTO: PrStateDTO;
@@ -77,6 +89,7 @@ export interface ApiSchema {
   RuleDTO: RuleDTO;
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
+  SharedDesignDTO: SharedDesignDTO;
   StoppedAgentDTO: StoppedAgentDTO;
   VisualAnswerDTO: VisualAnswerDTO;
   VisualDTO: VisualDTO;
@@ -825,6 +838,26 @@ export interface PermissionRuleDTO {
   source: string;
 }
 /**
+ * Where a thread is anchored (brindle.plan_docs): a text range of a
+ * section (``text``: ``quote`` between ``start`` and ``end``), a diagram
+ * section, a decision (optionally one option) or a whole section, the
+ * ask, the lede or the split. ``state``: where it is in the current
+ * revision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanAnchorDTO".
+ */
+export interface PlanAnchorDTO {
+  decision?: string | null;
+  end?: number | null;
+  kind: "text" | "diagram" | "decision" | "section";
+  option?: string | null;
+  quote?: string | null;
+  section?: string | null;
+  start?: number | null;
+  state?: "current" | "moved" | "detached";
+}
+/**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanCommentDTO".
  */
@@ -843,17 +876,22 @@ export interface PlanCommentDTO {
  */
 export interface PlanDTO {
   ask?: string | null;
+  can_edit?: boolean;
   created_at: number;
   decisions: PlanDecisionDTO[];
+  gate?: PlanGateDTO | null;
   id: string;
   lede: string;
   markdown: string;
   queued: number;
   rev: number;
+  revisions?: PlanRevisionDTO[];
   sections: PlanSectionDTO[];
   session: string;
   split: PlanWorkerDTO[];
   state: "open" | "redirected" | "approved";
+  team_ended?: boolean;
+  threads?: PlanThreadDTO[];
   title: string;
   verdict?: PlanVerdictDTO | null;
 }
@@ -865,10 +903,14 @@ export interface PlanDTO {
  */
 export interface PlanDecisionDTO {
   challenge?: string | null;
+  confirmed?: string | null;
   id: string;
   mine?: string | null;
   options: PlanOptionDTO[];
   title: string;
+  votes?: {
+    [k: string]: string[];
+  };
 }
 /**
  * One alternative of a plan's decision, as its card shows it: trade-offs
@@ -886,13 +928,151 @@ export interface PlanOptionDTO {
   touches?: string[];
 }
 /**
- * One ``##`` section of a plan's markdown: what a comment anchors to.
+ * A shared plan's build gate (brindle.plans.gate). ``reason``: why it
+ * can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
+ * every org review rule covering it, including those a listed reviewer meets.
+ * ``approval_refused``: why an Approve held for the Library wasn't applied.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanGateDTO".
+ */
+export interface PlanGateDTO {
+  approval_refused?: string | null;
+  policies?: PlanGatePolicyDTO[];
+  reason?: string | null;
+  required: number;
+  reviewers?: PlanGateRowDTO[];
+  signed: number;
+  state: "waiting" | "changes_requested" | "conflict" | "ready" | "closed";
+  unconfirmed?: PlanUnconfirmedDTO | null;
+  waiting_on?: string[];
+}
+/**
+ * An org review rule covering a shared plan, which nobody on the doc can
+ * remove. ``when``: paths, label or any; ``matched``: what in this revision
+ * set it off; ``needs_kind``: team, role or person; ``eligible``: how many
+ * people can meet it today; ``asked_at``: the last Ask again; ``opened_by``:
+ * who the rule counts has read the doc.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanGatePolicyDTO".
+ */
+export interface PlanGatePolicyDTO {
+  approvals: number;
+  asked_at?: number | null;
+  changes_by?: string[];
+  eligible?: number | null;
+  label?: string | null;
+  matched?: string[];
+  met_by?: string[];
+  name: string;
+  needs_kind?: string | null;
+  needs_name?: string | null;
+  note?: string | null;
+  opened_by?: PlanPolicyOpenDTO[];
+  org_id: string;
+  paths?: string[];
+  policy: string;
+  set_at?: number | null;
+  set_by?: string | null;
+  stand_ins?: PlanPolicyStandInDTO[];
+  status: "signed_off" | "changes_requested" | "waiting" | "waived";
+  waiver?: PlanPolicyWaiverDTO | null;
+  when?: string | null;
+}
+/**
+ * Someone a review rule counts who has read the doc, and when they last did.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyOpenDTO".
+ */
+export interface PlanPolicyOpenDTO {
+  at?: number | null;
+  sub: string;
+}
+/**
+ * Someone an org admin named to sign for a review rule until ``until``.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyStandInDTO".
+ */
+export interface PlanPolicyStandInDTO {
+  at?: number | null;
+  by?: string | null;
+  stand_in: string;
+  until: number;
+}
+/**
+ * An org admin's waiver of a review rule, for the revision on screen.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyWaiverDTO".
+ */
+export interface PlanPolicyWaiverDTO {
+  at?: number | null;
+  by: string;
+  reason: string;
+}
+/**
+ * One row of a plan's build gate: a reviewer (``sub``) or an org review
+ * rule no one on the list meets (``name``). ``meets``: the rules this
+ * reviewer's sign-off also counts for. ``met_by``: who met a rule.
+ * ``changes_by``: the rule's signers who have since asked for changes.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanGateRowDTO".
+ */
+export interface PlanGateRowDTO {
+  changes_by?: string[];
+  meets?: string[];
+  met_by?: string[];
+  name?: string | null;
+  required: boolean;
+  status: "signed_off" | "changes_requested" | "waiting" | "waived";
+  sub?: string | null;
+  you?: boolean;
+}
+/**
+ * Why the Library couldn't confirm a shared plan's review when the person
+ * tried to approve it. ``approval_held``: their Approve applies by itself
+ * once it can; ``can_stop_sharing``: they may make it a personal doc instead.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanUnconfirmedDTO".
+ */
+export interface PlanUnconfirmedDTO {
+  approval_held?: boolean;
+  can_stop_sharing?: boolean;
+  message: string;
+  reason: "offline" | "sign_in" | "key_unavailable" | "library_error" | "other_account";
+}
+/**
+ * One revision of a plan: the supervisor's proposal, the person's edit
+ * or accepted suggestion, or a teammate's text from the Library (``author``
+ * is teammate:<sub>); ``changed``, the sections it changed.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanRevisionDTO".
+ */
+export interface PlanRevisionDTO {
+  at: number;
+  author: string;
+  changed?: string[];
+  rev: number;
+  source: "proposal" | "edit" | "suggestion";
+}
+/**
+ * One section of a plan's revision: what a comment anchors to.
+ * ``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or
+ * SVG source, and ``caption`` its figure caption).
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanSectionDTO".
  */
 export interface PlanSectionDTO {
+  caption?: string | null;
   id: string;
+  kind?: "markdown" | "mermaid" | "svg";
   markdown: string;
   title: string;
 }
@@ -915,18 +1095,74 @@ export interface PlanWorkerDTO {
   title: string;
 }
 /**
+ * A comment thread, or a suggestion (``before`` becomes ``after`` when
+ * the author accepts it). ``sent``: a verdict carried it to the supervisor.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanThreadDTO".
+ */
+export interface PlanThreadDTO {
+  after?: string | null;
+  anchor: PlanAnchorDTO;
+  at: number;
+  attachments?: string[];
+  author: string;
+  before?: string | null;
+  id: number;
+  kind: "comment" | "suggestion";
+  question?: boolean;
+  replies?: PlanReplyDTO[];
+  rev: number;
+  sent?: boolean;
+  status: "open" | "resolved" | "accepted" | "rejected";
+  text: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanReplyDTO".
+ */
+export interface PlanReplyDTO {
+  at: number;
+  attachments?: string[];
+  author: string;
+  from_supervisor?: boolean;
+  id: number;
+  sent?: boolean;
+  text: string;
+}
+/**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanVerdictDTO".
  */
 export interface PlanVerdictDTO {
   approved: boolean;
   at: number;
+  attachments?: string[];
   comments?: PlanCommentDTO[];
   note?: string | null;
   picks?: {
     [k: string]: string;
   };
   rev: number;
+}
+/**
+ * An earlier revision's content: GET /v1/plans/{id}/revisions/{n}.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanRevisionDetailDTO".
+ */
+export interface PlanRevisionDetailDTO {
+  ask?: string | null;
+  at: number;
+  author: string;
+  changed?: string[];
+  decisions: PlanDecisionDTO[];
+  lede: string;
+  markdown: string;
+  rev: number;
+  sections: PlanSectionDTO[];
+  source: "proposal" | "edit" | "suggestion";
+  split: PlanWorkerDTO[];
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -1198,6 +1434,43 @@ export interface SessionDTO {
   status: string;
   status_since?: number | null;
   workspace_id: string;
+}
+/**
+ * A design someone else shared, as the person reviewing it reads it
+ * (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
+ * plan on this machine. ``can_*``: what the Library lets this account do,
+ * ``can_sign_off`` false only when it can't be one of the signers.
+ * ``author``: who wrote it, ``person`` if that is this account.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "SharedDesignDTO".
+ */
+export interface SharedDesignDTO {
+  ask?: string | null;
+  author?: string | null;
+  can_comment?: boolean;
+  can_edit?: boolean;
+  can_sign_off?: boolean;
+  can_suggest?: boolean;
+  created_at: number;
+  decisions: PlanDecisionDTO[];
+  gate?: PlanGateDTO | null;
+  id: string;
+  lede: string;
+  markdown: string;
+  me: string;
+  queued: number;
+  rev: number;
+  revisions?: PlanRevisionDTO[];
+  sections: PlanSectionDTO[];
+  session: string;
+  signed_off?: boolean;
+  split: PlanWorkerDTO[];
+  state: "open" | "redirected" | "approved";
+  team_ended?: boolean;
+  threads?: PlanThreadDTO[];
+  title: string;
+  verdict?: PlanVerdictDTO | null;
 }
 /**
  * A visual in a session (brindle.visuals). ``rev``: its current revision,

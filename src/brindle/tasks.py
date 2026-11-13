@@ -1391,6 +1391,18 @@ def plan_holds(db: DB, t: Task) -> bool:
     return plans.holding(db, autopilot.root_of(db, t.caller_id)) is not None
 
 
+def build_gate_refusal(db: DB, caller_id: str) -> str | None:
+    """Why ``caller_id`` may not give out new work, while its session's plan
+    is waiting on required reviewers (brindle.plans.gate); None otherwise."""
+    from brindle import autopilot, plans
+
+    plan = plans.gate_shut(db, autopilot.root_of(db, caller_id))
+    if plan is None:
+        return None
+    return (f"Not started: plan {plan['id']}'s build gate is closed. {plan['gate']['reason']} "
+            "Nothing was queued. Assign this once the person has started the build.")
+
+
 def held(db: DB, t: Task) -> bool:
     """Whether ``t``'s session holds it: paused, or waiting on its plan."""
     return session_paused(db, t) or plan_holds(db, t)

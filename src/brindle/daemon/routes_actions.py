@@ -153,6 +153,8 @@ def _endpoint(fn: Action):
             return JSONResponse(got.to_json(), 409)
         if isinstance(got, Job):
             return JSONResponse(got.to_json(), 202)
+        if isinstance(got, JSONResponse):
+            return got
         return JSONResponse(got)
 
     endpoint.__name__ = fn.__name__
@@ -2150,7 +2152,7 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
     return {"messages": _said(account)}
 
 
-# -- analysis docs: brindle Pro's library, proxied (the reads are in routes_read) ----
+# -- library: brindle Pro, proxied (the reads are in routes_read) ----
 # Answers pass through as the server gave them, held in memory only; a file
 # reaches disk only on an export to a folder the person picked.
 
@@ -2159,14 +2161,14 @@ EXPORT_FORMATS = ("md", "docx", "zip")
 EXPORT_DESTINATIONS = ("download", "google_docs", "sharepoint")
 
 
-def _docs_entitlement(repo: str | None):
+def _docs_entitlement(repo: str | None, store=None):
     from brindle import config
     from brindle.pro import analysis_docs
 
     if repo:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
-        return analysis_docs.require_entitlement()
+        return analysis_docs.require_entitlement(store)
     except RuntimeError as e:
         raise ServiceError("not_entitled", str(e), 402) from e
 
@@ -2188,16 +2190,33 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
     try:
         return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
     except (RuntimeError, auth.TransportError) as e:    # unreachable, or an answer it can't read: not signed out
-        raise ServiceError("upstream", str(e), 502) from e
+        raise upstream_error(e) from e
+
+
+def upstream_error(e: Exception) -> ServiceError:
+    """The Library's refusal as the daemon's answer: its own 4xx (a stale
+    version stays a 409, a missing permission a 403) so the app can act on it;
+    anything else, unreachable or unreadable, is a 502. A 401 is never passed
+    on: it would read as the daemon's own token being refused."""
+    from brindle.pro.analysis_docs import Refused
+
+    if isinstance(e, Refused) and 400 <= e.status < 500 and e.status != 401:
+        return ServiceError(e.code if e.code and e.code.isidentifier() else "upstream", str(e), e.status)
+    return ServiceError("upstream", str(e), 502)
 
 
 def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str | None = None,
-                 admin: bool = False) -> dict:
+                 admin: bool = False, org_id: str | None = None) -> dict:
     """``/orgs/<org>/analysis-docs/<tail>`` for the verified entitlement's org;
-    ``admin`` refuses (403, nothing sent) unless its role is owner or admin."""
+    ``admin`` refuses (403, nothing sent) unless its role is owner or admin.
+    ``org_id``: the org the caller read, refused (409, nothing sent) if the
+    active one is another, so a form loaded for one org never writes to a second.
+    Permissions beyond that are the Library's to check."""
     from urllib.parse import quote
 
     ent = _docs_entitlement(repo)
+    if org_id is not None and org_id != ent.org_id:
+        raise ServiceError("org_changed", "your active organization changed since this was loaded; reload it", 409)
     if admin and ent.role not in ("owner", "admin"):
         raise ServiceError("forbidden", "only an organisation owner or admin can do this", 403)
     return docs_api(method, f"/orgs/{quote(ent.org_id, safe='')}/analysis-docs/{tail}", body, repo=repo)
@@ -2300,6 +2319,34 @@ def unshare_doc(db: DB, params: dict, body: Body) -> Any:
     """Stop sharing a doc with ``scope`` (team:<id> or org:<id>)."""
     kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
     return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=params.get("repo"))
+
+
+def _folder_call(body: Body, run: Callable) -> Any:
+    """Run a pro/library_folders write on the scope named by the body's ``scope``
+    (user, team:<id> or org:<id>), through docs_api; bad input is a 400."""
+    repo = _get(body, "repo")
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), _docs_entitlement(repo).sub)
+    try:
+        return run(kind, scope_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo))
+    except ValueError as e:
+        raise ServiceError("invalid", str(e)) from e
+
+
+def create_library_folder(db: DB, params: dict, body: Body) -> Any:
+    """Make a folder in ``scope`` with ``name``, ``visibility`` (private or shared) and ``can_add``."""
+    from brindle.pro import library_folders as folders
+
+    return _folder_call(body, lambda kind, scope_id, api: folders.create(
+        kind, scope_id, _get(body, "name", required=True), _get(body, "visibility", default="private"),
+        _get(body, "can_add", default="owner"), api=api))
+
+
+def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
+    """Place the design in the ``folder`` (an id) of ``scope``."""
+    from brindle.pro import library_folders as folders
+
+    return _folder_call(body, lambda kind, scope_id, api: folders.move_doc(
+        params["id"], kind, scope_id, _get(body, "folder", required=True), api=api))
 
 
 def delete_doc(db: DB, params: dict, body: Body) -> Any:
@@ -3018,6 +3065,8 @@ ROUTES = [
     Route("/v1/analysis-docs/destination", _endpoint(put_doc_destination), methods=["PUT"]),
     Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
     Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
+    _post("/library/folders", create_library_folder),
+    Route("/v1/analysis-docs/{id}/folder", _endpoint(move_doc_to_folder), methods=["PUT"]),
     _post("/analysis-docs/{id}/share", share_doc),
     Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),
     _post("/analysis-docs/{id}/export", export_doc),

@@ -124,7 +124,7 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
   const viewable = open?.kind === "doc" && !open.local_path ? open.doc_id ?? open.id : null;
   const onDoc = viewable ? () => setDoc(viewable) : open?.kind === "doc" && preview?.node === open.id && preview.text ? () => setLocal({ id: open.id, title: open.title ?? open.id, text: preview.text! }) : undefined;
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
-    <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">All knowledge in this library scope, including local decisions and imported folders in Mine. Code paths optionally narrow the map. Shared paths and topics connect records.</p></header>
+    <header><h2 className={h2}>Library map</h2><p className="text-sm text-ink-2">All knowledge in this library scope, including local decisions and imported folders in Mine. Code paths optionally narrow the map. Shared paths and topics connect records.</p></header>
     {!repo ? <p className="text-ink-3">Choose a repo to explore its knowledge.</p> : <form onSubmit={submit} className={`${card} flex flex-wrap items-end gap-s1 p-s2`}>
       <label className="flex flex-col gap-1 text-xs text-ink-2">Library scope<select className={field} value={scopeKey} onChange={(e) => changeScope(e.target.value)}>{scopes.map((s) => <option key={`${s.kind}:${s.id}`} value={`${s.kind}:${s.id}`}>{scopeName(s)}</option>)}</select></label>
       <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs text-ink-2">Code paths<input className={field} value={input} onChange={(e) => setInput(e.target.value)} placeholder="src/cache, src/db" /></label>

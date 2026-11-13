@@ -1069,6 +1069,104 @@ CREATE TABLE IF NOT EXISTS plans (
     ask TEXT                       -- the person's request restated by the supervisor, if given
 );
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
+-- A plan as a design doc (brindle.plan_docs): every revision, the supervisor's
+-- and the person's own edits alike; the plans row holds the current one.
+CREATE TABLE IF NOT EXISTS plan_revisions (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    rev INTEGER NOT NULL,
+    author TEXT NOT NULL,          -- supervisor | person | teammate:<sub> (from the Library)
+    source TEXT NOT NULL,          -- proposal | edit | suggestion
+    lede TEXT NOT NULL,
+    sections TEXT NOT NULL,        -- JSON [{id, title, kind, markdown, caption}]
+    markdown TEXT NOT NULL,
+    decisions TEXT NOT NULL,
+    split TEXT NOT NULL,
+    ask TEXT,
+    changed TEXT NOT NULL,         -- JSON: the section ids this revision changed
+    created_at REAL NOT NULL,
+    PRIMARY KEY (plan_id, rev)
+);
+-- Comment threads on a plan, anchored to a text range, a diagram, a decision
+-- or a whole section; a suggestion is a thread with a replacement; replies
+-- name their thread in parent_id.
+CREATE TABLE IF NOT EXISTS plan_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    parent_id INTEGER REFERENCES plan_threads(id) ON DELETE CASCADE,
+    rev INTEGER NOT NULL,          -- the revision it was written on
+    kind TEXT NOT NULL,            -- comment | suggestion | reply
+    anchor TEXT,                   -- JSON, see brindle.plan_docs
+    author TEXT NOT NULL,          -- person | supervisor | teammate:<sub> (from the Library)
+    body TEXT NOT NULL,
+    after TEXT,                    -- a suggestion's replacement for the anchored text
+    attachments TEXT NOT NULL,     -- JSON [{name, ref}]
+    status TEXT NOT NULL,          -- open | resolved | accepted | rejected
+    sent_rev INTEGER,              -- the verdict that carried it to the supervisor
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_threads_plan ON plan_threads(plan_id, parent_id);
+-- Exact Brindle account ownership, recorded at supervisor launch. Unknown is
+-- deliberately absent, never a wildcard when routing a shared-doc question.
+CREATE TABLE IF NOT EXISTS supervisor_accounts (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    owner TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS doc_questions (
+    doc_id TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    owner TEXT NOT NULL,
+    agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (doc_id, thread_id, owner)
+);
+-- Votes on a plan's decisions (Confirm A): one per voter and decision.
+CREATE TABLE IF NOT EXISTS plan_votes (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    decision_id TEXT NOT NULL,
+    voter TEXT NOT NULL,
+    option_id TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    at REAL NOT NULL,
+    PRIMARY KEY (plan_id, decision_id, voter)
+);
+-- A plan shared through the Library (brindle.pro.shared_docs): its document,
+-- which local revision the Library's head holds, and the last review state.
+CREATE TABLE IF NOT EXISTS plan_shares (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
+    doc_id TEXT,                   -- NULL while the document is being created
+    owner TEXT NOT NULL,           -- the account that shared it
+    remote_rev INTEGER NOT NULL DEFAULT 0,
+    local_rev INTEGER NOT NULL DEFAULT 0,
+    review TEXT NOT NULL DEFAULT '{}',   -- JSON: reviewers, sign-offs, who is pending, ready
+    claimed_at REAL,               -- set while a create or a push is under way
+    org_id TEXT,                   -- the org it was shared from; NULL on a share older than this column
+    lapsed_at REAL,                -- when the server last confirmed that account and org have no Team plan;
+                                   -- NULL once a check fails. Honoured while recent (shared_docs.lapse_stands)
+    unconfirmed TEXT,              -- why the Library couldn't confirm the review (plans.UNCONFIRMED); NULL once it answers
+    approve_wanted TEXT,           -- JSON: the person's Approve, held until the Library answers (plans.settle_held_approval)
+    approve_refused TEXT,          -- why a held Approve wasn't applied, for the person
+    access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
+    review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
+);
+-- Documents whose owner chose Stop sharing while the Library was out of reach:
+-- their teams and org lose access at the next pass that reaches it.
+CREATE TABLE IF NOT EXISTS plan_unshares (
+    doc_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+-- Which local thread or reply each Library thread or reply became, so a pull
+-- adds it once; status is the Library's as last seen. A negative remote_id is
+-- a thread with no Library thread: status 'sending' for one sent whose answer
+-- hasn't come back, otherwise one written before sharing, which stays here.
+CREATE TABLE IF NOT EXISTS plan_share_threads (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    remote_id INTEGER NOT NULL,
+    local_id INTEGER NOT NULL REFERENCES plan_threads(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    PRIMARY KEY (plan_id, remote_id)
+);
 """
 
 
@@ -1507,6 +1605,10 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        thread_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_threads)")}
+        for flag in ("question", "from_supervisor"):
+            if flag not in thread_cols:
+                self.conn.execute(f"ALTER TABLE plan_threads ADD COLUMN {flag} INTEGER NOT NULL DEFAULT 0")
         merge_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(session_pr_merges)")}
         if "owner" not in merge_cols:
             self.conn.execute("ALTER TABLE session_pr_merges ADD COLUMN owner TEXT")
@@ -1528,6 +1630,15 @@ class DB:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN consented_by TEXT")
         if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
             self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
+        share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
+        for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL"), ("unconfirmed", "TEXT"),
+                          ("approve_wanted", "TEXT"), ("approve_refused", "TEXT"), ("access_refused", "TEXT")):
+            if col not in share_cols:
+                self.conn.execute(f"ALTER TABLE plan_shares ADD COLUMN {col} {kind}")
+        if "review_asked" not in share_cols:
+            self.conn.execute("ALTER TABLE plan_shares ADD COLUMN review_asked INTEGER NOT NULL DEFAULT 0")
+            # What these shares saw before it was kept is unknown: nothing may be assumed unreviewed.
+            self.conn.execute("UPDATE plan_shares SET review_asked=1")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:
