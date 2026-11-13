@@ -959,6 +959,16 @@ CREATE TABLE IF NOT EXISTS doc_requests (
     why TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- A supervisor's operational memory (brindle.supervisor_state owns this): a
+-- compact JSON state folded from the event bus up to ``last_event``, which a
+-- restart seeds the fresh session with.
+CREATE TABLE IF NOT EXISTS supervisor_state (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    last_event INTEGER NOT NULL DEFAULT 0,
+    restarts INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+);
 -- What the sweep reaped (brindle.reap): tmux sessions, stopped supervisors,
 -- superseded workers, notices sent once. `brindle doctor` lists recent rows;
 -- an 'idle_supervisor' row is an Inbox item while its root stays paused.
@@ -1557,6 +1567,46 @@ def request_subagent(row) -> str | None:
 
 
 WAITER_CLAIM = "waiter-claim:"   # agent_marks kind prefix, then the waiter's pid (DB.pop_pending)
+# agent_marks kind: a supervisor restart under way (brindle.supervisor_state), JSON
+# {token, ref, until}. Until ``until`` it holds the supervisor's queue (DB.pop_pending):
+# mail waits for the fresh session instead of waking the one about to stop.
+RESTART_HOLD = "supervisor-restart"
+RESULT_EVENT_CHARS = 2000   # of a result carried in its "agent.result" event
+
+
+def _restart_holds(c: sqlite3.Connection, agent_id: str, now: float | None = None) -> bool:
+    """Whether a restart that hasn't expired holds ``agent_id``'s queue."""
+    row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                    (agent_id, RESTART_HOLD)).fetchone()
+    if row is None:
+        return False
+    try:
+        return float(json.loads(row["value"])["until"]) > (time.time() if now is None else now)
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+INBOX_SEND = "inbox-send:"   # agent_marks kind prefix, then the message id: a direct inbox send under way
+INBOX_SEND_EXPIRES = 120.0   # seconds after which such a mark is a dead sender's, holding nothing
+
+
+def _deliveries_in_flight(c: sqlite3.Connection, agent_id: str, now: float | None = None) -> bool:
+    """Whether mail to ``agent_id`` is part way to it: a pane delivery typing
+    it, a waiter that took it and hasn't finished handing it over, or a
+    direct inbox send (DB.claim_delivery) that hasn't finished."""
+    if (_pane_delivery_message(c, agent_id) is not None
+            or c.execute(f"SELECT 1 FROM agent_marks WHERE agent_id=? AND kind LIKE '{WAITER_CLAIM}%' LIMIT 1",
+                         (agent_id,)).fetchone() is not None):
+        return True
+    now = time.time() if now is None else now
+    for row in c.execute(f"SELECT value FROM agent_marks WHERE agent_id=? AND kind LIKE '{INBOX_SEND}%'",
+                         (agent_id,)):
+        try:
+            if now - float(json.loads(row["value"])["at"]) < INBOX_SEND_EXPIRES:
+                return True
+        except (ValueError, TypeError, KeyError):
+            continue
+    return False
 
 
 def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
@@ -2347,8 +2397,22 @@ class DB:
             if won:
                 c.execute("UPDATE agents SET result=? WHERE id=?", (mask(payload), agent_id))
         if won:
-            bus.publish_agent(self, "agent.result", agent_id)
+            self._publish_result(agent_id)
         return won
+
+    def _publish_result(self, agent_id: str) -> None:
+        """The "agent.result" event, carrying what readers need once the
+        agent's row may be gone (brindle.supervisor_state): its mode, profile,
+        branch and (the start of its masked) result."""
+        try:
+            row = self.conn.execute(
+                "SELECT a.mode, a.profile, a.result, w.branch FROM agents a"
+                " LEFT JOIN workspaces w ON w.id = a.workspace_id WHERE a.id=?", (agent_id,)).fetchone()
+        except sqlite3.Error:
+            row = None
+        fields = ({"mode": row["mode"], "profile": row["profile"], "branch": row["branch"],
+                   "result": (row["result"] or "")[:RESULT_EVENT_CHARS]} if row else {})
+        bus.publish_agent(self, "agent.result", agent_id, **fields)
 
     def outbox_deliver(self, row_id: int, *, message: tuple | None = None,
                        agent_fields: dict | None = None, nothing: bool = False) -> bool:
@@ -2634,7 +2698,7 @@ class DB:
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE agents SET result=? WHERE id=?", (mask(result), agent_id))
-        bus.publish_agent(self, "agent.result", agent_id)
+        self._publish_result(agent_id)
 
     def delete_agent(self, agent_id: str) -> None:
         with self.tx() as c:
@@ -2720,21 +2784,33 @@ class DB:
         other path (read_messages, the waiter, a pane delivery) takes it too.
         Returns the claim's time, or None if another path already had it: one
         that delivered it, or a pane delivery typing it (its row stays
-        undelivered while its mark owns it)."""
+        undelivered while its mark owns it). None too while a supervisor
+        restart holds the recipient's queue (RESTART_HOLD). Until
+        ``finish_delivery`` or ``release_delivery``, the send counts as in
+        flight (_deliveries_in_flight), so no restart stops the recipient under it."""
         now = time.time()
         with self.tx() as c:
             row = c.execute("SELECT agent_id FROM inbox WHERE id=? AND delivered_at IS NULL",
                             (message_id,)).fetchone()
-            if row is None or _pane_delivery_message(c, row["agent_id"]) == message_id:
+            if (row is None or _pane_delivery_message(c, row["agent_id"]) == message_id
+                    or _restart_holds(c, row["agent_id"], now)):
                 return None
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (now, message_id))
+            c.execute("INSERT OR REPLACE INTO agent_marks (agent_id, kind, value) VALUES (?, ?, ?)",
+                      (row["agent_id"], f"{INBOX_SEND}{message_id}", json.dumps({"at": now})))
         return now
+
+    def finish_delivery(self, message_id: int) -> None:
+        """A claimed send (claim_delivery) is over, sent or put back: no longer in flight."""
+        with self.tx() as c:
+            c.execute("DELETE FROM agent_marks WHERE kind=?", (f"{INBOX_SEND}{message_id}",))
 
     def release_delivery(self, message_id: int, claimed_at: float) -> None:
         """Put back a message whose send failed, only if the claim is still this one's."""
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND delivered_at=?",
                       (message_id, claimed_at))
+        self.finish_delivery(message_id)
 
     # -- permission requests left to the person (brindle.permissions) --
 
@@ -2808,9 +2884,10 @@ class DB:
         ``pane_mark``: the claim is a pane delivery's, whose mark (what this
         returns for the message) owns the undelivered row from here on, so a
         process that dies before its first write loses nothing. ``waiter_pid``:
-        the claim is that waiter's, recorded with it (see ``waiter_claims``)."""
+        the claim is that waiter's, recorded with it (see ``waiter_claims``).
+        None too while a supervisor restart holds the queue (RESTART_HOLD)."""
         with self.tx() as c:
-            if _pane_delivery_message(c, agent_id) is not None:
+            if _pane_delivery_message(c, agent_id) is not None or _restart_holds(c, agent_id):
                 return None
             row = c.execute(
                 "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL "
@@ -2880,6 +2957,15 @@ class DB:
     def pane_delivery_holds(self, agent_id: str) -> bool:
         """Whether a pane delivery's mark is holding ``agent_id``'s queue."""
         return _pane_delivery_message(self.conn, agent_id) is not None
+
+    def restart_holding(self, agent_id: str) -> bool:
+        """Whether a supervisor restart holds ``agent_id``'s queue (RESTART_HOLD)."""
+        return _restart_holds(self.conn, agent_id)
+
+    def deliveries_in_flight(self, agent_id: str) -> bool:
+        """Whether mail to ``agent_id`` is part way to it: a pane delivery
+        typing it, or a waiter that took it and hasn't finished handing it over."""
+        return _deliveries_in_flight(self.conn, agent_id)
 
     @staticmethod
     def _drop_unwritten_pane_mark(c: sqlite3.Connection, agent_id: str, message_id: int) -> None:
