@@ -129,6 +129,20 @@ class DraftReplica:
     def resolve(self, cursor: bytes) -> int:
         return self._doc.resolve(cursor)
 
+    def export_bootstrap(self) -> list[bytes]:
+        """The latest snapshot and every update still waiting on dependencies.
+
+        A snapshot alone omits pending operations. Read both in one database
+        snapshot so a joining client can finish them when dependencies arrive.
+        """
+        with self.db.snapshot() as c:
+            got = _read(c, self.doc_id)
+        if got is None or got[0]["peer_id"] != self.peer_id:
+            raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
+        row, doc, pending = got
+        self._doc, self._seq = doc, row["seq"]
+        return [doc.export_snapshot(), *pending]
+
     # -- writing --------------------------------------------------------
 
     def insert(self, section: str, offset: int, text: str) -> bytes:
