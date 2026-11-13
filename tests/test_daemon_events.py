@@ -120,6 +120,8 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     # Only the merged-PR polling is under test: the checks refresh has its own pool.
     monkeypatch.setattr(review, "refresh_pr_states", lambda db: None)
     # Nor do the git sweeps (they touch the fake /repo, and their spawn.read calls would count as gh reads).
+    # Shown on the unstubbed scenario: with refresh_drift_flags held on an event, `both` is not set within 1s
+    # (the CI failure); without `slow`'s deadline assert, the sweep's `git remote` blocks on release before any gh read.
     monkeypatch.setattr(review.session_sync, "refresh_drift_flags", lambda *a, **kw: None)
     monkeypatch.setattr(review.session_sync, "refresh_idle_sessions", lambda *a, **kw: None)
     # Module-level state of earlier rows must not decide whether a read is submitted.
