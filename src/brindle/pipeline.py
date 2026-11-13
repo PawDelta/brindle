@@ -457,12 +457,26 @@ def _escalate(db: DB, ws: Workspace, worker: Agent | None) -> None:
 # -- stage 1: a worker reported ---------------------------------------------------
 
 
+FAST_PATH_REVIEW = (
+    "a light review of a small fast-path request. Judge the change against its task and finish "
+    "line: raise only blockers (a correctness bug, a broken or missing test for the finish line, "
+    "a security problem). Leave style, naming and suggestions as minor findings, and don't explore "
+    "beyond the diff.")
+
+
+def fast_path(db: DB, cfg: RepoConfig, worker: Agent) -> bool:
+    """Whether ``worker`` runs a fast-path task while its repo's ``fast_path``
+    setting is on: then its branch gets one light review (no second review)."""
+    return cfg.fast_path and tasks.fast_path_worker(db, worker.id)
+
+
 def second_profile(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> str | None:
     """The reviewer profile of the second review ``cfg.second_review`` asks
     for on ``worker``'s branch, by the weight its task was sized at. None when
     it's unset, the task has no weight there, or it names the profile that
-    does the first review anyway (one reviewer per profile and commit)."""
-    if not cfg.second_review:
+    does the first review anyway (one reviewer per profile and commit), or
+    the branch is on the fast path (one light review)."""
+    if not cfg.second_review or fast_path(db, cfg, worker):
         return None
     weight = next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
     profile = cfg.second_review.get(weight or "")
@@ -668,7 +682,8 @@ def _start_report_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, 
         # With a second review both calls carry a concrete profile, so the
         # reviewer dedupe compares profiles and neither can swallow the other.
         first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
-        started = agents.start_review(db, parent, ws, first, None, cfg, slot="", report=report)
+        focus = FAST_PATH_REVIEW if fast_path(db, cfg, worker) else None
+        started = agents.start_review(db, parent, ws, first, focus, cfg, slot="", report=report)
         if second:
             try:
                 agents.start_review(db, parent, ws, second, None, cfg, second=True, report=report)
@@ -914,7 +929,7 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     default = cfg.reviewer or "reviewer"
     if default != "reviewer" or _repo_pins_reviewer(repo_root):
         return default, f"using {default} (pinned by reviewer config)"
-    from brindle import autopilot, pricing, profiles
+    from brindle import autopilot, pricing, profiles, review_scope
 
     allow_local = "reviewer-local" in (
         *cfg.learning_candidates,
@@ -925,6 +940,10 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
         p.name for p in profiles.list_profiles(repo_root)
         if (p.name == "reviewer" or p.name.startswith("reviewer-"))
         and (allow_local or p.name != "reviewer-local")
+        # Built-in sizing profiles need risk/vendor checks. Keep custom profiles
+        # with these names eligible, as they were before sizing was introduced.
+        and not (p.name in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE)
+                 and profiles.profile_source(p.name, repo_root) == f"built-in profile {p.name}")
     ]
     for extra in (*cfg.routing.get("light", ()), *cfg.learning_candidates):
         if extra.startswith("reviewer") and extra not in names and (allow_local or extra != "reviewer-local"):
@@ -1944,9 +1963,17 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
     conflicts, the conflicting files are appended to ``conflicts_out``.
     ``waiting_on_checks(sha)`` is called before checks with no passing
     result for the commit yet start to run.
-    One merge into a base at a time (see ``base_lock``)."""
+    One merge into a base at a time (see ``base_lock``). Under
+    ``overlap_granularity`` "hunk", a merge whose changes meet a running
+    worker's says so (``tasks.merge_hunk_warning``), read before it lands."""
+    from brindle import tasks
+
     with merge_lock(ws.id), base_lock(ws.repo_root, ws.base_branch):
-        return _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
+        drift = tasks.merge_hunk_warning(db, ws)
+        text = _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
+    if drift and text.startswith("Merged"):
+        text += f" Warning: {drift}."
+    return text
 
 
 # Files whose change in the base can change any check's outcome, wherever

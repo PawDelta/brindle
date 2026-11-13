@@ -6,8 +6,14 @@ visuals capability is off. A page is served with the visuals CSP; the shell's
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
+import json
 import logging
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -15,7 +21,8 @@ from typing import Any
 from starlette.requests import Request
 from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from brindle import visuals, visual_offers
 from brindle.daemon.routes_actions import _endpoint, _get
@@ -24,6 +31,177 @@ from brindle.db import DB
 from brindle.service.errors import ServiceError, from_exception
 
 log = logging.getLogger(__name__)
+
+
+class _LiveRoom:
+    """Local subscribers and transient presence; durable text lives in DraftReplica."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+        self.clients: set[WebSocket] = set()
+        self.presence: dict[str, Any] = {}
+
+
+class _WindowSink:
+    """An app window's socket as the relay link (pro.live_docs) writes to it."""
+
+    def __init__(self, socket: WebSocket) -> None:
+        self.socket = socket
+
+    async def send(self, frame: dict) -> None:
+        await self.socket.send_json(frame)
+
+    async def close(self, code: int) -> None:
+        await self.socket.close(code=code)
+
+
+def _live_doc(db: DB, visual_id: str) -> tuple[str, dict]:
+    from brindle import plan_docs
+    from brindle.pro import shared_docs
+
+    p = plan_docs._plan(db, visual_id)
+    share = shared_docs.link(db, visual_id)
+    if share is None or not share["doc_id"] or share["access_refused"]:
+        raise ServiceError("not_found", "no live text for this visual", 404)
+    plan_docs._editable(p)
+    return share["doc_id"], p
+
+
+async def visual_live(socket: WebSocket) -> None:
+    """Guard consumed the token. Merge text locally and relay ephemeral carets."""
+    from brindle.crdt import CrdtError, Presence, SharedDoc
+    from brindle.plan_drafts import DraftGone, DraftReplica
+    from brindle.pro import live_docs
+
+    await socket.accept()
+    relay = getattr(socket.app.state, "live_docs", None)    # the daemon's relay links (pro.live_docs)
+    lease = None
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brindle-visual-live")
+    db = None
+    replica = None
+    room = None
+    rooms = getattr(socket.app.state, "visual_live_rooms", None)
+    if rooms is None:
+        rooms = socket.app.state.visual_live_rooms = {}
+    doc_id = None
+
+    async def work(fn, *args):
+        # Each submission gets its own context, including cancellation/deadline
+        # tokens belonging to the socket's request.
+        return await loop.run_in_executor(pool, copy_context().run, fn, *args)
+
+    def open_doc():
+        nonlocal db
+        db = DB()
+        return _live_doc(db, socket.path_params["id"])[0]
+
+    def current_plan():
+        current_id, p = _live_doc(db, socket.path_params["id"])
+        if current_id != doc_id:
+            raise DraftGone("the visual's shared document changed")
+        return p
+
+    def bootstrap():
+        nonlocal replica
+        p = current_plan()
+        # Only the first holder seeds; open prefers an existing stored replica.
+        sections = {"lede": p["lede"], **{s["id"]: s["markdown"] for s in p["sections"]
+                                         if s["kind"] == "markdown"}}
+        exists = db.conn.execute("SELECT 1 FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+        initial = None if exists else SharedDoc.new(sections).export_snapshot()
+        replica = DraftReplica.open(db, doc_id, initial)
+        if not exists:
+            # Seeded here, not by the relay: its first join re-types local edits from this text.
+            live_docs.note_seed(db, doc_id, sections, replica.version())
+        return replica.export_bootstrap()
+
+    def apply_update(data):
+        """The update this machine's other windows need for ``data``: itself,
+        or, if the replica was rebuilt under this window, its change re-typed
+        onto the new one (DraftReplica.receive); None for nothing yet."""
+        current_plan()
+        if data is not None:
+            return replica.receive(data)[1]
+        return None
+
+    def close_db():
+        if db is not None:
+            db.conn.close()
+
+    try:
+        doc_id = await work(open_doc)
+        room = rooms.setdefault(doc_id, _LiveRoom())
+        room.users += 1
+        async with room.lock:
+            if relay is not None:
+                # The number this window writes under, before its snapshot: the app sets it
+                # once the snapshot is in (as a string: relay numbers pass 2**53).
+                lease = await relay.open_window(doc_id, _WindowSink(socket))
+                if lease is not None:
+                    await socket.send_json({"peer": None if lease.peer is None else str(lease.peer)})
+                    await socket.send_json(relay.link(doc_id).state_frame())
+            for update in await work(bootstrap):
+                await socket.send_json({"update": base64.b64encode(update).decode("ascii")})
+            for section, presence in room.presence.items():
+                await socket.send_json({"section": section, "awareness": base64.b64encode(presence.encode()).decode("ascii")})
+            room.clients.add(socket)
+        while True:
+            frame = await socket.receive_text()
+            async with room.lock:
+                said = json.loads(frame)
+                if not isinstance(said, dict):
+                    raise ValueError("a live frame must be an object")
+                if isinstance(said.get("update"), str):
+                    data = base64.b64decode(said["update"], validate=True)
+                    forward = await work(apply_update, data)
+                    if lease is not None:
+                        await relay.changed(doc_id)
+                    if forward is None:
+                        continue
+                    if forward != data:     # this window is on a replaced replica: pass on the translation
+                        frame = json.dumps({"update": base64.b64encode(forward).decode("ascii")})
+                elif isinstance(said.get("awareness"), str) and isinstance(said.get("section"), str):
+                    await work(apply_update, None)
+                    presence = room.presence.setdefault(said["section"], Presence())
+                    presence.apply(base64.b64decode(said["awareness"], validate=True))
+                    if lease is not None:
+                        await relay.awareness(lease, said["section"], said["awareness"])
+                else:
+                    raise ValueError("not a live update or awareness frame")
+                for other in tuple(room.clients):
+                    if other is socket:
+                        continue
+                    try:
+                        await other.send_text(frame)
+                    except (WebSocketDisconnect, OSError, RuntimeError):
+                        room.clients.discard(other)
+    except WebSocketDisconnect:
+        pass
+    except ServiceError as e:
+        await socket.close(code=4409 if e.http_status == 409 else 4404 if e.http_status == 404 else 4403)
+    except DraftGone:
+        await socket.close(code=4404)
+    except (CrdtError, ValueError, binascii.Error):
+        await socket.close(code=1003)
+    finally:
+        if lease is not None:
+            try:
+                await relay.close_window(lease)
+            except Exception:  # noqa: BLE001 - the relay link must never keep the socket from ending
+                log.debug("brindle: the live relay didn't hear a window close", exc_info=True)
+        if room is not None:
+            room.clients.discard(socket)
+            room.users -= 1
+            if not room.users and rooms.get(doc_id) is room:
+                del rooms[doc_id]
+        try:
+            # Queue closure behind any in-flight operation, even if the socket
+            # was cancelled before opening or writing finished.
+            await asyncio.shield(work(close_db))
+        finally:
+            pool.shutdown(wait=False)
 
 
 def _page(fn: Callable[[DB, Request], Path]) -> Callable[[Request], Response]:
@@ -468,6 +646,7 @@ def kept_page(db: DB, request: Request) -> Path:
 
 
 ROUTES = [
+    WebSocketRoute("/v1/visuals/{id}/live", visual_live),
     Route("/v1/library/designs/{id}/question", _endpoint(doc_question), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-input", _endpoint(visual_input), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-offer", session_offer),

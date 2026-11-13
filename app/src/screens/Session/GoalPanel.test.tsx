@@ -316,7 +316,6 @@ describe("GoalPanel", () => {
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} compact />);
     // The sidebar's steps are one line each: the label and the reason are the row's tooltip.
     fireEvent.click(await sidebar.findByRole("button", { name: "1 pending" }));
-    fireEvent.click(sidebar.getByRole("button", { name: /finished milestones/ }));
     const [, row] = sidebar.getAllByTestId("milestone");
     expect(row.title).toContain(label);
     expect(row.title).toContain(why);
@@ -329,7 +328,7 @@ describe("GoalPanel", () => {
   });
 
   /* Only a milestone with work on it reads as in progress; one nobody has started reads as pending. */
-  it.each([false, true])("keeps a done fold and pending fold independent with active rows visible (phases: %s)", async (phased) => {
+  it.each([false, true])("keeps completed and active rows visible independently of pending rows (phases: %s)", async (phased) => {
     const milestones: MilestoneDTO[] = [
       { ...goal.milestones![0], state: "passed", status: "passed" },
       { ...goal.milestones![1], state: "not_done", status: "pending" },
@@ -339,16 +338,13 @@ describe("GoalPanel", () => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
     const pending = await sidebar.findByRole("button", { name: "1 pending" });
-    expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["now"]);
-    // No "N done" row: the finished rows stay hidden until the count toggles them.
+    expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now"]);
+    // Completed milestones stay listed; the count reports progress without hiding them.
     expect(sidebar.queryByRole("button", { name: /^\d+ done$/ })).toBeNull();
-    const done = sidebar.getByRole("button", { name: /finished milestones/ });
-    expect(done.getAttribute("aria-expanded")).toBe("false");
+    expect(sidebar.getByTestId("goal-count").hasAttribute("aria-expanded")).toBe(false);
     expect(sidebar.queryByText("Ship it")).toBeNull();
     expect(pending.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(pending);
-    expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["now", "pending"]);
-    fireEvent.click(done);
     expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "pending"]);
     expect(sidebar.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("33");
     expect(sidebar.getByTestId("goal-count").textContent).toBe("1 of 3");
@@ -365,12 +361,11 @@ describe("GoalPanel", () => {
     daemon.data.goal = { ...daemon.data.goal!, root_id: "other" };
     sidebar.rerender(<GoalPanel client={client} repo={REPO} root="other" store={createAppStore()} compact />);
     expect((await sidebar.findByRole("button", { name: "1 pending" })).getAttribute("aria-expanded")).toBe("false");
-    expect(sidebar.getByRole("button", { name: /finished milestones/ }).getAttribute("aria-expanded")).toBe("false");
+    expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now"]);
   });
 
-  /* A done fold for a leading unnamed group (the goal count) and for a phase (its count): each reveals its finished
-     rows, and a phase's count reads collapsed while the phase is folded, so its click reveals the rows again. */
-  it("reveals a done fold in the leading unnamed group and in a folded phase", async () => {
+  /* Completed rows remain visible in the leading unnamed group and inside an open phase. */
+  it("keeps leading completed rows visible while a named phase is folded", async () => {
     const base = goal.milestones![1];
     const milestones: MilestoneDTO[] = [
       { ...base, id: 1, position: 1, title: "Alpha", state: "passed", status: "passed", phase_name: null },
@@ -381,24 +376,15 @@ describe("GoalPanel", () => {
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
     await waitFor(() => expect(sidebar.getByRole("region", { name: "Goal" }).dataset.phase).toBe("in_progress"));
     const count = sidebar.getByTestId("goal-count");
-    expect(sidebar.queryByText("Alpha")).toBeNull();
-    fireEvent.click(count);
-    expect(count.getAttribute("aria-expanded")).toBe("true");
+    expect(count.tagName).toBe("SPAN");
     expect(sidebar.getByText("Alpha")).toBeTruthy();
-    fireEvent.click(count);
-    expect(sidebar.queryByText("Alpha")).toBeNull();
-
-    const phaseCount = sidebar.getByTestId("phase-done-toggle");
-    expect(sidebar.queryByText("Beta")).toBeNull();
-    fireEvent.click(phaseCount);
     expect(sidebar.getByText("Beta")).toBeTruthy();
-    expect(phaseCount.getAttribute("aria-expanded")).toBe("true");
-    // Fold the phase by its name: its rows hide, so the count reads collapsed and its click shows them again.
+    // Folding a named phase hides its children without affecting the leading completed rows.
     fireEvent.click(sidebar.getByTestId("phase-fold"));
     expect(sidebar.queryByText("Beta")).toBeNull();
-    expect(phaseCount.getAttribute("aria-expanded")).toBe("false");
-    expect(phaseCount.getAttribute("aria-label")).toContain("show finished milestones");
-    fireEvent.click(phaseCount);
+    expect(sidebar.getByText("Alpha")).toBeTruthy();
+    expect(sidebar.getByTestId("phase-fold").getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(sidebar.getByTestId("phase-fold"));
     expect(sidebar.getByText("Beta")).toBeTruthy();
     expect(sidebar.getByTestId("phase-fold").getAttribute("aria-expanded")).toBe("true");
   });
@@ -470,7 +456,7 @@ describe("GoalPanel", () => {
   it.each([["working"], ["checks"], ["review"], ["merging"], [null]])("colours the active step by its stage %s", async (stage) => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), stage } });
     const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
-    fireEvent.click(await view.findByRole("button", { name: /finished milestones/ }));
+    await view.findByTestId("goal-line");
     const [done, active] = view.getAllByTestId("milestone");
     const displayed = stage === "checks" ? "working" : stage;
     expect(done.className).not.toMatch(/\bst-/);
@@ -560,21 +546,22 @@ describe("GoalPanel", () => {
     if (!compact) unfold();
     const folds = () => view.getAllByTestId("phase-fold");
     const rows = () => view.queryAllByTestId("milestone").map((li) => li.textContent!.match(/M\d/)![0]);
-    // A phase with finished rows shows its count as the toggle beside the fold (compact); otherwise in the fold.
-    const countOf = (b: HTMLElement) => (b.querySelector(".k") ?? b.parentElement!.querySelector("[data-testid=phase-done-toggle]"))!.textContent;
+    const countOf = (b: HTMLElement) => b.querySelector(".k")!.textContent;
     expect(folds().map((b) => [b.dataset.st, b.querySelector(".n")!.textContent, countOf(b), b.getAttribute("aria-expanded")])).toEqual([
-      ["done", "Build", "✓ 2 of 2", "false"],
+      ["done", "Build", "✓ 2 of 2", compact ? "true" : "false"],
       ["active", "Polish", "1 of 2", "true"],
       ["todo", "Ship", "1 upcoming", "false"],
     ]);
-    if (compact) fireEvent.click(view.getByRole("button", { name: /1 of 2: show finished milestones in Polish/ }));
-    expect(rows()).toEqual(["M3", "M4"]);
+    expect(rows()).toEqual(compact ? ["M1", "M2", "M3", "M4"] : ["M3", "M4"]);
     // The sidebar's steps show their full titles (cut by CSS): a done one checked, the active one marked.
     expect(view.queryByTestId("goal-where")).toBeNull();
     // Only the panel's fold line carries the tiny per-phase bar, one segment per milestone.
     expect([...folds()[1].querySelectorAll(".bar-s i")].map((i) => (i as HTMLElement).dataset.s)).toEqual(compact ? [] : ["passed", "todo"]);
+    if (compact) {
+      fireEvent.click(folds()[0]);
+      expect(rows()).toEqual(["M3", "M4"]);
+    }
     fireEvent.click(folds()[0]);
-    if (compact) fireEvent.click(view.getByRole("button", { name: /show finished milestones in Build/ }));
     expect(rows()).toEqual(["M1", "M2", "M3", "M4"]);
     fireEvent.click(folds()[1]);
     expect(rows()).toEqual(["M1", "M2"]);
@@ -653,7 +640,6 @@ describe("GoalPanel", () => {
      sidebar's pane names it above), every milestone listed and checked, nothing of a PR or of no milestones. */
   async function expectDone(view: ReturnType<typeof render>, compact: boolean) {
     await waitFor(() => expect(view.getByRole("region", { name: "Goal" }).dataset.phase).toBe("done"));
-    if (compact) fireEvent.click(view.getByRole("button", { name: /finished milestones/ }));
     const items = [...within(view.getByRole("list", { name: "Milestones" })).getAllByTestId("milestone")];
     if (compact) {
       expect(items.map((li) => li.dataset.state)).toEqual(["done", "done"]);
