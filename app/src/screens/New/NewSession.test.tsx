@@ -233,7 +233,8 @@ describe("NewSession", () => {
     fireEvent.click(await startButton());
     // sup1 is running here: the engine asks what to do with it first.
     const ask = await screen.findByRole("group", { name: "Session already running" });
-    expect(ask.textContent).toContain("sup1");
+    expect(ask.textContent).toContain(live.goal);
+    expect(ask.textContent).not.toContain(live.id);
     fireEvent.click(within(ask).getByRole("button", { name: "Pause it and start fresh" }));
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
     expect(posts(daemon).map((r) => r.body)).toEqual([
