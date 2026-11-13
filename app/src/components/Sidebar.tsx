@@ -33,7 +33,7 @@ import { DaemonContext } from "../api/context";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { AgentDTO, GoalDTO, SessionDTO } from "../api/schema";
 import { inLibrary, inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
-import { LibraryIcon } from "./icons";
+import { GearIcon, InboxIcon, LibraryIcon } from "./icons";
 import { LibraryRail, type LibraryCounts } from "./LibraryRail";
 import { useLibraryFolders } from "./useLibraryFolders";
 import { recentEntries, useLibraryDocs } from "./useLibraryDocs";
@@ -53,7 +53,7 @@ import { useAppState, useStore } from "../store/useStore";
 import Logo from "./Logo";
 import { Preflight } from "./Preflight";
 import { SessionContext } from "./SessionContext";
-import { TerminalToggle } from "./TerminalPanel";
+import { TerminalToggle, useTerminals } from "./TerminalPanel";
 
 export interface SidebarProps {
   onBackFromSettings?(): void;
@@ -156,6 +156,46 @@ function LibraryButton({ open, waiting, onToggle }: { open: boolean; waiting: nu
       <LibraryIcon size={14} />
       {needs && <span className="absolute right-0.5 top-0.5 size-[7px] rounded-full bg-branch ring-2 ring-canvas-2" data-testid="library-dot" aria-hidden />}
     </button>
+  );
+}
+
+/* The first run's slim rail (no project yet, on New session): nothing to list,
+   so the column narrows to the mark, the Inbox and Settings, and at its foot
+   the terminal switch and the profile. The full sidebar comes back with the
+   first project or practice run. */
+const RAIL_BUTTON = "relative flex size-9 items-center justify-center rounded-md text-ink-3 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-branch";
+
+function SlimRail({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
+  const total = useAppState(waitingCount);
+  const terminals = useTerminals();
+  return (
+    <aside className="side flex w-16 shrink-0 flex-col items-center gap-[10px] border-r border-line bg-canvas-2 pb-3.5 pt-[18px]" aria-label="Sidebar" data-testid="slim-rail">
+      <Logo mark className="mb-3 text-[18px]" onHome={() => navigate({ screen: "new" })} />
+      <button type="button" className={RAIL_BUTTON} aria-label={total > 0 ? `Inbox, ${total} needing you` : "Inbox"} title="Inbox" data-testid="inbox-link" data-walkthrough="inbox" onClick={() => navigate({ screen: "inbox" })}>
+        <InboxIcon size={18} />
+        {total > 0 && <span className="side-nb absolute -right-1 -top-1 scale-75">{total}</span>}
+      </button>
+      <button type="button" className={RAIL_BUTTON} aria-label="Settings" title="Settings" onClick={() => navigate({ screen: "settings" })}>
+        <GearIcon size={18} />
+      </button>
+      <span className="flex-1" />
+      {terminals && (
+        <button
+          type="button"
+          className={`inline-flex h-[22px] items-center rounded-[var(--r)] border px-2 font-mono text-[11.5px] disabled:opacity-50 ${terminals.open ? "border-branch text-branch" : "border-line text-ink-2 hover:text-ink"}`}
+          aria-label="Terminal"
+          aria-pressed={terminals.open}
+          disabled={!terminals.here}
+          title="Show or hide the Terminal (⌃`)"
+          onClick={terminals.toggle}
+        >
+          &gt;_
+        </button>
+      )}
+      <button type="button" className="rounded-full focus-visible:outline-2 focus-visible:outline-branch" aria-label="Open Account › Usage" aria-current={settingsTab(route) ? "page" : undefined} data-testid="profile-pill" data-walkthrough="profile" onClick={() => navigate({ screen: "account", section: "usage", ask: ++usageAsks })}>
+        <AccountAvatar />
+      </button>
+    </aside>
   );
 }
 
@@ -727,8 +767,10 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
   const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
 
   // The live sessions in reading order (⌘1-9), and the paused ones after them.
-  const live = useMemo(() => (repos ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter((s) => !isPaused(s)).map((session) => ({ session, repo: repo.repo_root }))), [repos, sessions]);
-  const paused = useMemo(() => (repos ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter(isPaused).map((session) => ({ session, repo: repo.repo_root }))), [repos, sessions]);
+  // The practice repos last, each grouped as "Practice run" rather than by their folder's name.
+  const ordered = useMemo(() => (repos ? [...repos.filter((r) => !r.demo), ...repos.filter((r) => r.demo)] : null), [repos]);
+  const live = useMemo(() => (ordered ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter((s) => !isPaused(s)).map((session) => ({ session, repo: repo.repo_root }))), [ordered, sessions]);
+  const paused = useMemo(() => (ordered ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter(isPaused).map((session) => ({ session, repo: repo.repo_root }))), [ordered, sessions]);
   const all = useMemo(() => [...live, ...paused], [live, paused]);
 
   // The context pane's session: the one on screen, else the one kept from last time, while it is listed.
@@ -862,6 +904,9 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
     return () => window.removeEventListener("keydown", jump);
   }, [live, navigate, toggleLibrary]);
 
+  // No project at all yet, on New session: the first run's slim rail, not an empty sidebar.
+  if (repos !== null && repos.length === 0 && route.screen === "new") return <SlimRail route={route} navigate={navigate} />;
+
   let index = 0;
   return (
     <aside className="side flex min-h-0 w-[352px] max-w-full shrink-0 flex-col gap-[10px] overflow-hidden border-r border-line bg-canvas-2 px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
@@ -914,21 +959,27 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
         ) : repos.length === 0 ? (
           <p className="px-s1 text-xs text-ink-3">No project yet. Open a folder or clone a repository to start.</p>
         ) : (
-          repos.map((repo) => {
+          (ordered ?? repos).map((repo) => {
             const here = live.filter((r) => r.repo === repo.repo_root);
             const rested = paused.filter((r) => r.repo === repo.repo_root);
             if (here.length === 0 && rested.length === 0) return null;
             return (
-              <div key={repo.repo_root} className="flex flex-col" data-testid={`repo-${repo.name}`}>
-                <button
-                  type="button"
-                  className={`${REPO_HEADING} truncate text-left hover:text-ink`}
-                  title={`${repo.repo_root}: project settings`}
-                  aria-label={`Project settings for ${repo.name}`}
-                  onClick={() => navigate({ screen: "project-settings", repo: repo.repo_root })}
-                >
-                  {repo.name}
-                </button>
+              <div key={repo.repo_root} className="flex flex-col" data-testid={`repo-${repo.name}`} data-demo={repo.demo || undefined}>
+                {repo.demo ? (
+                  <div className={REPO_HEADING} title={repo.repo_root}>
+                    Practice run
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className={`${REPO_HEADING} truncate text-left hover:text-ink`}
+                    title={`${repo.repo_root}: project settings`}
+                    aria-label={`Project settings for ${repo.name}`}
+                    onClick={() => navigate({ screen: "project-settings", repo: repo.repo_root })}
+                  >
+                    {repo.name}
+                  </button>
+                )}
                 <ul className="flex flex-col gap-px">
                   {here.map(({ session }) => (
                     <SessionRows

@@ -9,7 +9,7 @@ import { ONBOARDED_KEY } from "../../api/providers";
 import { DaemonContext } from "../../api/context";
 import { SessionsProvider } from "../../store/sessions";
 import { StoreContext } from "../../store/useStore";
-import { WatchDemo } from "./Demo";
+import { PracticeRow } from "./Demo";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
@@ -105,7 +105,7 @@ describe("Onboarding", () => {
     // The composer, in the project just opened (the app's repo list has it, though no event said so).
     const composer = await screen.findByRole("form", { name: "Start a session" });
     expect(within(composer).getByLabelText("What should brindle work on?")).toBeTruthy();
-    expect(composer.textContent).toContain("in proj");
+    expect(within(composer).getByRole("button", { name: "Project: proj" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Welcome" })).toBeNull();
     expect(daemon.installs).toEqual(["claude"]);
     // The one thing over it: the first-time walkthrough, offered once now that setup is done.
@@ -502,12 +502,12 @@ describe("Onboarding", () => {
       <DaemonContext.Provider value={client}>
         <StoreContext.Provider value={createAppStore()}>
           <SessionsProvider client={client}>
-            <WatchDemo client={client} onStarted={onStarted} />
+            <PracticeRow client={client} onStarted={onStarted} />
           </SessionsProvider>
         </StoreContext.Provider>
       </DaemonContext.Provider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Watch brindle work on a practice repo" }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Practice run" })).getByRole("button"));
     const card = await screen.findByTestId("preflight");
     const box = within(card).getByRole("checkbox", { name: /Claude Code's security notes/ }) as HTMLInputElement;
     fireEvent.click(box);
