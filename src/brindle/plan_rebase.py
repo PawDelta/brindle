@@ -44,9 +44,14 @@ class Suggestion:
 
 @dataclass(frozen=True)
 class RebaseResult:
+    """``applied``: the local hunks :func:`rebase` put into ``text``, at their
+    offsets in the remote text, so a caller holding the remote text (a live
+    draft) can make exactly those edits. Only :func:`rebase` sets it."""
+
     text: str
     collisions: tuple[Collision, ...] = ()
     suggestions: tuple[Suggestion, ...] = ()
+    applied: tuple[Hunk, ...] = ()
 
 
 def _split(base: str, text: str) -> tuple[int, int]:
@@ -275,7 +280,11 @@ def rebase(base: str, local: str, remote: str) -> RebaseResult:
                             if h.end <= left and not inside(h))
         collisions.append(Collision(ident, offset, offset + len(before), base[left:right],
                                     _render(base, left, right, chosen), before))
-    return RebaseResult(_render(base, 0, len(base), edits), tuple(collisions))
+    # A safe hunk touches no remote one, so every remote hunk before it ends at
+    # or before its start (an insertion at the same point renders first).
+    applied = tuple(Hunk(h.start + shift, h.end + shift, h.text) for h in safe
+                    for shift in [sum(len(t.text) - (t.end - t.start) for t in theirs if t.end <= h.start)])
+    return RebaseResult(_render(base, 0, len(base), edits), tuple(collisions), applied=applied)
 
 
 def apply_resolution(

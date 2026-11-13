@@ -1159,8 +1159,20 @@ CREATE TABLE IF NOT EXISTS plan_drafts (
     state BLOB NOT NULL,           -- a Loro snapshot
     seq INTEGER NOT NULL,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    supervisor_peer INTEGER        -- the peer id the session's supervisor writes under; NULL until it first does
 );
+-- The draft text handed to the supervisor (plans.read_draft), by the id its
+-- next write names: its changes are worked out against this, never against
+-- the draft as it is when they land. Gone with the replica.
+CREATE TABLE IF NOT EXISTS plan_draft_bases (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    doc_id TEXT NOT NULL REFERENCES plan_drafts(doc_id) ON DELETE CASCADE,
+    texts TEXT NOT NULL,           -- JSON: section id (or lede) -> the text handed over
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_draft_bases_plan ON plan_draft_bases(plan_id, created_at);
 -- Updates a replica received before the changes they build on: a snapshot
 -- leaves them out, so they wait here and are imported again on every load.
 CREATE TABLE IF NOT EXISTS plan_draft_pending (
@@ -1659,6 +1671,8 @@ class DB:
             self.conn.execute("ALTER TABLE plan_shares ADD COLUMN review_asked INTEGER NOT NULL DEFAULT 0")
             # What these shares saw before it was kept is unknown: nothing may be assumed unreviewed.
             self.conn.execute("UPDATE plan_shares SET review_asked=1")
+        if "supervisor_peer" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_drafts)")}:
+            self.conn.execute("ALTER TABLE plan_drafts ADD COLUMN supervisor_peer INTEGER")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:
