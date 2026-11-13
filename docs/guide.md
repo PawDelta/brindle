@@ -774,6 +774,7 @@ Goal driving, merge gates and cleanup:
 | `pipeline` | `true` | brindle reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
+| `fast_path` | `false` | the supervisor may send a small request straight to one light or medium worker (`assign(fast_path=true)`): no goal, milestones or audit; one light review and the checks before it merges |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `permission_policy` | `"on"` | `"on"`: brindle answers agents' permission requests from its rules, on every plan (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. A value you set always wins over the default. The only permission switch: a leftover `permission_essentials` key is ignored |
@@ -1585,6 +1586,16 @@ trusts the passing checks and doesn't debate how deep the tests go. Only its
 approval of that commit finishes the goal. If it finds gaps, the supervisor gets
 them as a message and keeps working until a fresh audit approves.
 `"goal_audit": false` turns it off.
+
+**The fast path.** For a small request, the goal, milestones, milestone checks and
+completion audit can cost more than the work itself. With `"fast_path": true` the
+supervisor sends a small, well-scoped request (one area, no design decisions, roughly
+under 15 minutes of work) straight to one light or medium worker with a finish line:
+`assign(fast_path=true, weight="medium", done_when=...)`. There is no goal, no
+milestones and no audit. The branch gets one light review (blockers only, no second
+review) and the repo's checks, then merges, and the supervisor relays the result in
+one line. The supervisor decides what counts as small. Say "fast path" or "full path"
+to override it. It's off by default.
 
 **Spending fewer tokens.** Workers run only the tests that cover their change while
 they work. The full suite runs once: as the repo's `checks` before a branch merges,
