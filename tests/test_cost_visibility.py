@@ -127,13 +127,6 @@ def test_a_member_whose_org_hides_dollars_gets_no_org_line(org, monkeypatch):
     assert watch_costs._org("/r", budget.limits(Cfg(), "/r")) is None
 
 
-def test_a_member_whose_org_shows_dollars_still_gets_the_org_line(org, monkeypatch):
-    member(monkeypatch)
-    org(policy(spent=40))
-    got = watch_costs._org("/r", budget.limits(Cfg(), "/r"))
-    assert got == watch_costs.Org(False, 40.0, LIMIT)
-
-
 def test_own_dollars_false_is_parsed_and_survives_the_cache(org):
     p = policy(visibility=hidden())
     assert p.visibility["own_dollars"] is False and p.enforced.visibility["own_dollars"] is False

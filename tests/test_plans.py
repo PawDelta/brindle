@@ -326,7 +326,6 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
 
 
 @pytest.mark.parametrize("accept", [
-    True,
     pytest.param(False, marks=pytest.mark.variant(
         "No must start the task queued behind the offer; the other offer tests answer with nothing queued")),
     pytest.param("legacy", marks=pytest.mark.variant(

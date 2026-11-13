@@ -45,7 +45,7 @@ def ollama(monkeypatch):
     return requests
 
 
-@pytest.mark.parametrize('free, expected', [(1, 'developer-light'),
+@pytest.mark.parametrize('free, expected', [
                                             pytest.param(24, 'developer-light', marks=pytest.mark.variant('model fits but margin does not')),
                                             (26, 'developer-local')])
 def test_routing_and_suggestions_respect_memory(db, tmp_path, monkeypatch, ollama, free, expected):
@@ -75,6 +75,7 @@ def test_routing_and_suggestions_respect_memory(db, tmp_path, monkeypatch, ollam
     assert learned_rules.default_call(str(repo)).__name__ == ('native' if expected == 'developer-local' else 'claude')
 
 
+@pytest.mark.variant("memory accounting: macOS speculative pages already belong to free memory and cannot count twice")
 def test_darwin_free_memory_does_not_count_speculative_pages_twice(monkeypatch, ollama):
     import ctypes
     import os

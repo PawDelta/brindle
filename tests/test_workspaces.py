@@ -38,7 +38,10 @@ def test_failed_setup_keeps_workspace(db, repo):
     assert db.get_workspace(created.workspace.id)
 
 
-@pytest.mark.parametrize("configured", [None, "../elsewhere"])
+@pytest.mark.parametrize("configured", [
+    pytest.param(None, marks=pytest.mark.variant("A worktree inside the repo must stay ignored and trusted without trusting the main checkout")),
+    "../elsewhere",
+])
 def test_new_worktrees_go_under_the_repo_and_stay_out_of_git_status(db, repo, configured):
     if configured:
         write_config(repo, worktree_root=configured)

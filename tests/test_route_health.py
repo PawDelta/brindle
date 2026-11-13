@@ -29,7 +29,10 @@ def entitlement(plan):
     return Entitlement("user_1", "org_1", plan, "active", frozenset(), 1, 0, 10_000_000_000, "k")
 
 
-@pytest.mark.parametrize("plan,sent", [("team", 2), ("pro", 0)])   # the backend takes events from team orgs only
+@pytest.mark.parametrize("plan,sent", [
+    ("team", 2),
+    pytest.param("pro", 0, marks=pytest.mark.variant("entitlement: route-health events cannot be sent for an individual Pro account")),
+])
 def test_repeats_are_one_event_with_a_count_for_a_team_org(plan, sent, monkeypatch):
     monkeypatch.setattr(license, "current", lambda **kw: entitlement(plan))
     recorder = Recorder()

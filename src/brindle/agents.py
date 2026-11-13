@@ -54,6 +54,13 @@ from brindle.sidebar_follow import (
 
 log = logging.getLogger(__name__)
 
+TEST_GUIDANCE = """Full coverage is not a goal. A new feature needs a test proving its main path
+works; add a failure-path test only when that path matters. A bug fix needs one
+regression test that fails on the base and passes after the fix. Refactors,
+renames, docs, config, wording and pure glue need no new tests. Prefer extending
+an existing test or parametrize table. Never test wording, constants, defaults
+or a mock's own arguments. Every added test or row must catch a distinct bug."""
+
 WORKER_FOOTER = """
 
 ---
@@ -61,11 +68,11 @@ You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
 {guidance}
 Run only the tests that cover your change (a test file or a `-k` filter), not
 the full suite: brindle's merge gate runs the full suite on your branch.
+""" + TEST_GUIDANCE + """
 Before you finish, check your work against the task and its finish line, item
-by item: each behaviour it asks for needs a test that would fail without your
-change, and a requirement with no such test isn't done yet. If the task turns
-out too big for one branch, finish a coherent part and say exactly what's left
-(and how you'd split it) rather than leaving every part half done.
+by item. If the task turns out too big for one branch, finish a coherent part
+and say exactly what's left (and how you'd split it) rather than leaving every
+part half done.
 
 When you have finished:
 1. Commit your work to this branch with a clear message (do not push or merge).
@@ -101,11 +108,11 @@ Your shell may start in another directory, so begin every Bash command with
 `cd {path} && ` (or use `git -C {path}`), and give file tools absolute paths
 under that directory. Don't change files anywhere else, and don't switch branches.
 {guidance}
+""" + TEST_GUIDANCE + """
 Before you finish, check your work against the task and its finish line, item
-by item: each behaviour it asks for needs a test that would fail without your
-change, and a requirement with no such test isn't done yet. If the task turns
-out too big for one branch, finish a coherent part and say exactly what's left
-(and how you'd split it) rather than leaving every part half done.
+by item. If the task turns out too big for one branch, finish a coherent part
+and say exactly what's left (and how you'd split it) rather than leaving every
+part half done.
 
 When you have finished:
 1. Commit your work there on `{branch}` with a clear message (do not push or merge).

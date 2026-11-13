@@ -76,7 +76,10 @@ def test_the_supervisor_cannot_stop_until_it_deals_with_the_worker(db, boss, wor
     assert "w1" not in (autopilot.on_stop(db, boss, {}) or {"reason": ""})["reason"]
 
 
-@pytest.mark.parametrize("case", ["gave_up", "budget"])
+@pytest.mark.parametrize("case", [
+    pytest.param("gave_up", marks=pytest.mark.variant("A worker whose takeover gave up must not block its supervisor again on later stops")),
+    "budget",
+])
 def test_gave_up_stops_blocking(db, boss, worker, told, monkeypatch, case):
     now = T0
     monkeypatch.setattr(open_items.time, "time", lambda: now)
@@ -183,7 +186,7 @@ def test_a_stuck_worker_is_taken_over_after_the_hour(db, boss, takeover, told, v
 
 @pytest.mark.parametrize("wakes", [
     pytest.param("claim", marks=pytest.mark.variant("the worker wakes between the sweep's read and the claim")),
-    "preparing",
+    pytest.param("preparing", marks=pytest.mark.variant("Issue 384: a worker waking during replacement preparation must keep its work and dependencies")),
 ])
 def test_a_worker_that_came_back_is_not_retired(db, boss, takeover, monkeypatch, wakes):
     """Checked once more after everything that can take a while, and what

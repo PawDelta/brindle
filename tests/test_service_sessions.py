@@ -82,7 +82,8 @@ def test_a_new_worktree_session_launches_before_its_setup_and_code_map_rebuild(d
     assert order == ["launch", "rebuild", "setup"]
 
 
-@pytest.mark.parametrize("caller_id", [pytest.param("caller", id="concurrent_sessions")])
+@pytest.mark.parametrize("caller_id", [pytest.param("caller", id="concurrent_sessions",
+    marks=pytest.mark.variant("Continuing another session must not pause the live session issuing the command"))])
 def test_continue_refuses_to_pause_the_session_running_it(db, repo, monkeypatch, caller_id):
     ws = workspaces.adopt_root(db, str(repo))
     caller = add(db, ws, caller_id)

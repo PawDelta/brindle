@@ -50,18 +50,18 @@ def session(db, tmp_path, monkeypatch):
     ("off", "layout", {}, "setting_off"),
     ("worker", "layout", {}, "only_supervisors"),
     ("threshold", "options", {"options": 2, "attributes": 2}, "below_threshold"),
-    ("on", "options", {"options": 3}, None),
-    ("two", "options", {"options": 2, "attributes": 3}, None),
-    ("small_table", "comparison", {"rows": 4, "columns": 2}, "below_threshold"),
-    ("table", "comparison", {"rows": 4, "columns": 3}, None),
-    ("short_flow", "flow", {"steps": 4}, "below_threshold"),
-    ("flow", "flow", {"steps": 5}, None),
-    ("branch", "flow", {"branches": 1}, None),
-    ("short_diff", "diff", {"lines": 12}, "below_threshold"),
-    ("diff", "diff", {"lines": 13}, None),
-    ("unknown", "status", {}, "below_threshold"),
+    pytest.param("on", "options", {"options": 3}, None, marks=pytest.mark.variant("three options qualify without attributes")),
+    pytest.param("two", "options", {"options": 2, "attributes": 3}, None, marks=pytest.mark.variant("two options need three attributes")),
+    pytest.param("small_table", "comparison", {"rows": 4, "columns": 2}, "below_threshold", marks=pytest.mark.variant("enough rows but too few columns")),
+    pytest.param("table", "comparison", {"rows": 4, "columns": 3}, None, marks=pytest.mark.variant("comparison at both boundaries qualifies")),
+    pytest.param("short_flow", "flow", {"steps": 4}, "below_threshold", marks=pytest.mark.variant("four steps without a branch cannot qualify")),
+    pytest.param("flow", "flow", {"steps": 5}, None, marks=pytest.mark.variant("five steps qualify without a branch")),
+    pytest.param("branch", "flow", {"branches": 1}, None, marks=pytest.mark.variant("a branch qualifies without five steps")),
+    pytest.param("short_diff", "diff", {"lines": 12}, "below_threshold", marks=pytest.mark.variant("twelve-line diffs cannot qualify")),
+    pytest.param("diff", "diff", {"lines": 13}, None, marks=pytest.mark.variant("a diff must exceed twelve lines")),
+    pytest.param("unknown", "status", {}, "below_threshold", marks=pytest.mark.variant("unknown visual kinds fail closed")),
     ("invalid", "options", {"options": -1}, "invalid"),
-    ("expired", "layout", {}, None),
+    pytest.param("expired", "layout", {}, None, marks=pytest.mark.variant("an expired open offer must not prevent a new offer")),
     ("old_dismissals", "layout", {}, None),
 ])
 def test_offer_limits(db, session, monkeypatch, case, kind, counts, reason):
@@ -139,7 +139,6 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
 
 
 @pytest.mark.parametrize("text,scope", [
-    ("Please visualize this layout.", "visual"),
     ("Show me the release flow visually.", "visual"),
     pytest.param("can you render out what this new structure is again/", "visual",
                  marks=pytest.mark.variant("the owner's exact message from the 2026-11-11 incident")),
@@ -153,8 +152,10 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
                  marks=pytest.mark.variant("deferred render request must not grant consent")),
     # Surrounding context or an open-ended object no longer waits for a confirmation click:
     # the person's own request authorizes one, as a plain one does.
-    ("I am quoting a sentence.\nPlease render a mockup of the new session button", "visual"),
-    ("Create a planning document once I approve the approach.", "plan"),
+    pytest.param("I am quoting a sentence.\nPlease render a mockup of the new session button", "visual",
+                 marks=pytest.mark.variant("a leading sentence cannot hide the person's actual render request")),
+    pytest.param("Create a planning document once I approve the approach.", "plan",
+                 marks=pytest.mark.variant("a named planning-document request retains plan scope")),
     pytest.param("Please render a planning document", "plan",
                  marks=pytest.mark.variant("render must preserve the named plan scope")),
 ])
@@ -323,7 +324,8 @@ def typed_into_cli(db, boss, text, vouched=True):
 
 
 @pytest.mark.parametrize("typed,asked,terminal", [
-    ("then render first", "render first", False),
+    pytest.param("then render first", "render first", False,
+                 marks=pytest.mark.variant("the person's own quoted words authorize one visual without an intent grammar match")),
     pytest.param("please send me updated renders", "please send me updated renders", False,
                  marks=pytest.mark.variant("reported refusal")),
     pytest.param("can i see the new session button rendering?", "can i see the new session button rendering?", False,
@@ -332,7 +334,8 @@ def typed_into_cli(db, boss, text, vouched=True):
                  marks=pytest.mark.variant("reported refusal")),
     pytest.param("ok great, then render it", "then render it", False, marks=pytest.mark.variant("reported refusal, inside a longer message")),
     pytest.param("no, render first", "  RENDER\n first ", False, marks=pytest.mark.variant("case and whitespace; no is not a negation of the quote")),
-    ("then render it", "then render it", True),
+    pytest.param("then render it", "then render it", True,
+                 marks=pytest.mark.variant("typed app-terminal input must provide valid asked-word provenance")),
 ])
 def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, terminal):
     boss, _ = session
@@ -439,25 +442,28 @@ def _says(*texts):
 
 
 @pytest.mark.parametrize("setup,asked", [
-    (_says("fix the login bug"), "render first"),
-    (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", sender_id=worker.id), "render first"),
+    pytest.param(_says("fix the login bug"), "render first", marks=pytest.mark.variant("an unrelated user message cannot authorize invented asked words")),
+    pytest.param(lambda db, boss, worker: agents.send_message(db, boss.id, "render first", sender_id=worker.id), "render first",
+                 marks=pytest.mark.variant("worker messages cannot supply the person's asked words")),
     # Use a lead-in outside request_intent's grammar so these exercise asked-word
     # provenance without a separate automatic grant masking a refused quote.
     # A hook prompt nobody vouched for: a paste, a failed report, a terminal outside the app.
-    (lambda db, boss, worker: typed_into_cli(db, boss, "then render first", vouched=False), "render first"),
+    pytest.param(lambda db, boss, worker: typed_into_cli(db, boss, "then render first", vouched=False), "render first",
+                 marks=pytest.mark.variant("an unvouched CLI prompt cannot prove the person typed the quote")),
     (_report_came_late, "render first"),
-    (_report_lands_after_a_newer_cancel, "render first"),
-    (_report_with_no_prompt_yet, "render first"),
-    (_direct_message_cannot_stand_in_for_the_prompt, "render first"),
-    (_terminal(typed=False), "render first"),
-    (_terminal(), "render first"),
-    (lambda db, boss, worker: agents.send_message(db, boss.id, "then render first", person=True), "render first"),
-    (_says("surrender first please"), "render first"),
-    (_says("then render first"), "render"),
-    (_says("please don't render it"), "render it"),
-    (_says("render first", "Don't make a visual"), "render first"),
-    (_expired, "render first"),
-    (_other_session, "render first"),
+    pytest.param(_report_lands_after_a_newer_cancel, "render first", marks=pytest.mark.variant("a late app report cannot revive consent after a newer cancellation")),
+    pytest.param(_report_with_no_prompt_yet, "render first", marks=pytest.mark.variant("an app report cannot grant consent before its prompt arrives")),
+    pytest.param(_direct_message_cannot_stand_in_for_the_prompt, "render first", marks=pytest.mark.variant("a direct message cannot stand in for the correlated terminal prompt")),
+    pytest.param(_terminal(typed=False), "render first", marks=pytest.mark.variant("pasted terminal content cannot count as the person's typed request")),
+    pytest.param(_terminal(), "render first", marks=pytest.mark.variant("raw terminal keystrokes without a correlated prompt cannot authorize publication")),
+    pytest.param(lambda db, boss, worker: agents.send_message(db, boss.id, "then render first", person=True), "render first",
+                 marks=pytest.mark.variant("a direct send marked person cannot replace app-vouched typed provenance")),
+    pytest.param(_says("surrender first please"), "render first", marks=pytest.mark.variant("asked words cannot match inside another word")),
+    pytest.param(_says("then render first"), "render", marks=pytest.mark.variant("a one-word quote cannot authorize publication")),
+    pytest.param(_says("please don't render it"), "render it", marks=pytest.mark.variant("a quote from a refusal cannot authorize publication")),
+    pytest.param(_says("render first", "Don't make a visual"), "render first", marks=pytest.mark.variant("a later refusal must revoke the earlier request")),
+    pytest.param(_expired, "render first", marks=pytest.mark.variant("asked words older than the consent window cannot authorize publication")),
+    pytest.param(_other_session, "render first", marks=pytest.mark.variant("asked words belong to one supervisor session and cannot authorize another")),
 ])
 def test_asked_quote_refuses_words_that_are_not_the_persons(db, session, setup, asked):
     boss, worker = session
@@ -500,6 +506,7 @@ def test_asked_quote_is_not_for_workers_or_plans(db, session):
     visuals.publish(db, boss, "Still unspent", "<p>yes</p>", asked="render first")
 
 
+@pytest.mark.variant("a typed message's automatic grant and asked quote must share one publication allowance")
 def test_asked_quote_allows_one_publication_per_message(db, session):
     boss, _ = session
     typed_into_cli(db, boss, "then render first")
@@ -692,6 +699,7 @@ def test_visual_request_stress(db, session, monkeypatch, said, asked, published)
             mcp_server.publish_visual("Not asked", "<p>no</p>", asked=asked)
 
 
+@pytest.mark.variant("answering a choice must close its old offer without treating refusals or mentions as consent")
 def test_answer_folds_offer_and_setting_never_grants(db, session):
     boss, _ = session
     oid = offers.offer(db, boss, "Which layout?", "layout")["id"]

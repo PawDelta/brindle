@@ -62,7 +62,8 @@ def test_cli_new_pr(db, pr_repo, monkeypatch):
     assert ws.base_branch == "release"
 
 
-@pytest.mark.parametrize("extra", [["feature"], ["--base", "main"]])
+@pytest.mark.parametrize("extra", [pytest.param(["feature"], marks=pytest.mark.variant(
+    "new --pr must reject an explicit branch before contacting GitHub")), ["--base", "main"]])
 def test_cli_new_pr_rejects_branch_or_base(pr_repo, monkeypatch, extra):
     calls = fake_gh(monkeypatch)
     monkeypatch.chdir(pr_repo)

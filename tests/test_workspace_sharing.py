@@ -77,9 +77,9 @@ def two_sessions(db, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("prefix, branch, task, made", [
-    ("", "feat/shared", "task", "feat/shared"),
+    pytest.param("", "feat/shared", "task", "feat/shared", marks=pytest.mark.variant("Branch claim precedes the first worker row")),
     # Generated names: the same hint both times, and a task long enough to truncate.
-    ("", None, "a" * 120, f"brindle/developer/{'a' * 40}-abcd"),
+    pytest.param("", None, "a" * 120, f"brindle/developer/{'a' * 40}-abcd", marks=pytest.mark.variant("Identically truncated generated names must stay isolated")),
     pytest.param("team/", "feat/shared", "task", "team/feat/shared",
                  marks=pytest.mark.variant("bypass: the prefix create adds hid the owner")),
     pytest.param("", "x" * 95 + ".lock-more", "task", "x" * 95,

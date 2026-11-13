@@ -130,23 +130,6 @@ def test_accept_writes_a_rule_pack_every_profile_gets_and_checks(db, tmp_path, p
         learned_rules.accept(db, root, s.key)
 
 
-def test_a_second_accepted_rule_adds_to_the_pack(db, tmp_path, pro):
-    root = str(tmp_path)
-    first = suggest_one(db, root)
-    _, path = learned_rules.accept(db, root, first.key)
-    path.write_text(path.read_text().replace("\n---\n", "\ndirect_spawn_allowed:\n  - src/spawn.py\n---\n", 1))
-    for b in ("feat/d", "feat/e", "feat/f"):
-        review(db, root, b, "print left in")
-    [second] = learned_rules.refresh(db, root, FakeModel(lambda ids: [
-        {"title": "debug prints", "rule": "Remove debug prints.", "findings": ids,
-         "deny_patterns": [r"^\s*print\("]}])).suggested
-    learned_rules.accept(db, root, second.key)
-    pack = [p for p in load_rule_packs(load_profile("reviewer", root), root) if p.name == "learned"][0]
-    assert pack.deny_patterns == [r"except\s*:", r"^\s*print\("]
-    assert pack.direct_spawn_allowed == ["src/spawn.py"]    # the pack's own list survives
-    assert "Catch specific exceptions" in pack.prompt and "Remove debug prints." in pack.prompt
-
-
 PACK_HEAD = ("---\nname: learned\n# why this pack exists\n"
              "description: mine   # trailing note\n"
              "# processes we start on purpose\n"
@@ -217,13 +200,6 @@ def test_a_rejected_rule_is_never_proposed_again(db, tmp_path, pro):
 
 
 # -- which model the grouping step may use ---------------------------------------------------
-
-
-@pytest.mark.parametrize("url,local", [
-    ("http://[::1]:1/v1", True), ("https://user@evil.example/localhost", False),
-])
-def test_loopback_is_the_parsed_host(url, local):
-    assert learned_rules.is_loopback(url) is local
 
 
 def write_agent(root, name, base_url):

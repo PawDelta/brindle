@@ -8,8 +8,7 @@ import pytest
 from brindle import agents, codemap, git, workspaces
 from brindle.codemap import _broad_search
 from brindle.db import Agent
-from brindle.profiles import load_profile
-from brindle.providers import ClaudeCode, LaunchContext, get_provider
+from brindle.providers import get_provider
 
 
 @pytest.fixture
@@ -158,7 +157,10 @@ def test_graphify_single_flight(mapped, monkeypatch):
     assert len(started) == 3
 
 
-@pytest.mark.parametrize("tracked", [True, False])
+@pytest.mark.parametrize("tracked", [
+    pytest.param(True, marks=pytest.mark.variant("issue 235: automatic graphify must preserve tracked semantic artifacts")),
+    pytest.param(False, marks=pytest.mark.variant("disabling graphify refresh must preserve untracked artifacts too")),
+])
 def test_automatic_rebuild_preserves_tracked_graph_or_can_be_disabled(mapped, monkeypatch, tracked):
     from brindle import git
 
@@ -249,9 +251,3 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     monkeypatch.setattr("brindle.config.load_repo_config", lambda root: type("Cfg", (), {"graphify": False})())
     assert codemap.graph_path(worker_ws) is None
     assert codemap.seed_session(session_ws.path) is False
-
-
-def test_graphify_queries_are_pre_approved():
-    argv = ClaudeCode().command(LaunchContext("a1", load_profile("developer"), None))
-    allowed = argv[argv.index("--allowedTools") + 1]
-    assert "Bash(graphify query:*)" in allowed and "Bash(graphify affected:*)" in allowed

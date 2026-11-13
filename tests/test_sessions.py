@@ -61,7 +61,9 @@ def test_continue_backfills_a_live_legacy_root_without_enabling_workers(db, root
     assert db.get_autopilot("w1") is None
 
 
-@pytest.mark.parametrize("own_dirty", [False, True])
+@pytest.mark.parametrize("own_dirty", [False,
+    pytest.param(True, marks=pytest.mark.variant("Forgetting a session must preserve its own dirty worktree as well as dirty child worktrees")),
+])
 def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches_and_own_worktree(
     db, root, repo, own_dirty, tmp_path, tmp_path_factory
 ):
@@ -582,7 +584,7 @@ def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, roo
     assert set(began[:2]) == {"recent", "older"} and set(began[2:]) == {"same-tmux", "oldest"}
 
 
-@pytest.mark.parametrize("case", ["back", "hung", pytest.param("switched", marks=pytest.mark.variant("reported wait: switching sessions during the head start kept the new one waiting")), pytest.param("unreadable", marks=pytest.mark.variant(
+@pytest.mark.parametrize("case", [pytest.param("back", marks=pytest.mark.variant("The viewed session must recover ahead of more recently active sessions")), "hung", pytest.param("switched", marks=pytest.mark.variant("reported wait: switching sessions during the head start kept the new one waiting")), pytest.param("unreadable", marks=pytest.mark.variant(
     "a viewed-session file that isn't UTF-8 raised past the OSError handler and stopped every session coming back"))])
 def test_viewed_session_comes_back_first(db, root, monkeypatch, case):
     """The session the app showed last comes back first and alone, though it
@@ -1269,7 +1271,10 @@ def test_resume_launch_step_timing(db, root, monkeypatch, caplog):
         "provider": "codex", "command_s": 4.0, "codex_trust_s": 0.25}
 
 
-@pytest.mark.parametrize("early", [False, True], ids=["while-busy", "before-ordered"])
+@pytest.mark.parametrize("early", [
+    pytest.param(False, marks=pytest.mark.variant("Opening a session during another recovery must move it ahead of queued sessions")),
+    True,
+], ids=["while-busy", "before-ordered"])
 def test_recovery_opened_session_first(db, root, monkeypatch, early):
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -1319,7 +1324,10 @@ def test_a_pane_that_cant_say_whose_it_is_runs_nothing(tmp_path, monkeypatch):
     assert not ran.exists()
 
 
-@pytest.mark.parametrize("level, checks", [(1, 1), (spawn.PRESSURE_CRITICAL, 2)])
+@pytest.mark.parametrize("level, checks", [
+    pytest.param(1, 1, marks=pytest.mark.variant("Busy CPU alone must not hold session recovery indefinitely")),
+    (spawn.PRESSURE_CRITICAL, 2),
+])
 def test_a_recovery_wait_gives_up_on_busy_cpu_but_holds_for_critical_memory(monkeypatch, level, checks):
     import threading
 
@@ -1491,6 +1499,7 @@ def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, mon
         os.close(terminal)
 
 
+@pytest.mark.variant("A missing saved conversation must relaunch with the worker's finish line and reporting instructions")
 def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, root, monkeypatch, tmp_path):
     """a.task is stored raw (see agents.decorate_worker_prompt); a fresh
     restart needs the finish line, WORKER_FOOTER and /goal wrapper rebuilt,
@@ -1540,7 +1549,10 @@ def test_dropping_a_session_spares_a_pane_that_now_belongs_to_a_launching_chat(d
     assert tmux.window_alive(pane) == survives
 
 
-@pytest.mark.parametrize("elsewhere", [False, True])
+@pytest.mark.parametrize("elsewhere", [
+    pytest.param(False, marks=pytest.mark.variant("Retention must not delete a live failed chat, its records, or its worktree")),
+    True,
+])
 def test_failed_but_running_session_survives_retention(db, tmp_path, monkeypatch, elsewhere):
     """A chat marked "failed" (its brief's delivery unconfirmed, an auth
     error on a turn) keeps running. Retention once took it for a paused

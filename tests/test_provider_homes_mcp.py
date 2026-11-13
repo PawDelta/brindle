@@ -35,6 +35,7 @@ def _homes(tmp_path, monkeypatch):
     return ours
 
 
+@pytest.mark.variant("MCP home import must strip OAuth and secret fields while preserving existing local servers")
 def test_signed_in_home_gets_the_persons_mcp_servers_without_secrets(tmp_path, monkeypatch):
     ours = _homes(tmp_path, monkeypatch)
     (ours / ".claude.json").write_text(json.dumps({"mcpServers": {"local": MINE}}))

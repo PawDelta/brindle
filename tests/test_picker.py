@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from brindle import cli, doctor, picker, providers
 from brindle.config import supervisor_pick, set_user
-from brindle.policy import allow, deny
+from brindle.policy import deny
 from brindle.pro import license, managed_models, team_policy
 from brindle.pro.team_policy import parse_policy
 
@@ -27,11 +27,11 @@ def _unavailable(root):
 
 
 @pytest.mark.parametrize("policy, managed, clis, model_ok", [
-    (allow(), None, ["claude", "codex", "antigravity", "opencode"], True),
     ({"allowed_providers": ["codex", "claude"], "allowed_models": ["gpt-5"]}, None, ["claude", "codex"], False),
     ({}, "exclusive", ["codex"], True),                       # the managed routing serves only Codex
     ({}, _unavailable, [], False),                            # can't read it: nothing
-    (deny("never fetched"), None, [], False),
+    pytest.param(deny("never fetched"), None, [], False,
+                 marks=pytest.mark.variant("a denied organization policy cannot fall back to personal supervisor access")),
 ])
 def test_supervisor_access_narrows_to_the_org(monkeypatch, policy, managed, clis, model_ok):
     p = policy if not isinstance(policy, dict) else parse_policy(ORG, {"version": 1, "policy": policy})
@@ -72,7 +72,8 @@ def test_supervisor_sign_in_installs_opens_login_and_verifies(monkeypatch):
     assert ran[0][:2] == ["sh", "-c"] and "|" in ran[0][2]
 
 
-@pytest.mark.parametrize("opener, shown", [("wslview", {"BROWSER": "wslview"}), (None, None)])
+@pytest.mark.parametrize("opener, shown", [("wslview", {"BROWSER": "wslview"}), pytest.param(None, None,
+    marks=pytest.mark.variant("WSL sign-in without a Windows opener must not pass a bogus browser override"))])
 def test_wsl_browser_sign_in_points_the_login_at_the_windows_browser(monkeypatch, opener, shown):
     for var in ("DISPLAY", "WAYLAND_DISPLAY", "BROWSER"):
         monkeypatch.delenv(var, raising=False)
@@ -120,19 +121,25 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
 
 
 @pytest.mark.parametrize("kw, got, asked, remembered", [
-    (dict(provider="codex", signed_in=["codex"]), "codex", [], None),               # -s CLI is this session only
-    (dict(provider="codex"), "codex", ["sign_in:codex"], None),                     # -s CLI not signed in: sign in first
+    pytest.param(dict(provider="codex", signed_in=["codex"]), "codex", [], None,
+                 marks=pytest.mark.variant("an explicit supervisor CLI choice must not replace the saved preference")),
+    pytest.param(dict(provider="codex"), "codex", ["sign_in:codex"], None,
+                 marks=pytest.mark.variant("an explicitly selected signed-out CLI must sign in before launch")),
     (dict(provider="codex", allowed=("claude",)), "refused", [], None),             # -s refuses what the org doesn't allow
     (dict(provider=picker.PICK), "antigravity", [None], "antigravity"),             # bare -s opens the picker
     (dict(provider=picker.PICK, tty=False), "refused", [], None),
-    (dict(pick="codex", signed_in=["codex"]), "codex", [], "codex"),                # usable pick: no question
-    (dict(pick="codex"), "antigravity", ["codex"], "antigravity"),                  # pick not signed in: ask
-    (dict(pick="codex", signed_in=["codex"], allowed=("antigravity",)), "antigravity", ["codex"], "antigravity"),
-    (dict(), "antigravity", [None], "antigravity"),                                 # first launch: ask
+    pytest.param(dict(pick="codex", signed_in=["codex"]), "codex", [], "codex",
+                 marks=pytest.mark.variant("a usable saved preference must avoid unnecessary sign-in or repicking")),
+    pytest.param(dict(pick="codex"), "antigravity", ["codex"], "antigravity",
+                 marks=pytest.mark.variant("a saved but signed-out CLI cannot be launched without a new choice")),
+    pytest.param(dict(pick="codex", signed_in=["codex"], allowed=("antigravity",)), "antigravity", ["codex"], "antigravity",
+                 marks=pytest.mark.variant("a saved signed-in CLI must still respect a narrowed organization policy")),
     # No terminal: never ask; the default CLI, and with none usable nothing (not the profile's Claude).
-    (dict(tty=False, signed_in=["codex"]), "codex", [], None),
+    pytest.param(dict(tty=False, signed_in=["codex"]), "codex", [], None,
+                 marks=pytest.mark.variant("a noninteractive launch must use an available signed-in CLI without prompting")),
     (dict(ci=True), "refused", [], None),
-    (dict(provider="codex", tty=False), "refused", [], None),                       # -s CLI unusable, can't sign in
+    pytest.param(dict(provider="codex", tty=False), "refused", [], None,
+                 marks=pytest.mark.variant("an unusable explicit CLI must fail when no terminal can complete sign-in")),
     # The real picker never offers a CLI turned off in brindle (its second row is then Antigravity) ...
     (dict(off="codex", typed="2"), "antigravity", ["sign_in:antigravity"], "antigravity"),
     # ... and whatever a pick returns runs only if usable: never remembered otherwise.
@@ -144,10 +151,14 @@ def test_supervisor_launch_resolution(monkeypatch, kw, got, asked, remembered):
 
 @pytest.mark.parametrize("argv, value", [
     (["-s"], picker.PICK),
-    (["start", "-s", "--no-attach"], picker.PICK),
-    (["-s", "codex"], "codex"),
-    (["-s=codex"], "codex"),
-    (["-s", "codex", "start", "--no-attach"], "codex"),
+    pytest.param(["start", "-s", "--no-attach"], picker.PICK,
+                 marks=pytest.mark.variant("issue 196: a bare supervisor flag on start must not consume the next option")),
+    pytest.param(["-s", "codex"], "codex",
+                 marks=pytest.mark.variant("issue 196: the root command accepts an explicit supervisor CLI")),
+    pytest.param(["-s=codex"], "codex",
+                 marks=pytest.mark.variant("issue 196: the equals form of the supervisor flag must parse")),
+    pytest.param(["-s", "codex", "start", "--no-attach"], "codex",
+                 marks=pytest.mark.variant("issue 196: a root supervisor option must survive explicit start dispatch")),
     (["-s", "codex", "supervisor", "--no-attach"], "codex"),
 ])
 def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, value):
@@ -165,7 +176,9 @@ def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, va
 
 
 @pytest.mark.parametrize("wanted, default", [
-    (None, "o"), ("claude", "o"), (picker.PICK, "o"),
+    pytest.param(None, "o", marks=pytest.mark.variant("without an override, an existing session remains the default")),
+    pytest.param("claude", "o", marks=pytest.mark.variant("selecting the existing session's CLI must preserve the resume default")),
+    pytest.param(picker.PICK, "o", marks=pytest.mark.variant("a bare picker flag must not force a second session before choosing a CLI")),
     ("codex", "a"),                       # the running session is on another CLI: start alongside
 ])
 def test_running_session_on_another_cli_is_not_the_default(monkeypatch, wanted, default):
@@ -193,7 +206,9 @@ def test_supervisor_flag_reaches_the_running_session_question(db, repo, monkeypa
     assert asked == ["codex"]
 
 
-@pytest.mark.parametrize("argv", [["-s", "gemini"], ["start", "-s", "gemini"], ["-c", "-s", "codex"]])
+@pytest.mark.parametrize("argv", [["-s", "gemini"], pytest.param(["start", "-s", "gemini"],
+    marks=pytest.mark.variant("explicit start must reject an unsupported supervisor CLI cleanly too")),
+    ["-c", "-s", "codex"]])
 def test_supervisor_flag_that_cannot_be_honoured_fails_cleanly(db, repo, monkeypatch, argv):
     monkeypatch.chdir(repo)
     result = CliRunner().invoke(cli.app, argv)

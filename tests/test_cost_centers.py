@@ -93,6 +93,7 @@ def test_approval_raises_the_month_limit(repo, features, server):
 # -- refusal and CLI -------------------------------------------------------------------------------------
 
 
+@pytest.mark.variant("security: cost request and listing CLI paths require the entitlement before contacting the server")
 def test_cli_fails_closed_without_the_feature(repo, monkeypatch, server):
     monkeypatch.setattr(license, "has", lambda f: False)
     monkeypatch.chdir(repo)
@@ -101,6 +102,7 @@ def test_cli_fails_closed_without_the_feature(repo, monkeypatch, server):
     assert not server.calls
 
 
+@pytest.mark.variant("denied budget requests must not increase the local spending limit")
 def test_denied_raises_nothing(repo, features, server):
     cost_centers.request(25, "x", str(repo))
     server.status = "denied"
@@ -108,6 +110,7 @@ def test_denied_raises_nothing(repo, features, server):
     assert cost_centers.month_raise() == 0
 
 
+@pytest.mark.variant("privacy: team events cannot include repository identity without the cost-center entitlement")
 def test_events_omit_repo_without_the_feature(slug_repo, features, monkeypatch):
     monkeypatch.setattr(team_events.OrgKey, "ref", lambda self, s: "ref", raising=False)
     assert "repo" not in _payload(slug_repo, {"team"})

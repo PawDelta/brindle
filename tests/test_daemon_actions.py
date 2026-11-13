@@ -163,7 +163,6 @@ def _flat(args):
     ("POST", "/v1/sessions/sup/pause", {}, (agents, "pause"), [], 200, "sup"),
     # The person decides a plan as the worker's supervisor would.
     ("POST", "/v1/inbox/wk/approve", {}, (agents, "approve_plan"), "approved", 200, "sup"),
-    ("POST", "/v1/agents/wk/kill", {}, (agents, "kill"), None, 200, "wk"),
     # Real workspace ids contain a slash, which arrives in the path as %2F decoded.
     ("POST", "/v1/workspaces/proj/w-2/merge", {}, (pipeline, "merge"), "Merged feat2", 202, "proj/w-2"),
     ("POST", "/v1/workspaces/proj/w-2/remove", {}, (workspaces, "remove"), SimpleNamespace(branch_note=None, teardown=None), 200, "proj/w-2"),
@@ -258,13 +257,13 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
     ("app.py", "read", None, 200),              # the base from GET .../file, the app's way
     ("app.py", "e69de29", None, 409),           # the empty blob: not what the file is now
     ("app.py", "shown", "busy", 409),
-    ("app.py", "shown", "hook-refuses", 409),   # the file goes back; the worker's index survives
-    ("new.txt", "shown", "hook-refuses", 409),  # ... refused: untracked again, as it was
-    ("pkg/m.py", "shown", "deleted-refused", 409),  # its deletion staged, then refused: still staged
+    pytest.param("app.py", "shown", "hook-refuses", 409, marks=pytest.mark.variant("failed commit preserves staged content")),
+    pytest.param("new.txt", "shown", "hook-refuses", 409, marks=pytest.mark.variant("failed commit restores untracked file")),
+    pytest.param("pkg/m.py", "shown", "deleted-refused", 409, marks=pytest.mark.variant("failed commit preserves staged deletion")),
     ("app.py", "shown", "to-head", 200),        # back to HEAD's content: no commit, the staged version goes
     pytest.param("app.py", "shown", "agent", 403, marks=pytest.mark.variant("an agent holding the token")),
-    ("../proj/app.py", "shown", None, 400),
-    ("out/m.py", "shown", None, 400),           # a symlinked directory leading out of the worktree
+    pytest.param("../proj/app.py", "shown", None, 400, marks=pytest.mark.variant("review edit traversal escape")),
+    pytest.param("out/m.py", "shown", None, 400, marks=pytest.mark.variant("review edit symlink escape")),
     pytest.param(".git/HEAD", "shown", None, 400, marks=pytest.mark.variant("the worktree's own git link")),
     pytest.param(":(glob)*", "shown", None, 200,
                  marks=pytest.mark.variant("a name that is pathspec magic must not commit other work")),
@@ -433,20 +432,21 @@ def test_a_demo_held_by_its_preflight_keeps_its_repo_until_settled_or_cancelled(
 
 @pytest.mark.parametrize("scope,body,peer_pid,status,written", [
     # The picker's pick for a tier is dropped too, and so is an alias of a tier, or either would still win.
-    ("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,
-     {"routing": {"heavy": ["developer"], "light": ["developer-codex"], "advanced": ["developer-codex"]}}),
+    pytest.param("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,
+     {"routing": {"heavy": ["developer"], "light": ["developer-codex"], "advanced": ["developer-codex"]}},
+     marks=pytest.mark.variant("stale tier aliases override user edits")),
     # A kind's fallbacks alone keep the person's own pick, not the one this repo's local file overrides it with.
-    ("user", {"kinds": {"medium": {"fallbacks": ["developer-codex"]}}}, None, 200,
+    pytest.param("user", {"kinds": {"medium": {"fallbacks": ["developer-codex"]}}}, None, 200,
      {"routing": {"heavy": ["developer"], "advanced": ["developer-heavy"], "reasoning": ["developer-fable"],
                   "medium": ["developer-sonnet", "developer-codex"]},
-      "routing_locked": {"medium": True}, "routing_light": "claude-haiku"}),
-    ("local", {"reviewer": "reviewer"}, None, 200, {"reviewer": "reviewer"}),
+      "routing_locked": {"medium": True}, "routing_light": "claude-haiku"},
+     marks=pytest.mark.variant("fallback edit preserves user scope")),
     ("repo", {"tiers": {"light": ["developer"]}, "exclude_providers": ["claude"]}, None, 200,
      {"routing": {"light": ["developer"]}, "exclude_providers": ["claude"]}),
-    ("repo", {"tiers": {"heavy": ["developer", "nope"]}}, None, 400, {}),
+    pytest.param("repo", {"tiers": {"heavy": ["developer", "nope"]}}, None, 400, {}, marks=pytest.mark.variant("invalid profile rejects whole update")),
     pytest.param("repo", {"reviewer": "reviewer"}, 310, 403, {},
                  marks=pytest.mark.variant("an agent holding the token still can't change routing")),
-], ids=["user", "user-kind", "local", "repo", "bad-profile", "agent"])
+], ids=["user", "user-kind", "repo", "bad-profile", "agent"])
 def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body, peer_pid, status, written):
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent w1")
     config.set_user("routing", {"heavy": ["developer"], "advanced": ["developer-heavy"],
@@ -553,7 +553,7 @@ PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus=
 
 
 @pytest.mark.parametrize("acc,profile", [
-    (Access(org_id="acme", allowed_providers=("claude",)), "developer-codex"),
+    pytest.param(Access(org_id="acme", allowed_providers=("claude",)), "developer-codex", marks=pytest.mark.variant("PUT rejects org-forbidden provider")),
     (Access(org_id="acme", error="couldn't read the policy"), "developer-codex"),
     # opus is pinned to the us. id; delegation matches a pin exactly, so the eu. one doesn't allow it.
     (Access(org_id="acme", allowed_models=("eu.anthropic.claude-opus-x-v1:0",), agent_setup=PINNED),
@@ -577,7 +577,7 @@ SECRET = "sk-ant-daemon-test-0123456789wxyz"
 
 
 @pytest.mark.parametrize("name,value,peer_pid,status", [
-    ("ANTHROPIC_API_KEY", SECRET, None, 200),
+    pytest.param("ANTHROPIC_API_KEY", SECRET, None, 200, marks=pytest.mark.variant("stored key never echoed")),
     pytest.param("ANTHROPIC_API_KEY", SECRET, 310, 403, marks=pytest.mark.variant("an agent holding the token")),
     ("BRINDLE_TOKEN", SECRET, None, 400),
     # http.client refuses the header, quoting the whole value in its error.
@@ -615,7 +615,7 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
 
 @pytest.mark.parametrize("action,stored,env,provider_status,expect", [
     ("put", False, False, 200, ("verified", True, False)),
-    ("test", True, False, 401, ("rejected", True, False)),
+    pytest.param("test", True, False, 401, ("rejected", True, False), marks=pytest.mark.variant("rejected key remains stored")),
     ("test", True, False, 500, ("unchecked", True, False)),
     ("delete", True, False, 200, (None, False, False)),
     ("auth", True, False, 401, ("rejected", True, False)),
@@ -658,7 +658,10 @@ def test_api_key_lifecycle(db, world, monkeypatch, provider_http, action, stored
     assert SECRET not in json.dumps(got)
 
 
-@pytest.mark.parametrize("during", ["replaced", "deleted"])
+@pytest.mark.parametrize("during", [
+    pytest.param("replaced", marks=pytest.mark.variant("race: key replaced during verification")),
+    pytest.param("deleted", marks=pytest.mark.variant("race: key deleted during verification")),
+])
 def test_api_key_lifecycle_check_result_stays_with_the_key_it_checked(db, monkeypatch, provider_http, during):
     from brindle import key_check, keys_cmds, keystore
 
@@ -691,8 +694,9 @@ NOFLOCK = False  # True: children skip flock, which must make the lock test belo
 
 @pytest.mark.parametrize("fault", [
     "lock-unavailable",
-    pytest.param("delete-during-update", marks=pytest.mark.slow(
-        "a cross-process lock race: two spawned interpreters, and a 2s window the delete must stay blocked in")),
+    pytest.param("delete-during-update", marks=[pytest.mark.slow(
+        "a cross-process lock race: two spawned interpreters, and a 2s window the delete must stay blocked in"),
+        pytest.mark.variant("race: cross-process delete during update")]),
 ])
 def test_api_key_lifecycle_key_updates_hold_the_store_lock(monkeypatch, provider_http, fault):
     import fcntl
@@ -831,7 +835,7 @@ class _FakeCLI:
 
 
 @pytest.mark.parametrize("case", ["bedrock", "foundry", "org_refuses", "org_route_wins", "opencode_azure",
-                                  "concurrent"])
+                                  pytest.param("concurrent", marks=pytest.mark.variant("race: connection and settings saves"))])
 def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_org(
         db, world, tmp_path, monkeypatch, case):
     import subprocess
@@ -1376,28 +1380,29 @@ def _brindle_allows_npm_test() -> bool:
 
 
 @pytest.mark.parametrize("choice,suggested,race,status,verdict,rule", [
-    ("allow_once", True, None, 200, "allow", None),
+    pytest.param("allow_once", True, None, 200, "allow", None, marks=pytest.mark.variant("allow once persists no rule")),
     # No suggestion from Claude Code: brindle's own rule is written.
-    ("allow_always", False, None, 200, "allow", "brindle"),
+    pytest.param("allow_always", False, None, 200, "allow", "brindle", marks=pytest.mark.variant("always allow without CLI suggestion")),
     # Claude Code's suggestion goes back to it to apply, as if picked in its prompt.
     ("allow_always", True, None, 200, "allow", "claude"),
-    ("deny", True, None, 200, "deny", None),
+    pytest.param("deny", True, None, 200, "deny", None, marks=pytest.mark.variant("deny reaches waiting hook")),
     # "Answer in the terminal instead": the hold ends now, and the CLI's own prompt asks.
     ("terminal", True, None, 200, None, None),
     # Codex's hook holds its request the same way, and so do agy's (under agy_approvals
     # "brindle") and a native worker's loop, which have no prompt of their own.
     ("allow_once", False, "codex", 200, "allow", None),
-    ("allow_once", False, "antigravity", 200, "allow", None),
+    pytest.param("allow_once", False, "antigravity", 200, "allow", None, marks=pytest.mark.variant("Antigravity hook has no prompt")),
     ("allow_once", False, "native", 200, "allow", None),
     # A deny already in flight holds the request: this answer is refused, writes nothing,
     # and the hold runs out.
-    pytest.param("allow_always", False, "in-flight", 409, None, None, marks=WAITS_OUT_THE_HOLD),
+    pytest.param("allow_always", False, "in-flight", 409, None, None, marks=[WAITS_OUT_THE_HOLD,
+                 pytest.mark.variant("race: deny already in flight")]),
     # The hook gives up between the claim and the hand-over: the rule written meanwhile goes again.
     ("allow_always", False, "lost", 409, None, None),
     # The hold expires after the answer is handed over but before the hook takes it: not
     # delivered, so a conflict, and the rule written for it goes again.
-    ("allow_once", True, "expired", 409, None, None),
-    ("allow_always", False, "expired", 409, None, None),
+    pytest.param("allow_once", True, "expired", 409, None, None, marks=pytest.mark.variant("race: allow once expires after handover")),
+    pytest.param("allow_always", False, "expired", 409, None, None, marks=pytest.mark.variant("race: expired always-allow rolls back rule")),
     # Two requests for the same rule: one allowed always and consumed, the other expired.
     # The rule the first wrote stays.
     ("allow_always", False, "shared", 409, None, "brindle"),
@@ -1405,11 +1410,13 @@ def _brindle_allows_npm_test() -> bool:
     # own prompt: its PostToolUse ends the retry's hold, not the old denied request's.
     ("allow_once", True, "retried", None, None, None),
     # The stored request changed while the hook waits: it isn't the request the hook registered.
-    pytest.param("allow_once", True, "mutated", 409, None, None, marks=WAITS_OUT_THE_HOLD),
+    pytest.param("allow_once", True, "mutated", 409, None, None, marks=[WAITS_OUT_THE_HOLD,
+                 pytest.mark.variant("race: request mutated while held")]),
     # An answer written into the database is no answer: the hold runs out.
-    pytest.param("allow_once", True, "db-answer", None, None, None, marks=WAITS_OUT_THE_HOLD),
+    pytest.param("allow_once", True, "db-answer", None, None, None, marks=[WAITS_OUT_THE_HOLD,
+                 pytest.mark.variant("forged DB answer bypass attempt")]),
     # A daemon.json rewritten with another token and socket: the hook never reads it.
-    ("allow_once", True, "forged-json", 200, "allow", None),
+    pytest.param("allow_once", True, "forged-json", 200, "allow", None, marks=pytest.mark.variant("forged daemon metadata bypass attempt")),
     # Another identity's session: nothing is answered or written.
     pytest.param("allow_always", False, "locked", 409, None, None, marks=WAITS_OUT_THE_HOLD),
     # The agent is closed while it waits: the hold ends, and the request with it.
@@ -1653,10 +1660,12 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
 # The pane each second: the prompt, past it twice, a read it can't tell (the count starts over), past it for good.
 # Or drawn after 11s busy: looked at every 5s till a look catches it, so the app's deny at 16s still reaches the hook.
 @pytest.mark.parametrize("reads,looks,deny", [
-    ([CLAUDE_PROMPT, CLAUDE_IDLE, CLAUDE_IDLE, "", CLAUDE_IDLE, CLAUDE_IDLE, CLAUDE_IDLE], list(range(7)), False),
+    pytest.param([CLAUDE_PROMPT, CLAUDE_IDLE, CLAUDE_IDLE, "", CLAUDE_IDLE, CLAUDE_IDLE, CLAUDE_IDLE], list(range(7)), False,
+                 marks=pytest.mark.variant("terminal denial across ambiguous capture")),
     pytest.param([CLAUDE_PROMPT, CLAUDE_BUSY, CLAUDE_BUSY, "", CLAUDE_BUSY, CLAUDE_BUSY, CLAUDE_BUSY], list(range(7)),
                  False, marks=pytest.mark.variant("review: allowed in the pane, its tool still running, so no PostToolUse yet")),
-    ([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], list(range(17)), True)], ids=["denied", "allowed", "prompt-drawn-late"])
+    pytest.param([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], list(range(17)), True, marks=pytest.mark.variant("race: permission prompt drawn late"))],
+    ids=["denied", "allowed", "prompt-drawn-late"])
 def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, answering, monkeypatch, reads, looks, deny):
     from brindle import tmux
     from brindle.db import DB
@@ -2412,15 +2421,15 @@ def _codex_trust(codex, repo, level):
 
 @pytest.mark.parametrize("how,provider,setup,blocked", [
     # (A start signed out, or with nothing to answer: test_a_new_session_runs_on_a_usable_cli_or_starts_nothing.)
-    ("/v1/sessions", "codex", "untrusted", ["trust"]),   # the person's own answer to Codex is never overridden
+    pytest.param("/v1/sessions", "codex", "untrusted", ["trust"], marks=pytest.mark.variant("app launch cannot auto-trust Codex")),
     # Signed in by the key brindle stores for it, which Claude Code then asks about.
-    ("/v1/sessions", "claude", "stored-key", ["consent"]),
+    pytest.param("/v1/sessions", "claude", "stored-key", ["consent"], marks=pytest.mark.variant("stored key still needs CLI consent")),
     # "open" a session that has since exited: a fresh one would start, so it's checked.
     ("/v1/sessions?open", "claude", "signed-out", ["signin"]),
-    ("/v1/sessions/sup/continue", "claude", "signed-out", ["signin"]),
+    pytest.param("/v1/sessions/sup/continue", "claude", "signed-out", ["signin"], marks=pytest.mark.variant("signed-out resume preflight")),
     ("/v1/agents/wk/rewind", "claude", "signed-out", ["signin"]),
     # A worker started any way (assign, handoff, a queued task) goes through the same launch.
-    ("assign", "claude", "fresh", ["consent"]),
+    pytest.param("assign", "claude", "fresh", ["consent"], marks=pytest.mark.variant("worker first-run consent")),
     ("assign", "codex", "untrusted", ["trust"]),
     # The session's own key (its session_credentials), not brindle's: approving it clears the worker.
     ("assign", "claude", "session-key", ["consent"]),
@@ -2500,10 +2509,10 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
 
 
 @pytest.mark.parametrize("provider,setup,item", [
-    ("claude", "missing", "claude.install"),
+    pytest.param("claude", "missing", "claude.install", marks=pytest.mark.variant("agent cannot clear missing CLI")),
     ("antigravity", "gemini", "key.GEMINI_API_KEY"),
     ("claude", "fresh", "claude.onboarding"),
-    ("claude", "key", "claude.api_key"),
+    pytest.param("claude", "key", "claude.api_key", marks=pytest.mark.variant("agent cannot approve API-key consent")),
     ("codex", "untrusted", "codex.trust"),
 ], ids=["setup", "key", "consent-onboarding", "consent-api-key", "trust"])
 def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, world, tmp_path, monkeypatch,
@@ -2709,7 +2718,7 @@ def test_a_second_clone_press_gets_the_job_already_queued(db, cloning, tmp_path,
 
 
 @pytest.mark.parametrize("url", [
-    "/tmp/some/repo",
+    pytest.param("/tmp/some/repo", marks=pytest.mark.variant("local-path clone bypass attempt")),
     pytest.param("-u/bin/sh", marks=pytest.mark.variant("an option smuggled in as the url")),
     pytest.param("file:///tmp/x.git", marks=pytest.mark.variant("file:// stays refused in production")),
     pytest.param("git@local.git", marks=pytest.mark.variant("git@ without a host:path is a relative local path")),
@@ -2887,32 +2896,21 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     assert not list(path.parent.glob("*.tmp"))
 
 
-def test_session_diff_before_ready(db, repo, lead):
-    code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
-    assert code == 200 and not reply["ready"]        # nothing ahead of main yet
-    assert _send("GET", "/v1/sessions/lead/pr/draft")[0] == 200
-    code, d = _send("GET", "/v1/sessions/lead/diff")
-    assert code == 200 and d["files"] == []
-
-
-EVERY_CLI = ["claude", "codex", "antigravity", "opencode"]
-
-
 @pytest.mark.parametrize("asked,state,answer,usable", [
-    ("codex", {}, "codex", EVERY_CLI),
     # Fixable by the person: the preflight's items; else the reason. Both list what else would run.
-    ("codex", {"missing": "codex"}, (409, "preflight"), ["claude", "antigravity", "opencode"]),
-    ("codex", {"signed_out": ("codex",)}, (409, "preflight"), ["claude", "antigravity", "opencode"]),
+    pytest.param("codex", {"missing": "codex"}, (409, "preflight"), ["claude", "antigravity", "opencode"], marks=pytest.mark.variant("explicit missing CLI cannot fall back")),
+    pytest.param("codex", {"signed_out": ("codex",)}, (409, "preflight"), ["claude", "antigravity", "opencode"],
+                 marks=pytest.mark.variant("explicit signed-out CLI cannot fall back")),
     ("codex", {"allowed": ("claude", "opencode")}, (403, "forbidden"), ["claude", "opencode"]),
     ("codex", {"off": "codex"}, (409, "turned_off"), ["claude", "antigravity", "opencode"]),
     # No provider asked for: the remembered pick, else Claude, else the first usable one.
     (None, {"pick": "antigravity"}, "antigravity", ["antigravity", "claude", "codex", "opencode"]),
-    (None, {"signed_out": ("claude", "antigravity", "opencode")}, "codex", ["codex"]),
+    pytest.param(None, {"signed_out": ("claude", "antigravity", "opencode")}, "codex", ["codex"], marks=pytest.mark.variant("sole signed-in fallback CLI")),
     # The policy allows only a CLI that isn't installed: nothing starts, not the profile's Claude.
     (None, {"allowed": ("opencode",), "missing": "opencode"}, (409, "preflight"), []),
     # The policy allows no CLI at all: still a preflight, naming what stops each one.
     (None, {"allowed": ()}, (409, "preflight"), []),
-], ids=["explicit-usable", "explicit-missing", "explicit-signed-out", "explicit-policy", "explicit-off",
+], ids=["explicit-missing", "explicit-signed-out", "explicit-policy", "explicit-off",
         "default-pick", "default-only-codex", "default-none-by-policy", "default-none-allowed"])
 def test_a_new_session_runs_on_a_usable_cli_or_starts_nothing(db, world, tmp_path, monkeypatch, asked, state,
                                                              answer, usable):

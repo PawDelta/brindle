@@ -1,16 +1,14 @@
+import { connectDaemon, renderApp, inTestStore, trackedSync as startSync } from "../../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import App from "../../../App";
 import { DaemonClient, type Plan, type PlanVerdict, type VisualDTO } from "../../../api/client";
 import { ONBOARDED_KEY } from "../../../api/providers";
-import { PtyViewsProvider } from "../../../api/ptyView";
 import type { InboxItemDTO, SessionDTO } from "../../../api/schema";
 import { createAppStore } from "../../../store/store";
-import { startSync } from "../../../store/sync";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
-import { standInViews } from "../../../test/panes";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
@@ -66,6 +64,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   native.enabled = false;
   native.events.clear();
   document.documentElement.style.removeProperty("--canvas");
@@ -292,28 +291,26 @@ describe("visuals", () => {
       resolveVisualOffer: async (_root: string, _id: string, accept: boolean) => { decisions.push(accept); return { accepted: accept }; },
     };
     const chip = (root: string) => <StoreContext.Provider value={store}><OfferChip client={client} root={root} /></StoreContext.Provider>;
-    try {
-      const view = render(chip("old"));
-      view.rerender(chip("empty"));
-      await act(async () => { oldRead(offer); });
-      await act(async () => vi.advanceTimersByTime(2000));
-      expect(screen.queryByRole("button")).toBeNull();
-      view.rerender(chip("current"));
-      await act(async () => undefined);
-      await act(async () => vi.advanceTimersByTime(2000));
-      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Not now" })));
-      expect(decisions).toEqual([false]);
-      view.rerender(chip("expiry"));
-      await act(async () => undefined);
-      await act(async () => vi.advanceTimersByTime(2000));
-      expect(screen.queryByRole("button")).toBeNull();
-      // The person's own request needs no confirmation: an older engine's request card renders nothing.
-      view.rerender(chip("confirm"));
-      await act(async () => undefined);
-      await act(async () => vi.advanceTimersByTime(2000));
-      expect(screen.queryByRole("button")).toBeNull();
-      expect(decisions).toEqual([false]);
-    } finally { vi.useRealTimers(); }
+    const view = render(chip("old"));
+    view.rerender(chip("empty"));
+    await act(async () => { oldRead(offer); });
+    await act(async () => vi.advanceTimersByTime(2000));
+    expect(screen.queryByRole("button")).toBeNull();
+    view.rerender(chip("current"));
+    await act(async () => undefined);
+    await act(async () => vi.advanceTimersByTime(2000));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Not now" })));
+    expect(decisions).toEqual([false]);
+    view.rerender(chip("expiry"));
+    await act(async () => undefined);
+    await act(async () => vi.advanceTimersByTime(2000));
+    expect(screen.queryByRole("button")).toBeNull();
+    // The person's own request needs no confirmation: an older engine's request card renders nothing.
+    view.rerender(chip("confirm"));
+    await act(async () => undefined);
+    await act(async () => vi.advanceTimersByTime(2000));
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(decisions).toEqual([false]);
   });
 
   it("delays offers while typing, preserves focus and permits keyboard acceptance; setting saves independently", async () => {
@@ -328,28 +325,26 @@ describe("visuals", () => {
       userSettings: async () => ({ claude_permission_mode: "default" as const, visuals: mode }),
       patchUserSettings: async (body: { visuals?: "on" | "off" }) => { mode = body.visuals!; return client.userSettings(); },
     };
-    try {
-      render(<StoreContext.Provider value={store}><textarea aria-label="chat" /><OfferChip client={client} root="sup1" /><VisualsSetting client={client} /></StoreContext.Provider>);
-      await act(async () => undefined);
-      const chat = screen.getByRole("textbox");
-      chat.focus();
-      await act(async () => vi.advanceTimersByTime(1500));
-      fireEvent.keyDown(chat, { key: "a" });
-      await act(async () => vi.advanceTimersByTime(1500));
-      expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
-      await act(async () => vi.advanceTimersByTime(500));
-      expect(document.activeElement).toBe(chat);
-      const chip = screen.getByRole("button", { name: "Make a visual?" });
-      chip.focus();
-      fireEvent.keyDown(chip, { key: "Tab" });
-      expect(document.activeElement).toBe(chip);
-      await act(async () => fireEvent.click(chip));
-      expect(accepted).toEqual([true]);
-      expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
-      await act(async () => fireEvent.click(screen.getByRole("switch", { name: "Visuals" })));
-      expect(mode).toBe("on");
-      expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
-    } finally { vi.useRealTimers(); }
+    render(inTestStore(<><textarea aria-label="chat" /><OfferChip client={client} root="sup1" /><VisualsSetting client={client} /></>, store));
+    await act(async () => undefined);
+    const chat = screen.getByRole("textbox");
+    chat.focus();
+    await act(async () => vi.advanceTimersByTime(1500));
+    fireEvent.keyDown(chat, { key: "a" });
+    await act(async () => vi.advanceTimersByTime(1500));
+    expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
+    await act(async () => vi.advanceTimersByTime(500));
+    expect(document.activeElement).toBe(chat);
+    const chip = screen.getByRole("button", { name: "Make a visual?" });
+    chip.focus();
+    fireEvent.keyDown(chip, { key: "Tab" });
+    expect(document.activeElement).toBe(chip);
+    await act(async () => fireEvent.click(chip));
+    expect(accepted).toEqual([true]);
+    expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
+    await act(async () => fireEvent.click(screen.getByRole("switch", { name: "Visuals" })));
+    expect(mode).toBe("on");
+    expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
   });
 
   it("hosts the native page at the content bounds, relays choices and theme, and closes across reader lifecycles", async () => {
@@ -457,37 +452,28 @@ describe("visuals", () => {
     const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
     const label = "visual:v_8f2c:r2";
     const lastBounds = () => native.invoke.mock.calls.filter(([command]) => command === "visual_set_bounds").at(-1)?.[1];
-    try {
-      render(
-        <PtyViewsProvider value={standInViews}>
-          <App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, sheet: { kind: "visual", id: visual.id } }} />
-        </PtyViewsProvider>,
-      );
-      await advance(1000);
-      expect(native.invoke).toHaveBeenCalledWith("visual_open", { id: visual.id, rev: 2, bounds });
-      expect(lastBounds()).toEqual({ label, bounds });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, sheet: { kind: "visual", id: visual.id } }} />);
+    await advance(1000);
+    expect(native.invoke).toHaveBeenCalledWith("visual_open", { id: visual.id, rev: 2, bounds });
+    expect(lastBounds()).toEqual({ label, bounds });
 
-      // The engine drops: under the overlay the native page takes no room, so it can't show or take input over it.
-      daemon.die();
-      await advance(0);
-      expect(screen.queryByTestId("reconnecting")).toBeNull();
-      expect(lastBounds()).toEqual({ label, bounds });
-      await advance(1000);
-      expect(screen.getByTestId("reconnecting")).toBeTruthy();
-      expect(lastBounds()).toEqual({ label, bounds: { ...bounds, width: 0, height: 0 } });
+    // The engine drops: under the overlay the native page takes no room, so it can't show or take input over it.
+    daemon.die();
+    await advance(0);
+    expect(screen.queryByTestId("reconnecting")).toBeNull();
+    expect(lastBounds()).toEqual({ label, bounds });
+    await advance(1000);
+    expect(screen.getByTestId("reconnecting")).toBeTruthy();
+    expect(lastBounds()).toEqual({ label, bounds: { ...bounds, width: 0, height: 0 } });
 
-      // Back: the same page takes its room again on the next attempt; it was never closed or opened afresh.
-      daemon.revive();
-      await advance(1000);
-      expect(store.getState().connection).toBe("open");
-      expect(screen.queryByTestId("reconnecting")).toBeNull();
-      expect(lastBounds()).toEqual({ label, bounds });
-      expect(native.invoke.mock.calls.filter(([command]) => command === "visual_open")).toHaveLength(1);
-      expect(native.invoke).not.toHaveBeenCalledWith("visual_close", expect.anything());
-    } finally {
-      sync.stop();
-      vi.useRealTimers();
-    }
+    // Back: the same page takes its room again on the next attempt; it was never closed or opened afresh.
+    daemon.revive();
+    await advance(1000);
+    expect(store.getState().connection).toBe("open");
+    expect(screen.queryByTestId("reconnecting")).toBeNull();
+    expect(lastBounds()).toEqual({ label, bounds });
+    expect(native.invoke.mock.calls.filter(([command]) => command === "visual_open")).toHaveLength(1);
+    expect(native.invoke).not.toHaveBeenCalledWith("visual_close", expect.anything());
   });
 
   it("visuals unread dot clears on view while Inbox removes notices and keeps unanswered prompts", async () => {
@@ -505,33 +491,30 @@ describe("visuals", () => {
       daemon.publish("visual.read", { repo_root: REPO, root_id: row.session, payload: { visual: row.id } });
       return row;
     });
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} /></PtyViewsProvider>);
-      const entry = await screen.findByTestId("visuals-button");
-      expect(within(entry).getByLabelText("unread")).toBeTruthy();
-      await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("2"));
-      fireEvent.click(entry);
-      fireEvent.click(screen.getByTestId("visual-row-v_notice"));
-      await screen.findByTestId("visual-reader");
-      await waitFor(() => expect(store.getState().inbox).toEqual([prompt]));
-      expect(within(entry).getByLabelText("unread")).toBeTruthy();
-      fireEvent.click(screen.getByTestId("visual-back"));
-      expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
-      fireEvent.click(entry);
-      fireEvent.click(screen.getByTestId(`visual-row-${visual.id}`));
-      await screen.findByTestId("visual-reader");
-      await waitFor(() => expect(within(entry).queryByLabelText("unread")).toBeNull());
-      await act(async () => { await sync.idle(); });
-      expect(store.getState().inbox).toEqual([prompt]);
-      fireEvent.click(screen.getByTestId("visual-back"));
-      expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
-      fireEvent.click(screen.getByTestId("inbox-link"));
-      const cards = await screen.findAllByTestId("inbox-card");
-      expect(cards).toHaveLength(1);
-      expect(cards[0].dataset.kind).toBe("visual");
-    } finally { sync.stop(); }
+    const { store, sync } = connectDaemon(daemon, client);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    const entry = await screen.findByTestId("visuals-button");
+    expect(within(entry).getByLabelText("unread")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("2"));
+    fireEvent.click(entry);
+    fireEvent.click(screen.getByTestId("visual-row-v_notice"));
+    await screen.findByTestId("visual-reader");
+    await waitFor(() => expect(store.getState().inbox).toEqual([prompt]));
+    expect(within(entry).getByLabelText("unread")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("visual-back"));
+    expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
+    fireEvent.click(entry);
+    fireEvent.click(screen.getByTestId(`visual-row-${visual.id}`));
+    await screen.findByTestId("visual-reader");
+    await waitFor(() => expect(within(entry).queryByLabelText("unread")).toBeNull());
+    await act(async () => { await sync.idle(); });
+    expect(store.getState().inbox).toEqual([prompt]);
+    fireEvent.click(screen.getByTestId("visual-back"));
+    expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
+    fireEvent.click(screen.getByTestId("inbox-link"));
+    const cards = await screen.findAllByTestId("inbox-card");
+    expect(cards).toHaveLength(1);
+    expect(cards[0].dataset.kind).toBe("visual");
   });
 
   it("inbox drops a read visual without navigating", async () => {
@@ -539,9 +522,7 @@ describe("visuals", () => {
     const notice: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_notice", reason: "visual is ready", detail: "Flow notice" };
     const prompt: InboxItemDTO = { ...notice, visual_id: visual.id, reason: "asks you to choose", detail: "Pick a flow" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [notice, prompt] });
-    const client = daemon.client();
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const { client, store, sync } = connectDaemon(daemon);
     // As brindle.visuals publishes them: the session's repo and root, the visual (and, on a read, whether
     // it still waits) in the payload. Elsewhere: another window or the CLI, nothing this app asked for.
     const engine = async (kind: string, id: string, pending?: boolean) => {
@@ -550,32 +531,30 @@ describe("visuals", () => {
     };
     const cards = () => screen.queryAllByTestId("inbox-card").map((c) => c.textContent?.includes("Flow notice") ? "notice" : "prompt");
     const badge = () => screen.queryByTestId("inbox-badge")?.textContent ?? null;
-    try {
-      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox" }} /></PtyViewsProvider>);
-      await waitFor(() => expect(cards()).toEqual(["notice", "prompt"]));
-      await act(async () => sync.idle());
-      expect(badge()).toBe("2");
-      // A busy daemon: the inbox reads the events start don't answer until let go, oldest first.
-      const reads: ((items: InboxItemDTO[]) => void)[] = [];
-      const held = vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve)));
-      // Read, the question still waits for its answer; the read begun now still sees the notice.
-      const before = daemon.data.inbox;
-      await engine("visual.read", visual.id, true);
-      expect(cards()).toEqual(["notice", "prompt"]);
-      // The notice is read: gone at once, here and in the badge, with that read still out.
-      await engine("visual.read", "v_notice", false);
-      expect([cards(), badge()]).toEqual([["prompt"], "1"]);
-      // The read from before it lands: it doesn't put the notice back.
-      await act(async () => reads[0](before));
-      expect([cards(), badge()]).toEqual([["prompt"], "1"]);
-      await engine("visual.answered", visual.id);
-      expect([cards(), badge()]).toEqual([[], null]);
-      // The reads still out (one from before the answer) land, and the daemon answers again.
-      held.mockRestore();
-      await act(async () => { reads.slice(1).forEach((resolve, i) => resolve(i === 0 ? [prompt] : daemon.data.inbox)); });
-      await act(async () => sync.idle());
-      expect([cards(), badge()]).toEqual([[], null]);
-    } finally { sync.stop(); }
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox" }} />);
+    await waitFor(() => expect(cards()).toEqual(["notice", "prompt"]));
+    await act(async () => sync.idle());
+    expect(badge()).toBe("2");
+    // A busy daemon: the inbox reads the events start don't answer until let go, oldest first.
+    const reads: ((items: InboxItemDTO[]) => void)[] = [];
+    const held = vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve)));
+    // Read, the question still waits for its answer; the read begun now still sees the notice.
+    const before = daemon.data.inbox;
+    await engine("visual.read", visual.id, true);
+    expect(cards()).toEqual(["notice", "prompt"]);
+    // The notice is read: gone at once, here and in the badge, with that read still out.
+    await engine("visual.read", "v_notice", false);
+    expect([cards(), badge()]).toEqual([["prompt"], "1"]);
+    // The read from before it lands: it doesn't put the notice back.
+    await act(async () => reads[0](before));
+    expect([cards(), badge()]).toEqual([["prompt"], "1"]);
+    await engine("visual.answered", visual.id);
+    expect([cards(), badge()]).toEqual([[], null]);
+    // The reads still out (one from before the answer) land, and the daemon answers again.
+    held.mockRestore();
+    await act(async () => { reads.slice(1).forEach((resolve, i) => resolve(i === 0 ? [prompt] : daemon.data.inbox)); });
+    await act(async () => sync.idle());
+    expect([cards(), badge()]).toEqual([[], null]);
   });
 
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
@@ -595,101 +574,92 @@ describe("visuals", () => {
     const needUser = (id: number, text: string) =>
       act(() => store.dispatch({ type: "stream", message: { type: "event", id, ts: now, kind: "autopilot.need_user", repo_root: REPO, root_id: "sup1", agent_id: "sup1", workspace_id: "proj", task_id: null, payload: { question: text } } }));
     const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      render(
-        <PtyViewsProvider value={standInViews}>
-          {/* No agent, as Inbox's "Open the session" opens it: the reader's open then names the root. */}
-          <App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />
-        </PtyViewsProvider>,
-      );
-      const terminal = await screen.findByTestId("terminal", {}, { timeout: 4000 });
-      const sidebar = () => screen.getByRole("complementary", { name: "Sidebar" });
-      const aside = sidebar();
-      // The person folds the open session's agents away; Back must find them still folded.
-      fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
-      // The header uses an icon with an unread dot and no count text.
-      const entry = await screen.findByTestId("visuals-button");
-      expect(entry.querySelector("svg")).toBeTruthy();
-      expect(entry.textContent).toBe("");
-      expect(within(entry).getByLabelText("unread")).toBeTruthy();
-      needUser(1, "Which database should the cache use?");
-      ask(supervisorAsks);
-      fireEvent.click(entry);
-      const list = screen.getByTestId("visuals-panel");
-      expect(within(list).queryByTestId("visual-row-v_old")).toBeNull();
-      fireEvent.click(within(list).getByTestId("visuals-decided"));
-      expect(within(list).getByTestId("visual-row-v_old")).toBeTruthy();
-      fireEvent.click(within(list).getByTestId("visual-row-v_8f2c"));
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    const terminal = await screen.findByTestId("terminal", {}, { timeout: 4000 });
+    const sidebar = () => screen.getByRole("complementary", { name: "Sidebar" });
+    const aside = sidebar();
+    // The person folds the open session's agents away; Back must find them still folded.
+    fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
+    // The header uses an icon with an unread dot and no count text.
+    const entry = await screen.findByTestId("visuals-button");
+    expect(entry.querySelector("svg")).toBeTruthy();
+    expect(entry.textContent).toBe("");
+    expect(within(entry).getByLabelText("unread")).toBeTruthy();
+    needUser(1, "Which database should the cache use?");
+    ask(supervisorAsks);
+    fireEvent.click(entry);
+    const list = screen.getByTestId("visuals-panel");
+    expect(within(list).queryByTestId("visual-row-v_old")).toBeNull();
+    fireEvent.click(within(list).getByTestId("visuals-decided"));
+    expect(within(list).getByTestId("visual-row-v_old")).toBeTruthy();
+    fireEvent.click(within(list).getByTestId("visual-row-v_8f2c"));
 
-      // The reader takes the window; the terminal still mounted under it, hidden; the sidebar and the session's bar out of sight.
-      expect(screen.getByTestId("visual-reader")).toBeTruthy();
-      // Browser development keeps the frame placeholder without calling the desktop shell.
-      expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2");
-      expect(native.invoke).not.toHaveBeenCalled();
-      expect(screen.getByTestId("chat-area").className).toContain("hidden");
-      expect(screen.getByTestId("terminal")).toBe(terminal);
-      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
-      expect(screen.queryByRole("button", { name: /Visuals/ })).toBeNull();
-      // Opening marks it read, though the header remains icon-only either way.
-      await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
-      expect(screen.getByTestId("visuals-button").querySelector("svg")).toBeTruthy();
-      expect(screen.getByTestId("visuals-button").textContent).toBe("");
-      expect(read).toHaveBeenCalledTimes(1);
-      expect(read).toHaveBeenCalledWith("v_8f2c", 2);
-      // The ask there at opening badges nothing, read again or not; the supervisor asking anew (the same row) does.
-      expect(screen.queryByTestId("visual-back-asking")).toBeNull();
-      ask(supervisorAsks);
-      expect(screen.queryByTestId("visual-back-asking")).toBeNull();
-      needUser(2, "Should the cache be per user?");
-      expect(screen.getByTestId("visual-back-asking")).toBeTruthy();
-      // Keep: the engine's kept row shows at once.
-      fireEvent.click(screen.getByTestId("visual-keep"));
-      await waitFor(() => expect(screen.getByTestId("visual-keep").getAttribute("aria-pressed")).toBe("true"));
+    // The reader takes the window; the terminal still mounted under it, hidden; the sidebar and the session's bar out of sight.
+    expect(screen.getByTestId("visual-reader")).toBeTruthy();
+    // Browser development keeps the frame placeholder without calling the desktop shell.
+    expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2");
+    expect(native.invoke).not.toHaveBeenCalled();
+    expect(screen.getByTestId("chat-area").className).toContain("hidden");
+    expect(screen.getByTestId("terminal")).toBe(terminal);
+    expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Visuals/ })).toBeNull();
+    // Opening marks it read, though the header remains icon-only either way.
+    await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
+    expect(screen.getByTestId("visuals-button").querySelector("svg")).toBeTruthy();
+    expect(screen.getByTestId("visuals-button").textContent).toBe("");
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledWith("v_8f2c", 2);
+    // The ask there at opening badges nothing, read again or not; the supervisor asking anew (the same row) does.
+    expect(screen.queryByTestId("visual-back-asking")).toBeNull();
+    ask(supervisorAsks);
+    expect(screen.queryByTestId("visual-back-asking")).toBeNull();
+    needUser(2, "Should the cache be per user?");
+    expect(screen.getByTestId("visual-back-asking")).toBeTruthy();
+    // Keep: the engine's kept row shows at once.
+    fireEvent.click(screen.getByTestId("visual-keep"));
+    await waitFor(() => expect(screen.getByTestId("visual-keep").getAttribute("aria-pressed")).toBe("true"));
 
-      // Esc: the chat back, the same terminal, the very sidebar it left (never unmounted, so as it was).
-      act(() => void window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
-      expect(screen.queryByTestId("visual-reader")).toBeNull();
-      expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
-      expect(screen.getByTestId("terminal")).toBe(terminal);
-      expect(sidebar()).toBe(aside);
-      expect(within(sidebar()).getByTestId("tree-session-sup1")).toBeTruthy();
-      expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
+    // Esc: the chat back, the same terminal, the very sidebar it left (never unmounted, so as it was).
+    act(() => void window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+    expect(screen.queryByTestId("visual-reader")).toBeNull();
+    expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
+    expect(screen.getByTestId("terminal")).toBe(terminal);
+    expect(sidebar()).toBe(aside);
+    expect(within(sidebar()).getByTestId("tree-session-sup1")).toBeTruthy();
+    expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
 
-      // Opened again, the sidebar hides again.
-      fireEvent.click(screen.getByTestId("visuals-button"));
-      fireEvent.click(within(screen.getByTestId("visuals-panel")).getByTestId("visual-row-v_8f2c"));
-      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
-      // A fresh open starts the badge over; another ask taking the open one's place (the same count) badges it.
-      expect(screen.queryByTestId("visual-back-asking")).toBeNull();
-      ask({ ...waiting, agent_id: "sup1", workspace_id: "proj" });
-      expect(screen.getByTestId("visual-back-asking")).toBeTruthy();
+    // Opened again, the sidebar hides again.
+    fireEvent.click(screen.getByTestId("visuals-button"));
+    fireEvent.click(within(screen.getByTestId("visuals-panel")).getByTestId("visual-row-v_8f2c"));
+    expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+    // A fresh open starts the badge over; another ask taking the open one's place (the same count) badges it.
+    expect(screen.queryByTestId("visual-back-asking")).toBeNull();
+    ask({ ...waiting, agent_id: "sup1", workspace_id: "proj" });
+    expect(screen.getByTestId("visual-back-asking")).toBeTruthy();
 
-      // Back, the button: the same sidebar and terminal again.
-      vi.spyOn(client, "keptVisuals").mockResolvedValue([{ id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: { option: "B", note: "", at: now }, kept_at: now }]);
-      fireEvent.click(screen.getByTestId("visual-back"));
-      expect(sidebar()).toBe(aside);
-      expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
-      expect(screen.getByTestId("terminal")).toBe(terminal);
+    // Back, the button: the same sidebar and terminal again.
+    vi.spyOn(client, "keptVisuals").mockResolvedValue([{ id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: { option: "B", note: "", at: now }, kept_at: now }]);
+    fireEvent.click(screen.getByTestId("visual-back"));
+    expect(sidebar()).toBe(aside);
+    expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
+    expect(screen.getByTestId("terminal")).toBe(terminal);
 
-      // Library › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
-      fireEvent.click(within(sidebar()).getByRole("button", { name: /^Library/ }));
-      fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept visuals/ }));
-      fireEvent.click(await screen.findByTestId("kept-k_1"));
-      const kept = screen.getByTestId("kept-reader");
-      expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");
-      expect(within(kept).queryByTestId("visual-send")).toBeNull();
-      // Esc closes the reader and stays in the Library; the next Esc, with nothing nested open, leaves it.
-      fireEvent.keyDown(window, { key: "Escape" });
-      expect(await screen.findByTestId("kept-k_1")).toBeTruthy();
-      expect(screen.queryByTestId("kept-reader")).toBeNull();
-      fireEvent.keyDown(window, { key: "Escape" });
-      await waitFor(() => expect(screen.queryByTestId("kept-k_1")).toBeNull());
-    } finally {
-      sync.stop();
-    }
+    // Library › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+    fireEvent.click(within(sidebar()).getByRole("button", { name: /^Library/ }));
+    fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept visuals/ }));
+    fireEvent.click(await screen.findByTestId("kept-k_1"));
+    const kept = screen.getByTestId("kept-reader");
+    expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");
+    expect(within(kept).queryByTestId("visual-send")).toBeNull();
+    // Esc closes the reader and stays in the Library; the next Esc, with nothing nested open, leaves it.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByTestId("kept-k_1")).toBeTruthy();
+    expect(screen.queryByTestId("kept-reader")).toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("kept-k_1")).toBeNull());
   });
 
-  it.each(["Escape", "Back", "Answer"])("returns to the session from an Inbox visual after %s", async (leave) => {
+  it.each(["Escape", "Back", "Answer", "Home"])("returns to the session from an Inbox visual after %s", async (leave) => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now, goal: "Ship it" };
     const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [item] });
@@ -703,52 +673,33 @@ describe("visuals", () => {
       daemon.publish("visual.answered", { root_id: "sup1" });
       return row;
     });
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
-      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
-      await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
-      fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
-      await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
-      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
-      if (leave === "Answer") {
-        fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
-        fireEvent.click(screen.getByTestId("visual-send"));
-        await waitFor(() => expect(store.getState().inbox).toEqual([]));
-      }
-      if (leave === "Escape") fireEvent.keyDown(window, { key: "Escape" });
-      else if (leave === "Back") fireEvent.click(screen.getByTestId("visual-back"));
-      expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
-      expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
-      expect(screen.queryByTestId("inbox-session")).toBeNull();
-      expect(screen.queryByTestId("visual-reader")).toBeNull();
-      expect(screen.queryByTestId("inbox-card")).toBeNull();
-    } finally { sync.stop(); }
-  });
-
-  it("keeps the logo, a Home button, clear of Back over an Inbox visual, and it goes Home", async () => {
-    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now, goal: "Ship it" };
-    const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [item] });
-    const client = daemon.client();
-    vi.spyOn(client, "visuals").mockResolvedValue([visual]);
-    vi.spyOn(client, "markVisualRead").mockResolvedValue({ ...visual, unread: false });
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    try {
-      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
-      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
-      await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
-      fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
-      await screen.findByTestId("visual-reader");
-      // The logo's own row: not inside the reader's toolbar, so Back is still its own control.
+    const { store, sync } = connectDaemon(daemon, client);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} />);
+    const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+    await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
+    await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
+    expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+    if (leave === "Answer") {
+      fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+      fireEvent.click(screen.getByTestId("visual-send"));
+      await waitFor(() => expect(store.getState().inbox).toEqual([]));
+    }
+    if (leave === "Home") {
       const home = screen.getByRole("button", { name: "Home" });
       expect(screen.getByTestId("visual-back").parentElement?.contains(home)).toBe(false);
       fireEvent.click(home);
-      expect(await screen.findByRole("region", { name: "New session" })).toBeTruthy();
+      await screen.findByRole("region", { name: "New session" });
       expect(screen.queryByTestId("visual-reader")).toBeNull();
-    } finally { sync.stop(); }
+      return;
+    }
+    if (leave === "Escape") fireEvent.keyDown(window, { key: "Escape" });
+    else if (leave === "Back") fireEvent.click(screen.getByTestId("visual-back"));
+    expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
+    expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
+    expect(screen.queryByTestId("inbox-session")).toBeNull();
+    expect(screen.queryByTestId("visual-reader")).toBeNull();
+    expect(screen.queryByTestId("inbox-card")).toBeNull();
   });
 
   it("sends a note-only answer from the free-text choice", async () => {
@@ -832,33 +783,22 @@ describe("visuals", () => {
     await waitFor(() => expect(sent).toEqual([{ rev: 2, option: undefined, note: "Stage it" }]));
   });
 
-  it.each([null, { ...visual, id: "v_other" }, { ...visual, rev: 3 }])("ignores a pending answer after replacing its reader with %j", async (replacement) => {
-    let resolve!: (row: VisualDTO) => void;
-    const client = new FakeDaemon().client();
-    vi.spyOn(client, "answerVisual").mockImplementation(() => new Promise((done) => { resolve = done; }));
-    const onAnswered = vi.fn();
-    const reader = (row: VisualDTO) => <VisualReader client={client} visual={row} onAnswered={onAnswered} onBack={() => view.rerender(<div>Old session</div>)} Frame={() => <div />} />;
-    const view = render(reader(visual));
-    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
-    fireEvent.click(screen.getByTestId("visual-send"));
-    view.rerender(replacement ? reader(replacement) : <div>Another session</div>);
-    await act(async () => resolve({ ...visual, answer: { option: "B", note: "", at: now } }));
-    expect(replacement ? screen.getByTestId("visual-reader") : screen.getByText("Another session")).toBeTruthy();
-    expect(onAnswered).not.toHaveBeenCalled();
-  });
-
-  it.each([null, { ...visual, id: "v_other" }, { ...visual, rev: 3 }])("ignores a pending Keep after replacing its reader with %j", async (replacement) => {
-    let resolve!: (row: VisualDTO) => void;
-    const client = new FakeDaemon().client();
-    vi.spyOn(client, "keepVisual").mockImplementation(() => new Promise((done) => { resolve = done; }));
-    const onAnswered = vi.fn();
-    const reader = (row: VisualDTO) => <VisualReader client={client} visual={row} onAnswered={onAnswered} onBack={() => {}} Frame={() => <div />} />;
-    const view = render(reader(visual));
-    fireEvent.click(screen.getByTestId("visual-keep"));
-    view.rerender(replacement ? reader(replacement) : <div>Another session</div>);
-    await act(async () => resolve({ ...visual, kept: true }));
-    expect(onAnswered).not.toHaveBeenCalled();
-    if (replacement) expect((screen.getByTestId("visual-keep") as HTMLButtonElement).disabled).toBe(false);
+  describe.each(["answerVisual", "keepVisual"] as const)("%s", (action) => {
+    it.each([null, { ...visual, id: "v_other" }, { ...visual, rev: 3 }])("ignores a pending response after replacing its reader with %j", async (replacement) => {
+      let resolve!: (row: VisualDTO) => void;
+      const client = new FakeDaemon().client();
+      vi.spyOn(client, action).mockImplementation(() => new Promise<VisualDTO>((done) => { resolve = done; }));
+      const onAnswered = vi.fn();
+      const reader = (row: VisualDTO) => <VisualReader client={client} visual={row} onAnswered={onAnswered} onBack={() => view.rerender(<div>Old session</div>)} Frame={() => <div />} />;
+      const view = render(reader(visual));
+      if (action === "answerVisual") fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+      fireEvent.click(screen.getByTestId(action === "answerVisual" ? "visual-send" : "visual-keep"));
+      view.rerender(replacement ? reader(replacement) : <div>Another session</div>);
+      await act(async () => resolve(action === "answerVisual" ? { ...visual, answer: { option: "B", note: "", at: now } } : { ...visual, kept: true }));
+      expect(replacement ? screen.getByTestId("visual-reader") : screen.getByText("Another session")).toBeTruthy();
+      expect(onAnswered).not.toHaveBeenCalled();
+      if (replacement && action === "keepVisual") expect(screen.getByTestId("visual-keep")).toHaveProperty("disabled", false);
+    });
   });
 
   it("can dismiss a visual prompt without answering, closing the reader like Back", async () => {
@@ -872,24 +812,22 @@ describe("visuals", () => {
     const store = createAppStore();
     const sync = startSync({ client, store, repo: REPO, connect: daemon.connect });
     const answer = vi.spyOn(client, "answerVisual");
-    try {
-      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
-      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
-      await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
-      await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
-      fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
-      fireEvent.click(await screen.findByTestId("visual-dismiss"));
-      // Back to the session, as Back does; the Inbox count and card clear, the visual stays in the session.
-      expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
-      expect(screen.queryByTestId("visual-reader")).toBeNull();
-      await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
-      fireEvent.click(screen.getByTestId("inbox-link"));
-      await screen.findByRole("region", { name: "Inbox" });
-      expect(screen.queryByTestId("inbox-card")).toBeNull();
-      expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
-      expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
-      expect(answer).not.toHaveBeenCalled();
-    } finally { sync.stop(); }
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} />);
+    const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+    await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
+    fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
+    fireEvent.click(await screen.findByTestId("visual-dismiss"));
+    // Back to the session, as Back does; the Inbox count and card clear, the visual stays in the session.
+    expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
+    expect(screen.queryByTestId("visual-reader")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
+    fireEvent.click(screen.getByTestId("inbox-link"));
+    await screen.findByRole("region", { name: "Inbox" });
+    expect(screen.queryByTestId("inbox-card")).toBeNull();
+    expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
+    expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
+    expect(answer).not.toHaveBeenCalled();
   });
 
   const takesFiles: VisualDTO = { ...visual, answer_agent_id: "a_sup", accepts_files: true };
@@ -1044,9 +982,7 @@ describe("visuals", () => {
       return <VisualReader client={fake} visual={visuals?.find((v) => v.id === visual.id) ?? null} loading={visuals === null} onBack={back} onAnswered={put} onRead={read} Frame={Frame} />;
     }
     render(
-      <StoreContext.Provider value={store}>
-        <Reader />
-      </StoreContext.Provider>,
+      inTestStore(<><Reader /></>, store),
     );
     await screen.findByTestId("visual-frame");
     act(() => post(data, from));
