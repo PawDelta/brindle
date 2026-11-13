@@ -1149,6 +1149,18 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
     review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
 );
+-- This machine's replica of a shared doc's live draft (brindle.plan_drafts):
+-- its Loro state and the peer id it writes under, in one row, so the id is
+-- never used without the changes already written under it. seq goes up on
+-- every write, so a holder that missed one reloads before writing.
+CREATE TABLE IF NOT EXISTS plan_drafts (
+    doc_id TEXT PRIMARY KEY,       -- the Library document
+    peer_id INTEGER NOT NULL UNIQUE,
+    state BLOB NOT NULL,           -- a Loro snapshot
+    seq INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 -- Documents whose owner chose Stop sharing while the Library was out of reach:
 -- their teams and org lose access at the next pass that reaches it.
 CREATE TABLE IF NOT EXISTS plan_unshares (
