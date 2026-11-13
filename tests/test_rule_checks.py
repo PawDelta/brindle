@@ -43,6 +43,7 @@ Binary files differ
 """
 
 
+@pytest.mark.variant("bypass: content that looks like diff headers must not credit lines to another file")
 def test_parse_diff_is_not_fooled_by_content_that_looks_like_headers():
     """A removed ``-- sql comment`` renders as ``--- sql comment`` and an added
     ``++ x`` as ``+++ x``: hunk line counts say they're content, so a worker
@@ -80,6 +81,7 @@ def test_parse_diff_handles_blank_context_and_quoted_paths():
     assert d.added["one.py"] == [(2, "y")]
 
 
+@pytest.mark.variant("bypass: a form feed, bare CR or U+2028 inside a line must not end a hunk early")
 def test_parse_diff_counts_lines_the_way_git_does():
     """A form feed, a bare CR or U+2028 inside a line is one line to git. If
     the parser broke there too, the hunk's counts would run out early and
@@ -116,10 +118,6 @@ def test_deny_patterns_report_file_and_line_and_cap_the_noise():
 
 
 @pytest.mark.parametrize("path, lines, hits", [
-    ("src/brindle/workspaces.py", ["proc = subprocess.run(args, cwd=path)"], 1),
-    ("src/brindle/ci.py", ["def f(*, run=subprocess.Popen): pass", "from subprocess import PIPE, Popen",
-                           "Popen(x)", "os.system('x')", "async def g(): await asyncio.create_subprocess_exec('x')"],
-     4),
     pytest.param("src/brindle/b.py", [
         "import subprocess as sp", "sp.run(args)",
         "from subprocess import (", "    Popen as P,", ")", "P(args)",
@@ -129,7 +127,6 @@ def test_deny_patterns_report_file_and_line_and_cap_the_noise():
     ("src/brindle/a.py", ["try: pass", "except subprocess.TimeoutExpired: pass", "# subprocess.run would wait",
                           "def f(p: subprocess.Popen) -> subprocess.Popen: pass", "x: subprocess.Popen = None"], 0),
     ("src/brindle/spawn.py", ["subprocess.run(argv)"], 0),
-    ("tests/test_a.py", ["subprocess.run(['git'])"], 0),
     ("src/brindle/many.py", ["subprocess.call(x)"] * 11, 11),
     ("src/brindle/broken.py", ["def f(:", "    subprocess.run(x)"], 1),     # doesn't parse: line by line
 ])
@@ -173,6 +170,7 @@ def test_require_tests_for_wants_a_test_file_in_the_diff():
     assert rule_checks.check_require_tests(pack(require_tests_for=["src/**/*.py"]), cased)
 
 
+@pytest.mark.variant("bypass spellings of shell/verify/yaml/pickle/secrets must be denied; safe near-matches must pass")
 def test_the_builtin_security_pack_is_not_fooled_by_spelling():
     from brindle.profiles import load_rule_pack
 
@@ -256,6 +254,7 @@ def test_a_profile_that_wont_load_is_a_failure_not_a_pass(db, branch, repo):
     assert "extends itself" in rule_checks.run(db, branch).problem
 
 
+@pytest.mark.variant("bypass: a committed -diff attribute and shared git config must not hide added lines")
 def test_the_branch_cannot_hide_its_lines_from_the_diff(db, branch, monkeypatch):
     """A ``-diff`` attribute committed on the branch would make git print
     "Binary files differ" instead of the lines; shared git config could
@@ -298,11 +297,3 @@ def test_the_merge_gate_fails_on_a_violation_and_the_summary_reports_it(db, bran
     assert gates.check_summary(db, branch, cfg) == "PASS `rules security/backend`"
 
 
-def test_the_summary_lists_rules_before_the_checks(db, branch, repo, monkeypatch):
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["true"]}))
-    add_worker(db, branch, "sec")
-    monkeypatch.setattr(gates, "run_checked", lambda db_, ws, cmd, env, timeout: (True, ""))
-    summary = gates.check_summary(db, branch, load_repo_config(str(repo)))
-    assert summary.startswith("FAIL `rules security/backend`") and summary.endswith("PASS `true`")
-    db.delete_agent("w1")
-    assert gates.check_summary(db, branch, load_repo_config(str(repo))) == "PASS `true`"

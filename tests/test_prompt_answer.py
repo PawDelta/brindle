@@ -91,7 +91,7 @@ def sweeps(db, clock, n=2):
 
 @pytest.mark.parametrize("options,cursor", [
     (["1. Yes", "2. Not now", "3. Don't show again"], 0),
-    (["1. Yes"], 0),
+    pytest.param(["1. Yes"], 0, marks=pytest.mark.variant("incomplete auto-mode menu")),
     (["1. Yes", "2. Don't show again"], -1),
 ])
 def test_teach_auto_mode_startup_bypasses_classifier(db, launch, options, cursor):
@@ -109,14 +109,16 @@ def test_teach_auto_mode_startup_bypasses_classifier(db, launch, options, cursor
 
 
 @pytest.mark.parametrize("question,options,mode,status,screen,provider", [
-    ("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
-     "• Which storage should I use?\n\n  1. SQLite\n  2. Postgres\n\n› \n  97% context left", "codex"),
+    pytest.param("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
+                 "• Which storage should I use?\n\n  1. SQLite\n  2. Postgres\n\n› \n  97% context left", "codex",
+                 marks=pytest.mark.variant("Codex task question with footer")),
     pytest.param("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
                  "Which storage should I use?\n\n  1. SQLite\n  2. Postgres", "codex",
                  marks=pytest.mark.variant("numbered question without a composer footer")),
-    ("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
-     "⏺ Which storage should I use?\n\n  1. SQLite\n  2. Postgres\n\n────\n❯ \n────\n"
-     "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n", "claude"),
+    pytest.param("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
+                 "⏺ Which storage should I use?\n\n  1. SQLite\n  2. Postgres\n\n────\n❯ \n────\n"
+                 "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n", "claude",
+                 marks=pytest.mark.variant("Claude task question with footer")),
     pytest.param("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
                  "⏺ Read(schema.sql)\n  ⎿ Read 12 lines\n\n⏺ Which storage should I use?\n\n  1. SQLite\n  2. Postgres",
                  "claude", marks=pytest.mark.variant("completed Claude tool transcript before a plain question")),
@@ -159,15 +161,17 @@ def test_a_menu_after_the_session_started_is_never_answered(db, launch, monkeypa
 @pytest.mark.parametrize("question,options,reply,keys,chosen,told", [
     # trust, in wording agy's TRUST_DIALOG doesn't match: the cursor starts on
     # "Not now", so it moves down and presses Enter only once "Allow" is selected
-    (TRUST, ["Not now", "Allow this folder"], {"kind": "trust", "option": "Allow this folder"},
-     ["Down", "Enter"], "Allow this folder", 0),
+    pytest.param(TRUST, ["Not now", "Allow this folder"], {"kind": "trust", "option": "Allow this folder"},
+                 ["Down", "Enter"], "Allow this folder", 0,
+                 marks=pytest.mark.variant("#151: reworded folder trust prompt")),
     # a sign-in is the person's, whatever the model says
-    ("Sign in to Antigravity to continue",
+    pytest.param("Sign in to Antigravity to continue",
      ["Continue with Google", "Use a key file"], {"kind": "trust", "option": "Continue with Google"},
-     [], None, 1),
+     [], None, 1, marks=pytest.mark.variant("sign-in misclassified as trust")),
     # terms or a licence are the person's to accept: never a plain "Continue"
-    ("By continuing you agree to the Terms of Service and license agreement",
-     ["Continue", "Exit"], {"kind": "acknowledge", "option": "Continue"}, [], None, 1),
+    pytest.param("By continuing you agree to the Terms of Service and license agreement",
+                 ["Continue", "Exit"], {"kind": "acknowledge", "option": "Continue"}, [], None, 1,
+                 marks=pytest.mark.variant("legal consent misclassified as acknowledgement")),
     pytest.param("Terms of Service\n" + "\n".join(f"Notice {i}." for i in range(26)),
                  ["Continue", "Exit"], {"kind": "acknowledge", "option": "Continue"}, [], None, 1,
                  marks=pytest.mark.variant("terms above the 25 lines the model sees: a review finding")),
@@ -176,14 +180,16 @@ def test_a_menu_after_the_session_started_is_never_answered(db, launch, monkeypa
     ("Requesting permission for read_file\n{path}/README.md", ["Allow", "Deny"],
      {"kind": "trust", "option": "Allow"}, [], None, 1),
     # the model only points at an option: one granting more is left for the person
-    ("Some actions in this mode can't be undone.",
-     ["No, exit", "Yes, I accept"], {"kind": "acknowledge", "option": "Yes, I accept"}, [], None, 1),
+    pytest.param("Some actions in this mode can't be undone.",
+                 ["No, exit", "Yes, I accept"], {"kind": "acknowledge", "option": "Yes, I accept"}, [], None, 1,
+                 marks=pytest.mark.variant("irreversible-action consent")),
     # a trust "Yes" with words beyond trusting the folder (the screen can
     # carry repo text that steers the model to it)
     (TRUST, ["No", "Yes, and trust this project's servers"],
      {"kind": "trust", "option": "Yes, and trust this project's servers"}, [], None, 1),
     # a settings picker is only ever answered with its default
-    ("Choose a colour scheme", ["Dark", "Light"], {"kind": "setting_choice", "option": "Light"}, [], None, 1),
+    pytest.param("Choose a colour scheme", ["Dark", "Light"], {"kind": "setting_choice", "option": "Light"}, [], None, 1,
+                 marks=pytest.mark.variant("classifier selects nondefault setting")),
     pytest.param("Choose how edits are handled", ["Always allow edits", "Ask each time"],
                  {"kind": "setting_choice", "option": "Always allow edits"}, [], None, 1,
                  marks=pytest.mark.variant("a settings default that grants permissions: a review finding")),
@@ -198,8 +204,8 @@ def test_unrecognized_startup_prompt(db, launch, question, options, reply, keys,
 
 
 @pytest.mark.parametrize("provider,mode,parent,status", [
-    ("antigravity", "assign", "boss", "processing"),   # an argv task starts 'processing'
-    ("antigravity", "interactive", None, "idle"),      # a supervisor
+    pytest.param("antigravity", "assign", "boss", "processing", marks=pytest.mark.variant("argv worker's processing startup prompt")),
+    pytest.param("antigravity", "interactive", None, "idle", marks=pytest.mark.variant("idle supervisor's startup prompt")),
     ("claude", "assign", "boss", "waiting"),           # a startup menu reads as 'waiting'
 ])
 def test_sweep_answers_a_prompt_after_after_launch_gave_up(db, launch, provider, mode, parent, status):
@@ -227,6 +233,7 @@ def test_model_calls_are_capped_per_launch_across_sweeps(db, launch):
     assert len(asked) == prompt_answer.MAX_CALLS
 
 
+@pytest.mark.variant("#161: echoed brief mentions sign-in and keys")
 def test_the_delivered_brief_is_never_the_prompt(db, launch, monkeypatch):
     # The brief the CLI echoes as "❯ <brief>" with indented wrapped lines reads
     # as a menu, and its words (sign-in, API key) as a personal prompt.
@@ -249,7 +256,7 @@ def test_the_delivered_brief_is_never_the_prompt(db, launch, monkeypatch):
 
 
 @pytest.mark.parametrize("spinner", [
-    "",   # echoed, the turn not yet showing
+    pytest.param("", marks=pytest.mark.variant("#203: markdown brief before spinner")),
     pytest.param("✻ Pondering…\n", marks=pytest.mark.variant("the captured screen from #203")),
 ])
 def test_a_goal_brief_rendered_as_markdown_is_never_the_prompt(db, launch, monkeypatch, spinner):
@@ -281,7 +288,7 @@ def test_a_goal_brief_rendered_as_markdown_is_never_the_prompt(db, launch, monke
 
 
 @pytest.mark.parametrize("suffix,echo,provider", [
-    (None, False, "claude"),
+    pytest.param(None, False, "claude", marks=pytest.mark.variant("#196: brief prefix scrolled off")),
     *[pytest.param(suffix, echo, provider, marks=pytest.mark.variant(
         "busy, answered, and echoed transcript bypass attempts must not become pending questions"))
       for suffix, echo, provider in [

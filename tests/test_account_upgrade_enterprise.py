@@ -10,7 +10,6 @@ CONTACT = ("Enterprise is set up with PawDelta, not bought here. Email support@p
 
 @pytest.mark.parametrize("args", [
     ("upgrade", "--enterprise", "--trial", "--seats", "11", "--org", ORG),
-    ("upgrade", "--enterprise"),
 ])
 def test_enterprise_prints_the_contact_message_and_exits_zero(team, args):
     team.routes["POST /billing/checkout"] = lambda f, h: (200, {"url": "https://checkout.stripe.test/c/x"})

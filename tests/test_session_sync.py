@@ -228,7 +228,10 @@ def test_a_merge_into_the_session_tells_the_supervisor_how_far_behind_main_it_is
     assert not contains(sess.path, main)
 
 
-@pytest.mark.parametrize("trigger, diverged", [("merge", True), ("merge", False), ("resume", True)],
+@pytest.mark.parametrize("trigger, diverged", [
+    pytest.param("merge", True, marks=pytest.mark.variant("A diverged session must merge upstream fixes and check the combined result")),
+    ("merge", False),
+    pytest.param("resume", True, marks=pytest.mark.variant("Resuming a session cut from an old branch must still sync against main"))],
                          ids=["diverged", "linear", "resume"])
 def test_a_clean_sync_merges_main_in_and_checks_what_it_brought(db, repo, sess, other, told, monkeypatch,
                                                                  trigger, diverged):
@@ -639,7 +642,10 @@ def test_a_refused_fetch_tells_the_supervisor_once_until_origin_answers_again(db
     assert len(fetch_from("ssh://example.invalid/x")) == 2
 
 
-@pytest.mark.parametrize("reachable", [True, False], ids=["local-main-ahead", "origin-unreachable"])
+@pytest.mark.parametrize("reachable", [
+    pytest.param(True, marks=pytest.mark.variant("A new session must exclude unpushed commits on local main and start at freshly fetched origin/main")),
+    False,
+], ids=["local-main-ahead", "origin-unreachable"])
 def test_a_new_session_branch_starts_only_at_origin_main_as_just_fetched(db, repo, reachable):
     origin = sh("git rev-parse origin/main", repo)
     commit(repo, "local.py", "unpushed\n")   # local main has a commit of its own

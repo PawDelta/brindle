@@ -61,8 +61,9 @@ def _config(argv):
     pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
                  ["git branch --list fix/*"], "ask",
                  marks=pytest.mark.variant("unquoted patterns could expand into option-like filenames")),
-    ("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
-     ["git -C /otherworktree status"], "allow"),
+    pytest.param("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
+                 ["git -C /otherworktree status"], "allow", marks=pytest.mark.variant(
+                     "dontAsk must still permit a validated read-only command in a sibling worktree")),
     pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
                  ("git -C /otherworktree status", "git -C /otherworktree checkout status file"), "ask",
                  marks=pytest.mark.variant("same callID with changed command must still prompt; approvals expire and are single-use")),
@@ -151,11 +152,11 @@ console.log(JSON.stringify([counts, replies.map(r => r.body.response)]));
 
 
 @pytest.mark.parametrize("chosen, policy, mode, edit", [
-    ("ask", "on", None, "ask"),            # the default: OpenCode's own prompts stay, even on Autonomous
-    ("auto", "on", None, "allow"),         # edits run; commands outside allowed_tools still ask
+    pytest.param("ask", "on", None, "ask", marks=pytest.mark.variant("the person's ask choice must preserve OpenCode's own approval prompts")),
+    pytest.param("auto", "on", None, "allow", marks=pytest.mark.variant("the person's auto choice allows edits without granting every shell command")),
     ("autonomous", "on", None, None),      # nothing of OpenCode's asks: the plugin is the gate
-    ("autonomous", "off", None, "ask"),    # brindle can vouch for nothing: OpenCode keeps asking
-    ("autonomous", "on", "dontAsk", "deny"),   # a profile's own mode wins
+    pytest.param("autonomous", "off", None, "ask", marks=pytest.mark.variant("disabling permission policy must preserve OpenCode's own prompts")),
+    pytest.param("autonomous", "on", "dontAsk", "deny", marks=pytest.mark.variant("explicit dontAsk must deny rather than inherit Autonomous edit approval")),
 ])
 def test_opencode_permission_mode_picks_what_opencode_asks(db, ws, monkeypatch, chosen, policy, mode, edit):
     """The person's OpenCode mode maps onto OpenCode's permissions, a profile's mode wins,

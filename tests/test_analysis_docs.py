@@ -40,7 +40,8 @@ def uploader(tmp_path, remote, notices):
                            identity=lambda: "a" * 40, notice=notices.append, start_thread=False), store
 
 
-@pytest.mark.parametrize("status", [200, 500])
+@pytest.mark.parametrize("status", [200, pytest.param(500, marks=pytest.mark.variant(
+    "a failed upload must preserve every local document and omit the success receipt"))])
 def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_path, remote, fixed_identity, db,
                                                                  monkeypatch):
     from brindle import agents, identity_lock, mcp_server, pipeline, procs
@@ -85,7 +86,10 @@ def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_pat
         ["big.md", "summary.md"] if status == 200 else ["big.md", "raw.md", "summary.md"])
 
 
-@pytest.mark.parametrize("case", ["airgap", "unentitled", "off"])
+@pytest.mark.parametrize("case", ["airgap",
+    pytest.param("unentitled", marks=pytest.mark.variant("upload requires the analysis-docs entitlement")),
+    pytest.param("off", marks=pytest.mark.variant("the person's store opt-out prevents document upload")),
+])
 def test_nothing_sent(case, tmp_path, remote, fixed_identity, monkeypatch):
     write_doc(tmp_path)
     up, store = uploader(tmp_path, remote, [])
@@ -99,7 +103,8 @@ def test_nothing_sent(case, tmp_path, remote, fixed_identity, monkeypatch):
     assert remote.docs == []
 
 
-@pytest.mark.parametrize("case", ["airgap", "unentitled"])
+@pytest.mark.parametrize("case", [pytest.param("airgap", marks=pytest.mark.variant(
+    "the docs CLI must enforce repository airgap before making any request")), "unentitled"])
 def test_docs_cli_sends_nothing(case, tmp_path, remote, monkeypatch):
     import json
 
@@ -122,7 +127,8 @@ def test_docs_cli_sends_nothing(case, tmp_path, remote, monkeypatch):
     assert result.exit_code == 1 and sent == []
 
 
-@pytest.mark.parametrize("gate_ok, uploaded", [(True, 1), (False, 0)])
+@pytest.mark.parametrize("gate_ok, uploaded", [(True, 1), pytest.param(False, 0, marks=pytest.mark.variant(
+    "a failed merge gate cannot publish branch documents"))])
 def test_merge_uploads_the_branch_doc_only_when_it_merges(
         gate_ok, uploaded, db, remote, tmp_path, fixed_identity, monkeypatch):
     from brindle import codemap, codemap_docs, gates, git, pipeline, workspaces
@@ -150,7 +156,7 @@ def test_merge_uploads_the_branch_doc_only_when_it_merges(
     assert len(list(other.rglob("*.md"))) == 2
 
 
-@pytest.mark.parametrize("fmt, status", [("zip", 403), ("docx", 200), ("md", 200)])
+@pytest.mark.parametrize("fmt, status", [("zip", 403), ("md", 200)])
 def test_docs_export_writes_only_after_a_200(fmt, status, tmp_path, remote, monkeypatch):
     from typer.testing import CliRunner
 

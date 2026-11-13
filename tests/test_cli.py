@@ -11,7 +11,8 @@ from brindle.db import Agent
 from conftest import sh
 
 
-@pytest.mark.parametrize("command", [[], ["start", "--no-attach"]])
+@pytest.mark.parametrize("command", [[], pytest.param(["start", "--no-attach"], marks=pytest.mark.variant(
+    "the explicit start command must migrate the deprecated flag just like the root command"))])
 @pytest.mark.parametrize("flag", ["--no-autopilot"])
 def test_deprecated_driver_flags_still_start_a_goal_session(db, repo, monkeypatch, command, flag):
     from brindle import agents, cli, config
@@ -61,6 +62,7 @@ def test_supervisor_provider_rejects_worker_only_cli(db, repo, monkeypatch, comm
     assert result.exception is not None and isinstance(result.exception, SystemExit)
 
 
+@pytest.mark.variant("JSON workspace status must report dirty files and an exited agent without a tmux window")
 def test_ls_json(db, repo, monkeypatch):
     ws = workspaces.create(db, str(repo), "feat/x").workspace
     sh("echo change >> app.py && touch new.txt", ws.path)
@@ -97,7 +99,8 @@ def test_rm_survives_a_missing_base_branch(db, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("check,pushed,said", [
-    ("echo boom; false", False, "checks failed: echo boom; false"),
+    pytest.param("echo boom; false", False, "checks failed: echo boom; false", marks=pytest.mark.variant(
+        "a failed check must prevent opening or pushing a pull request")),
     ("git -c user.name=a -c user.email=a@a commit --allow-empty -qm moved", False, "changed while its checks ran"),
     ("grep -q fixed app.py; r=$?; git checkout -q app.py; exit $r", False, "uncommitted changes"),   # passes only dirty
     ("true", True, ""),

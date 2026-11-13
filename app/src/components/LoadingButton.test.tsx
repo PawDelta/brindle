@@ -15,7 +15,7 @@ function slowAction() {
 }
 
 describe("LoadingButton", () => {
-  it("shows nothing for 300ms, then dims with the sweep and aria-busy until the action settles", async () => {
+  it("delays busy feedback, ignores duplicate clicks while pending and runs again after settling", async () => {
     const { action, finish } = slowAction();
     render(<LoadingButton className="btn btn-primary" onClick={action}>Start</LoadingButton>);
     const button = screen.getByRole("button", { name: "Start" });
@@ -23,6 +23,8 @@ describe("LoadingButton", () => {
     expect(wrap.dataset.tone).toBe("primary");
 
     fireEvent.click(button);
+    fireEvent.click(button);
+    expect(action).toHaveBeenCalledTimes(1);
     act(() => vi.advanceTimersByTime(299));
     expect(wrap.classList.contains("slow")).toBe(false);
     expect(button.getAttribute("aria-busy")).toBeNull();
@@ -34,18 +36,6 @@ describe("LoadingButton", () => {
     await finish();
     expect(wrap.classList.contains("slow")).toBe(false);
     expect(button.getAttribute("aria-busy")).toBeNull();
-  });
-
-  it("ignores a second click while the action is out, and runs again once it settles", async () => {
-    const { action, finish } = slowAction();
-    render(<LoadingButton onClick={action}>Allow</LoadingButton>);
-    const button = screen.getByRole("button", { name: "Allow" });
-
-    fireEvent.click(button);
-    fireEvent.click(button);
-    expect(action).toHaveBeenCalledTimes(1);
-
-    await finish();
     fireEvent.click(button);
     expect(action).toHaveBeenCalledTimes(2);
   });

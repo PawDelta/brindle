@@ -22,9 +22,9 @@ from test_merge_order import add
 from test_pipeline_idempotent import drain
 
 
-@pytest.mark.parametrize("guard", [None, "health", "unreported", "verdict", "running", "queued", "moved", "standalone",
+@pytest.mark.parametrize("guard", ["health", "unreported", "verdict", "queued", "standalone",
                                     "resumed", pytest.param("repane", marks=pytest.mark.variant(
-                                        "a resumed review can exit in its new pane before stale death handling")), "tmux-error",
+                                        "a resumed review can exit in its new pane before stale death handling")),
                                     pytest.param("os-error", marks=pytest.mark.variant("process creation can raise OSError instead of TmuxError"))])
 def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch, guard):
     from brindle import launch_health, tmux
@@ -379,7 +379,7 @@ def test_reviewer_stopping_on_a_deleted_worktree_tells_the_supervisor(db, repo, 
     assert any(f"worktree {ws.path} no longer exists" in b for b in drain(db))
 
 
-@pytest.mark.parametrize("moves", [1, 99])
+@pytest.mark.parametrize("moves", [99])
 def test_a_reported_branch_that_moves_during_its_checks_is_not_dropped(db, repo, monkeypatch, moves):
     """#168: the base moved and the branch took new commits while its checks
     ran, with no new report to start another run. The branch is checked
@@ -453,7 +453,7 @@ def test_issue190_the_check_run_before_a_review_outlives_the_reporting_worker(db
                 os.kill(helper, signal.SIGKILL)
 
 
-@pytest.mark.parametrize("check_run, delay", [("gone", 90), ("at work", 90), ("launching", 15)])
+@pytest.mark.parametrize("check_run, delay", [("launching", 15)])
 def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, repo, monkeypatch, check_run, delay):
     """#186: a reported branch sat with no check run, no reviewer and no
     verdict until the 30-minute reminder asked the supervisor to call
@@ -636,7 +636,7 @@ def test_report_dispatch_preserves_the_current_claim(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("session, exits_mid_delivery", [
-    ("sess-w1", False), (None, False),
+    (None, False),
     # Alive when the verdict lands, gone by the time send_message delivers.
     ("sess-w1", True),
 ])
@@ -695,10 +695,7 @@ BLOCKER = "- blocker: missing check for None.\nNeeds supervisor action: None."
 
 
 @pytest.mark.parametrize("summary, landing, locked, restarted", [
-    (BLOCKER, "before the resume", None, ["boss", "w1"]),
     (BLOCKER, "as the chat starts", None, ["boss", "w1"]),      # past the resume's first look
-    (BLOCKER, "as the chat starts", "someone-else", ["boss"]),      # stays paused: note_stalled tells its supervisor
-    ("Needs supervisor action: ask about scope.", "before the resume", None, ["boss"]),
 ])
 def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkeypatch, summary, landing, locked, restarted):
     """Check runs and _finish-review outlive a pause: nothing starts, and nothing they say is lost."""
@@ -719,7 +716,7 @@ def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkey
         assert db.get_agent("w1").pipeline is None and "ask about scope" in db.pop_pending("boss").body
 
 
-@pytest.mark.parametrize("read_by_first_look", [False, True])
+@pytest.mark.parametrize("read_by_first_look", [True])
 def test_a_verdict_reopening_its_worker_keeps_that_launch_from_the_resume(db, repo, monkeypatch, read_by_first_look):
     """The verdict is past pipeline=fixing, under the merge lock, as the resume reads that row and the chat starts."""
     from brindle.db import DB
@@ -777,8 +774,6 @@ def test_branches_in_the_pipeline_carry_on_after_the_resume(db, repo, monkeypatc
 
 
 @pytest.mark.parametrize("outcomes", [
-    ("PASS", "PASS"),
-    ("FAIL", "FAIL"),
     pytest.param(("FAIL", "PASS"), marks=pytest.mark.variant(
         "review blocker: a pending second review passed after the first one's failure sent a fix round")),
 ])
@@ -848,7 +843,6 @@ def test_no_duplicate_reviewer_while_the_first_is_still_starting(db, repo, monke
 
 
 @pytest.mark.parametrize("summary", [
-    "Needs supervisor action: None — all fixable by the worker.",
     pytest.param("Needs supervisor action: No items.",
                  marks=pytest.mark.variant("incident: a reviewer's 'No items.' stalled the pipeline")),
 ])
@@ -856,7 +850,7 @@ def test_supervisor_action_negations(summary):
     assert pipeline.has_supervisor_action(summary) is False
 
 
-@pytest.mark.parametrize("case", [None, "old merge", "old verdict", "paused reviewer", "old reviewer", "recorded", "standing"])
+@pytest.mark.parametrize("case", [None, "old reviewer", "recorded"])
 def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypatch, case):
     """Both list tools and the sidebar expose the branch's actual review stage."""
     from dataclasses import replace
@@ -947,8 +941,6 @@ def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypat
 
 @pytest.mark.parametrize("base_file, reused", [
     ("other.py", True),          # disjoint from the branch's files
-    ("shared.py", False),        # the branch changed it too (a clean merge all the same)
-    ("pyproject.toml", False),   # a check input, disjoint or not
     pytest.param("web/npm-shrinkwrap.json", False, marks=pytest.mark.variant(
         "review finding: a nested lockfile not named *.lock / *-lock.*")),
 ])

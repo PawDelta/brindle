@@ -45,18 +45,24 @@ def mcp(ws, tool):
 
 
 @pytest.mark.parametrize("request_of, kind, exact, general, widest", [
-    (lambda ws: bash(ws, "git push origin fix/login:main"), "push", "fix/login → main @ origin", "* → main @ origin",
-     "* → * @ *"),
-    (lambda ws: write(ws, "src/auth/login.ts"), "write", "src/auth/login.ts", "src/**", "**"),
+    pytest.param(lambda ws: bash(ws, "git push origin fix/login:main"), "push", "fix/login → main @ origin", "* → main @ origin",
+     "* → * @ *",
+                 marks=pytest.mark.variant("approval scope boundaries differ for this request form")),
+    pytest.param(lambda ws: write(ws, "src/auth/login.ts"), "write", "src/auth/login.ts", "src/**", "**",
+                 marks=pytest.mark.variant("approval scope boundaries differ for this request form")),
     (lambda ws: write(ws, "README.md"), "write", "README.md", "README.md", "**"),
-    (lambda ws: bash(ws, "npm test -- --watch=false auth"), "bash", "npm test -- --watch=false auth", "npm test *",
-     "*"),
-    (lambda ws: bash(ws, "npm test -- auth"), "bash", "npm test -- auth", "family: dev/tests", "*"),
-    (lambda ws: bash(ws, "cat a | grep b"), "bash", "cat a | grep b", "family: shell/readonly", "*"),
+    pytest.param(lambda ws: bash(ws, "npm test -- --watch=false auth"), "bash", "npm test -- --watch=false auth", "npm test *",
+     "*",
+                 marks=pytest.mark.variant("approval scope boundaries differ for this request form")),
+    pytest.param(lambda ws: bash(ws, "npm test -- auth"), "bash", "npm test -- auth", "family: dev/tests", "*",
+                 marks=pytest.mark.variant("approval scope boundaries differ for this request form")),
+    pytest.param(lambda ws: bash(ws, "cat a | grep b"), "bash", "cat a | grep b", "family: shell/readonly", "*",
+                 marks=pytest.mark.variant("approval scope boundaries differ for this request form")),
     (lambda ws: bash(ws, "terraform apply dev | tee out"), "bash", "terraform apply dev | tee out",
      "terraform apply dev | tee out", "*"),
-    (lambda ws: mcp(ws, "mcp__github__create_issue"), "mcp", "mcp__github__create_issue",
-     "mcp__github__create_issue", "mcp__*"),
+    pytest.param(lambda ws: mcp(ws, "mcp__github__create_issue"), "mcp", "mcp__github__create_issue",
+     "mcp__github__create_issue", "mcp__*",
+                 marks=pytest.mark.variant("approval scope boundaries differ for this request form")),
     (lambda ws: Request("claude", "fetch", "WebFetch", ws.path, ws.path, ws.repo_root, url="https://t.example.com/a/b"),
      "fetch", "https://t.example.com/a/b", "https://t.example.com/*", "*"),
 ])
@@ -280,14 +286,17 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
 
 
 @pytest.mark.parametrize("approved, siblings", [
-    ("git log --oneline -5", [("git diff HEAD~1 | head -50", "allow"), ("git log -1 && git reset --hard", "deny")]),
+    pytest.param("git log --oneline -5", [("git diff HEAD~1 | head -50", "allow"), ("git log -1 && git reset --hard", "deny")],
+                 marks=pytest.mark.variant("family approval must still reject the disallowed sibling")),
     ("ls -la src | head", [("cd src && grep -rn foo . | wc -l", "allow"), ("ls && cd $DIR && cat secret.txt", "ask")]),
     ("uv run pytest tests/test_a.py", [("uv run pytest tests/test_b.py", "allow"), ("uv run rm -rf build", "ask"),
                                        ("cd / && uv run pytest", "ask"), ("uv run pytest --basetemp=src", "ask"),
                                        ("uv run pytest -k @args.txt", "ask")]),
-    ("npm config get registry | head", [("npm ls react | head -3", "allow"),
-                                        ("npm config set registry https://example.invalid", "ask")]),
-    ("grep -rn foo src | head", [("grep -rn foo src > found.txt", "ask")]),
+    pytest.param("npm config get registry | head", [("npm ls react | head -3", "allow"),
+                                        ("npm config set registry https://example.invalid", "ask")],
+                 marks=pytest.mark.variant("family approval must still reject the disallowed sibling")),
+    pytest.param("grep -rn foo src | head", [("grep -rn foo src > found.txt", "ask")],
+                 marks=pytest.mark.variant("family approval must still reject the disallowed sibling")),
 ])
 def test_approval_covers_its_family(db, ws, approved, siblings):
     """Approving one ask at its proposed scope lets every command of the same
@@ -357,7 +366,8 @@ def test_cd_chain_keeps_its_family(ws):
                         ("mv app.py {out}/", "ask"),
                         ("echo x > {out}/notes.txt", "ask"),
                         ("echo x > .git/hooks/pre-commit", "ask")]),
-    ("uv run pytest tests/test_a.py", [("cd {lib} && uv run pytest", "allow")]),
+    pytest.param("uv run pytest tests/test_a.py", [("cd {lib} && uv run pytest", "allow")],
+                 marks=pytest.mark.variant("test approval reaches a repo attached to this session")),
 ])
 def test_approval_widens_to_change_families(db, ws, tmp_path, approved, siblings):
     """An approved local git change, install or file change covers every
@@ -473,17 +483,20 @@ BYPASS = pytest.mark.variant("spelled so the families don't read it: a bypass at
 
 
 @pytest.mark.parametrize("control, command, decision, cap", [
-    (INSTALLS, "npm install left-pad", "deny", None),
+    pytest.param(INSTALLS, "npm install left-pad", "deny", None,
+                 marks=pytest.mark.variant("org control must constrain this saved approval")),
     pytest.param(INSTALLS, "FOO=bar npm install left-pad", "deny", None, marks=BYPASS),
     (COMMITS, "git add -A", "ask", 60),
     pytest.param(COMMITS, "FOO=bar git add -A", "ask", 60, marks=BYPASS),
     # The member's own push rule asks for at most 10 minutes at the branch: the offer is held to both.
     ({"rule": "bash git-push any git push", "decision": "ask", "reason": "pushes are reviewed"},
      "git push origin fix:main", "ask", 10),
-    ({"rule": "bash glob *prod*", "decision": "deny", "reason": "nothing runs against prod"}, "npm test -- prod",
-     "deny", None),
+    pytest.param({"rule": "bash glob *prod*", "decision": "deny", "reason": "nothing runs against prod"}, "npm test -- prod",
+     "deny", None,
+                 marks=pytest.mark.variant("org control must constrain this saved approval")),
     ({"rule": "bash prefix npm install", "decision": "deny"}, "FOO=1 npm --prefix web install x", "deny", None),
-    (DEPLOYS, "gh workflow run release.yml", "deny", None),
+    pytest.param(DEPLOYS, "gh workflow run release.yml", "deny", None,
+                 marks=pytest.mark.variant("org control must constrain this saved approval")),
     pytest.param(DEPLOYS, "gh --repo o/r workflow run release.yml", "deny", None, marks=BYPASS),
     pytest.param(DEPLOYS, "vercel --prod", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "npm --prefix web install left-pad", "deny", None, marks=BYPASS),
@@ -491,14 +504,16 @@ BYPASS = pytest.mark.variant("spelled so the families don't read it: a bypass at
     pytest.param(PACKAGES, "npm " + "--registry https://registry.npmjs.org " * 33 + "install left-pad", "deny", None,
                  marks=BYPASS),
     ({"group": "network/fetch", "decision": "ask"}, "curl -s https://example.com", "ask", 60),
-    (PACKAGES, "pip install requests", "deny", None),
+    pytest.param(PACKAGES, "pip install requests", "deny", None,
+                 marks=pytest.mark.variant("org control must constrain this saved approval")),
     pytest.param(PACKAGES, "python -I -m pip install requests", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "npm --location global install left-pad", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "sudo --user root npm install left-pad", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "uv pip install httpx", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "env env env env env npm install left-pad", "deny", None, marks=BYPASS),
     ({"group": "shell/unchecked", "decision": "deny"}, 'eval "$X"', "deny", None),
-    (None, "npm install left-pad", "allow", None),
+    pytest.param(None, "npm install left-pad", "allow", None,
+                 marks=pytest.mark.variant("org control must constrain this saved approval")),
 ])
 def test_org_blocks_family(db, ws, monkeypatch, control, command, decision, cap):
     """An org control wins over the member's saved grant of the command's

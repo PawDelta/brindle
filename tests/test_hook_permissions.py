@@ -31,6 +31,7 @@ def bash(command):
     return {"tool_name": "Bash", "tool_input": {"command": command}}
 
 
+@pytest.mark.variant("in-worktree absolute and relative cd chains must remain covered")
 def test_cd_into_the_worktree_counts_as_covered(db, ws):
     a = worker(db, ws)
     assert agents.handle_hook(db, a.id, "pre-tool", bash(f"cd {ws.path} && git status")) is not None
@@ -38,14 +39,17 @@ def test_cd_into_the_worktree_counts_as_covered(db, ws):
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd src && pytest -q")) is not None
 
 
+@pytest.mark.variant("a cd escaping the worktree must not inherit command approval")
 def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     a = worker(db, ws)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd .. && git status")) is None
 
 
 @pytest.mark.parametrize("command, bound, extra", [
-    pytest.param("ls *.py", False, None, id="shell_syntax_fallback-glob"),
-    pytest.param("git commit -m \"$(cat <<'EOF'\n* fix\nEOF\n)\"", False, None, id="shell_syntax_fallback-heredoc"),
+    pytest.param("ls *.py", False, None, id="shell_syntax_fallback-glob",
+                 marks=pytest.mark.variant("shell fallback must preserve restrictions for this spelling")),
+    pytest.param("git commit -m \"$(cat <<'EOF'\n* fix\nEOF\n)\"", False, None, id="shell_syntax_fallback-heredoc",
+                 marks=pytest.mark.variant("shell fallback must preserve restrictions for this spelling")),
     pytest.param('git commit -m "$(date)"', False, None, id="shell_syntax_fallback-substitution",
                  marks=pytest.mark.variant("reported substitution fallback regression")),
     pytest.param("ls '*.py'", False, None, id="shell_syntax_fallback-quoted_glob",
@@ -101,12 +105,17 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
                  marks=pytest.mark.variant("supervisor: an expanded redirect could read daemon.json")),
     pytest.param("{ git [p]ush; }", True, None, id="shell_syntax_fallback-glob_unparsed",
                  marks=pytest.mark.variant("a pattern inside syntax neither parse reads")),
-    pytest.param("grep -n hi *.py | head -5", False, None, id="read_only_no_stall-grep_head"),
-    pytest.param("grep -n SECRET ../../../.e*", True, None, id="read_only_no_stall-denied_file"),
+    pytest.param("grep -n hi *.py | head -5", False, None, id="read_only_no_stall-grep_head",
+                 marks=pytest.mark.variant("shell fallback must preserve restrictions for this spelling")),
+    pytest.param("grep -n SECRET ../../../.e*", True, None, id="read_only_no_stall-denied_file",
+                 marks=pytest.mark.variant("shell fallback must preserve restrictions for this spelling")),
     pytest.param("grep -n hi *.py", True, ("grep -n hi app.py", "deny"), id="read_only_no_stall-denied_expansion"),
-    pytest.param("sed -n '/^print/p' *.py", False, None, id="read_only_no_stall-sed_print"),
-    pytest.param("sed -n 's/a/b/w out' *.py", True, None, id="read_only_no_stall-sed_write"),
-    pytest.param("{ awk '{print $1}' app.py; }", False, None, id="read_only_no_stall-single_quoted"),
+    pytest.param("sed -n '/^print/p' *.py", False, None, id="read_only_no_stall-sed_print",
+                 marks=pytest.mark.variant("shell fallback must preserve restrictions for this spelling")),
+    pytest.param("sed -n 's/a/b/w out' *.py", True, None, id="read_only_no_stall-sed_write",
+                 marks=pytest.mark.variant("shell fallback must preserve restrictions for this spelling")),
+    pytest.param("{ awk '{print $1}' app.py; }", False, None, id="read_only_no_stall-single_quoted",
+                 marks=pytest.mark.variant("shell fallback must preserve restrictions for this spelling")),
     pytest.param("grep -f../../../.env *.py", True, None, id="read_only_no_stall-attached_file_option",
                  marks=pytest.mark.variant("review: -fFILE named a denied file")),
     pytest.param("grep --file=../../../.env *.py", True, None, id="read_only_no_stall-long_file_option",
@@ -225,6 +234,7 @@ def test_worker_file_tools_are_denied_the_credential_stores():
     assert "permissions" not in settings("interactive")
 
 
+@pytest.mark.variant("file and dynamic MCP denies require an all-tool hook matcher")
 def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
     """The policy's deny or ask on a file, fetch or MCP tool reaches Claude
     Code only through the PreToolUse hook, so a launch with the policy on

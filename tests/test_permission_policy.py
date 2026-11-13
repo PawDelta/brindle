@@ -79,6 +79,7 @@ def test_existing_free_user_gets_the_policy(repo, monkeypatch, before, policy, s
     assert svc.policy_dto(repo_root=str(repo)).policy_on == (policy == "on")
 
 
+@pytest.mark.variant("PR 371: fresh free accounts need policy enforcement for interactive supervisors")
 def test_new_free_user_gets_the_policy(repo, monkeypatch):
     """Nothing of brindle's on this machine and no plan, from the app's daemon: the
     policy is on with Autonomous, and it answers a supervisor on Claude and on
@@ -105,7 +106,8 @@ def test_new_free_user_gets_the_policy(repo, monkeypatch):
 
 
 @pytest.mark.parametrize("before,repo_says,preset,policy,source", [
-    (None, None, "secure", "on", "user"),
+    pytest.param(None, None, "secure", "on", "user",
+                 marks=pytest.mark.variant("explicit Secure selection enables policy despite its previous default")),
     # The default preset (the suite's is Standard) isn't choosing the switch: Codex can still fall back.
     (None, None, "standard", "on", "default"),
     ("off", None, "secure", "off", "user"),
@@ -150,16 +152,18 @@ def _bypass(command, why):
 
 
 @pytest.mark.parametrize("command, decision", [
-    ('tmux -L sock list-panes -a -F "#{pane_id} #{pane_pid} #{pane_start_command}"', "allow"),
+    pytest.param('tmux -L sock list-panes -a -F "#{pane_id} #{pane_pid} #{pane_start_command}"', "allow",
+                 marks=pytest.mark.variant("shell syntax must preserve the decision of every part")),
     pytest.param('tmux -L sock list-panes -F "#{pane_id}"', "allow",
                  marks=pytest.mark.variant("a tmux format without spaces is still literal")),
     _bypass('tmux -L sock list-panes -F "#{pane_id}" $(id)', "substitution after a quoted format"),
     _bypass('tmux -L sock list-panes -F "#{pane_id}" `id`', "backticks after a quoted format"),
     _bypass('tmux -L sock list-panes -F "#{pane_id}" > out', "redirection after a quoted format"),
     _bypass('tmux -L sock list-panes -F {pane_id,pane_pid}', "unquoted brace expansion is not literal"),
-    ('git show main:a.sql && echo "=== B ===" && git show main:b.sql; git log | git show', "allow"),
-    ("git status; rm -rf /", "ask"),
-    ("git status && git push", "deny"),
+    pytest.param("git status; rm -rf /", "ask",
+                 marks=pytest.mark.variant("shell syntax must preserve the decision of every part")),
+    pytest.param("git status && git push", "deny",
+                 marks=pytest.mark.variant("shell syntax must preserve the decision of every part")),
     _bypass("git diff | sh", "a pipe into an uncovered command"),
     _bypass("git log $(rm x)", "command substitution"),
     _bypass("git log `id`", "backticks"),
@@ -187,6 +191,7 @@ def test_a_compound_command_is_allowed_only_when_every_part_is(ws, command, deci
 # -- the defaults -----------------------------------------------------------------------------
 
 
+@pytest.mark.variant("tracked-file allowance must exclude untracked, ignored and Git metadata reads")
 def test_untracked_ignored_and_dot_git_reads_are_not_allowed(ws):
     root = ws.path
     with open(os.path.join(root, "new.txt"), "w") as f:
@@ -202,6 +207,7 @@ def test_untracked_ignored_and_dot_git_reads_are_not_allowed(ws):
     assert decide(read(ws, os.path.expanduser("~/.ssh/id_rsa"))).decision == "deny"
 
 
+@pytest.mark.variant("Git pathspec metacharacters in file names must not broaden read approval")
 def test_pathspec_magic_names_are_taken_literally(ws):
     for name in ("app.py*", "[a]pp.py", "*.py"):
         with open(os.path.join(ws.path, name), "w") as f:
@@ -209,6 +215,7 @@ def test_pathspec_magic_names_are_taken_literally(ws):
         assert decide(read(ws, os.path.join(ws.path, name))).decision == "ask", name
 
 
+@pytest.mark.variant("even a tracked symlink cannot authorize an outside read")
 def test_symlink_out_of_the_repo_is_not_allowed(ws, tmp_path):
     outside = tmp_path / "secret.txt"
     outside.write_text("x")
@@ -218,7 +225,9 @@ def test_symlink_out_of_the_repo_is_not_allowed(ws, tmp_path):
     assert decide(read(ws, link)).decision == "ask"
 
 
-@pytest.mark.parametrize("match,match_type", [("src/*", "glob"), ("src/link.txt", "exact")])
+@pytest.mark.parametrize("match,match_type", [pytest.param("src/*", "glob",
+                 marks=pytest.mark.variant("a user path rule must not allow a symlink escape")), pytest.param("src/link.txt", "exact",
+                 marks=pytest.mark.variant("a user path rule must not allow a symlink escape"))])
 def test_a_user_allow_rule_does_not_follow_a_symlink_out(ws, tmp_path, match, match_type):
     # An allow rule matches where the path really leads, not the name the
     # worker chose: a link under an allowed folder can point anywhere.
@@ -258,6 +267,7 @@ def test_compound_commands_are_never_learned(ws):
     assert permissions.suggestions() == []
 
 
+@pytest.mark.variant("learned read approval must remain relative to the worktree")
 def test_paths_are_learned_relative_to_the_worktree(ws):
     permissions.record_approval(read(ws, os.path.join(ws.path, "out", "log.txt")))
     permissions.record_approval(read(ws, os.path.join(ws.path, "out", "log.txt")))
@@ -277,13 +287,18 @@ ON_FRESH_ACCOUNT = ("""echo "--- config"; git config --show-origin --get-regexp 
 
 @pytest.mark.parametrize("preset, policy, chosen, profile_mode, mode", [
     # Nobody set the policy: on, whatever is in the home, and that's what stops the prompts.
-    ("autonomous", None, None, None, "default"),
-    ("standard", "on", None, None, "default"),
+    pytest.param("autonomous", None, None, None, "default",
+                 marks=pytest.mark.variant("launch mode changes hook fallback and fail-closed behavior")),
+    pytest.param("standard", "on", None, None, "default",
+                 marks=pytest.mark.variant("launch mode changes hook fallback and fail-closed behavior")),
     ("autonomous", "off", None, None, "default"),
     ("autonomous", "on", "bypassPermissions", None, "bypassPermissions"),
-    ("standard", "on", "auto", None, "auto"),
-    ("autonomous", "on", None, "auto", "auto"),     # the built-in developer profile
-    ("autonomous", "on", None, "acceptEdits", "acceptEdits"),
+    pytest.param("standard", "on", "auto", None, "auto",
+                 marks=pytest.mark.variant("launch mode changes hook fallback and fail-closed behavior")),
+    pytest.param("autonomous", "on", None, "auto", "auto",
+                 marks=pytest.mark.variant("launch mode changes hook fallback and fail-closed behavior")),     # the built-in developer profile
+    pytest.param("autonomous", "on", None, "acceptEdits", "acceptEdits",
+                 marks=pytest.mark.variant("launch mode changes hook fallback and fail-closed behavior")),
 ])
 def test_autonomous_starts_claude_without_prompts(db, ws, monkeypatch, preset, policy, chosen, profile_mode, mode):
     """On Autonomous the hooks answer what Claude Code would prompt for, a chosen mode
@@ -394,7 +409,8 @@ def test_approval_after_ask_is_learned_and_end_of_turn_is_not(db, ws):
     assert [(s.match, s.count) for s in permissions.suggestions()] == [("make docs", 2)]
 
 
-@pytest.mark.parametrize("mode,age", [("assign", 1000), ("review", 0)])
+@pytest.mark.parametrize("mode,age", [pytest.param("assign", 1000,
+                 marks=pytest.mark.variant("an aged worker request still reaches the supervisor")), ("review", 0)])
 def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch, mode, age):
     a = worker(db, ws)
     turn_on(ws)
@@ -426,7 +442,8 @@ def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch, mode, age):
 
 @pytest.mark.parametrize("stored, expected", [
     pytest.param({"version": 1, "rules": [{"kind": "bash", "match": "deploy", "decision": "ask", "roles": ["admin"]}],
-                  "future_policy": {"team": "restricted"}}, "deny", id="store_version-unknown_fields"),
+                  "future_policy": {"team": "restricted"}}, "deny", id="store_version-unknown_fields",
+                 marks=pytest.mark.variant("older store with unknown restrictions must fail closed on rewrite")),
     pytest.param({"version": 2, "rules": [{"kind": "bash", "match": "deploy", "decision": "deny", "future_scope": "team"}]},
                  "deny", id="store_version-unknown_deny_scope",
                  marks=pytest.mark.variant("unknown future scope previously broadened instead of being dropped")),

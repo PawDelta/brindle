@@ -102,7 +102,10 @@ def test_fair_share_counts_a_claim_as_it_becomes_its_worker(rows, monkeypatch):
     assert linked and not claimed and why
 
 
-@pytest.mark.parametrize("competing", [None, True, False], ids=["round-robin", "over-share", "lone-session"])
+@pytest.mark.parametrize("competing", [None,
+    pytest.param(True, marks=pytest.mark.variant("a session over its fair share cannot consume a competing session's capacity")),
+    pytest.param(False, marks=pytest.mark.variant("a lone session can use otherwise idle machine capacity")),
+], ids=["round-robin", "over-share", "lone-session"])
 def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows, monkeypatch, competing):
     if competing is not None:
         _session_capacity(rows, monkeypatch, competing)

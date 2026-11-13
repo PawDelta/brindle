@@ -173,6 +173,9 @@ For each group give:
 whose changes need a test change in the same diff), only when the rule is exactly that \
 mechanical check
 
+Missing feature or regression tests do not justify a blanket require_tests_for
+rule: refactors, renames, docs, config, wording and pure glue need no new tests.
+
 Answer with JSON only: {{"groups": [...]}}
 
 Known groups:

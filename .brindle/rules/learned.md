@@ -23,40 +23,22 @@ direct_spawn_allowed:
   - src/brindle/native/lsp.py     # the native agent runner's language server
   - scripts/*                     # repo scripts
 ---
-Tests in this repo must earn their place. There is no limit on how many tests a
-branch adds, but each new test function and each new parametrize row must be worth
-committing. scripts/check_new_tests.py (a repo check on every branch before review,
-and in CI) fails a test or row that covers no line or branch other tests don't, unless
-it is marked `@pytest.mark.variant("why")`. The reviewer is given every test and row
-the diff adds and must be told what bug each would catch; one with no answer is a blocker.
-- Add the fewest tests that would fail without your change: usually one, a
-  regression test for the bug or the new branch. Extend an existing test or
-  parametrize table before writing a new test, and a new file only for a new module.
-- Never test wording (help, prompts, docs, messages), constants, defaults, enum
-  values or entry-point registration; never assert that a mock was called with
-  what the test just gave it.
-- A parametrize table gets one row per branch plus real edge cases, not one per
-  input. A row or test that covers no new code is fine only as a deliberate input
-  variant (a bypass attempt, a race, an input from a real incident), marked
-  `@pytest.mark.variant("why")`.
-- Use database rows and fakes, not real tmux sessions, subprocesses or sleeps,
-  unless spawning or timing is what the test is about.
-Tests must also be fast. The whole suite runs on every branch, so a slow test
-costs every worker, every time.
-- Each test's call phase must finish within 10 seconds (tests/conftest.py fails
-  the run otherwise; BRINDLE_TEST_DURATION_LIMIT overrides it). Aim for well
-  under one second. Mark a genuinely slow test `@pytest.mark.slow("why")`, and
-  expect reviewers to ask why.
-- Test the function, not the program: call the pure function or seed DB rows
-  instead of running the brindle CLI, a git repo, tmux or a subprocess.
-- At most one end-to-end test per feature; every other case goes in unit tests.
-- Build expensive setup (a git repo, a DB with many rows) once, in a
-  module-scoped fixture, and copy it rather than rebuild it per test.
-- Never wait on the wall clock: pass a fake clock or `now`, and drive events
-  directly instead of polling for them.
-- No network: fake the HTTP client or the server it talks to.
-- Reviewers: treat any of the above in a diff as a blocker, the same as a missing
-  test. Deleting a redundant test is an improvement, not a coverage loss.
+Full coverage is not a goal. A new feature needs a test proving its main path
+works; add a failure-path test only when that path matters. A bug fix needs one
+regression test that fails on the base and passes after the fix. Refactors,
+renames, docs, config, wording and pure glue need no new tests.
+- Extend an existing test or parametrize table first. Never test wording,
+  constants, defaults, enum values, entry-point registration or mock arguments.
+- Every added test or row must catch a distinct bug. Missing feature or regression
+  tests and added tests with no distinct bug are blockers.
+- scripts/check_new_tests.py checks for unique coverage. Use
+  `@pytest.mark.variant("why")` for a deliberate input variant that catches a
+  distinct bug without adding coverage.
+- Use database rows and fakes. Test functions directly, avoid network calls and
+  drive events with a fake clock. Keep at most one end-to-end test per feature.
+- Aim for under one second per test; the call-phase limit is 10 seconds.
+  Mark a necessary slow test `@pytest.mark.slow("why")`. Share expensive setup
+  in a module-scoped fixture and copy it per test.
 - When a lookup takes an optional filter (such as a profile), treat None as 'no filter' only when the caller truly means any; never let a missing value match a live resource that belongs to a different identity. When an action can be triggered twice, make the second trigger check for and respect existing in-flight work instead of cancelling or replacing it, and cover that path with a test that runs the real dispatch code rather than a mock. (learned 2026-10-13 from 4 reviews of developer-sonnet work: Lookup ignores caller's filter and races on detached work; rule 8967a6e2)
 - Before changing code for a reported bug, write a test that reproduces the reported symptom and fails on the unmodified code. Fix the root cause in the source, then confirm that test passes. A test that already passes before the change is not evidence of a fix. (learned 2026-10-13 from 3 reviews of developer-codex-heavy work: Bug fix not reproduced or root-caused; rule 634c00cd)
 - Use `brindle baseline -- <test command>` to check the regression test against base source with your test files overlaid in a temporary worktree, instead of stashing changes. Select one test per command; `--base REF` overrides the default merge-base with the workspace's base branch.
@@ -87,3 +69,4 @@ costs every worker, every time.
 - A regression test must correctly detect the issue it is meant to prevent. When using frame or observer callbacks, ensure assertions are executed after React commits updates and schedules additional frames, using flushed act() boundaries to capture all side effects. (learned 2026-11-08 from 3 reviews of developer-haiku work: Regression Test Ineffective; rule 51af2bc2)
 - Before a doc states what the product enforces, what a statistic measures, or what an installer does, check it against the code and the guide, and use the same scope and denominator as the source (review events, not distinct branches). Qualify any limit that only some providers enforce, and describe per-platform install behavior as the installer script actually does it. (learned 2026-11-08 from 5 reviews of developer-heavy work: Docs claims stronger than their source; rule 1946ec21)
 - When a request hands out or starts work that its reply promises, commit that state only after the transport confirms the response was written. Cancel or roll back that work on client disconnect or cancellation, and keep any slow start-up off the reply path. Never leave a worker waiting on that confirmation: if it does not arrive, release or cancel the work so nothing is left hung. Cover this with a test that goes through the real transport, including a blocked response write and a cancellation notification. (learned 2026-11-08 from 3 reviews of developer-heavy work: Work released before the reply is delivered; rule a6cd1967)
+- When reducing or consolidating tests, do not delete a test that guards a failure path. Each protected scenario, such as a launch failure converting to its error code, must still be exercised by a retained test, and coverage should confirm this before anything is removed. (learned 2026-11-13 from 4 reviews of developer-codex work: Regression coverage removed while trimming tests; rule 4a977e9a)
