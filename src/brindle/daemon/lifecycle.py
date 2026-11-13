@@ -433,6 +433,7 @@ RESUME_STALL = 120.0   # seconds with no session finished after which a start st
 RESUME_TRIES = 2       # starts that may fail to bring one session back before it is left paused
 RESUME_PARALLEL = 4    # sessions a start brings back at once (resume_after_start)
 RESUME_BUSY_WAIT = 3.0  # seconds a session other than the person's own waits on a machine short of CPU only
+RESUME_PROMPT_WAIT = 90.0   # seconds to wait for Claude's input box after its pane is launched
 VIEWED_HEAD_START = 8.0     # seconds the session on screen comes back alone before the others start, if it hangs
 
 
@@ -674,6 +675,34 @@ def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env
         return True
 
 
+def _await_resume_prompt(db, root_id: str, recovery: Recovery) -> None:
+    """Keep the recovery display until Claude can take input. SessionStart
+    marks it idle before a large conversation has finished loading; neither
+    that status nor a live pane means its prompt is up. Read the pane using
+    the provider's existing input detection, outside the resume/launch locks.
+    If it never draws (or can't be read), expose the real status at the bound.
+    Other providers and headless sessions keep their existing readiness path.
+    """
+    from brindle import agents, providers, tmux
+
+    until = time.monotonic() + RESUME_PROMPT_WAIT
+    while not recovery.stopping.is_set():
+        root = db.get_agent(root_id)
+        if (root is None or root.provider != "claude" or root.headless or root.mode != "interactive"
+                or root.status not in ("starting", "idle", "processing", "waiting") or not root.tmux_window):
+            return
+        left = until - time.monotonic()
+        if left <= 0:
+            return
+        try:
+            screen = tmux.capture(root.tmux_window, lines=40, server=agents.server_of(root))
+            if providers.get_provider(root.provider).input_ready(screen):
+                return
+        except tmux.TmuxError:
+            pass   # a transient capture failure must not announce that it is ready
+        recovery.stopping.wait(min(left, 0.5))
+
+
 def _join(threads: list[threading.Thread], recovery: Recovery) -> None:
     """Wait for ``threads``, or until no session has finished for RESUME_STALL
     seconds: what hangs mustn't keep the app waiting or its progress up for
@@ -785,6 +814,7 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                                 log.warning("brindle: session %s couldn't be noted as tried; left to the next start",
                                             entry["id"])
                             elif _resume_session(db, entry, server, recovery, env, waited=waited):
+                                _await_resume_prompt(db, entry["id"], recovery)
                                 resumed.append(entry["id"])
                         except agents.Cancelled:
                             entry["tries"] -= 1     # stopped, it didn't fail

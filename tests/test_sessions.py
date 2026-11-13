@@ -164,6 +164,7 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
         go.wait(10)
 
     monkeypatch.setattr(agents, "_open_window", lambda db_, a, *args, **kw: events.append(("launch", a.id)) or "%0")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **kw: "❯ \n? for shortcuts")
     monkeypatch.setattr(agents, "_detach", lambda args: None)
     real_start = spawn.start
     monkeypatch.setattr(spawn, "start", lambda argv, **kw: None if "_after-launch" in argv else real_start(argv, **kw))
@@ -343,6 +344,8 @@ def _recorded_sessions(db, root, monkeypatch, sessions):
                         (paused_at - rank - 1, aid))
     lifecycle._record_resume([{"id": aid, "server": here} for aid, _ in reversed(sessions)])
     monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
+    # These lifecycle tests launch stand-in programs that don't draw a CLI prompt.
+    monkeypatch.setattr(tmux, "capture", lambda *a, **kw: "❯ \n? for shortcuts")
 
 
 def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db, monkeypatch):
@@ -408,6 +411,64 @@ def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db
     assert launching == [("first", "resuming"), ("queued", "resuming")]
     assert orders[0] == [["first", "queued", "exhausted", "foreign", "manual"]] * 3
     assert set(statuses(db).values()) == {"paused"}
+
+
+@pytest.mark.parametrize("prompt_ready", [True, False])
+def test_recovery_waits_for_claude_prompt_after_session_start(db, monkeypatch, prompt_ready):
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from brindle.daemon import routes_read
+    from brindle.db import Workspace
+
+    ws = Workspace("proj", "/proj", "proj", "root", "main", None, "/proj", None, "proj", 1)
+    db.add_workspace(ws)
+    add(db, ws, "chat")
+    panes = tmux.PaneSnapshot()
+    monkeypatch.setattr(tmux, "current_server", lambda: None)
+    monkeypatch.setattr(tmux, "list_panes", lambda: panes)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
+    monkeypatch.setattr(agents, "panes_match", lambda *a: True)
+    monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
+    monkeypatch.setattr(lifecycle, "_read_viewed", lambda: None)
+    recovery = lifecycle.Recovery()
+    request = Request({"type": "http", "query_string": b"repo=/proj",
+                       "app": SimpleNamespace(state=SimpleNamespace(recovery=recovery))})
+    clock, seen, active = [0.0], [], []
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def status(db_):
+        return routes_read.list_sessions.__wrapped__(db_, request)[0]["status"]
+
+    def resume(db_, root_id, **kw):
+        active.append(db_)
+        db_.set_status(root_id, "starting")
+        db_.update_agent(root_id, tmux_window="%chat")
+        panes["%chat"] = True
+        agents.handle_hook(db_, root_id, "session-start", {})
+        assert db_.get_agent(root_id).status == "idle"
+
+    def capture(*a, **kw):
+        seen.append(status(active[0]))
+        if clock[0] and not prompt_ready:
+            raise tmux.TmuxError("pane unavailable")
+        return "❯ \n? for shortcuts" if clock[0] else "Loading conversation"
+
+    def advance(seconds):
+        clock[0] += 1 if prompt_ready else 60
+        if not prompt_ready:
+            active[0].set_status("chat", "waiting")
+        return False
+
+    monkeypatch.setattr(agents, "resume", resume)
+    monkeypatch.setattr(tmux, "capture", capture)
+    monkeypatch.setattr(recovery.stopping, "wait", advance)
+    lifecycle._record_resume([{"id": "chat", "server": None}])
+    assert lifecycle.resume_after_start(recovery) == ["chat"]
+    assert len(seen) >= 2 and set(seen) == {"resuming"}
+    assert status(db) == ("idle" if prompt_ready else "waiting")
+    assert not recovery.pending and not recovery.resuming() and lifecycle._read_resume() is None
 
 
 @pytest.mark.variant("concurrent recovery must overlap distinct tmux sessions while serializing chats sharing one session")
