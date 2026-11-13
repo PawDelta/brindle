@@ -4,6 +4,7 @@
    {"error": {"code", "message"}} (brindle/service/errors.py) and is thrown as a
    DaemonError with that code. */
 
+import type { WebSocketFactory, WebSocketLike } from "./events";
 import { startupStep } from "./startup";
 import type {
   AccountDTO,
@@ -1319,6 +1320,40 @@ export interface DaemonConfig {
   /* The per-start token from ~/.brindle/daemon.json. */
   token: string;
   fetch?: typeof fetch;
+  /* Opens the client's own sockets (visualLive); a DOM WebSocket when absent. */
+  connect?: WebSocketFactory;
+}
+
+/* What a shared design doc's live channel delivers (DaemonClient.visualLive). */
+export interface LiveHandlers {
+  /* Loro update bytes to import: the doc as it is first (a snapshot), then each other writer's change. */
+  onUpdate(bytes: Uint8Array): void;
+  /* Another writer's presence in one section's text: Loro EphemeralStore bytes to apply. */
+  onAwareness(section: string, bytes: Uint8Array): void;
+  /* The channel closed: 4401 a wrong token, 4404 no live text for this visual, 4409 the text is
+     locked (a version is out for sign-off), 1006 the connection dropped. */
+  onClose?(code: number): void;
+}
+
+export interface LiveChannel {
+  /* A local change, as LoroDoc.subscribeLocalUpdates hands it over. */
+  sendUpdate(bytes: Uint8Array): void;
+  /* This writer's caret and name in `section`, as EphemeralStore.subscribeLocalUpdates hands them over. */
+  sendAwareness(section: string, bytes: Uint8Array): void;
+  close(): void;
+}
+
+/* Bytes as base64 and back: the live channel's frames are text, as the shell's stream sends them. */
+export function toBase64(bytes: Uint8Array): string {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
+export function fromBase64(data: string): Uint8Array {
+  const text = atob(data);
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+  return bytes;
 }
 
 /* GET/POST/DELETE /github/connection. `expires_at` is an ISO date or unix seconds (the contract doesn't say), or null. */
@@ -1367,6 +1402,7 @@ export class DaemonClient {
   readonly baseUrl: string;
   readonly token: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly connect?: WebSocketFactory;
   private inboxAcknowledgements = 0;
 
   /* Sync reads begun before an action settled cannot restore its old card.
@@ -1379,6 +1415,7 @@ export class DaemonClient {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.token = config.token;
     this.fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
+    this.connect = config.connect;
   }
 
   meta() {
@@ -1784,6 +1821,72 @@ export class DaemonClient {
 
   markVisualRead(id: string, rev: number) {
     return this.postInbox<unknown>(`/visuals/${encodeURIComponent(id)}/read`, { rev });
+  }
+
+  /* WS /v1/visuals/{id}/live: a shared design doc's text, edited live by everyone writing in it
+     (DocEditor.tsx). The daemon implements this later; test/fakeDaemon.ts serves it now.
+
+     The text is one Loro document per visual (loro-crdt). Each text section is the root LoroText
+     named by the section's id ("lede" for the overview), positions in UTF-16 units as Loro's JS
+     API and CodeMirror count them. The daemon owns the document: it seeds it from the doc's
+     current revision, keeps every update, and is the only one that turns the live text into a
+     revision. A client never seeds a section itself (two would each insert the same text).
+
+     Frames, all text (the shell's stream carries text: src-tauri/src/daemon.rs):
+     - client → daemon: the token first, as on /v1/events (a wrong one closes with 4401). Then
+       {"update": base64} for each local Loro change (LoroDoc.subscribeLocalUpdates), and
+       {"awareness": base64, "section": id} for this writer's caret and name in a section
+       (an EphemeralStore per section, keyed `<peer>-cm-cursor` / `<peer>-cm-user` by
+       loro-codemirror).
+     - daemon → client: first {"update": base64}, the whole document (a snapshot); then every
+       other client's frames as they were sent, update or awareness, and on joining each
+       section's last-known awareness. A visual with no live text closes with 4404; a doc whose
+       version is out for sign-off is locked and closes with 4409.
+     Importing is idempotent, so a frame relayed twice (or echoed back) changes nothing. */
+  visualLive(id: string, handlers: LiveHandlers): LiveChannel {
+    const url = new URL(this.url(`/visuals/${encodeURIComponent(id)}/live`));
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const socket: WebSocketLike = this.connect ? this.connect(url.toString()) : (new WebSocket(url) as unknown as WebSocketLike);
+    let open = false;
+    let closed = false;
+    const queued: string[] = [];
+    const send = (frame: object) => {
+      if (closed) return;
+      const text = JSON.stringify(frame);
+      if (open) socket.send(text);
+      else queued.push(text);
+    };
+    socket.onopen = () => {
+      socket.send(this.token);
+      open = true;
+      for (const text of queued.splice(0)) socket.send(text);
+    };
+    socket.onmessage = (ev) => {
+      if (closed || typeof ev.data !== "string") return;
+      let said: { update?: string; awareness?: string; section?: string };
+      try {
+        said = JSON.parse(ev.data) as typeof said;
+      } catch {
+        return;
+      }
+      if (typeof said.update === "string") handlers.onUpdate(fromBase64(said.update));
+      else if (typeof said.awareness === "string" && typeof said.section === "string") handlers.onAwareness(said.section, fromBase64(said.awareness));
+    };
+    socket.onclose = (ev) => {
+      if (closed) return;
+      closed = true;
+      handlers.onClose?.(ev.code);
+    };
+    socket.onerror = () => {};
+    return {
+      sendUpdate: (bytes) => send({ update: toBase64(bytes) }),
+      sendAwareness: (section, bytes) => send({ awareness: toBase64(bytes), section }),
+      close() {
+        if (closed) return;
+        closed = true;
+        socket.close(1000);
+      },
+    };
   }
 
   /* A planning doc: the visual of kind "plan" with the same id. */

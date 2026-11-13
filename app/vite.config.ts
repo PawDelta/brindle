@@ -9,6 +9,11 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
+  // loro-crdt (DocEditor's live text): its browser build in the app, dev server included (its
+  // dev entry imports the .wasm as a module, which needs a plugin), kept out of the dependency
+  // pre-bundle so the .wasm stays beside it. Tests run Node's build, as loro-codemirror does there.
+  resolve: process.env.VITEST ? {} : { alias: [{ find: /^loro-crdt$/, replacement: "loro-crdt/browser" }] },
+  optimizeDeps: { exclude: ["loro-crdt"] },
   server: {
     port: 1420,
     strictPort: true,
