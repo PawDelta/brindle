@@ -54,15 +54,38 @@ def test_load_kit_resolves_a_relative_task_dir(tmp_path, monkeypatch, name):
     monkeypatch.chdir(tmp_path)
     assert bench.load_kit(Path("kit"))[2] == kit.resolve() / "grade.sh"   # grade.sh runs from the clone
     monkeypatch.setattr(bench, "prepare_clone", lambda kit, scratch, env: scratch)
-    monkeypatch.setattr(bench, "run_solo", lambda args, clone, spec, scratch, env: {
-        "finished": "exit", "valid": True, "why": "", "wall_seconds": 1,
-        "supervisor_model": None, "supervisor_model_observed": None,
-        "by_model": {}, "by_role": {}, "prompts": {}, "checkout": clone, "rates": {}, "free": set()})
+
+    def fake_run(args, clone, spec, *unused):
+        return {
+            "finished": "exit", "valid": True, "why": "", "wall_seconds": 1,
+            "supervisor_model": None, "supervisor_model_observed": None,
+            "by_model": {}, "by_role": {}, "prompts": {}, "checkout": clone, "rates": {}, "free": set()}
+
+    monkeypatch.setattr(bench, "run_solo", fake_run)
+    monkeypatch.setattr(bench, "run_brindle", fake_run)
     monkeypatch.setattr(bench, "grade", lambda path, checkout, env: {"passed": 1, "failed": 0})
+    phase = {"after": False}
+
+    def machine(op, **kw):
+        after = phase["after"]
+        phase["after"] = True
+        return {"limits": {"claude": {"used": 34.5 if after else 31, "resets_at": 1000},
+                           "codex": None, "antigravity": None},
+                "other_agents": [{"id": "other", "provider": "claude", "status": "processing"}]}
+
+    monkeypatch.setattr(bench, "installed_client", lambda *a: SimpleNamespace(probe=machine))
     results = tmp_path / "results.jsonl"
-    assert bench.main(["run", "--arm", "solo", "--run-id", "1", "--task-dir", "kit",
-                       "--scratch", str(tmp_path / "scratch"), "--results", str(results)]) == 0
-    assert bench.load_records(results)[0]["task"] == (name if name is not None else "tinydb")
+    arm = "solo" if name is None else "brindle"
+    assert bench.main(["run", "--arm", arm, "--run-id", "1", "--task-dir", "kit",
+                       "--scratch", str(tmp_path / "scratch"), "--results", str(results),
+                       *(["--only-workers", "developer-codex"] if arm == "brindle" else [])]) == 0
+    record = bench.load_records(results)[0]
+    assert record["task"] == (name if name is not None else "tinydb")
+    assert record["limits_before"]["claude"]["used"] == 31
+    assert record["limits_after"]["claude"]["used"] == 34.5
+    assert record["limits_used"] == {"claude": 3.5, "codex": None, "antigravity": None}
+    assert [a["id"] for a in record["other_agents"]] == ["other"]
+    assert record["only_workers"] == (["developer-codex"] if arm == "brindle" else None)
 
 
 def test_solo_cost_from_a_recorded_stream():
@@ -120,6 +143,142 @@ def test_solo_session_answers_a_closing_question_by_resuming_it():
     # Neither result has the CLI's totals: each turn falls back to its messages.
     assert bench.stream_usage(got)["claude-fable-5-2"]["output"] == 12
     assert bench.solo_prompts(got, []) == {"permission": 0, "question": 1, "other": 0}
+
+
+@pytest.mark.parametrize("decisions,flags,rounds,cap_hit,failure", [
+    ([True, True, False], [], 2, False, None),
+    ([True, True, True], ["--max-fix-rounds", "2"], 2, True, None),
+    ([], ["--no-review-followup"], 0, False, None),
+    pytest.param([True], [], 1, False, "classifier-expired", marks=pytest.mark.variant(
+        "An expired classifier process must preserve the completed benchmark and earlier usage")),
+    pytest.param([True], [], 1, False, "classifier-json", marks=pytest.mark.variant(
+        "Malformed classifier JSON must preserve a record rather than escape the run lifecycle")),
+    pytest.param([True], [], 1, False, "classifier-ambiguous", marks=pytest.mark.variant(
+        "An ambiguous classifier answer must preserve its billable usage as well as earlier usage")),
+    ([], [], 0, False, "missing-result"),
+    pytest.param([], [], 0, False, "missing-result-success", marks=pytest.mark.variant(
+        "A zero process exit without a result must still invalidate the run")),
+    ([], [], 0, False, "failed-result"),
+])
+def test_solo_review_followup_records_first_and_final_passes(
+        tmp_path, monkeypatch, decisions, flags, rounds, cap_hit, failure):
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "repo.json").write_text('{}')
+    (kit / "spec.md").write_text("Implement the feature.")
+    (kit / "grade.sh").touch()
+    clock = [100.0]
+    monkeypatch.setattr(bench.time, "time", lambda: clock[0])
+    monkeypatch.setattr(bench.shutil, "which", lambda *a, **kw: "claude")
+
+    def prepare(repo, scratch, env):
+        clone = scratch / "repo"
+        clone.mkdir()
+        return clone
+
+    monkeypatch.setattr(bench, "prepare_clone", prepare)
+    monkeypatch.setattr(bench, "installed_client", lambda *a: SimpleNamespace(
+        probe=lambda *a, **kw: {"limits": {}, "other_agents": []}))
+    calls, classified, grades = [], [], []
+    answers = iter(decisions)
+
+    def run_turn(cmd, clone, scratch, env, deadline):
+        calls.append(cmd)
+        clock[0] += 10
+        (clone / "implementation").write_text(str(len(calls)))
+        if len(calls) == 2 and failure in ("missing-result", "missing-result-success"):
+            return [], "exit" if failure == "missing-result-success" else "exit:1"
+        return [{"type": "result", "session_id": "same-session", "result": f"Reply {len(calls)}",
+                 "modelUsage": {"claude-fable-5-2": {"inputTokens": 1000, "outputTokens": 100}}}], (
+                     "exit:1" if len(calls) == 2 and failure == "failed-result" else "exit")
+
+    def classify(claude, text, cwd, env, remaining):
+        classified.append(text)
+        return next(answers, False), {"claude-haiku-5-5": HAIKU}
+
+    def grade(path, checkout, env):
+        state = int((checkout / "implementation").read_text())
+        grades.append((checkout, state))
+        clock[0] += 50  # grading and snapshots aren't agent wall time
+        return {"passed": state, "failed": 0}
+
+    monkeypatch.setattr(bench, "run_solo_turn", run_turn)
+    if failure and failure.startswith("classifier-"):
+        def classifier_cli(cmd, cwd, env, **kw):
+            classified.append(f"Reply {len(calls)}")
+            if len(classified) == 2:
+                if failure == "classifier-expired":
+                    raise bench.subprocess.TimeoutExpired("claude", kw["timeout"])
+                if failure == "classifier-json":
+                    return SimpleNamespace(stdout="invalid JSON")
+            answer = "unclear" if len(classified) == 2 else "yes"
+            return SimpleNamespace(stdout=json.dumps({"result": answer, "modelUsage": {
+                "claude-haiku-5-5": {"inputTokens": 10, "outputTokens": 20, "cacheReadInputTokens": 400}}}))
+
+        monkeypatch.setattr(bench, "sh", classifier_cli)
+    else:
+        monkeypatch.setattr(bench, "classify_fixes", classify)
+    monkeypatch.setattr(bench, "grade", grade)
+    output = tmp_path / "results.jsonl"
+    assert bench.main(["run", "--arm", "solo", "--run-id", "1", "--task-dir", str(kit),
+                       "--scratch", str(tmp_path / "scratch"), "--results", str(output),
+                       "--solo-note", "", *flags]) == 0
+    record = bench.load_records(output)[0]
+    messages = (["Did you run a code review on this?"] + ["Please fix those."] * rounds
+                if "--no-review-followup" not in flags else [])
+    assert [cmd[2] for cmd in calls] == ["Implement the feature.", *messages]
+    assert "--resume" not in calls[0]
+    assert all(cmd[-2:] == ["--resume", "same-session"] for cmd in calls[1:])
+    assert record["followup_messages"] == messages
+    assert record["fix_rounds"] == rounds
+    assert record["fix_rounds_cap_hit"] is cap_hit
+    classifier_failed = bool(failure and failure.startswith("classifier-"))
+    expected_checks = [{"text": text, "fixes_needed": needed} for text, needed in zip(classified, decisions)]
+    if classifier_failed:
+        error_check = record["review_checks"][-1]
+        assert error_check["error"]
+        assert error_check["fixes_needed"] is None
+        assert error_check["text"] == f"Reply {len(calls)}"
+        expected_checks.append(error_check)
+    assert record["review_checks"] == expected_checks
+    assert len(classified) == len(decisions) + int(classifier_failed)
+    assert record["valid"] is (failure is None)
+    assert bool(record["why"]) is (failure is not None)
+    if failure and not classifier_failed:
+        assert record["finished"] == ("incomplete" if failure == "missing-result-success" else "exit:1")
+    assert record["prompts"]["followup"] == record["prompts_total"] == len(messages)
+    assert record["grade_first_pass"] == {"passed": 1, "failed": 0}
+    assert record["grade"] == {"passed": len(calls), "failed": 0}
+    snapshot = Path(record["first_pass_checkout"])
+    assert snapshot == grades[0][0]
+    assert (snapshot / "implementation").read_text() == "1"
+    assert record["wall_seconds_first_pass"] == 10
+    assert record["wall_seconds"] == len(calls) * 10
+    assert record["cost_first_pass"] == pytest.approx(0.012)
+    completed = len(calls) - int(failure in ("missing-result", "missing-result-success"))
+    assert record["cost_usd"] == pytest.approx(0.012 * completed)
+    assert record["tokens_total"] == 1100 * completed
+    harness_calls = len(decisions) + int(failure == "classifier-ambiguous")
+    assert record["harness_tokens"] == ({"claude-haiku-5-5": {
+        k: v * harness_calls for k, v in HAIKU.items()}} if harness_calls else {})
+    assert record["harness_cost_usd"] == pytest.approx(0.000015 * harness_calls)
+
+
+@pytest.mark.parametrize("answer", [
+    "yes",
+    pytest.param("no", marks=pytest.mark.variant("A negative classification must stop fix requests")),
+    "unclear",
+])
+def test_fix_classifier_reads_cli_result_and_rejects_ambiguous_answers(tmp_path, monkeypatch, answer):
+    monkeypatch.setattr(bench, "sh", lambda *a, **kw: SimpleNamespace(stdout=json.dumps({
+        "result": answer, "modelUsage": {"claude-haiku-5-5": {"inputTokens": 10, "outputTokens": 20}}})))
+    if answer == "unclear":
+        with pytest.raises(bench.BenchError):
+            bench.classify_fixes("claude", "developer reply", tmp_path, {}, 60)
+    else:
+        needed, usage = bench.classify_fixes("claude", "developer reply", tmp_path, {}, 60)
+        assert needed is (answer == "yes")
+        assert bench.tokens_total(usage) == 30
 
 
 def test_brindle_prompts_count_only_what_reached_the_person():
@@ -340,6 +499,17 @@ def test_report_medians_and_require_runs(tmp_path, capsys):
     grouped = capsys.readouterr().out
     assert "task: tinydb\n" + tinydb.split("task: tinydb\n")[-1] in grouped
     assert "task: large\n" + large in grouped
+    rows = [{"arm": "brindle", "only_workers": ["developer-codex"], "limits_used": {"codex": 3.5}},
+            {"arm": "brindle", "only_workers": ["developer-fable"], "limits_used": {"codex": None}},
+            {"arm": "brindle", "excluded_workers": ["developer-fable"], "limits_used": {"codex": 1}}]
+    results.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    summary = bench.summarize(rows)
+    assert summary["brindle [only=developer-codex]"]["limits_used.codex"] == {
+        "median": 3.5, "min": 3.5, "max": 3.5}
+    assert summary["brindle [only=developer-fable]"]["limits_used.codex"] is None
+    assert summary["brindle [exclude=developer-fable]"]["runs"] == 1
+    assert bench.main(["report", "--results", str(results)]) == 0
+    assert "3.5%" in capsys.readouterr().out
 
 
 def test_capped_routing_drops_excluded_workers_from_every_tier(tmp_path):
@@ -348,3 +518,128 @@ def test_capped_routing_drops_excluded_workers_from_every_tier(tmp_path):
     bench.configure_clone(tmp_path, "claude-opus-5-5", None, routing)
     cfg = json.loads((tmp_path / ".brindle" / "config.local.json").read_text())
     assert cfg["routing"] == {"heavy": ["developer-heavy"], "advanced": ["developer-heavy"]}
+
+
+def test_only_workers_cli_writes_every_tier(tmp_path, monkeypatch):
+    client = SimpleNamespace(
+        python="python", cli=lambda *a, **kw: SimpleNamespace(returncode=0),
+        probe=lambda *a, **kw: {"root": {"id": "root"}})
+    monkeypatch.setattr(bench, "installed_client", lambda *a: client)
+    monkeypatch.setattr(bench, "sh", lambda *a, **kw: SimpleNamespace(stdout=json.dumps({
+        "heavy": ["developer-heavy"], "advanced": ["developer-fable"]})))
+    monkeypatch.setattr(bench, "watch_session", lambda *a: {
+        "seen": {"root": {}}, "transcripts": {}, "outside": {}, "snap": {}, "finished": "goal",
+        "valid": True, "why": None, "needs_person": False, "stop": time.time(), "rates": {}, "events": []})
+    monkeypatch.setattr(bench, "brindle_usage", lambda *a: {})
+    runs = []
+
+    def run(args):
+        runs.append(bench.run_brindle(args, tmp_path, "spec", {}))
+        return 0
+
+    monkeypatch.setattr(bench, "cmd_run", run)
+    assert bench.main(["run", "--arm", "brindle", "--run-id", "1",
+                       "--only-workers", "developer-codex,developer-fable"]) == 0
+    cfg = json.loads((tmp_path / ".brindle/config.local.json").read_text())
+    assert cfg["routing"] == {tier: ["developer-codex", "developer-fable"] for tier in ("heavy", "advanced")}
+    assert runs[0]["only_workers"] == ["developer-codex", "developer-fable"]
+    assert bench.main(["run", "--arm", "brindle", "--run-id", "2",
+                       "--only-workers", "developer-codex,developer-fable",
+                       "--exclude-worker", "developer-fable"]) == 0
+    cfg = json.loads((tmp_path / ".brindle/config.local.json").read_text())
+    assert cfg["routing"] == {tier: ["developer-codex"] for tier in ("heavy", "advanced")}
+
+
+def test_machine_probe_reads_weekly_plan_limits_and_other_sessions(db, tmp_path, monkeypatch):
+    from brindle import quota, subscription_usage
+
+    repo = str(tmp_path)
+    for wid, path in (("own", repo), ("other", "/other")):
+        db.add_workspace(Workspace(wid, path, "s", "worktree", "branch", "main", path, None, "t", time.time()))
+        db.add_agent(Agent(wid, wid, "supervisor", "claude", None, "interactive", "processing",
+                           "@1", None, time.time()))
+    db.add_agent(Agent("done", "other", "developer", "codex", None, "interactive", "done",
+                       "@2", None, time.time()))
+    monkeypatch.setattr(quota, "get", lambda provider: quota.Quota(provider, [
+        quota.Window(80, 1000, 300), quota.Window(31, 2000, 10080),
+        quota.Window(90, 2000, 10080, "Fable")]) if provider == "claude" else None)
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    monkeypatch.setattr(subscription_usage, "cache_key", lambda provider: provider)
+    ns = {"__name__": "bench_probe"}
+    exec(bench.PROBE, ns)
+    out = ns["main"]({"op": "machine", "clone": repo})
+    assert out["limits"]["claude"]["used"] == 31  # neither the short window nor the model cap
+    assert out["limits"]["codex"] is None
+    assert [a["id"] for a in out["other_agents"]] == ["other"]
+    before = out["limits"]
+    after = {**before, "claude": {**before["claude"], "used": 35}}
+    assert bench.limits_used(before, after)["claude"] == 4
+    assert bench.limits_used(before, {**after, "codex": {"used": 10}})["codex"] is None
+    after["claude"]["resets_at"] += 1
+    assert bench.limits_used(before, after)["claude"] is None
+    after["claude"] = {**before["claude"], "identity": "new-account", "used": 40}
+    assert bench.limits_used(before, after)["claude"] is None
+
+
+def test_monitor_keeps_agents_seen_only_during_the_run():
+    samples = iter([[], [{"id": "midrun", "status": "processing"}], []])
+    b = SimpleNamespace(probe=lambda op, **kw: {"limits": {}, "other_agents": next(samples)})
+    monitor = bench.RunMonitor(b, 20)
+    ticks = iter([False, True])
+    monitor.stopped = SimpleNamespace(wait=lambda interval: next(ticks))
+    monitor.before = monitor.sample()
+    monitor.watch()
+    monitor.after = monitor.sample()
+    assert [a["id"] for a in monitor.record()["other_agents"]] == ["midrun"]
+
+
+def test_machine_boundary_reads_codex_rollout_past_a_fresh_cache(tmp_path, monkeypatch):
+    from brindle import quota
+
+    monkeypatch.setattr(quota.time, "time", lambda: 1000)
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    home = tmp_path / "codex"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    rollout = sessions / "rollout-latest.jsonl"
+    monkeypatch.setattr(quota, "codex_home", lambda: home)
+    quota.record("codex", [quota.Window(31, 2000, 10080)])
+    event = {"payload": {"rate_limits": {"secondary": {
+        "used_percent": 31, "resets_at": 2000, "window_minutes": 10080}}}}
+    rollout.write_text(json.dumps(event) + "\n")
+    ns = {"__name__": "bench_probe"}
+    exec(bench.PROBE, ns)
+    b = SimpleNamespace(probe=lambda op, **kw: ns["main"]({"op": op, "clone": str(tmp_path), **kw}))
+    with bench.RunMonitor(b, 20) as monitor:
+        event["payload"]["rate_limits"]["secondary"]["used_percent"] = 35
+        rollout.write_text(json.dumps(event) + "\n")
+        assert quota.get("codex").windows[0].used == 31
+    assert monitor.record()["limits_used"]["codex"] == 4
+    args = {"op": "machine", "clone": str(tmp_path), "boundary": True}
+    rollout.unlink()
+    assert ns["main"](args)["limits"]["codex"] is None
+
+
+def test_solo_limits_do_not_use_another_claude_home(tmp_path, monkeypatch):
+    from brindle import providers, quota
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    brindle_config = tmp_path / "brindle-claude.json"
+    account = {"oauthAccount": {"accountUuid": "brindle-account", "organizationUuid": "org"}}
+    brindle_config.write_text(json.dumps(account))
+    solo_config = tmp_path / ".claude.json"
+    solo_config.write_text(json.dumps({"oauthAccount": {"accountUuid": "solo-account", "organizationUuid": "org"}}))
+    monkeypatch.setattr(providers, "claude_global_config", lambda: str(brindle_config))
+    quota.record("claude", [quota.Window(31, time.time() + 1000, 10080)])
+    ns = {"__name__": "bench_probe"}
+    exec(bench.PROBE, ns)
+    b = SimpleNamespace(probe=lambda op, **kw: ns["main"]({"op": op, "clone": str(tmp_path), **kw}))
+    with bench.RunMonitor(b, 20, "solo") as monitor:
+        pass
+    assert monitor.record()["limits_used"]["claude"] is None
+    args = {"op": "machine", "clone": str(tmp_path), "arm": "solo"}
+    assert ns["main"](args)["limits"]["claude"] is None
+    solo_config.write_text(json.dumps(account))
+    assert ns["main"](args)["limits"]["claude"]["used"] == 31
