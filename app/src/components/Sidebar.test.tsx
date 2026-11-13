@@ -519,7 +519,7 @@ describe("Sidebar", () => {
     expect(within(context()).getByTestId("goal-count").textContent).toBe("1 of 2");
     const milestones = within(context()).getByRole("list", { name: "Milestones" });
     expect(milestones.textContent).toContain("Print JSON");
-    expect(within(milestones).getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["now"]);
+    expect(within(milestones).getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now"]);
     expect(within(context()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
     expect(screen.queryByTestId("connection")).toBeNull();
     expect(within(context()).queryByRole("button", { name: /Check milestone|Run checks/ })).toBeNull();
