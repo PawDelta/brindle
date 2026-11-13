@@ -15,25 +15,30 @@ this repo, runs the setup commands, starts the clock, then runs one arm:
 - solo: ``claude -p <spec> --model claude-fable-5-2 --output-format
   stream-json --verbose`` in the clone, in Claude Code's default permission
   mode, with ``--permission-prompt-tool`` pointing at a small stdio MCP server
-  in this script that logs and approves each request. Tokens are summed per
+  in this script that logs and approves each request (an AskUserQuestion gets
+  its recommended, else first, option). A turn that ends by asking the person
+  something is answered by resuming the same session. Tokens are summed per
   model (subagents included) from the stream's assistant messages.
 - brindle: the INSTALLED ``brindle`` (never this checkout's CLI: it would
   migrate the real database). ``brindle init`` in the clone, the supervisor
   pinned to ``--supervisor-model`` (a repo profile named in
-  ``supervisor_profile``), then ``brindle start --no-attach -p <spec>``.
-  Done is the goal reached, or the supervisor idle with no worker running for
-  ``--idle-grace`` seconds; the clock stops then. Tokens per model for the
-  supervisor and every worker and reviewer of that session come from their
-  transcripts (Codex and other providers: brindle's own usage reader and price
-  table), read through the installed brindle's Python.
+  ``supervisor_profile``), the app's hold on a permission ask shortened to
+  ``--hold-seconds`` (so it reaches the agent's own prompt, where this runner
+  answers it), then ``brindle start --no-attach -p <spec>``. Done is the goal
+  reached, or the whole session quiet (supervisor idle, no agent working,
+  nothing waiting on the person) for ``--idle-grace`` seconds; the clock stops
+  when that quiet began. Tokens per model for the supervisor and every worker
+  and reviewer of that session come from their transcripts (Codex and others
+  without one: brindle's own usage reader), read through the installed
+  brindle's Python.
 
 Person-facing interruptions are counted in both arms. Solo: each request the
-permission tool logged, each AskUserQuestion, and a final reply that ends in a
+permission tool logged, each AskUserQuestion, and each turn that ends in a
 question. brindle: permission asks its checker or the worker's supervisor did
 not answer (``permission_asks``), the supervisor stopping on a question or a
 need_user call, and anything else that lands in the session's Inbox. Each is
-answered automatically ("go ahead with your recommendation") so the run keeps
-going.
+answered automatically ("go ahead with your recommendation", or the Inbox
+item's own answer) so the run keeps going.
 
 Then ``grade.sh`` runs on the final checkout (brindle: the session branch's
 worktree) and one JSON record is appended to
@@ -87,6 +92,9 @@ ASK_TOOL = "AskUserQuestion"
 AUTO_RESOLVED = {"policy", "saved_action", "supervisor"}
 # Inbox kinds that put a question to the person; the rest are "other".
 QUESTION_KINDS = {"question", "waiting", "plan", "plan_offer", "proposed_checks", "visual"}
+# Inbox kinds this runner answers with the item's own operation (the probe's
+# "answer"); each keeps the session from counting as done while it is listed.
+ANSWERED_KINDS = {"plan", "plan_offer", "proposed_checks", "visual", "doc"}
 BUSY = ("processing", "starting")
 TAIL_BYTES = 256 * 1024
 
@@ -187,26 +195,30 @@ def tokens_total(by_model: dict[str, dict[str, int]]) -> int:
     return sum(sum(k.values()) for k in by_model.values())
 
 
-def price_usage(by_model: dict[str, dict[str, int]],
-                outside: dict[str, float | None] | None = None) -> tuple[float, dict[str, float], list[str]]:
+def price_usage(by_model: dict[str, dict[str, int]], rates: dict[str, list[float]] | None = None,
+                free: set[str] | frozenset = frozenset()) -> tuple[float, dict[str, float], list[str]]:
     """Dollars for ``by_model``: the total, per model, and the models left
     unpriced. A Claude model this script has no price for raises UnknownModel
-    (never priced at 0). Another provider's model takes its dollars from
-    ``outside`` (brindle's own price table), else is listed as unpriced."""
-    outside = outside or {}
+    (never priced at 0). Another provider's model is priced at brindle's own
+    rate (``rates``: input, output, cache write, cache read per MTok), costs
+    nothing when it ran on this machine (``free``), else is listed as unpriced."""
+    rates = rates or {}
     total, per, unpriced = 0.0, {}, []
     for model, k in sorted(by_model.items()):
         if model in PRICES:
             inp, out, read = PRICES[model]
-            dollars = (k["input"] * inp + k["output"] * out + k["cache_read"] * read
-                       + k["cache_creation"] * inp * CACHE_WRITE_FACTOR) / MTOK
+            write = inp * CACHE_WRITE_FACTOR
         elif model.startswith("claude"):
             raise UnknownModel(f"no price for model {model!r}: add it to PRICES in {SCRIPT.name}")
-        elif outside.get(model) is not None:
-            dollars = float(outside[model])
+        elif model in free:
+            inp = out = write = read = 0.0
+        elif model in rates:
+            inp, out, write, read = rates[model]
         else:
             unpriced.append(model)
             continue
+        dollars = (k["input"] * inp + k["output"] * out + k["cache_creation"] * write
+                   + k["cache_read"] * read) / MTOK
         per[model] = round(dollars, 6)
         total += dollars
     return round(total, 6), per, unpriced
@@ -232,13 +244,17 @@ def ask_tool_uses(entries: list[dict]) -> int:
     return len(ids)
 
 
+def results(entries: list[dict]) -> list[dict]:
+    return [e for e in entries if e.get("type") == "result"]
+
+
 def solo_prompts(entries: list[dict], approvals: list[dict]) -> dict[str, int]:
     """The solo session's interruptions: each permission request its prompt
-    tool logged, each AskUserQuestion, and a final reply ending in a question."""
-    final = next((e.get("result") for e in reversed(entries) if e.get("type") == "result"), None)
-    questions = ask_tool_uses(entries) + ends_with_question(final if isinstance(final, str) else None)
+    tool logged, each AskUserQuestion, and each turn ending in a question."""
+    closing = sum(ends_with_question(r.get("result") if isinstance(r.get("result"), str) else None)
+                  for r in results(entries))
     permission = sum(1 for a in approvals if a.get("tool_name") != ASK_TOOL)
-    return {"permission": permission, "question": questions, "other": 0}
+    return {"permission": permission, "question": ask_tool_uses(entries) + closing, "other": 0}
 
 
 def brindle_prompts(asks: list[dict], events: list[dict]) -> dict[str, int]:
@@ -254,9 +270,25 @@ def brindle_prompts(asks: list[dict], events: list[dict]) -> dict[str, int]:
 # -- the solo arm's permission prompt tool ----------------------------------------------------------
 
 
+def recommended(question: dict) -> str | None:
+    """The option an AskUserQuestion recommends (its label says so), else its first."""
+    labels = [o.get("label") for o in question.get("options") or () if isinstance(o, dict)]
+    return next((label for label in labels if label and "recommended" in label.lower()),
+                labels[0] if labels else None)
+
+
+def approval(tool_name: str | None, tool_input: dict) -> dict:
+    """The permission tool's answer: allow, unchanged; an AskUserQuestion is
+    allowed with each question answered by its recommended option."""
+    if tool_name == ASK_TOOL:
+        questions = [q for q in tool_input.get("questions") or () if isinstance(q, dict)]
+        tool_input = {**tool_input, "answers": {q.get("question"): recommended(q) or ANSWER for q in questions}}
+    return {"behavior": "allow", "updatedInput": tool_input}
+
+
 def approver_reply(msg: dict, log_path: Path) -> dict | None:
     """One JSON-RPC message to the approver MCP server: its reply, or None for
-    a notification. A tools/call is logged, then allowed unchanged."""
+    a notification. A tools/call is logged, then allowed."""
     method, mid = msg.get("method"), msg.get("id")
     if method == "initialize":
         result = {"protocolVersion": (msg.get("params") or {}).get("protocolVersion", "2025-06-18"),
@@ -274,7 +306,7 @@ def approver_reply(msg: dict, log_path: Path) -> dict | None:
         with log_path.open("a") as f:
             f.write(json.dumps({"ts": time.time(), "tool_name": args.get("tool_name"),
                                 "input": args.get("input")}) + "\n")
-        decision = {"behavior": "allow", "updatedInput": args.get("input") or {}}
+        decision = approval(args.get("tool_name"), args.get("input") or {})
         result = {"content": [{"type": "text", "text": json.dumps(decision)}]}
     elif method == "ping":
         result = {}
@@ -415,6 +447,29 @@ def grade(grade_sh: Path, checkout: Path, env: dict) -> dict:
     return {"error": f"grade.sh exit {res.returncode}: no JSON on stdout", "passed": 0, "failed": 0}
 
 
+def main_model(by_model: dict[str, dict[str, int]]) -> str | None:
+    return max(by_model, key=lambda m: by_model[m]["output"], default=None)
+
+
+def solo_session(run_turn, spec: str, max_answers: int) -> list[dict]:
+    """The solo session's stream-json entries over all its turns:
+    ``run_turn(prompt, session_id)`` runs one (``session_id`` None: a new
+    session) and returns its entries. A turn that ends by asking the person
+    something is answered in the same session, up to ``max_answers`` times."""
+    entries = run_turn(spec, None)
+    for _ in range(max_answers):
+        last = (results(entries) or [{}])[-1]
+        if last.get("gave_up") or not ends_with_question(last.get("result") if isinstance(
+                last.get("result"), str) else None):
+            break
+        session = last.get("session_id") or next(
+            (e["session_id"] for e in reversed(entries) if isinstance(e.get("session_id"), str)), None)
+        if not session:
+            break
+        entries += run_turn(ANSWER, session)
+    return entries
+
+
 def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict) -> dict:
     claude = shutil.which("claude", path=env.get("PATH"))
     if not claude:
@@ -424,128 +479,207 @@ def run_solo(args, clone: Path, spec: str, scratch: Path, env: dict) -> dict:
     mcp = scratch / "mcp.json"
     mcp.write_text(json.dumps({"mcpServers": {APPROVER_SERVER: {
         "command": sys.executable, "args": [str(SCRIPT), "approver", "--log", str(approvals)]}}}))
-    cmd = [claude, "-p", spec, "--model", args.model, "--output-format", "stream-json", "--verbose",
-           "--mcp-config", str(mcp), "--strict-mcp-config",
-           "--permission-prompt-tool", f"mcp__{APPROVER_SERVER}__{APPROVER_TOOL}"]
-    limit = args.max_hours * 3600
+    flags = ["--model", args.model, "--output-format", "stream-json", "--verbose",
+             "--mcp-config", str(mcp), "--strict-mcp-config",
+             "--permission-prompt-tool", f"mcp__{APPROVER_SERVER}__{APPROVER_TOOL}"]
     t0 = time.time()
-    with stream.open("w") as out:
-        proc = subprocess.Popen(cmd, cwd=clone, env=env, stdout=out, stdin=subprocess.DEVNULL, text=True)
-        try:
-            code = proc.wait(limit)
-            finished = "exit" if code == 0 else f"exit:{code}"
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            finished = "gave_up"
+    deadline = t0 + args.max_hours * 3600
+    state = {"finished": "exit"}
+
+    def run_turn(prompt: str, session: str | None) -> list[dict]:
+        turn = scratch / f"solo_turn_{len(list(scratch.glob('solo_turn_*')))}.jsonl"
+        cmd = [claude, "-p", prompt, *flags, *(["--resume", session] if session else [])]
+        with turn.open("w") as out:
+            proc = subprocess.Popen(cmd, cwd=clone, env=env, stdout=out, stdin=subprocess.DEVNULL, text=True)
+            try:
+                code = proc.wait(max(1.0, deadline - time.time()))
+                state["finished"] = "exit" if code == 0 else f"exit:{code}"
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                state["finished"] = "gave_up"
+        text = turn.read_text(errors="replace")
+        with stream.open("a") as f:
+            f.write(text)
+        entries = iter_json(text.splitlines())
+        return entries + ([{"type": "result", "gave_up": True}] if state["finished"] == "gave_up" else [])
+
+    entries = solo_session(run_turn, spec, args.max_answers)
     stop = time.time()
-    entries = iter_json(stream.read_text(errors="replace").splitlines())
     by_model = message_usage(entries)
-    result = next((e for e in reversed(entries) if e.get("type") == "result"), {})
-    return {"finished": finished, "wall_seconds": round(stop - t0, 1), "by_model": by_model,
-            "by_role": {"solo": by_model}, "outside": {},
+    return {"finished": state["finished"], "wall_seconds": round(stop - t0, 1), "by_model": by_model,
+            "by_role": {"solo": by_model}, "rates": {}, "free": set(),
             "prompts": solo_prompts(entries, iter_json(approvals.read_text().splitlines())),
             "checkout": clone, "supervisor_model": args.model,
             "supervisor_model_observed": main_model(by_model),
-            "cli_model_usage": result.get("modelUsage")}
-
-
-def main_model(by_model: dict[str, dict[str, int]]) -> str | None:
-    return max(by_model, key=lambda m: by_model[m]["output"], default=None)
+            "turns": len(results(entries)),
+            "cli_model_usage": [r.get("modelUsage") for r in results(entries)]}
 
 
 # -- the brindle arm --------------------------------------------------------------------------------
 
 # Runs under the INSTALLED brindle's Python (``python -I``: nothing from this
 # checkout or the current directory is importable), so it reads the database
-# with the code that owns its schema.
+# with the code that owns its schema. It never calls service.inbox.items: that
+# would mark requests the daemon holds (in its own memory) as gone to the CLI's
+# prompt; nor anything that asks GitHub.
 PROBE = r'''
 import json, os, sys, time
-args = json.loads(sys.argv[1])
-import brindle
-from brindle.db import DB
-from brindle import autopilot
-db = DB()
-op = args["op"]
-out = {"errors": [], "brindle_file": brindle.__file__}
 
-def real(p):
-    return os.path.realpath(p) if p else p
 
-def describe(a):
-    ws = db.get_workspace(a.workspace_id)
-    d = {k: getattr(a, k, None) for k in ("id", "profile", "provider", "parent_id", "mode", "status",
-                                          "status_since", "created_at", "transcript_path", "session_ref")}
-    d.update(workspace_path=ws.path if ws else None, branch=ws.branch if ws else None,
-             repo_root=ws.repo_root if ws else None)
-    return d
+def main(args):
+    import brindle
+    from brindle import autopilot
+    from brindle.db import DB
 
-def in_repo(a):
-    ws = db.get_workspace(a.workspace_id)
-    return ws is not None and real(ws.repo_root) == real(args["clone"])
+    db = DB()
+    op = args["op"]
+    out = {"errors": [], "brindle_file": brindle.__file__}
 
-if op == "find_root":
-    found = [a for a in db.list_agents() if a.profile == "supervisor" and a.mode == "interactive"
-             and not a.parent_id and a.created_at >= args["since"] and in_repo(a)]
-    found.sort(key=lambda a: a.created_at)
-    out["root"] = describe(found[-1]) if found else None
-elif op == "snapshot":
-    rid, repo = args["root_id"], args["repo_root"]
-    agents = [a for a in db.list_agents() if in_repo(a) and autopilot.root_of(db, a.id) == rid]
-    out["agents"] = [describe(a) for a in agents]
-    ap = db.get_autopilot(rid)
-    out["autopilot"] = {"state": ap.state, "question": ap.question, "goal": ap.goal} if ap else None
-    # The session's Inbox, read only: service.inbox.items would mark requests the
-    # daemon holds (in its own memory) as gone to the CLI's prompt.
-    now, items = time.time(), []
-    for a in agents:
-        rows = [dict(r) for r in db.permission_requests_of(a.id)]
-        held = any(r["channel"] in ("hook", "supervisor") and (r["hold_until"] or 0) > now for r in rows)
-        if a.status == "waiting" or held:
-            items.append({"kind": "waiting" if a.status == "waiting" else "permission", "agent_id": a.id,
-                          "detail": None, "held": held, "permission": bool(rows)})
-        if a.status == "failed":
-            items.append({"kind": "failed", "agent_id": a.id, "detail": getattr(a, "failed_why", None)})
-        if getattr(a, "plan_state", None) == "proposed" and getattr(a, "plan_first", None) and a.parent_id:
-            items.append({"kind": "plan", "agent_id": a.id, "detail": (a.plan_text or "")[:200]})
-    if ap is not None and autopilot.proposing(ap):
-        items.append({"kind": "proposed_checks", "agent_id": rid, "detail": ap.proposal})
-    try:
+    def real(p):
+        return os.path.realpath(p) if p else p
+
+    def describe(a):
+        ws = db.get_workspace(a.workspace_id)
+        d = {k: getattr(a, k, None) for k in ("id", "profile", "provider", "parent_id", "mode", "status",
+                                              "status_since", "created_at", "transcript_path", "session_ref")}
+        d.update(workspace_path=ws.path if ws else None, branch=ws.branch if ws else None,
+                 repo_root=ws.repo_root if ws else None, local=False)
+        try:
+            from brindle import pricing
+            from brindle.profiles import load_profile
+            d["local"] = pricing.is_local(load_profile(a.profile, ws.repo_root if ws else None).base_url)
+        except Exception:
+            pass
+        return d
+
+    def in_repo(a):
+        ws = db.get_workspace(a.workspace_id)
+        return ws is not None and real(ws.repo_root) == real(args["clone"])
+
+    def guarded(name, fn):
+        try:
+            return fn()
+        except Exception as e:
+            out["errors"].append("%s: %r" % (name, e))
+            return None
+
+    if op == "find_root":
+        found = [a for a in db.list_agents() if a.profile == "supervisor" and a.mode == "interactive"
+                 and not a.parent_id and a.created_at >= args["since"] and in_repo(a)]
+        found.sort(key=lambda a: a.created_at)
+        out["root"] = describe(found[-1]) if found else None
+    elif op == "snapshot":
+        rid, repo = args["root_id"], args["repo_root"]
+        agents = [a for a in db.list_agents() if in_repo(a) and autopilot.root_of(db, a.id) == rid]
+        out["agents"] = [describe(a) for a in agents]
+        ap = db.get_autopilot(rid)
+        out["autopilot"] = {"state": ap.state, "question": ap.question, "goal": ap.goal} if ap else None
+        now, items = time.time(), []
+        for a in agents:
+            rows = [dict(r) for r in db.permission_requests_of(a.id)]
+            held = any(r["channel"] in ("hook", "supervisor") and (r["hold_until"] or 0) > now for r in rows)
+            if a.status == "waiting" or held:
+                items.append({"kind": "waiting" if a.status == "waiting" else "permission", "agent_id": a.id,
+                              "held": held, "permission": bool(rows)})
+            if a.status == "failed":
+                items.append({"kind": "failed", "agent_id": a.id, "detail": getattr(a, "failed_why", None)})
+            if getattr(a, "plan_state", None) == "proposed" and getattr(a, "plan_first", None) and a.parent_id:
+                items.append({"kind": "plan", "agent_id": a.id, "detail": (a.plan_text or "")[:200]})
+        if ap is not None and autopilot.proposing(ap):
+            items.append({"kind": "proposed_checks", "agent_id": rid, "detail": ap.proposal})
+        # The session's PR, from what brindle recorded (the Inbox's own reading also asks GitHub).
+        for r in db.conn.execute("SELECT state, title, check_cmd, output FROM session_pr_prep"
+                                 " WHERE root_id=? AND state IN ('passed', 'failed')", (rid,)):
+            items.append({"kind": "pr_ready" if r["state"] == "passed" else "pr_failed", "agent_id": rid,
+                          "detail": r["title"] if r["state"] == "passed" else r["check_cmd"]})
+        for r in db.conn.execute("SELECT p.url, m.error FROM session_prs p LEFT JOIN session_pr_merges m"
+                                 " ON m.url = p.url AND m.state = 'failed'"
+                                 " WHERE p.root_id=? AND p.url IS NOT NULL AND p.merged_at IS NULL", (rid,)):
+            items.append({"kind": "pr_failed" if r["error"] else "pr_opened", "agent_id": rid, "detail": r["url"]})
+        root = db.get_agent(rid)
+        home = db.get_workspace(root.workspace_id) if root else None
+        if home is not None:
+            from brindle import session_sync
+            stuck = guarded("sync", lambda: session_sync.needs_you(db, home))
+            if stuck:
+                items.append({"kind": "sync_conflict", "agent_id": rid, "detail": stuck})
+        login = guarded("login", lambda: db.get_login_state(rid))
+        if login is not None and login.state == "auth_paused":
+            items.append({"kind": "login", "agent_id": rid, "detail": login.refresh_cmd})
         from brindle.service import inbox
         ids = {a.id for a in agents}
-        for i in (inbox._visual_items(db, repo) + inbox._plan_offer_items(db, repo)
-                  + inbox._doc_items(db, repo, ids)):
-            if i.root_id == rid:
-                items.append({"kind": i.kind, "agent_id": i.agent_id, "detail": i.detail})
-    except Exception as e:
-        out["errors"].append("inbox: %r" % (e,))
-    out["inbox"] = items
-    out["outside_usage"] = {}
-    try:
-        from brindle import pricing
-        from brindle.usage import agent_usage, usage_cost
-        extra = pricing.repo_overrides(repo)
-        for a in agents:
-            if a.provider == "claude":
-                continue
-            u = agent_usage(db, a)
-            if u is not None:
-                out["outside_usage"][a.id] = {
-                    "model": u.model or "unknown", "input": u.input_tokens, "output": u.output_tokens,
-                    "cache_read": u.cache_read_tokens, "cache_creation": u.cache_creation_tokens,
-                    "cost": usage_cost(u, extra)}
-    except Exception as e:
-        out["errors"].append("usage: %r" % (e,))
-    out["permission_asks"] = [dict(r) for r in db.conn.execute(
-        "SELECT * FROM permission_asks WHERE repo_root=?", (repo,)).fetchall()]
-    out["history"] = [{"agent_id": h.agent_id, "kind": h.kind, "profile": h.profile, "tokens": h.tokens}
-                      for h in db.list_history(repo, None, 10_000_000) if h.tokens]
-elif op == "press_enter":
-    from brindle import agents as ag, tmux
-    a = db.get_agent(args["agent_id"])
-    if a is not None and a.tmux_window:
-        tmux.send_keys(a.tmux_window, "Enter", server=ag.server_of(a))
-print(json.dumps(out, default=str))
+        for name, fn in (("visuals", lambda: inbox._visual_items(db, repo)),
+                         ("plan offers", lambda: inbox._plan_offer_items(db, repo)),
+                         ("docs", lambda: inbox._doc_items(db, repo, ids)),
+                         ("idle", lambda: inbox._idle_items(db, repo))):
+            for i in guarded(name, fn) or []:
+                if i.root_id == rid:
+                    items.append({"kind": i.kind, "agent_id": i.agent_id, "detail": i.detail,
+                                  "visual_id": i.visual_id, "request_id": i.request_id})
+        out["inbox"] = items
+        out["outside_usage"] = {}
+        out["rates"] = {}
+        try:
+            from brindle import pricing
+            from brindle.usage import agent_usage
+            extra = pricing.repo_overrides(repo)
+            for model, p in {**pricing.PRICES, **extra}.items():
+                out["rates"][model] = [p.input, p.output, p.cache_write, p.cache_read]
+            for a in agents:
+                if a.provider == "claude" or a.transcript_path:
+                    continue   # its transcript is read directly: one source per agent
+                u = agent_usage(db, a)
+                if u is not None:
+                    out["outside_usage"][a.id] = {
+                        "model": u.model or "unknown", "input": u.input_tokens, "output": u.output_tokens,
+                        "cache_read": u.cache_read_tokens, "cache_creation": u.cache_creation_tokens}
+        except Exception as e:
+            out["errors"].append("usage: %r" % (e,))
+        out["permission_asks"] = [dict(r) for r in db.conn.execute(
+            "SELECT * FROM permission_asks WHERE repo_root=?", (repo,)).fetchall()]
+        out["history"] = [{"agent_id": h.agent_id, "kind": h.kind, "profile": h.profile, "tokens": h.tokens}
+                          for h in db.list_history(repo, None, 10_000_000) if h.tokens]
+    elif op == "press_enter":
+        from brindle import agents as ag, tmux
+        a = db.get_agent(args["agent_id"])
+        if a is not None and a.tmux_window:
+            tmux.send_keys(a.tmux_window, "Enter", server=ag.server_of(a))
+    elif op == "answer":
+        # The person's answer, through the same operation the app's Inbox action runs.
+        item, rid = args["item"], args["root_id"]
+        kind = item["kind"]
+        if kind == "plan":
+            from brindle import agents as ag
+            a = db.get_agent(item["agent_id"])
+            ag.approve_plan(db, a.parent_id, a.id, "", True)
+        elif kind == "proposed_checks":
+            ap = db.get_autopilot(rid)
+            if ap is not None and autopilot.proposing(ap):
+                checks = json.loads(ap.proposal).get("checks") or []
+                autopilot.add_checks(args["repo_root"], checks, False)
+                with db.tx() as c:
+                    c.execute("UPDATE autopilot SET proposal = NULL WHERE root_id = ? AND proposal = ?",
+                              (rid, ap.proposal))
+        elif kind == "visual":
+            from brindle import visuals
+            v = visuals.get(db, item["visual_id"])
+            if v["options"]:
+                visuals.answer(db, v["id"], v["rev"], option=v["options"][0]["id"], note=args["answer"])
+            else:
+                visuals.mark_read(db, v["id"], v["rev"])
+        elif kind == "plan_offer":
+            from brindle import plans
+            plans.answer_offer(db, rid, item["request_id"], False)
+        elif kind == "doc":
+            from brindle.service import inbox
+            inbox.dismiss_doc_read(db, item["request_id"])
+        out["answered"] = kind
+    return out
+
+
+if __name__ == "__main__":
+    print(json.dumps(main(json.loads(sys.argv[1])), default=str))
 '''
 
 
@@ -599,9 +733,12 @@ class Brindle:
         return out
 
 
-def pin_supervisor(clone: Path, model: str) -> None:
-    """A repo profile on ``model`` and ``supervisor_profile`` naming it: a new
-    supervisor chat takes its provider, model and effort from there."""
+def configure_clone(clone: Path, model: str, hold_seconds: int) -> None:
+    """A repo profile on ``model`` and ``supervisor_profile`` naming it (a new
+    supervisor chat takes its provider, model and effort from there), and the
+    app's hold on a permission ask shortened to ``hold_seconds``: an ask the
+    person must answer then reaches the agent's own prompt, where this runner
+    answers it, instead of waiting a day for the app."""
     agents_dir = clone / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / f"{PROFILE_NAME}.md").write_text(
@@ -610,6 +747,7 @@ def pin_supervisor(clone: Path, model: str) -> None:
     local = clone / ".brindle" / "config.local.json"
     cfg = json.loads(local.read_text()) if local.exists() else {}
     cfg["supervisor_profile"] = PROFILE_NAME
+    cfg["permission_hold_seconds"] = hold_seconds
     local.write_text(json.dumps(cfg, indent=2) + "\n")
 
 
@@ -638,6 +776,96 @@ def role(agent: dict, root_id: str) -> str:
     return "reviewer" if agent.get("mode") == "review" else "worker"
 
 
+def watch_session(b, rid: str, root: dict, t0: float, args, clock=time.time, pause=wait) -> dict:
+    """Look at the session every ``args.poll`` seconds until it is done,
+    answering what waits on the person, and counting each such interruption.
+    Done: the goal reached, or the whole session quiet (supervisor idle, no
+    agent working, nothing waiting on the person) for ``args.idle_grace``
+    seconds; ``stop`` is when that quiet began."""
+    seen: dict[str, dict] = {rid: root}            # every session agent ever seen (workers get removed)
+    transcripts: dict[str, set[str]] = {}
+    outside: dict[str, dict] = {}
+    rates: dict[str, list[float]] = {}
+    events: list[dict] = []
+    counted: set[tuple] = set()
+    answered: set[tuple] = set()
+    pressed: dict[str, float] = {}
+    quiet_since = None
+    snap: dict = {}
+    while True:
+        snap = b.probe("snapshot", root_id=rid, repo_root=root["repo_root"])
+        now = clock()
+        for a in snap["agents"]:
+            seen[a["id"]] = {**seen.get(a["id"], {}), **a}
+            if a.get("transcript_path"):
+                transcripts.setdefault(a["id"], set()).add(a["transcript_path"])
+        outside.update(snap.get("outside_usage") or {})
+        rates.update(snap.get("rates") or {})
+        live = {a["id"]: a for a in snap["agents"]}
+        sup = live.get(rid, seen[rid])
+        ap = snap.get("autopilot") or {}
+        waiting = False   # something is waiting on the person (or on its answer to land)
+        for item in snap["inbox"]:
+            kind, aid = item["kind"], item.get("agent_id")
+            if item.get("held"):
+                waiting = True   # held for the app: after --hold-seconds it reaches the agent's prompt
+                continue
+            if kind == "waiting":
+                # A prompt or dialog still on an agent's screen after --answer-after: take its
+                # default (first) choice. A permission prompt is counted from permission_asks,
+                # any other dialog here.
+                waiting = True
+                since = float(live.get(aid, {}).get("status_since") or now)
+                if now - since < args.answer_after or now - pressed.get(aid, -1e18) < args.answer_after:
+                    continue
+                key = (kind, aid, since)
+                if not item.get("permission") and key not in counted:
+                    events.append({"kind": kind, "agent_id": aid, "at": now})
+                counted.add(key)
+                b.probe("press_enter", agent_id=aid)
+                pressed[aid] = now
+                continue
+            key = (kind, aid, item.get("visual_id") or item.get("request_id") or (item.get("detail") or "")[:200])
+            if key not in counted:
+                counted.add(key)
+                events.append({"kind": kind, "agent_id": aid, "at": now})
+            if kind in ANSWERED_KINDS:
+                waiting = True   # until it leaves the Inbox
+                if key not in answered:
+                    answered.add(key)
+                    try:
+                        b.probe("answer", root_id=rid, repo_root=root["repo_root"], item=item, answer=ANSWER)
+                    except BenchError as e:
+                        print(f"couldn't answer {kind}: {e}", file=sys.stderr)
+        stopped = sup.get("status") == "idle"
+        asking = stopped and (ap.get("state") == "blocked" or ends_with_question(
+            last_text(sup.get("transcript_path"))))
+        if ap.get("state") == "done":
+            if asking:
+                events.append({"kind": "question", "agent_id": rid, "at": now})
+            return {"finished": "goal", "stop": now, "seen": seen, "transcripts": transcripts, "outside": outside,
+                    "rates": rates, "events": events, "snap": snap}
+        if asking:
+            waiting = True
+            spell = ("question", rid, sup.get("status_since"))
+            if spell not in counted and now - float(sup.get("status_since") or now) >= args.answer_after:
+                counted.add(spell)
+                events.append({"kind": "question", "agent_id": rid, "at": now})
+                b.cli("send", rid, ANSWER, check=False)
+        busy = any(a.get("status") in BUSY for a in snap["agents"])
+        if stopped and not busy and not waiting:
+            quiet_since = now if quiet_since is None else quiet_since
+            if now - quiet_since >= args.idle_grace:
+                return {"finished": "idle", "stop": quiet_since, "seen": seen, "transcripts": transcripts,
+                        "outside": outside, "rates": rates, "events": events, "snap": snap}
+        else:
+            quiet_since = None
+        if now - t0 > args.max_hours * 3600:
+            return {"finished": "gave_up", "stop": now, "seen": seen, "transcripts": transcripts,
+                    "outside": outside, "rates": rates, "events": events, "snap": snap}
+        pause(args.poll)
+
+
 def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
     b = Brindle(installed_brindle(args.brindle, env), "", clone, env)
     b.python = brindle_python(b.exe, args.brindle_python)
@@ -645,7 +873,7 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
     init = b.cli("init", "--yes", check=False)
     if init.returncode != 0:
         print(f"brindle init exited {init.returncode}: {init.stderr.strip()[-500:]}", file=sys.stderr)
-    pin_supervisor(clone, args.supervisor_model)
+    configure_clone(clone, args.supervisor_model, args.hold_seconds)
     b.cli("start", "--no-attach", "--no-watch", "--yes", "-p", spec)
     root = None
     while root is None:
@@ -654,113 +882,39 @@ def run_brindle(args, clone: Path, spec: str, env: dict) -> dict:
             if time.time() - t0 > args.start_grace:
                 raise BenchError("brindle start launched no supervisor in this clone")
             wait(args.poll)
-    rid, repo = root["id"], root["repo_root"]
-    seen: dict[str, dict] = {rid: root}            # every session agent ever seen (workers get removed)
-    transcripts: dict[str, set[str]] = {}
-    outside: dict[str, dict] = {}
-    events: list[dict] = []
-    handled: set[tuple] = set()
-    pressed: dict[str, float] = {}
-    quiet_since = None
-    finished, stop = "gave_up", None
-    snap: dict = {}
-    while True:
-        snap = b.probe("snapshot", root_id=rid, repo_root=repo)
-        now = time.time()
-        for a in snap["agents"]:
-            seen[a["id"]] = {**seen.get(a["id"], {}), **a}
-            if a.get("transcript_path"):
-                transcripts.setdefault(a["id"], set()).add(a["transcript_path"])
-        outside.update(snap["outside_usage"])
-        live = {a["id"]: a for a in snap["agents"]}
-        root = live.get(rid, seen[rid])
-        ap = snap["autopilot"] or {}
-        unhandled = False
-        for item in snap["inbox"]:
-            kind, aid = item["kind"], item.get("agent_id")
-            if item.get("held"):
-                unhandled = True   # held for the app's answer: it reaches the agent's own prompt later
-                continue
-            if kind == "waiting":
-                # A prompt or dialog still on an agent's screen after --answer-after: take its
-                # default (first) choice. A permission prompt is counted from permission_asks,
-                # any other dialog here.
-                unhandled = True
-                since = float(live.get(aid, {}).get("status_since") or now)
-                if now - since < args.answer_after or now - pressed.get(aid, 0) < args.answer_after:
-                    continue
-                key = (kind, aid, since)
-                if not item.get("permission") and key not in handled:
-                    events.append({"kind": kind, "agent_id": aid, "at": now})
-                handled.add(key)
-                b.probe("press_enter", agent_id=aid)
-                pressed[aid] = now
-                continue
-            key = (kind, aid, (item.get("detail") or "")[:200])
-            if key not in handled:
-                handled.add(key)
-                events.append({"kind": kind, "agent_id": aid, "at": now})
-                b.cli("send", rid, ANSWER, check=False)
-                unhandled = True
-        stopped = root.get("status") == "idle"
-        asking = stopped and (ap.get("state") == "blocked" or ends_with_question(
-            last_text(root.get("transcript_path"))))
-        if ap.get("state") == "done":
-            if asking:
-                events.append({"kind": "question", "agent_id": rid, "at": now})
-            finished, stop = "goal", now
-            break
-        if asking:
-            unhandled = True
-            spell = ("question", rid, root.get("status_since"))
-            if spell not in handled and now - float(root.get("status_since") or now) >= args.answer_after:
-                handled.add(spell)
-                events.append({"kind": "question", "agent_id": rid, "at": now})
-                b.cli("send", rid, ANSWER, check=False)
-        busy = any(a.get("status") in BUSY for a in snap["agents"])
-        if stopped and not busy and not unhandled:
-            quiet_since = quiet_since or max(t0, float(root.get("status_since") or now))
-            if now - quiet_since >= args.idle_grace:
-                finished, stop = "idle", quiet_since
-                break
-        else:
-            quiet_since = None
-        if now - t0 > args.max_hours * 3600:
-            finished, stop = "gave_up", now
-            break
-        wait(args.poll)
-    usage = brindle_usage(rid, seen, transcripts, outside, snap.get("history", []))
+    rid = root["id"]
+    w = watch_session(b, rid, root, t0, args)
+    usage = brindle_usage(rid, w["seen"], w["transcripts"], w["outside"], w["snap"].get("history", []))
     if not args.leave_running:
-        for aid, a in seen.items():
+        for aid, a in w["seen"].items():
             if a.get("status") not in ("done", "paused"):
                 b.cli("close", aid, check=False)
-    checkout = Path(seen[rid].get("workspace_path") or clone)
-    return {"finished": finished, "wall_seconds": round(stop - t0, 1), **usage,
-            "prompts": brindle_prompts(snap.get("permission_asks", []), events),
+    checkout = Path(w["seen"][rid].get("workspace_path") or clone)
+    return {"finished": w["finished"], "wall_seconds": round(w["stop"] - t0, 1), **usage, "rates": w["rates"],
+            "prompts": brindle_prompts(w["snap"].get("permission_asks", []), w["events"]),
             "checkout": checkout, "supervisor_model": args.supervisor_model,
-            "session_root": rid, "agents": len(seen)}
+            "session_root": rid, "agents": len(w["seen"])}
 
 
 def brindle_usage(rid: str, seen: dict[str, dict], transcripts: dict[str, set[str]],
                   outside: dict[str, dict], history: list[dict]) -> dict:
-    """Tokens per model and per role over the session's agents: Claude ones
-    from their transcripts, others from brindle's usage reader, and any agent
-    never seen live (started and removed between two looks) from its history
-    rows."""
+    """Tokens per model and per role over the session's agents, one source
+    each: its transcripts when it has any (Claude, and native workers, which
+    write the same format), else brindle's usage reader (Codex). An agent never
+    seen live (started and removed between two looks) counts from its history
+    rows. ``free``: the models agents ran on this machine."""
     by_model: dict[str, dict[str, int]] = {}
     by_role: dict[str, dict[str, dict[str, int]]] = {}
-    outside_cost: dict[str, float | None] = {}
+    free: set[str] = set()
     supervisor: dict[str, dict[str, int]] = {}
     for aid, a in seen.items():
         mine: dict[str, dict[str, int]] = {}
         for path in sorted(transcripts.get(aid, ())):
             merge(mine, transcript_usage(path))
-        if aid in outside:
-            u = outside[aid]
-            model = normalize_model(u["model"])
-            add_usage(mine, model, u)
-            prior = outside_cost.get(model, 0.0)
-            outside_cost[model] = None if prior is None or u["cost"] is None else prior + u["cost"]
+        if not transcripts.get(aid) and aid in outside:
+            add_usage(mine, normalize_model(outside[aid]["model"]), outside[aid])
+        if a.get("local"):
+            free.update(mine)
         if aid == rid:
             supervisor = mine
         merge(by_model, mine)
@@ -774,10 +928,8 @@ def brindle_usage(rid: str, seen: dict[str, dict], transcripts: dict[str, set[st
             continue
         model = normalize_model(d.get("model") or "unknown")
         add_usage(by_model, model, d)
-        merge(by_role.setdefault("unseen", {}), {model: {k: int(d.get(k) or 0) for k in KINDS}})
-        if not model.startswith("claude"):
-            outside_cost[model] = None
-    return {"by_model": by_model, "by_role": by_role, "outside": outside_cost,
+        add_usage(by_role.setdefault("unseen", {}), model, d)
+    return {"by_model": by_model, "by_role": by_role, "free": free,
             "supervisor_model_observed": main_model(supervisor)}
 
 
@@ -805,21 +957,21 @@ def cmd_run(args) -> int:
               "tokens_total": tokens_total(out["by_model"]),
               "prompts_total": sum(prompts.values()), "prompts": prompts,
               "grade": graded, "pass_rate": pass_rate(graded), "checkout": str(out["checkout"])}
-    for extra in ("cli_model_usage", "session_root", "agents"):
+    for extra in ("turns", "cli_model_usage", "session_root", "agents"):
         if extra in out:
             record[extra] = out[extra]
-    results = Path(args.results)
-    results.parent.mkdir(parents=True, exist_ok=True)
+    results_path = Path(args.results)
+    results_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        cost, per_model, unpriced = price_usage(out["by_model"], out["outside"])
+        cost, per_model, unpriced = price_usage(out["by_model"], out["rates"], out["free"])
     except UnknownModel as e:
-        side = results.with_name(results.stem + ".unpriced.jsonl")
+        side = results_path.with_name(results_path.stem + ".unpriced.jsonl")
         with side.open("a") as f:
             f.write(json.dumps({**record, "error": str(e)}) + "\n")
         print(f"error: {e} (record kept in {side})", file=sys.stderr)
         return 2
     record.update(cost_usd=cost, cost_by_model=per_model, unpriced=unpriced)
-    with results.open("a") as f:
+    with results_path.open("a") as f:
         f.write(json.dumps(record) + "\n")
     print(json.dumps({k: record[k] for k in ("arm", "run_id", "finished", "wall_seconds", "tokens_total",
                                              "cost_usd", "prompts_total", "pass_rate")}))
@@ -829,12 +981,14 @@ def cmd_run(args) -> int:
 ARMS_HELP = """arms:
   solo     claude -p <spec> --model claude-fable-5-2 --output-format stream-json --verbose,
            in default permission mode; --permission-prompt-tool points at this script's
-           approver MCP server, which logs and allows each request.
+           approver MCP server, which logs and allows each request (AskUserQuestion: its
+           recommended option). A turn ending in a question is answered with --resume.
   brindle  the installed brindle: `brindle init`, the supervisor pinned to
-           --supervisor-model, `brindle start --no-attach -p <spec>`; done when the goal is
-           reached or the supervisor is idle with no worker running for --idle-grace
-           seconds. Questions and Inbox items are answered "go ahead with your
-           recommendation"; prompts on an agent's screen take their default choice.
+           --supervisor-model, the app's permission hold cut to --hold-seconds, `brindle
+           start --no-attach -p <spec>`; done when the goal is reached or the whole session
+           is quiet for --idle-grace seconds. Questions are answered "go ahead with your
+           recommendation", Inbox items with their own answer, prompts on an agent's
+           screen with their default choice.
 """
 
 
@@ -852,15 +1006,19 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--scratch", default=str(Path(tempfile.gettempdir()) / "bench_solo_vs_brindle"),
                      help="where clones go (outside this repo)")
     run.add_argument("--model", default=SOLO_MODEL, help="solo: the session's model")
+    run.add_argument("--max-answers", type=int, default=5,
+                     help="solo: how many closing questions to answer by resuming the session")
     run.add_argument("--supervisor-model", default=SUPERVISOR_MODEL,
                      help="brindle: the supervisor's model (workers keep default routing)")
     run.add_argument("--brindle", help="brindle: the installed brindle (default: `brindle` on PATH)")
     run.add_argument("--brindle-python", help="brindle: the Python the installed brindle runs on")
+    run.add_argument("--hold-seconds", type=int, default=30,
+                     help="brindle: how long the app holds a permission ask before the agent's own prompt")
     run.add_argument("--poll", type=float, default=20.0, help="brindle: seconds between looks")
     run.add_argument("--idle-grace", type=float, default=300.0,
                      help="brindle: seconds the session must stay quiet to count as done")
     run.add_argument("--answer-after", type=float, default=60.0,
-                     help="brindle: seconds a question waits before it is answered")
+                     help="brindle: seconds a question or prompt waits before it is answered")
     run.add_argument("--start-grace", type=float, default=120.0,
                      help="brindle: seconds to wait for the supervisor to appear")
     run.add_argument("--max-hours", type=float, default=6.0, help="give up after this long")
