@@ -345,6 +345,24 @@ def hunks(base: str, ours: str) -> list[tuple[int, int, int, int]]:
             if tag != "equal"]
 
 
+def matched(base: list, ours: list) -> list[tuple[int, int, int, int]]:
+    """What changed from ``base`` to ``ours``, given the id of each letter
+    of each (SharedDoc.letters): the hunks :func:`hunks` gives, but exact,
+    since a letter in both is one that stands, not one that looks the same."""
+    in_ours, in_base = set(ours), set(base)
+    out, i, j = [], 0, 0
+    while i < len(base) or j < len(ours):
+        i1, j1 = i, j
+        while i < len(base) and base[i] not in in_ours:     # deleted since
+            i += 1
+        while j < len(ours) and ours[j] not in in_base:     # typed since
+            j += 1
+        if (i1, j1) != (i, j):
+            out.append((i1, i, j1, j))
+        i, j = i + 1, j + 1     # a letter both hold: the same one, in the same order
+    return out
+
+
 def mapping(base: str, other: str) -> tuple[Callable[[int], int], list[tuple[int, int]]]:
     """Where an offset into ``base`` is in ``other``, another descendant of it
     (an offset inside a stretch ``other`` changed lands just after that
@@ -361,7 +379,8 @@ def mapping(base: str, other: str) -> tuple[Callable[[int], int], list[tuple[int
 
 
 def retype(doc: SharedDoc, base: dict[str, str], ours: dict[str, str],
-           writers: dict[str, list[int]] | None = None, deleters: dict[str, list[int]] | None = None) -> None:
+           writers: dict[str, list[int]] | None = None, deleters: dict[str, list[int]] | None = None,
+           spans: dict[str, list[tuple[int, int, int, int]]] | None = None) -> None:
     """Make on ``doc`` what changed from ``base`` to ``ours`` (both texts by
     section) somewhere else. Where ``doc``'s text also changed a stretch that
     ours changed, ours goes in beside it and deletes nothing of it.
@@ -370,7 +389,8 @@ def retype(doc: SharedDoc, base: dict[str, str], ours: dict[str, str],
     each section, the peer id to write each character of ``ours`` under, and
     ``deleters``, the one to delete each character of ``base`` under (each
     peer's earlier changes in ``doc``). What has none is written under
-    ``doc``'s own peer id, which it keeps."""
+    ``doc``'s own peer id, which it keeps. ``spans``: the changes themselves,
+    per section (:func:`matched`), in place of a diff of the two texts."""
     own = doc.peer_id
     try:
         for section in sorted(set(base) | set(ours)):
@@ -383,7 +403,8 @@ def retype(doc: SharedDoc, base: dict[str, str], ours: dict[str, str],
             gone = gone if len(gone) == len(was) else [own] * len(was)
             at, changed = mapping(was, doc.text(section))
             edits = []
-            for i1, i2, j1, j2 in hunks(was, mine):
+            given = (spans or {}).get(section)
+            for i1, i2, j1, j2 in (given if given is not None else hunks(was, mine)):
                 start = at(i1)
                 touched = any(b1 < i2 and i1 < b2 for b1, b2 in changed) or at(i2) - start != i2 - i1
                 runs = [(peer, "".join(ch for _, ch in run)) for peer, run in itertools.groupby(

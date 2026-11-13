@@ -67,7 +67,7 @@ from typing import Any, Protocol
 from brindle import plan_drafts
 from brindle.crdt import CrdtError, SharedDoc, merge_versions, update_version
 from brindle.db import DB
-from brindle.plan_drafts import retype
+from brindle.plan_drafts import matched, retype
 
 log = logging.getLogger(__name__)
 
@@ -188,6 +188,13 @@ def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int | None, carry: bool
             link = _link(c, doc_id)
             base, since = _base(current, link), _base_version(link)
             ours = current.sections()
+            spans = None
+            if since is not None:
+                # The changes since, letter by letter (which letters were typed and which removed),
+                # never a guess from how the texts look: an untouched letter is never re-typed.
+                base = current.sections_at(since)
+                then, now = current.letters(since), current.letters()
+                spans = {s: matched(then.get(s, []), now.get(s, [])) for s in set(base) | set(ours)}
             # What the supervisor typed or deleted (under its relay number, or one it chose before
             # it had one) is re-typed under its relay number; the rest under the person's.
             row = c.execute("SELECT supervisor_peer FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
@@ -199,7 +206,7 @@ def _rebuild(db: DB, doc_id: str, snapshot: bytes, peer: int | None, carry: bool
                 if since is not None:
                     deleters = {s: [supervisor if e in theirs else doc.peer_id for e in who]
                                 for s, who in current.deleters_since(since).items()}
-            retype(doc, doc.sections() if base is None else base, ours, writers, deleters)
+            retype(doc, doc.sections() if base is None else base, ours, writers, deleters, spans)
         _put_relay_version(c, doc_id, update_version(snapshot))
         return doc
 

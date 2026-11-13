@@ -290,7 +290,8 @@ def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay
         replica.insert("body", 5, " here")
         # The supervisor writes and deletes before any join too.
         await a.supervise_in("lede", len(REVISION["lede"]), " (sv)")
-        await a.supervise_in("lede", len("# Design\n\n"), "", delete=len("Hello"))
+        for at in reversed(range(len("# Design\n\n"), len("# Design\n\nHello"))):  # backwards, a letter at a time
+            await a.supervise_in("lede", at, "", delete=1)
         await a.link.connect()
         await settle(a.link, b.link)
         # The relay's seed only, never a second one; A's early edits re-typed onto it, B's kept.
@@ -299,6 +300,7 @@ def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay
         supervisor = a.supervisor_peer()
         assert relay.marks[supervisor] == "supervisor"
         assert edits_by(relay, supervisor) == (len(" (sv)"), len("Hello"))
+        assert edits_by(relay, a.replica().peer_id)[1] == 0       # none of its deletions credited to the person
 
         window = Window()
         lease = await a.manager.open_window("doc1", window)
@@ -331,7 +333,8 @@ def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay
         stray.insert("body", 0, "?")
         a.replica().apply_remote(stray.export_updates(before))
         await a.supervise_in("lede", 0, "Also: ")
-        await a.supervise_in("body", 1, "", delete=len("Remote "))
+        for at in reversed(range(1, 1 + len("Remote "))):
+            await a.supervise_in("body", at, "", delete=1)
         await settle(a.link, b.link)
         assert relay.refusals == ["batch_refused"]
         await a.link.connect()
@@ -340,6 +343,7 @@ def test_two_machines_converge_and_an_app_window_writes_under_a_number_the_relay
                                                                        "body": "?World here!"}
         assert a.supervisor_peer() == supervisor
         assert edits_by(relay, supervisor) == (len(" (sv)Also: "), len("HelloRemote "))
+        assert edits_by(relay, a.replica().peer_id)[1] == 0
 
     asyncio.run(run())
 
