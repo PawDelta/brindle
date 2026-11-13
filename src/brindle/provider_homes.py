@@ -394,25 +394,25 @@ def copy_mcp_servers(where: Path) -> bool:
         merged = False
         if plain:
             dest = ours / CLAUDE_JSON
-            try:        # re-read as late as possible: Claude Code may have just written it
-                st = os.lstat(dest)
-            except FileNotFoundError:
-                st = None
-            if st is not None and not stat.S_ISREG(st.st_mode):
-                raise ValueError(f"{dest} is a link or not a regular file")
-            raw = _read(ours, CLAUDE_JSON) if st is not None else b"{}"
-            if raw is None:
-                raise ValueError(f"{dest} is a link or not a regular file")
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                raise ValueError(f"{dest} doesn't hold a JSON object")
-            have = data.get("mcpServers")
-            if not isinstance(have, dict):
-                have = data["mcpServers"] = {}
-            new = {name: s for name, s in plain.items() if name not in have}
-            if new:
-                have.update(new)
-                providers._replace_json(str(dest), data, stat.S_IMODE(st.st_mode) if st else 0o600)
-                merged = True
+
+            def read_config(config: str) -> dict:
+                if not stat.S_ISREG(os.lstat(config).st_mode):
+                    raise ValueError(f"{dest} is a link or not a regular file")
+                raw = _read(ours, CLAUDE_JSON)
+                if raw is None:
+                    raise ValueError(f"{dest} is a link or not a regular file")
+                return json.loads(raw)
+
+            def merge(data: dict) -> None:
+                nonlocal merged
+                have = data.get("mcpServers")
+                if not isinstance(have, dict):
+                    have = data["mcpServers"] = {}
+                new = {name: s for name, s in plain.items() if name not in have}
+                if new:
+                    have.update(new)
+                    merged = True
+
+            providers._update_config(str(dest), merge, create=True, lock_path=str(dest), read=read_config)
         (where / MCP_MARKER).write_text(f"{time.time()}\n")
     return merged

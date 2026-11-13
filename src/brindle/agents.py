@@ -867,7 +867,19 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
     # Claude Code's managed settings supply the credential: no stored Claude key.
     no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
     env = {**keystore.pane_keys(credentials - no_stored, {**env, **org_env}), **env, **org_env}
-    result = env, credentials, allow, deny, org_env
+    # The proxy and certificate settings the daemon read from the person's login
+    # shell (it starts without them), only where the pane wouldn't have one anyway.
+    # Claude Code's client key is kept past the scrub; `deny` still takes it out.
+    from brindle import login_shell_env
+
+    if network := login_shell_env.for_launch(agent.provider, env):
+        inherited = tmux.inherited_env(ws.tmux_session)
+        env = {**{k: v for k, v in network.items() if not inherited.get(k)}, **env}
+    credentials = credentials | login_shell_env.kept(agent.provider)
+    # The pane keeps its provider's credentials and, for Claude Code, its TLS
+    # client settings, inherited from the tmux server as much as read from the
+    # login shell: only the credentials are stored keys (pane_keys above).
+    result = env, secrets.pane_keep(agent.provider, credentials), allow, deny, org_env
     # Resolve stored/org keys once for this launch: catalog, health identity
     # and pane must use the same key helper result, without repeated delays.
     agent._pane_environment = m, result

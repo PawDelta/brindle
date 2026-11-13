@@ -1533,12 +1533,14 @@ PERMISSION_MODES = ("default", "auto")
 
 
 def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
-    """``visuals`` ("on" or "off", offers only), ``claude_permission_mode`` ("default" or "auto") and/or
-    ``opencode_permission_mode`` ("ask", "auto" or "autonomous") into
+    """``visuals`` ("on" or "off", offers only), ``claude_permission_mode`` ("default" or "auto"),
+    ``opencode_permission_mode`` ("ask", "auto" or "autonomous") and/or ``login_shell_env``
+    ("on" or "off": the login shell's proxy and certificate settings for launched CLIs;
+    "off" applies to the next launch, "on" from the next daemon start) into
     ~/.brindle/config.json; its other keys are kept."""
     from brindle import config
 
-    allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"),
+    allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"), "login_shell_env": ("on", "off"),
                "claude_permission_mode": PERMISSION_MODES,
                "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES}
     changes = {key: _get(body, key) for key in allowed if body.get(key) is not None}
@@ -1556,7 +1558,8 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
             bus.publish(db, "visual.offers_setting", repo_root=row["repo_root"])
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
             "opencode_permission_mode": config.opencode_permission_mode(),
-            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off"}
+            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off",
+            "login_shell_env": "on" if config.login_shell_env_setting() else "off"}
 
 
 def put_debug(db: DB, params: dict, body: Body) -> Any:

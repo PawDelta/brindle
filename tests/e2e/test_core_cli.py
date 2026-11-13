@@ -34,6 +34,7 @@ def ws_path(proj, db):
     return ws
 
 
+@pytest.mark.slow("The one real init flow: runs the brindle CLI twice against a real repo")
 def test_init_writes_config_and_is_idempotent(proj):
     res = run("init", "--yes", ok=False)
     assert (proj / ".brindle" / "config.json").is_file(), res.output

@@ -12,8 +12,8 @@ from unittest import mock
 
 import pytest
 
-from brindle import (agents, company_identity, git, knowledge, pipeline, procs, providers, sessions, signin_pause,
-                     spawn, tmux, workspaces)
+from brindle import (agents, company_identity, git, knowledge, login_shell_env, pipeline, procs, providers, sessions,
+                     signin_pause, spawn, tmux, workspaces)
 from brindle.daemon import lifecycle
 from brindle.db import DB, Agent
 from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
@@ -241,7 +241,15 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
         real_close(db_, closings)
 
     monkeypatch.setattr(agents, "close_paused", close_paused)
+    # Its start asks the person's login shell for their proxy settings, once (login_shell_env).
+    # Only this first daemon's shell exports any: the launches further down run without them.
+    mark = login_shell_env.MARK.encode() + b"\0"
+    exported = [b"\0" + mark + b"HTTPS_PROXY=http://proxy.corp.example:8080\0" + mark]
+    monkeypatch.setattr(login_shell_env, "_run", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 0, exported.pop() if exported else b"", b""))
     serve(app_gone=False)
+    assert not exported and login_shell_env.for_launch("codex", environ={}) == {
+        "HTTPS_PROXY": "http://proxy.corp.example:8080"}
     assert stopped_again and lifecycle.read_info() is None, "a second stop cut the way out short"
     assert not swept.is_set(), "the daemon waited for the sweep before it paused and exited"
     assert hook_kept.wait(5), "the Codex hook's trust wasn't looked at when the daemon started"
