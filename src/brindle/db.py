@@ -959,6 +959,17 @@ CREATE TABLE IF NOT EXISTS doc_requests (
     why TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- A supervisor's operational memory (brindle.supervisor_state owns this): a
+-- compact JSON state folded from the event bus up to ``last_event``, which a
+-- restart seeds the fresh session with.
+CREATE TABLE IF NOT EXISTS supervisor_state (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    last_event INTEGER NOT NULL DEFAULT 0,
+    restarts INTEGER NOT NULL DEFAULT 0,
+    restarting_at REAL,            -- a restart is under way (one at a time)
+    updated_at REAL NOT NULL
+);
 -- What the sweep reaped (brindle.reap): tmux sessions, stopped supervisors,
 -- superseded workers, notices sent once. `brindle doctor` lists recent rows;
 -- an 'idle_supervisor' row is an Inbox item while its root stays paused.

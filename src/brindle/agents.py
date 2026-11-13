@@ -1898,13 +1898,16 @@ def resume_lock(root_id: str):
 def resume(db: DB, root_id: str, *, watch_pane: bool = True,
            only: set[str] | list[str] | None = None,
            recovery_env: dict[str, str] | None = None, gate=None, settle: bool = False,
-           unstarted: set[str] | None = None, window_size: tuple[int, int] | None = None) -> list[Agent]:
+           unstarted: set[str] | None = None, window_size: tuple[int, int] | None = None,
+           prompts: dict[str, str] | None = None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task. A
     worker or reviewer is told to carry on (``_needs_a_turn``): resumed
     conversations otherwise sit at their input box.
-    With ``only``, just those agents (if paused) restart.
+    With ``only``, just those agents (if paused) restart. ``prompts``: agent
+    id -> the first prompt of a fresh session for it, instead of resuming its
+    conversation (brindle.supervisor_state's restart).
 
     ``gate``: a context manager factory the caller can stop this resume
     with (lifecycle.Recovery.launching), which raises Cancelled once
@@ -1936,7 +1939,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     try:
         with resume_lock(root_id), debuglog.recovery_timings(_launch_gate.get() is not None):
             return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env,
-                           settle=settle, unstarted=unstarted)
+                           settle=settle, unstarted=unstarted, prompts=prompts)
     finally:
         _resume_window_size.reset(size)
         if token is not None:
@@ -2089,7 +2092,8 @@ def _launch_step(name: str):
         steps[name] = steps.get(name, 0.0) + time.monotonic() - began
 
 
-def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settle=False, unstarted=None) -> list[Agent]:
+def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settle=False, unstarted=None,
+            prompts: dict[str, str] | None = None) -> list[Agent]:
     from brindle import identity_lock, providers
 
     _gate_check()
@@ -2217,6 +2221,8 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE + note)
             if ref and _needs_a_turn(db, a):
                 prompt = HEADLESS_CONTINUE + note   # the same words, for any worker resumed at its input box
+            if prompts and a.id in prompts:
+                ref, prompt = None, prompts[a.id]   # a fresh session, seeded by the caller
         _gate_check()
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
@@ -6109,6 +6115,19 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # before anything below could start its next turn.
         snapshot_turn(db, agent)
         analysis_docs_turn(db, agent)
+
+        if agent.mode == "interactive":
+            # The supervisor's goal state is brought up to date; past the repo's
+            # context threshold it restarts fresh from it (brindle.supervisor_state),
+            # and this turn ends as it is: queued messages wait for the fresh session.
+            from brindle import supervisor_state
+
+            try:
+                if supervisor_state.on_turn_end(db, agent, payload):
+                    db.set_status(agent_id, "idle")
+                    return None
+            except Exception:  # noqa: BLE001 -- must never break the Stop hook
+                log.exception("brindle: supervisor state update failed")
 
         # Claude Code shows any blocked stop as "Stop hook error" in the chat.
         # Where a person watches (an interactive agent), brindle lets the stop

@@ -1766,7 +1766,7 @@ def record_accepted_decision(db: DB, root_id: str, decision: str) -> None:
     entry = f"Accepted decision / scope exclusion:\n{decision.strip()}"
     new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
     db.update_autopilot(root_id, audit_history=new_history, audit_sha=None, audit_ok=None, auditor_id=None, state="running")
-    bus.publish_agent(db, "autopilot.audit_decision", root_id)
+    bus.publish_agent(db, "autopilot.audit_decision", root_id, decision=decision.strip()[:1000])
 
 
 def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:

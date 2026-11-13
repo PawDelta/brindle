@@ -3371,6 +3371,17 @@ def drain_ready_cmd(repo_root: str, base: Annotated[Optional[str], typer.Option(
     pipeline.drain(_helper_db(), repo_root, base)
 
 
+@app.command("_restart-supervisor", hidden=True)
+def restart_supervisor_cmd(root_id: str, transcript: Annotated[Optional[str], typer.Argument()] = None) -> None:
+    """Restart a supervisor fresh from its goal state (detached by its Stop hook)."""
+    import signal
+
+    from brindle import supervisor_state
+
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    supervisor_state.restart(_helper_db(), root_id, Path(transcript) if transcript else None)
+
+
 @app.command("_start-when-room", hidden=True)
 def start_when_room_cmd(task_id: str) -> None:
     """Start a task queued for room on the machine once there is (detached)."""
