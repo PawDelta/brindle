@@ -63,8 +63,8 @@ expose everything for its default table.
 
 ## Hidden tests
 
-`hidden_tests/test_partN_<name>.py`, one file per part (54 tests: 12, 7, 11,
-12, 12). They use only the public API the spec names (`Table.find`,
+`hidden_tests/test_partN_<name>.py`, one file per part (58 tests: 13, 7, 12,
+13, 13). They use only the public API the spec names (`Table.find`,
 `distinct`, `aggregate`, `group_by`, `ensure_unique`, `watch`,
 `tinydb.UniqueViolation`) plus TinyDB's existing API, and never internal
 names. Each part is graded on its own: part 5 does not need part 4, and a

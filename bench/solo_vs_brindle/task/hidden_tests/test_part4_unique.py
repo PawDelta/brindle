@@ -55,6 +55,20 @@ def test_equal_values_of_different_types_and_unhashable_values_clash(db):
     assert len(table) == 2
 
 
+def test_equal_hashable_and_unhashable_values_clash_in_either_order(db):
+    # {1, 2} is unhashable but equals the hashable frozenset({1, 2}).
+    for name, first, second in [
+        ("set_first", {1, 2}, frozenset({1, 2})),
+        ("frozenset_first", frozenset({1, 2}), {1, 2}),
+    ]:
+        table = db.table(name)
+        table.ensure_unique("v")
+        table.insert({"v": first})
+        with pytest.raises(UniqueViolation):
+            table.insert({"v": second})
+        assert len(table) == 1, name
+
+
 def test_nested_paths_and_several_constraints_are_each_enforced(users):
     users.ensure_unique("profile.handle")
     users.ensure_unique("profile.handle")

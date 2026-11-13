@@ -24,6 +24,17 @@ def test_distinct_handles_unhashable_values_nested_paths_and_a_query(db):
     assert table.distinct("v.tags", where("k") == "b") == [["z"]]
 
 
+def test_distinct_treats_equal_hashable_and_unhashable_values_as_one(db):
+    # {1, 2} is unhashable but equals the hashable frozenset({1, 2}).
+    for name, first, second in [
+        ("set_first", {1, 2}, frozenset({1, 2})),
+        ("frozenset_first", frozenset({1, 2}), {1, 2}),
+    ]:
+        table = db.table(name)
+        table.insert_multiple([{"v": first}, {"v": second}, {"v": 3}])
+        assert table.distinct("v") == [first, 3], name
+
+
 def test_count_and_sum_ignore_missing_and_null(people):
     assert people.aggregate("age", "count") == 4
     assert people.aggregate("score", "sum") == 26

@@ -92,6 +92,22 @@ def test_unwatch_stops_notifications_and_is_idempotent(table):
     assert [e[0] for e in second.events] == ["insert", "remove"]
 
 
+def test_each_registration_is_unwatched_on_its_own(table):
+    rec = Recorder()
+    stale = table.watch(rec)
+    stale()
+    table.watch(rec)
+    stale()
+    twice = Recorder()
+    unwatch_one = table.watch(twice)
+    table.watch(twice)
+    unwatch_one()
+    unwatch_one()
+    table.insert({"k": "c"})
+    assert [e[0] for e in rec.events] == ["insert"]
+    assert [e[0] for e in twice.events] == ["insert"]
+
+
 def test_several_watchers_are_called_in_registration_order(table):
     calls = []
     table.watch(lambda op, doc_id, old, new: calls.append(("first", op, doc_id)))

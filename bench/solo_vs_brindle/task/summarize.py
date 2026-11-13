@@ -31,7 +31,12 @@ def expected_tests(tests_dir: Path) -> dict:
 
 
 def passed_tests(report: Path) -> set:
-    passed = set()
+    """(module, function) pairs whose every reported case passed.
+
+    Parametrized cases ("test_x[a]") are folded into their function, which
+    passes only if all of its cases do.
+    """
+    passed, failed = set(), set()
     if not report.exists():
         return passed
     try:
@@ -39,11 +44,13 @@ def passed_tests(report: Path) -> set:
     except ET.ParseError:
         return passed
     for case in root.iter("testcase"):
-        if any(child.tag in ("failure", "error", "skipped") for child in case):
-            continue
         module = case.get("classname", "").rsplit(".", 1)[-1]
-        passed.add((module, case.get("name", "")))
-    return passed
+        key = (module, case.get("name", "").split("[", 1)[0])
+        if any(child.tag in ("failure", "error", "skipped") for child in case):
+            failed.add(key)
+        else:
+            passed.add(key)
+    return passed - failed
 
 
 def main(argv) -> int:

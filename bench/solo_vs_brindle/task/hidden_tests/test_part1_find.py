@@ -75,6 +75,17 @@ def test_incomparable_values_raise_type_error(db):
         table.find(order_by="v")
 
 
+def test_later_keys_are_compared_only_where_earlier_keys_tie(db):
+    table = db.table("mixed")
+    table.insert_multiple([
+        {"name": "x", "p": 2, "s": 7},
+        {"name": "y", "p": 1, "s": "a"},
+        {"name": "z", "p": 2, "s": 3},
+    ])
+    assert names(table.find(order_by=["p", "s"])) == ["y", "z", "x"]
+    assert names(table.find(order_by=["-p", "-s"])) == ["x", "z", "y"]
+
+
 def test_returned_documents_are_independent_copies(db):
     table = db.table("t")
     table.insert({"name": "x", "tags": ["a"], "meta": {"n": 1}})

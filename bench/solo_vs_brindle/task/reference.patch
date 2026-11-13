@@ -71,21 +71,22 @@ index 4a8941d..b6d579e 100644
 +__all__ = ('TinyDB', 'Storage', 'JSONStorage', 'Query', 'where',
 +           'UniqueViolation')
 diff --git a/tinydb/table.py b/tinydb/table.py
-index 76470aa..49983fe 100644
+index 76470aa..5872348 100644
 --- a/tinydb/table.py
 +++ b/tinydb/table.py
-@@ -4,7 +4,10 @@ data in TinyDB.
+@@ -4,7 +4,11 @@ data in TinyDB.
  """
  
  from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
 +from copy import deepcopy
++from functools import cmp_to_key
 +from numbers import Real
  from typing import (
 +    Any,
      NoReturn,
      Optional,
      Union,
-@@ -14,9 +17,65 @@ from typing import (
+@@ -14,9 +18,110 @@ from typing import (
  
  from .queries import QueryLike
  from .storages import Storage
@@ -115,22 +116,47 @@ index 76470aa..49983fe 100644
 +    return value is not MISSING and value is not None
 +
 +
++class _SeenValues:
++    """
++    Remembers values and answers "was an equal value seen before?".
++
++    Hashable values are looked up in a set; unhashable ones (lists, dicts,
++    sets) are compared against every earlier value, since an unhashable
++    value can equal a hashable one (``{1} == frozenset({1})``).
++    """
++
++    def __init__(self):
++        self._hashed: set = set()
++        self._hashable: list = []
++        self._unhashable: list = []
++
++    def add(self, value) -> bool:
++        """
++        Remember ``value``; return whether an equal value was seen before.
++        """
++        try:
++            hash(value)
++        except TypeError:
++            seen = value in self._unhashable or value in self._hashable
++            self._unhashable.append(value)
++            return seen
++
++        seen = value in self._hashed or value in self._unhashable
++        if not seen:
++            self._hashed.add(value)
++            self._hashable.append(value)
++        return seen
++
++
 +def _first_duplicate(values: Iterable) -> Any:
 +    """
 +    Return the first value in ``values`` that equals an earlier one, or
 +    :data:`MISSING` if all are distinct. Works for unhashable values too.
 +    """
-+    hashable: set = set()
-+    unhashable: list = []
++    seen = _SeenValues()
 +    for value in values:
-+        try:
-+            if value in hashable:
-+                return value
-+            hashable.add(value)
-+        except TypeError:
-+            if value in unhashable:
-+                return value
-+            unhashable.append(value)
++        if seen.add(value):
++            return value
 +    return MISSING
 +
 +
@@ -138,22 +164,42 @@ index 76470aa..49983fe 100644
 +    """
 +    The distinct values of ``values`` in first-seen order, by equality.
 +    """
-+    hashable: set = set()
-+    result: list = []
-+    for value in values:
-+        try:
-+            if value in hashable:
++    seen = _SeenValues()
++    return [value for value in values if not seen.add(value)]
++
++
++def _sort_key(keys: list[str]) -> Callable[[tuple[Any, Mapping]], Any]:
++    """
++    A sort key for ``(doc_id, doc)`` pairs ordering by several field paths
++    (``-path`` for descending). Missing or null values sort last in both
++    directions. Keys are compared one at a time, so a later key's values
++    are only compared when all earlier keys tie.
++    """
++    fields = [
++        (key[1:], True) if key.startswith('-') else (key, False)
++        for key in keys
++    ]
++
++    def compare(a: tuple[Any, Mapping], b: tuple[Any, Mapping]) -> int:
++        for path, descending in fields:
++            value_a = resolve_path(a[1], path)
++            value_b = resolve_path(b[1], path)
++            present_a, present_b = _present(value_a), _present(value_b)
++            if not present_a or not present_b:
++                if present_a != present_b:
++                    return -1 if present_a else 1
 +                continue
-+            hashable.add(value)
-+        except TypeError:
-+            if value in result:
++            if value_a == value_b:
 +                continue
-+        result.append(value)
-+    return result
++            result = -1 if value_a < value_b else 1
++            return -result if descending else result
++        return 0
++
++    return cmp_to_key(compare)
  
  
  class Document(dict):
-@@ -108,6 +167,12 @@ class Table:
+@@ -108,6 +213,12 @@ class Table:
              = self.query_cache_class(capacity=cache_size)
  
          self._next_id: Optional[int] = None
@@ -161,12 +207,12 @@ index 76470aa..49983fe 100644
 +        # Field paths declared unique (see ``ensure_unique``) and change
 +        # callbacks (see ``watch``). Both must exist before the first write.
 +        self._unique_paths: list[str] = []
-+        self._watchers: list[ChangeCallback] = []
++        self._watchers: list[list[ChangeCallback]] = []
 +
          # Only persist a brand-new empty table. Never clear existing documents
          # when reopen/construct with persist_empty=True (see issue #636).
          if persist_empty and not self._read_table():
-@@ -715,6 +780,193 @@ class Table:
+@@ -715,6 +826,182 @@ class Table:
  
          return len(self.search(cond))
  
@@ -204,24 +250,8 @@ index 76470aa..49983fe 100644
 +
 +        if order_by is not None:
 +            keys = [order_by] if isinstance(order_by, str) else list(order_by)
-+
-+            # Sort by the last key first: as each pass is stable, earlier
-+            # keys end up deciding and later keys break ties.
-+            for key in reversed(keys):
-+                descending = key.startswith('-')
-+                path = key[1:] if descending else key
-+
-+                with_value = []
-+                without_value = []
-+                for item in matches:
-+                    value = resolve_path(item[1], path)
-+                    if _present(value):
-+                        with_value.append((value, item))
-+                    else:
-+                        without_value.append(item)
-+
-+                with_value.sort(key=lambda pair: pair[0], reverse=descending)
-+                matches = [item for _, item in with_value] + without_value
++            # list.sort is stable, so full ties keep their table order
++            matches.sort(key=_sort_key(keys))
 +
 +        end = None if limit is None else skip + limit
 +        matches = matches[skip:end]
@@ -321,11 +351,16 @@ index 76470aa..49983fe 100644
 +        :param callback: the function to call
 +        :returns: a function that stops the notifications
 +        """
-+        self._watchers.append(callback)
++        # Each registration is its own entry, so unwatching one never
++        # touches another registration of the same callback.
++        registration = [callback]
++        self._watchers.append(registration)
 +
 +        def unwatch() -> None:
-+            if callback in self._watchers:
-+                self._watchers.remove(callback)
++            for index, entry in enumerate(self._watchers):
++                if entry is registration:
++                    del self._watchers[index]
++                    return
 +
 +        return unwatch
 +
@@ -360,7 +395,7 @@ index 76470aa..49983fe 100644
      def clear_cache(self) -> None:
          """
          Clear the query cache.
-@@ -831,14 +1083,28 @@ class Table:
+@@ -831,14 +1118,28 @@ class Table:
          # This is required as the rest of TinyDB expects the document IDs
          # to be an instance of ``self.document_id_class`` but the storage
          # might convert dict keys to strings.
@@ -390,7 +425,7 @@ index 76470aa..49983fe 100644
          # Convert the document IDs back to strings.
          # This is required as some storages (most notably the JSON file format)
          # don't support IDs other than strings.
-@@ -852,3 +1118,30 @@ class Table:
+@@ -852,3 +1153,30 @@ class Table:
  
          # Clear the query cache, as the table contents have changed
          self.clear_cache()
@@ -413,7 +448,7 @@ index 76470aa..49983fe 100644
 +                changes.append(('remove', doc_id, doc, None))
 +
 +        # Copy the list: a callback may unwatch while we iterate
-+        for callback in list(self._watchers):
++        for (callback,) in list(self._watchers):
 +            for op, doc_id, old, new in changes:
 +                callback(
 +                    op,
