@@ -418,6 +418,20 @@ def _plan_now(db: DB, plan_id: str) -> Any:
 
 
 @_json
+def plan_history(db: DB, request: Request) -> Any:
+    from brindle import plan_docs
+
+    return plan_docs.timeline(db, request.path_params["id"])
+
+
+@_json
+def plan_comparison(db: DB, request: Request) -> Any:
+    from brindle import plan_docs
+
+    return plan_docs.comparison(db, request.path_params["id"], request.path_params["n"])
+
+
+@_json
 def plan_revision(db: DB, request: Request) -> Any:
     from brindle import plan_docs
 
@@ -747,6 +761,8 @@ ROUTES = [
     Route("/v1/plans/{id}", plan),
     Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
     Route("/v1/plans/{id}/revisions/{n}", plan_revision),
+    Route("/v1/plans/{id}/history", plan_history),
+    Route("/v1/plans/{id}/revisions/{n}/changes", plan_comparison),
     Route("/v1/plans/{id}/comments", _endpoint(plan_comment), methods=["POST"]),
     Route("/v1/plans/{id}/suggestions", _endpoint(plan_suggest), methods=["POST"]),
     Route("/v1/plans/{id}/edit", _endpoint(plan_edit), methods=["POST"]),

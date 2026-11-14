@@ -973,6 +973,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         claimed = c.execute("UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
                             (state, record, at, p["id"], rev)).rowcount == 1
         if claimed:
+            plan_docs.record_event(c, p["id"], f"verdict:{rev}", "sign_off" if approved else "changes",
+                                   plan_docs.PERSON, at, rev=rev)
             plan_docs.mark_sent(c, threads, rev)
             c.execute("UPDATE plan_shares SET unconfirmed=NULL, approve_wanted=NULL, approve_refused=NULL"
                       " WHERE plan_id=?", (p["id"],))

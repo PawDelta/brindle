@@ -982,6 +982,87 @@ def _revision_dto(r: dict) -> dict:
             "at": r["created_at"]}
 
 
+def record_event(c, plan_id: str, key: str, kind: str, actor: str, at: float,
+                 *, rev: int | None = None, version: int | None = None, observed: bool = False) -> None:
+    """Append a confirmed action in its mutation's transaction; replay is harmless."""
+    c.execute("INSERT OR IGNORE INTO plan_history_events"
+              " (plan_id, event_key, kind, actor, rev, version, at, observed) VALUES (?,?,?,?,?,?,?,?)",
+              (plan_id, key, kind, actor, rev, version, at, int(observed)))
+
+
+def timeline(db: DB, plan_id: str) -> dict:
+    """One timeline, newest first. Historical sign-offs survive withdrawal."""
+    p = _plan(db, plan_id)
+    events = [{"id": f"revision:{r['rev']}", "kind": "revision", "actor": r["author"],
+               "rev": r["rev"], "version": None, "at": r["created_at"], "source": r["source"],
+               "changed": r["changed"]} for r in _history(db, p)]
+    events += [{"id": r["event_key"], "observed": bool(r["observed"]),
+                **{k: r[k] for k in ("kind", "actor", "rev", "version", "at")}}
+               for r in db.conn.execute("SELECT * FROM plan_history_events WHERE plan_id=?", (p["id"],))]
+    return {"events": sorted(events, key=lambda e: (e["at"], e["id"]), reverse=True)}
+
+
+def comparison(db: DB, plan_id: str, rev: Any) -> dict:
+    """A revision against the preceding retained one, with spans the reader can mark in place.
+
+    Include removed sections and structural changes, even when the text is identical.
+    A legacy revision with no retained baseline opens without invented additions.
+    No draft or plan state changes while reading history.
+    """
+    from difflib import SequenceMatcher
+
+    p = _plan(db, plan_id)
+    current = revision_dto(db, p["id"], rev)
+    n = current["rev"]
+    retained = db.conn.execute("SELECT MAX(rev) FROM plan_revisions WHERE plan_id=? AND rev<?",
+                               (p["id"], n)).fetchone()[0]
+    previous = revision_dto(db, plan_id, str(retained)) if retained is not None else None
+    baseline_available = previous is not None or n == 1
+    before = {s["id"]: s for s in previous["sections"]} if previous else {}
+    after = {s["id"]: s for s in current["sections"]}
+    before = {LEDE: {"markdown": previous["lede"] if previous else "", "title": "Overview"}, **before}
+    after = {LEDE: {"markdown": current["lede"], "title": "Overview"}, **after}
+
+    def extra(r: dict | None) -> dict:
+        if r is None:
+            return {}
+        out = {}
+        for d in r["decisions"]:
+            lines = [d.get("challenge") or "", f"Proposed option: {d['mine']}" if d.get("mine") else ""]
+            for option in d["options"]:
+                lines += [f"{option['id']}: {option['label']}", option.get("detail") or "",
+                          *(f"+ {p}" for p in option.get("pros", [])),
+                          *(f"− {p}" for p in option.get("cons", [])),
+                          *option.get("touches", [])]
+            out[f"decision:{d['id']}"] = {"title": d["title"], "markdown": "\n".join(filter(None, lines))}
+        if r["split"]:
+            out["split"] = {"title": "Tasks", "markdown": "\n\n".join(
+                "\n".join(filter(None, [w["title"], w.get("test"),
+                                       ", ".join(w.get("files") or []),
+                                       "After: " + ", ".join(w["after"]) if w.get("after") else ""]))
+                for w in r["split"])}
+        if r.get("ask"):
+            out["ask"] = {"title": "Question", "markdown": r["ask"]}
+        return out
+
+    before.update(extra(previous))
+    after.update(extra(current))
+    changes = []
+    for sid in dict.fromkeys([*after, *before]):
+        old, new = before.get(sid), after.get(sid)
+        if old == new or not baseline_available:
+            continue
+        left, right = (old or {}).get("markdown", ""), (new or {}).get("markdown", "")
+        spans = [{"kind": kind, "before_start": a, "before_end": b, "start": x, "end": y,
+                  "before": left[a:b], "after": right[x:y]}
+                 for kind, a, b, x, y in SequenceMatcher(None, left, right).get_opcodes()
+                 if kind != "equal"]
+        changes.append({"section": sid, "before": old, "after": new, "spans": spans})
+    return {"revision": current, "previous": previous, "changes": changes,
+            "baseline_available": baseline_available,
+            "document": [{"id": sid, **s} for sid, s in after.items()]}
+
+
 def revision_dto(db: DB, plan_id: str, rev: Any) -> dict:
     """One revision's full content, for reading an earlier one."""
     from brindle.service.dto import PlanRevisionDetailDTO

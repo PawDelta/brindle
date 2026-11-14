@@ -427,6 +427,32 @@ export interface PlanChange {
   after: string;
 }
 
+export interface DocHistoryEntry {
+  id: string;
+  kind: "revision" | "freeze" | "reopen" | "sign_off" | "changes";
+  actor: string;
+  at: number;
+  rev: number | null;
+  version: number | null;
+  source?: string;
+  changed?: string[];
+  observed?: boolean;
+}
+
+export type DocRevision = Pick<Plan, "rev" | "lede" | "sections" | "markdown" | "decisions" | "split" | "ask">;
+export interface DocRevisionComparison {
+  revision: DocRevision;
+  previous: DocRevision | null;
+  baseline_available?: boolean;
+  document?: { id: string; title: string; markdown: string }[];
+  changes: {
+    section: string;
+    before: { title: string; markdown: string; kind?: string; caption?: string } | null;
+    after: { title: string; markdown: string; kind?: string; caption?: string } | null;
+    spans: { kind: string; before_start: number; before_end: number; start: number; end: number; before: string; after: string }[];
+  }[];
+}
+
 export type Repo = RepoDTO;
 
 export interface Diff {
@@ -2088,6 +2114,14 @@ export class DaemonClient {
   /* A planning doc: the visual of kind "plan" with the same id. */
   plan(id: string) {
     return this.get<Plan>(`/plans/${encodeURIComponent(id)}`);
+  }
+
+  planHistory(id: string) {
+    return this.get<{ events: DocHistoryEntry[] }>(`/plans/${encodeURIComponent(id)}/history`);
+  }
+
+  planRevisionChanges(id: string, rev: number) {
+    return this.get<DocRevisionComparison>(`/plans/${encodeURIComponent(id)}/revisions/${rev}/changes`);
   }
 
   /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
