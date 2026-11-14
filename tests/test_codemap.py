@@ -8,7 +8,6 @@ import pytest
 from brindle import agents, codemap, git, workspaces
 from brindle.codemap import _broad_search
 from brindle.db import Agent
-from brindle.providers import get_provider
 
 
 @pytest.fixture
@@ -86,7 +85,7 @@ def test_supervisor_repo_map_is_in_the_supervisor_prompt_and_cached_per_graph_mt
     prompt = agents._profile_for(db, db.get_agent("s1"), ws).prompt
     assert "Alpha (3)" in prompt and "Beta (2)" in prompt and "Hub src/a.py:10" in prompt
     assert "graphify affected" in prompt
-    worker = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
+    worker = agents.worker_brief(ws)
     assert "Alpha (3)" not in worker
     assert "Hub src" in codemap.supervisor_map(mapped)
     _fake_graph(graph, "Renamed")
@@ -223,7 +222,7 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     session_ws = workspaces.create(db, str(mapped), "session-branch").workspace
     worker_ws = workspaces.create(db, str(mapped), "worker-task", base="session-branch").workspace
 
-    prompt = agents.decorate_worker_prompt("do task", "w1", worker_ws, None, get_provider("claude"), headless=False)
+    prompt = agents.worker_brief(worker_ws)   # a worker's repo brief
     codemap._run_refresh(*runners.pop())
     session_graph = Path(session_ws.path) / "graphify-out" / "graph.json"
     assert "Code map:" in prompt and str(session_graph) in prompt

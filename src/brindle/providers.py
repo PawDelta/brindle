@@ -1208,6 +1208,10 @@ class ClaudeCode(Provider):
             settings["permissions"] = {"deny": [*_credential_file_denies(), "AskUserQuestion"]}
         mcp = {"mcpServers": {"brindle": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
+        if p.short_cache:
+            # A short-lived agent (agents.short_lived_tools) finishes within
+            # minutes: the 5-minute prompt cache costs less to write.
+            settings["env"]["FORCE_PROMPT_CACHING_5M"] = "1"
         argv = [claude_binary()]
         if p.headless:
             # One turn per process; brindle's headless runner (agents.run_headless)
@@ -1229,6 +1233,12 @@ class ClaudeCode(Provider):
                                         # `//` makes the path absolute; reads only.
                                         *(f"Read(/{d.rstrip('/')}/**)" for d in p.read_dirs or [])]),
         ]
+        if p.hidden_brindle_tools:
+            # The brindle tools a short-lived agent's role doesn't use
+            # (agents.short_lived_tools): out of its context, so its tool
+            # definitions are smaller and the same at every start. Variadic
+            # like --allowedTools: --append-system-prompt always follows.
+            argv += ["--disallowedTools", ",".join(f"mcp__brindle__{t}" for t in p.hidden_brindle_tools)]
         # Lightweight workers. --settings (brindle's hooks) is its own setting
         # source, so --setting-sources never drops them; --strict-mcp-config
         # keeps the --mcp-config servers (brindle) and ignores all others.
@@ -2166,6 +2176,10 @@ class Codex(Provider):
             # Codex's default MCP startup timeout (10s) is too short on a loaded
             # machine; without it a worker can start without brindle's tools (#159).
             "-c", "mcp_servers.brindle.startup_timeout_sec=120",
+            # The brindle tools a short-lived agent's role doesn't use
+            # (agents.short_lived_tools): Codex leaves them out of its context.
+            *(("-c", f"mcp_servers.brindle.disabled_tools={json.dumps(ctx.profile.hidden_brindle_tools)}")
+              if ctx.profile.hidden_brindle_tools else ()),
             "-c", f"notify={json.dumps(notify)}",
             # Only this launch's shell commands; the person's config.toml is untouched.
             *(a for k, v in {**_uv_cache_env(ctx), **_venv_path_env(ctx)}.items()
@@ -2291,7 +2305,15 @@ class Antigravity(Provider):
             # dontAsk (nobody watches, e.g. a reviewer) brindle's hook decides
             # every call, as under agy_approvals "brindle" (unset, for workers).
             strict = ctx.mode == "doc_question" or ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
-            antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
+            from brindle import agents
+
+            # The MCP config is the checkout's: whether to hide a short-lived
+            # agent's unused tools is decided again under the lock that every
+            # agy launch here writes it under, so a neighbour that started
+            # since its profile was built keeps its tools.
+            with agents.agy_config_lock(ctx.cwd):
+                antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict,
+                                    hidden=agents.agy_tools_to_hide(ctx.agent_id, ctx.profile.hidden_brindle_tools))
             antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]
         if strict:

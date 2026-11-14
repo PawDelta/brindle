@@ -148,7 +148,11 @@ class RepoConfig:
     # once its context passes supervisor_restart_tokens, it restarts fresh, seeded with that state.
     supervisor_state: bool = True
     supervisor_restart_tokens: int = 120_000
-    review_rounds: int = 2             # suggested fix-round cap; notify the supervisor once, then keep fixing
+    # Cheaper agent start: a worker's or reviewer's stable brief (role prompt, rule packs,
+    # repo brief) leads its prompt and the per-task text follows; reviewers and light
+    # workers get only the brindle tools their role uses and the 5-minute prompt cache.
+    prompt_cache_prefix: bool = True
+    review_rounds: int = 2            # suggested fix-round cap; notify the supervisor once, then keep fixing
     review_stall_stop: bool = True     # past the cap, hand repeated findings to the supervisor
     # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
     # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
@@ -498,7 +502,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "usage_limit", "limit_headroom", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
                 "review_rounds", "review_stall_stop", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "fast_path",
-                "supervisor_state", "supervisor_restart_tokens", "overlap",
+                "supervisor_state", "supervisor_restart_tokens", "prompt_cache_prefix", "overlap",
                 "overlap_granularity", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "auto_merge_session_prs", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
