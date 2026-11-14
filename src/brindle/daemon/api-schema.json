@@ -13494,6 +13494,10 @@
       "path": "/v1/plans/{id}/edit"
     },
     {
+      "method": "GET",
+      "path": "/v1/plans/{id}/history"
+    },
+    {
       "method": "POST",
       "path": "/v1/plans/{id}/policy-ask"
     },
@@ -13512,6 +13516,10 @@
     {
       "method": "GET",
       "path": "/v1/plans/{id}/revisions/{n}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}/revisions/{n}/changes"
     },
     {
       "method": "POST",
