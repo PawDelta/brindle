@@ -78,6 +78,38 @@ def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
     assert not [k for k, _, _ in lib.calls.calls if k.startswith((f"POST {DESIGN}/edits", f"POST {DESIGN}/revisions"))]
 
 
+def test_a_teammates_frozen_version_carries_the_librarys_sign_offs_and_their_own_once_signed(db, lib):
+    """A teammate keeps no plan here, so the live channel reads a frozen
+    version's sign-offs from the Library itself; once they sign off, their
+    window's refresh tells every window the version with their sign-off."""
+    from brindle.pro import live_docs
+    from test_live_docs import Clock, FakeRelay
+
+    relay = FakeRelay(Clock(), author="u_author")
+    relay.frozen = lib.rev = 2                          # version 2 is out for sign-off
+    lib.sign_offs = [{"sub": "u_other", "rev": 1, "at": 1.0}]      # signed an earlier version only
+    here = live_docs.Manager(relay.transport("user_1"), available=lambda: True, drive=False)
+    built = build_app(TOKEN)
+    built.state.live_docs = here
+
+    def state(window):
+        while "state" not in (frame := window.receive_json()):
+            pass
+        return frame["state"]
+
+    with TestClient(built, headers=AUTH) as client:
+        client.portal.call(here.link(DOC).connect)
+        with client.websocket_connect(f"/v1/visuals/{DOC}/live") as window:
+            window.send_text(TOKEN)
+            first = state(window)
+            assert (first["lock"], first["version"]["id"], first["version"]["signOffs"]) == ("sign_off", 2, [])
+            assert client.post(f"{ROUTE}/sign-offs", json={"rev": 2}).json()["signed_off"] is True
+            window.send_json({"refresh": True})
+            assert state(window)["version"]["signOffs"] == ["user_1"]
+        client.portal.call(here.stop)
+    assert not db.conn.execute("SELECT 1 FROM plan_shares").fetchone()
+
+
 def test_the_librarys_refusals_reach_the_app(lib, app):
     """A permission refused, a revision that moved, and what a reader may never send."""
     lib.refuse_vote = True

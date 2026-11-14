@@ -1371,6 +1371,8 @@ export interface LiveChannel {
   sendAwareness(section: string, bytes: Uint8Array): void;
   freeze(): void;
   reopen(): void;
+  /* This window's person changed the review (signed off): every window is told the frozen version again. */
+  refresh(): void;
   close(): void;
 }
 
@@ -1947,6 +1949,7 @@ export class DaemonClient {
       sendAwareness: (section, bytes) => send({ awareness: toBase64(bytes), section }),
       freeze: () => send({ freeze: true }),
       reopen: () => send({ reopen: true }),
+      refresh: () => send({ refresh: true }),
       close() {
         if (closed) return;
         closed = true;

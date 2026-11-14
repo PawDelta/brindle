@@ -371,6 +371,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       return null;
     }
   }, [frozen?.snapshot]);
+  // While the text is live it reads as everyone has typed it (DocPresence keeps it), not as the
+  // revision: Done editing, and a Reopen, show the live text, never the older revision's.
+  const [liveTexts, setLiveTexts] = useState<Map<string, string> | null>(null);
+  const shownTexts = frozenTexts ?? (useLiveReview && !locked ? liveTexts : null);
+  // Counts this person's changes to the review while a version is frozen: each asks the live
+  // channel for the version again, so its sign-offs are the Library's now.
+  const [refreshes, setRefreshes] = useState(0);
   const [raw, setRaw] = useState(false);
   const [sharingOpen, setSharingOpen] = useState(false);
   const [briefOpen, setBriefOpen] = useState(false);
@@ -463,9 +470,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // The doc's order: the overview, each section under its number, then each decision under its own.
   const numbers = new Map(plan.sections.map((s, i): [string, number] => [s.id, i + 1]));
   const figures = new Map(plan.sections.filter((s) => s.kind === "mermaid" || s.kind === "svg").map((s, i): [string, number] => [s.id, i + 1]));
-  const textPlan: Plan = frozenTexts ? {
-    ...plan, lede: frozenTexts.get(LEDE) ?? plan.lede,
-    sections: plan.sections.map((s) => (s.kind === "mermaid" || s.kind === "svg" ? s : { ...s, markdown: frozenTexts.get(s.id) ?? s.markdown })),
+  const textPlan: Plan = shownTexts ? {
+    ...plan, lede: shownTexts.get(LEDE) ?? plan.lede,
+    sections: plan.sections.map((s) => (s.kind === "mermaid" || s.kind === "svg" ? s : { ...s, markdown: shownTexts.get(s.id) ?? s.markdown })),
   } : plan;
   const bodyOf = (section: string) => (section === LEDE ? textPlan.lede : textPlan.sections.find((s) => s.id === section)?.markdown) ?? "";
   // What an anchor is on, as text: a draft is stale once this differs from what it was begun on.
@@ -521,8 +528,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       if (a.kind !== "text" || a.section !== section || a.state === "detached" || a.start == null || a.end == null) continue;
       // The engine's offsets count code points; the text on screen, UTF-16 units.
       const range = { start: toUnits(body, a.start), end: toUnits(body, a.end), thread: t.id, ref: t.id, lit: followed?.thread === String(t.id) };
-      // On a frozen version's own text a range is only drawn where its words still are.
-      if (frozenTexts?.has(section) && a.quote != null && body.slice(range.start, range.end) !== a.quote) continue;
+      // On the live or frozen text a range is only drawn where its words still are.
+      if (shownTexts?.has(section) && a.quote != null && body.slice(range.start, range.end) !== a.quote) continue;
       out.push(t.kind === "suggestion" ? { ...range, kind: "del", ins: t.after ?? "" } : { ...range, kind: "anchor" });
     }
     // A suggestion is typed on the page in its own editor; a comment's words are lit while it is written.
@@ -603,7 +610,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   // What the suggestion being typed changes: one replaced range of its section (start in code points).
   const draftChange = draft?.kind === "suggest" && draftText !== null ? changeBetween(bodyOf(draft.section), draftText) : null;
-  const suggestionReady = !!draftChange && (!!draftChange.before || !!draftChange.after);
+  // A suggestion is typed only in Suggesting, on text that isn't locked; a locked version takes none.
+  const suggestOpen = mode === "suggesting" && !locked;
+  const suggestionReady = !locked && !!draftChange && (!!draftChange.before || !!draftChange.after);
   // The draft's offsets are the screen's (UTF-16); the engine is sent code points. A draft whose
   // text changed under it (a newer revision) isn't sent: its range no longer says what was meant.
   const sendDraft = async (text: string) => {
@@ -707,8 +716,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const signOff = async () => {
     if (!source.signOff || reviewBlocked) return;
     setSending("approve");
-    await write(() => source.signOff!(plan.rev, reviewVersion));
+    if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes((n) => n + 1);
     if (alive.current) setSending(null);
+  };
+  // A write that may change the review (the Share panel's sign-off) asks for the frozen version again.
+  const reviewWrite = async (work: () => Promise<Plan>) => {
+    const done = await write(work);
+    if (done && frozen) setRefreshes((n) => n + 1);
+    return done;
   };
   const nextOption = next?.options.find((o) => o.id === chosen(next));
   const signers = (gate?.reviewers ?? []).filter((r) => r.sub);
@@ -779,12 +794,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     else if (mode === "suggesting" && canSuggest && plan.state !== "approved") suggestAt(section, caretIn(section), "");
   };
   const textBody = (section: string, title: string) => editing?.section === section ? (live ? liveEditor(section, title, "page") : editBox(title))
-    : draft?.kind === "suggest" && draft.section === section && !draftStale ? (
+    : draft?.kind === "suggest" && draft.section === section && !draftStale && suggestOpen ? (
       <div className="grid font-sans" data-testid="plan-suggest-box">
         <Suspense fallback={<DocText body={bodyOf(section)} />}>
-          <SuggestEditor key={`${drafting!.source}:${draft.start}`} source={bodyOf(section)} select={{ from: draft.start, to: draft.start + draft.before.length }}
+          <SuggestEditor key={`${drafting!.source}:${draft.start}`} source={bodyOf(section)} text={draftText ?? undefined} select={{ from: draft.start, to: draft.start + draft.before.length }}
             label={`Suggestion to ${title}`} onText={setDraftText} />
         </Suspense>
+      </div>
+    ) : draft?.kind === "suggest" && draft.section === section && !draftStale && draftChange ? (
+      // Out of Suggesting (another mode, or the text locked for sign-off): the change, read only.
+      <div data-section={section} className="grid gap-2.5" data-testid="plan-suggest-preview">
+        <DocText body={bodyOf(section)} marks={[...marksOf(section), { start: toUnits(bodyOf(section), draftChange.start), end: toUnits(bodyOf(section), draftChange.start) + draftChange.before.length, kind: "del", ins: draftChange.after }]} />
       </div>
     ) : (
       <div data-section={section} className="grid gap-2.5" onClick={() => opened(section)}>
@@ -849,12 +869,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // Who reviews it, and sharing it: over the page from the toolbar's Share, not a row of the header.
   const reviewersPanel = (
     <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
-      <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} reviewVersion={reviewVersion} reviewBlocked={reviewBlocked} />
+      <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={reviewWrite} reviewVersion={reviewVersion} reviewBlocked={reviewBlocked} />
     </dl>
   );
   const canShare = !!gate || (!!sharing && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
   const presence = docLive && (
-    <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={myName} onState={setLiveState} onCapability={setLiveCapability}
+    <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={myName} onState={setLiveState} onCapability={setLiveCapability} onText={setLiveTexts} refreshes={refreshes}
       mode={mode} stripHost={stripHost} reviewers={reviewerNames} onHistory={() => { if (collapsed) collapse(false); setTab("history"); }} />
   );
   return (

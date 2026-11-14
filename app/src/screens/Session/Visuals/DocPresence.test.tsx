@@ -158,9 +158,11 @@ it("withdraws the rendered review and build gate when a signed live version is r
   // A delayed request for the withdrawn version cannot sign the replacement or build it.
   await expect(live.signOffPlan("doc", 7, firstVersion)).rejects.toMatchObject({ status: 409 });
   await expect(live.decidePlan("doc", { rev: 7, version: firstVersion, approved: true, picks: {}, comments: [], note: "" })).rejects.toMatchObject({ status: 409 });
+  const asked = daemon.liveRefreshes;
   fireEvent.click(reviewerUI.getByTestId("plan-sign-off"));
   await settle();
   expect(reviewerUI.queryByTestId("plan-sign-off")).toBeNull();
+  expect(daemon.liveRefreshes).toBe(asked + 1);   // the frozen version asked for again, its sign-offs the review's now
   expect(authorUI.getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(authorUI.getByTestId("plan-build"));
@@ -264,7 +266,7 @@ it("locks others' text while the author is offline and still sends comments and 
   expect(sent).toEqual(["comments", "suggestions"]);
 });
 
-it("shows a frozen version's own text, as typed live before the freeze, on the page and in the Markdown view", async () => {
+it("shows the live text, not the revision's, after Done editing, once frozen and once reopened, on the page and in the Markdown view", async () => {
   const daemon = new FakeDaemon();
   const live = daemon.client();
   const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
@@ -286,13 +288,65 @@ it("shows a frozen version's own text, as typed live before the freeze, on the p
   await act(async () => text.dispatch({ changes: { from: text.state.doc.length - 1, insert: ", on the customer's machine" } }));
   await settle();
   fireEvent.click(screen.getByRole("button", { name: "Done editing" }));
+  await settle();
+  // The revision still says "Workers run here."; the doc reads as it was typed, at every step.
+  const typed = "Workers run here, on the customer's machine.";
+  const showsTyped = () => {
+    expect(within(screen.getByRole("region", { name: "Summary" })).getByText(typed)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
+    expect(screen.getByTestId("doc-markdown").textContent).toContain(typed);
+    fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
+  };
+  showsTyped();
   fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
-  // The revision still says "Workers run here."; the version signed is what was typed.
-  const typed = "Workers run here, on the customer's machine.";
-  expect(within(screen.getByRole("region", { name: "Summary" })).getByText(typed)).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
-  expect(screen.getByTestId("doc-markdown").textContent).toContain(typed);
+  showsTyped();
+  fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
+  await settle();
+  showsTyped();
+});
+
+it("types a suggestion only in Suggesting on unlocked text: in Viewing or once frozen it is shown read only", async () => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "doc", session: "boss", title: "Workers", rev: 1, state: "open", markdown: "", lede: "", decisions: [], split: [], queued: 0, created_at: 1,
+    sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["Bo"], reviewers: [{ sub: "Bo", required: true, status: "waiting" }] } };
+  daemon.seedLive("doc", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: async () => plan, decidePlan: live.decidePlan.bind(live),
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await settle();
+  const words = within(screen.getByRole("region", { name: "Summary" })).getByText("Workers run here.").firstChild!;
+  const range = document.createRange();
+  range.setStart(words, 0);
+  range.setEnd(words, 7);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+  fireEvent.click(within(screen.getByRole("toolbar", { name: "For the highlighted text" })).getByRole("button", { name: "Suggest edit" }));
+  await settle();
+  const typing = editor("Suggestion to Summary");
+  await act(async () => typing.dispatch(typing.state.replaceSelection("Agents")));
+  const editable = () => screen.getByRole("region", { name: "Summary" }).querySelector('[contenteditable="true"]');
+  const preview = () => screen.getByTestId("plan-suggest-preview");
+  // Viewing: the page reads, the change still shown; Suggesting again picks up what was typed.
+  fireEvent.click(screen.getByRole("radio", { name: "Viewing" }));
+  expect(editable()).toBeNull();
+  expect([preview().querySelector("del")?.textContent, preview().querySelector("ins")?.textContent]).toEqual(["Worker", "Agent"]);
+  fireEvent.click(screen.getByRole("radio", { name: "Suggesting" }));
+  await settle();
+  expect(editor("Suggestion to Summary").state.doc.toString()).toBe("Agents run here.");
+  // Frozen with its text as it was: nothing can be typed, and the suggestion can't be sent.
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  await settle();
+  expect(editable()).toBeNull();
+  expect(preview().querySelector("ins")?.textContent).toBe("Agent");
+  expect((within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Send 1 suggestion" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 /* The Markdown switch changes the view, never the mode: read-only while Viewing, the live text while

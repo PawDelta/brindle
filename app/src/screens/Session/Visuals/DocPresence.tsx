@@ -15,10 +15,14 @@ import { PRESENCE_TTL, peerClass } from "./docAwareness";
 
 export type LiveCapability = "unknown" | "live" | "unsupported";
 
-export function DocPresence({ client, visual, isAuthor, name, onState, onCapability, mode = "editing", stripHost, reviewers = [], onHistory }: {
+export function DocPresence({ client, visual, isAuthor, name, onState, onCapability, onText, refreshes = 0, mode = "editing", stripHost, reviewers = [], onHistory }: {
   client: LiveClient; visual: string; isAuthor: boolean; name: string;
   onState?(state: LiveDocState | null): void;
   onCapability?(capability: LiveCapability): void;
+  /* The doc's live text, each section's, as it stands now (everyone's typing included); null until known. */
+  onText?(texts: Map<string, string> | null): void;
+  /* Counts this person's changes to the review (a sign-off): each asks for the frozen version again. */
+  refreshes?: number;
   /* The reader's mode: the live strip is for Editing (and for the author, who freezes). */
   mode?: "viewing" | "suggesting" | "editing";
   stripHost?: HTMLElement | null;
@@ -51,8 +55,12 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
       }
       setPeers([...people.values()]);
     };
+    // The live text, kept here for the reader: every window's changes arrive on this channel too.
+    const text = new LoroDoc();
+    const told = () => onText?.(new Map(Object.entries(text.toJSON() as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string")));
     setState(null);
     onState?.(null);
+    onText?.(null);
     onCapability?.(known.current.live ? "live" : "unknown");
     setUnsupported(false);
     setRefused(null);
@@ -60,7 +68,15 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
     setPeers([]);
     let stopRefresh = () => {};
     const live = client.visualLive(visual, {
-      onUpdate() { confirm(); },
+      onUpdate(bytes) {
+        confirm();
+        try {
+          text.import(bytes);
+          told();
+        } catch {
+          // Not a change this copy can take (its base is missing): the next snapshot brings it.
+        }
+      },
       onState(next) { confirm(); setState(next); onState?.(next); setConnected(true); },
       onRefused(why) { setRefused(why); },
       onAwareness(section, bytes) {
@@ -102,7 +118,10 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
       live.close();
       for (const store of stores.values()) store.destroy();
     };
-  }, [client, visual, name, onState, onCapability, opened]);
+  }, [client, visual, name, onState, onCapability, onText, opened]);
+  useEffect(() => {
+    if (refreshes > 0) channel.current?.refresh();
+  }, [refreshes]);
   if (unsupported) return null;
   const author = state?.author ?? "";
   const freeze = () => { setRefused(null); channel.current?.freeze(); };

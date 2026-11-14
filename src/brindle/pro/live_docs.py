@@ -157,21 +157,39 @@ def _base_version(row) -> bytes | None:
     return row["relay_version"] if row["relay_version"] is not None else row["seed_version"]
 
 
-def _frozen_version(db: DB, doc_id: str, frozen: Any) -> dict | None:
+def _library_review(doc_id: str) -> dict | None:
+    """The design's review as the Library has it now (its sign-offs, each with
+    the revision signed), for the author and a teammate alike: None when it
+    can't be read (offline, signed out), and the version then says what this
+    machine last knew."""
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import shared_docs as sd
+
+    try:
+        view = ad.api("GET", sd._path(doc_id))
+    except Exception:  # noqa: BLE001 - unreachable or refused: the last known review stands
+        log.debug("brindle: couldn't read the review of %s", doc_id, exc_info=True)
+        return None
+    return view if isinstance(view.get("sign_offs"), list) else None
+
+
+def _frozen_version(db: DB, doc_id: str, frozen: Any, review: dict | None = None) -> dict | None:
     """The version out for sign-off, as the app's live contract has it
     (``LiveDocState.version``): its number, who wrote in it, who signed it,
     and its text as a Loro snapshot. The text is the relay's draft as this
     machine last knew the relay to hold it (a freeze is of that, and nothing
-    typed here since reaches it); the sign-offs are the plan's review as last
-    read from the Library, for this version. Writers are the ones this
+    typed here since reaches it); the sign-offs are the Library's review
+    (``review``, read by :func:`_library_review`) for this version, else the
+    plan's as last read from it (an author's own). Writers are the ones this
     machine can name from its own numbers: "you" (this account's replica and
     windows) and "the supervisor". The relay doesn't say which account each
     other number is (and the revision's own text is under one too), so
     nobody else is credited here."""
     if not frozen:
         return None
-    share = db.conn.execute("SELECT review FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
-    review = json.loads(share["review"]) if share is not None and share["review"] else {}
+    if review is None:
+        share = db.conn.execute("SELECT review FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
+        review = json.loads(share["review"]) if share is not None and share["review"] else {}
     rev = frozen if isinstance(frozen, int) and not isinstance(frozen, bool) else review.get("rev")
     rev = rev if isinstance(rev, int) else 0
     replica = _replica(db, doc_id)
@@ -564,8 +582,20 @@ class DocLink:
         return {"state": {"author": self.author, "lock": lock, "version": self.version if self.frozen else None}}
 
     async def note_version(self) -> None:
-        """Read the frozen version again, from the replica and the plan's review."""
-        self.version = await self.manager.work(_frozen_version, self.doc_id, self.frozen) if self.frozen else None
+        """Read the frozen version again: its text from the replica, its
+        sign-offs from the Library (off the event loop)."""
+        if not self.frozen:
+            self.version = None
+            return
+        review = await asyncio.to_thread(self.manager.review, self.doc_id)
+        self.version = await self.manager.work(_frozen_version, self.doc_id, self.frozen, review)
+
+    async def refresh(self) -> None:
+        """A window says the review changed (its person signed off): read the
+        version again and tell every window here."""
+        if self.frozen:
+            await self.note_version()
+            await self._to_windows(self.state_frame())
 
     async def _to_windows(self, frame: dict, skip: Lease | None = None) -> None:
         for w in tuple(self.windows):
@@ -833,9 +863,11 @@ class Manager:
     def __init__(self, transport: Transport | None = None, *, db_factory: Callable[[], DB] = DB,
                  wait: Callable[[float], Awaitable[None]] = _elapse,
                  available: Callable[[], bool] | None = None, drive: bool = True,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 review: Callable[[str], dict | None] | None = None) -> None:
         self.transport = transport or RelayTransport()
         self.wait = wait
+        self.review = review or _library_review     # the Library's review of a doc, read for a frozen version
         self.clock = clock          # the relay's lock times are its wall clock's
         self.stopping = False
         self._db_factory = db_factory

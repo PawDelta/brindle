@@ -193,6 +193,11 @@ async def visual_live(socket: WebSocket) -> None:
                 if refused is not None:     # to this window only: its Freeze or Reopen didn't happen
                     await socket.send_json({"refused": {"action": "reopen" if reopen else "freeze", "reason": refused}})
                 continue
+            if lease is not None and said.get("refresh") is True:
+                # The window's person signed off (or otherwise changed the review): every window
+                # here is told the frozen version's sign-offs as the Library has them now.
+                await relay.link(doc_id).refresh()
+                continue
             async with room.lock:
                 if isinstance(said.get("update"), str):
                     data = base64.b64decode(said["update"], validate=True)

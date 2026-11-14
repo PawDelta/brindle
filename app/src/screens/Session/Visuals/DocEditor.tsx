@@ -404,9 +404,11 @@ const trackedLook = EditorView.theme({
   ".cm-sg-ins": { background: "var(--pass-soft)", color: "var(--pass)" },
 });
 
-export function SuggestEditor({ source, select, label, onText }: {
+export function SuggestEditor({ source, text, select, label, onText }: {
   /* The section's text the suggestion is made on. */
   source: string;
+  /* What was typed of it already (opened again after another mode): else `source`. */
+  text?: string;
   /* What to select at first (UTF-16 offsets): the highlighted words, or a caret. */
   select: { from: number; to: number };
   label: string;
@@ -424,8 +426,8 @@ export function SuggestEditor({ source, select, label, onText }: {
     const view = new EditorView({
       parent: host.current,
       state: EditorState.create({
-        doc: source,
-        selection: { anchor: Math.min(select.from, source.length), head: Math.min(select.to, source.length) },
+        doc: text ?? source,
+        selection: { anchor: Math.min(select.from, (text ?? source).length), head: Math.min(select.to, (text ?? source).length) },
         extensions: [
           history(),
           keymap.of([...historyKeymap, ...defaultKeymap]),

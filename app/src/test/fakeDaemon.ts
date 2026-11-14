@@ -813,6 +813,8 @@ export class FakeDaemon {
      being under the number their window was lent. holdLivePeers: none free until lendLivePeers. */
   private nextLivePeer = 2n ** 60n;
   readonly liveRefused: string[] = [];
+  /* How many times a window asked for the frozen version again (after its person signed off). */
+  liveRefreshes = 0;
   holdLivePeers = false;
 
   lendLivePeers(): void {
@@ -2562,7 +2564,12 @@ export class FakeDaemon {
   relayLive(from: FakeLiveSocket, frame: string): void {
     const live = this.live.get(from.visual);
     if (!live) return;
-    const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string; freeze?: boolean; reopen?: boolean };
+    const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string; freeze?: boolean; reopen?: boolean; refresh?: boolean };
+    if (said.refresh) {     // a window's person signed off: the version, as the review has it now, to every window
+      this.liveRefreshes++;
+      this.setLiveState(from.visual, {});
+      return;
+    }
     if (said.freeze || said.reopen) {
       if (!live.canFreeze) {    // as the daemon answers a Freeze or Reopen the Library refused: to the asking window
         from.push({ refused: { action: said.freeze ? "freeze" : "reopen", reason: "only the design's author can freeze its draft" } });
