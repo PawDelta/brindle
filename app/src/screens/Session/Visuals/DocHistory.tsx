@@ -143,7 +143,9 @@ export function DocumentHistory({ client, planId, refresh, onCompare }: {
 export function DocHistoryComparison({ comparison, onClose }: { comparison: DocRevisionComparison; onClose(): void }) {
   const { revision, previous, changes } = comparison;
   const [active, setActive] = useState(0);
-  const [original, setOriginal] = useState(false);
+  const baselineAvailable = comparison.baseline_available ?? (previous != null || revision.rev === 1);
+  const [showOriginal, setShowOriginal] = useState(false);
+  const original = showOriginal || !baselineAvailable;
   const blocks = useRef(new Map<string, HTMLElement>());
   const targets = changes.flatMap((change) => change.spans.length
     ? change.spans.map((_, span) => ({ section: change.section, span: span as number | null }))
@@ -179,12 +181,12 @@ export function DocHistoryComparison({ comparison, onClose }: { comparison: DocR
     result.push(characters.slice(position).join(""));
     return result;
   };
-  return <section aria-label="Revision comparison" data-revision={revision.rev} data-state={original ? "original" : "changes"}>
+  return <section aria-label="Revision comparison" data-revision={revision.rev} data-state={!baselineAvailable ? "unavailable-baseline" : original ? "original" : "changes"}>
     <div className="flex flex-wrap items-center gap-2 border-b border-line p-3">
-      <b>{`Revision ${revision.rev}${previous ? ` against revision ${previous.rev}` : " · first revision"}`}</b>
+      <b>{`Revision ${revision.rev}${previous ? ` against revision ${previous.rev}` : baselineAvailable ? " · first revision" : " · earlier revision unavailable"}`}</b>
       <button type="button" className={quiet} disabled={original || active === 0 || !targets.length} onClick={() => jump(active - 1)}>Previous change</button>
       <button type="button" className={quiet} disabled={original || active >= targets.length - 1} onClick={() => jump(active + 1)}>Next change</button>
-      <button type="button" className={quiet} onClick={() => setOriginal(!original)}>{original ? "Show changes" : "Open revision as it was"}</button>
+      <button type="button" className={quiet} disabled={!baselineAvailable} onClick={() => setShowOriginal(!showOriginal)}>{!baselineAvailable ? "Comparison unavailable" : original ? "Show changes" : "Open revision as it was"}</button>
       <button type="button" className={quiet} onClick={onClose}>Back to the latest</button>
     </div>
     {sections.map((s) => {

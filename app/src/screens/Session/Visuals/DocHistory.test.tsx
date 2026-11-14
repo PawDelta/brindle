@@ -49,6 +49,13 @@ it("loads one timeline and lets a revision show its changes and its read-only or
   expect(screen.getByRole("region", { name: "Revision comparison" }).dataset.state).toBe("original");
   fireEvent.click(screen.getByRole("button", { name: "Back to the latest" }));
   expect(screen.queryByRole("region", { name: "Revision comparison" })).toBeNull();
+  client.planRevisionChanges = async (_, rev) => ({ ...comparison(rev), previous: null, changes: [], baseline_available: false });
+  fireEvent.click(timeline.querySelectorAll("button")[0]);
+  await settle();
+  expect(screen.getByRole("region", { name: "Revision comparison" }).dataset.state).toBe("unavailable-baseline");
+  expect(container.querySelector('[data-section="summary"] .whitespace-pre-wrap')?.textContent).toBe("🦊 The new text.");
+  expect(container.querySelectorAll("ins, del")).toHaveLength(0);
+  expect((screen.getByRole("button", { name: "Next change" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 it("discards out-of-order revision responses and responses for a document that was closed", async () => {

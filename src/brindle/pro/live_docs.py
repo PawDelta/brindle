@@ -586,6 +586,11 @@ class DocLink:
         lock = "sign_off" if self.frozen else "author_offline" if self.author_offline else None
         return {"state": {"author": self.author, "lock": lock, "version": self.version if self.frozen else None}}
 
+    async def _note_frozen(self) -> None:
+        from brindle.pro.shared_docs import remember_live_state
+
+        await self.manager.work(remember_live_state, self.doc_id, self.frozen, self.author, self.manager.clock())
+
     async def note_version(self) -> bool:
         """Read the frozen version again: its text from the replica, its
         sign-offs from the Library (off the event loop). Reads can overlap (two
@@ -687,6 +692,7 @@ class DocLink:
         self.author, self.frozen = said.get("author") or "", said.get("frozen")
         self.author_offline = said.get("author_offline")
         self.blocked = bool(self.frozen)
+        await self._note_frozen()
         if not take:
             await self.manager.work(_record_numbers, self.doc_id, self.claimed, claims, marks)
             return
@@ -781,6 +787,7 @@ class DocLink:
             await self._to_windows(self.state_frame())
         elif error == "frozen":
             self.frozen, self.blocked = said.get("rev") or True, True
+            await self._note_frozen()
             await self.note_version()
             await self._to_windows(self.state_frame())
         elif error == "batch_refused":

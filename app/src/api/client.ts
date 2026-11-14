@@ -443,6 +443,7 @@ export type DocRevision = Pick<Plan, "rev" | "lede" | "sections" | "markdown" | 
 export interface DocRevisionComparison {
   revision: DocRevision;
   previous: DocRevision | null;
+  baseline_available?: boolean;
   document?: { id: string; title: string; markdown: string }[];
   changes: {
     section: string;

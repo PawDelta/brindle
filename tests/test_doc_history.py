@@ -102,5 +102,53 @@ def test_relay_records_confirmed_actions_and_not_refusals(db, session, monkeypat
         manager._pool.shutdown(wait=True)
 
     asyncio.run(run())
-    assert sorted(e["kind"] for e in plan_docs.timeline(db, pid)["events"] if e["kind"] != "revision") == [
-        "freeze", "reopen"]
+    shared_docs.remember_live_state(db, "shared-doc", 5, "owner", 40)
+    shared_docs.remember_live_state(db, "shared-doc", None, "owner", 41)
+    actions = [e for e in plan_docs.timeline(db, pid)["events"] if e["kind"] != "revision"]
+    assert sorted(e["kind"] for e in actions) == ["freeze", "reopen"]
+    assert all(e["at"] == 30 and not e["observed"] for e in actions)
+
+
+def test_live_join_and_reconcile_archive_remote_freeze_and_reopen_without_sync(db, session):
+    import asyncio
+
+    from test_live_docs import Clock, FakeRelay, REVISION
+
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = plans.propose(db, boss, REVISION["lede"], sections=[
+        {"id": "body", "title": "Body", "markdown": REVISION["body"]}])["id"]
+    with db.tx() as c:
+        c.execute("INSERT INTO plan_shares (plan_id, owner, doc_id, remote_rev, local_rev) VALUES (?,?,?,?,?)",
+                  (pid, "owner", "doc1", 8, 1))
+    clock = Clock()
+
+    async def run():
+        relay = FakeRelay(clock, author="remote-author")
+        relay.frozen = 8
+        manager = live_docs.Manager(relay.transport("owner"), db_factory=lambda: db, drive=False, clock=clock,
+                                   review=lambda doc_id: {"rev": 8, "sign_offs": [
+                                       {"sub": "dana", "rev": 8, "at": clock() - 1}]})
+
+        async def work(fn, *args):
+            return fn(db, *args)
+
+        manager.work = work
+        try:
+            link = manager.link("doc1")
+            await link.connect()
+            await link.note_version()
+            clock.now += 10
+            relay.frozen = None
+            await link.reconcile()
+            assert link.frozen is None
+            await link.note_version()
+        finally:
+            await manager.stop()
+
+    asyncio.run(run())
+    events = [e for e in plan_docs.timeline(db, pid)["events"] if e["kind"] != "revision"]
+    assert [(e["kind"], e["actor"], e["at"], e["observed"]) for e in events] == [
+        ("reopen", "teammate:remote-author", clock(), True),
+        ("freeze", "teammate:remote-author", clock() - 10, True),
+        ("sign_off", "teammate:dana", clock() - 11, False)]

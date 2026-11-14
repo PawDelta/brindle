@@ -1003,16 +1003,21 @@ def timeline(db: DB, plan_id: str) -> dict:
 
 
 def comparison(db: DB, plan_id: str, rev: Any) -> dict:
-    """A revision against its predecessor, with spans the reader can mark in place.
+    """A revision against the preceding retained one, with spans the reader can mark in place.
 
     Include removed sections and structural changes, even when the text is identical.
+    A legacy revision with no retained baseline opens without invented additions.
     No draft or plan state changes while reading history.
     """
     from difflib import SequenceMatcher
 
-    current = revision_dto(db, plan_id, rev)
+    p = _plan(db, plan_id)
+    current = revision_dto(db, p["id"], rev)
     n = current["rev"]
-    previous = revision_dto(db, plan_id, str(n - 1)) if n > 1 else None
+    retained = db.conn.execute("SELECT MAX(rev) FROM plan_revisions WHERE plan_id=? AND rev<?",
+                               (p["id"], n)).fetchone()[0]
+    previous = revision_dto(db, plan_id, str(retained)) if retained is not None else None
+    baseline_available = previous is not None or n == 1
     before = {s["id"]: s for s in previous["sections"]} if previous else {}
     after = {s["id"]: s for s in current["sections"]}
     before = {LEDE: {"markdown": previous["lede"] if previous else "", "title": "Overview"}, **before}
@@ -1045,7 +1050,7 @@ def comparison(db: DB, plan_id: str, rev: Any) -> dict:
     changes = []
     for sid in dict.fromkeys([*after, *before]):
         old, new = before.get(sid), after.get(sid)
-        if old == new:
+        if old == new or not baseline_available:
             continue
         left, right = (old or {}).get("markdown", ""), (new or {}).get("markdown", "")
         spans = [{"kind": kind, "before_start": a, "before_end": b, "start": x, "end": y,
@@ -1054,6 +1059,7 @@ def comparison(db: DB, plan_id: str, rev: Any) -> dict:
                  if kind != "equal"]
         changes.append({"section": sid, "before": old, "after": new, "spans": spans})
     return {"revision": current, "previous": previous, "changes": changes,
+            "baseline_available": baseline_available,
             "document": [{"id": sid, **s} for sid, s in after.items()]}
 
 

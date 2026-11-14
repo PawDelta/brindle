@@ -274,16 +274,7 @@ def _remember(db: DB, plan_id: str, view: dict) -> bool:
             draft = view.get("draft")
             if isinstance(draft, dict) and "frozen" in draft:
                 kept["draft"] = {"frozen": draft["frozen"]}
-                was = old.get("frozen") if isinstance(old, dict) else None
-                frozen = draft["frozen"]
-                if type(frozen) is int or (type(was) is int and frozen is None):
-                    version = frozen if type(frozen) is int else was
-                    kind = "freeze" if type(frozen) is int else "reopen"
-                    author = view.get("author") if isinstance(view.get("author"), str) else share_["owner"]
-                    actor = plan_docs.PERSON if author == share_["owner"] else plan_docs.TEAMMATE + author
-                    plan_docs.record_event(c, plan_id, f"{kind}:{version}", kind, actor, time.time(),
-                                           version=version, observed=True,
-                                           rev=share_["local_rev"] if version == share_["remote_rev"] else None)
+                _observe_frozen(c, plan_id, share_, draft["frozen"], view.get("author"), time.time())
             elif old is not None:
                 kept["draft"] = old
             _record_signatures(c, plan_id, share_, view)
@@ -292,6 +283,37 @@ def _remember(db: DB, plan_id: str, view: dict) -> bool:
                   " END WHERE plan_id=?", (int(whole), plan_id))
         return c.execute("UPDATE plan_shares SET review=? WHERE plan_id=? AND review<>?",
                          (review, plan_id, review)).rowcount == 1
+
+
+def _observe_frozen(c, plan_id: str, share_, frozen: Any, author: Any, at: float) -> None:
+    old = json.loads(share_["review"] or "{}").get("draft")
+    was = old.get("frozen") if isinstance(old, dict) else None
+    if type(frozen) is int or (type(was) is int and frozen is None):
+        version = frozen if type(frozen) is int else was
+        kind = "freeze" if type(frozen) is int else "reopen"
+        author = author if isinstance(author, str) and author else share_["owner"]
+        actor = plan_docs.PERSON if author == share_["owner"] else plan_docs.TEAMMATE + author
+        plan_docs.record_event(c, plan_id, f"{kind}:{version}", kind, actor, at,
+                               version=version, observed=True,
+                               rev=share_["local_rev"] if version == share_["remote_rev"] else None)
+
+
+def remember_live_state(db: DB, doc_id: str, frozen: Any, author: str, at: float) -> None:
+    """Archive a relay's freeze state, including reopening, at its ingestion boundary.
+
+    Only the draft marker is kept in the review cache; the build gate's review fields stay
+    as they were. Event keys are shared with confirmed local actions and sync observations.
+    """
+    if frozen is not None and type(frozen) is not int:
+        return       # a refusal can say frozen without supplying a version number
+    with db.tx() as c:
+        row = c.execute("SELECT plan_id, owner, remote_rev, local_rev, review FROM plan_shares WHERE doc_id=?",
+                        (doc_id,)).fetchone()
+        if row is not None:
+            _observe_frozen(c, row["plan_id"], row, frozen, author, at)
+            review = json.loads(row["review"] or "{}")
+            review["draft"] = {"frozen": frozen}
+            c.execute("UPDATE plan_shares SET review=? WHERE plan_id=?", (json.dumps(review, sort_keys=True), row["plan_id"]))
 
 
 def _record_signatures(c, plan_id: str, share_, view: dict) -> None:
