@@ -1,0 +1,16 @@
+# Every file reference.patch changes, by ticket (the per_part key grade.sh
+# reports). validate.sh checks that no file appears twice, that this list
+# matches the patch exactly, and that each ticket passes with only its own
+# files applied.
+part01_hyperlinks src/click/termui.py
+part01_hyperlinks src/click/_compat.py
+part01_hyperlinks tests/test_utils/test_style.py
+part02_duration src/click/types.py
+part02_duration src/click/__init__.py
+part02_duration tests/test_types/test_Duration.py
+part03_help_lists src/click/formatting.py
+part03_help_lists tests/test_formatting.py
+part04_app_dirs src/click/utils.py
+part04_app_dirs tests/test_utils/test_get_app_dir.py
+part05_cli_runner src/click/testing.py
+part05_cli_runner tests/test_testing.py

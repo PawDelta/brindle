@@ -1,0 +1,10 @@
+{
+  "name": "large",
+  "url": "https://github.com/simonw/sqlite-utils.git",
+  "commit": "9c66bafa52ae23d40499c74b0db3b635bcddb876",
+  "setup": [
+    "uv venv -q --python 3.12 .venv",
+    "uv pip install -q --python .venv/bin/python -e . 'pytest~=9.0' 'hypothesis~=6.0' 'cogapp~=3.6' 'click==8.5.1' 'tabulate==0.10.0'"
+  ],
+  "test_cmd": ".venv/bin/python -m pytest -q -p no:cacheprovider --disable-warnings tests"
+}

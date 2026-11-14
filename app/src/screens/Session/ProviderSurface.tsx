@@ -32,6 +32,7 @@ import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
 import { PanesReadyContext, panesReadyFor } from "../../store/panes";
 import type { Recovery } from "./useContinue";
+import { RestartHistory } from "./RestartHistory";
 import { visualsGate, withTypedWords, withVisualInput } from "./Visuals/terminalInput";
 
 export interface ProviderSurfaceProps {
@@ -210,9 +211,15 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
     attach: (file: Attachment) => client.attach(agent.id, file),
   } : undefined, [client, agent?.id, agent?.accepts_files]);
   const left = agent && card && card.kind !== "starting" && card.kind !== "returning" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));
+  // Paused roots may be absent from the snapshot; their saved chat is still
+  // available by root id. The endpoint checks the session's identity lock.
+  const historyId = !agent ? root : !agent.locked && agent.provider === "claude" && (!root || root === agent.id) ? agent.id : undefined;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"}>
+      {historyId && (
+        <RestartHistory key={historyId} id={historyId} revision={agent ?? sessionStatus} />
+      )}
       {/* A real tmux client on a pty; nothing until the shell has said it can (its status). */}
       {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
           that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}

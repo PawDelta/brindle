@@ -1,0 +1,3001 @@
+diff --git a/docs/cli-reference.rst b/docs/cli-reference.rst
+index c53d642..6ee6898 100644
+--- a/docs/cli-reference.rst
++++ b/docs/cli-reference.rst
+@@ -49,6 +49,14 @@ This page lists the ``--help`` for every ``sqlite-utils`` CLI sub-command.
+         "drop-index": "cli_drop_index",
+         "enable-wal": "cli_wal",
+         "enable-counts": "cli_enable_counts",
++        "enable-history": "cli_history",
++        "disable-history": "cli_history",
++        "history": "cli_history_show",
++        "as-of": "cli_history_as_of",
++        "restore": "cli_history_as_of",
++        "changesets": "cli_history_changesets",
++        "undo": "cli_history_changesets",
++        "prune-history": "cli_history_prune",
+         "bulk": "cli_bulk",
+         "migrate": "cli_migrate",
+         "create-database": "cli_create_database",
+@@ -316,6 +324,8 @@ See :ref:`cli_inserting_data`, :ref:`cli_insert_csv_tsv`, :ref:`cli_insert_unstr
+       --load-extension TEXT     Path to SQLite extension, with optional :entrypoint
+       --silent                  Do not show progress bar
+       --strict                  Apply STRICT mode to created table
++      --changeset TEXT          Record the changes to tables with history enabled as
++                                a changeset with this message
+       --ignore                  Ignore records if pk already exists
+       --replace                 Replace records if pk already exists
+       --truncate                Truncate table before inserting records, if table
+@@ -380,6 +390,8 @@ See :ref:`cli_upsert`.
+       --load-extension TEXT     Path to SQLite extension, with optional :entrypoint
+       --silent                  Do not show progress bar
+       --strict                  Apply STRICT mode to created table
++      --changeset TEXT          Record the changes to tables with history enabled as
++                                a changeset with this message
+       -h, --help                Show this message and exit.
+ 
+ 
+@@ -1429,6 +1441,269 @@ reset-counts
+       -h, --help             Show this message and exit.
+ 
+ 
++.. _cli_ref_enable_history:
++
++enable-history
++==============
++
++See :ref:`cli_history`.
++
++::
++
++    Usage: sqlite-utils enable-history [OPTIONS] PATH TABLES...
++
++      Record every change made to the rows of these tables
++
++      Example:
++
++          sqlite-utils enable-history chickens.db chickens
++
++      Use "sqlite-utils history" to see the recorded changes.
++
++    Options:
++      -x, --exclude TEXT     Column that should not be recorded - only with a single
++                             table
++      --no-import-legacy     Do not import history recorded by the sqlite-history
++                             plugin
++      --load-extension TEXT  Path to SQLite extension, with optional :entrypoint
++      -h, --help             Show this message and exit.
++
++
++.. _cli_ref_disable_history:
++
++disable-history
++===============
++
++See :ref:`cli_history`.
++
++::
++
++    Usage: sqlite-utils disable-history [OPTIONS] PATH TABLES...
++
++      Stop recording changes to these tables and delete their history
++
++      Example:
++
++          sqlite-utils disable-history chickens.db chickens
++
++    Options:
++      --load-extension TEXT  Path to SQLite extension, with optional :entrypoint
++      -h, --help             Show this message and exit.
++
++
++.. _cli_ref_history:
++
++history
++=======
++
++See :ref:`cli_history_show`.
++
++::
++
++    Usage: sqlite-utils history [OPTIONS] PATH [DBTABLE] [PK_VALUES]...
++
++      Show the changes recorded for tables that have history enabled
++
++      Example:
++
++          sqlite-utils history chickens.db
++
++      Add a table name to see just that table, and primary key values to see the
++      history of a single row:
++
++          sqlite-utils history chickens.db chickens 3
++
++    Options:
++      --since INTEGER        Only changes after this version number
++      --until INTEGER        Only changes up to this version number
++      --changeset INTEGER    Only changes in this changeset
++      --nl                   Output newline-delimited JSON
++      --arrays               Output rows as arrays instead of objects
++      --csv                  Output CSV
++      --tsv                  Output TSV
++      --no-headers           Omit headers from CSV/TSV and table/--fmt output
++      -t, --table            Output as a formatted table
++      --fmt TEXT             Table format - one of asciidoc, colon_grid,
++                             double_grid, double_outline, fancy_grid, fancy_outline,
++                             github, grid, heavy_grid, heavy_outline, html, jira,
++                             latex, latex_booktabs, latex_longtable, latex_raw,
++                             mediawiki, mixed_grid, mixed_outline, moinmoin, orgtbl,
++                             outline, pipe, plain, presto, pretty, psql,
++                             rounded_grid, rounded_outline, rst, simple,
++                             simple_grid, simple_outline, textile, tsv, unsafehtml,
++                             youtrack
++      --json-cols            Detect JSON cols and output them as JSON, not escaped
++                             strings
++      --ascii                Escape non-ASCII characters in JSON output as \uXXXX
++      --load-extension TEXT  Path to SQLite extension, with optional :entrypoint
++      -h, --help             Show this message and exit.
++
++
++.. _cli_ref_as_of:
++
++as-of
++=====
++
++See :ref:`cli_history_as_of`.
++
++::
++
++    Usage: sqlite-utils as-of [OPTIONS] PATH DBTABLE VERSION
++
++      Output the rows of a table as they were at an earlier version
++
++      VERSION is a history version number, or a timestamp - which means the newest
++      version recorded at or before that time.
++
++      Example:
++
++          sqlite-utils as-of chickens.db chickens 42
++          sqlite-utils as-of chickens.db chickens "2026-11-01 09:00"
++
++    Options:
++      --nl                   Output newline-delimited JSON
++      --arrays               Output rows as arrays instead of objects
++      --csv                  Output CSV
++      --tsv                  Output TSV
++      --no-headers           Omit headers from CSV/TSV and table/--fmt output
++      -t, --table            Output as a formatted table
++      --fmt TEXT             Table format - one of asciidoc, colon_grid,
++                             double_grid, double_outline, fancy_grid, fancy_outline,
++                             github, grid, heavy_grid, heavy_outline, html, jira,
++                             latex, latex_booktabs, latex_longtable, latex_raw,
++                             mediawiki, mixed_grid, mixed_outline, moinmoin, orgtbl,
++                             outline, pipe, plain, presto, pretty, psql,
++                             rounded_grid, rounded_outline, rst, simple,
++                             simple_grid, simple_outline, textile, tsv, unsafehtml,
++                             youtrack
++      --json-cols            Detect JSON cols and output them as JSON, not escaped
++                             strings
++      --ascii                Escape non-ASCII characters in JSON output as \uXXXX
++      --load-extension TEXT  Path to SQLite extension, with optional :entrypoint
++      -h, --help             Show this message and exit.
++
++
++.. _cli_ref_restore:
++
++restore
++=======
++
++See :ref:`cli_history_as_of`.
++
++::
++
++    Usage: sqlite-utils restore [OPTIONS] PATH DBTABLE VERSION [PK_VALUES]...
++
++      Put a table, or one of its rows, back to how it was at an earlier version
++
++      VERSION is a history version number, or a timestamp. Outputs the number of
++      rows that were changed.
++
++      Example:
++
++          sqlite-utils restore chickens.db chickens 42
++
++      Add primary key values to restore just that row:
++
++          sqlite-utils restore chickens.db chickens 42 3
++
++    Options:
++      --load-extension TEXT  Path to SQLite extension, with optional :entrypoint
++      -h, --help             Show this message and exit.
++
++
++.. _cli_ref_changesets:
++
++changesets
++==========
++
++See :ref:`cli_history_changesets`.
++
++::
++
++    Usage: sqlite-utils changesets [OPTIONS] PATH
++
++      List the changesets recorded in this database
++
++      Example:
++
++          sqlite-utils changesets chickens.db
++
++    Options:
++      --nl                   Output newline-delimited JSON
++      --arrays               Output rows as arrays instead of objects
++      --csv                  Output CSV
++      --tsv                  Output TSV
++      --no-headers           Omit headers from CSV/TSV and table/--fmt output
++      -t, --table            Output as a formatted table
++      --fmt TEXT             Table format - one of asciidoc, colon_grid,
++                             double_grid, double_outline, fancy_grid, fancy_outline,
++                             github, grid, heavy_grid, heavy_outline, html, jira,
++                             latex, latex_booktabs, latex_longtable, latex_raw,
++                             mediawiki, mixed_grid, mixed_outline, moinmoin, orgtbl,
++                             outline, pipe, plain, presto, pretty, psql,
++                             rounded_grid, rounded_outline, rst, simple,
++                             simple_grid, simple_outline, textile, tsv, unsafehtml,
++                             youtrack
++      --json-cols            Detect JSON cols and output them as JSON, not escaped
++                             strings
++      --ascii                Escape non-ASCII characters in JSON output as \uXXXX
++      --load-extension TEXT  Path to SQLite extension, with optional :entrypoint
++      -h, --help             Show this message and exit.
++
++
++.. _cli_ref_undo:
++
++undo
++====
++
++See :ref:`cli_history_changesets`.
++
++::
++
++    Usage: sqlite-utils undo [OPTIONS] PATH CHANGESET_ID
++
++      Undo a changeset, putting the rows it changed back as they were before
++
++      The undo is recorded as a new changeset. Outputs its ID.
++
++      Example:
++
++          sqlite-utils undo chickens.db 3
++
++    Options:
++      --force                Undo even if rows have been changed again since
++      --author TEXT          Author to record for the undo
++      --load-extension TEXT  Path to SQLite extension, with optional :entrypoint
++      -h, --help             Show this message and exit.
++
++
++.. _cli_ref_prune_history:
++
++prune-history
++=============
++
++See :ref:`cli_history_prune`.
++
++::
++
++    Usage: sqlite-utils prune-history [OPTIONS] PATH DBTABLE VERSION
++
++      Forget the individual changes to a table up to and including VERSION
++
++      VERSION is a history version number, or a timestamp. The table can no longer
++      be taken back to before that version. Outputs the number of change records
++      that were removed.
++
++      Example:
++
++          sqlite-utils prune-history chickens.db chickens 42
++
++    Options:
++      --load-extension TEXT  Path to SQLite extension, with optional :entrypoint
++      -h, --help             Show this message and exit.
++
++
+ .. _cli_ref_duplicate:
+ 
+ duplicate
+diff --git a/docs/cli.rst b/docs/cli.rst
+index 78c33b8..561a3f5 100644
+--- a/docs/cli.rst
++++ b/docs/cli.rst
+@@ -2858,6 +2858,139 @@ If the ``_counts`` table ever becomes out-of-sync with the actual table counts y
+ .. note::
+     In Python: :ref:`table.enable_counts() <python_api_cached_table_counts>`  CLI reference: :ref:`sqlite-utils enable-counts <cli_ref_enable_counts>`
+ 
++.. _cli_history:
++
++Tracking changes with history
++=============================
++
++``sqlite-utils`` can record every change made to the rows of a table, so that you can see what changed, look at the table as it was earlier and put things back. See :ref:`python_api_history` for a full description of how this works.
++
++Use ``enable-history`` to start recording changes to one or more tables:
++
++.. code-block:: bash
++
++    sqlite-utils enable-history data.db places visits
++
++The rows already in each table are recorded as its starting point. From then on every insert, update and delete is recorded, whichever tool makes it.
++
++Use ``-x/--exclude`` to leave columns out of the history. This option can be used multiple times, and only when enabling history for a single table:
++
++.. code-block:: bash
++
++    sqlite-utils enable-history data.db pages --exclude hits
++
++If a table was previously tracked by the ``sqlite-history`` plugin its recorded history is imported. Add ``--no-import-legacy`` to leave that history where it is.
++
++To stop recording and delete the history that has been recorded for a table:
++
++.. code-block:: bash
++
++    sqlite-utils disable-history data.db places
++
++.. _cli_history_show:
++
++Showing recorded changes
++------------------------
++
++The ``history`` command shows the changes that have been recorded, oldest first:
++
++.. code-block:: bash
++
++    sqlite-utils history data.db
++
++.. code-block:: output
++
++    [{"version": 1, "table": "places", "op": "insert", "pk": 1, "at": "2026-11-13 09:30:00.123", "changeset": null, "row": {"id": 1, "name": "Oslo"}, "changed": {}},
++     {"version": 2, "table": "places", "op": "update", "pk": 1, "at": "2026-11-13 09:31:10.456", "changeset": null, "row": {"id": 1, "name": "Bergen"}, "changed": {"name": ["Oslo", "Bergen"]}}]
++
++Each change has a ``version`` number. ``row`` is the row after the change (or just before it was deleted), and ``changed`` shows the old and new value of each column an update changed.
++
++Add a table name to see the changes to that table, and one or more primary key values to see the history of a single row:
++
++.. code-block:: bash
++
++    sqlite-utils history data.db places
++    sqlite-utils history data.db places 1
++
++Use ``--since`` and ``--until`` to limit the output to a range of versions, and ``--changeset`` to show the changes in one changeset. The command accepts the same :ref:`output format options <cli_query_csv>` as ``query`` - with ``--csv``, ``--tsv`` and the table formats the ``row`` and ``changed`` columns contain JSON.
++
++.. _cli_history_as_of:
++
++Viewing and restoring earlier versions
++--------------------------------------
++
++The ``as-of`` command outputs the rows of a table as they were at an earlier version:
++
++.. code-block:: bash
++
++    sqlite-utils as-of data.db places 42
++
++Instead of a version number you can pass a timestamp, which stands for the newest version recorded at or before that time (in UTC):
++
++.. code-block:: bash
++
++    sqlite-utils as-of data.db places "2026-11-12 09:00" --csv
++
++The ``restore`` command puts a table back to how it was at a version, and outputs the number of rows it changed:
++
++.. code-block:: bash
++
++    sqlite-utils restore data.db places 42
++
++Add primary key values to restore a single row:
++
++.. code-block:: bash
++
++    sqlite-utils restore data.db places 42 1
++
++Restoring is recorded as new changes, so the history from before the restore is not lost.
++
++.. _cli_history_changesets:
++
++Changesets and undo
++-------------------
++
++The ``insert`` and ``upsert`` commands accept a ``--changeset`` option, which records everything the command changes in tables with history enabled as a single named changeset:
++
++.. code-block:: bash
++
++    sqlite-utils insert data.db places places.json --pk id \
++      --changeset "March import"
++
++List the changesets in a database using ``changesets``:
++
++.. code-block:: bash
++
++    sqlite-utils changesets data.db
++
++.. code-block:: output
++
++    [{"id": 1, "message": "March import", "author": null, "created_at": "2026-11-13 09:30:00.123"}]
++
++To undo a changeset, pass its ID to ``undo``. This puts every row the changeset changed back to how it was before, records that as a new changeset and outputs the new changeset's ID:
++
++.. code-block:: bash
++
++    sqlite-utils undo data.db 1
++
++If any of those rows have been changed again since the changeset the command exits with an error and changes nothing. Use ``--force`` to undo anyway.
++
++.. _cli_history_prune:
++
++Pruning history
++---------------
++
++History grows with every change. The ``prune-history`` command forgets the individual changes to a table up to and including a version (or timestamp), keeping one record for each row that existed at that point. It outputs the number of change records it removed:
++
++.. code-block:: bash
++
++    sqlite-utils prune-history data.db places 42
++
++After pruning, ``as-of`` and ``restore`` no longer accept versions earlier than that one.
++
++.. note::
++    In Python: :ref:`table.enable_history() <python_api_history>`  CLI reference: :ref:`sqlite-utils enable-history <cli_ref_enable_history>`, :ref:`sqlite-utils history <cli_ref_history>`
++
+ .. _cli_analyze:
+ 
+ Optimizing index usage with ANALYZE
+diff --git a/docs/migrations.rst b/docs/migrations.rst
+index 23aa9d8..1ff4442 100644
+--- a/docs/migrations.rst
++++ b/docs/migrations.rst
+@@ -91,6 +91,8 @@ A migration registered with ``transactional=False`` runs without a wrapping tran
+ 
+ Avoid calling ``db.commit()`` or otherwise managing transactions manually inside a transactional migration - register the migration with ``transactional=False`` if it needs to control its own transactions. Using ``with db.atomic():`` blocks inside a migration is fine: they nest as savepoints within the migration's transaction, so the migration as a whole still commits or rolls back as a single unit. See :ref:`python_api_transactions`.
+ 
++If the database has tables with :ref:`history enabled <python_api_history>`, the transaction of each transactional migration is a :ref:`changeset <python_api_history_changesets>` with the message ``Migration <set>:<name>``. The rows a migration changed in those tables can then be listed with ``db.changes(changeset=...)`` and put back with ``db.undo_changeset()``. A migration applied while a changeset is already open becomes part of that changeset instead.
++
+ Applying migrations using the CLI
+ =================================
+ 
+diff --git a/docs/python-api.rst b/docs/python-api.rst
+index d515642..4ca67dc 100644
+--- a/docs/python-api.rst
++++ b/docs/python-api.rst
+@@ -3091,6 +3091,207 @@ If the ``_counts`` table ever becomes out-of-sync with the actual table counts y
+ .. note::
+     In the CLI: :ref:`sqlite-utils enable-counts <cli_enable_counts>`
+ 
++.. _python_api_history:
++
++Tracking changes with history
++=============================
++
++``sqlite-utils`` can keep a record of every change made to the rows of a table. With history enabled you can see who changed what and when, read a table as it was at an earlier point, put rows or whole tables back, and undo a group of changes in one go.
++
++Call ``table.enable_history()`` to start recording:
++
++.. code-block:: python
++
++    db.table("places").enable_history()
++
++History is recorded by SQLite triggers, so every change is captured however it is made: by the methods in this library, by SQL passed to ``db.execute()``, or by another program writing to the same database file. The rows already in the table are recorded as its starting point.
++
++Everything the feature stores lives in tables with names that start with ``_history_``. These are managed for you - ``db.enable_counts()`` leaves them out, and history cannot be enabled for them.
++
++``table.has_history`` tells you if history is enabled for a table, and ``db.history_tables()`` lists the tables that have it::
++
++    >>> db.table("places").has_history
++    True
++    >>> db.history_tables()
++    ['places']
++
++History cannot be enabled for views, virtual tables or ``WITHOUT ROWID`` tables - these raise ``sqlite_utils.history.HistoryError``, the exception used for every history operation that cannot be carried out.
++
++``table.disable_history()`` stops recording and deletes everything recorded for that table.
++
++.. _python_api_history_versions:
++
++Versions
++--------
++
++Every recorded change - one row inserted, updated or deleted - gets a version number. Versions are shared by the whole database: the first change recorded is version 1 and each later change, in any table, is one higher. Version numbers are never used twice.
++
++``db.history_version`` is the version of the newest change, or ``0`` if nothing has been recorded. ``db.history_version_at(timestamp)`` is the newest version recorded at or before a point in time, given as a ``datetime`` or an ISO 8601 string. Values without a timezone are UTC::
++
++    >>> db.history_version
++    1204
++    >>> db.history_version_at("2026-11-01 09:00")
++    911
++
++These are the rules for what gets recorded:
++
++- An ``UPDATE`` that leaves every recorded column of a row as it was records nothing.
++- Changing a row's primary key (or the ``rowid`` of a table without one) is recorded as a delete of the old row followed by an insert of the new one.
++- Replacing a row, for example with ``insert(..., replace=True)``, is recorded as a delete followed by an insert.
++- Changes that are rolled back are not recorded, and use up no version numbers.
++
++.. _python_api_history_changes:
++
++Reading the recorded changes
++----------------------------
++
++``table.changes()`` iterates over the changes recorded for a table, oldest first. ``db.changes()`` does the same for every table with history enabled. Both accept ``since=`` (only versions higher than this), ``until=`` (only versions up to and including this) and ``changeset=`` (see :ref:`python_api_history_changesets`).
++
++.. code-block:: python
++
++    last_seen = db.history_version
++    # ... later ...
++    for change in db.changes(since=last_seen):
++        print(change.version, change.table, change.op, change.pk)
++
++``table.history(pk_values)`` returns the list of changes for a single row, which stays available after the row has been deleted.
++
++Each change is a ``sqlite_utils.history.Change`` with these attributes:
++
++``version``
++    The version number of the change.
++
++``table``
++    The name of the table.
++
++``op``
++    ``"insert"``, ``"update"`` or ``"delete"``.
++
++``pk``
++    The primary key of the row - a tuple for compound primary keys, the ``rowid`` for tables without a primary key.
++
++``row``
++    A dictionary of the recorded columns after the change. For a delete, the values the row had just before it was deleted.
++
++``changed``
++    For an update, a dictionary mapping each column that changed to an ``(old, new)`` tuple. Empty for inserts and deletes.
++
++``changeset``
++    The ID of the changeset the change belongs to, or ``None``.
++
++``at``
++    When the change was recorded, as a UTC string such as ``"2026-11-13 09:30:00.123"``.
++
++.. _python_api_history_time_travel:
++
++Time travel
++-----------
++
++``table.as_of(version)`` iterates over the rows of the table as they were when ``version`` was the newest change in the database, in primary key order. ``table.get_as_of(pk_values, version)`` returns a single row, raising ``NotFoundError`` if it did not exist at that version.
++
++.. code-block:: python
++
++    yesterday = db.history_version_at("2026-11-12")
++    for row in db.table("places").as_of(yesterday):
++        print(row)
++
++Rows are returned with the columns the table has now. A column that did not exist yet at that version is ``None``.
++
++``table.diff(from_version, to_version)`` lists the rows that differ between two versions as ``sqlite_utils.history.RowDiff`` objects. Each has a ``pk``, an ``op`` of ``"insert"``, ``"update"`` or ``"delete"``, and ``before`` and ``after`` dictionaries - ``None`` where the row did not exist. ``to_version`` defaults to the current version.
++
++.. _python_api_history_restore:
++
++Restoring rows and tables
++-------------------------
++
++``table.revert(pk_values, version)`` puts one row back to how it was at a version. A row that has been deleted since is created again, and a row that did not exist then is deleted. It returns ``True`` if the table was changed.
++
++``table.restore(version)`` does the same for the whole table and returns the number of rows it inserted, updated or deleted. It makes all of its changes in one transaction.
++
++.. code-block:: python
++
++    places = db.table("places")
++    places.revert(42, version=911)
++    places.restore(911)
++
++Restoring is recorded like any other change, so nothing is lost: a restore can itself be reverted.
++
++.. _python_api_history_changesets:
++
++Changesets
++----------
++
++A changeset groups changes together and gives them a message and an author. Use ``db.changeset()`` as a context manager:
++
++.. code-block:: python
++
++    with db.changeset("Import March data", author="simon") as changeset:
++        db.table("places").insert_all(rows)
++        db.execute("update places set checked = 0")
++    print(changeset.id)
++
++Every change recorded inside the block, in any table and by any means, belongs to the changeset. The block runs in a transaction: if it raises an exception its changes are rolled back and no changeset is kept. A changeset that recorded no changes is discarded. Changesets cannot be nested.
++
++``db.changesets()`` returns a list of ``sqlite_utils.history.Changeset`` objects with ``id``, ``message``, ``author`` and ``created_at`` attributes.
++
++``db.undo_changeset(changeset_id)`` puts every row the changeset changed back to how it was just before the changeset. The undo is recorded as a new changeset with the message ``Undo changeset <id>``, which is returned - so an undo can be undone too.
++
++If any of those rows has been changed again since the changeset, ``sqlite_utils.history.HistoryConflict`` is raised and nothing is changed. Its ``conflicts`` attribute is a list of ``(table_name, pk)`` tuples. Pass ``force=True`` to undo anyway, overwriting the later changes.
++
++:ref:`Migrations <migrations>` that run in a transaction are recorded as a changeset named ``Migration <set>:<name>`` when the database has tables with history enabled.
++
++.. _python_api_history_schema:
++
++History and schema changes
++--------------------------
++
++History keeps working when a table is changed using this library:
++
++- ``table.add_column()`` starts recording the new column.
++- ``table.transform()`` keeps the history. Renamed columns are renamed in the recorded history as well, dropped columns are removed from it.
++- ``db.rename_table()`` takes the history along to the new name.
++- ``table.drop()`` deletes the history together with the table.
++
++After any of these, ``table.as_of(db.history_version)`` still matches the table. Where a schema change alters stored values - a new column with a default, or a type change that converts values - the new values are recorded as updates.
++
++If you change a table in some other way, for example with ``ALTER TABLE``, call ``table.enable_history()`` again. This brings the tracking up to date with the table's columns and records anything that differs from the last recorded state, keeping the existing history.
++
++.. _python_api_history_exclude:
++
++Excluding columns
++-----------------
++
++Use ``exclude=`` to leave columns out of the history, for example a counter that changes all the time:
++
++.. code-block:: python
++
++    db.table("pages").enable_history(exclude=["hits"])
++
++Changes that only touch excluded columns are not recorded, and restoring leaves those columns alone. ``table.history_columns`` lists the columns that are recorded. Primary key columns cannot be excluded.
++
++Call ``enable_history(exclude=[...])`` again to change the excluded columns.
++
++.. _python_api_history_prune:
++
++Pruning history
++---------------
++
++``table.prune_history(version)`` forgets the individual changes up to and including a version, to save space. Each row that existed at that version keeps a single record as its starting point. It returns the number of change records removed.
++
++After pruning, the table can still be read or restored as of that version or any later one. Earlier versions raise ``HistoryError``. ``table.history_floor`` is the oldest version that can still be used, ``0`` for a table that has never been pruned.
++
++.. _python_api_history_legacy:
++
++Importing history from sqlite-history
++-------------------------------------
++
++Tables that were tracked by the older `sqlite-history <https://github.com/simonw/sqlite-history>`__ plugin have a ``_<table>_history`` table and three triggers. The first time ``enable_history()`` is called for such a table those records are imported, keeping their timestamps, and the old table and triggers are removed.
++
++Pass ``import_legacy=False`` to leave them untouched and start a fresh history instead.
++
++.. note::
++    In the CLI: :ref:`sqlite-utils enable-history <cli_history>`
++
+ .. _python_api_create_index:
+ 
+ Creating indexes
+diff --git a/docs/reference.rst b/docs/reference.rst
+index a9fdf29..29807ee 100644
+--- a/docs/reference.rst
++++ b/docs/reference.rst
+@@ -77,6 +77,23 @@ sqlite_utils.db.ForeignKey
+ 
+ .. autoclass:: sqlite_utils.db.ForeignKey
+ 
++.. _reference_history:
++
++sqlite_utils.history
++====================
++
++The classes used by :ref:`python_api_history`.
++
++.. autoclass:: sqlite_utils.history.Change
++
++.. autoclass:: sqlite_utils.history.Changeset
++
++.. autoclass:: sqlite_utils.history.RowDiff
++
++.. autoexception:: sqlite_utils.history.HistoryError
++
++.. autoexception:: sqlite_utils.history.HistoryConflict
++
+ sqlite_utils.utils
+ ==================
+ 
+diff --git a/sqlite_utils/cli.py b/sqlite_utils/cli.py
+index c230902..0f56d6c 100644
+--- a/sqlite_utils/cli.py
++++ b/sqlite_utils/cli.py
+@@ -27,11 +27,13 @@ from sqlite_utils.db import (
+     BadMultiValues,
+     DescIndex,
+     InvalidColumns,
++    NotFoundError,
+     NoTable,
+     NoView,
+     PrimaryKeyRequired,
+     quote_identifier,
+ )
++from sqlite_utils.history import HistoryError, coerce_pk
+ from sqlite_utils.plugins import ensure_plugins_loaded, get_plugins, pm
+ from sqlite_utils.utils import maximize_csv_field_size_limit
+ 
+@@ -931,6 +933,442 @@ def reset_counts(path, load_extension):
+     db.reset_counts()
+ 
+ 
++def _existing_tables(db, tables):
++    "Table objects for these names - an error if any is not a table"
++    bad_tables = [table for table in tables if table not in db.table_names()]
++    if bad_tables:
++        raise click.ClickException(f"Invalid tables: {bad_tables}")
++    return [db.table(table) for table in tables]
++
++
++def _history_version(db, value):
++    "A VERSION argument is a version number, or a timestamp to look up"
++    try:
++        return int(value)
++    except ValueError:
++        pass
++    try:
++        return db.history_version_at(value)
++    except ValueError:
++        raise click.ClickException(
++            f"VERSION must be a version number or a timestamp, got: {value}"
++        )
++
++
++def _output_table(
++    rows, headers, nl, arrays, csv, tsv, no_headers, table, fmt, json_cols, ascii_
++):
++    "Output lists of values in the format picked with the output options"
++    if table or fmt or csv or tsv:
++        # These formats have no nesting, so nested values are shown as JSON
++        rows = [
++            [
++                (
++                    json.dumps(value, default=json_binary, ensure_ascii=ascii_)
++                    if isinstance(value, (dict, list, tuple))
++                    else value
++                )
++                for value in row
++            ]
++            for row in rows
++        ]
++    if table or fmt:
++        print(
++            tabulate.tabulate(
++                rows, headers=() if no_headers else headers, tablefmt=fmt or "simple"
++            )
++        )
++    elif csv or tsv:
++        writer = csv_std.writer(sys.stdout, dialect="excel-tab" if tsv else "excel")
++        if not no_headers:
++            writer.writerow(headers)
++        for row in rows:
++            writer.writerow(row)
++    else:
++        for line in output_rows(iter(rows), headers, nl, arrays, json_cols, ascii_):
++            click.echo(line)
++
++
++@cli.command(name="enable-history")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("tables", nargs=-1, required=True)
++@click.option(
++    "-x",
++    "--exclude",
++    multiple=True,
++    help="Column that should not be recorded - only with a single table",
++)
++@click.option(
++    "--no-import-legacy",
++    is_flag=True,
++    help="Do not import history recorded by the sqlite-history plugin",
++)
++@load_extension_option
++def enable_history(path, tables, exclude, no_import_legacy, load_extension):
++    """Record every change made to the rows of these tables
++
++    Example:
++
++    \b
++        sqlite-utils enable-history chickens.db chickens
++
++    Use "sqlite-utils history" to see the recorded changes.
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    if exclude and len(tables) > 1:
++        raise click.ClickException("--exclude can only be used with a single table")
++    try:
++        with db.atomic():
++            for table in _existing_tables(db, tables):
++                table.enable_history(
++                    exclude=exclude or None, import_legacy=not no_import_legacy
++                )
++    except HistoryError as e:
++        raise click.ClickException(str(e))
++
++
++@cli.command(name="disable-history")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("tables", nargs=-1, required=True)
++@load_extension_option
++def disable_history(path, tables, load_extension):
++    """Stop recording changes to these tables and delete their history
++
++    Example:
++
++    \b
++        sqlite-utils disable-history chickens.db chickens
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    try:
++        with db.atomic():
++            for table in _existing_tables(db, tables):
++                table.disable_history()
++    except HistoryError as e:
++        raise click.ClickException(str(e))
++
++
++@cli.command()
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("dbtable", required=False)
++@click.argument("pk_values", nargs=-1)
++@click.option(
++    "--since", type=int, default=0, help="Only changes after this version number"
++)
++@click.option("--until", type=int, help="Only changes up to this version number")
++@click.option("--changeset", type=int, help="Only changes in this changeset")
++@output_options
++@load_extension_option
++def history(
++    path,
++    dbtable,
++    pk_values,
++    since,
++    until,
++    changeset,
++    nl,
++    arrays,
++    csv,
++    tsv,
++    no_headers,
++    table,
++    fmt,
++    json_cols,
++    ascii_,
++    load_extension,
++):
++    """Show the changes recorded for tables that have history enabled
++
++    Example:
++
++    \b
++        sqlite-utils history chickens.db
++
++    Add a table name to see just that table, and primary key values to see
++    the history of a single row:
++
++    \b
++        sqlite-utils history chickens.db chickens 3
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    try:
++        if dbtable is None:
++            changes = db.changes(since=since, until=until, changeset=changeset)
++        else:
++            (history_table,) = _existing_tables(db, [dbtable])
++            if pk_values:
++                changes = (
++                    change
++                    for change in history_table.history(
++                        coerce_pk(history_table, pk_values)
++                    )
++                    if change.version > since
++                    and (until is None or change.version <= until)
++                    and (changeset is None or change.changeset == changeset)
++                )
++            else:
++                changes = history_table.changes(
++                    since=since, until=until, changeset=changeset
++                )
++        rows = [
++            [
++                change.version,
++                change.table,
++                change.op,
++                change.pk,
++                change.at,
++                change.changeset,
++                change.row,
++                {column: list(pair) for column, pair in change.changed.items()},
++            ]
++            for change in changes
++        ]
++    except (HistoryError, NotFoundError) as e:
++        raise click.ClickException(str(e))
++    _output_table(
++        rows,
++        ["version", "table", "op", "pk", "at", "changeset", "row", "changed"],
++        nl,
++        arrays,
++        csv,
++        tsv,
++        no_headers,
++        table,
++        fmt,
++        json_cols,
++        ascii_,
++    )
++
++
++@cli.command(name="as-of")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("dbtable")
++@click.argument("version")
++@output_options
++@load_extension_option
++def as_of(
++    path,
++    dbtable,
++    version,
++    nl,
++    arrays,
++    csv,
++    tsv,
++    no_headers,
++    table,
++    fmt,
++    json_cols,
++    ascii_,
++    load_extension,
++):
++    """Output the rows of a table as they were at an earlier version
++
++    VERSION is a history version number, or a timestamp - which means the
++    newest version recorded at or before that time.
++
++    Example:
++
++    \b
++        sqlite-utils as-of chickens.db chickens 42
++        sqlite-utils as-of chickens.db chickens "2026-11-01 09:00"
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    try:
++        (history_table,) = _existing_tables(db, [dbtable])
++        headers = history_table.history_columns
++        rows = [
++            [row[column] for column in headers]
++            for row in history_table.as_of(_history_version(db, version))
++        ]
++    except HistoryError as e:
++        raise click.ClickException(str(e))
++    _output_table(
++        rows, headers, nl, arrays, csv, tsv, no_headers, table, fmt, json_cols, ascii_
++    )
++
++
++@cli.command()
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("dbtable")
++@click.argument("version")
++@click.argument("pk_values", nargs=-1)
++@load_extension_option
++def restore(path, dbtable, version, pk_values, load_extension):
++    """Put a table, or one of its rows, back to how it was at an earlier version
++
++    VERSION is a history version number, or a timestamp. Outputs the number
++    of rows that were changed.
++
++    Example:
++
++    \b
++        sqlite-utils restore chickens.db chickens 42
++
++    Add primary key values to restore just that row:
++
++    \b
++        sqlite-utils restore chickens.db chickens 42 3
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    try:
++        (history_table,) = _existing_tables(db, [dbtable])
++        version = _history_version(db, version)
++        if pk_values:
++            changed = int(
++                history_table.revert(coerce_pk(history_table, pk_values), version)
++            )
++        else:
++            changed = history_table.restore(version)
++    except (HistoryError, NotFoundError, sqlite3.DatabaseError) as e:
++        raise click.ClickException(str(e) or "Row not found")
++    click.echo(changed)
++
++
++@cli.command()
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@output_options
++@load_extension_option
++def changesets(
++    path,
++    nl,
++    arrays,
++    csv,
++    tsv,
++    no_headers,
++    table,
++    fmt,
++    json_cols,
++    ascii_,
++    load_extension,
++):
++    """List the changesets recorded in this database
++
++    Example:
++
++    \b
++        sqlite-utils changesets chickens.db
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    _output_table(
++        [
++            [changeset.id, changeset.message, changeset.author, changeset.created_at]
++            for changeset in db.changesets()
++        ],
++        ["id", "message", "author", "created_at"],
++        nl,
++        arrays,
++        csv,
++        tsv,
++        no_headers,
++        table,
++        fmt,
++        json_cols,
++        ascii_,
++    )
++
++
++@cli.command()
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("changeset_id", type=int)
++@click.option(
++    "--force",
++    is_flag=True,
++    help="Undo even if rows have been changed again since",
++)
++@click.option("--author", help="Author to record for the undo")
++@load_extension_option
++def undo(path, changeset_id, force, author, load_extension):
++    """Undo a changeset, putting the rows it changed back as they were before
++
++    The undo is recorded as a new changeset. Outputs its ID.
++
++    Example:
++
++    \b
++        sqlite-utils undo chickens.db 3
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    try:
++        changeset = db.undo_changeset(changeset_id, force=force, author=author)
++    except (HistoryError, sqlite3.DatabaseError) as e:
++        raise click.ClickException(str(e))
++    if changeset is not None:
++        click.echo(changeset.id)
++
++
++@cli.command(name="prune-history")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("dbtable")
++@click.argument("version")
++@load_extension_option
++def prune_history(path, dbtable, version, load_extension):
++    """Forget the individual changes to a table up to and including VERSION
++
++    VERSION is a history version number, or a timestamp. The table can no
++    longer be taken back to before that version. Outputs the number of
++    change records that were removed.
++
++    Example:
++
++    \b
++        sqlite-utils prune-history chickens.db chickens 42
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    try:
++        (history_table,) = _existing_tables(db, [dbtable])
++        click.echo(history_table.prune_history(_history_version(db, version)))
++    except HistoryError as e:
++        raise click.ClickException(str(e))
++
++
+ _import_options = (
+     click.option(
+         "--flatten",
+@@ -1050,6 +1488,11 @@ def insert_upsert_options(*, require_pk=False):
+                     default=False,
+                     help="Apply STRICT mode to created table",
+                 ),
++                click.option(
++                    "--changeset",
++                    help="Record the changes to tables with history enabled "
++                    "as a changeset with this message",
++                ),
+             )
+         ):
+             fn = decorator(fn)
+@@ -1095,6 +1538,7 @@ def insert_upsert_implementation(
+     functions=None,
+     strict=False,
+     code=None,
++    changeset=None,
+ ):
+     db = sqlite_utils.Database(path)
+     _register_db_for_cleanup(db)
+@@ -1103,6 +1547,15 @@ def insert_upsert_implementation(
+     column_type_overrides = {column: ctype.upper() for column, ctype in (types or [])}
+ 
+     def _insert_docs(docs, tracker=None):
++        if changeset is None:
++            _insert_docs_now(docs, tracker)
++        else:
++            # Everything the command writes becomes one changeset, in one
++            # transaction - see "sqlite-utils changesets" and "undo"
++            with db.changeset(changeset):
++                _insert_docs_now(docs, tracker)
++
++    def _insert_docs_now(docs, tracker):
+         extra_kwargs: dict[str, Any] = {
+             "ignore": ignore,
+             "replace": replace,
+@@ -1386,6 +1839,7 @@ def insert(
+     default,
+     types,
+     strict,
++    changeset,
+ ):
+     """
+     Insert records from FILE into a table, creating the table if it
+@@ -1481,6 +1935,7 @@ def insert(
+             types=types,
+             strict=strict,
+             code=code,
++            changeset=changeset,
+         )
+     except UnicodeDecodeError as ex:
+         raise click.ClickException(UNICODE_ERROR.format(ex))
+@@ -1519,6 +1974,7 @@ def upsert(
+     load_extension,
+     silent,
+     strict,
++    changeset,
+ ):
+     """
+     Upsert records based on their primary key. Works like 'insert' but if
+@@ -1571,6 +2027,7 @@ def upsert(
+             silent=silent,
+             strict=strict,
+             code=code,
++            changeset=changeset,
+         )
+     except UnicodeDecodeError as ex:
+         raise click.ClickException(UNICODE_ERROR.format(ex))
+diff --git a/sqlite_utils/db.py b/sqlite_utils/db.py
+index c011d9b..5027f14 100644
+--- a/sqlite_utils/db.py
++++ b/sqlite_utils/db.py
+@@ -26,6 +26,7 @@ from typing import (
+ from sqlite_fts4 import rank_bm25
+ from sqlite_utils.plugins import ensure_plugins_loaded, pm
+ 
++from . import history as _history
+ from .create_table_parser import (
+     Check,
+     ColumnComments,
+@@ -1250,6 +1251,7 @@ class Database:
+             if (
+                 table.virtual_table_using is None
+                 and table.name != self._counts_table_name
++                and not _history.is_history_table(table.name)
+             ):
+                 table.enable_counts()
+         self.use_counts_table = True
+@@ -1839,12 +1841,100 @@ class Database:
+         """
+         Rename a table.
+ 
++        If the table has :ref:`history enabled <python_api_history>` its
++        recorded history is kept and follows it to the new name.
++
+         :param name: Current table name
+         :param new_name: Name to rename it to
+         """
+-        self.execute(
+-            f"ALTER TABLE {quote_identifier(name)} RENAME TO {quote_identifier(new_name)}"
+-        )
++        sql = f"ALTER TABLE {quote_identifier(name)} RENAME TO {quote_identifier(new_name)}"
++        if not _history.is_tracked_name(self, name):
++            self.execute(sql)
++            return
++        with self.atomic():
++            _history.before_rename(self, name)
++            self.execute(sql)
++            _history.after_rename(self, name, new_name)
++
++    def history_tables(self) -> list[str]:
++        """
++        Names of the tables that have history enabled, in the order it was
++        enabled. See :ref:`python_api_history`.
++        """
++        return _history.tracked_names(self)
++
++    @property
++    def history_version(self) -> int:
++        """
++        The version number of the most recently recorded change, or ``0`` if
++        nothing has been recorded. See :ref:`python_api_history_versions`.
++        """
++        return _history.version(self)
++
++    def history_version_at(self, timestamp: str | datetime.datetime) -> int:
++        """
++        The highest version that was recorded at or before ``timestamp``, or
++        ``0`` if there is none.
++
++        :param timestamp: A ``datetime`` or an ISO 8601 string such as
++          ``"2026-11-13"`` or ``"2026-11-13 09:30:00"`` - values without a
++          timezone are treated as UTC
++        """
++        return _history.version_at(self, timestamp)
++
++    def changes(
++        self,
++        since: int = 0,
++        until: int | None = None,
++        changeset: int | None = None,
++    ) -> Generator["_history.Change", None, None]:
++        """
++        Iterate over the changes recorded for every table with history
++        enabled, oldest first. See :ref:`python_api_history_changes`.
++
++        :param since: Only changes with a version higher than this
++        :param until: Only changes with a version no higher than this
++        :param changeset: Only changes that belong to this changeset ID
++        """
++        return _history.db_changes(self, since=since, until=until, changeset=changeset)
++
++    def changeset(
++        self, message: str | None = None, author: str | None = None
++    ) -> contextlib.AbstractContextManager["_history.Changeset"]:
++        """
++        Context manager that groups every change recorded inside it into a
++        changeset, which can later be undone as a unit::
++
++            with db.changeset("Import March data", author="simon"):
++                db["places"].insert_all(rows)
++
++        The block runs in a transaction. See :ref:`python_api_history_changesets`.
++
++        :param message: Description of the changeset
++        :param author: Who made the changes
++        """
++        return _history.changeset(self, message=message, author=author)
++
++    def changesets(self) -> list["_history.Changeset"]:
++        "List of the changesets recorded in this database, oldest first."
++        return _history.changesets(self)
++
++    def undo_changeset(
++        self, changeset_id: int, force: bool = False, author: str | None = None
++    ) -> "_history.Changeset | None":
++        """
++        Put every row changed by a changeset back to how it was just before
++        that changeset. The undo is recorded as a new changeset, which is
++        returned - or ``None`` if nothing needed to change.
++
++        :param changeset_id: ID of the changeset to undo
++        :param force: Undo even if rows have been changed again since, overwriting
++          those later changes
++        :param author: Author to record for the new changeset
++        :raises sqlite_utils.history.HistoryConflict: if rows changed by the
++          changeset have been changed again since, unless ``force=True``
++        """
++        return _history.undo_changeset(self, changeset_id, force=force, author=author)
+ 
+     def create_view(
+         self, name: str, sql: str, ignore: bool = False, replace: bool = False
+@@ -2752,8 +2842,20 @@ class Table(Queryable):
+                 if not defer_foreign_keys_was_on:
+                     self.db.execute("PRAGMA defer_foreign_keys=ON;")
+             with self.db.atomic():
++                # A table with history enabled loses its triggers when it is
++                # replaced, and its shadow table has to follow the new columns
++                has_history = _history.before_transform(self)
++                columns_before = self.columns_dict if has_history else {}
+                 for sql in sqls:
+                     self.db.execute(sql)
++                if has_history:
++                    _history.after_transform(
++                        self,
++                        {
++                            resolve_casing(old, columns_before): new
++                            for old, new in (rename or {}).items()
++                        },
++                    )
+                 # Run the foreign_key_check before we commit
+                 if pragma_foreign_keys_was_on:
+                     foreign_key_violations = self.db.execute(
+@@ -3527,18 +3629,26 @@ class Table(Queryable):
+             not_null_default=(" " + not_null_sql) if not_null_sql else "",
+         )
+         self.db.execute(sql)
++        if _history.is_tracked(self):
++            # Start recording the new column
++            _history.resync(self)
+         if fk is not None:
+             self.add_foreign_key(col_name, fk, fk_col)
+         return self
+ 
+     def drop(self, ignore: bool = False) -> None:
+         """
+-        Drop this table.
++        Drop this table. If the table has :ref:`history enabled <python_api_history>`
++        its recorded history is deleted too.
+ 
+         :param ignore: Set to ``True`` to ignore the error if the table does not exist
+         """
++        has_history = _history.is_tracked(self)
+         try:
+-            self.db.execute(f"DROP TABLE {quote_identifier(self.name)}")
++            with self.db.atomic():
++                self.db.execute(f"DROP TABLE {quote_identifier(self.name)}")
++                if has_history:
++                    _history.forget(self.db, self.name)
+         except sqlite3.OperationalError:
+             if not ignore:
+                 raise
+@@ -3751,6 +3861,141 @@ class Table(Queryable):
+         }
+         return trigger_names.issubset(self.triggers_dict.keys())
+ 
++    def enable_history(
++        self, exclude: Iterable[str] | None = None, import_legacy: bool = True
++    ) -> "Table":
++        """
++        Start recording every change made to the rows of this table, by any
++        means. See :ref:`python_api_history`.
++
++        The rows already in the table are recorded as the starting point.
++        Calling this on a table that already has history enabled keeps what
++        has been recorded and brings the tracking up to date with the table.
++
++        :param exclude: Columns that should not be recorded - ``None`` keeps
++          the current setting
++        :param import_legacy: Import history recorded by the ``sqlite-history``
++          plugin, if there is any - see :ref:`python_api_history_legacy`
++        :raises sqlite_utils.history.HistoryError: if history cannot be
++          enabled for this table
++        """
++        _history.enable(self, exclude=exclude, import_legacy=import_legacy)
++        return self
++
++    def disable_history(self) -> "Table":
++        """
++        Stop recording changes to this table and delete its recorded history.
++
++        :raises sqlite_utils.history.HistoryError: if history is not enabled
++        """
++        _history.disable(self)
++        return self
++
++    @property
++    def has_history(self) -> bool:
++        "Is history enabled for this table?"
++        return _history.is_tracked(self)
++
++    @property
++    def history_columns(self) -> list[str]:
++        "The columns of this table that are recorded in its history."
++        return _history._Tracked(self).columns
++
++    @property
++    def history_floor(self) -> int:
++        """
++        The oldest version this table can be taken back to - ``0`` unless
++        :meth:`prune_history` has been used.
++        """
++        return _history._Tracked(self).floor
++
++    def changes(
++        self,
++        since: int = 0,
++        until: int | None = None,
++        changeset: int | None = None,
++    ) -> Generator["_history.Change", None, None]:
++        """
++        Iterate over the changes recorded for this table, oldest first.
++        See :ref:`python_api_history_changes`.
++
++        :param since: Only changes with a version higher than this
++        :param until: Only changes with a version no higher than this
++        :param changeset: Only changes that belong to this changeset ID
++        """
++        return _history.changes(self, since=since, until=until, changeset=changeset)
++
++    def history(self, pk_values: list | tuple | str | int) -> list["_history.Change"]:
++        """
++        The changes recorded for one row, oldest first.
++
++        :param pk_values: A single value, or a tuple of values for tables that have a compound primary key
++        """
++        return list(_history.changes(self, key=_history._as_key(pk_values)))
++
++    def as_of(self, version: int) -> Generator[dict[str, Any], None, None]:
++        """
++        Iterate over the rows of this table as they were when ``version`` was
++        the newest change in the database, in primary key order.
++        See :ref:`python_api_history_time_travel`.
++
++        :param version: A history version number
++        """
++        return _history.as_of(self, version)
++
++    def get_as_of(self, pk_values: list | tuple | str | int, version: int) -> dict:
++        """
++        Return a row as it was at ``version``.
++
++        Raises ``sqlite_utils.db.NotFoundError`` if the row did not exist then.
++
++        :param pk_values: A single value, or a tuple of values for tables that have a compound primary key
++        :param version: A history version number
++        """
++        return _history.get_as_of(self, pk_values, version)
++
++    def diff(
++        self, from_version: int, to_version: int | None = None
++    ) -> list["_history.RowDiff"]:
++        """
++        The rows that differ between two versions of this table, in primary
++        key order.
++
++        :param from_version: The version to compare from
++        :param to_version: The version to compare to - defaults to the current version
++        """
++        return _history.diff(self, from_version, to_version)
++
++    def revert(self, pk_values: list | tuple | str | int, version: int) -> bool:
++        """
++        Put one row back to how it was at ``version`` - re-creating it if it
++        has been deleted since, or deleting it if it did not exist then.
++        Returns ``True`` if the table was changed.
++
++        :param pk_values: A single value, or a tuple of values for tables that have a compound primary key
++        :param version: A history version number
++        """
++        return _history.revert(self, pk_values, version)
++
++    def restore(self, version: int) -> int:
++        """
++        Put the whole table back to how it was at ``version``. Returns the
++        number of rows that were inserted, updated or deleted.
++
++        :param version: A history version number
++        """
++        return _history.restore(self, version)
++
++    def prune_history(self, version: int) -> int:
++        """
++        Forget the individual changes up to and including ``version``, keeping
++        a single starting point for each row that existed then. Returns the
++        number of change records removed. See :ref:`python_api_history_prune`.
++
++        :param version: A history version number
++        """
++        return _history.prune(self, version)
++
+     def enable_fts(
+         self,
+         columns: Iterable[str],
+diff --git a/sqlite_utils/history.py b/sqlite_utils/history.py
+new file mode 100644
+index 0000000..62139ee
+--- /dev/null
++++ b/sqlite_utils/history.py
+@@ -0,0 +1,1144 @@
++"""
++Row history: change tracking, time travel and undo for tables.
++
++Every tracked table gets four triggers and a shadow table. The triggers write
++one record to the shadow table for each row that is inserted, updated or
++deleted, numbered by a database-wide version counter. Everything else in this
++module reads those records: listing changes, rebuilding a table as it was at
++an earlier version, restoring rows and undoing whole changesets.
++
++The public API lives on :class:`sqlite_utils.db.Table` and
++:class:`sqlite_utils.db.Database` - the functions here implement it.
++"""
++
++import contextlib
++import datetime
++import heapq
++import json
++from collections.abc import Generator, Iterable
++from dataclasses import dataclass
++from typing import TYPE_CHECKING, Any
++
++from . import db as _db
++
++if TYPE_CHECKING:
++    from .db import Database, Table
++
++#: Every table, trigger and index created by this module starts with this
++PREFIX = "_history_"
++TABLES_TABLE = "_history_tables"
++STATE_TABLE = "_history_state"
++CHANGESETS_TABLE = "_history_changesets"
++SHADOW_PREFIX = "_history_data_"
++TRIGGER_PREFIX = "_history_on_"
++INDEX_PREFIX = "_history_idx_"
++
++_NOW = "strftime('%Y-%m-%d %H:%M:%f', 'now')"
++_TRIGGER_SUFFIXES = ("insert", "update", "rekey", "delete")
++_SYSTEM_COLUMNS = "_version, _op, _at, _changeset, _rowid"
++
++_LEGACY_SYSTEM_COLUMNS = ("_rowid", "_version", "_updated", "_mask")
++_LEGACY_TRIGGER_SUFFIXES = ("insert_history", "update_history", "delete_history")
++
++_CREATE_TABLES_SQL = f"""
++CREATE TABLE IF NOT EXISTS "{TABLES_TABLE}" (
++   name TEXT PRIMARY KEY,
++   exclude TEXT NOT NULL DEFAULT '[]',
++   floor INTEGER NOT NULL DEFAULT 0,
++   enabled_at TEXT
++);
++CREATE TABLE IF NOT EXISTS "{STATE_TABLE}" (
++   id INTEGER PRIMARY KEY CHECK (id = 1),
++   version INTEGER NOT NULL DEFAULT 0,
++   changeset INTEGER
++);
++INSERT OR IGNORE INTO "{STATE_TABLE}" (id, version) VALUES (1, 0);
++CREATE TABLE IF NOT EXISTS "{CHANGESETS_TABLE}" (
++   id INTEGER PRIMARY KEY,
++   message TEXT,
++   author TEXT,
++   created_at TEXT,
++   pruned INTEGER NOT NULL DEFAULT 0
++);
++"""
++
++
++class HistoryError(Exception):
++    "A history operation could not be carried out"
++
++
++class HistoryConflict(HistoryError):
++    """
++    Undoing a changeset would overwrite changes made after it.
++
++    ``conflicts`` is a list of ``(table_name, pk)`` pairs.
++    """
++
++    def __init__(self, message: str, conflicts: list[tuple[str, Any]]):
++        super().__init__(message)
++        self.conflicts = conflicts
++
++
++@dataclass(frozen=True)
++class Change:
++    """
++    One recorded change to one row.
++
++    ``row`` holds the tracked columns after an insert or update, or as they
++    were just before a delete. ``changed`` maps column names to
++    ``(old, new)`` pairs for an update and is empty otherwise.
++    """
++
++    version: int
++    table: str
++    op: str
++    pk: Any
++    row: dict[str, Any]
++    changed: dict[str, tuple[Any, Any]]
++    changeset: int | None
++    at: str
++
++
++@dataclass(frozen=True)
++class Changeset:
++    "A named group of changes created with ``db.changeset()``"
++
++    id: int
++    message: str | None
++    author: str | None
++    created_at: str
++
++
++@dataclass(frozen=True)
++class RowDiff:
++    "How one row differs between two versions - see ``table.diff()``"
++
++    pk: Any
++    before: dict[str, Any] | None
++    after: dict[str, Any] | None
++
++    @property
++    def op(self) -> str:
++        if self.before is None:
++            return "insert"
++        if self.after is None:
++            return "delete"
++        return "update"
++
++
++def _q(identifier: str) -> str:
++    return _db.quote_identifier(identifier)
++
++
++def is_history_table(name: str) -> bool:
++    "Is this one of the tables created by this module?"
++    return name.startswith(PREFIX)
++
++
++def shadow_name(table_name: str) -> str:
++    return SHADOW_PREFIX + table_name
++
++
++def _trigger_names(table_name: str) -> list[str]:
++    return [f"{TRIGGER_PREFIX}{table_name}_{suffix}" for suffix in _TRIGGER_SUFFIXES]
++
++
++def _index_names(table_name: str) -> tuple[str, str]:
++    return (
++        f"{INDEX_PREFIX}{table_name}_key",
++        f"{INDEX_PREFIX}{table_name}_changeset",
++    )
++
++
++def _same(a: Any, b: Any) -> bool:
++    "Strict equality: 1 and 1.0 and '1' are all different values"
++    return type(a) is type(b) and a == b
++
++
++def _as_pk(key: tuple) -> Any:
++    return key[0] if len(key) == 1 else key
++
++
++def _as_key(pk_values: Any) -> tuple:
++    if isinstance(pk_values, (list, tuple)):
++        return tuple(pk_values)
++    return (pk_values,)
++
++
++def has_tables(db: "Database") -> bool:
++    "Have the history bookkeeping tables been created in this database?"
++    # conn.execute, not db.execute: these probes run inside existing code
++    # paths such as transform() and should not show up in their SQL traces
++    return (
++        db.conn.execute(
++            "select 1 from sqlite_master where type = 'table' and name = ?",
++            (STATE_TABLE,),
++        ).fetchone()
++        is not None
++    )
++
++
++def ensure_tables(db: "Database") -> None:
++    if not has_tables(db):
++        with db.atomic():
++            db.executescript(_CREATE_TABLES_SQL)
++
++
++def _meta(db: "Database", table_name: str) -> tuple | None:
++    if not has_tables(db):
++        return None
++    return db.conn.execute(
++        f'select exclude, floor from "{TABLES_TABLE}" where name = ?', (table_name,)
++    ).fetchone()
++
++
++def is_tracked_name(db: "Database", table_name: str) -> bool:
++    return _meta(db, table_name) is not None
++
++
++def is_tracked(table: "Table") -> bool:
++    return is_tracked_name(table.db, table.name) and table.exists()
++
++
++def tracked_names(db: "Database") -> list[str]:
++    "Names of the tables with history enabled, in the order it was enabled"
++    if not has_tables(db):
++        return []
++    existing = set(db.table_names())
++    return [
++        row[0]
++        for row in db.execute(
++            f'select name from "{TABLES_TABLE}" order by rowid'
++        ).fetchall()
++        if row[0] in existing
++    ]
++
++
++class _Tracked:
++    "Everything needed to build SQL for one tracked table"
++
++    def __init__(self, table: "Table"):
++        meta = _meta(table.db, table.name)
++        if meta is None or not table.exists():
++            raise HistoryError(f"History is not enabled for table {table.name}")
++        self.table = table
++        self.db = table.db
++        self.name = table.name
++        self.exclude: list[str] = json.loads(meta[0])
++        self.floor: int = meta[1]
++        self.shadow = shadow_name(table.name)
++        self.pks: list[str] = [] if table.use_rowid else table.pks
++        #: The columns that should be recorded, going by the table as it is now
++        self.live_columns = [
++            column.name for column in table.columns if column.name not in self.exclude
++        ]
++        # The columns that are recorded. A column added behind our back is in
++        # the table but not in the shadow table or the triggers until
++        # _sync_schema() has run, and must not be read from history before then
++        stored = {column.name for column in table.db.table(self.shadow).columns}
++        self.columns = [
++            column for column in self.live_columns if "d_" + column in stored
++        ]
++
++    @property
++    def shadow_columns(self) -> list[str]:
++        return ["d_" + column for column in self.columns]
++
++    @property
++    def shadow_key_columns(self) -> list[str]:
++        return ["d_" + pk for pk in self.pks] if self.pks else ["_rowid"]
++
++    @property
++    def select_list(self) -> str:
++        "The system columns followed by every tracked column"
++        return ", ".join(
++            [_SYSTEM_COLUMNS] + [_q(column) for column in self.shadow_columns]
++        )
++
++    def key_of(self, rowid: int, image: dict[str, Any]) -> tuple:
++        if self.pks:
++            return tuple(image[pk] for pk in self.pks)
++        return (rowid,)
++
++    def check_key(self, key: tuple) -> tuple:
++        expected = len(self.shadow_key_columns)
++        if len(key) != expected:
++            raise _db.NotFoundError(
++                "Need {} primary key value{}".format(
++                    expected, "" if expected == 1 else "s"
++                )
++            )
++        return key
++
++    def match(self, a: str, b: str) -> str:
++        "Do shadow rows aliased a and b describe the same table row?"
++        return " AND ".join(
++            f"{a}.{_q(column)} IS {b}.{_q(column)}"
++            for column in self.shadow_key_columns
++        )
++
++    def match_live(self, live: str, shadow: str) -> str:
++        "Does the table row aliased live match the shadow row aliased shadow?"
++        if not self.pks:
++            return f"{live}.rowid IS {shadow}._rowid"
++        return " AND ".join(
++            f"{live}.{_q(pk)} IS {shadow}.{_q('d_' + pk)}" for pk in self.pks
++        )
++
++    def latest(self, alias: str, upto: str | None = None) -> str:
++        "Is the shadow row aliased alias the newest one for its table row?"
++        limit = f" AND n._version <= {upto}" if upto else ""
++        return (
++            f"NOT EXISTS (SELECT 1 FROM {_q(self.shadow)} n WHERE "
++            f"{self.match('n', alias)} AND n._version > {alias}._version{limit})"
++        )
++
++    @property
++    def shadow_key_where(self) -> str:
++        return " AND ".join(f"{_q(column)} IS ?" for column in self.shadow_key_columns)
++
++    @property
++    def live_key_where(self) -> str:
++        if not self.pks:
++            return "rowid IS ?"
++        return " AND ".join(f"{_q(pk)} IS ?" for pk in self.pks)
++
++    def check_version(self, version: Any) -> int:
++        if isinstance(version, bool) or not isinstance(version, int):
++            raise TypeError("version must be an integer")
++        if version < self.floor:
++            raise HistoryError(
++                f"History of table {self.name} before version {self.floor} "
++                "has been pruned"
++            )
++        return version
++
++
++# Enabling, disabling and keeping the shadow table in step with the table
++
++
++def _check_trackable(table: "Table") -> None:
++    if is_history_table(table.name):
++        raise HistoryError(f"{table.name} is used to store history")
++    if not table.exists():
++        raise HistoryError(f"Table {table.name} does not exist")
++    if table.virtual_table_using is not None:
++        raise HistoryError(f"{table.name} is a virtual table")
++    try:
++        table.db.conn.execute(f"select rowid from {_q(table.name)} limit 0")
++    except _db.OperationalError:
++        raise HistoryError(f"{table.name} is a WITHOUT ROWID table")
++
++
++def _validate_exclude(table: "Table", exclude: Iterable[str]) -> list[str]:
++    columns = [column.name for column in table.columns]
++    resolved = {_db.resolve_casing(name, columns) for name in exclude}
++    unknown = sorted(resolved.difference(columns))
++    if unknown:
++        raise HistoryError(
++            "Cannot exclude columns that do not exist: {}".format(", ".join(unknown))
++        )
++    pks = [] if table.use_rowid else table.pks
++    excluded_pks = [pk for pk in pks if pk in resolved]
++    if excluded_pks:
++        raise HistoryError(
++            "Cannot exclude primary key columns: {}".format(", ".join(excluded_pks))
++        )
++    if len(resolved) == len(columns):
++        raise HistoryError("Cannot exclude every column")
++    return [column for column in columns if column in resolved]
++
++
++def enable(
++    table: "Table", exclude: Iterable[str] | None = None, import_legacy: bool = True
++) -> None:
++    db = table.db
++    _check_trackable(table)
++    with db.atomic():
++        ensure_tables(db)
++        fresh = _meta(db, table.name) is None
++        if fresh:
++            db.execute(
++                f'insert into "{TABLES_TABLE}" (name, exclude, enabled_at) '
++                f"values (?, ?, {_NOW})",
++                (table.name, json.dumps(_validate_exclude(table, exclude or []))),
++            )
++        elif exclude is not None:
++            _set_exclude(db, table.name, _validate_exclude(table, exclude))
++        _sync_schema(table)
++        if fresh and import_legacy and _legacy_present(table):
++            _import_legacy(table)
++        _reconcile(table)
++
++
++def disable(table: "Table") -> None:
++    _Tracked(table)  # raises HistoryError if the table is not tracked
++    with table.db.atomic():
++        _drop_triggers(table.db, table.name)
++        forget(table.db, table.name)
++
++
++def forget(db: "Database", table_name: str) -> None:
++    "Delete the recorded history and bookkeeping for a table"
++    db.execute(f"DROP TABLE IF EXISTS {_q(shadow_name(table_name))}")
++    db.execute(f'delete from "{TABLES_TABLE}" where name = ?', (table_name,))
++
++
++def resync(table: "Table") -> None:
++    "Bring tracking back in line after the table's columns or rows changed"
++    with table.db.atomic():
++        _sync_schema(table)
++        _reconcile(table)
++
++
++def _set_exclude(db: "Database", table_name: str, exclude: list[str]) -> None:
++    db.execute(
++        f'update "{TABLES_TABLE}" set exclude = ? where name = ?',
++        (json.dumps(exclude), table_name),
++    )
++
++
++def _drop_triggers(db: "Database", table_name: str) -> None:
++    for name in _trigger_names(table_name):
++        db.execute(f"DROP TRIGGER IF EXISTS {_q(name)}")
++
++
++def _sync_schema(table: "Table") -> None:
++    """
++    Make the shadow table, its indexes and the triggers match the table's
++    current columns and primary key. Recorded history is kept, apart from
++    columns that are no longer tracked.
++    """
++    db = table.db
++    info = _Tracked(table)
++    # Excluded columns can vanish, or become part of the primary key
++    exclude = [
++        column
++        for column in info.exclude
++        if column in table.columns_dict and column not in info.pks
++    ]
++    if exclude != info.exclude:
++        _set_exclude(db, table.name, exclude)
++        info = _Tracked(table)
++    key_index, changeset_index = _index_names(table.name)
++    shadow = db.table(info.shadow)
++    wanted = ["d_" + column for column in info.live_columns]
++    _drop_triggers(db, table.name)
++    db.execute(f"DROP INDEX IF EXISTS {_q(key_index)}")
++    # Data columns are declared BLOB, which gives them no type affinity:
++    # every value is stored exactly as the table held it
++    if not shadow.exists():
++        columns = "".join(f",\n   {_q(column)} BLOB" for column in wanted)
++        db.execute(
++            f"CREATE TABLE {_q(info.shadow)} (\n"
++            "   _version INTEGER PRIMARY KEY,\n"
++            "   _op TEXT NOT NULL,\n"
++            "   _at TEXT NOT NULL,\n"
++            "   _changeset INTEGER,\n"
++            f"   _rowid INTEGER{columns}\n)"
++        )
++    else:
++        existing = [
++            column.name for column in shadow.columns if column.name.startswith("d_")
++        ]
++        stale = [column for column in existing if column not in wanted]
++        if stale:
++            shadow.transform(drop=stale)
++        for column in wanted:
++            if column not in existing:
++                db.execute(
++                    f"ALTER TABLE {_q(info.shadow)} ADD COLUMN {_q(column)} BLOB"
++                )
++    # From here on the recorded columns are the table's columns
++    info = _Tracked(table)
++    db.execute(
++        "CREATE INDEX {} ON {} ({}, _version)".format(
++            _q(key_index),
++            _q(info.shadow),
++            ", ".join(_q(column) for column in info.shadow_key_columns),
++        )
++    )
++    db.execute(
++        f"CREATE INDEX IF NOT EXISTS {_q(changeset_index)} "
++        f"ON {_q(info.shadow)} (_changeset)"
++    )
++    _create_triggers(info)
++
++
++def _create_triggers(info: _Tracked) -> None:
++    table = _q(info.name)
++    shadow_columns = "".join(", " + _q(column) for column in info.shadow_columns)
++
++    def record(op: str, ref: str) -> str:
++        values = "".join(f", {ref}.{_q(column)}" for column in info.columns)
++        return (
++            f'    UPDATE "{STATE_TABLE}" SET version = version + 1;\n'
++            f"    INSERT INTO {_q(info.shadow)} ({_SYSTEM_COLUMNS}{shadow_columns})\n"
++            f"    SELECT version, '{op}', {_NOW}, changeset, {ref}.rowid{values}\n"
++            f'    FROM "{STATE_TABLE}";\n'
++        )
++
++    if info.pks:
++        same_key = " AND ".join(f"old.{_q(pk)} IS new.{_q(pk)}" for pk in info.pks)
++    else:
++        same_key = "old.rowid IS new.rowid"
++    # IS NOT alone treats the integer 1 and the real 1.0 as the same value,
++    # so the storage class is compared as well - as _reconcile() does
++    changed = " OR ".join(
++        "old.{c} IS NOT new.{c} OR typeof(old.{c}) IS NOT typeof(new.{c})".format(
++            c=_q(column)
++        )
++        for column in info.columns
++    )
++    insert, update, rekey, delete = (_q(name) for name in _trigger_names(info.name))
++    for sql in (
++        f"CREATE TRIGGER {insert} AFTER INSERT ON {table}\nBEGIN\n"
++        + record("insert", "new")
++        + "END",
++        f"CREATE TRIGGER {update} AFTER UPDATE ON {table}\n"
++        f"WHEN ({same_key}) AND ({changed})\nBEGIN\n" + record("update", "new") + "END",
++        # Changing a primary key retires the old row and starts a new one
++        f"CREATE TRIGGER {rekey} AFTER UPDATE ON {table}\n"
++        f"WHEN NOT ({same_key})\nBEGIN\n"
++        + record("delete", "old")
++        + record("insert", "new")
++        + "END",
++        f"CREATE TRIGGER {delete} AFTER DELETE ON {table}\nBEGIN\n"
++        + record("delete", "old")
++        + "END",
++    ):
++        info.db.execute(sql)
++
++
++def _record_from_select(info: _Tracked, op: str, select: str) -> int:
++    """
++    Write one record per row of ``select``, which must produce ``ord``,
++    ``_rowid`` and then the tracked columns. Versions follow ``ord``.
++    """
++    shadow_columns = "".join(", " + _q(column) for column in info.shadow_columns)
++    source_columns = "".join(", src." + _q(column) for column in info.shadow_columns)
++    count = info.db.execute(
++        f"INSERT INTO {_q(info.shadow)} ({_SYSTEM_COLUMNS}{shadow_columns})\n"
++        f"SELECT st.version + row_number() OVER (ORDER BY src.ord), '{op}', {_NOW}, "
++        f"st.changeset, src._rowid{source_columns}\n"
++        f'FROM ({select}) src, "{STATE_TABLE}" st'
++    ).rowcount
++    if count:
++        info.db.execute(f'UPDATE "{STATE_TABLE}" SET version = version + ?', (count,))
++    return count
++
++
++def _reconcile(table: "Table") -> None:
++    """
++    Record whatever differs between the table and its newest recorded state:
++    deletes, then updates, then inserts, each in rowid order. On a table that
++    has no history yet this records every row as an insert.
++    """
++    info = _Tracked(table)
++    shadow = _q(info.shadow)
++    live = _q(info.name)
++    from_shadow = "".join(f", s.{_q(column)}" for column in info.shadow_columns)
++    from_live = "".join(
++        f", t.{_q(column)} AS {_q('d_' + column)}" for column in info.columns
++    )
++    current = f"s._op != 'delete' AND {info.latest('s')}"
++    differs = " OR ".join(
++        "typeof(t.{c}) IS NOT typeof(s.{d}) OR t.{c} IS NOT s.{d}".format(
++            c=_q(column), d=_q("d_" + column)
++        )
++        for column in info.columns
++    )
++    with info.db.atomic():
++        _record_from_select(
++            info,
++            "delete",
++            f"SELECT s._rowid AS ord, s._rowid AS _rowid{from_shadow} FROM {shadow} s "
++            f"WHERE {current} AND NOT EXISTS "
++            f"(SELECT 1 FROM {live} t WHERE {info.match_live('t', 's')})",
++        )
++        _record_from_select(
++            info,
++            "update",
++            f"SELECT t.rowid AS ord, t.rowid AS _rowid{from_live} FROM {live} t "
++            f"JOIN {shadow} s ON {info.match_live('t', 's')} "
++            f"WHERE {current} AND ({differs})",
++        )
++        _record_from_select(
++            info,
++            "insert",
++            f"SELECT t.rowid AS ord, t.rowid AS _rowid{from_live} FROM {live} t "
++            f"WHERE NOT EXISTS (SELECT 1 FROM {shadow} s "
++            f"WHERE {info.match_live('t', 's')} AND {current})",
++        )
++
++
++# Hooks called from the existing schema-changing methods in db.py
++
++
++def before_transform(table: "Table") -> bool:
++    """
++    Called inside transform()'s transaction before it runs. The triggers are
++    dropped so that a table kept with keep_table= stops recording.
++    """
++    if not is_tracked(table):
++        return False
++    _drop_triggers(table.db, table.name)
++    return True
++
++
++def after_transform(table: "Table", rename: dict[str, str]) -> None:
++    db = table.db
++    meta = _meta(db, table.name)
++    assert meta is not None
++    shadow = db.table(shadow_name(table.name))
++    existing = {column.name for column in shadow.columns}
++    renames = {
++        "d_" + old: "d_" + new
++        for old, new in rename.items()
++        if "d_" + old in existing and old != new
++    }
++    if renames:
++        db.execute(f"DROP INDEX IF EXISTS {_q(_index_names(table.name)[0])}")
++        shadow.transform(rename=renames)
++    _set_exclude(
++        db, table.name, [rename.get(column, column) for column in json.loads(meta[0])]
++    )
++    _sync_schema(table)
++    _reconcile(table)
++
++
++def before_rename(db: "Database", name: str) -> None:
++    _drop_triggers(db, name)
++    for index in _index_names(name):
++        db.execute(f"DROP INDEX IF EXISTS {_q(index)}")
++
++
++def after_rename(db: "Database", name: str, new_name: str) -> None:
++    db.execute(
++        f"ALTER TABLE {_q(shadow_name(name))} RENAME TO {_q(shadow_name(new_name))}"
++    )
++    db.execute(f'update "{TABLES_TABLE}" set name = ? where name = ?', (new_name, name))
++    _sync_schema(db.table(new_name))
++
++
++# Reading the log
++
++
++def version(db: "Database") -> int:
++    if not has_tables(db):
++        return 0
++    return db.execute(f'select version from "{STATE_TABLE}"').fetchone()[0]
++
++
++def normalize_timestamp(timestamp: str | datetime.datetime) -> str:
++    "Convert a datetime or ISO 8601 string to the format history is stored in"
++    if isinstance(timestamp, str):
++        try:
++            timestamp = datetime.datetime.fromisoformat(timestamp.strip())
++        except ValueError:
++            raise ValueError(f"Invalid timestamp: {timestamp!r}")
++    elif not isinstance(timestamp, datetime.datetime):
++        raise ValueError(f"Invalid timestamp: {timestamp!r}")
++    if timestamp.tzinfo is not None:
++        timestamp = timestamp.astimezone(datetime.timezone.utc)
++    return timestamp.strftime("%Y-%m-%d %H:%M:%S.") + "{:03d}".format(
++        timestamp.microsecond // 1000
++    )
++
++
++def version_at(db: "Database", timestamp: str | datetime.datetime) -> int:
++    at = normalize_timestamp(timestamp)
++    best = 0
++    for name in tracked_names(db):
++        found = db.execute(
++            f"select max(_version) from {_q(shadow_name(name))} where _at <= ?", (at,)
++        ).fetchone()[0]
++        best = max(best, found or 0)
++    return best
++
++
++def _image(info: _Tracked, values: Iterable[Any]) -> dict[str, Any]:
++    return dict(zip(info.columns, values))
++
++
++def _change(info: _Tracked, row: tuple) -> Change:
++    version_, op, at, changeset_id, rowid = row[:5]
++    image = _image(info, row[5:])
++    key = info.key_of(rowid, image)
++    changed: dict[str, tuple[Any, Any]] = {}
++    if op == "update":
++        previous = info.db.execute(
++            "select {} from {} where {} and _version < ? "
++            "order by _version desc limit 1".format(
++                ", ".join(_q(column) for column in info.shadow_columns),
++                _q(info.shadow),
++                info.shadow_key_where,
++            ),
++            (*key, version_),
++        ).fetchone()
++        before = _image(info, previous) if previous else {}
++        changed = {
++            column: (before.get(column), value)
++            for column, value in image.items()
++            if not _same(before.get(column), value)
++        }
++    return Change(
++        version=version_,
++        table=info.name,
++        op=op,
++        pk=_as_pk(key),
++        row=image,
++        changed=changed,
++        changeset=changeset_id,
++        at=at,
++    )
++
++
++def changes(
++    table: "Table",
++    since: int = 0,
++    until: int | None = None,
++    changeset: int | None = None,
++    key: tuple | None = None,
++) -> Generator[Change, None, None]:
++    info = _Tracked(table)
++    where = ["_version > ?"]
++    params: list[Any] = [since]
++    if until is not None:
++        where.append("_version <= ?")
++        params.append(until)
++    if changeset is not None:
++        where.append("_changeset = ?")
++        params.append(changeset)
++    if key is not None:
++        where.append(info.shadow_key_where)
++        params.extend(info.check_key(key))
++    rows = info.db.execute(
++        "select {} from {} where {} order by _version".format(
++            info.select_list, _q(info.shadow), " and ".join(where)
++        ),
++        params,
++    ).fetchall()
++    for row in rows:
++        yield _change(info, row)
++
++
++def db_changes(
++    db: "Database",
++    since: int = 0,
++    until: int | None = None,
++    changeset: int | None = None,
++) -> Generator[Change, None, None]:
++    streams = [
++        changes(db.table(name), since=since, until=until, changeset=changeset)
++        for name in tracked_names(db)
++    ]
++    yield from heapq.merge(*streams, key=lambda change: change.version)
++
++
++# Time travel
++
++
++def _state_of_key(info: _Tracked, key: tuple, version_: int) -> dict[str, Any] | None:
++    "The row's tracked columns as of a version, or None if it did not exist"
++    row = info.db.execute(
++        "select _op, {} from {} where {} and _version <= ? "
++        "order by _version desc limit 1".format(
++            ", ".join(_q(column) for column in info.shadow_columns),
++            _q(info.shadow),
++            info.shadow_key_where,
++        ),
++        (*key, version_),
++    ).fetchone()
++    if row is None or row[0] == "delete":
++        return None
++    return _image(info, row[1:])
++
++
++def as_of(table: "Table", version_: int) -> Generator[dict[str, Any], None, None]:
++    info = _Tracked(table)
++    info.check_version(version_)
++    rows = info.db.execute(
++        "select {} from {} s where s._version <= :v and s._op != 'delete' "
++        "and {} order by {}".format(
++            ", ".join("s." + _q(column) for column in info.shadow_columns),
++            _q(info.shadow),
++            info.latest("s", upto=":v"),
++            ", ".join("s." + _q(column) for column in info.shadow_key_columns),
++        ),
++        {"v": version_},
++    ).fetchall()
++    for row in rows:
++        yield _image(info, row)
++
++
++def get_as_of(table: "Table", pk_values: Any, version_: int) -> dict[str, Any]:
++    info = _Tracked(table)
++    info.check_version(version_)
++    state = _state_of_key(info, info.check_key(_as_key(pk_values)), version_)
++    if state is None:
++        raise _db.NotFoundError
++    return state
++
++
++def diff(table: "Table", from_version: int, to_version: int | None = None) -> list:
++    info = _Tracked(table)
++    if to_version is None:
++        to_version = max(version(info.db), from_version)
++    info.check_version(from_version)
++    info.check_version(to_version)
++    low, high = sorted((from_version, to_version))
++    key_columns = ", ".join(_q(column) for column in info.shadow_key_columns)
++    keys = info.db.execute(
++        f"select distinct {key_columns} from {_q(info.shadow)} "
++        f"where _version > ? and _version <= ? order by {key_columns}",
++        (low, high),
++    ).fetchall()
++    diffs = []
++    for key in keys:
++        before = _state_of_key(info, key, from_version)
++        after = _state_of_key(info, key, to_version)
++        if before is None and after is None:
++            continue
++        if (
++            before is not None
++            and after is not None
++            and all(_same(before[column], after[column]) for column in before)
++        ):
++            continue
++        diffs.append(RowDiff(pk=_as_pk(tuple(key)), before=before, after=after))
++    return diffs
++
++
++# Restoring
++
++
++def _apply_state(info: _Tracked, key: tuple, target: dict[str, Any] | None) -> bool:
++    "Make the live row match target (None meaning no row). True if it changed."
++    live_row = info.db.execute(
++        "select {} from {} where {}".format(
++            ", ".join(_q(column) for column in info.columns),
++            _q(info.name),
++            info.live_key_where,
++        ),
++        key,
++    ).fetchone()
++    if target is None:
++        if live_row is None:
++            return False
++        info.db.execute(f"delete from {_q(info.name)} where {info.live_key_where}", key)
++        return True
++    if live_row is None:
++        columns = [_q(column) for column in info.columns]
++        values = [target[column] for column in info.columns]
++        if not info.pks:
++            columns.append("rowid")
++            values.append(key[0])
++        info.db.execute(
++            "insert into {} ({}) values ({})".format(
++                _q(info.name), ", ".join(columns), ", ".join("?" for _ in columns)
++            ),
++            values,
++        )
++        return True
++    live = _image(info, live_row)
++    updates = {
++        column: value
++        for column, value in target.items()
++        if column not in info.pks and not _same(live[column], value)
++    }
++    if not updates:
++        return False
++    info.db.execute(
++        "update {} set {} where {}".format(
++            _q(info.name),
++            ", ".join(f"{_q(column)} = ?" for column in updates),
++            info.live_key_where,
++        ),
++        (*updates.values(), *key),
++    )
++    return True
++
++
++def revert(table: "Table", pk_values: Any, version_: int) -> bool:
++    info = _Tracked(table)
++    info.check_version(version_)
++    key = info.check_key(_as_key(pk_values))
++    with info.db.atomic():
++        return _apply_state(info, key, _state_of_key(info, key, version_))
++
++
++def restore(table: "Table", version_: int) -> int:
++    info = _Tracked(table)
++    info.check_version(version_)
++    diffs = diff(table, version(info.db), version_)
++    # Deletes first and inserts last, so that restored rows are less likely
++    # to collide with rows that are about to go
++    order = {"delete": 0, "update": 1, "insert": 2}
++    diffs.sort(key=lambda row_diff: order[row_diff.op])
++    changed = 0
++    with info.db.atomic():
++        for row_diff in diffs:
++            changed += _apply_state(info, _as_key(row_diff.pk), row_diff.after)
++    return changed
++
++
++def prune(table: "Table", version_: int) -> int:
++    """
++    Squash every change up to and including version_ into one baseline
++    insert per row that existed at that version.
++    """
++    info = _Tracked(table)
++    if isinstance(version_, bool) or not isinstance(version_, int):
++        raise TypeError("version must be an integer")
++    version_ = min(version_, version(info.db))
++    if version_ <= info.floor:
++        return 0
++    shadow = _q(info.shadow)
++    with info.db.atomic():
++        # A changeset that loses any of its changes can no longer be undone
++        info.db.execute(
++            f'update "{CHANGESETS_TABLE}" set pruned = 1 where id in ('
++            f"select _changeset from {shadow} where _version <= ?)",
++            (version_,),
++        )
++        removed = info.db.execute(
++            f"delete from {shadow} where _version in ("
++            f"select s._version from {shadow} s where s._version <= :v "
++            f"and (s._op = 'delete' or not {info.latest('s', upto=':v')}))",
++            {"v": version_},
++        ).rowcount
++        info.db.execute(
++            f"update {shadow} set _op = 'insert' where _version <= ?", (version_,)
++        )
++        info.db.execute(
++            f'update "{TABLES_TABLE}" set floor = ? where name = ?',
++            (version_, info.name),
++        )
++    return removed
++
++
++# Changesets
++
++
++def _changeset_from_row(row: tuple) -> Changeset:
++    return Changeset(id=row[0], message=row[1], author=row[2], created_at=row[3])
++
++
++def get_changeset(db: "Database", changeset_id: int) -> Changeset | None:
++    if not has_tables(db):
++        return None
++    row = db.execute(
++        f'select id, message, author, created_at from "{CHANGESETS_TABLE}" '
++        "where id = ?",
++        (changeset_id,),
++    ).fetchone()
++    return _changeset_from_row(row) if row else None
++
++
++def changesets(db: "Database") -> list[Changeset]:
++    if not has_tables(db):
++        return []
++    return [
++        _changeset_from_row(row)
++        for row in db.execute(
++            f'select id, message, author, created_at from "{CHANGESETS_TABLE}" '
++            "order by id"
++        ).fetchall()
++    ]
++
++
++def open_changeset(db: "Database") -> int | None:
++    "The id of the changeset that is currently open on this connection"
++    if not has_tables(db):
++        return None
++    return db.conn.execute(f'select changeset from "{STATE_TABLE}"').fetchone()[0]
++
++
++@contextlib.contextmanager
++def changeset(
++    db: "Database", message: str | None = None, author: str | None = None
++) -> Generator[Changeset, None, None]:
++    # One transaction covers the whole block, so the open marker in the state
++    # table is never visible to other connections and a failure rolls back
++    # the changes together with the changeset itself
++    with db.atomic():
++        ensure_tables(db)
++        if open_changeset(db) is not None:
++            raise HistoryError("Changesets cannot be nested")
++        started_at = version(db)
++        changeset_id = db.execute(
++            f'insert into "{CHANGESETS_TABLE}" (message, author, created_at) '
++            f"values (?, ?, {_NOW})",
++            (message, author),
++        ).lastrowid
++        db.execute(f'update "{STATE_TABLE}" set changeset = ?', (changeset_id,))
++        created = get_changeset(db, changeset_id)
++        assert created is not None
++        yield created
++        db.execute(f'update "{STATE_TABLE}" set changeset = NULL')
++        if version(db) == started_at:
++            # Nothing was recorded - do not leave an empty changeset behind
++            db.execute(
++                f'delete from "{CHANGESETS_TABLE}" where id = ?', (changeset_id,)
++            )
++
++
++def undo_changeset(
++    db: "Database", changeset_id: int, force: bool = False, author: str | None = None
++) -> Changeset | None:
++    if get_changeset(db, changeset_id) is None:
++        raise HistoryError(f"No changeset with id {changeset_id}")
++    pruned = db.execute(
++        f'select pruned from "{CHANGESETS_TABLE}" where id = ?', (changeset_id,)
++    ).fetchone()[0]
++    if pruned:
++        raise HistoryError(
++            f"Changeset {changeset_id} cannot be undone: some of its changes "
++            "have been pruned"
++        )
++    plan: list[tuple[int, _Tracked, tuple, dict[str, Any] | None]] = []
++    conflicts: list[tuple[str, Any]] = []
++    for name in tracked_names(db):
++        info = _Tracked(db.table(name))
++        key_columns = ", ".join(_q(column) for column in info.shadow_key_columns)
++        touched = db.execute(
++            f"select min(_version), {key_columns} from {_q(info.shadow)} "
++            f"where _changeset = ? group by {key_columns}",
++            (changeset_id,),
++        ).fetchall()
++        for first, *key_values in touched:
++            key = tuple(key_values)
++            changed_since = db.execute(
++                f"select 1 from {_q(info.shadow)} where {info.shadow_key_where} "
++                "and _version > ? and _changeset is not ? limit 1",
++                (*key, first, changeset_id),
++            ).fetchone()
++            if changed_since:
++                conflicts.append((name, _as_pk(key)))
++            plan.append((first, info, key, _state_of_key(info, key, first - 1)))
++    if conflicts and not force:
++        raise HistoryConflict(
++            "Changeset {} cannot be undone, these rows have changed since: {}".format(
++                changeset_id,
++                ", ".join(f"{name} {pk!r}" for name, pk in conflicts),
++            ),
++            conflicts,
++        )
++    # Newest first, the reverse of the order the changes were made in
++    plan.sort(key=lambda item: item[0], reverse=True)
++    with changeset(db, f"Undo changeset {changeset_id}", author) as undo:
++        for _, info, key, state in plan:
++            _apply_state(info, key, state)
++    return get_changeset(db, undo.id)
++
++
++# Importing history recorded by the sqlite-history plugin
++
++
++def _legacy_name(table_name: str) -> str:
++    return f"_{table_name}_history"
++
++
++def _legacy_present(table: "Table") -> bool:
++    legacy = table.db.table(_legacy_name(table.name))
++    if not legacy.exists():
++        return False
++    return set(_LEGACY_SYSTEM_COLUMNS).issubset(c.name for c in legacy.columns)
++
++
++def _format_milliseconds(milliseconds: int) -> str:
++    seconds, millis = divmod(int(milliseconds), 1000)
++    moment = datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc)
++    return moment.strftime("%Y-%m-%d %H:%M:%S.") + f"{millis:03d}"
++
++
++def _import_legacy(table: "Table") -> None:
++    """
++    Replay the records of a sqlite-history table into the shadow table, then
++    remove the legacy table and its triggers.
++
++    Legacy update records only hold the columns named by their bit mask, so
++    each row's full state is rebuilt by replaying its records in the order
++    they were written.
++    """
++    db = table.db
++    info = _Tracked(table)
++    legacy_name = _legacy_name(table.name)
++    legacy_columns = [
++        column.name
++        for column in db.table(legacy_name).columns
++        if column.name not in _LEGACY_SYSTEM_COLUMNS
++    ]
++    for suffix in _LEGACY_TRIGGER_SUFFIXES:
++        db.execute(f"DROP TRIGGER IF EXISTS {_q(f'{table.name}_{suffix}')}")
++    rows = db.execute(
++        "select _rowid, _updated, _mask{} from {} order by rowid".format(
++            "".join(", " + _q(column) for column in legacy_columns), _q(legacy_name)
++        )
++    ).fetchall()
++    images: dict[Any, dict[str, Any]] = {}
++    records: list[tuple[str, Any, dict[str, Any], str | None]] = []
++    for rowid, updated, mask, *values in rows:
++        at = _format_milliseconds(updated) if updated is not None else None
++        recorded = dict(zip(legacy_columns, values))
++        previous = images.get(rowid)
++        if mask is not None and mask < 0:
++            records.append(("delete", rowid, recorded, at))
++            images.pop(rowid, None)
++            continue
++        if previous is None:
++            image = recorded
++            records.append(("insert", rowid, image, at))
++        else:
++            image = dict(previous)
++            for position, column in enumerate(legacy_columns):
++                if mask is None or mask & (1 << position):
++                    image[column] = recorded[column]
++            if any(not _same(previous.get(pk), image.get(pk)) for pk in info.pks):
++                records.append(("delete", rowid, previous, at))
++                records.append(("insert", rowid, image, at))
++            else:
++                records.append(("update", rowid, image, at))
++        images[rowid] = image
++    next_version = version(db)
++    insert_sql = "insert into {} ({}) values (?, ?, coalesce(?, {}), NULL, ?{})".format(
++        _q(info.shadow),
++        info.select_list,
++        _NOW,
++        ", ?" * len(info.columns),
++    )
++    for op, rowid, image, at in records:
++        next_version += 1
++        db.execute(
++            insert_sql,
++            (
++                next_version,
++                op,
++                at,
++                rowid,
++                *(image.get(column) for column in info.columns),
++            ),
++        )
++    db.execute(f'update "{STATE_TABLE}" set version = ?', (next_version,))
++    db.execute(f"DROP TABLE {_q(legacy_name)}")
++
++
++def coerce_pk(table: "Table", values: Iterable[str]) -> tuple:
++    """
++    Convert primary key values given as strings (on the command line) to the
++    types of the table's primary key columns.
++    """
++    types = table.columns_dict
++    pks = table.pks
++    coerced = []
++    for position, value in enumerate(values):
++        target = types.get(pks[position], int) if position < len(pks) else str
++        if target in (int, float):
++            try:
++                coerced.append(target(value))
++                continue
++            except ValueError:
++                pass
++        coerced.append(value)
++    return tuple(coerced)
+diff --git a/sqlite_utils/migrations.py b/sqlite_utils/migrations.py
+index 69397ba..fd19ead 100644
+--- a/sqlite_utils/migrations.py
++++ b/sqlite_utils/migrations.py
+@@ -3,6 +3,8 @@ from collections.abc import Callable, Iterable
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+ 
++from . import history as _history
++
+ if TYPE_CHECKING:
+     from sqlite_utils.db import Database, Table
+ 
+@@ -136,13 +138,24 @@ class Migrations:
+             if name in stop_before_names:
+                 return
+             if migration.transactional:
+-                with db.atomic():
++                with self._transaction(db, name):
+                     migration.fn(db)
+                     self._record_applied(db, name)
+             else:
+                 migration.fn(db)
+                 self._record_applied(db, name)
+ 
++    def _transaction(self, db: "Database", name: str):
++        """
++        The transaction a migration runs in. If the database has tables with
++        history enabled this is a changeset named after the migration, so the
++        rows it changes can be traced back to it and undone - unless a
++        changeset is already open, in which case the changes join that one.
++        """
++        if db.history_tables() and _history.open_changeset(db) is None:
++            return db.changeset(f"Migration {self.name}:{name}")
++        return db.atomic()
++
+     def _record_applied(self, db: "Database", name: str):
+         _table(db, self.migrations_table).insert(
+             {
+diff --git a/tests/test_history.py b/tests/test_history.py
+new file mode 100644
+index 0000000..d7b29f0
+--- /dev/null
++++ b/tests/test_history.py
+@@ -0,0 +1,257 @@
++import json
++
++import pytest
++from click.testing import CliRunner
++
++from sqlite_utils import Database, Migrations, cli
++from sqlite_utils.db import NotFoundError
++from sqlite_utils.history import HistoryConflict, HistoryError
++
++CLEO = {"id": 1, "name": "Cleo", "age": 4}
++PANCAKES = {"id": 2, "name": "Pancakes", "age": 2}
++
++
++@pytest.fixture
++def dogs(fresh_db):
++    table = fresh_db.table("dogs", pk="id")
++    table.insert_all([CLEO, PANCAKES])
++    table.enable_history()
++    return table
++
++
++def summary(changes):
++    return [(change.version, change.op, change.pk) for change in changes]
++
++
++def test_enable_history_records_existing_rows(fresh_db, dogs):
++    assert dogs.has_history
++    assert fresh_db.history_tables() == ["dogs"]
++    assert summary(dogs.changes()) == [(1, "insert", 1), (2, "insert", 2)]
++    assert fresh_db.history_version == 2
++    assert all(name.startswith("_history_") for name in fresh_db.table_names()[1:])
++
++
++@pytest.mark.parametrize(
++    "setup",
++    (
++        "create virtual table t using fts5(a)",
++        "create table t (a text primary key) without rowid",
++        "create view t as select 1",
++        "select 1",
++    ),
++)
++def test_enable_history_refuses_unsuitable_tables(fresh_db, setup):
++    fresh_db.execute(setup)
++    with pytest.raises(Exception) as ex:
++        fresh_db.table("t").enable_history()
++    assert ex.type.__name__ in ("HistoryError", "NoTable")
++
++
++def test_changes_are_recorded_however_they_are_made(fresh_db, dogs):
++    dogs.update(1, {"age": 5})
++    dogs.update(1, {"age": 5})
++    fresh_db.execute("update dogs set id = 20 where id = 2")
++    dogs.insert({"id": 1, "name": "Cleopaws", "age": 5}, replace=True)
++    dogs.delete(20)
++    changes = list(dogs.changes(since=2))
++    assert summary(changes) == [
++        (3, "update", 1),
++        (4, "delete", 2),
++        (5, "insert", 20),
++        (6, "delete", 1),
++        (7, "insert", 1),
++        (8, "delete", 20),
++    ]
++    assert changes[0].changed == {"age": (4, 5)}
++    assert changes[-1].row == {"id": 20, "name": "Pancakes", "age": 2}
++    assert summary(dogs.history(20)) == [(5, "insert", 20), (8, "delete", 20)]
++
++
++def test_rolled_back_changes_are_not_recorded(fresh_db, dogs):
++    with pytest.raises(ZeroDivisionError):
++        with fresh_db.atomic():
++            dogs.delete(1)
++            1 / 0
++    assert fresh_db.history_version == 2
++
++
++def test_change_of_storage_class_is_recorded(fresh_db):
++    # 1 and 1.0 compare equal in SQLite but are different stored values
++    table = fresh_db.table("loose", pk="id")
++    table.create({"id": int, "value": bytes})
++    table.insert({"id": 1, "value": 1})
++    table.enable_history()
++    fresh_db.execute("update loose set value = 1.0")
++    fresh_db.execute("update loose set value = 1.0")
++    changes = list(table.changes())
++    assert summary(changes) == [(1, "insert", 1), (2, "update", 1)]
++    assert [type(c.row["value"]) for c in changes] == [int, float]
++    assert type(table.get_as_of(1, 1)["value"]) is int
++
++
++def test_column_added_with_raw_sql_waits_for_enable_history(fresh_db, dogs):
++    fresh_db.execute("alter table dogs add column breed text default 'mutt'")
++    assert dogs.history_columns == ["id", "name", "age"]
++    assert [change.row for change in dogs.changes()] == [CLEO, PANCAKES]
++    assert list(dogs.as_of(2)) == [CLEO, PANCAKES]
++    dogs.update(1, {"age": 5, "breed": "corgi"})
++    assert list(dogs.changes())[-1].row == dict(CLEO, age=5)
++    dogs.enable_history()
++    assert dogs.history_columns == ["id", "name", "age", "breed"]
++    assert list(dogs.as_of(fresh_db.history_version)) == list(dogs.rows)
++
++
++def test_time_travel_and_diff(fresh_db, dogs):
++    dogs.update(2, {"age": 3})
++    dogs.delete(1)
++    assert list(dogs.as_of(2)) == [CLEO, PANCAKES]
++    assert list(dogs.as_of(4)) == [dict(PANCAKES, age=3)]
++    assert dogs.get_as_of(1, 3) == CLEO
++    with pytest.raises(NotFoundError):
++        dogs.get_as_of(1, 4)
++    assert [(d.pk, d.op) for d in dogs.diff(2)] == [(1, "delete"), (2, "update")]
++    assert [(d.pk, d.op) for d in dogs.diff(4, 2)] == [(1, "insert"), (2, "update")]
++
++
++def test_revert_and_restore(fresh_db, dogs):
++    dogs.update(2, {"age": 3})
++    dogs.delete(1)
++    dogs.insert({"id": 3, "name": "Marnie", "age": 9})
++    assert dogs.revert(2, 2) is True
++    assert dogs.revert(2, 2) is False
++    assert dogs.restore(2) == 2
++    assert list(dogs.rows_where(order_by="id")) == [CLEO, PANCAKES]
++    assert list(dogs.as_of(fresh_db.history_version)) == [CLEO, PANCAKES]
++
++
++def test_changeset_and_undo(fresh_db, dogs):
++    with fresh_db.changeset("Birthday", author="cleo") as changeset:
++        dogs.update(1, {"age": 5})
++        dogs.insert({"id": 3, "name": "Marnie", "age": 9})
++    assert [c.changeset for c in dogs.changes(since=2)] == [changeset.id] * 2
++    assert [c.message for c in fresh_db.changesets()] == ["Birthday"]
++    dogs.update(1, {"name": "Cleopaws"})
++    with pytest.raises(HistoryConflict) as ex:
++        fresh_db.undo_changeset(changeset.id)
++    assert ex.value.conflicts == [("dogs", 1)]
++    undo = fresh_db.undo_changeset(changeset.id, force=True)
++    assert undo.message == f"Undo changeset {changeset.id}"
++    assert list(dogs.rows_where(order_by="id")) == [CLEO, PANCAKES]
++
++
++def test_changeset_rolls_back_and_cannot_nest(fresh_db, dogs):
++    with pytest.raises(HistoryError):
++        with fresh_db.changeset("outer"):
++            dogs.delete(1)
++            with fresh_db.changeset("inner"):
++                pass
++    assert dogs.count == 2
++    assert fresh_db.changesets() == []
++
++
++def test_migration_is_recorded_as_changeset(fresh_db, dogs):
++    migrations = Migrations("pets")
++
++    @migrations()
++    def older(db):
++        db.execute("update dogs set age = age + 1")
++
++    migrations.apply(fresh_db)
++    assert [c.message for c in fresh_db.changesets()] == ["Migration pets:older"]
++
++
++def test_history_follows_schema_changes(fresh_db, dogs):
++    dogs.add_column("breed", str, not_null_default="mutt")
++    dogs.transform(rename={"age": "years"}, drop=["breed"])
++    fresh_db.rename_table("dogs", "hounds")
++    hounds = fresh_db.table("hounds")
++    assert hounds.history_columns == ["id", "name", "years"]
++    assert list(hounds.as_of(1)) == [{"id": 1, "name": "Cleo", "years": 4}]
++    hounds.update(1, {"years": 5})
++    assert list(hounds.changes())[-1].changed == {"years": (4, 5)}
++    assert list(hounds.as_of(fresh_db.history_version)) == list(hounds.rows)
++    hounds.drop()
++    assert fresh_db.history_tables() == []
++
++
++def test_exclude_and_reenable(fresh_db):
++    table = fresh_db.table("pages", pk="id")
++    table.insert({"id": 1, "title": "Home", "hits": 0})
++    with pytest.raises(HistoryError):
++        table.enable_history(exclude=["id"])
++    table.enable_history(exclude=["hits"])
++    table.update(1, {"hits": 1})
++    assert fresh_db.history_version == 1
++    table.enable_history(exclude=[])
++    assert list(table.changes())[-1].changed == {"hits": (None, 1)}
++
++
++def test_prune_history(fresh_db, dogs):
++    dogs.update(1, {"age": 5})
++    dogs.delete(2)
++    assert dogs.prune_history(3) == 1
++    assert dogs.history_floor == 3
++    assert summary(dogs.changes()) == [
++        (2, "insert", 2),
++        (3, "insert", 1),
++        (4, "delete", 2),
++    ]
++    with pytest.raises(HistoryError):
++        list(dogs.as_of(2))
++    assert list(dogs.as_of(3)) == [dict(CLEO, age=5), PANCAKES]
++
++
++def test_import_legacy_history(fresh_db):
++    fresh_db.executescript("""
++        create table docs (id integer primary key, title text, body text);
++        create table _docs_history (
++            _rowid integer, id integer, title text, body text,
++            _version integer, _updated integer, _mask integer
++        );
++        insert into docs values (1, 'Intro', null);
++        insert into _docs_history values (1, 1, 'Draft', 'x', 1, 1704164645678, 7);
++        insert into _docs_history values (1, null, 'Intro', null, 2, 1704164646678, 6);
++        insert into _docs_history values (2, 2, 'Gone', 'y', 1, 1704164647678, 7);
++        insert into _docs_history values (2, 2, 'Gone', 'y', 2, 1704164648678, -1);
++    """)
++    docs = fresh_db.table("docs")
++    docs.enable_history()
++    changes = list(docs.changes())
++    assert summary(changes) == [
++        (1, "insert", 1),
++        (2, "update", 1),
++        (3, "insert", 2),
++        (4, "delete", 2),
++    ]
++    assert changes[0].at == "2024-01-02 03:04:05.678"
++    assert changes[1].row == {"id": 1, "title": "Intro", "body": None}
++    assert fresh_db.history_version_at("2024-01-02 03:04:06") == 1
++    assert "_docs_history" not in fresh_db.table_names()
++
++
++def test_cli_history_commands(tmpdir):
++    path = str(tmpdir / "dogs.db")
++    db = Database(path)
++    db.table("dogs", pk="id").insert_all([CLEO, PANCAKES])
++    db.close()
++    runner = CliRunner()
++
++    def run(*args, input=None):
++        result = runner.invoke(cli.cli, [str(arg) for arg in args], input=input)
++        assert result.exit_code == 0, result.output
++        return result.output
++
++    run("enable-history", path, "dogs")
++    upsert = ["upsert", path, "dogs", "-", "--pk", "id", "--changeset", "Older"]
++    run(*upsert, input=json.dumps(dict(CLEO, age=5)))
++    history = json.loads(run("history", path, "dogs", "1"))
++    assert [(c["version"], c["op"]) for c in history] == [(1, "insert"), (3, "update")]
++    assert history[1]["changed"] == {"age": [4, 5]}
++    assert json.loads(run("as-of", path, "dogs", "2")) == [CLEO, PANCAKES]
++    (changeset,) = json.loads(run("changesets", path))
++    assert changeset["message"] == "Older"
++    assert run("undo", path, changeset["id"]).strip() == "2"
++    assert run("restore", path, "dogs", "3").strip() == "1"
++    assert run("prune-history", path, "dogs", "2999-01-01").strip() == "3"
++    run("disable-history", path, "dogs")
++    assert runner.invoke(cli.cli, ["history", path, "dogs"]).exit_code == 1
