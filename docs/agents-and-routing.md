@@ -37,9 +37,13 @@ lists agents in the order brindle tries them. These are the defaults:
 ```
 
 An agent is skipped when its CLI isn't installed or signed in, a local model
-server isn't answering, or its provider is at your `usage_limit` (90% of your
-usage limit by default; `limit_cooldown_minutes` sets how long a provider that
-hit its limit counts as unavailable). The first agent left runs. If every
+server isn't answering, or its provider lacks room to finish the task below
+your `usage_limit` (90% by default). `limit_headroom` reserves 10 percentage
+points by default for heavy, advanced and unknown task weights, half that for
+medium tasks and a quarter for light tasks. Set it to 0 to route up to
+`usage_limit`. Local servers keep their availability check without a usage
+margin. `limit_cooldown_minutes` sets how long a provider that hit its limit
+counts as unavailable. The first agent left runs. If every
 candidate is out, the repo's `default_agent` runs. The reply to the supervisor
 says what was picked and why, for example
 `weight medium -> developer (Codex at 93%, skipped developer-codex)`.
@@ -61,6 +65,18 @@ tiers you leave out keep theirs:
 
 `brindle doctor` shows the list in effect for each tier and the file it came
 from.
+
+To reserve Fable for design-heavy work, set `"fable_for_design_only": true`
+in one of those config files. It defaults to `false`, preserving today's
+routing. The supervisor marks tasks where Fable best fits shared designs,
+interfaces or tricky architecture with `assign(design_heavy=true, ...)`.
+This flag is independent of task size: it makes `developer-fable` eligible
+within the task's routing tier without changing its weight. For example,
+`assign(weight="advanced", design_heavy=true, task="Design the shared interfaces")`
+can use Fable; an unmarked advanced task skips it and tries `developer-heavy`
+next in the default list. Hosted learning cannot choose Fable for unmarked
+tasks, including tasks without a weight. Explicit agent and milestone profile
+choices still win. Queued assignments retain the profile selected at assignment.
 
 ## Profiles (custom agents)
 

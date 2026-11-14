@@ -393,7 +393,8 @@ def branch_name(repo_root: str, branch: str, apply_prefix: bool = True) -> str:
     """The branch ``create`` makes for ``branch``: with the repo's
     ``branch_prefix`` (unless ``apply_prefix`` is off), sanitized."""
     prefix = load_repo_config(repo_root).branch_prefix if apply_prefix else ""
-    return git.sanitize_branch(f"{prefix}{branch}")
+    # A takeover supplies the old branch's full name, already prefixed.
+    return git.sanitize_branch(branch if branch.startswith(prefix) else f"{prefix}{branch}")
 
 
 def create(

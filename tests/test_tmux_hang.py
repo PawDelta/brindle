@@ -121,6 +121,53 @@ def test_orphan_servers_leaves_a_hung_server_and_its_socket_alone(monkeypatch):
     assert any("brindle-hung" in n and "answering" in n for n in notes)
 
 
+@pytest.mark.parametrize("denied", [
+    "connect",
+    pytest.param("metadata", marks=pytest.mark.variant("a sandbox that also denies reading the socket's metadata")),
+    pytest.param(None, marks=pytest.mark.variant("a live server whose list-sessions failed for another reason")),
+])
+def test_orphan_servers_keeps_the_socket_of_a_live_server_it_could_not_list(monkeypatch, tmp_path, denied):
+    # A sandboxed process can't connect to a live server ("Operation not
+    # permitted"), so its list-sessions fails and server_homes reads None.
+    # Deleting the socket then orphaned the live server: the next tmux call
+    # started a second one, and a benchmark run's supervisor dropped out of sight.
+    import errno
+    import socket
+
+    monkeypatch.chdir(tmp_path)              # relative paths: a Unix socket path must stay short
+    monkeypatch.setenv("TMUX_TMPDIR", ".")
+    sockets = tmux.socket_dir()
+    sockets.mkdir()
+    monkeypatch.setattr(tmux, "server_homes", lambda name: None)
+    stale = socket.socket(socket.AF_UNIX)
+    stale.bind(str(sockets / "brindle-stale"))
+    stale.close()                            # its file stays, nobody listening
+    real_stat = os.stat
+
+    class Sandboxed(socket.socket):
+        def connect(self, address):
+            if str(address).endswith("brindle-live"):
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+            return super().connect(address)
+
+    def no_metadata(path, *a, **kw):
+        if str(path).endswith("brindle-live"):
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_stat(path, *a, **kw)
+
+    with socket.socket(socket.AF_UNIX) as live:
+        live.bind(str(sockets / "brindle-live"))
+        live.listen()
+        with monkeypatch.context() as sandbox:
+            if denied == "connect":
+                sandbox.setattr(socket, "socket", Sandboxed)
+            elif denied == "metadata":
+                sandbox.setattr(os, "stat", no_metadata)
+            cull.orphan_servers()
+        assert (sockets / "brindle-live").exists()
+    assert not (sockets / "brindle-stale").exists()
+
+
 # -- nothing in brindle stops the default server ---------------------------------------
 
 

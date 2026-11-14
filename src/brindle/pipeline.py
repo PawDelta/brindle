@@ -24,7 +24,9 @@ With ``pipeline`` on (the default), brindle runs those stages itself:
    The reviewer requests changes: brindle sends the findings straight to the
    worker, which fixes them and reports again, back to step 1; after
    ``review_rounds`` rounds it suggests the supervisor reconsider the approach,
-   while fix rounds continue. Past those rounds, findings that only concern
+   while fix rounds continue. With ``review_stall_stop`` enabled, repeated
+   findings past that cap instead go to the supervisor to ship, defer, or
+   redesign. Past those rounds, findings that only concern
    test code no longer block: the branch proceeds as approved and they go to
    the supervisor as a note. Findings needing supervisor action still go
    straight to the supervisor. Every review after a branch's first covers
@@ -457,12 +459,26 @@ def _escalate(db: DB, ws: Workspace, worker: Agent | None) -> None:
 # -- stage 1: a worker reported ---------------------------------------------------
 
 
+FAST_PATH_REVIEW = (
+    "a light review of a small fast-path request. Judge the change against its task and finish "
+    "line: raise only blockers (a correctness bug, a broken or missing test for the finish line, "
+    "a security problem). Leave style, naming and suggestions as minor findings, and don't explore "
+    "beyond the diff.")
+
+
+def fast_path(db: DB, cfg: RepoConfig, worker: Agent) -> bool:
+    """Whether ``worker`` runs a fast-path task while its repo's ``fast_path``
+    setting is on: then its branch gets one light review (no second review)."""
+    return cfg.fast_path and tasks.fast_path_worker(db, worker.id)
+
+
 def second_profile(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> str | None:
     """The reviewer profile of the second review ``cfg.second_review`` asks
     for on ``worker``'s branch, by the weight its task was sized at. None when
     it's unset, the task has no weight there, or it names the profile that
-    does the first review anyway (one reviewer per profile and commit)."""
-    if not cfg.second_review:
+    does the first review anyway (one reviewer per profile and commit), or
+    the branch is on the fast path (one light review)."""
+    if not cfg.second_review or fast_path(db, cfg, worker):
         return None
     weight = next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
     profile = cfg.second_review.get(weight or "")
@@ -668,7 +684,8 @@ def _start_report_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, 
         # With a second review both calls carry a concrete profile, so the
         # reviewer dedupe compares profiles and neither can swallow the other.
         first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
-        started = agents.start_review(db, parent, ws, first, None, cfg, slot="", report=report)
+        focus = FAST_PATH_REVIEW if fast_path(db, cfg, worker) else None
+        started = agents.start_review(db, parent, ws, first, focus, cfg, slot="", report=report)
         if second:
             try:
                 agents.start_review(db, parent, ws, second, None, cfg, second=True, report=report)
@@ -914,7 +931,7 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     default = cfg.reviewer or "reviewer"
     if default != "reviewer" or _repo_pins_reviewer(repo_root):
         return default, f"using {default} (pinned by reviewer config)"
-    from brindle import autopilot, pricing, profiles
+    from brindle import autopilot, pricing, profiles, review_scope
 
     allow_local = "reviewer-local" in (
         *cfg.learning_candidates,
@@ -925,6 +942,10 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
         p.name for p in profiles.list_profiles(repo_root)
         if (p.name == "reviewer" or p.name.startswith("reviewer-"))
         and (allow_local or p.name != "reviewer-local")
+        # Built-in sizing profiles need risk/vendor checks. Keep custom profiles
+        # with these names eligible, as they were before sizing was introduced.
+        and not (p.name in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE)
+                 and profiles.profile_source(p.name, repo_root) == f"built-in profile {p.name}")
     ]
     for extra in (*cfg.routing.get("light", ()), *cfg.learning_candidates):
         if extra.startswith("reviewer") and extra not in names and (allow_local or extra != "reviewer-local"):
@@ -995,23 +1016,33 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
             sha = gates.head(ws)
         except git.GitError:
             return False  # no branch remains to restart a review on
-        if reviewer.review_sha != sha or db.reviews_at(ws.id, sha):
+        slot = _review_slot(db, reviewer)
+        reviews = db.reviews_at(ws.id, sha)
+        # Another slot's verdict cannot finish this review. A preceding
+        # round at the same commit cannot finish a newer reviewer either.
+        covered = any(slot is None or r.reviewer_id == reviewer.id or (
+            r.review_slot == slot and r.reviewer_created_at is not None
+            and r.reviewer_created_at >= reviewer.created_at) for r in reviews)
+        if reviewer.review_sha != sha or covered:
             db.update_agent(reviewer.id, status="done")
             return True
-        others = [a for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id]
+        others = [a for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id
+                  and (slot is None or _review_slot(db, a) == slot)]
         if any(a.result is None and a.review_sha == sha and agents.alive_or_starting(a)
                and not a.unreported_noted for a in others):
             db.update_agent(reviewer.id, status="done")
             return True
-        profiles = {reviewer.profile, *profile_names(ws.repo_root), *(a.profile for a in others)}
+        profiles = {reviewer.profile, *(a.profile for a in others)}
+        if slot is None:
+            profiles.update(profile_names(ws.repo_root))
         report = review_claim(db, ws)
         if any(agents._review_pending(ws.id, profile, sha, report) for profile in profiles):
             db.update_agent(reviewer.id, status="done")
             return True
         # An explicit dispatcher may have claimed a slot before creating its row.
         if db.conn.execute("SELECT 1 FROM review_claims WHERE workspace_id=? AND sha=? "
-                           "AND agent_id IS NULL AND claimed_at>?",
-                           (ws.id, sha, time.time() - agents.LAUNCH_GRACE)).fetchone():
+                           "AND agent_id IS NULL AND claimed_at>? AND (? IS NULL OR slot=?)",
+                           (ws.id, sha, time.time() - agents.LAUNCH_GRACE, slot, slot)).fetchone():
             return True
         try:
             cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
@@ -1027,7 +1058,7 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
                 replacement = agents.request_review(
                     db, parent, ws, reviewer.profile, cfg=cfg,
                     check_summary=_cached_check_summary(db, ws, cfg, reviewer),
-                    second=bool(_review_slot(db, reviewer)), slot=db.review_slot(reviewer.id),
+                    second=bool(slot), slot=slot,
                     expected_sha=sha,
                 )
                 if replacement is not None:
@@ -1306,6 +1337,56 @@ def _superseded(ws: Workspace, worker: Agent, reviewer: Agent) -> bool:
         return False
 
 
+def _review_round_pending(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig,
+                          sha: str, reviews: list[Review]) -> bool:
+    """Wait for each configured or already-started review slot to give a verdict."""
+    second = second_profile(db, cfg, worker, ws)
+    expected = {"", second} if second else set()
+    latest: dict[str, Agent] = {}
+    for a in sorted(db.list_agents(ws.id), key=lambda a: a.created_at):
+        if a.mode == "review" and a.review_sha == sha and (slot := _review_slot(db, a)) is not None:
+            latest[slot] = a
+    expected.update(latest)
+    completed = {r.review_slot for r in reviews}
+    return not expected <= completed or any(
+        not any(r.reviewer_id == a.id for r in reviews) for a in latest.values())
+
+
+def _review_stalled(db: DB, ws: Workspace, reviewer: Agent) -> bool:
+    """Compare standing findings with the preceding review round.
+
+    Ignore line order and whitespace, but treat any changed text as progress.
+    Missing history or a verdict for an old commit cannot establish a stall.
+    """
+    sha = reviewer.review_sha
+    if not sha or gates.head(ws) != sha:
+        return False
+    history = db.workspace_reviews(ws.id)
+
+    def lines(reviews) -> set[str]:
+        return {" ".join(line.split()) for r in reviews
+                if not r.approved for line in r.summary.splitlines() if line.strip()}
+
+    standing = gates.standing_reviews(db, ws.id, sha)
+    current_ids = {r.id for r in standing}
+    first = next((i for i, r in enumerate(history) if r.id in current_ids), 0)
+    if not first:
+        return False
+    previous_sha = history[first - 1].sha
+    if previous_sha == sha:
+        # No new commit: recover the preceding round before any of this
+        # round's standing verdicts, one verdict per slot.
+        previous = {}
+        for r in history[:first]:
+            if r.sha == sha:
+                previous[r.review_slot if r.review_slot is not None else r.reviewer_id] = r
+        prior = list(previous.values())
+    else:
+        prior = gates.standing_reviews(db, ws.id, previous_sha)
+    current = lines(standing)
+    return bool(current) and current == lines(prior)
+
+
 def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
                summary: str) -> tuple[bool, bool]:
     """(handled, ready): whether the pipeline took the verdict, and whether
@@ -1357,6 +1438,19 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         db.update_agent(worker.id, pipeline="reviewing")
         worker = db.get_agent(worker.id)
     report = worker.result or ""
+    if cfg.review_stall_stop and worker.pipeline == "reviewing" \
+            and (worker.pipeline_rounds or 0) + 1 > cfg.review_rounds \
+            and reviewer.review_sha and gates.head(ws) == reviewer.review_sha \
+            and not has_supervisor_action(summary):
+        reviews = gates.standing_reviews(db, ws.id, reviewer.review_sha)
+        if _review_round_pending(db, ws, worker, cfg, reviewer.review_sha, reviews):
+            return True, False
+        rejected = [r for r in reviews if not r.approved]
+        if rejected:
+            # The last verdict may be an approval; earlier rejections still
+            # need one combined fix dispatch or a stall handoff.
+            approved = False
+            summary = "\n\n".join(r.summary for r in rejected)
     if approved:
         if not cfg.auto_merge_default_branch and ws.base_branch \
                 and ws.base_branch == git.default_branch(ws.repo_root):
@@ -1405,6 +1499,19 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False
         db.update_agent(worker.id, pipeline="ready")
         return True, True
+    if cfg.review_stall_stop and worker.pipeline == "reviewing" \
+            and (worker.pipeline_rounds or 0) + 1 > cfg.review_rounds \
+            and _review_stalled(db, ws, reviewer):
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        if db.claim_review_cap_notice(ws.id, stalled=True):
+            _tell(db, parent_id,
+                  agents.condense(
+                      f"[brindle pipeline] `{ws.branch}` stopped automatic fixes: the same review "
+                      f"findings returned past {cfg.review_rounds} fix round(s). This needs you: "
+                      "choose whether to ship with the known findings, defer, or redesign the approach.",
+                      f"Latest review ({reviewer.id}):\n{summary}"), worker.id)
+        return True, False
     _send_back(db, ws, worker, cfg, summary, has_supervisor_action(summary),
                subject="Review of your branch", verb="requested changes", what="review",
                sender_id=reviewer.id)
@@ -1425,7 +1532,7 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
     rounds = (worker.pipeline_rounds or 1) if worker.pipeline == "fixing" else (worker.pipeline_rounds or 0) + 1
     if not needs_sup:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
-        if rounds > cfg.review_rounds and db.claim_review_cap_notice(ws.id):
+        if rounds > cfg.review_rounds and not cfg.review_stall_stop and db.claim_review_cap_notice(ws.id):
             _tell(db, worker.parent_id,
                   f"[brindle pipeline] `{ws.branch}` reached the suggested cap of "
                   f"{cfg.review_rounds} fix round(s); fixes continue. Strongly consider "
@@ -1944,9 +2051,17 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
     conflicts, the conflicting files are appended to ``conflicts_out``.
     ``waiting_on_checks(sha)`` is called before checks with no passing
     result for the commit yet start to run.
-    One merge into a base at a time (see ``base_lock``)."""
+    One merge into a base at a time (see ``base_lock``). Under
+    ``overlap_granularity`` "hunk", a merge whose changes meet a running
+    worker's says so (``tasks.merge_hunk_warning``), read before it lands."""
+    from brindle import tasks
+
     with merge_lock(ws.id), base_lock(ws.repo_root, ws.base_branch):
-        return _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
+        drift = tasks.merge_hunk_warning(db, ws)
+        text = _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
+    if drift and text.startswith("Merged"):
+        text += f" Warning: {drift}."
+    return text
 
 
 # Files whose change in the base can change any check's outcome, wherever
