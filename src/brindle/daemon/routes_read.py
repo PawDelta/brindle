@@ -923,12 +923,13 @@ def analysis_doc_scopes(db: DB, request: Request) -> Any:
 @_json
 def library_folders(db: DB, request: Request) -> Any:
     """``{"scopes": [{scope: {kind, id, name}, folders: [...]}]}``: the folders
-    the person can see in each scope they read (see pro/library_folders)."""
+    the person can see in each scope they read (see pro/library_folders), each
+    with the ``repo`` it was made for (None when this machine doesn't know)."""
     from brindle.pro import library_folders as folders
 
     repo = _repo(request)
-    return {"scopes": folders.list_all(docs_scopes(repo), api=lambda m, p, b=None: docs_api(m, p, b, repo=repo),
-                                       refusals=(ServiceError,))}
+    return {"scopes": folders.with_repos(db, folders.list_all(
+        docs_scopes(repo), api=lambda m, p, b=None: docs_api(m, p, b, repo=repo), refusals=(ServiceError,)))}
 
 
 @_json
@@ -967,11 +968,16 @@ def analysis_doc_results(db: DB, request: Request) -> Any:
 
 @_json
 def analysis_doc(db: DB, request: Request) -> Any:
-    """One doc: its files, what the server read from it and how often briefs used it."""
+    """One doc: its files, what the server read from it and how often briefs used it,
+    and ``tasks`` when it is a plan on this machine (plans.doc_tasks: its split, in board state)."""
     from urllib.parse import quote
 
-    return docs_api("GET", f"/analysis-docs/{quote(request.path_params['id'], safe='')}",
-                    repo=_repo(request))
+    from brindle import plans
+
+    doc_id = request.path_params["id"]
+    got = docs_api("GET", f"/analysis-docs/{quote(doc_id, safe='')}", repo=_repo(request))
+    tasks = plans.doc_tasks(db, doc_id)
+    return dict(got, tasks=tasks) if isinstance(got, dict) and tasks is not None else got
 
 
 USAGE_NEAR_PERCENT = 80.0

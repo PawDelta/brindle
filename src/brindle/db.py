@@ -1149,6 +1149,16 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
     review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
 );
+-- The repo a Library folder was made for (brindle.pro.library_folders): the
+-- server keeps folders per person, team or org and refuses any other field,
+-- so which repo a folder belongs to is kept here, by the folder it names.
+CREATE TABLE IF NOT EXISTS library_folder_repos (
+    scope_kind TEXT NOT NULL,      -- user | group | org
+    scope_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    repo TEXT NOT NULL,            -- the repo's root, as the app names it
+    PRIMARY KEY (scope_kind, scope_id, folder_id)
+);
 -- This machine's replica of a shared doc's live draft (brindle.plan_drafts):
 -- its Loro state and the peer id it writes under, in one row, so the id is
 -- never used without the changes already written under it. seq goes up on

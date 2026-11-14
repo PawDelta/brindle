@@ -31,9 +31,9 @@ export function useLibraryFolders(client: DaemonClient | null | undefined, activ
     };
   }, [active, load]);
   const create = useCallback(
-    async (scope: string, name: string, visibility: FolderVisibility, canAdd: CanAdd) => {
+    async (scope: string, name: string, visibility: FolderVisibility, canAdd: CanAdd, repo?: string) => {
       const started = epoch.current;
-      await client!.createLibraryFolder(scope, name, visibility, canAdd);
+      await client!.createLibraryFolder(scope, name, visibility, canAdd, repo);
       if (started === epoch.current) await load();
     },
     [client, load],

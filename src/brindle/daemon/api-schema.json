@@ -2066,6 +2066,30 @@
       "title": "DecisionDTO",
       "type": "object"
     },
+    "DesignTaskDTO": {
+      "description": "One task of a design's plan (GET /v1/analysis-docs/{id} ``tasks``), in\nits board state: queued, working, in review, merged or cancelled.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "state"
+      ],
+      "title": "DesignTaskDTO",
+      "type": "object"
+    },
     "GcloudOptionsDTO": {
       "properties": {
         "adc": {
@@ -3135,6 +3159,58 @@
         "kept_at"
       ],
       "title": "KeptVisualDTO",
+      "type": "object"
+    },
+    "LibraryFolderDTO": {
+      "description": "A Library folder (GET /v1/library/folders): the server's, plus ``repo``,\nthe repo it was made for as this machine recorded it (None: not known here).",
+      "properties": {
+        "created_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repo"
+        },
+        "visibility": {
+          "default": "private",
+          "enum": [
+            "private",
+            "shared"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "LibraryFolderDTO",
       "type": "object"
     },
     "MilestoneDTO": {

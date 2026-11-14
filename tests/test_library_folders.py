@@ -52,3 +52,16 @@ def test_daemon_routes_resolve_the_scope_and_turn_bad_input_into_400(monkeypatch
     with pytest.raises(ServiceError) as err:
         actions.create_library_folder(None, {}, {"scope": "user", "name": " "})
     assert err.value.http_status == 400
+
+
+def test_a_folder_keeps_the_repo_it_was_made_for(db, monkeypatch):
+    api = FakeApi()
+    monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(sub="u1"))
+    monkeypatch.setattr(actions, "docs_api", lambda m, p, b=None, repo=None: api(m, p, b))
+    made = actions.create_library_folder(db, {}, {"scope": "team:t1", "name": "Engine", "repo": "/src/pawdelta"})
+    assert made["repo"] == "/src/pawdelta" and "repo" not in api.calls[0][2]    # the server refuses the field
+    listed = [{"scope": {"kind": "group", "id": "t1"}, "folders": [{"id": "fld_new", "name": "Engine"}, {"id": "fld_x", "name": "X"}]},
+              {"scope": {"kind": "user", "id": "u1"}, "folders": [{"id": "fld_new", "name": "Same id, other scope"}, {"id": "bad"}]}]
+    got = folders.with_repos(db, listed)
+    assert [[(f["id"], f["repo"]) for f in g["folders"]] for g in got] == [[("fld_new", "/src/pawdelta"), ("fld_x", None)],
+                                                                        [("fld_new", None)]]
