@@ -44,11 +44,13 @@ it.each(["author", "shared"])("opens %s history through the reader and shows the
   let finishComparison!: (value: DocRevisionComparison) => void;
   const revisionChanges = () => new Promise<DocRevisionComparison>((resolve) => { finishComparison = resolve; });
   let reads = 0;
+  const verdicts: number[] = [];
   const client = {
-    ...visuals, ...docWrites(() => plan), plan: async () => { reads++; return { ...plan }; }, decidePlan: async () => plan,
+    ...visuals, ...docWrites(() => plan), plan: async () => { reads++; return { ...plan }; },
+    decidePlan: async (_id: string, verdict: { rev: number }) => { verdicts.push(verdict.rev); return plan; },
     planHistory: history, planRevisionChanges: revisionChanges,
     sharedDesign: async () => { reads++; return { ...plan, me: "me", author: "author", can_comment: true, can_suggest: true, can_sign_off: true, signed_off: false }; },
-    writeSharedDesign: async () => ({ ...plan, me: "me" }), libraryPeople: async () => ({ people: [] }),
+    writeSharedDesign: async (_id: string, _tail: string, body: Record<string, unknown>) => { verdicts.push(body.rev as number); return { ...plan, me: "me" }; }, libraryPeople: async () => ({ people: [] }),
     sharedDesignHistory: history, sharedDesignRevisionChanges: revisionChanges,
   };
   const store = createAppStore();
@@ -64,6 +66,8 @@ it.each(["author", "shared"])("opens %s history through the reader and shows the
     ? <PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />
     : <SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />, store));
   await screen.findByText("Latest passage.");
+  const verdictButton = () => screen.getByTestId(reader === "author" ? "plan-build" : "plan-sign-off") as HTMLButtonElement;
+  expect(verdictButton().disabled).toBe(false);
   fireEvent.click(screen.getByRole("tab", { name: "History" }));
   await act(async () => {});
   const timeline = screen.getByTestId("doc-history");
@@ -79,12 +83,18 @@ it.each(["author", "shared"])("opens %s history through the reader and shows the
   expect(shown.querySelector("ins")?.textContent).toBe("Revised");
   expect(within(pane).queryByText("Latest passage.")).toBeNull();
   expect(within(pane).queryByRole("button", { name: "Edit Summary" })).toBeNull();
+  await act(async () => fireEvent.click(verdictButton()));
+  expect(verdicts).toEqual([]);
+  expect(verdictButton().disabled).toBe(true);
   // Nor should another read replace the comparison once it is displayed.
   await refresh();
   expect(within(pane).getByRole("region", { name: "Revision comparison" })).toBe(shown);
   fireEvent.click(within(shown).getByRole("button", { name: "Back to the latest" }));
   expect(within(pane).queryByRole("region", { name: "Revision comparison" })).toBeNull();
   expect(within(pane).getByText("Latest passage.")).toBeTruthy();
+  expect(verdictButton().disabled).toBe(false);
+  await act(async () => fireEvent.click(verdictButton()));
+  expect(verdicts).toEqual([3]);
 });
 
 it("keeps an approved plan board live from recorded worker events and drops stale reads", async () => {

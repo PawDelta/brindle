@@ -709,7 +709,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const canRequest = said;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
   const decide = async (approved: boolean) => {
-    if (!client || (approved && reviewBlocked)) return;
+    if (historical || !client || (approved && reviewBlocked)) return;
     setSending(approved ? "approve" : "changes");
     const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(reviewVersion === undefined ? {} : { version: reviewVersion }), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
@@ -723,6 +723,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   const stopSharing = async () => {
+    if (historical) return;
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
     if (now) await decide(true);
@@ -730,19 +731,20 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   const confirm = async () => {
     const option = next && chosen(next);
-    if (!next || !option) return;
+    if (historical || !next || !option) return;
     setSending("confirm");
     await write(() => source.vote(plan.rev, next.id, option));
     if (alive.current) setSending(null);
   };
   const signOff = async () => {
-    if (!source.signOff || reviewBlocked) return;
+    if (historical || !source.signOff || reviewBlocked) return;
     setSending("approve");
     if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes((n) => n + 1);
     if (alive.current) setSending(null);
   };
   // A write that may change the review (the Share panel's sign-off) asks for the frozen version again.
   const reviewWrite = async (work: () => Promise<Plan>) => {
+    if (historical) return false;
     const done = await write(work);
     if (done && frozen) setRefreshes((n) => n + 1);
     return done;
@@ -768,7 +770,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // it reads (live) or its markdown in a box.
   const commentButton = (on: () => void, name = "Comment") => canComment && <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={on}>{name}</button>;
   const nextOptionConfirm = next && (
-    <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={busy || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
+    <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={!!historical || busy || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
       <span className="truncate">{nextOption ? `Confirm ${shortName(nextOption.label)}` : "Confirm"}</span>
     </LoadingButton>
   );
@@ -907,7 +909,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           presence={presence}
           markdown={{ pressed: raw, onToggle: () => setRaw((r) => !r) }}
           modes={{ current: mode, picker: <ModePicker modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} /> }}
-          share={canShare && <Popover label="Share" open={sharingOpen} onOpenChange={setSharingOpen} testid="plan-share">{reviewersPanel}</Popover>} />
+          share={canShare && !historical && <Popover label="Share" open={sharingOpen} onOpenChange={setSharingOpen} testid="plan-share">{reviewersPanel}</Popover>} />
       )}
       {!chrome && presence && <div className="hidden">{presence}</div>}
       {top}
@@ -1040,7 +1042,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               {next ? nextOptionConfirm : teammate.rights.signOff && !teammate.signedOff && (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>{signName}</LoadingButton>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>{signName}</LoadingButton>
               )}
             </div>
           </>
@@ -1058,13 +1060,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
-              <LoadingButton className={button} busy={sending === "changes"} disabled={busy || !canRequest || uploading > 0}
+              <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
                 title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
                 Request changes
               </LoadingButton>
               {/* One main action at a time: the next decision's confirmation, then the sign-off. */}
               {next ? nextOptionConfirm : (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
                   data-testid="plan-build" data-gate={gate?.state} onClick={() => void decide(true)}>
                   {gate ? "Start building" : "Sign off"}
                 </LoadingButton>
