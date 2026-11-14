@@ -32,7 +32,7 @@ it("shows the author a Freeze the daemon refused and leaves the document editabl
   daemon.seedLive("doc", { lede: "Text" }, { canFreeze: false });
   render(<DocPresence client={daemon.client()} visual="doc" isAuthor name="Ann" />);
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   const panel = screen.getByRole("region", { name: "Live document" });
   expect(within(panel).getByRole("alert").dataset.state).toBe("freeze-refused");
@@ -59,6 +59,7 @@ it("preserves HTTP review and build controls when the document has no live text"
   const reviewerClient = { visualLive: client.visualLive, libraryPeople: client.libraryPeople, sharedDesign: async () => design(), writeSharedDesign: async () => { signedOff = true; return design(); } };
   const reviewer = render(<SharedDesignReader client={reviewerClient} docId="http-doc" onBack={() => {}} />);
   await settle();
+  fireEvent.click(within(author.container).getByRole("button", { name: "Share" }));
   expect(within(author.container).getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
   expect((within(author.container).getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   expect(within(reviewer.container).queryByTestId("plan-sign-off")).toBeNull();
@@ -124,7 +125,8 @@ it("withdraws the rendered review and build gate when a signed live version is r
   const author = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   const authorUI = within(author.container);
   await settle();
-  fireEvent.click(authorUI.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(authorUI.getByRole("button", { name: "Share" }));
+  fireEvent.click(authorUI.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   const firstVersion = daemon.liveState("doc").version!.id;
   fireEvent.click(within(authorUI.getByTestId("plan-reviewer-Bo")).getByRole("button", { name: "Sign off" }));
@@ -151,14 +153,16 @@ it("withdraws the rendered review and build gate when a signed live version is r
   expect((reviewerUI.getByTestId("plan-sign-off") as HTMLButtonElement).disabled).toBe(true);
   expect((await live.plan("doc")).gate?.reviewers?.[0].status).toBe("waiting");
   expect((await live.sharedDesign("doc")).signed_off).toBe(false);
-  fireEvent.click(authorUI.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(authorUI.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   // A delayed request for the withdrawn version cannot sign the replacement or build it.
   await expect(live.signOffPlan("doc", 7, firstVersion)).rejects.toMatchObject({ status: 409 });
   await expect(live.decidePlan("doc", { rev: 7, version: firstVersion, approved: true, picks: {}, comments: [], note: "" })).rejects.toMatchObject({ status: 409 });
+  const asked = daemon.liveRefreshes;
   fireEvent.click(reviewerUI.getByTestId("plan-sign-off"));
   await settle();
   expect(reviewerUI.queryByTestId("plan-sign-off")).toBeNull();
+  expect(daemon.liveRefreshes).toBe(asked + 1);   // the frozen version asked for again, its sign-offs the review's now
   expect(authorUI.getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(authorUI.getByTestId("plan-build"));
@@ -183,7 +187,7 @@ it("shows awareness colours, freezes credited text for everyone and withdraws si
   const bo = editor("Bo's text");
   await act(async () => ann.dispatch({ changes: { from: 0, insert: "New " } }));
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   expect(screen.getByRole("region", { name: "Live document" }).dataset.state).toBe("sign_off");
   expect(within(screen.getByRole("list", { name: "Credited writers" })).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Ann"]);
@@ -207,7 +211,7 @@ it("shows awareness colours, freezes credited text for everyone and withdraws si
   expect(ann.state.facet(EditorState.readOnly)).toBe(false);
   await act(async () => bo.dispatch({ changes: { from: 0, insert: "Again " } }));
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   expect(daemon.liveState("doc").version?.id).toBeGreaterThan(frozen.id);
   expect(daemon.liveState("doc").version?.signOffs).toEqual([]);
@@ -255,7 +259,133 @@ it("locks others' text while the author is offline and still sends comments and 
   await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
   highlight();
   fireEvent.click(within(screen.getByRole("toolbar")).getByRole("button", { name: "Suggest edit" }));
-  fireEvent.change(screen.getByRole("textbox", { name: /Replace/ }), { target: { value: "Agents" } });
+  await settle();
+  const suggestion = editor("Suggestion to the overview");
+  await act(async () => suggestion.dispatch(suggestion.state.replaceSelection("Agents")));
   await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
   expect(sent).toEqual(["comments", "suggestions"]);
+});
+
+it("shows the live text, not the revision's, after Done editing, once frozen and once reopened, on the page and in the Markdown view", async () => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "doc", session: "boss", title: "Workers", rev: 1, state: "open", markdown: "", lede: "", decisions: [], split: [], queued: 0, created_at: 1,
+    sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["Bo"], reviewers: [{ sub: "Bo", required: true, status: "waiting" }] } };
+  daemon.seedLive("doc", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: async () => plan, decidePlan: live.decidePlan.bind(live),
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await settle();
+  fireEvent.click(screen.getByRole("radio", { name: "Editing" }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+  await settle();
+  const text = editor("Text of Summary");
+  await act(async () => text.dispatch({ changes: { from: text.state.doc.length - 1, insert: ", on the customer's machine" } }));
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Done editing" }));
+  await settle();
+  // The revision still says "Workers run here."; the doc reads as it was typed, at every step.
+  const typed = "Workers run here, on the customer's machine.";
+  const showsTyped = () => {
+    expect(within(screen.getByRole("region", { name: "Summary" })).getByText(typed)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
+    expect(screen.getByTestId("doc-markdown").textContent).toContain(typed);
+    fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
+  };
+  showsTyped();
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  await settle();
+  showsTyped();
+  fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
+  await settle();
+  showsTyped();
+});
+
+it("types a suggestion only in Suggesting on unlocked text: in Viewing or once frozen it is shown read only", async () => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "doc", session: "boss", title: "Workers", rev: 1, state: "open", markdown: "", lede: "", decisions: [], split: [], queued: 0, created_at: 1,
+    sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["Bo"], reviewers: [{ sub: "Bo", required: true, status: "waiting" }] } };
+  daemon.seedLive("doc", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: async () => plan, decidePlan: live.decidePlan.bind(live),
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await settle();
+  const words = within(screen.getByRole("region", { name: "Summary" })).getByText("Workers run here.").firstChild!;
+  const range = document.createRange();
+  range.setStart(words, 0);
+  range.setEnd(words, 7);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+  fireEvent.click(within(screen.getByRole("toolbar", { name: "For the highlighted text" })).getByRole("button", { name: "Suggest edit" }));
+  await settle();
+  const typing = editor("Suggestion to Summary");
+  await act(async () => typing.dispatch(typing.state.replaceSelection("Agents")));
+  const editable = () => screen.getByRole("region", { name: "Summary" }).querySelector('[contenteditable="true"]');
+  const preview = () => screen.getByTestId("plan-suggest-preview");
+  // Viewing: the page reads, the change still shown; Suggesting again picks up what was typed.
+  fireEvent.click(screen.getByRole("radio", { name: "Viewing" }));
+  expect(editable()).toBeNull();
+  expect([preview().querySelector("del")?.textContent, preview().querySelector("ins")?.textContent]).toEqual(["Worker", "Agent"]);
+  fireEvent.click(screen.getByRole("radio", { name: "Suggesting" }));
+  await settle();
+  expect(editor("Suggestion to Summary").state.doc.toString()).toBe("Agents run here.");
+  // Frozen with its text as it was: nothing can be typed, and the suggestion can't be sent.
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  await settle();
+  expect(editable()).toBeNull();
+  expect(preview().querySelector("ins")?.textContent).toBe("Agent");
+  expect((within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Send 1 suggestion" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+/* The Markdown switch changes the view, never the mode: read-only while Viewing, the live text while
+   Editing (where the formatting toolbar writes the syntax into the draft), read-only and marked while
+   a version is locked for sign-off. */
+it.each([
+  ["viewing", () => {}],
+  ["editing", () => fireEvent.click(screen.getByRole("radio", { name: "Editing" }))],
+  ["locked", () => fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }))],
+] as const)("shows the doc's Markdown %s", async (state, enter) => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "doc", session: "boss", title: "Workers", rev: 1, state: "open", markdown: "", lede: "", decisions: [], split: [], queued: 0, created_at: 1,
+    sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["Bo"], reviewers: [{ sub: "Bo", required: true, status: "waiting" }] } };
+  daemon.seedLive("doc", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: live.plan.bind(live), decidePlan: live.decidePlan.bind(live),
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await settle();
+  enter();
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
+  await settle();
+  const source = screen.getByTestId("doc-markdown");
+  expect(source.dataset.state).toBe(state);
+  expect(screen.queryByRole("toolbar", { name: "Formatting" }) !== null).toBe(state === "editing");
+  expect(source.querySelector('[contenteditable="true"]') !== null).toBe(state === "editing");
+  expect(within(source).queryByTestId("doc-markdown-readonly") !== null).toBe(state === "locked");
+  if (state !== "editing") return;
+  const text = EditorView.findFromDOM(source.querySelector<HTMLElement>(".cm-editor")!)!;
+  expect(text.state.doc.toString()).toBe("Workers run here.");
+  text.dispatch({ selection: { anchor: 0, head: 7 } });
+  fireEvent.focus(text.contentDOM);
+  fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+  await settle();
+  expect(daemon.liveText("doc", "summary")).toBe("**Workers** run here.");
 });

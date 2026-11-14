@@ -1,9 +1,10 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
 import { afterEach, expect, it, vi } from "vitest";
 import { LIVE_RELOAD } from "../../../api/client";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { DocEditor } from "./DocEditor";
+import { FormatBar, FormatProvider } from "./DocFormat";
 
 afterEach(() => {
   cleanup();
@@ -71,6 +72,30 @@ it("waits read only for a number from the daemon, writes under it, and opens aga
   daemon.liveSockets.at(-1)!.close(LIVE_RELOAD);
   await settle();
   expect(view().state.doc.toString()).toBe("Theirs.");
+});
+
+it("writes the formatting toolbar's Markdown into the live draft for every writer", async () => {
+  const daemon = new FakeDaemon();
+  daemon.seedLive("plan-1", { goals: "Ship the editor.\nTest it." });
+  render(
+    <FormatProvider>
+      <FormatBar />
+      <div data-testid="ann"><DocEditor client={daemon.client()} visual="plan-1" section="goals" name="Ann" label="Ann's text" /></div>
+      <div data-testid="bo"><DocEditor client={daemon.client()} visual="plan-1" section="goals" name="Bo" label="Bo's text" variant="source" /></div>
+    </FormatProvider>,
+  );
+  await settle();
+  const viewIn = (who: string) => EditorView.findFromDOM(screen.getByTestId(who).querySelector<HTMLElement>(".cm-editor")!)!;
+  const ann = viewIn("ann");
+  // Bold over "Ship", then the second line made a bulleted item: both as one change each.
+  ann.dispatch({ selection: { anchor: 0, head: 4 } });
+  fireEvent.focus(ann.contentDOM);
+  fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+  ann.dispatch({ selection: { anchor: ann.state.doc.length } });
+  fireEvent.click(screen.getByRole("button", { name: "Bulleted list" }));
+  await settle();
+  expect(daemon.liveText("plan-1", "goals")).toBe("**Ship** the editor.\n- Test it.");
+  expect(viewIn("bo").state.doc.toString()).toBe("**Ship** the editor.\n- Test it.");
 });
 
 it("keeps the local caret on the same text when a teammate inserts before it, after an emoji too", async () => {

@@ -37,6 +37,7 @@ import type { KnowledgeView, LibraryStage } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
+import { LibraryDesign } from "../Session/Visuals/LibraryDesign";
 import { docQueue } from "../Library/libraryStages";
 import { ImportedLibrary } from "./ImportedLibrary";
 import { KeptVisuals } from "./KeptVisuals";
@@ -61,6 +62,8 @@ export interface KnowledgeScreenProps {
   onCounts?(counts: Pick<LibraryCounts, "imported" | "decisions" | "kept">): void;
   /* A library doc (its id) to open in the reader, or an imported one (its number). */
   doc?: number | string;
+  /* `doc` is a design: it opens in the design reader. */
+  design?: boolean;
   /* Docs only of this session (its root agent id). */
   session?: string;
   /* Back to the session the person came from (Docs' Back to session). */
@@ -406,7 +409,7 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRepo, onView, onCounts, doc, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
+export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRepo, onView, onCounts, doc, design, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
   const pick = useRepo(fromRepo);
   const { repo, repos } = pick;
   const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
@@ -577,7 +580,15 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRep
   if (tab === "docs") {
     return (
       <section className="flex min-h-0 flex-1 flex-col" aria-label="Library">
-        <DocsView key={stage ?? ""} stage={stage} folder={folder} inRepo={inRepo} queue={docQueue(inbox)} repos={repos} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />
+        <DocsView key={stage ?? ""} stage={stage} folder={folder} inRepo={inRepo} queue={docQueue(inbox)} repos={repos} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder}
+          design={design} designReader={(id, title, back, place) => (
+            // The reader fills the Library's page, its bottom bar in view. Its project (where a
+            // question to the supervisor goes): the one the person came with (a review card's, a
+            // session's), else the design's own (the repo picked, or its folder's), else this page's.
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <LibraryDesign key={id} client={client} docId={id} title={title} repo={fromRepo ?? place ?? repo ?? undefined} onBack={back} />
+            </div>
+          )} />
       </section>
     );
   }

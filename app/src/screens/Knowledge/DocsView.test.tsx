@@ -211,6 +211,22 @@ describe("docs view", () => {
     await waitFor(() => expect(readerDoc()).toBeNull());
   });
 
+  it("opens a design in the design reader here in the Library, and Back comes to the list as it was", async () => {
+    const docs = [...DOCS, listed("d5", "Cloud workers", "design", "root1")];
+    const designReader = (id: string, title: string | undefined, back: () => void) => (
+      <div data-testid="design-reader" data-doc={id}>{title}<button type="button" onClick={back}>Back to list</button></div>
+    );
+    render(<DocsView client={client((id) => view(docs.find((d) => d.doc_id === id)!), RESULTS, docs)} repo="/r" designReader={designReader} />);
+    await waitFor(() => expect(shown()).toContain("d5"));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search the library" }), { target: { value: "cloud" } });
+    await waitFor(() => expect(shown()).toEqual(["d5"]));
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d5"]')!).getByRole("button"));
+    expect(screen.getByTestId("design-reader").dataset.doc).toBe("d5");
+    fireEvent.click(screen.getByRole("button", { name: "Back to list" }));
+    expect((screen.getByRole("searchbox", { name: "Search the library" }) as HTMLInputElement).value).toBe("cloud");
+    expect(shown()).toEqual(["d5"]);
+  });
+
   it("reads a real doc: raw HTML and images stay text, mentions are listed, and Share offers every team of the person's", async () => {
     const team = { kind: "group", id: "team-pay" };
     const md = '# Findings\n\n<script>window.pwned = 1</script>\n<img src="https://evil.example/x.png" onerror="alert(1)">\n\n![chart](https://evil.example/chart.png) and **bold**';

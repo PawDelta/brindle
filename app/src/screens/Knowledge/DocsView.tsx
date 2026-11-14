@@ -46,6 +46,10 @@ export interface DocsViewProps {
   repos?: Pick<RepoDTO, "name" | "repo_root">[] | null;
   /* Back to the session the person came from; the filter's chip clears only the filter. */
   onBack?(): void;
+  /* A design opens in the design reader (Session/Visuals/SharedDesignReader), here in the Library:
+     Back comes back to this list as it was. `design`: `doc` is one, before the list says so. */
+  designReader?(id: string, title: string | undefined, onBack: () => void, repo: string | undefined): ReactNode;
+  design?: boolean;
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -432,7 +436,7 @@ function Seg<T extends string>({ name, value, options, onChange }: { name: strin
 
 const signed = (n: number) => `${n < 0 ? "−" : "+"}${Math.abs(n)}%`;
 
-export function DocsView({ client, repo, session: initialSession, doc, pickFolder, stage, folder, inRepo, queue = EMPTY_QUEUE, repos, onBack }: DocsViewProps) {
+export function DocsView({ client, repo, session: initialSession, doc, pickFolder, stage, folder, inRepo, queue = EMPTY_QUEUE, repos, onBack, designReader, design }: DocsViewProps) {
   const [layout, setLayout] = useState<Layout>(readLayout);
   const pickLayout = (next: Layout) => {
     setLayout(next);
@@ -590,6 +594,9 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   if (sourceOpen?.kept) return <div className="flex min-h-0 flex-1 flex-col p-s3"><ReaderChrome title={sourceOpen.title} meta={sourceOpen.kept.from_session_name} source={{ kind: "kept", id: sourceOpen.kept.id }} onBack={() => setSourceOpen(null)} backLabel="Library" /></div>;
   if (sourceOpen) return scroll(<Reader client={client} repo={repo} id={sourceOpen.id} targets={[]} titles={new Map()} local={{ title: sourceOpen.title, markdown: sourceOpen.text }} onBack={() => setSourceOpen(null)} onDeleted={() => undefined} onOpen={setOpen} onScopes={learn} />);
 
+  const listed = open ? docs.find((d) => d.id === open) : undefined;
+  // The design's project: the repo picked in the sidebar, else the one its own folder is in.
+  if (open && designReader && (listed?.kind === "design" || (design && open === doc))) return designReader(open, listed?.title, () => setOpen(null), inRepo ?? placeOf(open)?.repo ?? undefined);
   if (open) {
     return scroll(
       <Reader

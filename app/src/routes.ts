@@ -57,8 +57,10 @@ export type Route =
      imported doc's number; `session`: only that session's docs (its root), from the
      session's goal panel; `from`: the session the person came from, for Back to session.
      `folder`: a folder picked in its sidebar (libraryStages.folderKey: scope and id); `repo`: a
-     repo picked there (its root), its folders' designs. */
-  | { screen: "knowledge"; view?: KnowledgeView; stage?: LibraryStage; folder?: string; repo?: string; doc?: number | string; section?: string; session?: string; from?: SessionRef }
+     repo picked there (its root), its folders' designs; `design`: `doc` is a design, opened in
+     the design reader (PlanReader's) before the list loads; `designRepo`: the project it opens
+     on (a review card's: a question to the supervisor stays there). */
+  | { screen: "knowledge"; view?: KnowledgeView; stage?: LibraryStage; folder?: string; repo?: string; doc?: number | string; section?: string; session?: string; from?: SessionRef; design?: boolean; designRepo?: string }
   /* A design someone else shared, by its Library doc id (from the Inbox's "Review requested" card):
      `title`, the card's; `repo`, the local project a question to the supervisor should stay in. */
   | { screen: "shared-design"; doc: string; title?: string; repo?: string }

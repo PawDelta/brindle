@@ -54,6 +54,35 @@ const paneWaits = () => screen.queryByTestId("state-card")?.dataset.kind === "re
 
 describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
+  /* A design opened in the Library on the second project: from an Inbox review card on it, or with
+     it picked in the Library's sidebar. Either way its reader reads and asks in that project. */
+  const OTHER = "/home/me/other";
+  it.each([
+    ["an Inbox review card's design", { screen: "shared-design", doc: "lib-1", title: "Workers", repo: OTHER }],
+    ["a design opened with a project picked in the Library's sidebar", { screen: "knowledge", view: "docs", repo: OTHER, doc: "lib-1", design: true }],
+  ] as const)("opens %s in the Library on that project, and a question to the supervisor stays in it", async (_, route) => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [], workspaces: [], inbox: [] });
+    const plan = { id: "lib-1", session: "", title: "Workers", rev: 1, state: "open" as const, markdown: "", lede: "Workers run here.", sections: [], decisions: [], split: [], queued: 0, created_at: 1 };
+    daemon.seedLive("lib-1", { lede: "Workers run here." }, { plan, me: "Bo", author: "Ann" });
+    const { client, store, sync } = connectDaemon(daemon);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={route} />);
+    const words = (await screen.findByText("Workers run here.")).firstChild!;
+    // In the Library, with its navigation, on the card's repo.
+    expect(screen.getByRole("region", { name: "Library" })).toBeTruthy();
+    expect(daemon.requests.find((r) => r.path === "/shared-designs/lib-1")?.query.repo).toBe(OTHER);
+    const range = document.createRange();
+    range.setStart(words, 0);
+    range.setEnd(words, 7);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "For the highlighted text" })).getByRole("button", { name: /^Ask/ }));
+    fireEvent.change(within(screen.getByTestId("thread-draft")).getByRole("textbox"), { target: { value: "Which machine?" } });
+    await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
+    const asked = daemon.requests.find((r) => r.method === "POST" && r.path === "/shared-designs/lib-1/comments");
+    expect(asked?.body).toMatchObject({ question: true, repo: OTHER });
+    sync.stop();
+  });
   it("keeps recovery visible in the session row and header until it succeeds or fails", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: "paused" }], workspaces: [], inbox: [{ ...question, kind: "failed", agent_id: "sup1", root_id: "sup1" }], preflight: { claude: [{ id: "trust", kind: "trust", label: "Trust folder", done: false }] } });
     const { client, store, sync } = connectDaemon(daemon);

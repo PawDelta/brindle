@@ -58,7 +58,7 @@ export interface DaemonData {
   /* Optional hosted library fixtures, independent of the local KB. */
   docScopes?: import("../api/client").DocScope[];
   /* The Library's designs as the server lists them (doc_id) with each one's `design` review state; none: not entitled. */
-  libraryDocs?: { doc_id: string; title: string; updated_at?: number; design?: object }[];
+  libraryDocs?: { doc_id: string; title: string; kind?: string; updated_at?: number; design?: object }[];
   knowledgeMap?: import("../api/client").KnowledgeMap;
   kbDocuments?: import("../api/client").MapNode[];
   profiles: ProfileDTO[];
@@ -814,6 +814,10 @@ export class FakeDaemon {
      being under the number their window was lent. holdLivePeers: none free until lendLivePeers. */
   private nextLivePeer = 2n ** 60n;
   readonly liveRefused: string[] = [];
+  /* How many times a window asked for the frozen version again (after its person signed off). */
+  liveRefreshes = 0;
+  /* Library doc id → the plan (visual id) it was shared from on this machine. */
+  readonly libraryPlans = new Map<string, string>();
   holdLivePeers = false;
 
   lendLivePeers(): void {
@@ -2563,7 +2567,12 @@ export class FakeDaemon {
   relayLive(from: FakeLiveSocket, frame: string): void {
     const live = this.live.get(from.visual);
     if (!live) return;
-    const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string; freeze?: boolean; reopen?: boolean };
+    const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string; freeze?: boolean; reopen?: boolean; refresh?: boolean };
+    if (said.refresh) {     // a window's person signed off: the version, as the review has it now, to every window
+      this.liveRefreshes++;
+      this.setLiveState(from.visual, {});
+      return;
+    }
     if (said.freeze || said.reopen) {
       if (!live.canFreeze) {    // as the daemon answers a Freeze or Reopen the Library refused: to the asking window
         from.push({ refused: { action: said.freeze ? "freeze" : "reopen", reason: "only the design's author can freeze its draft" } });
@@ -2952,6 +2961,12 @@ export class FakeDaemon {
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
     if ((m = path.match(/^\/providers\/([^/]+)\/connection$/))) return this.connectionOf(m[1]);
     if ((m = path.match(/^\/sessions\/([^/]+)\/visuals$/))) return json(this.visualRows.filter((v) => v.session === m![1]));
+    // A Library design shared from here: its plan's visual (routes_visuals.library_design_plan).
+    if ((m = path.match(/^\/library\/designs\/([^/]+)\/plan$/))) {
+      const plan = this.libraryPlans.get(m[1]);
+      const row = plan && this.visualRows.find((v) => v.id === plan);
+      return row ? json(row) : error("not_found", "this design wasn't shared from here", 404);
+    }
     if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
     // The doc library, as an engine not signed in to a plan answers it (routes_actions._docs_entitlement).
     if (this.data.libraryDocs) {

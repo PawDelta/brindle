@@ -1434,6 +1434,8 @@ export interface LiveChannel {
   sendAwareness(section: string, bytes: Uint8Array): void;
   freeze(): void;
   reopen(): void;
+  /* This window's person changed the review (signed off): every window is told the frozen version again. */
+  refresh(): void;
   close(): void;
 }
 
@@ -2010,6 +2012,7 @@ export class DaemonClient {
       sendAwareness: (section, bytes) => send({ awareness: toBase64(bytes), section }),
       freeze: () => send({ freeze: true }),
       reopen: () => send({ reopen: true }),
+      refresh: () => send({ refresh: true }),
       close() {
         if (closed) return;
         closed = true;
@@ -2109,6 +2112,12 @@ export class DaemonClient {
      Library each time and held only in memory. A write answers with the design as it is now. */
   sharedDesign(doc: string, repo?: string) {
     return this.get<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}`, { repo });
+  }
+
+  /* The plan a Library design was shared from, when it was shared from this machine (its visual):
+     the author's own design, opened in the author's reader. A 404 for anyone else's. */
+  libraryDesignPlan(doc: string) {
+    return this.get<VisualDTO>(`/library/designs/${encodeURIComponent(doc)}/plan`);
   }
 
   writeSharedDesign(doc: string, tail: string, body: Record<string, unknown>) {
