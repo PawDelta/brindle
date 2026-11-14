@@ -643,15 +643,13 @@ def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
 
 
 def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws, monkeypatch):
-    from brindle.providers import get_provider
-
-    prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
-    assert "run only the tests that cover your change" in prompt
-    assert "Run the full suite once, just before you commit." in prompt
+    brief = agents.worker_brief(ws)   # in the worker's prompt (brief_in_profile)
+    assert "run only the tests that cover your change" in brief
+    assert "Run the full suite once, just before you commit." in brief
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
     (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"checks": ["uv run pytest -q"]}')
-    prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
-    assert "Don't run the full suite yourself" in prompt and "`uv run pytest -q`" in prompt
+    brief = agents.worker_brief(ws)
+    assert "Don't run the full suite yourself" in brief and "`uv run pytest -q`" in brief
     sub = agents.subagent_prompt("You are a subagent.", "add a flag", ws, None)
     assert "Don't run the full suite yourself" in sub
     agents_dir = Path(ws.repo_root) / ".brindle" / "agents"

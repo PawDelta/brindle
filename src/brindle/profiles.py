@@ -161,6 +161,12 @@ class Profile:
     # wins, else the CLI's own login), ``subscription`` (no key reaches the pane,
     # so the login is used) or ``api_key`` (refuse to start without a key).
     auth: str = "auto"
+    # Set at launch (agents._profile_for), never by a profile file: brindle
+    # tools taken out of the agent's context (Claude Code --disallowedTools,
+    # Codex disabled_tools, OpenCode permission deny), and Claude Code's
+    # 5-minute prompt cache instead of the hour-long one (FORCE_PROMPT_CACHING_5M).
+    hidden_brindle_tools: list[str] | None = None
+    short_cache: bool = False
 
 
 AUTH_CHOICES = ("auto", "subscription", "api_key", "cloud")

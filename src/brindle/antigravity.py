@@ -3,11 +3,12 @@
 agy has no flags for settings, MCP servers or a system prompt; it reads them
 from the workspace's ``.agents/`` folder. brindle adds three files there, each
 kept out of git through ``.git/info/exclude`` and each the same for every
-agent (several agents can share a checkout):
+agent that may share the checkout (several can):
 
 - ``mcp_config.json``: brindle's MCP server, marked eager so its tools reach
   the model. The server inherits the agent's environment, so it knows which
-  agent is calling.
+  agent is calling. A reviewer or light worker alone in its checkout launches
+  with the tools its role doesn't use disabled (see install).
 - ``hooks.json``: lifecycle hooks that call ``brindle _hook agy-<event>``. agy
   doesn't pass its environment to hooks, so the hook reads the agent's id
   from the agy process that ran it.
@@ -201,17 +202,23 @@ def _hook_command(event: str) -> str:
     return assigns + " ".join(shlex.quote(a) for a in [*brindle_invocation(), "_hook", event])
 
 
-def install(workspace: str, permission_policy: bool = False, strict: bool = False) -> None:
+def install(workspace: str, permission_policy: bool = False, strict: bool = False,
+            hidden: list[str] | None = None) -> None:
     """Give the checkout brindle's MCP server, hooks and rule for agy (and,
     with ``permission_policy``, the PreToolUse hook that applies it; with
-    ``strict``, the one for agy_approvals "brindle", on every tool)."""
+    ``strict``, the one for agy_approvals "brindle", on every tool).
+    ``hidden``: brindle tools a short-lived agent's role doesn't use
+    (agents.short_lived_tools), left out of its context as the server's
+    ``disabledTools``. The launch after it in this checkout writes its own."""
     from brindle.providers import brindle_invocation
 
     cmd = brindle_invocation()
     server = {"command": cmd[0], "args": [*cmd[1:], "mcp"],
               # Eager: the tools reach the model up front. Otherwise agy holds
               # them back, and the agent doesn't know brindle's tools exist.
-              "tools": {name: {"eager": True} for name in tool_names()}}
+              "tools": {name: {"eager": True} for name in tool_names() if name not in (hidden or ())}}
+    if hidden:
+        server["disabledTools"] = list(hidden)
     _merge_json(workspace, AGENTS_DIR / "mcp_config.json", "mcpServers", "brindle", server)
     handler = lambda ev: [{"type": "command", "command": _hook_command(EVENTS[ev]), "timeout": 60}]  # noqa: E731
     hooks = {"PreInvocation": handler("PreInvocation"), "Stop": handler("Stop"),
