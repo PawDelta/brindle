@@ -9,14 +9,14 @@ export type VisualsClient = Pick<DaemonClient, "visuals" | "answerVisual" | "dis
 export type PlansClient = Pick<DaemonClient, "plan" | "decidePlan">;
 /* What the person writes on the design doc (brindle/plan_docs.py): comments and replies,
    suggestions and their answers, direct edits, and their pick on a decision. */
-export type PlanDocClient = Pick<DaemonClient, "commentPlan" | "replyPlan" | "resolvePlanThread" | "suggestPlan" | "acceptPlanSuggestion" | "rejectPlanSuggestion" | "editPlan" | "confirmPlan">;
+export type PlanDocClient = Pick<DaemonClient, "commentPlan" | "replyPlan" | "resolvePlanThread" | "suggestPlan" | "acceptPlanSuggestion" | "rejectPlanSuggestion" | "editPlan" | "confirmPlan"> & Partial<Pick<DaemonClient, "planHistory" | "planRevisionChanges">>;
 
 /* Team review through the Library (brindle/pro/shared_docs.py). Not every build of the screen has it. */
 export type PlanSharingClient = Pick<DaemonClient, "sharePlan" | "setPlanReviewers" | "syncPlan" | "signOffPlan" | "overridePlanPolicy" | "libraryPeople" | "docScopes"> &
   Partial<Pick<DaemonClient, "askPlanPolicyAgain" | "previewPlanPolicies" | "stopSharingPlan">>;
 
 /* A design someone else shared, read and reviewed from the Library (brindle/pro/shared_reader.py). */
-export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople">;
+export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "sharedDesignHistory" | "sharedDesignRevisionChanges">>;
 
 export type KeptVisualsClient = Pick<DaemonClient, "keptVisuals">;
 

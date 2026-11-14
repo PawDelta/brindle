@@ -2212,6 +2212,14 @@ export class DaemonClient {
     return this.get<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}`, { repo });
   }
 
+  sharedDesignHistory(doc: string, repo?: string) {
+    return this.get<{ events: DocHistoryEntry[] }>(`/shared-designs/${encodeURIComponent(doc)}/history`, { repo });
+  }
+
+  sharedDesignRevisionChanges(doc: string, rev: number, repo?: string) {
+    return this.get<DocRevisionComparison>(`/shared-designs/${encodeURIComponent(doc)}/revisions/${rev}/changes`, { repo });
+  }
+
   /* The plan a Library design was shared from, when it was shared from this machine (its visual):
      the author's own design, opened in the author's reader. A 404 for anyone else's. */
   libraryDesignPlan(doc: string) {

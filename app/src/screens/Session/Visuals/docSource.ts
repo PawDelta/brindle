@@ -4,10 +4,12 @@
 
 import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type SharedDesign } from "../../../api/client";
 import type { PlanDocClient, PlansClient, SharedDesignClient } from "./client";
+import type { HistoryClient } from "./DocHistory";
 
 export interface DocSource<P extends Plan = Plan> {
   /* The doc's own id there: a plan's, or a Library doc's. Anything kept about a doc is keyed by it. */
   readonly id: string;
+  history?: HistoryClient;
   read(): Promise<P>;
   comment(rev: number, anchor: PlanAnchor, text: string, question: boolean): Promise<P>;
   reply(rev: number, thread: number, text: string): Promise<P>;
@@ -23,6 +25,10 @@ export interface DocSource<P extends Plan = Plan> {
 export function planSource(client: PlansClient & PlanDocClient, id: string): DocSource {
   return {
     id,
+    history: client.planHistory && client.planRevisionChanges ? {
+      planHistory: (planId) => client.planHistory!(planId),
+      planRevisionChanges: (planId, rev) => client.planRevisionChanges!(planId, rev),
+    } : undefined,
     read: () => client.plan(id),
     comment: (rev, anchor, text, question) => client.commentPlan(id, rev, anchor, text, question),
     reply: (_rev, thread, text) => client.replyPlan(id, thread, text),
@@ -39,6 +45,10 @@ export function sharedSource(client: SharedDesignClient, id: string, repo?: stri
   const send = (tail: string, body: Record<string, unknown>) => client.writeSharedDesign(id, tail, repo ? { ...body, repo } : body);
   return {
     id,
+    history: client.sharedDesignHistory && client.sharedDesignRevisionChanges ? {
+      planHistory: (docId) => client.sharedDesignHistory!(docId, repo),
+      planRevisionChanges: (docId, rev) => client.sharedDesignRevisionChanges!(docId, rev, repo),
+    } : undefined,
     read: () => client.sharedDesign(id, repo),
     comment: (rev, anchor, text, question) => send("comments", { rev, anchor, text, ...(question ? { question } : {}) }),
     reply: (rev, thread, text) => send("comments", { rev, parent: thread, text }),

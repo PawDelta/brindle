@@ -29,7 +29,7 @@
 
 import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { LoroDoc } from "loro-crdt";
-import { DaemonError, fromBase64, type DaemonClient, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { DaemonError, fromBase64, type DaemonClient, type DocRevisionComparison, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
 import { liveReviewGate } from "../../../api/liveReview";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { DocReference } from "../../../components/DocReference";
@@ -44,7 +44,7 @@ import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack }
 import { Popover, ReaderBar } from "./DocBar";
 import { Diagram } from "./DocDiagram";
 import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
-import type { HistoryEvent, WorkItem } from "./DocHistory";
+import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { DocMarkdown } from "./DocMarkdown";
 import { Review, ReviewStrip, SignOffSheet, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
@@ -397,6 +397,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // A suggestion's section text as it is being typed on the page (SuggestEditor).
   const [draftText, setDraftText] = useState<string | null>(null);
   const [historyRev, setHistoryRev] = useState<number | null>(null);
+  const [historical, setHistorical] = useState<{ comparison: DocRevisionComparison; close(): void } | null>(null);
   const lastRead = useLastRead(receivedPlan.id, receivedPlan.rev);
   const plan = useLiveReview ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
   const teammate = receivedTeammate && useLiveReview ? { ...receivedTeammate, signedOff: !!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me) } : receivedTeammate;
@@ -911,10 +912,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       {!chrome && presence && <div className="hidden">{presence}</div>}
       {top}
       <div ref={setStripHost} className="contents" />
-      {typing && <FormatBar hint={raw ? "The buttons write the Markdown for you: Bold wraps the selection in **." : undefined} />}
+      {typing && !historical && <FormatBar hint={raw ? "The buttons write the Markdown for you: Bold wraps the selection in **." : undefined} />}
       <div className="flex min-h-0 flex-1">
-        <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" data-mode={mode} onMouseUp={pick} onKeyUp={pick} onClick={followAnchor}>
-          <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
+        <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" data-mode={historical ? "viewing" : mode} onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
+          {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
                 {plan.title} <DocReference reference={plan.reference} className="ml-1 font-sans" />
@@ -975,8 +976,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               );
             })}
             </>}
-          </article>
-          {picked && (
+          </article>}
+          {picked && !historical && (
             <div role="toolbar" aria-label="For the highlighted text" className="absolute z-10 inline-flex -translate-y-[calc(100%+6px)] gap-0.5 rounded-md border border-line-strong bg-canvas-2 p-[3px] font-sans text-xs shadow-lg" style={{ left: picked.x, top: picked.y }}
               onMouseDown={(e) => e.preventDefault()} onMouseUp={(e) => e.stopPropagation()}>
               {canComment && <button type="button" className="cursor-pointer rounded-[3px] bg-branch-soft px-[9px] py-0.5 font-medium text-branch" onClick={() => offer("comment")}>Comment</button>}
@@ -991,6 +992,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
             active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
+            historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
+              onCompare={(comparison, close) => setHistorical(comparison ? { comparison, close } : null)} />}
             history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} work={work} canLink={!teammate || canComment} />
         ) : (
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />

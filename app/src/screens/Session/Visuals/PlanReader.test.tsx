@@ -2,12 +2,13 @@ import { inTestStore } from "../../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
 import { afterEach, expect, it } from "vitest";
-import { DaemonError, type DaemonClient, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
+import { DaemonError, type DaemonClient, type DocRevisionComparison, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
 import { DaemonContext } from "../../../api/context";
 import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
 import { changeBetween } from "./DocText";
 import { PlanReader, REVIEW_COLLAPSED_KEY } from "./PlanReader";
+import { SharedDesignReader } from "./SharedDesignReader";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
 afterEach(() => {
@@ -27,6 +28,43 @@ const visuals: VisualsClient = {
 const docWrites = (now: () => Plan): PlanDocClient => ({
   commentPlan: async () => now(), replyPlan: async () => now(), resolvePlanThread: async () => now(), suggestPlan: async () => now(),
   acceptPlanSuggestion: async () => now(), rejectPlanSuggestion: async () => now(), editPlan: async () => now(), confirmPlan: async () => now(),
+});
+
+it.each(["author", "shared"])("opens %s history through the reader and shows the selected changes in the document pane", async (reader) => {
+  const plan = doc(3, "Latest passage.");
+  const comparison: DocRevisionComparison = {
+    revision: { ...plan, rev: 2, sections: [{ id: "summary", title: "Summary", markdown: "Revised passage." }] },
+    previous: { ...plan, rev: 1, sections: [{ id: "summary", title: "Summary", markdown: "Earlier passage." }] },
+    changes: [{ section: "summary", before: { title: "Summary", markdown: "Earlier passage." }, after: { title: "Summary", markdown: "Revised passage." },
+      spans: [{ kind: "replace", before_start: 0, before_end: 7, start: 0, end: 7, before: "Earlier", after: "Revised" }] }],
+  };
+  const history = async () => ({ events: [{ id: "r2", kind: "revision" as const, actor: "person", at: 2, rev: 2, version: null }] });
+  const client = {
+    ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
+    planHistory: history, planRevisionChanges: async () => comparison,
+    sharedDesign: async () => ({ ...plan, me: "me", author: "author", can_comment: true, can_suggest: true, can_sign_off: true, signed_off: false }),
+    writeSharedDesign: async () => ({ ...plan, me: "me" }), libraryPeople: async () => ({ people: [] }),
+    sharedDesignHistory: history, sharedDesignRevisionChanges: async () => comparison,
+  };
+  render(reader === "author"
+    ? <PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />
+    : <SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />);
+  await screen.findByText("Latest passage.");
+  fireEvent.click(screen.getByRole("tab", { name: "History" }));
+  await act(async () => {});
+  const timeline = screen.getByTestId("doc-history");
+  expect(timeline.dataset.state).toBe("ready");
+  fireEvent.click(within(timeline).getByRole("button"));
+  const pane = screen.getByTestId("plan-doc");
+  const shown = await within(pane).findByRole("region", { name: "Revision comparison" });
+  expect(shown.dataset.revision).toBe("2");
+  expect(shown.querySelector("del")?.textContent).toBe("Earlier");
+  expect(shown.querySelector("ins")?.textContent).toBe("Revised");
+  expect(within(pane).queryByText("Latest passage.")).toBeNull();
+  expect(within(pane).queryByRole("button", { name: "Edit Summary" })).toBeNull();
+  fireEvent.click(within(shown).getByRole("button", { name: "Back to the latest" }));
+  expect(within(pane).queryByRole("region", { name: "Revision comparison" })).toBeNull();
+  expect(within(pane).getByText("Latest passage.")).toBeTruthy();
 });
 
 it("keeps an approved plan board live from recorded worker events and drops stale reads", async () => {
