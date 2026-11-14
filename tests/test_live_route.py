@@ -40,14 +40,22 @@ def joined(socket):
     return SharedDoc.load(base64.b64decode(socket.receive_json()["update"]))
 
 
-def test_a_library_design_shared_from_here_finds_its_plan_and_anyone_elses_does_not(db, live_doc):
+def test_a_library_design_shared_from_here_finds_its_plan_only_for_the_account_that_shared_it(db, live_doc, monkeypatch):
     """The Library opens an author's own design in the author's reader: by its
-    doc id, the plan (its visual) it was shared from on this machine."""
+    doc id, the plan (its visual) it was shared from on this machine, and only
+    for the account signed in now being the one that shared it."""
+    from types import SimpleNamespace
+
+    from brindle.daemon import routes_actions
     from test_plans import AUTH
 
+    signed_in = {"sub": "owner"}
+    monkeypatch.setattr(routes_actions, "_docs_entitlement", lambda repo, store=None: SimpleNamespace(sub=signed_in["sub"]))
     with TestClient(build_app(TOKEN), headers=AUTH) as client:
         assert client.get("/v1/library/designs/doc1/plan").json()["id"] == live_doc
         assert client.get("/v1/library/designs/ad_someone_elses/plan").status_code == 404
+        signed_in["sub"] = "reviewer"                       # another account, which can review the same design
+        assert client.get("/v1/library/designs/doc1/plan").status_code == 404
 
 
 def test_two_local_sockets_converge_and_rejoin_the_persisted_replica(db, live_doc):

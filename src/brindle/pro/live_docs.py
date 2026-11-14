@@ -574,6 +574,7 @@ class DocLink:
 
     _unsent: bool = False
     _reconciled: float = 0.0     # when a blocked outbox was last checked (manager.clock)
+    _reads: int = 0              # frozen-version reads asked for (note_version): only the latest is kept
 
     # -- the app's side
 
@@ -581,20 +582,29 @@ class DocLink:
         lock = "sign_off" if self.frozen else "author_offline" if self.author_offline else None
         return {"state": {"author": self.author, "lock": lock, "version": self.version if self.frozen else None}}
 
-    async def note_version(self) -> None:
+    async def note_version(self) -> bool:
         """Read the frozen version again: its text from the replica, its
-        sign-offs from the Library (off the event loop)."""
-        if not self.frozen:
+        sign-offs from the Library (off the event loop). Reads can overlap (two
+        windows' refreshes, a join's): only the latest one asked for is kept,
+        and only for the version still frozen, so an older answer that arrives
+        last never takes back a sign-off a newer one showed. True when this
+        read is the one kept."""
+        self._reads += 1
+        mine, frozen = self._reads, self.frozen
+        if not frozen:
             self.version = None
-            return
+            return True
         review = await asyncio.to_thread(self.manager.review, self.doc_id)
-        self.version = await self.manager.work(_frozen_version, self.doc_id, self.frozen, review)
+        version = await self.manager.work(_frozen_version, self.doc_id, frozen, review)
+        if mine != self._reads or self.frozen != frozen:
+            return False        # a later read, or another lock, has the say
+        self.version = version
+        return True
 
     async def refresh(self) -> None:
         """A window says the review changed (its person signed off): read the
-        version again and tell every window here."""
-        if self.frozen:
-            await self.note_version()
+        version again and tell every window here (unless a later read will)."""
+        if self.frozen and await self.note_version():
             await self._to_windows(self.state_frame())
 
     async def _to_windows(self, frame: dict, skip: Lease | None = None) -> None:

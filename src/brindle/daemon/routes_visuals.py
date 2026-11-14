@@ -659,12 +659,22 @@ def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
 @_json
 def library_design_plan(db: DB, request: Request) -> Any:
     """The plan a Library design was shared from, when it was shared from this
-    machine: its visual, so the Library opens it in the author's own reader
-    (sharing, Freeze, the build). A 404 for anyone else's design."""
+    machine by the account signed in now: its visual, so the Library opens it
+    in the author's own reader (sharing, Freeze, the build). A 404 for anyone
+    else's design, for one another account here shared, for one the Library
+    refused this account, and when no account can be verified: those open in
+    the teammate's reader, with what the Library lets this account do."""
+    from brindle.daemon import routes_actions as actions
+
     visuals.require_enabled()
-    row = db.conn.execute("SELECT plan_id FROM plan_shares WHERE doc_id=?", (request.path_params["id"],)).fetchone()
-    if row is None:
-        raise ServiceError("not_found", "this design wasn't shared from here", 404)
+    row = db.conn.execute("SELECT plan_id, owner, access_refused FROM plan_shares WHERE doc_id=?",
+                          (request.path_params["id"],)).fetchone()
+    try:
+        me = actions._docs_entitlement(None).sub
+    except ServiceError:
+        me = None
+    if row is None or row["access_refused"] or me is None or row["owner"] != me:
+        raise ServiceError("not_found", "this design wasn't shared from here by this account", 404)
     v = visuals.get(db, row["plan_id"])
     visuals._unlocked(v["root_id"])
     return visuals.to_dto(db, v)
