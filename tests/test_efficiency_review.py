@@ -130,6 +130,57 @@ def test_review_stall_waits_for_both_slots(db, repo, monkeypatch, changed_slot, 
             break
 
 
+@pytest.mark.parametrize("terminal", [False, pytest.param(True, marks=pytest.mark.variant(
+    "the replacement's death must escalate once instead of waiting forever on the unfinished slot"))])
+def test_review_stall_recovers_unfinished_slot(db, repo, monkeypatch, terminal):
+    from brindle import launch_health
+
+    cfg = RepoConfig(review_stall_stop=True, review_rounds=2,
+                     second_review={"": "reviewer-codex"}, review_profile="reviewer", learning="off")
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **kw: cfg)
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    ws = workspaces.create(db, str(repo), "unfinished-slot").workspace
+    sha = gates.head(ws)
+    add(db, ws, "writer", "assign", parent="boss", result="done", pipeline="reviewing")
+    db.update_agent("writer", pipeline_rounds=2)
+    for rid, slot in (("first", ""), ("dead", "reviewer-codex")):
+        add(db, ws, rid, "review", slot or "reviewer", parent="boss", review_sha=sha)
+        db.update_agent(rid, review_slot=slot)
+    dead = {"dead"}
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id not in dead)
+    monkeypatch.setattr(agents, "unusable", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **kw: db_.enqueue(to, body, None))
+    monkeypatch.setattr(launch_health, "last_error", lambda a: None)
+    started = fake_spawn(monkeypatch)
+    first = "src/auth.py: missing credentials accepted"
+    db.add_review(ws.id, sha, "first", False, first)
+    assert pipeline.on_review(db, db.get_agent("first"), ws, False, first)
+    assert db.get_agent("writer").pipeline == "reviewing"
+    assert drain(db, "writer") == []
+    observed = db.get_agent("dead")
+    assert pipeline.on_reviewer_dead(db, observed, ws)
+    assert len(started) == 1
+    replacement = db.get_agent(started[0].id)
+    assert pipeline.on_reviewer_dead(db, observed, ws)
+    assert len(started) == 1 and drain(db) == []
+    if terminal:
+        dead.add(replacement.id)
+        assert pipeline.on_reviewer_dead(db, replacement, ws)
+        assert db.get_agent("writer").pipeline is None
+        assert len(drain(db)) == 1
+        assert pipeline.on_reviewer_dead(db, replacement, ws)
+        assert drain(db) == [] and drain(db, "writer") == []
+    else:
+        second = "src/cache.py: stale credentials accepted"
+        db.add_review(ws.id, sha, replacement.id, False, second)
+        assert pipeline.on_review(db, replacement, ws, False, second)
+        assert db.get_agent("writer").pipeline == "fixing"
+        messages = drain(db, "writer")
+        assert len(messages) == 1 and first in messages[0] and second in messages[0]
+        assert drain(db) == []
+
+
 def commit(repo, path, text):
     target = repo / path
     target.parent.mkdir(parents=True, exist_ok=True)

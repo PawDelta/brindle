@@ -1016,23 +1016,33 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
             sha = gates.head(ws)
         except git.GitError:
             return False  # no branch remains to restart a review on
-        if reviewer.review_sha != sha or db.reviews_at(ws.id, sha):
+        slot = _review_slot(db, reviewer)
+        reviews = db.reviews_at(ws.id, sha)
+        # Another slot's verdict cannot finish this review. A preceding
+        # round at the same commit cannot finish a newer reviewer either.
+        covered = any(slot is None or r.reviewer_id == reviewer.id or (
+            r.review_slot == slot and r.reviewer_created_at is not None
+            and r.reviewer_created_at >= reviewer.created_at) for r in reviews)
+        if reviewer.review_sha != sha or covered:
             db.update_agent(reviewer.id, status="done")
             return True
-        others = [a for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id]
+        others = [a for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id
+                  and (slot is None or _review_slot(db, a) == slot)]
         if any(a.result is None and a.review_sha == sha and agents.alive_or_starting(a)
                and not a.unreported_noted for a in others):
             db.update_agent(reviewer.id, status="done")
             return True
-        profiles = {reviewer.profile, *profile_names(ws.repo_root), *(a.profile for a in others)}
+        profiles = {reviewer.profile, *(a.profile for a in others)}
+        if slot is None:
+            profiles.update(profile_names(ws.repo_root))
         report = review_claim(db, ws)
         if any(agents._review_pending(ws.id, profile, sha, report) for profile in profiles):
             db.update_agent(reviewer.id, status="done")
             return True
         # An explicit dispatcher may have claimed a slot before creating its row.
         if db.conn.execute("SELECT 1 FROM review_claims WHERE workspace_id=? AND sha=? "
-                           "AND agent_id IS NULL AND claimed_at>?",
-                           (ws.id, sha, time.time() - agents.LAUNCH_GRACE)).fetchone():
+                           "AND agent_id IS NULL AND claimed_at>? AND (? IS NULL OR slot=?)",
+                           (ws.id, sha, time.time() - agents.LAUNCH_GRACE, slot, slot)).fetchone():
             return True
         try:
             cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
@@ -1048,7 +1058,7 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
                 replacement = agents.request_review(
                     db, parent, ws, reviewer.profile, cfg=cfg,
                     check_summary=_cached_check_summary(db, ws, cfg, reviewer),
-                    second=bool(_review_slot(db, reviewer)), slot=db.review_slot(reviewer.id),
+                    second=bool(slot), slot=slot,
                     expected_sha=sha,
                 )
                 if replacement is not None:
