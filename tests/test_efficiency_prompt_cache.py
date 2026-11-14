@@ -10,7 +10,7 @@ import pytest
 from conftest import sh
 from brindle import agents, opencode, workspaces
 from brindle.db import Agent
-from brindle.providers import ClaudeCode, Codex, LaunchContext, get_provider
+from brindle.providers import Antigravity, ClaudeCode, Codex, LaunchContext, get_provider
 
 
 def _start(db, agent, ws, prompt=None):
@@ -95,6 +95,11 @@ def _hidden(db, ws, agent):
     if agent.provider == "codex":
         flag = next(a for a in Codex().command(ctx) if a.startswith("mcp_servers.brindle.disabled_tools="))
         return json.loads(flag.split("=", 1)[1])
+    if agent.provider == "antigravity":   # agy reads the checkout's .agents/mcp_config.json
+        Antigravity().command(ctx)
+        server = json.loads((Path(ws.path) / ".agents" / "mcp_config.json").read_text())["mcpServers"]["brindle"]
+        assert not set(server.get("disabledTools", [])) & set(server["tools"])   # none still eager
+        return server.get("disabledTools", [])
     if agent.provider == "opencode":
         perms = opencode.config(ctx, opencode.launch_for(profile, ws.path))["permission"]
         return sorted(k.removeprefix("brindle_") for k, v in perms.items() if k.startswith("brindle_") and v == "deny")
@@ -108,6 +113,7 @@ def _hidden(db, ws, agent):
         "Claude Code's own rendering (--disallowedTools, the 5-minute cache) and a medium worker kept whole")),
     ("codex", "reviewer-codex", "review", None, agents.REVIEWER_TOOLS),
     ("opencode", "developer-opencode", "assign", "light", agents.LIGHT_WORKER_TOOLS),
+    ("antigravity", "reviewer-gemini", "review", None, agents.REVIEWER_TOOLS),
 ])
 def test_short_lived_agents_get_a_fixed_subset_of_brindle_tools(db, repo, provider, profile, mode, weight, keep):
     from brindle.mcp_server import mcp
@@ -121,6 +127,12 @@ def test_short_lived_agents_get_a_fixed_subset_of_brindle_tools(db, repo, provid
         starts.append(_hidden(db, ws, db.get_agent(aid)))
     assert starts[0] == starts[1]   # the same tool list at every start
     assert every - set(starts[0]) == set(keep) and set(keep) < every
+    if provider == "antigravity":
+        # The tool list is the checkout's: with an agy worker at work beside
+        # it, the reviewer's launch leaves that worker's tools alone.
+        db.add_agent(Agent("w1", ws.id, "developer-gemini", provider, None, "assign", "starting", "", None,
+                           time.time()))
+        assert _hidden(db, ws, db.get_agent("a1")) == []
     if provider == "claude":   # a worker on a normal task keeps every tool and the default cache
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "starting", "", None,
                            time.time()))
