@@ -104,15 +104,20 @@ export function DocumentHistory({ client, planId, refresh, onCompare }: {
   compareCallback.current = onCompare;
   const identity = useRef({ client, planId });
   identity.current = { client, planId };
+  // Comparisons are immutable: reloading the timeline must not cancel or close one.
+  useEffect(() => {
+    request.current++;
+    setComparison(null); setLoading(false);
+    compareCallback.current?.(null, close);
+    return () => { request.current++; compareCallback.current?.(null, close); };
+  }, [client, planId]);
   useEffect(() => {
     let active = true;
-    request.current++;
-    setEvents(null); setComparison(null); setError(false); setLoading(false);
-    compareCallback.current?.(null, close);
+    setEvents(null); setError(false);
     void client.planHistory(planId).then((result) => {
       if (active && identity.current.client === client && identity.current.planId === planId) setEvents(historyEvents(result.events));
     }, () => { if (active && identity.current.client === client && identity.current.planId === planId) setError(true); });
-    return () => { active = false; request.current++; compareCallback.current?.(null, close); };
+    return () => { active = false; };
   }, [client, planId, refresh]);
   const pick = async (rev: number) => {
     const sequence = ++request.current;

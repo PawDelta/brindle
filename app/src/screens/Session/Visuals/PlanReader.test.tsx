@@ -1,7 +1,7 @@
 import { inTestStore } from "../../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { DaemonError, type DaemonClient, type DocRevisionComparison, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
 import { DaemonContext } from "../../../api/context";
 import { createAppStore } from "../../../store/store";
@@ -13,6 +13,7 @@ import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   localStorage.removeItem(REVIEW_COLLAPSED_KEY);
 });
 
@@ -31,6 +32,7 @@ const docWrites = (now: () => Plan): PlanDocClient => ({
 });
 
 it.each(["author", "shared"])("opens %s history through the reader and shows the selected changes in the document pane", async (reader) => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const plan = doc(3, "Latest passage.");
   const comparison: DocRevisionComparison = {
     revision: { ...plan, rev: 2, sections: [{ id: "summary", title: "Summary", markdown: "Revised passage." }] },
@@ -39,29 +41,47 @@ it.each(["author", "shared"])("opens %s history through the reader and shows the
       spans: [{ kind: "replace", before_start: 0, before_end: 7, start: 0, end: 7, before: "Earlier", after: "Revised" }] }],
   };
   const history = async () => ({ events: [{ id: "r2", kind: "revision" as const, actor: "person", at: 2, rev: 2, version: null }] });
+  let finishComparison!: (value: DocRevisionComparison) => void;
+  const revisionChanges = () => new Promise<DocRevisionComparison>((resolve) => { finishComparison = resolve; });
+  let reads = 0;
   const client = {
-    ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
-    planHistory: history, planRevisionChanges: async () => comparison,
-    sharedDesign: async () => ({ ...plan, me: "me", author: "author", can_comment: true, can_suggest: true, can_sign_off: true, signed_off: false }),
+    ...visuals, ...docWrites(() => plan), plan: async () => { reads++; return { ...plan }; }, decidePlan: async () => plan,
+    planHistory: history, planRevisionChanges: revisionChanges,
+    sharedDesign: async () => { reads++; return { ...plan, me: "me", author: "author", can_comment: true, can_suggest: true, can_sign_off: true, signed_off: false }; },
     writeSharedDesign: async () => ({ ...plan, me: "me" }), libraryPeople: async () => ({ people: [] }),
-    sharedDesignHistory: history, sharedDesignRevisionChanges: async () => comparison,
+    sharedDesignHistory: history, sharedDesignRevisionChanges: revisionChanges,
   };
-  render(reader === "author"
+  const store = createAppStore();
+  const refresh = async () => {
+    const before = reads;
+    await act(async () => {
+      if (reader === "shared") vi.advanceTimersByTime(30_000);
+      else store.dispatch({ type: "stream", message: { type: "event", id: reads, ts: reads, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: {} } });
+    });
+    expect(reads).toBe(before + 1);
+  };
+  render(inTestStore(reader === "author"
     ? <PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />
-    : <SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />);
+    : <SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />, store));
   await screen.findByText("Latest passage.");
   fireEvent.click(screen.getByRole("tab", { name: "History" }));
   await act(async () => {});
   const timeline = screen.getByTestId("doc-history");
   expect(timeline.dataset.state).toBe("ready");
   fireEvent.click(within(timeline).getByRole("button"));
+  // A background read must preserve the request for an immutable revision.
+  await refresh();
+  await act(async () => finishComparison(comparison));
   const pane = screen.getByTestId("plan-doc");
-  const shown = await within(pane).findByRole("region", { name: "Revision comparison" });
+  const shown = within(pane).getByRole("region", { name: "Revision comparison" });
   expect(shown.dataset.revision).toBe("2");
   expect(shown.querySelector("del")?.textContent).toBe("Earlier");
   expect(shown.querySelector("ins")?.textContent).toBe("Revised");
   expect(within(pane).queryByText("Latest passage.")).toBeNull();
   expect(within(pane).queryByRole("button", { name: "Edit Summary" })).toBeNull();
+  // Nor should another read replace the comparison once it is displayed.
+  await refresh();
+  expect(within(pane).getByRole("region", { name: "Revision comparison" })).toBe(shown);
   fireEvent.click(within(shown).getByRole("button", { name: "Back to the latest" }));
   expect(within(pane).queryByRole("region", { name: "Revision comparison" })).toBeNull();
   expect(within(pane).getByText("Latest passage.")).toBeTruthy();
