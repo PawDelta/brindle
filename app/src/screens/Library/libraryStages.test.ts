@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { AnalysisDoc, FolderGroup } from "../../api/client";
-import { docQueue, folderTree, groupDocs, loadRecords, placedFolders, stageCounts, stageOf, type DesignRecord } from "./libraryStages";
+import { docQueue, folderTree, groupDocs, loadRecords, loadWorkItems, placedFolders, stageCounts, stageOf, type DesignRecord } from "./libraryStages";
 
 const task = (id: string, state: string) => ({ id, title: id, state });
 const TEAM = { kind: "group", id: "t1", name: "Founding Team" };
@@ -75,6 +75,16 @@ it("the list's and board's work item is the design's own item with the tracker's
   const failed = await loadRecords({ ...base, libraryWorkItems: async () => { throw new Error("offline"); } }, [doc("a")]);
   expect(failed.get("a")).toBeDefined();
   expect(failed.get("a")?.work_item).toBeUndefined();
+});
+
+it("a design the daemon stops listing on a later page (refused since) loses the item an earlier page gave it", async () => {
+  const epic = { link_id: "wl", tracker: "azure_devops", key: "1", display: "AB#1", target: { kind: "design" }, state: "New" } as const;
+  const pages = [
+    { items: { a: { epic, done: 0, total: 0 }, b: { epic, done: 0, total: 0 } }, remaining: ["b"] },     // b was cached, due a read
+    { items: { }, remaining: [] },                                                                         // the read of b was refused
+  ];
+  const got = await loadWorkItems(async () => pages.shift() as never, ["a", "b"]);
+  expect(Object.keys(got)).toEqual(["a"]);
 });
 
 it("work items of a listing longer than one request are all asked for, the daemon's few reads at a time", async () => {

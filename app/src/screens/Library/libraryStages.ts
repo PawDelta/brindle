@@ -108,6 +108,9 @@ export async function loadWorkItems(read: NonNullable<DaemonClient["libraryWorkI
       let got: Awaited<ReturnType<typeof read>> | undefined;
       try { got = await read(ask, repo); } catch { return; }
       if (!got) return;
+      // This answer is authoritative for every design it was asked about: one it no longer lists (refused
+      // or gone since an earlier page) must not keep the value an earlier page gave it.
+      for (const id of ask) delete out[id];
       Object.assign(out, got.items ?? {});
       const next = got.remaining ?? [];
       if (next.length >= ask.length) return;

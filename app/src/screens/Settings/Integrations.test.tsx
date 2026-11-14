@@ -71,8 +71,14 @@ describe("Settings › Integrations", () => {
     fireEvent.change(screen.getByLabelText("pawdelta project"), { target: { value: "PawDelta" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /Close a story when its task's branch merges/ }));
     const done = screen.getByLabelText("Azure DevOps done states") as HTMLInputElement;
-    for (const typed of ["Resolved", "Resolved,", "Resolved, ", "Resolved, Closed", "Resolved, Closed for good"]) fireEvent.change(done, { target: { value: typed } });
-    expect(done.value).toBe("Resolved, Closed for good");     // nothing was dropped while typing
+    fireEvent.change(done, { target: { value: "" } });
+    // Key by key, each press added to what the box holds now, as a person types.
+    for (const ch of "Resolved,") fireEvent.change(done, { target: { value: done.value + ch } });
+    expect(done.value).toBe("Resolved,");                      // the comma stays until the next state follows it
+    fireEvent.change(done, { target: { value: done.value + " " } });
+    expect(done.value).toBe("Resolved, ");
+    for (const ch of "Closed for good") fireEvent.change(done, { target: { value: done.value + ch } });
+    expect(done.value).toBe("Resolved, Closed for good");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect((screen.getByLabelText("Azure DevOps done states") as HTMLInputElement).value).toBe("Resolved, Closed for good"));
     expect((screen.getByLabelText("pawdelta project") as HTMLInputElement).value).toBe("PawDelta");
