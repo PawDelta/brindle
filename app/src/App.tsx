@@ -178,13 +178,13 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           doc={route.doc}
           design={route.design}
           session={route.session}
-          fromRepo={docsFrom?.repo}
+          fromRepo={docsFrom?.repo ?? route.repo}
           onBackToSession={docsFrom && (() => navigate({ screen: "session", root: docsFrom.root, repo: docsFrom.repo, agent: docsFrom.root }))}
         />
       );
     case "shared-design":
       // A shared design opens in the Library's reader, with the Library around it.
-      return <OpenInLibrary navigate={navigate} to={{ screen: "knowledge", view: "docs", doc: route.doc, design: true }} />;
+      return <OpenInLibrary navigate={navigate} to={{ screen: "knowledge", view: "docs", doc: route.doc, design: true, repo: route.repo }} />;
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     /* One Settings, in tabs: the older Account and Project settings routes open it on their tab. */

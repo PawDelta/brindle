@@ -54,8 +54,9 @@ export type Route =
      Stage row picked in its sidebar; `doc`: a library doc's id (opened in the reader) or an
      imported doc's number; `session`: only that session's docs (its root), from the
      session's goal panel; `from`: the session the person came from, for Back to session;
-     `design`: `doc` is a design, opened in the design reader (PlanReader's) before the list loads. */
-  | { screen: "knowledge"; view?: KnowledgeView; stage?: LibraryStage; doc?: number | string; section?: string; session?: string; from?: SessionRef; design?: boolean }
+     `design`: `doc` is a design, opened in the design reader (PlanReader's) before the list loads;
+     `repo`: the project it opens on (a review card's: a question to the supervisor stays there). */
+  | { screen: "knowledge"; view?: KnowledgeView; stage?: LibraryStage; doc?: number | string; section?: string; session?: string; from?: SessionRef; design?: boolean; repo?: string }
   /* A design someone else shared, by its Library doc id (from the Inbox's "Review requested" card):
      `title`, the card's; `repo`, the local project a question to the supervisor should stay in. */
   | { screen: "shared-design"; doc: string; title?: string; repo?: string }
