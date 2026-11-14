@@ -67,11 +67,13 @@ export function formatEdit(text: string, from: number, to: number, command: Form
   const nl = text.indexOf("\n", b > a && text[b - 1] === "\n" ? b - 1 : b);
   const end = nl < 0 ? text.length : nl;
   const lines = text.slice(start, end).split("\n");
-  const every = lines.every((line) => !line.trim() || prefixOf(command, line).same);
+  // Only empty lines (a caret on a new line): start them, and the caret goes after the prefix.
+  const blank = lines.every((line) => !line.trim());
+  const every = !blank && lines.every((line) => !line.trim() || prefixOf(command, line).same);
   const prefix = PREFIX[command]!;
   let n = 0;
   const insert = lines.map((line) => {
-    if (!line.trim()) return line;
+    if (!line.trim() && !blank) return line;
     const { mark: old } = prefixOf(command, line);
     const bare = line.slice(old.length);
     return every ? bare : `${prefix(n++)}${bare}`;
