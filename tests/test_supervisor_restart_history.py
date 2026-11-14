@@ -37,7 +37,12 @@ def test_restarts_keep_ordered_history_after_reopening(db, restarting, tmp_path,
         db, "GET", "/api/agents/boss/transcript", {"id": "boss"})).body)
     token = supervisor_state._claim(db, db.get_agent("boss"), time.time())
     assert supervisor_state.restart(db, "boss", token, middle)
-    fresh("fresh-chat", "Now add a wave.")
+    penultimate = fresh("penultimate-chat", "Now add a wave.")
+    token = supervisor_state._claim(db, db.get_agent("boss"), time.time())
+    assert supervisor_state.restart(db, "boss", token, penultimate)
+    fresh("fresh-chat", "Then ship it.")
+    assert [item["session_ref"] for item in supervisor_state.previous_sessions(db, "boss")] == [
+        "old-long-chat", "middle-chat", "penultimate-chat"]
     # A new DB connection models reopening the app/daemon; no in-memory history.
     reopened = DB()
     try:
@@ -48,9 +53,9 @@ def test_restarts_keep_ordered_history_after_reopening(db, restarting, tmp_path,
         reopened.conn.close()
     assert data["reset"]
     assert [m["text"] for m in data["messages"] if m["role"] != "restart"] == [
-        "Ship on Monday.", "Noted, Monday it is.", "Keep the greeting short.", "Now add a wave."]
+        "Ship on Monday.", "Noted, Monday it is.", "Keep the greeting short.", "Now add a wave.", "Then ship it."]
     assert [m["role"] for m in data["messages"]] == [
-        "user", "assistant", "restart", "user", "restart", "user"]
+        "user", "assistant", "restart", "user", "restart", "user", "restart", "user"]
     assert all(m.get("history") for m in data["messages"][:-1])
     assert not data["messages"][-1].get("history")
     code, daemon = _get("/v1/agents/boss/transcript", {"Authorization": f"Bearer {TOKEN}"})
@@ -64,7 +69,7 @@ def test_restarts_keep_ordered_history_after_reopening(db, restarting, tmp_path,
                            f"after={daemon['cursor']}")
     assert code == 200 and remaining["reset"]
     assert [m["text"] for m in remaining["messages"] if m["role"] != "restart"] == [
-        "Keep the greeting short.", "Now add a wave."]
+        "Keep the greeting short.", "Now add a wave.", "Then ship it."]
     from brindle import identity_lock
 
     monkeypatch.setattr(identity_lock, "locked_by", lambda _: "another identity")

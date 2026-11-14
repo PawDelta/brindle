@@ -48,6 +48,9 @@ TAIL_BYTES = 512 * 1024    # of the transcript read for its context size and lat
 RESTART_CLAIM = 600.0      # seconds a restart claim (and its hold on the queue) lasts at most
 RESTART_LOCK_WAIT = 120.0  # seconds a pause waits for a restart's launch to commit (restart_lock)
 RESTART_HEAD = "[brindle] Your context was restarted"
+SEED_BYTES = 30_000        # bytes upper-bound tokens, including non-ASCII text
+RESTART_COOLDOWN = 300.0   # let a fresh supervisor make progress before another restart
+FINISHED_BRANCHES = {"merged", "removed unmerged"}
 
 
 def _empty() -> dict:
@@ -146,47 +149,108 @@ def _fold(db: DB, root_id: str, state: dict, ev: dict) -> None:
 # -- what the fresh session is told -------------------------------------------------
 
 
-def render(db: DB, root_id: str, state: dict | None = None) -> str:
+def render(db: DB, root_id: str, state: dict | None = None, *, max_bytes: int | None = None) -> str:
     """The state as the supervisor reads it: the goal and milestones (live),
-    branches, decisions, questions and workers' last results."""
-    from brindle import agents
+    branches, decisions, questions and workers' last results. With a budget,
+    omit old history first; never omit current work to make history fit."""
+    from brindle import agents, tasks
 
     state = refresh(db, root_id) if state is None else state
     ap = db.get_autopilot(root_id)
-    out = []
+    # Priority -1 is essential, 0 is decisions/recent replies, 1 is finished
+    # work. Keep the newest optional rows first, without changing display order.
+    sections: list[tuple[str, list[tuple[str, int]]]] = []
     if ap and ap.goal:
-        out.append(f"## Goal\n{ap.goal}" + (f"\n{ap.detail}" if ap.detail else ""))
+        sections.append(("## Goal", [(ap.goal + (f"\n{ap.detail}" if ap.detail else ""), -1)]))
         ms = db.milestones(root_id)
         if ms:
-            out.append("## Milestones\n" + "\n".join(
-                f"{m.position}. [{m.state or m.status}] {m.title}" for m in ms))
+            sections.append(("## Milestones", [
+                (f"{m.position}. [{m.state or m.status}] {m.title}",
+                 1 if (m.state or m.status) == "passed" else -1) for m in ms]))
         if ap.state != "running":
-            out.append(f"Autopilot: {ap.state}" + (f" ({ap.note})" if ap.note else ""))
+            sections.append(("", [(f"Autopilot: {ap.state}" + (f" ({ap.note})" if ap.note else ""), -1)]))
+    tree = agents.tree(db, root_id)
     branches = dict(state["branches"])
-    for a in agents.tree(db, root_id)[1:]:
+    live_workers = set()
+    live_rows = []
+    for a in tree[1:]:
         ws = db.get_workspace(a.workspace_id)
-        if a.mode in WORKER_MODES and ws and ws.branch and ws.branch not in branches:
-            branches[ws.branch] = {"state": a.pipeline or a.status, "worker": a.id}
+        if a.mode not in WORKER_MODES:
+            continue
+        if not agents.finished_reporting(a) or a.status == "processing":
+            live_workers.add(a.id)
+            live_rows.append((f"- {a.id} ({a.profile}, {ws.branch if ws else 'no branch'}): "
+                              f"{a.pipeline or a.status}; {_clip(a.task, RESULT_CHARS)}", -1))
+        if ws and ws.branch:
+            if ws.branch not in branches or a.id in live_workers:
+                branches[ws.branch] = {"state": a.pipeline or a.status, "worker": a.id}
+
+    def finished(branch: str | None) -> bool:
+        info = branches.get(branch, {})
+        return info.get("state") in FINISHED_BRANCHES and info.get("worker") not in live_workers
+
     if branches:
-        out.append("## Branches\n" + "\n".join(
-            f"- {b} ({v.get('worker') or '?'}): {v['state']}" for b, v in branches.items()))
+        sections.append(("## Branches", [
+            (f"- {b} ({v.get('worker') or '?'}): {v['state']}", 1 if finished(b) else -1)
+            for b, v in branches.items()]))
+    if live_rows:
+        sections.append(("## Live workers", live_rows))
+    ids = {a.id for a in tree}
+    queued = [t for t in db.list_tasks() if t.caller_id in ids and t.state in (*tasks.QUEUED, "starting")]
+    if queued:
+        sections.append(("## Queued workers", [
+            (f"- {t.id} ({t.profile}, {t.branch or 'no branch'}): {t.state}; "
+             f"{_clip(t.task_text, RESULT_CHARS)}", -1) for t in queued]))
     if state["decisions"]:
-        out.append("## Decisions made\n" + "\n".join(
-            f"- {d['text']}" + (f" (decision {d['id']})" if d.get("id") else "") for d in state["decisions"]))
+        sections.append(("## Decisions made", [
+            (f"- {d['text']}" + (f" (decision {d['id']})" if d.get("id") else ""), 0)
+            for d in state["decisions"]]))
     questions = [q["text"] for q in state["questions"]]
     if ap and ap.question and ap.question not in questions:
         questions.append(ap.question)
     if questions:
-        out.append("## Open questions for the person\n" + "\n".join(f"- {q}" for q in questions)
-                   + "\nStill unanswered: wait for the reply (or remind them), then call "
-                   "need_user(answered=true).")
+        sections.append(("## Open questions for the person", [(f"- {q}", -1) for q in questions] + [
+            ("Still unanswered: wait for the reply (or remind them), then call need_user(answered=true).", -1)]))
     if state["answered"]:
-        out.append("## Recently answered (the reply may be in the latest messages)\n"
-                   + "\n".join(f"- {q['text']}" for q in state["answered"]))
+        sections.append(("## Recently answered (the reply may be in the latest messages)", [
+            (f"- {q['text']}", 0) for q in state["answered"]]))
     if state["workers"]:
-        out.append("## Last result per worker\n" + "\n".join(
-            f"- {wid} ({w.get('profile')}, {w.get('branch') or 'no branch'}): {w['result']}"
-            for wid, w in state["workers"].items()))
+        # Results belong to workers, not branches. A completed handoff on the
+        # supervisor's branch is history, even when a successor uses that branch.
+        # Keep a reported result awaiting review/merge only for its current owner.
+        outstanding_results = live_workers | {
+            info.get("worker") for branch, info in state["branches"].items()
+            if info["state"] not in FINISHED_BRANCHES
+            and branches.get(branch, {}).get("worker") == info.get("worker")
+        }
+        sections.append(("## Last result per worker", [
+            (f"- {wid} ({w.get('profile')}, {w.get('branch') or 'no branch'}): {w['result']}",
+             -1 if wid in outstanding_results else 1)
+            for wid, w in state["workers"].items()]))
+    omitted = ("Older completed work and decisions omitted. Fetch the rest with get_progress, "
+               "list_agents and read_messages.")
+    rows = [(section, index, text, priority) for section, (_, entries) in enumerate(sections)
+            for index, (text, priority) in enumerate(entries)]
+    keep = {(s, i) for s, i, _, priority in rows if priority < 0 or max_bytes is None}
+    if max_bytes is not None:
+        # Reserve all headings and the omission notice, conservatively. Essential
+        # work may exceed the budget; seed_prompt refuses that restart intact.
+        used = sum(len(title.encode()) + 3 for title, _ in sections) + len(omitted.encode()) + 2
+        used += sum(len(text.encode()) + 1 for s, i, text, _ in rows if (s, i) in keep)
+        for s, i, text, priority in sorted(rows, key=lambda r: (r[3], -r[0], -r[1])):
+            if priority < 0:
+                continue
+            size = len(text.encode()) + 1
+            if used + size <= max_bytes:
+                keep.add((s, i))
+                used += size
+    out = []
+    for s, (title, entries) in enumerate(sections):
+        selected = [text for i, (text, _) in enumerate(entries) if (s, i) in keep]
+        if selected:
+            out.append((title + "\n" if title else "") + "\n".join(selected))
+    if len(keep) < len(rows):
+        out.append(omitted)
     return "\n\n".join(out) or "(nothing recorded yet)"
 
 
@@ -264,17 +328,30 @@ SEED = (f"{RESTART_HEAD} to keep it small: this is a fresh session of the same s
         "messages below. Don't redo work the state says is done.")
 
 
+class SeedTooLarge(ValueError):
+    """Current work alone exceeds the safe budget: retain the existing chat."""
+
+
 def seed_prompt(db: DB, root_id: str, transcript: Path | None = None) -> str:
     """The first prompt of a restarted supervisor: the state and the latest messages."""
     root = db.get_agent(root_id)
     parts = [SEED.format(root_id=root_id)]
     if root and root.task:
         parts.append("## The request this session started from\n" + _clip(root.task, 2000))
-    parts.append(render(db, root_id))
     latest = latest_messages(transcript)
     if latest:
         parts.append("## Latest messages\n" + "\n".join(f"- {who}: {text}" for who, text in latest))
-    return "\n\n".join(parts)
+    from brindle.config import load_repo_config
+
+    ws = db.get_workspace(root.workspace_id) if root else None
+    limit = load_repo_config(ws.repo_root).supervisor_restart_tokens if ws else 0
+    budget = min(SEED_BYTES, limit // 4) if limit else SEED_BYTES
+    remaining = budget - len("\n\n".join(parts).encode()) - 2
+    parts.insert(2 if root and root.task else 1, render(db, root_id, max_bytes=remaining))
+    seed = "\n\n".join(parts)
+    if len(seed.encode()) > budget:
+        raise SeedTooLarge("the supervisor's current work exceeds its restart seed budget")
+    return seed
 
 
 # -- the restart ------------------------------------------------------------------------
@@ -423,6 +500,9 @@ def on_turn_end(db: DB, agent: Agent, payload: dict) -> bool:
     limit = load_repo_config(ws.repo_root).supervisor_restart_tokens
     if tokens is None or not limit or tokens < limit:
         return False
+    last_restart = db.mark(agent.id, "supervisor-restarted-at")
+    if last_restart and time.time() - float(last_restart) < RESTART_COOLDOWN:
+        return False
     agent = db.get_agent(agent.id) or agent    # its session_ref as this hook just recorded it
     token = _claim(db, agent, time.time())
     if token is None:
@@ -456,6 +536,13 @@ def restart(db: DB, root_id: str, token: str, transcript: Path | None = None) ->
 
     try:
         with agents.resume_lock(root_id):
+            if _held_claim(db, root_id, token) is None:
+                return None
+            try:
+                seed = seed_prompt(db, root_id, transcript)
+            except SeedTooLarge:
+                log.warning("brindle: supervisor %s has too much current work for a safe restart", root_id)
+                return None
             # No paste into its pane under way, no pause or new turn meanwhile
             # (cancel waits on restart_lock): checked immediately before the stop.
             with agents.delivery_lock(root_id), restart_lock(root_id):
@@ -474,8 +561,6 @@ def restart(db: DB, root_id: str, token: str, transcript: Path | None = None) ->
                 # (agents.ended).
                 db.set_status(root_id, "paused")
                 agents._stop(db, root)
-            refresh(db, root_id)
-            seed = seed_prompt(db, root_id, transcript)
             try:
                 # The launch commits only while the claim stands (_gate): a pause from here on wins.
                 agents.resume(db, root_id, only={root_id}, prompts={root_id: seed},
@@ -483,6 +568,7 @@ def restart(db: DB, root_id: str, token: str, transcript: Path | None = None) ->
             except agents.Cancelled:
                 log.info("brindle: supervisor %s's restart was cancelled before its launch", root_id)
                 return None
+            db.set_mark(root_id, "supervisor-restarted-at", str(time.time()))
         with db.tx() as c:
             c.execute("UPDATE supervisor_state SET restarts=restarts+1 WHERE root_id=?", (root_id,))
         bus.publish_agent(db, "supervisor.restarted", root_id)
