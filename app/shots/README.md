@@ -51,7 +51,9 @@ the session, each pane its provider's own in the state its row shows),
 org's policy), `agents-make` (Medium's model list open, the custom agent
 builder under it),
 `library` (the Library open from the foot's button: the sidebar as its
-navigation, the docs in the main area), `library-decisions` (its Decisions
+navigation, eight designs from `library.ts` as a list, Needs you pinned and
+the rest by folder), `library-board` (the same designs on the board, a column
+per stage), `library-decisions` (its Decisions
 source: three decisions as cards),
 `knowledge` (three decisions as cards, two document folders),
 `knowledge-map` (Map on open: zero hosted docs in three scopes, local decisions, imported folders and indexed KB documents),

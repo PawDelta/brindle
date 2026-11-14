@@ -38,7 +38,7 @@ import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
 import { LibraryDesign } from "../Session/Visuals/LibraryDesign";
-import { docStages } from "./libraryStages";
+import { docQueue } from "../Library/libraryStages";
 import { ImportedLibrary } from "./ImportedLibrary";
 import { KeptVisuals } from "./KeptVisuals";
 import { MapView } from "./MapView";
@@ -53,6 +53,9 @@ export interface KnowledgeScreenProps {
   /* The Stage row picked in the sidebar: picking one shows the docs list again (a doc open in
      the reader closes). The repo picked here stays: the screen isn't remounted for it. */
   stage?: LibraryStage;
+  /* The folder (libraryStages.folderKey) or repo (its root) picked in the sidebar: the designs in it. */
+  folder?: string;
+  inRepo?: string;
   /* The screen moved to a view itself (the empty state's buttons): the sidebar follows. */
   onView?(view: KnowledgeView): void;
   /* What the repo on screen holds, for the sidebar's counts. */
@@ -406,7 +409,7 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCounts, doc, design, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
+export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRepo, onView, onCounts, doc, design, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
   const pick = useRepo(fromRepo);
   const { repo, repos } = pick;
   const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
@@ -573,6 +576,20 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCou
     setAdding(true);
   };
   const local = tab === "imported" || tab === "decisions";
+  // The designs fill the page under their own title: every repo's at once, so no repo picker.
+  if (tab === "docs") {
+    return (
+      <section className="flex min-h-0 flex-1 flex-col" aria-label="Library">
+        <DocsView key={stage ?? ""} stage={stage} folder={folder} inRepo={inRepo} queue={docQueue(inbox)} repos={repos} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder}
+          design={design} designReader={(id, title, back) => (
+            // The reader fills the Library's page, its bottom bar in view.
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <LibraryDesign key={id} client={client} docId={id} title={title} repo={repo ?? fromRepo ?? undefined} onBack={back} />
+            </div>
+          )} />
+      </section>
+    );
+  }
   return (
     <section className="flex flex-col gap-s3" aria-label="Library">
       <PageHeader title="Library" lede="What your agents know and remember about this repo: docs they wrote, decisions they follow, and documents they can look up.">
@@ -580,13 +597,6 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCou
       </PageHeader>
       {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
       {tab === "kept" && <KeptVisuals client={client} />}
-      {tab === "docs" && <DocsView key={stage ?? ""} stage={stage} stages={docStages(inbox)} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder}
-        design={design} designReader={(id, title, back) => (
-          // The reader keeps to the window under the Library's header, its bottom bar in view.
-          <div className="flex h-[calc(100vh-12rem)] min-h-[480px] flex-col overflow-hidden">
-            <LibraryDesign key={id} client={client} docId={id} title={title} repo={repo ?? fromRepo ?? undefined} onBack={back} />
-          </div>
-        )} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>

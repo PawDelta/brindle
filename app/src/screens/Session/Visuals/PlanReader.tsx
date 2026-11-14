@@ -32,6 +32,7 @@ import { LoroDoc } from "loro-crdt";
 import { DaemonError, fromBase64, type DaemonClient, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
 import { liveReviewGate } from "../../../api/liveReview";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
+import { DocReference } from "../../../components/DocReference";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { ago } from "../../../components/ProviderConnect";
 import { PaperclipIcon } from "../../../components/icons";
@@ -897,7 +898,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" data-mode={mode} onMouseUp={pick} onKeyUp={pick} onClick={followAnchor}>
           <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
-              <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">{plan.title}</h1>
+              <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
+                {plan.title} <DocReference reference={plan.reference} className="ml-1 font-sans" />
+              </h1>
               <DocStatus stage={stage} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
                 reviewers={statusReviewers} frozen={!!frozen} byline={byline} workItem={workItem}
                 brief={!!plan.ask} briefOpen={briefOpen} onBrief={() => setBriefOpen((o) => !o)}

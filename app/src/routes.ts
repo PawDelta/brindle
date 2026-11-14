@@ -33,9 +33,11 @@ export type SheetRef = { kind: "review" } | { kind: "changes" } | { kind: "visua
 /* The Library's views: its designs ("docs"), and its Sources. */
 export type KnowledgeView = "map" | "docs" | "imported" | "decisions" | "kept";
 
-/* The stages a design moves through, as the Library's sidebar lists them. */
+/* The stages a design moves through, as the Library's sidebar lists them: "Needs you" (what
+   waits on the person) first, then the five a design reaches in turn, the board's columns. */
 export const LIBRARY_STAGES = [
   { id: "needs-you", label: "Needs you" },
+  { id: "drafting", label: "Drafting" },
   { id: "in-review", label: "In review" },
   { id: "approved", label: "Approved" },
   { id: "building", label: "Building" },
@@ -53,10 +55,12 @@ export type Route =
   /* The Library. `view`: the designs (the default) or one of its Sources; `stage`: the
      Stage row picked in its sidebar; `doc`: a library doc's id (opened in the reader) or an
      imported doc's number; `session`: only that session's docs (its root), from the
-     session's goal panel; `from`: the session the person came from, for Back to session;
-     `design`: `doc` is a design, opened in the design reader (PlanReader's) before the list loads;
-     `repo`: the project it opens on (a review card's: a question to the supervisor stays there). */
-  | { screen: "knowledge"; view?: KnowledgeView; stage?: LibraryStage; doc?: number | string; section?: string; session?: string; from?: SessionRef; design?: boolean; repo?: string }
+     session's goal panel; `from`: the session the person came from, for Back to session.
+     `folder`: a folder picked in its sidebar (libraryStages.folderKey: scope and id); `repo`: a
+     repo picked there (its root), its folders' designs; `design`: `doc` is a design, opened in
+     the design reader (PlanReader's) before the list loads; `designRepo`: the project it opens
+     on (a review card's: a question to the supervisor stays there). */
+  | { screen: "knowledge"; view?: KnowledgeView; stage?: LibraryStage; folder?: string; repo?: string; doc?: number | string; section?: string; session?: string; from?: SessionRef; design?: boolean; designRepo?: string }
   /* A design someone else shared, by its Library doc id (from the Inbox's "Review requested" card):
      `title`, the card's; `repo`, the local project a question to the supervisor should stay in. */
   | { screen: "shared-design"; doc: string; title?: string; repo?: string }
@@ -86,6 +90,7 @@ export const SETTINGS_TABS = [
   { id: "general", label: "General" },
   { id: "providers", label: "Workers & providers" },
   { id: "permissions", label: "Permissions" },
+  { id: "format", label: "Doc format" },
   { id: "storage", label: "Storage" },
   { id: "project", label: "Project" },
   { id: "about", label: "About" },

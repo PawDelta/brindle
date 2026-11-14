@@ -41,7 +41,7 @@ import re
 import time
 from typing import Any
 
-from brindle import bus, redact, visual_offers, visuals
+from brindle import bus, doc_templates, redact, visual_offers, visuals
 from brindle.db import DB, Agent
 from brindle.service.errors import ServiceError
 
@@ -478,7 +478,7 @@ def to_dto(db: DB, p: dict) -> dict:
                    state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=_board(db, p),
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
-                   **plan_docs.fields(db, p)).to_json()
+                   reference=doc_templates.reference_of(db, p["id"]), **plan_docs.fields(db, p)).to_json()
 
 
 def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
@@ -519,6 +519,23 @@ def _board(db: DB, p: dict) -> list[dict]:
                 w["test_state"] = "passing" if max(results, key=lambda r: r[0])[1] else "failing"
         out.append(w)
     return out
+
+
+def doc_tasks(db: DB, doc_id: str) -> list[dict] | None:
+    """The split of the plan shared as Library doc ``doc_id``, each task with
+    its state as the plan's board has it (queued, working, in review, merged
+    or cancelled): what the Library reads Building and Shipped from. None when
+    no plan on this machine is that doc."""
+    from brindle.service.dto import DesignTaskDTO
+
+    row = db.conn.execute("SELECT plan_id FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        p = _row(db, row["plan_id"])
+    except ServiceError:
+        return None
+    return [DesignTaskDTO(id=w["id"], title=w.get("title") or w["id"], state=w["state"]).to_json() for w in _board(db, p)]
 
 
 def _page(title: str, markdown: str) -> str:
@@ -564,6 +581,14 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     else:
         markdown = markdown.strip()
         lede, parts = plan_docs.from_markdown(markdown)
+    # The doc format: a new plan starts from the default template, a revision keeps the one
+    # its plan was written with; either way a required heading left out comes back, empty.
+    where = doc_templates.store()
+    fmt = None if plan_id else doc_templates.resolve(where=where)
+    template = doc_templates.default_template(fmt) if fmt else (doc_templates.of(db, plan_id) or {}).get("template")
+    parts, added = doc_templates.apply(template, parts)
+    if added:
+        markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     given = [name for name, raw in (("decisions", decisions), ("split", split), ("ask", ask)) if raw]
@@ -606,6 +631,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         drafted.update(plan_docs.supervise(c, current, replica, base, replaced, lede, parts, off_draft))
 
     settled: list[int] = []
+    numbered: list[bool] = []
 
     def write(c, vid: str, visual_rev: int) -> None:
         now = time.time()
@@ -616,6 +642,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         if visual_rev == 1:
             c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                       " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
+            numbered.append(doc_templates.start(c, vid, template, fmt and fmt["naming"]["reference"], now))
             # The plan now holds the session's tasks: the offer to plan first is settled
             # (an open one too: the person asked for a plan in their own words).
             # A plan asked for directly, with no offer before it, settles the goal too, so growing
@@ -646,6 +673,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                "only after they asked for a planning doc, said yes to planning the goal "
                                "first, or redirected this one", 403) from e
         raise
+    if any(numbered):
+        # Taken once the plan exists, so a refused proposal never spends a number.
+        doc_templates.number(db, v["id"], where)
     if any(settled):
         bus.publish_agent(db, "autopilot.goal", root.id)   # the offer's card goes
     if replica is not None:
@@ -904,6 +934,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
+    if approved:
+        doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     unconfirmed, was_ready = None, False
     if approved and not confirmed:
         before = gate(db, p)            # what the person pressed Approve on, before asking can change it
@@ -1022,6 +1054,7 @@ def answer_offer(db: DB, root_id: str, offer_id: Any, accept: bool) -> None:
 
     if not isinstance(offer_id, str) or not offer_id:
         raise ServiceError("invalid", "offer (the offer on screen) is required", 400)
+    told = OFFER_YES + doc_templates.planning_brief() if accept else OFFER_NO   # read before the transaction
     with db.tx() as c:
         claimed = c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer=?",
                             (OFFER_ACCEPTED if accept else OFFER_DISMISSED, root_id,
@@ -1029,7 +1062,7 @@ def answer_offer(db: DB, root_id: str, offer_id: Any, accept: bool) -> None:
         if claimed:
             if accept:
                 visual_offers._grant(c, root_id, "plan")
-            queued = _queue_message(c, root_id, OFFER_YES if accept else OFFER_NO)
+            queued = _queue_message(c, root_id, told)
     if not claimed:
         raise ServiceError("stale", "this offer is no longer open", 409)
     bus.publish_agent(db, "autopilot.goal", root_id)

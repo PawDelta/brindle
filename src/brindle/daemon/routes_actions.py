@@ -2265,6 +2265,18 @@ def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
     return doc_switches(repo)
 
 
+def put_doc_format(db: DB, params: dict, body: Body) -> Any:
+    """Replace what one level (``level``: org, team:<id> or a level of the
+    org's structure) of Settings › Doc format sets with ``format``
+    (brindle.doc_templates); ``version``: the one the GET gave, so an org's
+    format changed meanwhile is refused. Returns the GET's view."""
+    from brindle import doc_templates
+
+    level = _get(body, "level", default=doc_templates.ORG)
+    doc_templates.save(level, _get(body, "format", dict, required=True), version=_get(body, "version", int))
+    return doc_templates.view(db, level)
+
+
 def docs_scopes(repo: str | None = None) -> list[dict]:
     """Every scope the person reads, as the server lists them
     (``{kind, id, name, can_share}``; their teams too, docs or not)."""
@@ -2334,12 +2346,20 @@ def _folder_call(body: Body, run: Callable) -> Any:
 
 
 def create_library_folder(db: DB, params: dict, body: Body) -> Any:
-    """Make a folder in ``scope`` with ``name``, ``visibility`` (private or shared) and ``can_add``."""
+    """Make a folder in ``scope`` with ``name``, ``visibility`` (private or shared) and ``can_add``,
+    for ``repo`` (the repo it belongs to, kept on this machine: see library_folders.remember_repo)."""
     from brindle.pro import library_folders as folders
 
-    return _folder_call(body, lambda kind, scope_id, api: folders.create(
-        kind, scope_id, _get(body, "name", required=True), _get(body, "visibility", default="private"),
-        _get(body, "can_add", default="owner"), api=api))
+    def make(kind: str, scope_id: str, api: Callable) -> Any:
+        made = folders.create(kind, scope_id, _get(body, "name", required=True), _get(body, "visibility", default="private"),
+                              _get(body, "can_add", default="owner"), api=api)
+        repo = _get(body, "repo")
+        if isinstance(made, dict) and isinstance(made.get("id"), str):
+            folders.remember_repo(db, kind, scope_id, made["id"], repo)
+            made = dict(made, repo=repo)
+        return made
+
+    return _folder_call(body, make)
 
 
 def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
@@ -3037,6 +3057,7 @@ ROUTES = [
     _post("/kb/sources/{id}/library", kb_library),
     Route("/v1/kb/sources/{id}/library", _endpoint(unlibrary_kb_source), methods=["DELETE"]),
     Route("/v1/config", _endpoint(patch_config), methods=["PATCH"]),
+    Route("/v1/doc-format", _endpoint(put_doc_format), methods=["PUT"]),
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
     Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),
     Route("/v1/routing", _endpoint(put_routing), methods=["PUT"]),

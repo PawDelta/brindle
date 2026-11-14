@@ -419,3 +419,5 @@ body {
 /* A pill is its tone in the text and a dot in that tone, no box; a pill
    with its own dot (a .rounded-full inside) or in mono (a path) has none. */
 .pill:not(:has(.rounded-full)):not(.font-mono)::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+/* A stage not yet reached for good (Drafting, In review): the dot as a ring. */
+.pill.pill-hollow::before { background: transparent; border: 1.5px solid currentColor; width: 5px; height: 5px; }

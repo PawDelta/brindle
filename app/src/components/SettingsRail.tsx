@@ -8,6 +8,7 @@ const ICONS: Record<SettingsTab, string> = {
   general: "M12 3v3M12 18v3M3 12h3M18 12h3M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6",
   providers: "M4 5h16v5H4zM4 14h16v5H4z",
   permissions: "M12 3l7 3v5c0 5-3.5 8-7 10-3.5-2-7-5-7-10V6z",
+  format: "M6 3h9l4 4v14H6zM9 10h7M9 14h7M9 18h4",
   storage: "M5 6c0-3 14-3 14 0s-14 3-14 0v12c0 3 14 3 14 0V6M5 12c0 3 14 3 14 0",
   project: "M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z",
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16M12 11v5M12 8h.01",
