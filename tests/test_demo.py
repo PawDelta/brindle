@@ -217,9 +217,15 @@ def test_app_demo_starts_workers_and_reviewer(db, monkeypatch):
     # The daemon's sign-in probe answered more than its TTL ago (or not yet):
     # demo_provider finds no CLI, and the demo must still run on the usable one.
     only = "codex"
-    from brindle import config, doctor, mcp_server, providers
+    from brindle import config, cull, doctor, mcp_server, procs, providers, spawn
     from brindle.daemon import routes_actions
 
+    # Run a detached cull after delegation, past the fake chat's launch grace,
+    # as a loaded host can. It must not pause workers that have no real panes.
+    detached = []
+    monkeypatch.setattr(spawn, "detach", lambda argv, **kw: detached.append(argv))
+    monkeypatch.setattr(procs, "table", lambda: {})
+    monkeypatch.setattr(procs, "handed_orphans", lambda **kw: {})
     monkeypatch.setattr(providers, "unusable", lambda provider, *a, **k:
                         None if provider == only else "CLI not installed")
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: [])
@@ -227,6 +233,8 @@ def test_app_demo_starts_workers_and_reviewer(db, monkeypatch):
     # The machine's own CLI setup (is codex installed here?) is preflight's job, not this test's.
     monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
     monkeypatch.setattr(doctor, "preflight", lambda *a, **k: [])
+    # Fake launches have no panes; a real cull would pause the whole session.
+    monkeypatch.setattr(routes_actions.svc, "cull_detached", lambda *a, **k: None)
     launched = []
 
     def launch(db, agent, ws, **kwargs):
@@ -252,6 +260,9 @@ def test_app_demo_starts_workers_and_reviewer(db, monkeypatch):
     for name, m in zip(("slug", "wrap"), milestones):
         asyncio.run(mcp_server.assign(task=m.title, weight="light", branch=name,
                                               done_when=m.check_cmd))
+    for argv in detached:
+        if "_cull" in argv:
+            cull.sweep(db, now=time.time() + cull.LAUNCH_GRACE + 1)
     workers = [a for a in db.list_agents() if a.parent_id == supervisor.id]
     assert len(workers) == 2
     assert all(a.status == "processing" and a.provider == only for a in workers)
