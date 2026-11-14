@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { AnalysisDoc, FolderGroup } from "../../api/client";
-import { docQueue, folderTree, groupDocs, placedFolders, stageCounts, stageOf, type DesignRecord } from "./libraryStages";
+import { docQueue, folderTree, groupDocs, loadRecords, placedFolders, stageCounts, stageOf, type DesignRecord } from "./libraryStages";
 
 const task = (id: string, state: string) => ({ id, title: id, state });
 const TEAM = { kind: "group", id: "t1", name: "Founding Team" };
@@ -62,4 +62,17 @@ it("the sidebar groups folders by the repo each was made for, newest first, and 
     ["brindle", 1, [["Releases", 1, true]]],
     ["My folders", 0, [["Designs", 0, true]]],
   ]);
+});
+
+it("the list's and board's work item is the design's own item with the tracker's state; a failed read leaves it empty", async () => {
+  const doc = (id: string) => ({ id }) as AnalysisDoc;
+  const detail = { design: null, tasks: [], threads: [], decisions: [], verdict: null };
+  const epic = { link_id: "wl_1", tracker: "azure_devops", key: "4810", display: "AB#4810", target: { kind: "design" }, state: "Active", done: false } as const;
+  const base = { doc: async () => detail as never };
+  const withItems = await loadRecords({ ...base, libraryWorkItems: async () => ({ items: { a: { epic, done: 2, total: 3 } } }) }, [doc("a"), doc("b")]);
+  expect(withItems.get("a")?.work_item).toMatchObject({ key: "AB#4810", state: "Active", tone: "active" });
+  expect(withItems.get("b")?.work_item).toBeUndefined();
+  const failed = await loadRecords({ ...base, libraryWorkItems: async () => { throw new Error("offline"); } }, [doc("a")]);
+  expect(failed.get("a")).toBeDefined();
+  expect(failed.get("a")?.work_item).toBeUndefined();
 });

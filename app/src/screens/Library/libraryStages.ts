@@ -8,7 +8,7 @@
    server's list carries none of this, so each design's detail is read once (loadRecords); the
    filter, the rows, the cards and the sidebar's counts all use these same functions. */
 
-import type { AnalysisDoc, AnalysisDocDetail, DaemonClient, DocScope, FolderGroup, LibraryFolder } from "../../api/client";
+import type { AnalysisDoc, AnalysisDocDetail, DaemonClient, DocScope, FolderGroup, LibraryFolder, TrackerLink, WorkItemLink } from "../../api/client";
 import type { DesignTaskDTO, InboxItemDTO, RepoDTO } from "../../api/schema";
 import type { LibraryStage } from "../../routes";
 
@@ -77,11 +77,30 @@ export function stageCounts(docs: AnalysisDoc[], queue: Queue, records: Map<stri
 }
 
 /* Each listed design's record (from its detail). A failed read is skipped: the design shows as Drafting. */
-export async function loadRecords(client: Pick<DaemonClient, "doc">, docs: AnalysisDoc[], repo?: string): Promise<Map<string, DesignRecord>> {
-  const got = await Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item }), () => null)));
+export async function loadRecords(client: Pick<DaemonClient, "doc"> & Partial<Pick<DaemonClient, "libraryWorkItems">>, docs: AnalysisDoc[], repo?: string): Promise<Map<string, DesignRecord>> {
+  const [got, work] = await Promise.all([
+    Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item }), () => null))),
+    // The linked work item is a nicety: a failed or refused read leaves the column empty, never the list.
+    docs.length && client.libraryWorkItems ? client.libraryWorkItems(docs.map((d) => d.id), repo).then((r) => r.items, () => ({} as Record<string, never>)) : Promise.resolve({}),
+  ]);
   const records = new Map<string, DesignRecord>();
-  docs.forEach((d, i) => got[i] && records.set(d.id, got[i]!));
+  docs.forEach((d, i) => {
+    const record = got[i];
+    if (!record) return;
+    const mine = (work as Record<string, { epic: TrackerLink | null; done: number; total: number }>)[d.id];
+    records.set(d.id, mine?.epic ? { ...record, work_item: epicLink(mine.epic, mine.done, mine.total) } : record);
+  });
   return records;
+}
+
+/* A design's own item as the list's and board's chip shows it: its key and the tracker's word for its state. */
+export function epicLink(epic: TrackerLink, done: number, total: number): WorkItemLink {
+  return {
+    key: epic.display,
+    state: epic.state ?? null,
+    tone: epic.done ? "done" : epic.state ? "active" : null,
+    title: total ? `${epic.display}: ${done} of its ${total} items done` : epic.display,
+  };
 }
 
 /* The plan's progress once it is building: tasks merged, in review, and in all (cancelled ones left out). */

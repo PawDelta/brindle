@@ -54,6 +54,7 @@ import { DocStatus, type StatusReviewer } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
+import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
@@ -213,8 +214,10 @@ export function ModePicker({ modes, current, allowed, onPick }: { modes: typeof 
   );
 }
 
-export function PlanReader({ client, visual, repo, onBack, asking, onChanged, backLabel }: {
+export function PlanReader({ client, visual, repo, onBack, asking, onChanged, backLabel, work }: {
   client: Client;
+  /* The design's work items, when it was opened from the Library. */
+  work?: Work;
   visual: VisualDTO;
   repo?: string;
   onBack(): void;
@@ -263,7 +266,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="plan-reader">
       {shown ? (
-        <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes}
+        <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
           chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode }}
           top={shown.state === "approved" && (
             <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">
@@ -313,8 +316,10 @@ export interface Teammate {
   directory: LibraryPerson[];
 }
 
-export function DesignDoc({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history = null, workItems = null, workItem = null }: {
+export function DesignDoc({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history = null, workItems = null, workItem = null, work }: {
   source: DocSource;
+  /* The design's work items in the tracker, from the Library: the Tasks tab, the status line, "Create work item". */
+  work?: Work;
   /* The doc's author, on this machine: sharing, the verdict and the build. */
   author?: { client: Client; visual: VisualDTO };
   teammate?: Teammate;
@@ -334,12 +339,13 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
 }) {
   return (
     <FormatProvider>
-      <DesignDocBody source={source} author={author} teammate={receivedTeammate} plan={receivedPlan} mode={chosenMode} writes={writes} liveClient={liveClient} chrome={chrome} top={top} history={history} workItems={workItems} workItem={workItem} />
+      <DesignDocBody source={source} author={author} teammate={receivedTeammate} plan={receivedPlan} mode={chosenMode} writes={writes} liveClient={liveClient} chrome={chrome} top={top} history={history} workItems={workItems} workItem={workItem} work={work} />
     </FormatProvider>
   );
 }
 
-function DesignDocBody({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history, workItems, workItem }: {
+function DesignDocBody({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history, workItems, workItem: receivedWorkItem, work }: {
+  work?: Work;
   source: DocSource;
   author?: { client: Client; visual: VisualDTO };
   teammate?: Teammate;
@@ -354,7 +360,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   workItem: WorkItem | null;
 }) {
   const client = author?.client;
-  const docLive = liveClient ?? (receivedPlan.gate && client?.visualLive ? (client as LiveClient) : null);
+  // The design's own item sits in the status line with its state as last read.
+  const epic = work?.state?.epic;
+  const workItem: WorkItem | null = epic ? { key: epic.display, title: epic.display, state: epic.state ?? "linked", done: epic.done, active: !!epic.state && !epic.done, url: epic.url ?? undefined } : receivedWorkItem;
+  const docLive =liveClient ?? (receivedPlan.gate && client?.visualLive ? (client as LiveClient) : null);
   const [liveState, setLiveState] = useState<LiveDocState | null>(null);
   const [liveCapability, setLiveCapability] = useState<LiveCapability>("unknown");
   const useLiveReview = !!docLive && liveCapability !== "unsupported";
@@ -605,6 +614,15 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const { section, start, quote } = picked;
     if (kind === "suggest") return suggestAt(section, start, quote);
     begin({ kind, anchor: { kind: "text", section, start, quote }, where: partName(section) });
+  };
+  // "Create work item": an item that quotes the highlighted passage and names its section.
+  const createFromPassage = () => {
+    if (!picked || picked.kind !== "text" || !work) return;
+    const { section, quote } = picked;
+    setPicked(null);
+    if (collapsed) collapse(false);
+    setTab("tasks");
+    void work.create({ kind: "passage", section, quote });
   };
   const comment = (anchor: PlanAnchor, on: string) => begin({ kind: "comment", anchor, where: on });
   const setDraft = (_: null) => {
@@ -964,6 +982,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               {canComment && <button type="button" className="cursor-pointer rounded-[3px] bg-branch-soft px-[9px] py-0.5 font-medium text-branch" onClick={() => offer("comment")}>Comment</button>}
               {picked.kind === "text" && plan.state !== "approved" && canSuggest && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("suggest")}>Suggest edit</button>}
               {canComment && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("ask")}>{teammate?.author ? `Ask ${authorName}` : "Ask the supervisor"}</button>}
+              {picked.kind === "text" && work && Object.values(work.state?.connected ?? {}).some(Boolean) && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink hover:bg-surface-2" onClick={createFromPassage}>Create work item</button>}
             </div>
           )}
         </div>
@@ -972,7 +991,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
             active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
-            history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} />
+            history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} work={work} canLink={!teammate || canComment} />
         ) : (
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />
         )}
