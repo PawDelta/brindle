@@ -13115,6 +13115,14 @@
     },
     {
       "method": "GET",
+      "path": "/v1/doc-format"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/doc-format"
+    },
+    {
+      "method": "GET",
       "path": "/v1/doctor"
     },
     {
