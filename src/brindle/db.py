@@ -1071,6 +1071,17 @@ CREATE TABLE IF NOT EXISTS plans (
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
 -- A plan as a design doc (brindle.plan_docs): every revision, the supervisor's
 -- and the person's own edits alike; the plans row holds the current one.
+CREATE TABLE IF NOT EXISTS plan_history_events (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    rev INTEGER,
+    version INTEGER,
+    at REAL NOT NULL,
+    observed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (plan_id, event_key)
+);
 CREATE TABLE IF NOT EXISTS plan_revisions (
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
     rev INTEGER NOT NULL,

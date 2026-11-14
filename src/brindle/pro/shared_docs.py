@@ -265,10 +265,71 @@ def _remember(db: DB, plan_id: str, view: dict) -> bool:
     review = json.dumps(kept, sort_keys=True)
     whole = plans._review_rows(kept) is not None        # only a whole answer takes back an access refusal
     with db.tx() as c:
+        share_ = c.execute("SELECT owner, remote_rev, local_rev, review FROM plan_shares WHERE plan_id=?",
+                           (plan_id,)).fetchone()
+        if share_ is not None:
+            # A Library read can observe a freeze/reopen made in another window or on another
+            # machine. Keep the observation time; the draft API doesn't provide an action time.
+            old = json.loads(share_["review"] or "{}").get("draft")
+            draft = view.get("draft")
+            if isinstance(draft, dict) and "frozen" in draft:
+                kept["draft"] = {"frozen": draft["frozen"]}
+                was = old.get("frozen") if isinstance(old, dict) else None
+                frozen = draft["frozen"]
+                if type(frozen) is int or (type(was) is int and frozen is None):
+                    version = frozen if type(frozen) is int else was
+                    kind = "freeze" if type(frozen) is int else "reopen"
+                    author = view.get("author") if isinstance(view.get("author"), str) else share_["owner"]
+                    actor = plan_docs.PERSON if author == share_["owner"] else plan_docs.TEAMMATE + author
+                    plan_docs.record_event(c, plan_id, f"{kind}:{version}", kind, actor, time.time(),
+                                           version=version, observed=True,
+                                           rev=share_["local_rev"] if version == share_["remote_rev"] else None)
+            elif old is not None:
+                kept["draft"] = old
+            _record_signatures(c, plan_id, share_, view)
+        review = json.dumps(kept, sort_keys=True)
         c.execute("UPDATE plan_shares SET unconfirmed=NULL, access_refused=CASE WHEN ? THEN NULL ELSE access_refused"
                   " END WHERE plan_id=?", (int(whole), plan_id))
         return c.execute("UPDATE plan_shares SET review=? WHERE plan_id=? AND review<>?",
                          (review, plan_id, review)).rowcount == 1
+
+
+def _record_signatures(c, plan_id: str, share_, view: dict) -> None:
+    for s in view.get("sign_offs") or []:
+        if (isinstance(s, dict) and isinstance(s.get("sub"), str)
+                and type(s.get("rev")) is int and type(s.get("at")) in (int, float)):
+            actor = plan_docs.PERSON if s["sub"] == share_["owner"] else plan_docs.TEAMMATE + s["sub"]
+            plan_docs.record_event(c, plan_id, f"signature:{s['rev']}:{s['sub']}:{s['at']}",
+                                   "sign_off", actor, s["at"], version=s["rev"],
+                                   rev=share_["local_rev"] if s["rev"] == share_["remote_rev"] else None)
+
+
+def remember_live_review(db: DB, doc_id: str, view: dict) -> None:
+    """Archive signatures seen by the live channel without changing the build gate's cache."""
+    with db.tx() as c:
+        row = c.execute("SELECT plan_id, owner, remote_rev, local_rev FROM plan_shares WHERE doc_id=?",
+                        (doc_id,)).fetchone()
+        if row is not None:
+            _record_signatures(c, row["plan_id"], row, view)
+
+
+def record_freeze(db: DB, doc_id: str, version: int, reopen: bool, at: float) -> None:
+    """Keep an author's confirmed relay action on a locally held design.
+
+    Version numbers belong to the Library; they need not equal local revisions.
+    """
+    if type(version) is not int:
+        return
+    with db.tx() as c:
+        row = c.execute("SELECT plan_id, remote_rev, local_rev, review FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
+        if row is not None:
+            kind = "reopen" if reopen else "freeze"
+            plan_docs.record_event(c, row["plan_id"], f"{kind}:{version}", kind, plan_docs.PERSON, at,
+                                   version=version,
+                                   rev=row["local_rev"] if row["remote_rev"] == version else None)
+            review = json.loads(row["review"] or "{}")
+            review["draft"] = {"frozen": None if reopen else version}
+            c.execute("UPDATE plan_shares SET review=? WHERE plan_id=?", (json.dumps(review, sort_keys=True), row["plan_id"]))
 
 
 def _grant(db: DB, p: dict, doc_id: str, reviewers: list[dict], permissions: dict | None, client, store) -> None:

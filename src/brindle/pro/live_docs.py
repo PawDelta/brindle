@@ -187,6 +187,10 @@ def _frozen_version(db: DB, doc_id: str, frozen: Any, review: dict | None = None
     nobody else is credited here."""
     if not frozen:
         return None
+    if review is not None:
+        from brindle.pro.shared_docs import remember_live_review
+
+        remember_live_review(db, doc_id, review)
     if review is None:
         share = db.conn.execute("SELECT review FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
         review = json.loads(share["review"]) if share is not None and share["review"] else {}
@@ -999,7 +1003,12 @@ class Manager:
                 if not reopen and not link.frozen:
                     await self._drain(link)
                 link.freezing = True
+                previous = link.frozen
                 link.frozen = await asyncio.to_thread(_library_freeze, doc_id, reopen)
+                if previous != link.frozen:
+                    from brindle.pro.shared_docs import record_freeze
+
+                    await self.work(record_freeze, doc_id, previous if reopen else link.frozen, reopen, self.clock())
             except Exception as e:  # noqa: BLE001 - refused or unreachable: the windows keep the state they had
                 refused = mask(str(e)) or "the Library couldn't be reached"
                 log.warning("brindle: couldn't %s %s: %s", "reopen" if reopen else "freeze", doc_id, refused)
