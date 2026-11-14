@@ -81,8 +81,8 @@ pill) and `update-session` (the strip over a session). Themes
 `visuals.tsx` (a design doc with a diagram, three decisions, a suggestion
 and comment threads, over a small in-memory engine) and takes it with its
 review column open, the next decision's table, a highlight with its comment bar, the comment landed in
-the column, the column collapsed to its strip, Suggesting with a section in
-its box, and signed off under its live board, in both themes.
+the column, the column collapsed to its strip, Suggesting with a tracked
+change on the page, and signed off under its live board, in both themes.
 
 ## Timing the wheel over a live Claude Code
 

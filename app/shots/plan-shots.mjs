@@ -5,7 +5,7 @@
    (--channel chrome uses the Chrome already installed, where Playwright's own isn't downloaded.)
    Seven states x light/dark at 1440px: the doc with its review column open, the next decision's
    table, a highlight with its Comment / Suggest edit / Ask the supervisor bar, the comment landed in the column, the column
-   collapsed to its strip, Suggesting with a section's text in its box, and the signed-off doc
+   collapsed to its strip, Suggesting with a tracked change on the page, and the signed-off doc
    under its live board. */
 
 import { mkdirSync } from "node:fs";
@@ -73,10 +73,24 @@ try {
     await shot("5-doc-column-collapsed");
     await page.click('[data-testid="plan-review-strip"]');
     await page.click('[role="radiogroup"][aria-label="Mode"] button:has-text("Suggesting")');
-    await page.click('button[aria-label="Suggest an edit to Summary"]');
+    // A suggestion is typed on a highlight and drawn in the text as a tracked change.
+    await page.evaluate(() => {
+      const doc = document.querySelector('[data-testid="plan-doc"]');
+      // The earlier comment cut "so code never passes through PawDelta" in two: take the run before it.
+      const leaf = [...doc.querySelectorAll("[data-o]")].find((el) => el.textContent.includes("so ") && !el.dataset.thread);
+      const range = document.createRange();
+      range.setStart(leaf.firstChild, leaf.textContent.indexOf("so "));
+      range.setEnd(leaf.firstChild, leaf.textContent.length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      doc.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+    await page.click('[role="toolbar"][aria-label="For the highlighted text"] button:has-text("Suggest edit")');
+    await page.fill('[data-testid="thread-draft"] textarea[aria-label="Replace with"]', "and so ");
     await shot("6-doc-suggesting");
-    await page.click('button:has-text("Cancel")');
+    await page.click(`${bar} button:has-text("Discard all")`);
     // Take the two open decisions as recommended, then sign off: the live board.
+    await page.click('[role="tab"]:has-text("Decisions")');
     await page.click(`${bar} button:has-text("Confirm A")`);
     await page.waitForSelector('[data-testid="plan-todo"] button[data-state="current"]:has-text("lease")');
     await page.click(`${bar} button:has-text("Confirm A")`);
