@@ -40,6 +40,18 @@ import type {
 } from "./schema";
 import { engineAttachment, type Attachment } from "./attachments";
 
+export interface TranscriptMessage {
+  role: "user" | "assistant" | "restart";
+  text: string;
+  history?: boolean;
+}
+
+export interface Transcript {
+  messages: TranscriptMessage[];
+  cursor: string;
+  reset: boolean;
+}
+
 /* PUT /routing (routes_actions.put_routing): what to write and where. The
    tiers given replace their lists in that scope's file; the others, and a
    reviewer or exclusion list not given, keep what is there. "user" is
@@ -1795,6 +1807,10 @@ export class DaemonClient {
 
   agent(id: string) {
     return this.get<AgentDTO>(`/agents/${encodeURIComponent(id)}`);
+  }
+
+  transcript(id: string, after = "0") {
+    return this.get<Transcript>(`/agents/${encodeURIComponent(id)}/transcript?after=${encodeURIComponent(after)}`);
   }
 
   /* The person's message, queued until the agent is idle. */

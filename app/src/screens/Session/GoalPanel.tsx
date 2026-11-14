@@ -696,7 +696,18 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
      way back into Review, where the session's commits not on the PR yet wait for the person's Push. */
   const unpushed = readiness.pr?.unpushed ?? 0;
   const step =
-    phase === "pr_open" && prUrl ? (
+    phase === "ready_for_pr" && onReview ? (
+      <button
+        type="button"
+        className={`flex items-center gap-s1 rounded-md border px-s1 py-1 text-left ${mainTone} ${compact ? "mx-0.5" : ""}`}
+        data-testid="goal-review"
+        title="brindle judges the session ready: review its changes and open the PR"
+        onClick={onReview}
+      >
+        Review &amp; open PR
+        <span className="flex-1" />›
+      </button>
+    ) : phase === "pr_open" && prUrl ? (
       <div className={`flex items-center gap-1.5 ${compact ? "mx-0.5" : ""}`}>
         {/* The PR as a chip: its number (from the URL) and ↗; the URL itself only on hover. */}
         <button

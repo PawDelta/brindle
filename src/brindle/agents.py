@@ -18,6 +18,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
@@ -1372,8 +1373,16 @@ def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, ide
     session = credentials_session(agent)
     if session:
         launch["session"] = session
-    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch,
-                           check_cloud=not keys_only)
+    # The probes depend on the provider, its config home, the repo and who
+    # signs in, not on the launch, which only the actions name: in a
+    # recovery, every launch signed in alike shares them (shared_launch_checks).
+    def key():
+        who = hashlib.sha256(json.dumps([sorted(env.items()), org_key]).encode()).hexdigest()
+        return ("preflight", agent.provider, agent.config_home, ws.repo_root, who, keys_only)
+
+    items = _shared(key, lambda: preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key,
+                                                 check_cloud=not keys_only))
+    return preflight.bind_launch(items, launch)
 
 
 def credentials_session(agent: Agent) -> str | None:
@@ -1418,6 +1427,71 @@ def consent_identity(db: DB, repo: str, profile: str, provider: str, session: st
     who = Agent("", ws.id, profile, provider, parent, "assign" if parent else "interactive", "starting", "",
                 None, 0.0)
     return launch_identity(who, ws)[0]
+
+
+class _SharedChecks:
+    """The read-only launch checks (model check, preflight) of one daemon
+    start's recovery, each worked out once per provider and identity and
+    reused by every launch of that recovery: sessions and their workers
+    coming back side by side mostly sign in as the same account. One check
+    under way is waited for, not run again beside it; one that raised is
+    left unrecorded, so the next launch runs it afresh."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._results: dict[tuple, tuple] = {}     # key: (its lock, [its result once known])
+
+    def get(self, key: tuple, check):
+        with self._lock:
+            lock, box = self._results.setdefault(key, (threading.Lock(), []))
+        with lock:
+            if not box:
+                box.append(check())
+            return box[0]
+
+
+_shared_checks: ContextVar[_SharedChecks | None] = ContextVar("brindle_shared_checks", default=None)
+
+
+@contextmanager
+def shared_launch_checks():
+    """Within it, launches share their model checks and preflights (_SharedChecks):
+    a daemon start's recovery, whose threads each run in a copy of this context."""
+    token = _shared_checks.set(_SharedChecks())
+    try:
+        yield
+    finally:
+        _shared_checks.reset(token)
+
+
+def _shared(key, check):
+    """``check()``'s result, shared within shared_launch_checks by every
+    launch whose ``key()`` is the same (what the check depends on, hashed
+    where it holds credentials); run as is outside it, or when the key can't
+    be told (``key`` raises AgentError)."""
+    shared = _shared_checks.get()
+    if shared is None:
+        return check()
+    try:
+        k = key()
+    except AgentError:
+        return check()
+    return shared.get(k, check)
+
+
+def _model_check_key(agent: Agent, ws: Workspace, profile, m) -> tuple:
+    """What model_problem's answer for ``agent`` depends on: the profile and
+    repo a refusal is recorded for, and the identity it checks with, which is
+    its window's whole environment (the tmux session's included) less launch
+    bookkeeping (launch_health.fingerprint), its login's revision and the
+    project settings its CLI's catalog reads (provisioning_context)."""
+    from dataclasses import replace
+    from brindle.launch_health import fingerprint
+
+    effective = _effective_window_env(agent, ws, m)
+    return ("model", agent.provider, agent.config_home, agent.profile, ws.repo_root,
+            fingerprint(replace(profile, provider=agent.provider), effective),
+            provisioning_context(agent.provider, ws.path, effective))
 
 
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
@@ -1486,7 +1560,8 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     provider = get_provider(agent.provider)
     if not model_checked:
         with _launch_step("model_check_s"):
-            why = model_problem(agent.profile, ws, agent=agent, profile=profile, m=m)
+            why = _shared(lambda: _model_check_key(agent, ws, profile, m),
+                          lambda: model_problem(agent.profile, ws, agent=agent, profile=profile, m=m))
         if why:
             raise AgentError(why)
     if not provider.launches_process:

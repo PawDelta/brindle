@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from conftest import sh
 from fast_repo import repo, repo_template  # noqa: F401
-from brindle import agents, autopilot, cli, mcp_server, providers, supervisor_state, wake, workspaces
+from brindle import agents, autopilot, cli, mcp_server, procs, providers, supervisor_state, wake, workspaces
 from test_merge_order import add, quiet_removal, worktree
 
 
@@ -99,6 +99,7 @@ def restarting(db, session, tmp_path, monkeypatch):
     calls = SimpleNamespace(detached=[], stopped=[], launched=[], preflight=lambda: None)
     monkeypatch.setattr(agents, "_detach_orphan", lambda argv: calls.detached.append(list(argv)))
     monkeypatch.setattr(agents, "_stop", lambda db_, a: calls.stopped.append(a.id))
+    monkeypatch.setattr(procs, "stop", lambda *a, **kw: None)
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
 
     def launch(db_, a, ws, **kw):

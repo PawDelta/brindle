@@ -223,6 +223,22 @@ def agent(db: DB, request: Request) -> Any:
 
 
 @_json
+def agent_transcript(db: DB, request: Request) -> Any:
+    from brindle import identity_lock
+    from brindle.web.chat import transcript
+
+    a = db.get_agent(request.path_params["id"])
+    if a is None:
+        raise ServiceError("not_found", "no such agent", 404)
+    if identity_lock.locked_by(a.id):
+        raise ServiceError("forbidden", "session belongs to another identity", 403)
+    try:
+        return transcript(a, request.query_params.get("after") or 0, db=db)
+    except ValueError as e:
+        raise ServiceError("invalid", "bad cursor", 400) from e
+
+
+@_json
 def diff(db: DB, request: Request) -> Any:
     ws = db.get_workspace(request.path_params["id"])
     if ws is None:
@@ -1041,6 +1057,7 @@ ROUTES = [
     Route("/v1/goal", goal),
     Route("/v1/inbox", inbox_),
     Route("/v1/agents/{id}", agent),
+    Route("/v1/agents/{id}/transcript", agent_transcript),
     Route("/v1/workspaces/{id:path}/diff", diff),
     # PUT on the same path is the edit (routes_actions); agent callers are refused by the guard.
     Route("/v1/workspaces/{id:path}/file", workspace_file),
