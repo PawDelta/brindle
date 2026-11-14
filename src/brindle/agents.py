@@ -61,12 +61,7 @@ renames, docs, config, wording and pure glue need no new tests. Prefer extending
 an existing test or parametrize table. Never test wording, constants, defaults
 or a mock's own arguments. Every added test or row must catch a distinct bug."""
 
-WORKER_FOOTER = """
-
----
-You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
-{guidance}
-Run only the tests that cover your change (a test file or a `-k` filter), not
+_WORKER_STEPS = """Run only the tests that cover your change (a test file or a `-k` filter), not
 the full suite: brindle's merge gate runs the full suite on your branch.
 """ + TEST_GUIDANCE + """
 Before you finish, check your work against the task and its finish line, item
@@ -81,14 +76,36 @@ When you have finished:
    supervisor should check.
 """
 
-REPORT_ONLY_FOOTER = """
+_REPORT_ONLY_STEPS = """You don't edit or commit anything: when you have finished, call the
+`report_result` tool from the `brindle` MCP server with your findings.
+"""
+
+_FOOTER_HEAD = """
 
 ---
 You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
 {guidance}
-You don't edit or commit anything: when you have finished, call the
-`report_result` tool from the `brindle` MCP server with your findings.
 """
+
+WORKER_FOOTER = _FOOTER_HEAD + _WORKER_STEPS
+REPORT_ONLY_FOOTER = _FOOTER_HEAD + _REPORT_ONLY_STEPS
+
+# With prompt_cache_prefix, the stable part of a worker's footer (the repo
+# brief and how to finish) joins its profile's prompt instead (worker_brief),
+# after the role prompt and rule packs, and its task ends with just this tail.
+_BRIEF_HEAD = """Your brief as a brindle worker (your agent id, branch and task follow in your first message):
+{guidance}
+"""
+WORKER_BRIEF = _BRIEF_HEAD + _WORKER_STEPS
+REPORT_ONLY_BRIEF = _BRIEF_HEAD + _REPORT_ONLY_STEPS
+TASK_TAIL = """
+
+---
+You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
+When you have finished, {finish}, as your brief says.
+"""
+_WORKER_FINISH = "commit your work and call the brindle `report_result` tool"
+_REPORT_ONLY_FINISH = "call the brindle `report_result` tool with your findings"
 
 REVIEW_FOOTER = """
 
@@ -211,6 +228,67 @@ def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
     parts = (codemap.guidance(ws), "" if report_only else test_guidance(checks),
              PERMISSION_GUIDANCE.format(root=ws.repo_root))
     return "\n".join(p for p in parts if p)
+
+
+# Providers whose agents read the profile's prompt ahead of their task: Claude
+# Code's --append-system-prompt, the head of Codex's first message, the native
+# loop's system prompt. Only there does a worker's brief move into it.
+_BRIEF_IN_PROFILE = ("claude", "codex", "native")
+
+# The brindle tools each short-lived role uses (prompt_cache_prefix): the rest
+# are taken out of its context, so its tool definitions are smaller and the
+# same at every start.
+REVIEWER_TOOLS = ("submit_review", "report_result", "workspace_diff", "read_messages", "send_message",
+                  "decisions", "kb_search", "read_analysis_doc")
+LIGHT_WORKER_TOOLS = ("report_result", "submit_plan", "read_messages", "send_message", "workspace_diff",
+                      "decisions", "kb_search", "who_is_working", "read_analysis_doc", "edit_analysis_doc",
+                      "record_decision", "publish_visual")
+_WORKER_MODES = ("handoff", "handoff_detached", "assign")
+
+
+def prompt_cache_prefix(ws: Workspace) -> bool:
+    """The repo's ``prompt_cache_prefix`` setting (on unless turned off)."""
+    from brindle.config import load_repo_config
+
+    try:
+        return bool(load_repo_config(ws.repo_root).prompt_cache_prefix)
+    except ValueError:
+        return True
+
+
+def brief_in_profile(ws: Workspace, provider_name: str) -> bool:
+    """Whether a worker's stable brief (worker_brief) goes in its profile's
+    prompt, after the role prompt and rule packs, rather than in its task:
+    so every worker of a profile starts with the same prefix."""
+    return provider_name in _BRIEF_IN_PROFILE and prompt_cache_prefix(ws)
+
+
+def worker_brief(ws: Workspace, report_only: bool = False) -> str:
+    """The part of a worker's footer that is the same for every task in
+    ``ws``'s repo: the repo brief (code map, testing, permissions) and how to
+    finish. No agent id, branch or other per-task text."""
+    template = REPORT_ONLY_BRIEF if report_only else WORKER_BRIEF
+    return template.format(guidance=worker_guidance(ws, report_only)).strip()
+
+
+def short_lived_tools(agent: Agent, ws: Workspace) -> tuple[str, ...] | None:
+    """The brindle tools a reviewer or light worker uses, or None for any
+    other agent (it keeps them all)."""
+    if agent.mode == "review" or (agent.mode in _WORKER_MODES and is_review_profile(agent.profile, ws.repo_root)):
+        return REVIEWER_TOOLS
+    if agent.mode in _WORKER_MODES and (agent.weight == "light" or agent.profile.endswith("-light")):
+        return LIGHT_WORKER_TOOLS
+    return None
+
+
+def _hidden_brindle_tools(keep: tuple[str, ...]) -> list[str]:
+    """Claude Code's names for every brindle tool not in ``keep``, sorted so
+    the list is the same at every start. All of the server's tools, whoever
+    asks: not its per-caller list."""
+    from brindle.mcp_server import mcp
+
+    names = {t.name for t in mcp._tool_manager.list_tools()}
+    return [f"mcp__brindle__{name}" for name in sorted(names - set(keep))]
 
 
 def managed(repo_root: str):
@@ -381,7 +459,8 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
                            decisions: str = "", chunks: str = "", report_only: bool = False) -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
     ``task``, the ``decisions`` block that covers its files, its finish line,
-    the WORKER_FOOTER reminder to report, and (for an interactive Claude
+    the WORKER_FOOTER reminder to report (just its TASK_TAIL when the rest is
+    in the profile's prompt: brief_in_profile), and (for an interactive Claude
     worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
     again by ``resume`` to rebuild it (decisions from the brief's receipt)
     when a paused worker's CLI session can't be resumed and must restart fresh."""
@@ -393,9 +472,15 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
         prompt += PLAN_FIRST_NOTE
-    footer = REPORT_ONLY_FOOTER if report_only else WORKER_FOOTER
-    prompt += footer.format(agent_id=agent_id, branch=ws.branch,
-                            guidance=worker_guidance(ws, report_only))
+    if brief_in_profile(ws, provider.name):
+        # The stable brief is in the profile's prompt (_profile_for): the
+        # task carries only what is this worker's own.
+        prompt += TASK_TAIL.format(agent_id=agent_id, branch=ws.branch,
+                                   finish=_REPORT_ONLY_FINISH if report_only else _WORKER_FINISH)
+    else:
+        footer = REPORT_ONLY_FOOTER if report_only else WORKER_FOOTER
+        prompt += footer.format(agent_id=agent_id, branch=ws.branch,
+                                guidance=worker_guidance(ws, report_only))
     if (done_when and provider.name == "claude" and not headless
             and not provider.hooks_disabled(ws.path)):
         # /goal is an interactive command that Claude Code refuses when hooks
@@ -728,6 +813,20 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if rules:
         profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{rules}".strip())
     cfg = load_repo_config(ws.repo_root)
+    if agent.mode in _WORKER_MODES and agent.provider in _BRIEF_IN_PROFILE and cfg.prompt_cache_prefix:
+        # brief_in_profile: role prompt, rule packs, then the repo brief, the
+        # same for every worker of this profile; decorate_worker_prompt
+        # leaves it out of the task.
+        brief = worker_brief(ws, is_review_profile(agent.profile, ws.repo_root))
+        profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{brief}".strip())
+    keep = short_lived_tools(agent, ws) if cfg.prompt_cache_prefix and agent.provider == "claude" else None
+    if keep is not None:
+        try:
+            hidden = _hidden_brindle_tools(keep)
+        except Exception:  # noqa: BLE001 - a smaller tool list is only a saving
+            log.warning("could not list brindle's tools; %s keeps them all", agent.id, exc_info=True)
+            hidden = None
+        profile = replace(profile, disallowed_tools=hidden, short_cache=True)
     autopilot_on = db.get_autopilot(agent.id) is not None
     if autopilot_on:
         profile = replace(profile, prompt=profile.prompt + pilot.guide(cfg, ws.repo_root))
