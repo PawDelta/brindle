@@ -207,6 +207,66 @@ def sent(backend, key):
     return [form for k, form, _ in backend.calls if k == key]
 
 
+@pytest.mark.variant("Missing, refusing, and unreachable relays must all preserve the same HTTP fallback")
+@pytest.mark.parametrize("failure", ["404", "forbidden", "unreachable"])
+def test_unavailable_relay_keeps_shared_docs_on_http(db, parts, failure):
+    from starlette.websockets import WebSocketDisconnect
+
+    from brindle.pro import live_docs, shared_reader
+
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "user_1", "required": True}], **net)
+    attempts = []
+    connections_closed = []
+
+    class Refused:
+        async def send(self, text):
+            pass
+
+        async def recv(self):
+            return json.dumps({"type": "error", "error": "forbidden"})
+
+        async def close(self, code):
+            connections_closed.append(code)
+
+    class Connector:
+        async def connect(self, doc_id):
+            attempts.append(doc_id)
+            if failure == "404":
+                raise live_docs.RelayError("HTTP 404", "rejected")
+            if failure == "unreachable":
+                raise OSError("connection refused")
+            return Refused()
+
+    manager = live_docs.Manager(Connector(), available=lambda: True)
+    app = build_app(TOKEN)
+    app.state.live_docs = manager
+    with TestClient(app) as client:
+        try:
+            # Both the author's visual and the teammate's Library reader must
+            # close before any state/text frame: DocPresence then uses HTTP.
+            for visual_id in (pid, DOC, pid):
+                with client.websocket_connect(f"/v1/visuals/{visual_id}/live") as window:
+                    window.send_text(TOKEN)
+                    with pytest.raises(WebSocketDisconnect) as closed:
+                        window.receive_json()
+                    assert closed.value.code == 4404
+                client.portal.call(manager.sweep)
+            assert attempts == [DOC]
+            assert bool(connections_closed) == (failure == "forbidden")
+            assert live_docs.docs_with_unsent(db) == []
+            assert db.conn.execute("SELECT 1 FROM plan_drafts WHERE doc_id=?", (DOC,)).fetchone() is None
+            assert shared_reader.read(DOC, **net)["rev"] == 1
+            plan_docs.edit(db, pid, 1, "summary", 0, SUMMARY, "Edited through HTTP.")
+            sd.sync(db, pid, **net)
+            assert lib.content["sections"][0]["markdown"] == "Edited through HTTP."
+            sd.sign_off(db, pid, 2, **net)
+            assert shared_reader.read(DOC, **net)["gate"]["state"] == "ready"
+            assert live_docs.docs_with_unsent(db) == []
+        finally:
+            client.portal.call(manager.stop)
+
+
 def test_ask_the_supervisor_routes_to_the_teammates_session(db, parts, monkeypatch):
     from dataclasses import replace
     from brindle.pro import doc_questions as dq

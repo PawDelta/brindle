@@ -410,9 +410,15 @@ def test_a_held_outbox_goes_once_the_author_lock_lapses_and_once_a_frozen_versio
         relay = FakeRelay(clock, author="alice")
         a, b = Machine(relay, tmp_path / "a.db", "alice"), Machine(relay, tmp_path / "b.db", "bob")
         window = Window()
-        await b.manager.open_window("doc1", window)
+        lease = await b.manager.open_window("doc1", window)
         await a.link.connect()
         await b.link.connect()
+        # B held no text of the doc: its first join stores the relay's, and the window opens again on it.
+        assert window.closed == live_docs.RELOAD
+        await b.manager.close_window(lease)
+        window = Window()
+        await b.manager.open_window("doc1", window)
+        await b.link.connect()                                # what the link's task does once a window is open again
         await a.type_in("body", 5, " now")
         await settle(a.link, b.link)
         relay.drop("alice")                                   # mid-edit: the draft is locked to its author

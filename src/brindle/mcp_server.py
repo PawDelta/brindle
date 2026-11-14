@@ -1111,7 +1111,9 @@ async def assign(
 
     design_heavy: shared designs, interfaces or tricky architecture where Fable
     is best suited. With fable_for_design_only enabled, this makes Fable eligible
-    in the task's routing tier; it does not change the task's weight.
+    in the task's routing tier; it does not change the task's weight. Keep a
+    design_heavy task to the design itself (interfaces, data model, a short
+    plan doc); assign the implementation as separate tasks without it.
 
     When it finishes, its result arrives in your conversation as a message.
     Isolation works as for handoff. Use this to run several workers in parallel.
