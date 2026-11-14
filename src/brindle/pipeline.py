@@ -24,7 +24,9 @@ With ``pipeline`` on (the default), brindle runs those stages itself:
    The reviewer requests changes: brindle sends the findings straight to the
    worker, which fixes them and reports again, back to step 1; after
    ``review_rounds`` rounds it suggests the supervisor reconsider the approach,
-   while fix rounds continue. Past those rounds, findings that only concern
+   while fix rounds continue. With ``review_stall_stop`` enabled, repeated
+   findings past that cap instead go to the supervisor to ship, defer, or
+   redesign. Past those rounds, findings that only concern
    test code no longer block: the branch proceeds as approved and they go to
    the supervisor as a note. Findings needing supervisor action still go
    straight to the supervisor. Every review after a branch's first covers
@@ -1325,6 +1327,42 @@ def _superseded(ws: Workspace, worker: Agent, reviewer: Agent) -> bool:
         return False
 
 
+def _review_stalled(db: DB, ws: Workspace, reviewer: Agent) -> bool:
+    """Compare standing findings with the preceding review round.
+
+    Ignore line order and whitespace, but treat any changed text as progress.
+    Missing history or a verdict for an old commit cannot establish a stall.
+    """
+    sha = reviewer.review_sha
+    if not sha or gates.head(ws) != sha:
+        return False
+    history = db.workspace_reviews(ws.id)
+
+    def lines(reviews) -> set[str]:
+        return {" ".join(line.split()) for r in reviews
+                if not r.approved for line in r.summary.splitlines() if line.strip()}
+
+    # A worker can report again without committing. Compare successive
+    # reviewers in its slot, without confusing a second review with a round.
+    own = [r for r in history if r.review_slot == reviewer.review_slot]
+    if len(own) >= 2 and own[-1].reviewer_id == reviewer.id and own[-2].sha == sha \
+            and own[-2].reviewer_id != reviewer.id:
+        standing = gates.standing_reviews(db, ws.id, sha)
+        if any(not r.approved and r.review_slot != reviewer.review_slot for r in standing):
+            return False
+        return bool(lines(own[-1:])) and lines(own[-1:]) == lines(own[-2:-1])
+    first = next((i for i, r in enumerate(history) if r.sha == sha), 0)
+    if not first:
+        return False
+    previous = history[first - 1].sha
+
+    def findings(commit: str) -> set[str]:
+        return lines(gates.standing_reviews(db, ws.id, commit))
+
+    current = findings(sha)
+    return bool(current) and current == findings(previous)
+
+
 def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
                summary: str) -> tuple[bool, bool]:
     """(handled, ready): whether the pipeline took the verdict, and whether
@@ -1424,6 +1462,19 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False
         db.update_agent(worker.id, pipeline="ready")
         return True, True
+    if cfg.review_stall_stop and worker.pipeline == "reviewing" \
+            and (worker.pipeline_rounds or 0) + 1 > cfg.review_rounds \
+            and _review_stalled(db, ws, reviewer):
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        if db.claim_review_cap_notice(ws.id):
+            _tell(db, parent_id,
+                  agents.condense(
+                      f"[brindle pipeline] `{ws.branch}` stopped automatic fixes: the same review "
+                      f"findings returned past {cfg.review_rounds} fix round(s). This needs you: "
+                      "choose whether to ship with the known findings, defer, or redesign the approach.",
+                      f"Latest review ({reviewer.id}):\n{summary}"), worker.id)
+        return True, False
     _send_back(db, ws, worker, cfg, summary, has_supervisor_action(summary),
                subject="Review of your branch", verb="requested changes", what="review",
                sender_id=reviewer.id)
@@ -1444,7 +1495,7 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
     rounds = (worker.pipeline_rounds or 1) if worker.pipeline == "fixing" else (worker.pipeline_rounds or 0) + 1
     if not needs_sup:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
-        if rounds > cfg.review_rounds and db.claim_review_cap_notice(ws.id):
+        if rounds > cfg.review_rounds and not cfg.review_stall_stop and db.claim_review_cap_notice(ws.id):
             _tell(db, worker.parent_id,
                   f"[brindle pipeline] `{ws.branch}` reached the suggested cap of "
                   f"{cfg.review_rounds} fix round(s); fixes continue. Strongly consider "

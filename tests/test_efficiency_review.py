@@ -6,12 +6,59 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, codemap, git, review_scope, workspaces
+from brindle import agents, bus, codemap, gates, git, pipeline, review_scope, workspaces
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import Agent
 from brindle.profiles import load_profile
+from test_merge_order import add
+from test_pipeline_idempotent import drain
 from test_reviewer_dedupe import fake_spawn
 from test_routing import config
+
+
+@pytest.mark.parametrize("stop,new_commit", [
+    (True, True),
+    pytest.param(False, True, marks=pytest.mark.variant(
+        "opting out preserves fix dispatch even when findings repeat past the cap")),
+    (True, False),
+])
+def test_review_stall_stops_only_repeated_findings_past_cap(db, repo, monkeypatch, stop, new_commit):
+    config(repo, review_stall_stop=stop, review_rounds=2)
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    ws = workspaces.create(db, str(repo), "stall").workspace
+    add(db, ws, "writer", "assign", parent="boss", result="done", status="done")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    launched = []
+    notices = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, **kw: launched.append(a.id))
+    first = "- blocker: src/auth.py accepts missing credentials."
+    changed = "- blocker: src/auth.py accepts expired credentials."
+    for round_, summary in enumerate((first, first, changed, changed), 1):
+        sha = f"commit-{round_}" if new_commit else "unchanged-commit"
+        monkeypatch.setattr(gates, "head", lambda ws_: sha)
+        db.update_agent("writer", pipeline="reviewing")
+        rid = f"reviewer-{round_}"
+        add(db, ws, rid, "review", "reviewer", parent="boss", review_sha=sha)
+        db.update_agent(rid, review_slot="")
+        db.add_review(ws.id, sha, rid, False, summary)
+        reviewer = db.get_agent(rid)
+        assert pipeline.on_review(db, reviewer, ws, False, summary)
+        messages = drain(db)
+        notices.extend(messages)
+        if stop and round_ == 4:
+            assert db.get_agent("writer").pipeline is None
+            assert len(launched) == 3
+            assert len(messages) == len(notices) == 1
+            assert not pipeline.on_review(db, reviewer, ws, False, summary)
+            assert drain(db) == []
+            assert len(bus.tail(db, kinds=("pipeline.escalated",))) == 1
+        else:
+            assert db.get_agent("writer").pipeline == "fixing"
+            assert len(launched) == round_
+            if not stop:
+                assert len(messages) == (1 if round_ == 3 else 0)
 
 
 def commit(repo, path, text):
