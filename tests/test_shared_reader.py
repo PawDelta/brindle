@@ -47,6 +47,31 @@ def _home_files():
     return {p: p.read_bytes() for p in brindle_home().rglob("*") if p.is_file() and p.suffix not in (".db", ".db-wal", ".db-shm")}
 
 
+def test_shared_history_compares_library_revisions_without_a_local_plan(db, lib, app):
+    revisions = [{"rev": n, "author": "u_author", "source": "edit", "at": n} for n in (1, 2)]
+    old = copy.deepcopy(CONTENT)
+    old["sections"][0]["markdown"] = "Earlier passage."
+    new = copy.deepcopy(CONTENT)
+    new["sections"][0]["markdown"] = "Revised passage."
+    lib.calls.routes.update({
+        f"GET {DESIGN}": lambda f, h: (200, {**lib.view(), "rev": 2, "revisions": revisions}),
+        f"GET {DESIGN}/revisions/1": lambda f, h: (200, {**old, **revisions[0]}),
+        f"GET {DESIGN}/revisions/2": lambda f, h: (200, {**new, **revisions[1]}),
+    })
+    before = db.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+    events = app.get(f"{ROUTE}/history").json()["events"]
+    assert [event["rev"] for event in events] == [2, 1]
+    comparison = app.get(f"{ROUTE}/revisions/2/changes").json()
+    assert comparison["revision"]["rev"] == 2 and comparison["previous"]["rev"] == 1
+    assert comparison["changes"][0]["spans"]
+    assert comparison["changes"][0]["before"]["markdown"] == "Earlier passage."
+    assert comparison["changes"][0]["after"]["markdown"] == "Revised passage."
+    lib.calls.routes[f"GET {DESIGN}"] = lambda f, h: (403, {"error": "forbidden"})
+    assert app.get(f"{ROUTE}/history").status_code == 403
+    assert app.get(f"{ROUTE}/revisions/2/changes").status_code == 403
+    assert db.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == before
+
+
 def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
     before = _home_files()
     plans_before = db.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
@@ -54,6 +79,9 @@ def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
     read = app.get(ROUTE).json()
     assert read["markdown"].startswith("Why we are doing this.") and SUMMARY in read["sections"][0]["markdown"]
     assert (read["me"], read["author"], read["can_comment"], read["can_sign_off"]) == ("user_1", "u_author", True, True)
+    assert read["can_edit"] is False
+    lib.permissions["user_1"]["can_edit"] = True            # granted writing in the live draft
+    assert app.get(ROUTE).json()["can_edit"] is True
     assert read["gate"]["waiting_on"] == ["user_1", "u_other"] and [r["you"] for r in read["gate"]["reviewers"]] == [True, False]
 
     commented = app.post(f"{ROUTE}/comments", json={"rev": 1, "anchor": SECTION, "text": "Which VM?"}).json()
@@ -76,6 +104,38 @@ def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
     assert not db.conn.execute("SELECT 1 FROM plan_shares").fetchone()
     assert _home_files() == before
     assert not [k for k, _, _ in lib.calls.calls if k.startswith((f"POST {DESIGN}/edits", f"POST {DESIGN}/revisions"))]
+
+
+def test_a_teammates_frozen_version_carries_the_librarys_sign_offs_and_their_own_once_signed(db, lib):
+    """A teammate keeps no plan here, so the live channel reads a frozen
+    version's sign-offs from the Library itself; once they sign off, their
+    window's refresh tells every window the version with their sign-off."""
+    from brindle.pro import live_docs
+    from test_live_docs import Clock, FakeRelay
+
+    relay = FakeRelay(Clock(), author="u_author")
+    relay.frozen = lib.rev = 2                          # version 2 is out for sign-off
+    lib.sign_offs = [{"sub": "u_other", "rev": 1, "at": 1.0}]      # signed an earlier version only
+    here = live_docs.Manager(relay.transport("user_1"), available=lambda: True, drive=False)
+    built = build_app(TOKEN)
+    built.state.live_docs = here
+
+    def state(window):
+        while "state" not in (frame := window.receive_json()):
+            pass
+        return frame["state"]
+
+    with TestClient(built, headers=AUTH) as client:
+        client.portal.call(here.link(DOC).connect)
+        with client.websocket_connect(f"/v1/visuals/{DOC}/live") as window:
+            window.send_text(TOKEN)
+            first = state(window)
+            assert (first["lock"], first["version"]["id"], first["version"]["signOffs"]) == ("sign_off", 2, [])
+            assert client.post(f"{ROUTE}/sign-offs", json={"rev": 2}).json()["signed_off"] is True
+            window.send_json({"refresh": True})
+            assert state(window)["version"]["signOffs"] == ["user_1"]
+        client.portal.call(here.stop)
+    assert not db.conn.execute("SELECT 1 FROM plan_shares").fetchone()
 
 
 def test_the_librarys_refusals_reach_the_app(lib, app):

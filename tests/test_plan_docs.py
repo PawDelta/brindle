@@ -136,8 +136,19 @@ def test_a_plan_from_before_revisions_stays_readable_and_keeps_its_history(db, s
         assert (section(1, 1), section(2, 1)) == ("Two workers.", "Three workers.")
 
         db.conn.execute("DELETE FROM plan_revisions")      # legacy again, now at r2
+        earliest = client.get(f"/v1/plans/{pid}/revisions/2/changes")
+        assert earliest.status_code == 200
+        retained = earliest.json()
+        assert retained["revision"]["sections"][1]["markdown"] == "Three workers."
+        assert retained["previous"] is None and not retained["baseline_available"]
+        assert retained["changes"] == []
         client.post(f"/v1/plans/{pid}/decide", json={"rev": 2, "approved": False, "note": "Fewer."})
         mcp_server.propose_plan(PLAN.replace("Two workers.", "One worker."), plan_id=pid)
         got = client.get(f"/v1/plans/{pid}").json()
         assert [r["rev"] for r in got["revisions"]] == [2, 3]
         assert (section(2, 1), section(3, 1)) == ("Three workers.", "One worker.")
+        assert client.get(f"/v1/plans/{pid}/revisions/2/changes").json()["revision"]["rev"] == 2
+        assert client.get(f"/v1/plans/{pid}/revisions/3/changes").json()["previous"]["rev"] == 2
+        db.conn.execute("UPDATE plan_revisions SET rev=4 WHERE plan_id=? AND rev=3", (pid,))
+        db.conn.execute("UPDATE plans SET rev=4 WHERE id=?", (pid,))
+        assert client.get(f"/v1/plans/{pid}/revisions/4/changes").json()["previous"]["rev"] == 2

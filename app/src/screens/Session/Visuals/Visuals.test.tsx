@@ -1096,7 +1096,8 @@ describe("visuals", () => {
     const row: VisualDTO = { ...visual, id: plan.id, kind: "plan", title: plan.title, rev: 1, question: undefined, options: undefined, unread: false };
     render(<VisualReader client={fake} visual={row} onBack={() => {}} onAnswered={() => {}} />);
     await screen.findByText("Three workers.");
-    // The restated ask sits in the doc's header; Correct it is a comment on the ask.
+    // The restated ask folds behind the status line's "The brief"; Correct it is a comment on the ask.
+    fireEvent.click(screen.getByRole("button", { name: /The brief/ }));
     fireEvent.click(within(screen.getByTestId("plan-ask")).getByRole("button", { name: "Correct it" }));
     const draft = screen.getByTestId("thread-draft");
     fireEvent.change(within(draft).getByRole("textbox"), { target: { value: "Teams too." } });

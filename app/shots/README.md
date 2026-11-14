@@ -51,7 +51,9 @@ the session, each pane its provider's own in the state its row shows),
 org's policy), `agents-make` (Medium's model list open, the custom agent
 builder under it),
 `library` (the Library open from the foot's button: the sidebar as its
-navigation, the docs in the main area), `library-decisions` (its Decisions
+navigation, eight designs from `library.ts` as a list, Needs you pinned and
+the rest by folder), `library-board` (the same designs on the board, a column
+per stage), `library-decisions` (its Decisions
 source: three decisions as cards),
 `knowledge` (three decisions as cards, two document folders),
 `knowledge-map` (Map on open: zero hosted docs in three scopes, local decisions, imported folders and indexed KB documents),
@@ -81,8 +83,8 @@ pill) and `update-session` (the strip over a session). Themes
 `visuals.tsx` (a design doc with a diagram, three decisions, a suggestion
 and comment threads, over a small in-memory engine) and takes it with its
 review column open, the next decision's table, a highlight with its comment bar, the comment landed in
-the column, the column collapsed to its strip, Suggesting with a section in
-its box, and signed off under its live board, in both themes.
+the column, the column collapsed to its strip, Suggesting with a tracked
+change on the page, and signed off under its live board, in both themes.
 
 ## Timing the wheel over a live Claude Code
 

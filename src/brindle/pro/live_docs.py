@@ -157,6 +157,65 @@ def _base_version(row) -> bytes | None:
     return row["relay_version"] if row["relay_version"] is not None else row["seed_version"]
 
 
+def _library_review(doc_id: str) -> dict | None:
+    """The design's review as the Library has it now (its sign-offs, each with
+    the revision signed), for the author and a teammate alike: None when it
+    can't be read (offline, signed out), and the version then says what this
+    machine last knew."""
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import shared_docs as sd
+
+    try:
+        view = ad.api("GET", sd._path(doc_id))
+    except Exception:  # noqa: BLE001 - unreachable or refused: the last known review stands
+        log.debug("brindle: couldn't read the review of %s", doc_id, exc_info=True)
+        return None
+    return view if isinstance(view.get("sign_offs"), list) else None
+
+
+def _frozen_version(db: DB, doc_id: str, frozen: Any, review: dict | None = None) -> dict | None:
+    """The version out for sign-off, as the app's live contract has it
+    (``LiveDocState.version``): its number, who wrote in it, who signed it,
+    and its text as a Loro snapshot. The text is the relay's draft as this
+    machine last knew the relay to hold it (a freeze is of that, and nothing
+    typed here since reaches it); the sign-offs are the Library's review
+    (``review``, read by :func:`_library_review`) for this version, else the
+    plan's as last read from it (an author's own). Writers are the ones this
+    machine can name from its own numbers: "you" (this account's replica and
+    windows) and "the supervisor". The relay doesn't say which account each
+    other number is (and the revision's own text is under one too), so
+    nobody else is credited here."""
+    if not frozen:
+        return None
+    if review is not None:
+        from brindle.pro.shared_docs import remember_live_review
+
+        remember_live_review(db, doc_id, review)
+    if review is None:
+        share = db.conn.execute("SELECT review FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
+        review = json.loads(share["review"]) if share is not None and share["review"] else {}
+    rev = frozen if isinstance(frozen, int) and not isinstance(frozen, bool) else review.get("rev")
+    rev = rev if isinstance(rev, int) else 0
+    replica = _replica(db, doc_id)
+    sections: dict[str, str] = {}
+    writers: list[str] = []
+    if replica is not None:
+        sections = _base(replica, _link(db, doc_id)) or replica.sections()
+        ours = {replica.peer_id, *_peers(db, doc_id)}
+        draft = db.conn.execute("SELECT supervisor_peer FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+        supervisor = draft["supervisor_peer"] if draft is not None else None
+        seen: set[str] = set()
+        for section in sections:
+            for peer in replica.editors(section):
+                who = "the supervisor" if peer is not None and peer == supervisor else "you" if peer in ours else None
+                if who and who not in seen:
+                    seen.add(who)
+                    writers.append(who)
+    signed = [s["sub"] for s in review.get("sign_offs") or []
+              if isinstance(s, dict) and isinstance(s.get("sub"), str) and s.get("rev") == rev]
+    return {"id": rev, "writers": writers, "signOffs": signed, "snapshot": _b64(SharedDoc.new(sections).export_snapshot())}
+
+
 def unsent(db: DB, doc_id: str) -> bool:
     """Whether the replica holds edits the relay has not acknowledged."""
     replica, row = _replica(db, doc_id), _link(db, doc_id)
@@ -501,6 +560,7 @@ class DocLink:
     conn: Connection | None = None
     author: str = ""
     frozen: Any = None
+    version: dict | None = None     # the frozen version as windows are told it (_frozen_version)
     author_offline: Any = None
     blocked: bool = False       # a lock or freeze holds the outbox back
     freezing: bool = False      # a Freeze or Reopen is being asked of the Library: hold the outbox (only it clears this)
@@ -518,12 +578,43 @@ class DocLink:
 
     _unsent: bool = False
     _reconciled: float = 0.0     # when a blocked outbox was last checked (manager.clock)
+    _reads: int = 0              # frozen-version reads asked for (note_version): only the latest is kept
 
     # -- the app's side
 
     def state_frame(self) -> dict:
         lock = "sign_off" if self.frozen else "author_offline" if self.author_offline else None
-        return {"state": {"author": self.author, "lock": lock, "version": None}}
+        return {"state": {"author": self.author, "lock": lock, "version": self.version if self.frozen else None}}
+
+    async def _note_frozen(self) -> None:
+        from brindle.pro.shared_docs import remember_live_state
+
+        await self.manager.work(remember_live_state, self.doc_id, self.frozen, self.author, self.manager.clock())
+
+    async def note_version(self) -> bool:
+        """Read the frozen version again: its text from the replica, its
+        sign-offs from the Library (off the event loop). Reads can overlap (two
+        windows' refreshes, a join's): only the latest one asked for is kept,
+        and only for the version still frozen, so an older answer that arrives
+        last never takes back a sign-off a newer one showed. True when this
+        read is the one kept."""
+        self._reads += 1
+        mine, frozen = self._reads, self.frozen
+        if not frozen:
+            self.version = None
+            return True
+        review = await asyncio.to_thread(self.manager.review, self.doc_id)
+        version = await self.manager.work(_frozen_version, self.doc_id, frozen, review)
+        if mine != self._reads or self.frozen != frozen:
+            return False        # a later read, or another lock, has the say
+        self.version = version
+        return True
+
+    async def refresh(self) -> None:
+        """A window says the review changed (its person signed off): read the
+        version again and tell every window here (unless a later read will)."""
+        if self.frozen and await self.note_version():
+            await self._to_windows(self.state_frame())
 
     async def _to_windows(self, frame: dict, skip: Lease | None = None) -> None:
         for w in tuple(self.windows):
@@ -601,12 +692,14 @@ class DocLink:
         self.author, self.frozen = said.get("author") or "", said.get("frozen")
         self.author_offline = said.get("author_offline")
         self.blocked = bool(self.frozen)
+        await self._note_frozen()
         if not take:
             await self.manager.work(_record_numbers, self.doc_id, self.claimed, claims, marks)
             return
         replaced, missed = await self.manager.work(_take_state, self.doc_id, _unb64(said.get("snapshot")),
                                                    self.claimed, claims, self.rebase, marks)
         self.rebase = False
+        await self.note_version()
         if replaced:
             await self._reload_windows()
         else:
@@ -694,6 +787,8 @@ class DocLink:
             await self._to_windows(self.state_frame())
         elif error == "frozen":
             self.frozen, self.blocked = said.get("rev") or True, True
+            await self._note_frozen()
+            await self.note_version()
             await self._to_windows(self.state_frame())
         elif error == "batch_refused":
             # Changes the relay can't take as they are (not under this account's
@@ -789,9 +884,11 @@ class Manager:
     def __init__(self, transport: Transport | None = None, *, db_factory: Callable[[], DB] = DB,
                  wait: Callable[[float], Awaitable[None]] = _elapse,
                  available: Callable[[], bool] | None = None, drive: bool = True,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 review: Callable[[str], dict | None] | None = None) -> None:
         self.transport = transport or RelayTransport()
         self.wait = wait
+        self.review = review or _library_review     # the Library's review of a doc, read for a frozen version
         self.clock = clock          # the relay's lock times are its wall clock's
         self.stopping = False
         self._db_factory = db_factory
@@ -913,13 +1010,19 @@ class Manager:
                 if not reopen and not link.frozen:
                     await self._drain(link)
                 link.freezing = True
+                previous = link.frozen
                 link.frozen = await asyncio.to_thread(_library_freeze, doc_id, reopen)
+                if previous != link.frozen:
+                    from brindle.pro.shared_docs import record_freeze
+
+                    await self.work(record_freeze, doc_id, previous if reopen else link.frozen, reopen, self.clock())
             except Exception as e:  # noqa: BLE001 - refused or unreachable: the windows keep the state they had
                 refused = mask(str(e)) or "the Library couldn't be reached"
                 log.warning("brindle: couldn't %s %s: %s", "reopen" if reopen else "freeze", doc_id, refused)
             finally:
                 link.freezing = False
             link.blocked = bool(link.frozen or link.author_offline)
+            await link.note_version()
             await link._to_windows(link.state_frame())
             await link.flush()
             return refused

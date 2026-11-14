@@ -1,19 +1,35 @@
-/* Document-wide awareness and the author's version controls. Section editors own their carets. */
+/* Document-wide awareness and the author's version controls. Section editors own their carets.
+   Who else is in the doc shows as faces where this sits (the reader's toolbar); the strip under
+   the toolbar (DocFreeze.tsx) says whether the text is live or locked, and holds Freeze and
+   Reopen. The reader hands over the element to draw the strip into (`stripHost`); without one it
+   is drawn here, after the faces. */
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { EphemeralStore, LoroDoc } from "loro-crdt";
 import { getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
 import { LIVE_RELOAD, type LiveChannel, type LiveDocState, type LiveRefusal } from "../../../api/client";
-import { quiet } from "../../../components/ui";
 import type { LiveClient } from "./DocEditor";
-import { Avatar } from "./PlanCards";
+import { LiveStrip, LockStrip, OfflineStrip } from "./DocFreeze";
+import { Avatar, personName } from "./PlanCards";
 import { PRESENCE_TTL, peerClass } from "./docAwareness";
 
 export type LiveCapability = "unknown" | "live" | "unsupported";
 
-export function DocPresence({ client, visual, isAuthor, name, onState, onCapability }: {
+export function DocPresence({ client, visual, isAuthor, name, onState, onCapability, onText, refreshes = 0, mode = "editing", stripHost, reviewers = [], onHistory }: {
   client: LiveClient; visual: string; isAuthor: boolean; name: string;
   onState?(state: LiveDocState | null): void;
   onCapability?(capability: LiveCapability): void;
+  /* The doc's live text, each section's, as it stands now (everyone's typing included); null until known. */
+  onText?(texts: Map<string, string> | null): void;
+  /* Counts this person's changes to the review (a sign-off): each asks for the frozen version again. */
+  refreshes?: number;
+  /* The reader's mode: the live strip is for Editing (and for the author, who freezes). */
+  mode?: "viewing" | "suggesting" | "editing";
+  stripHost?: HTMLElement | null;
+  /* Who signs a frozen version, by name: Freeze says it asks them. */
+  reviewers?: string[];
+  /* Show what the frozen version changed (the reader's History tab). */
+  onHistory?(): void;
 }) {
   const channel = useRef<LiveChannel | null>(null);
   const [state, setState] = useState<LiveDocState | null>(null);
@@ -39,8 +55,12 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
       }
       setPeers([...people.values()]);
     };
+    // The live text, kept here for the reader: every window's changes arrive on this channel too.
+    const text = new LoroDoc();
+    const told = () => onText?.(new Map(Object.entries(text.toJSON() as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string")));
     setState(null);
     onState?.(null);
+    onText?.(null);
     onCapability?.(known.current.live ? "live" : "unknown");
     setUnsupported(false);
     setRefused(null);
@@ -48,7 +68,15 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
     setPeers([]);
     let stopRefresh = () => {};
     const live = client.visualLive(visual, {
-      onUpdate() { confirm(); },
+      onUpdate(bytes) {
+        confirm();
+        try {
+          text.import(bytes);
+          told();
+        } catch {
+          // Not a change this copy can take (its base is missing): the next snapshot brings it.
+        }
+      },
       onState(next) { confirm(); setState(next); onState?.(next); setConnected(true); },
       onRefused(why) { setRefused(why); },
       onAwareness(section, bytes) {
@@ -90,30 +118,36 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
       live.close();
       for (const store of stores.values()) store.destroy();
     };
-  }, [client, visual, name, onState, onCapability, opened]);
+  }, [client, visual, name, onState, onCapability, onText, opened]);
+  useEffect(() => {
+    if (refreshes > 0) channel.current?.refresh();
+  }, [refreshes]);
   if (unsupported) return null;
+  const author = state?.author ?? "";
+  const freeze = () => { setRefused(null); channel.current?.freeze(); };
+  const reopen = () => { setRefused(null); channel.current?.reopen(); };
+  // Who is here, by first name: "You, Dana and Maya".
+  const here = ["You", ...new Set(peers.map((p) => personName(p.name).split(" ")[0]))];
+  const strip = state?.lock === "sign_off" && state.version
+    ? <LockStrip version={state.version} author={author} writers={state.version.writers} isAuthor={isAuthor} connected={connected} refused={refused} onReopen={reopen} onHistory={onHistory} />
+    : state?.lock === "sign_off"
+      ? <LockStrip version={{ id: 0, writers: [], signOffs: [], snapshot: "" }} author={author} writers={[]} isAuthor={isAuthor} connected={connected} refused={refused} onReopen={reopen} onHistory={onHistory} />
+      : state?.lock === "author_offline"
+        ? <OfflineStrip author={author} />
+        : mode === "editing" || isAuthor || refused
+          ? <LiveStrip isAuthor={isAuthor} author={author} here={here} reviewers={reviewers} editing={mode === "editing"} connected={connected} refused={refused} onFreeze={freeze} />
+          : null;
   return (
-    <section aria-label="Live document" className="grid gap-2 rounded-md border border-line p-2.5 font-sans text-xs" data-state={state?.lock ?? "editing"}>
-      <ul aria-label="Others in this document" className="m-0 flex list-none flex-wrap gap-3 p-0">
-        {peers.map((peer) => <li key={peer.name} className="inline-flex items-center gap-1.5" data-peer={peer.name}>
-          <Avatar who={peer.name} small />
-          <span aria-label="Caret colour" data-colour={peer.colorClassName} className="h-3 w-0.5" style={{ backgroundColor: `var(--group-${Number(peer.colorClassName?.replace("loro-peer-", "")) + 2})` }} />
-          {peer.name}
-        </li>)}
+    <>
+      <ul aria-label="Others in this document" className="m-0 flex list-none p-0" title={peers.length ? `${peers.map((p) => p.name).join(", ")} ${peers.length === 1 ? "is" : "are"} in this doc` : undefined}>
+        {peers.map((peer, i) => (
+          <li key={peer.name} className={`inline-flex rounded-full ${i ? "-ml-[5px] shadow-[0_0_0_1.5px_var(--canvas)]" : ""}`} data-peer={peer.name}>
+            <Avatar who={peer.name} />
+            <span aria-label="Caret colour" data-colour={peer.colorClassName} hidden />
+          </li>
+        ))}
       </ul>
-      {state?.lock === "author_offline" && <p role="status" className="m-0 text-sap">{state.author} went offline while editing · comments and suggestions only</p>}
-      {state?.lock === "sign_off" ? <div className="flex items-center gap-2">
-        <span>Locked for sign-off</span>
-        {isAuthor && <button type="button" className={quiet} disabled={!connected} onClick={() => { setRefused(null); channel.current?.reopen(); }}>Reopen</button>}
-      </div> : isAuthor ? <button type="button" className={`${quiet} justify-self-start`} disabled={!connected || !!state?.lock} onClick={() => { setRefused(null); channel.current?.freeze(); }}>Freeze</button>
-        : <p role="status" data-state="author-required" className="m-0 text-ink-3">Ask the author to freeze</p>}
-      {refused && <p role="alert" data-state={`${refused.action}-refused`} className="m-0 text-sap">
-        {refused.action === "freeze" ? "Not frozen" : "Not reopened"}{refused.reason ? `: ${refused.reason}` : ""}
-      </p>}
-      {state?.version && <div data-testid="doc-version" data-version={state.version.id}>
-        <span>Version {state.version.id} · Credited writers</span>
-        <ul aria-label="Credited writers" className="m-0 list-none p-0">{state.version.writers.map((writer) => <li key={writer}>{writer}</li>)}</ul>
-      </div>}
-    </section>
+      {strip && (stripHost ? createPortal(strip, stripHost) : stripHost === undefined ? strip : null)}
+    </>
   );
 }

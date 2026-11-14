@@ -142,6 +142,10 @@ class DraftReplica:
     def sections_at(self, version: bytes) -> dict[str, str]:
         return self._doc.sections_at(version)
 
+    def editors(self, section: str) -> list[int | None]:
+        """For each character of ``section``, the number that typed it."""
+        return self._doc.editors(section)
+
     def lacks(self, since: bytes) -> bool:
         """Whether a replica at version ``since`` lacks a change this one holds."""
         return self._doc.lacks(since)

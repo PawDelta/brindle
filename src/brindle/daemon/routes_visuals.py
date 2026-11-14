@@ -153,6 +153,18 @@ async def visual_live(socket: WebSocket) -> None:
             return replica.receive(data)[1]
         return None
 
+    def unfilled():
+        """Why the author's Freeze can't go: its template's required sections
+        still empty in the text typed so far (brindle.doc_templates), else None."""
+        from brindle import doc_templates, plan_docs
+
+        p = current_plan()
+        try:
+            doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p, replica)["sections"])
+        except ServiceError as e:
+            return e.message
+        return None
+
     def close_db():
         if db is not None:
             db.conn.close()
@@ -189,9 +201,16 @@ async def visual_live(socket: WebSocket) -> None:
                 # The author's Freeze or Reopen: the Library makes or withdraws the version (it
                 # refuses anyone else); not under the room's lock, so typing here never waits on it.
                 reopen = said.get("reopen") is True
-                refused = await relay.freeze(doc_id, reopen=reopen)
+                refused = None if reopen or teammate else await work(unfilled)
+                if refused is None:
+                    refused = await relay.freeze(doc_id, reopen=reopen)
                 if refused is not None:     # to this window only: its Freeze or Reopen didn't happen
                     await socket.send_json({"refused": {"action": "reopen" if reopen else "freeze", "reason": refused}})
+                continue
+            if lease is not None and said.get("refresh") is True:
+                # The window's person signed off (or otherwise changed the review): every window
+                # here is told the frozen version's sign-offs as the Library has them now.
+                await relay.link(doc_id).refresh()
                 continue
             async with room.lock:
                 if isinstance(said.get("update"), str):
@@ -396,6 +415,20 @@ def _plan_now(db: DB, plan_id: str) -> Any:
     from brindle import plans
 
     return plans.to_dto(db, plans.get(db, plan_id))
+
+
+@_json
+def plan_history(db: DB, request: Request) -> Any:
+    from brindle import plan_docs
+
+    return plan_docs.timeline(db, request.path_params["id"])
+
+
+@_json
+def plan_comparison(db: DB, request: Request) -> Any:
+    from brindle import plan_docs
+
+    return plan_docs.comparison(db, request.path_params["id"], request.path_params["n"])
 
 
 @_json
@@ -611,6 +644,18 @@ def shared_design(db: DB, request: Request) -> Any:
     return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc))
 
 
+@_json
+def shared_design_history(db: DB, request: Request) -> Any:
+    return _shared_design(request.query_params.get("repo") or None,
+                          lambda r: r.timeline(request.path_params["doc_id"]))
+
+
+@_json
+def shared_design_comparison(db: DB, request: Request) -> Any:
+    return _shared_design(request.query_params.get("repo") or None,
+                          lambda r: r.comparison(request.path_params["doc_id"], request.path_params["n"]))
+
+
 def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
     """A comment, a reply (``parent``), or a question for the person's own
     supervisor, which starts it only once this answer has been written."""
@@ -652,6 +697,30 @@ def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
 
 
 @_json
+def library_design_plan(db: DB, request: Request) -> Any:
+    """The plan a Library design was shared from, when it was shared from this
+    machine by the account signed in now: its visual, so the Library opens it
+    in the author's own reader (sharing, Freeze, the build). A 404 for anyone
+    else's design, for one another account here shared, for one the Library
+    refused this account, and when no account can be verified: those open in
+    the teammate's reader, with what the Library lets this account do."""
+    from brindle.daemon import routes_actions as actions
+
+    visuals.require_enabled()
+    row = db.conn.execute("SELECT plan_id, owner, access_refused FROM plan_shares WHERE doc_id=?",
+                          (request.path_params["id"],)).fetchone()
+    try:
+        me = actions._docs_entitlement(None).sub
+    except ServiceError:
+        me = None
+    if row is None or row["access_refused"] or me is None or row["owner"] != me:
+        raise ServiceError("not_found", "this design wasn't shared from here by this account", 404)
+    v = visuals.get(db, row["plan_id"])
+    visuals._unlocked(v["root_id"])
+    return visuals.to_dto(db, v)
+
+
+@_json
 def library_people(db: DB, request: Request) -> Any:
     """The people of the person's org, to pick reviewers from, leaving out
     the person (``me``). ``admin_org``: the org whose review rules the doc
@@ -689,6 +758,7 @@ def kept_page(db: DB, request: Request) -> Path:
 ROUTES = [
     WebSocketRoute("/v1/visuals/{id}/live", visual_live),
     Route("/v1/library/designs/{id}/question", _endpoint(doc_question), methods=["POST"]),
+    Route("/v1/library/designs/{id}/plan", library_design_plan),
     Route("/v1/sessions/{id:path}/visual-input", _endpoint(visual_input), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-offer", session_offer),
     Route("/v1/sessions/{id:path}/visual-offer", _endpoint(resolve_offer), methods=["POST"]),
@@ -703,6 +773,8 @@ ROUTES = [
     Route("/v1/plans/{id}", plan),
     Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
     Route("/v1/plans/{id}/revisions/{n}", plan_revision),
+    Route("/v1/plans/{id}/history", plan_history),
+    Route("/v1/plans/{id}/revisions/{n}/changes", plan_comparison),
     Route("/v1/plans/{id}/comments", _endpoint(plan_comment), methods=["POST"]),
     Route("/v1/plans/{id}/suggestions", _endpoint(plan_suggest), methods=["POST"]),
     Route("/v1/plans/{id}/edit", _endpoint(plan_edit), methods=["POST"]),
@@ -723,6 +795,8 @@ ROUTES = [
     Route("/v1/review-policies/draft-impact", _endpoint(review_policies_impact), methods=["POST"]),
     Route("/v1/library/people", library_people),
     Route("/v1/shared-designs/{doc_id}", shared_design),
+    Route("/v1/shared-designs/{doc_id}/history", shared_design_history),
+    Route("/v1/shared-designs/{doc_id}/revisions/{n:int}/changes", shared_design_comparison),
     Route("/v1/shared-designs/{doc_id}/comments", _endpoint(shared_design_comment), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/suggestions", _endpoint(shared_design_suggest), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/threads/{tid:int}", _endpoint(shared_design_thread), methods=["POST"]),

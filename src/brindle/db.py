@@ -1084,6 +1084,17 @@ CREATE TABLE IF NOT EXISTS plans (
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
 -- A plan as a design doc (brindle.plan_docs): every revision, the supervisor's
 -- and the person's own edits alike; the plans row holds the current one.
+CREATE TABLE IF NOT EXISTS plan_history_events (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    rev INTEGER,
+    version INTEGER,
+    at REAL NOT NULL,
+    observed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (plan_id, event_key)
+);
 CREATE TABLE IF NOT EXISTS plan_revisions (
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
     rev INTEGER NOT NULL,
@@ -1143,6 +1154,21 @@ CREATE TABLE IF NOT EXISTS plan_votes (
     at REAL NOT NULL,
     PRIMARY KEY (plan_id, decision_id, voter)
 );
+-- The doc format a plan was written with (brindle.doc_templates): its
+-- template, kept as it was so a later change never rewrites the doc, and
+-- its reference (DES-0042). No row: the plan was written without a format.
+CREATE TABLE IF NOT EXISTS plan_formats (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
+    template TEXT,                 -- JSON {id, name, default, sections}; NULL with a reference only
+    reference TEXT,
+    team TEXT,                     -- the team it was shared with, whose format its gates follow
+    created_at REAL NOT NULL
+);
+-- The next number of each reference pattern (DES-{number}) on this machine.
+CREATE TABLE IF NOT EXISTS doc_references (
+    pattern TEXT PRIMARY KEY,
+    next INTEGER NOT NULL
+);
 -- A plan shared through the Library (brindle.pro.shared_docs): its document,
 -- which local revision the Library's head holds, and the last review state.
 CREATE TABLE IF NOT EXISTS plan_shares (
@@ -1161,6 +1187,16 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     approve_refused TEXT,          -- why a held Approve wasn't applied, for the person
     access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
     review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
+);
+-- The repo a Library folder was made for (brindle.pro.library_folders): the
+-- server keeps folders per person, team or org and refuses any other field,
+-- so which repo a folder belongs to is kept here, by the folder it names.
+CREATE TABLE IF NOT EXISTS library_folder_repos (
+    scope_kind TEXT NOT NULL,      -- user | group | org
+    scope_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    repo TEXT NOT NULL,            -- the repo's root, as the app names it
+    PRIMARY KEY (scope_kind, scope_id, folder_id)
 );
 -- This machine's replica of a shared doc's live draft (brindle.plan_drafts):
 -- its Loro state and the peer id it writes under, in one row, so the id is

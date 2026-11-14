@@ -923,18 +923,31 @@ def analysis_doc_scopes(db: DB, request: Request) -> Any:
 @_json
 def library_folders(db: DB, request: Request) -> Any:
     """``{"scopes": [{scope: {kind, id, name}, folders: [...]}]}``: the folders
-    the person can see in each scope they read (see pro/library_folders)."""
+    the person can see in each scope they read (see pro/library_folders), each
+    with the ``repo`` it was made for (None when this machine doesn't know)."""
     from brindle.pro import library_folders as folders
 
     repo = _repo(request)
-    return {"scopes": folders.list_all(docs_scopes(repo), api=lambda m, p, b=None: docs_api(m, p, b, repo=repo),
-                                       refusals=(ServiceError,))}
+    return {"scopes": folders.with_repos(db, folders.list_all(
+        docs_scopes(repo), api=lambda m, p, b=None: docs_api(m, p, b, repo=repo), refusals=(ServiceError,)))}
 
 
 @_json
 def analysis_doc_switches(db: DB, request: Request) -> Any:
     """The person's own switches, and which their org has locked (see routes_actions.doc_switches)."""
     return doc_switches(_repo(request))
+
+
+@_json
+def doc_format(db: DB, request: Request) -> Any:
+    """Settings › Doc format (brindle.doc_templates): what ``level`` (org, the
+    default, team:<id>, or a level of the org's structure) sets and its
+    version, the format in force there, where it is kept, the reference this
+    machine's next new doc gets, and how many docs each template wrote."""
+    from brindle import doc_templates
+
+    level = request.query_params.get("level") or doc_templates.ORG
+    return doc_templates.view(db, level)
 
 
 @_json
@@ -967,11 +980,16 @@ def analysis_doc_results(db: DB, request: Request) -> Any:
 
 @_json
 def analysis_doc(db: DB, request: Request) -> Any:
-    """One doc: its files, what the server read from it and how often briefs used it."""
+    """One doc: its files, what the server read from it and how often briefs used it,
+    and ``tasks`` when it is a plan on this machine (plans.doc_tasks: its split, in board state)."""
     from urllib.parse import quote
 
-    return docs_api("GET", f"/analysis-docs/{quote(request.path_params['id'], safe='')}",
-                    repo=_repo(request))
+    from brindle import plans
+
+    doc_id = request.path_params["id"]
+    got = docs_api("GET", f"/analysis-docs/{quote(doc_id, safe='')}", repo=_repo(request))
+    tasks = plans.doc_tasks(db, doc_id)
+    return dict(got, tasks=tasks) if isinstance(got, dict) and tasks is not None else got
 
 
 USAGE_NEAR_PERCENT = 80.0
@@ -1053,6 +1071,7 @@ ROUTES = [
     Route("/v1/profiles/{name}", get_profile),
     Route("/v1/rules", list_rules),
     Route("/v1/config", get_config),
+    Route("/v1/doc-format", doc_format),
     Route("/v1/user-settings", get_user_settings),
     Route("/v1/permissions", get_permissions),
     Route("/v1/permissions/asks", get_permission_asks),

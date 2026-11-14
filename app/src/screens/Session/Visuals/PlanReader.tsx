@@ -1,44 +1,60 @@
 /* A design doc (brindle/plans.py, brindle/plan_docs.py), opened over the whole window like any
    visual. Unlike a visual it isn't the agent's HTML: brindle renders it itself (DocText.tsx:
    elements only, no raw HTML, no fetched images), so it needs no frame, and every control on it
-   is the app's own. It is one scrolling doc: the title and
-   what it is waiting on, the overview, each section with its number in the margin, then each
-   decision as a table of its alternatives with who voted for which. Beside it, the review
-   column (DocReview.tsx): what is left to decide, and the comment and suggestion threads, each
-   tied to its place in the text. Along the bottom, a bar in two rows: what's next with its
-   actions (Jump to it, Request changes, Confirm a decision, then Sign off), and under it the
-   person's note with its attachments.
+   is the app's own. One reader for every doc, wherever it was opened from.
 
-   Three modes, in the header. Viewing reads. Suggesting and Editing put an Edit control on each
-   text section: its markdown in a box, saved as a suggestion to accept, or as a direct edit (a
-   new revision). A doc in team review is edited live instead, in Editing mode: the section's
-   text in DocEditor.tsx, shared with everyone writing in it as they type. In any mode, highlighting text offers Comment, Suggest edit and Ask the
-   supervisor; what the person writes lands in the review column, tied to that text.
+   Top to bottom: the toolbar (DocBar.tsx: Back, the title with its one number, who else is in the
+   doc, the Markdown switch, the mode, Share and the doc's actions); for a shared doc, one strip
+   that says whether its text is live or locked for sign-off (DocFreeze.tsx); under it, whenever
+   the person can type, the formatting toolbar (DocFormat.tsx). Then the page: the title and its
+   status in one line (DocStatus.tsx), the overview, each section with its number in the margin,
+   then each decision as a table of its alternatives with who voted for which. Beside it, the side
+   column (DocReview.tsx): Comments, Decisions (and the sign-off sheet), History, Tasks. Along the
+   bottom, a bar that says the next step in words, with its actions (Jump to it, Request changes,
+   Confirm a decision, then Sign off), and under it the person's note with its attachments.
+
+   Three modes, in the toolbar. Viewing reads. Suggesting: highlighting text and Suggest edit
+   writes the change on the page as a tracked change (struck, and inserted in green), sent with a
+   reason from its card. Editing: a section's own Edit control opens its text where it reads: on
+   a doc in team review, the live text (DocEditor.tsx), shared with everyone writing in it as they
+   type; on a personal doc, its Markdown in a box saved as a new revision. The Markdown switch
+   shows the doc as its source in any mode (DocMarkdown.tsx). In any mode, highlighting text
+   offers Comment, Suggest edit and Ask; what the person writes lands in the Comments tab, tied to
+   that text by its number.
 
    The next decision to take is led by the bottom bar, and marked in the doc by a green divider.
    Sign off starts the session's queued workers, and the split's task cards stay on top as a
    live board; Request changes sends the person's picks, threads and note back to the supervisor,
    who publishes a new revision. A write names the revision on screen: a newer one is a 409. */
 
-import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
-import { DaemonError, type DaemonClient, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
+import { LoroDoc } from "loro-crdt";
+import { DaemonError, fromBase64, type DaemonClient, type DocRevisionComparison, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
 import { liveReviewGate } from "../../../api/liveReview";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
+import { DocReference } from "../../../components/DocReference";
 import { LoadingButton } from "../../../components/LoadingButton";
+import { ago } from "../../../components/ProviderConnect";
 import { PaperclipIcon } from "../../../components/icons";
-import { button, field, label, main, pill, quiet } from "../../../components/ui";
+import { button, field, label, main, quiet } from "../../../components/ui";
 import { CloudLoginStatus, useCloudLogin } from "../../Inbox/CloudSignIn";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
 import type { PlanDocClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
+import { Popover, ReaderBar } from "./DocBar";
 import { Diagram } from "./DocDiagram";
-import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, type TodoItem } from "./DocReview";
+import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
+import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
+import { DocMarkdown } from "./DocMarkdown";
+import { Review, ReviewStrip, SignOffSheet, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
 import type { LiveClient } from "./DocEditor";
 import { DocPresence, type LiveCapability } from "./DocPresence";
+import { DocStatus, type StatusReviewer } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
-import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
+import { Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
+import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
@@ -48,6 +64,7 @@ type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient
    revision never reopens, so a response with less progress than the one on screen is stale. */
 /* The live editor brings CodeMirror and Loro's WebAssembly: loaded when a section is first edited live. */
 const DocEditor = lazy(() => import("./DocEditor").then((m) => ({ default: m.DocEditor })));
+const SuggestEditor = lazy(() => import("./DocEditor").then((m) => ({ default: m.SuggestEditor })));
 
 const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
 const noSubscribe = () => () => {};
@@ -74,6 +91,46 @@ function storedCollapsed(): boolean {
   } catch {
     return false;
   }
+}
+
+/* The revision this viewer last read of each doc, kept on this device: the sign-off sheet says what
+   changed since. Reading a doc moves it on to the revision on screen. */
+export const LAST_READ_KEY = "brindle.plan.lastRead.";
+function useLastRead(id: string, rev: number): number | null {
+  const [before] = useState(() => {
+    try {
+      const got = Number(localStorage.getItem(`${LAST_READ_KEY}${id}`));
+      return Number.isFinite(got) && got > 0 ? got : null;
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(`${LAST_READ_KEY}${id}`, String(rev));
+    } catch {
+      // Not kept: the sheet only says less next time.
+    }
+  }, [id, rev]);
+  return before;
+}
+
+/* A box of Markdown the formatting toolbar writes into while it has the focus. */
+function FormatTextarea({ value, onValue, ...rest }: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange"> & { value: string; onValue(value: string): void }) {
+  const box = useRef<HTMLTextAreaElement>(null);
+  const target = useFormatTarget({ apply: (c) => textareaTarget(box.current, onValue).apply(c) });
+  return <textarea ref={box} {...rest} value={value} onChange={(e) => onValue(e.target.value)} onFocus={target.focused} />;
+}
+
+/* What the reader's toolbar is given by whoever opened the doc. */
+export interface ReaderChrome {
+  /* Back and the title. */
+  lead: ReactNode;
+  badges?: ReactNode;
+  actions?: ReactNode;
+  modes: typeof MODES;
+  allowed(mode: Mode): boolean;
+  onMode(mode: Mode): void;
 }
 
 /* The doc from its source, kept current, with its writes kept in order. `version` changing asks
@@ -157,12 +214,16 @@ export function ModePicker({ modes, current, allowed, onPick }: { modes: typeof 
   );
 }
 
-export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: {
+export function PlanReader({ client, visual, repo, onBack, asking, onChanged, backLabel, work }: {
   client: Client;
+  /* The design's work items, when it was opened from the Library. */
+  work?: Work;
   visual: VisualDTO;
   repo?: string;
   onBack(): void;
   asking?: boolean;
+  /* Where Back goes, in words ("Library"). */
+  backLabel?: string;
   /* The engine's row after a Keep, ahead of the bus. */
   onChanged(visual: VisualDTO): void;
 }) {
@@ -182,45 +243,47 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
   // A decided plan is read, not edited; the engine takes a suggestion until it is approved.
   const allowed = (m: Mode) => m === "viewing" || (!!shown && (m === "editing" ? shown.state === "open" : shown.state !== "approved"));
   const current = allowed(mode) ? mode : "viewing";
+  const lead = (
+    <>
+      <BackButton onBack={onBack} asking={asking} label={backLabel} />
+      <span className="mx-1 h-5 w-px bg-line" aria-hidden />
+      <h2 className="min-w-0 truncate text-[13px] font-semibold">{visual.title}</h2>
+    </>
+  );
+  const badges = shown?.state === "approved" && (
+    <span className={`${passChip} font-mono`} data-testid="plan-board-progress">
+      approved · {shown.split.filter((w) => w.test_state === "passing").length} of {shown.split.length} green
+    </span>
+  );
+  const actions = (
+    <>
+      <KeepButton client={client} visual={visual} onKept={onChanged} />
+      {exportClient && shown && (
+        <ExportButton key={`${shown.id}:${shown.rev}`} client={exportClient} repo={repo} open={exporting} onOpenChange={setExporting} source={{ kind: "plan", id: shown.id, rev: shown.rev, markdown: shown.markdown }} />
+      )}
+    </>
+  );
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="plan-reader">
-      {/* One toolbar, as a visual's: Back (Esc) and the title, then the mode and the doc's actions. */}
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-s2 py-2">
-        <BackButton onBack={onBack} asking={asking} />
-        <span className="mx-1 h-5 w-px bg-line" aria-hidden />
-        <h2 className="min-w-0 truncate text-[13px] font-semibold">{visual.title}</h2>
-        <span className="whitespace-nowrap text-xs text-ink-3" title={`${visual.id} · ${visual.by} · rendered by brindle from the plan's own text`} data-testid="plan-rev">
-          {`rev ${shown?.rev ?? visual.rev}`}
-        </span>
-        {shown?.state === "approved" && (
-          <span className={`${passChip} font-mono`} data-testid="plan-board-progress">
-            approved · {shown.split.filter((w) => w.test_state === "passing").length} of {shown.split.length} green
-          </span>
-        )}
-        <span className="flex-1" />
-        <ModePicker modes={MODES} current={current} allowed={allowed} onPick={setMode} />
-        <KeepButton client={client} visual={visual} onKept={onChanged} />
-        {exportClient && shown && (
-          <ExportButton key={`${shown.id}:${shown.rev}`} client={exportClient} repo={repo} open={exporting} onOpenChange={setExporting} source={{ kind: "plan", id: shown.id, rev: shown.rev, markdown: shown.markdown }} />
-        )}
-      </header>
-      {shown ? <>
-        {shown.state === "approved" && (
-          <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">
-            <Tasks plan={shown} shared={overlaps(shown)} />
-          </section>
-        )}
-        <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} />
-      </> : <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>}
+      {shown ? (
+        <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
+          chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode }}
+          top={shown.state === "approved" && (
+            <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">
+              <Tasks plan={shown} shared={overlaps(shown)} />
+            </section>
+          )} />
+      ) : (
+        <>
+          <ReaderBar lead={lead} version={<span className="whitespace-nowrap text-xs text-ink-3" data-testid="plan-rev">{`rev ${visual.rev}`}</span>} actions={actions} />
+          <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>
+        </>
+      )}
     </div>
   );
 }
 
 const LEDE = "lede";
-const clip = (text: string, most: number) => {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > most ? `${flat.slice(0, most - 1)}…` : flat;
-};
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 /* "A · Your own server" is confirmed as "Confirm A"; a label with no such lead, by its name. */
 const shortName = (optionLabel: string) => /^([A-Za-z0-9]{1,3})\s*[·:.)-]\s/.exec(optionLabel)?.[1] ?? optionLabel;
@@ -253,8 +316,10 @@ export interface Teammate {
   directory: LibraryPerson[];
 }
 
-export function DesignDoc({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode, writes, liveClient }: {
+export function DesignDoc({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history = null, workItems = null, workItem = null, work }: {
   source: DocSource;
+  /* The design's work items in the tracker, from the Library: the Tasks tab, the status line, "Create work item". */
+  work?: Work;
   /* The doc's author, on this machine: sharing, the verdict and the build. */
   author?: { client: Client; visual: VisualDTO };
   teammate?: Teammate;
@@ -262,12 +327,78 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   mode: Mode;
   writes: Writes;
   liveClient?: LiveClient;
+  /* The toolbar's parts from whoever opened the doc. */
+  chrome?: ReaderChrome;
+  /* Shown between the toolbar and the page (the approved plan's live board). */
+  top?: ReactNode;
+  /* The History tab's timeline, and the tracker's items under Tasks: null until they are known. */
+  history?: HistoryEvent[] | null;
+  workItems?: WorkItem[] | null;
+  /* The design's own linked work item, in its status line. */
+  workItem?: WorkItem | null;
+}) {
+  return (
+    <FormatProvider>
+      <DesignDocBody source={source} author={author} teammate={receivedTeammate} plan={receivedPlan} mode={chosenMode} writes={writes} liveClient={liveClient} chrome={chrome} top={top} history={history} workItems={workItems} workItem={workItem} work={work} />
+    </FormatProvider>
+  );
+}
+
+function DesignDocBody({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history, workItems, workItem: receivedWorkItem, work }: {
+  work?: Work;
+  source: DocSource;
+  author?: { client: Client; visual: VisualDTO };
+  teammate?: Teammate;
+  plan: Plan;
+  mode: Mode;
+  writes: Writes;
+  liveClient?: LiveClient;
+  chrome?: ReaderChrome;
+  top?: ReactNode;
+  history: HistoryEvent[] | null;
+  workItems: WorkItem[] | null;
+  workItem: WorkItem | null;
 }) {
   const client = author?.client;
-  const docLive = liveClient ?? (receivedPlan.gate && client?.visualLive ? (client as LiveClient) : null);
+  // The design's own item sits in the status line with its state as last read.
+  const epic = work?.state?.epic;
+  const workItem: WorkItem | null = epic ? { key: epic.display, title: epic.display, state: epic.state ?? "linked", done: epic.done, active: !!epic.state && !epic.done, url: epic.url ?? undefined } : receivedWorkItem;
+  const docLive =liveClient ?? (receivedPlan.gate && client?.visualLive ? (client as LiveClient) : null);
   const [liveState, setLiveState] = useState<LiveDocState | null>(null);
   const [liveCapability, setLiveCapability] = useState<LiveCapability>("unknown");
   const useLiveReview = !!docLive && liveCapability !== "unsupported";
+  // A version frozen for sign-off can't change in any view: the reader only reads (and comments).
+  const locked = useLiveReview && liveState?.lock === "sign_off";
+  const mode: Mode = locked ? "viewing" : chosenMode;
+  const frozen = useLiveReview && liveState?.lock === "sign_off" ? liveState.version : null;
+  // A frozen version reads as its own text (its snapshot), which may have moved on from the
+  // revision's: what is signed is what is shown, on the page and in the Markdown view.
+  const frozenTexts = useMemo(() => {
+    if (!frozen?.snapshot) return null;
+    try {
+      const snapshot = new LoroDoc();
+      snapshot.import(fromBase64(frozen.snapshot));
+      return new Map(Object.entries(snapshot.toJSON() as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string"));
+    } catch {
+      return null;
+    }
+  }, [frozen?.snapshot]);
+  // While the text is live it reads as everyone has typed it (DocPresence keeps it), not as the
+  // revision: Done editing, and a Reopen, show the live text, never the older revision's.
+  const [liveTexts, setLiveTexts] = useState<Map<string, string> | null>(null);
+  const shownTexts = frozenTexts ?? (useLiveReview && !locked ? liveTexts : null);
+  // Counts this person's changes to the review while a version is frozen: each asks the live
+  // channel for the version again, so its sign-offs are the Library's now.
+  const [refreshes, setRefreshes] = useState(0);
+  const [raw, setRaw] = useState(false);
+  const [sharingOpen, setSharingOpen] = useState(false);
+  const [briefOpen, setBriefOpen] = useState(false);
+  const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
+  // A suggestion's section text as it is being typed on the page (SuggestEditor).
+  const [draftText, setDraftText] = useState<string | null>(null);
+  const [historyRev, setHistoryRev] = useState<number | null>(null);
+  const [historical, setHistorical] = useState<{ comparison: DocRevisionComparison; close(): void } | null>(null);
+  const lastRead = useLastRead(receivedPlan.id, receivedPlan.rev);
   const plan = useLiveReview ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
   const teammate = receivedTeammate && useLiveReview ? { ...receivedTeammate, signedOff: !!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me) } : receivedTeammate;
   const reviewVersion = useLiveReview ? liveState?.version?.id : undefined;
@@ -295,7 +426,7 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   // A section's box belongs to Suggesting and Editing: back in Viewing (or decided), it is closed.
   const editing = mode === "viewing" ? null : box;
   const [followed, setFollowed] = useState<{ thread: string } | null>(null);
-  const [tab, setTab] = useState<ReviewTab>("review");
+  const [tab, setTab] = useState<ReviewTab>("comments");
   const [collapsed, setCollapsed] = useState(storedCollapsed);
   const doc = useRef<HTMLDivElement>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -329,6 +460,13 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
   }, [plan.id, shared]);
   const nameOf = (sub: string) => directory.find((p) => p.sub === sub)?.email || sub;
+  // A person in a sentence: "You", or their name's first word ("dana.okafor@…" → "Dana").
+  const firstName = (who: string) => {
+    if (who === "person" || (!!me && who === me) || who === teammate?.me) return "You";
+    const name = nameOf(who).split("@")[0].split(/[\s._-]+/)[0] ?? who;
+    return name ? name[0].toUpperCase() + name.slice(1) : who;
+  };
+  const authorName = teammate ? (teammate.author ? firstName(teammate.author) : "the author") : "you";
   const gateWhy = [...(gate?.waiting_on ?? []), ...(gate?.reviewers ?? []).flatMap((r) => r.changes_by ?? [])].reduce((text, who) => text.split(who).join(nameOf(who)), gate?.reason ?? "");
   // Everyone the author chose has signed and only org rules are left.
   const unsigned = (gate?.reviewers ?? []).filter((r) => r.required && r.status !== "signed_off" && r.status !== "waived");
@@ -345,8 +483,11 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   // The doc's order: the overview, each section under its number, then each decision under its own.
   const numbers = new Map(plan.sections.map((s, i): [string, number] => [s.id, i + 1]));
   const figures = new Map(plan.sections.filter((s) => s.kind === "mermaid" || s.kind === "svg").map((s, i): [string, number] => [s.id, i + 1]));
-  const bodyOf = (section: string) => (section === LEDE ? plan.lede : plan.sections.find((s) => s.id === section)?.markdown) ?? "";
-  const sectionName = (section: string) => (section === LEDE ? "overview" : `§${numbers.get(section) ?? "?"}`);
+  const textPlan: Plan = shownTexts ? {
+    ...plan, lede: shownTexts.get(LEDE) ?? plan.lede,
+    sections: plan.sections.map((s) => (s.kind === "mermaid" || s.kind === "svg" ? s : { ...s, markdown: shownTexts.get(s.id) ?? s.markdown })),
+  } : plan;
+  const bodyOf = (section: string) => (section === LEDE ? textPlan.lede : textPlan.sections.find((s) => s.id === section)?.markdown) ?? "";
   // What an anchor is on, as text: a draft is stale once this differs from what it was begun on.
   const decisionSource = (id: string) => {
     const d = plan.decisions.find((x) => x.id === id);
@@ -370,24 +511,28 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   const settled = (d: PlanDecisionDTO) => !open || (!!d.confirmed && (drafted(d) ?? d.confirmed) === d.confirmed);
   const next = plan.decisions.find((d) => !settled(d));
   const decided = plan.decisions.filter(settled).length;
-  const todo: TodoItem[] = plan.decisions.map((d) => ({ id: d.id, title: d.title, state: settled(d) ? "done" : d === next ? "current" : "todo" }));
+  const todo: TodoItem[] = plan.decisions.map((d) => {
+    const label = settled(d) ? d.options.find((o) => o.id === chosen(d))?.label : undefined;
+    return { id: d.id, title: d.title, state: settled(d) ? "done" : d === next ? "current" : "todo", pick: label && shortName(label) !== label ? shortName(label) : undefined };
+  });
   const openThreads = threads.filter((t) => t.status === "open");
   const suggestions = openThreads.filter((t) => t.kind === "suggestion").length;
 
   // What a thread is on, as its card says it.
-  const decisionName = (id: string | null | undefined) => `decision · ${plan.decisions.find((d) => d.id === id)?.title ?? id}`;
-  const partName = (section: string) => (section === "ask" ? "what I understood" : section === LEDE ? "the overview" : section === "split" ? "the split"
+  const decisionName = (id: string | null | undefined) => `Decision · ${plan.decisions.find((d) => d.id === id)?.title ?? id}`;
+  const partName = (section: string) => (section === "ask" ? "The brief" : section === LEDE ? "Overview" : section === "split" ? "The split"
     : section.startsWith("decision:") ? decisionName(section.slice(9)) : `§${numbers.get(section) ?? "?"} ${plan.sections.find((s) => s.id === section)?.title ?? section}`);
+  // A thread's place in plain words: "§1 Summary", "Decision · Where cloud workers run", "Figure 1".
   const where = (t: PlanThreadDTO) => {
     const a = t.anchor;
     if (a.kind === "decision") return decisionName(a.decision);
     if (a.kind === "diagram") return `Figure ${figures.get(a.section ?? "") ?? "?"}`;
-    if (a.kind === "section" || t.kind === "suggestion") return partName(a.section ?? "");
-    return `"${clip(a.quote ?? "", 28)}" · ${sectionName(a.section ?? "")}`;
+    return partName(a.section ?? "");
   };
 
-  // The ranges drawn into a section's text: open comments' anchors, open suggestions' changes,
-  // and the text being commented on right now.
+  // The ranges drawn into a section's text: open comments' anchors with their numbers, open
+  // suggestions' changes, and what is being written right now (the text commented on, or a
+  // suggestion's change, tracked as it is typed).
   const marksOf = (section: string): Mark[] => {
     const out: Mark[] = [];
     const body = bodyOf(section);
@@ -395,10 +540,13 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
       const a = t.anchor;
       if (a.kind !== "text" || a.section !== section || a.state === "detached" || a.start == null || a.end == null) continue;
       // The engine's offsets count code points; the text on screen, UTF-16 units.
-      const range = { start: toUnits(body, a.start), end: toUnits(body, a.end), thread: t.id };
+      const range = { start: toUnits(body, a.start), end: toUnits(body, a.end), thread: t.id, ref: t.id, lit: followed?.thread === String(t.id) };
+      // On the live or frozen text a range is only drawn where its words still are.
+      if (shownTexts?.has(section) && a.quote != null && body.slice(range.start, range.end) !== a.quote) continue;
       out.push(t.kind === "suggestion" ? { ...range, kind: "del", ins: t.after ?? "" } : { ...range, kind: "anchor" });
     }
-    const on = draft && !draftStale ? anchorOf(draft) : null;
+    // A suggestion is typed on the page in its own editor; a comment's words are lit while it is written.
+    const on = draft && draft.kind !== "suggest" && !draftStale ? anchorOf(draft) : null;
     if (on?.kind === "text" && on.section === section) out.push({ start: on.start, end: on.start + on.quote.length, kind: "sel" });
     return out;
   };
@@ -450,29 +598,55 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   };
   const begin = (next: Draft) => {
     setDrafting({ draft: next, source: sourceOf(anchorOf(next)) });
+    setDraftText(next.kind === "suggest" ? bodyOf(next.section) : null);
     setPicked(null);
-    setTab("review");
+    setTab("comments");
     window.getSelection()?.removeAllRanges();
+  };
+  // Suggesting is typed on the page: the section opens in its suggestion editor, with the
+  // highlighted words (or a caret) selected, and Suggesting is the mode while it is.
+  const suggestAt = (section: string, start: number, quote: string) => {
+    if (chrome && mode !== "suggesting" && chrome.allowed("suggesting")) chrome.onMode("suggesting");
+    begin({ kind: "suggest", section, start, before: quote, where: partName(section) });
   };
   const offer = (kind: "comment" | "ask" | "suggest") => {
     if (!picked) return;
     if (picked.kind === "diagram") return begin({ kind: kind === "ask" ? "ask" : "comment", anchor: { kind: "diagram", section: picked.section }, where: `Figure ${figures.get(picked.section) ?? "?"}` });
     const { section, start, quote } = picked;
-    if (kind === "suggest") return begin({ kind, section, start, before: quote, where: partName(section) });
-    begin({ kind, anchor: { kind: "text", section, start, quote }, where: `"${clip(quote, 28)}" · ${sectionName(section)}` });
+    if (kind === "suggest") return suggestAt(section, start, quote);
+    begin({ kind, anchor: { kind: "text", section, start, quote }, where: partName(section) });
+  };
+  // "Create work item": an item that quotes the highlighted passage and names its section.
+  const createFromPassage = () => {
+    if (!picked || picked.kind !== "text" || !work) return;
+    const { section, quote } = picked;
+    setPicked(null);
+    if (collapsed) collapse(false);
+    setTab("tasks");
+    void work.create({ kind: "passage", section, quote });
   };
   const comment = (anchor: PlanAnchor, on: string) => begin({ kind: "comment", anchor, where: on });
-  const setDraft = (_: null) => setDrafting(null);
+  const setDraft = (_: null) => {
+    setDrafting(null);
+    setDraftText(null);
+  };
+  // What the suggestion being typed changes: one replaced range of its section (start in code points).
+  const draftChange = draft?.kind === "suggest" && draftText !== null ? changeBetween(bodyOf(draft.section), draftText) : null;
+  // A suggestion is typed only in Suggesting, on text that isn't locked; a locked version takes none.
+  const suggestOpen = mode === "suggesting" && !locked;
+  const suggestionReady = !locked && !!draftChange && (!!draftChange.before || !!draftChange.after);
   // The draft's offsets are the screen's (UTF-16); the engine is sent code points. A draft whose
   // text changed under it (a newer revision) isn't sent: its range no longer says what was meant.
-  const sendDraft = async (text: string, after: string) => {
+  const sendDraft = async (text: string) => {
     if (!draft || draftStale) return;
+    if (draft.kind === "suggest") {
+      if (!draftChange || !suggestionReady) return;
+      if ((await write(() => source.suggest(plan.rev, { section: draft.section, ...draftChange }, text))) && alive.current) setDraft(null);
+      return;
+    }
     const on = anchorOf(draft);
     const start = on.kind === "text" ? toPoints(bodyOf(on.section), on.start) : 0;
-    const sent = draft.kind === "suggest"
-      ? () => source.suggest(plan.rev, { section: draft.section, start, before: draft.before, after }, text)
-      : () => source.comment(plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask");
-    if ((await write(sent)) && alive.current) setDraft(null);
+    if ((await write(() => source.comment(plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask"))) && alive.current) setDraft(null);
   };
 
   // A section's box, saved: only what changed between the text it was opened on and the box is
@@ -487,14 +661,16 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
 
   // Following a thread to its place in the doc, and an underlined anchor to its thread.
   const showThread = (t: PlanThreadDTO) => {
+    setFollowed({ thread: String(t.id) });
     const a = t.anchor;
     const root = doc.current;
     show(root?.querySelector(`[data-thread="${t.id}"]`) ?? document.getElementById(a.kind === "decision" ? `plan-decision-${a.decision}` : `plan-${a.section?.replace(/^decision:/, "decision-") ?? "ask"}`), "center");
   };
   const followAnchor = (e: MouseEvent) => {
-    const thread = (e.target as HTMLElement).closest<HTMLElement>("[data-thread]")?.dataset.thread;
+    const at = (e.target as HTMLElement).closest<HTMLElement>("[data-thread],[data-ref]");
+    const thread = at?.dataset.thread ?? at?.dataset.ref;
     if (!thread || collapsed) return;
-    setTab("review");
+    setTab("comments");
     setFollowed({ thread });
   };
   useEffect(() => {
@@ -533,7 +709,7 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   const canRequest = said;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
   const decide = async (approved: boolean) => {
-    if (!client || (approved && reviewBlocked)) return;
+    if (historical || !client || (approved && reviewBlocked)) return;
     setSending(approved ? "approve" : "changes");
     const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(reviewVersion === undefined ? {} : { version: reviewVersion }), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
@@ -547,6 +723,7 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   const stopSharing = async () => {
+    if (historical) return;
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
     if (now) await decide(true);
@@ -554,85 +731,122 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   };
   const confirm = async () => {
     const option = next && chosen(next);
-    if (!next || !option) return;
+    if (historical || !next || !option) return;
     setSending("confirm");
     await write(() => source.vote(plan.rev, next.id, option));
     if (alive.current) setSending(null);
   };
   const signOff = async () => {
-    if (!source.signOff || reviewBlocked) return;
+    if (historical || !source.signOff || reviewBlocked) return;
     setSending("approve");
-    await write(() => source.signOff!(plan.rev, reviewVersion));
+    if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes((n) => n + 1);
     if (alive.current) setSending(null);
   };
+  // A write that may change the review (the Share panel's sign-off) asks for the frozen version again.
+  const reviewWrite = async (work: () => Promise<Plan>) => {
+    if (historical) return false;
+    const done = await write(work);
+    if (done && frozen) setRefreshes((n) => n + 1);
+    return done;
+  };
   const nextOption = next?.options.find((o) => o.id === chosen(next));
+  const signers = (gate?.reviewers ?? []).filter((r) => r.sub);
+  const iAmUnsigned = signers.some((r) => (r.you || (!!teammate?.me && r.sub === teammate.me)) && r.required && r.status !== "signed_off");
+  const unsignedOthers = unsigned.filter((r) => !(r.you || (!!teammate?.me && r.sub === teammate.me)));
+  // The next step in words, not a run of counts.
   const summary = [
-    gate && gate.required > 0 && `${gate.signed} of ${plural(gate.required, "required sign-off")}`,
-    plan.decisions.length > 0 && `${decided} of ${plan.decisions.length} decided`,
-    suggestions > 0 && `${plural(suggestions, "suggestion")} to accept`,
-    openThreads.length - suggestions > 0 && `${plural(openThreads.length - suggestions, "comment")} open`,
-    plan.queued > 0 && `${plural(plan.queued, "assigned task waits", "assigned tasks wait")} on this design`,
-  ].filter(Boolean).join(" · ");
+    plan.decisions.length - decided > 0 && `${plural(plan.decisions.length - decided, "decision")} left.`,
+    gate && useLiveReview && !frozen && plan.state === "open" && (teammate ? `You sign once ${authorName} freezes a version.` : "Freeze a version when the text is ready for sign-off."),
+    gate && frozen && iAmUnsigned && unsignedOthers.length === 0 && `You are the last required reviewer.${teammate ? ` ${authorName} can start the build once you sign.` : ""}`,
+    gate && frozen && unsignedOthers.length > 0 && `Waiting on ${unsignedOthers.map((r) => (r.sub ? firstName(r.sub) : r.name ?? "an org rule")).join(", ")}.`,
+    gate && !useLiveReview && gate.required > 0 && `${gate.signed} of ${plural(gate.required, "required sign-off")}.`,
+    suggestions > 0 && !teammate && `${plural(suggestions, "suggestion")} to accept.`,
+    openThreads.length - suggestions > 0 && `${plural(openThreads.length - suggestions, "comment")} open.`,
+    plan.queued > 0 && `${plural(plan.queued, "assigned task waits", "assigned tasks wait")} on this design.`,
+  ].filter(Boolean).slice(0, 2).join(" ");
+  const signName = frozen ? `Sign off version ${frozen.id}` : "Sign off";
 
-  // A text section: its text with the threads' ranges drawn in, or, being edited, its markdown in a box.
-  const editable = mode !== "viewing";
+  // A text section: its text with the threads' ranges drawn in, or, being edited, its text where
+  // it reads (live) or its markdown in a box.
   const commentButton = (on: () => void, name = "Comment") => canComment && <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={on}>{name}</button>;
   const nextOptionConfirm = next && (
-    <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={busy || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
+    <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={!!historical || busy || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
       <span className="truncate">{nextOption ? `Confirm ${shortName(nextOption.label)}` : "Confirm"}</span>
     </LoadingButton>
   );
-  const editControl = (section: string, title: string) => editable && editing?.section !== section && (
-    <button type="button" className={`${quiet} -my-0.5 text-xs`} aria-label={`${mode === "editing" ? "Edit" : "Suggest an edit to"} ${title}`} disabled={!!editing} onClick={() => setEditing({ section, text: bodyOf(section), source: bodyOf(section) })}>
-      {mode === "editing" ? "Edit" : "Suggest an edit"}
+  // Editing opens a section where it reads; Suggesting is done on a highlight, as a tracked change.
+  const editControl = (section: string, title: string) => mode === "editing" && editing?.section !== section && (
+    <button type="button" className={`${quiet} -my-0.5 text-xs`} aria-label={`Edit ${title}`} disabled={!!editing} onClick={() => setEditing({ section, text: bodyOf(section), source: bodyOf(section) })}>
+      Edit
     </button>
   );
   // A doc in team review, in Editing mode, is edited live with everyone writing in it: its text
   // is the daemon's live document (DocEditor), each change going out as it is typed.
   const live = mode === "editing" && useLiveReview ? docLive : null;
-  const textBody = (section: string, title: string) => editing?.section === section && live ? (
-    <div className="grid gap-2 font-sans" data-testid="plan-live-box">
+  // What teammates see beside this person's caret and in the doc's presence.
+  const myName = personName(teammate?.me ? nameOf(teammate.me) : me ? nameOf(me) : "Author");
+  const liveEditor = (section: string, title: string, variant: "page" | "source") => live && (
+    <div className="grid font-sans" data-testid="plan-live-box">
       <Suspense fallback={<p className="text-xs text-ink-3" role="status">Opening the live text…</p>}>
-        <DocEditor client={live} visual={plan.id} section={section} name={me ? nameOf(me) : "Author"} label={`Text of ${title}`} isAuthor={!!author} />
+        <DocEditor client={live} visual={plan.id} section={section} name={myName} label={`Text of ${title}`} isAuthor={!!author} variant={variant} />
       </Suspense>
-      <div className="flex items-center gap-1.5">
-        <button type="button" className={`${quiet} text-xs`} onClick={() => setEditing(null)}>Done</button>
-      </div>
     </div>
-  ) : editing?.section === section ? (
+  );
+  const editBox = (title: string) => editing && (
     <div className="grid gap-2 font-sans" data-testid="plan-edit-box" data-stale={editStale || undefined}>
-      <textarea className={`${field} w-full resize-y font-mono text-[12.5px] leading-[1.6]`} aria-label={`Text of ${title}`} autoFocus rows={Math.min(24, editing.text.split("\n").length + 2)}
-        value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} />
+      <FormatTextarea className={`${field} w-full resize-y font-mono text-[12.5px] leading-[1.6]`} aria-label={`Text of ${title}`} autoFocus rows={Math.min(24, editing.text.split("\n").length + 2)}
+        value={editing.text} onValue={(text) => setEditing({ ...editing, text })} />
       {editStale && <p role="alert" className="text-xs text-sap">This section changed in a newer revision, so this draft can't be saved over it. Copy what you need, cancel, and edit the new text.</p>}
       <div className="flex items-center gap-1.5">
         <LoadingButton className={`${button} text-xs`} busy={busy} disabled={busy || editStale || editing.text === editing.source} onClick={() => void saveEdit()}>
-          {mode === "editing" ? "Save" : "Suggest this change"}
+          Save
         </LoadingButton>
         <button type="button" className={`${quiet} text-xs`} onClick={() => setEditing(null)}>Cancel</button>
       </div>
     </div>
-  ) : (
-    <>
-      <div data-section={section} className="grid gap-2.5">
+  );
+  // Where a click lands in a section's text (its offset in the source), for a suggestion's caret.
+  const caretIn = (section: string) => {
+    const selection = window.getSelection();
+    const node = selection?.anchorNode;
+    const leaf = (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>("[data-o]");
+    return leaf ? Number(leaf.dataset.o) + (selection?.anchorOffset ?? 0) : bodyOf(section).length;
+  };
+  const opened = (section: string) => {
+    if (window.getSelection()?.toString() || editing || draft) return;
+    if (mode === "editing") setEditing({ section, text: bodyOf(section), source: bodyOf(section) });
+    else if (mode === "suggesting" && canSuggest && plan.state !== "approved") suggestAt(section, caretIn(section), "");
+  };
+  const textBody = (section: string, title: string) => editing?.section === section ? (live ? liveEditor(section, title, "page") : editBox(title))
+    : draft?.kind === "suggest" && draft.section === section && !draftStale && suggestOpen ? (
+      <div className="grid font-sans" data-testid="plan-suggest-box">
+        <Suspense fallback={<DocText body={bodyOf(section)} />}>
+          <SuggestEditor key={`${drafting!.source}:${draft.start}`} source={bodyOf(section)} text={draftText ?? undefined} select={{ from: draft.start, to: draft.start + draft.before.length }}
+            label={`Suggestion to ${title}`} onText={setDraftText} />
+        </Suspense>
+      </div>
+    ) : draft?.kind === "suggest" && draft.section === section && !draftStale && draftChange ? (
+      // Out of Suggesting (another mode, or the text locked for sign-off): the change, read only.
+      <div data-section={section} className="grid gap-2.5" data-testid="plan-suggest-preview">
+        <DocText body={bodyOf(section)} marks={[...marksOf(section), { start: toUnits(bodyOf(section), draftChange.start), end: toUnits(bodyOf(section), draftChange.start) + draftChange.before.length, kind: "del", ins: draftChange.after }]} />
+      </div>
+    ) : (
+      <div data-section={section} className="grid gap-2.5" onClick={() => opened(section)}>
         <DocText body={bodyOf(section)} marks={marksOf(section)} />
       </div>
-      {openThreads.filter((t) => t.kind === "suggestion" && t.anchor.kind === "text" && t.anchor.section === section && t.anchor.state !== "detached").map((t) => (
-        <span key={t.id} className="flex items-center gap-1.5 font-sans text-xs text-ink-3">
-          <Avatar who={t.author} small />
-          {`${personName(t.author)} suggested${t.text ? `: ${t.text}` : " a change"}`}
-        </span>
-      ))}
-    </>
-  );
+    );
+  // The section being edited live wears a blue rule in the margin.
+  const editingRule = "relative before:absolute before:-left-10 before:bottom-0 before:top-3.5 before:w-0.5 before:rounded-sm before:bg-[var(--group-1)]";
   const section = (s: PlanSectionDTO): ReactNode => {
     const diagram = s.kind === "mermaid" || s.kind === "svg";
+    const here = editing?.section === s.id;
     return (
-      <section key={s.id} id={`plan-${s.id}`} aria-labelledby={`plan-title-${s.id}`} className={`grid gap-2.5 border-t pt-4 ${editing?.section === s.id ? "border-[var(--group-1)]" : "border-line"}`}>
+      <section key={s.id} id={`plan-${s.id}`} aria-labelledby={`plan-title-${s.id}`} className={`grid gap-2.5 border-t pt-4 ${here ? `border-[var(--group-1)] ${editingRule}` : "border-line"}`}>
         <h3 className={heading}>
           <span aria-hidden className={margin}>{numbers.get(s.id)}</span>
           <span id={`plan-title-${s.id}`}>{s.title}</span>
-          <span className={`${aside} ${editing?.section === s.id ? "!text-[var(--group-1)]" : ""}`}>
-            {editing?.section === s.id ? (mode === "editing" ? "You are editing" : "You are suggesting") : !diagram && editControl(s.id, s.title)}
+          <span className={`${aside} ${here ? "!text-[var(--group-1)]" : ""}`}>
+            {here ? (live ? "You are writing here · live" : "You are editing") : !diagram && editControl(s.id, s.title)}
           </span>
         </h3>
         {diagram ? (
@@ -644,65 +858,104 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
     );
   };
   const columnOpen = !collapsed || !!draft;
+  // What the person can type into, so the formatting toolbar shows: a section open for editing,
+  // a suggestion's new text, or the Markdown view while Editing live.
+  const typing = !locked && (mode === "editing" || (mode === "suggesting" && draft?.kind === "suggest"));
+  const markdownState = locked ? "locked" : mode === "editing" && live ? "editing" : "viewing";
+  // The one number in the toolbar: the frozen version while there is one, else the revision.
+  const versionLabel = frozen ? `Version ${frozen.id}` : `rev ${plan.rev}`;
+  const reviewerNames = signers.filter((r) => r.required).map((r) => (r.sub ? firstName(r.sub) : r.name ?? "")).filter(Boolean);
 
+  // The status line.
+  const stage = !open && !teammate ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
+    : frozen ? "Locked for sign-off"
+    : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off";
+  const statusLine = teammate?.signedOff ? `You signed off ${frozen ? `version ${frozen.id}` : `r${plan.rev}`}`
+    : frozen && gate ? `Version ${frozen.id} · ${gate.signed} of ${plural(gate.required, "sign-off")}`
+    : gate && useLiveReview && open ? `Still being written · sign-off opens when ${teammate ? authorName : "you"} freeze${teammate ? "s" : ""} a version`
+    : teammate ? "Its author builds it once every required reviewer signs off"
+    : !open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it")
+    : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off";
+  const statusReviewers: StatusReviewer[] = signers.map((r) => ({ key: r.sub!, who: r.you ? "person" : nameOf(r.sub!), name: r.you ? "You" : firstName(r.sub!), required: r.required, signed: r.status === "signed_off" }));
+  const changedAt = Math.max(plan.created_at, ...(plan.revisions ?? []).map((r) => r.at));
+  const byline = `by ${teammate ? (teammate.author ? personName(nameOf(teammate.author)) : "its author") : "you and your supervisor"} · changed ${ago(changedAt)}`;
+
+  // The sign-off sheet, under the decisions: once a version is frozen (or for a doc reviewed without live text).
+  const sheetRows: SignOffRow[] = signers.map((r) => ({
+    key: r.sub!, who: r.you ? "person" : nameOf(r.sub!), name: r.you ? "You" : personName(nameOf(r.sub!)), required: r.required,
+    state: r.status === "signed_off" ? "signed" : r.status === "changes_requested" ? "changes" : r.status === "waived" ? "waived" : "waiting",
+  }));
+  const sinceRevs = lastRead !== null && lastRead < plan.rev ? (plan.revisions ?? []).filter((r) => r.rev > lastRead).map((r) => ({ rev: r.rev, sections: (r.changed ?? []).map((id) => partName(id)) })) : null;
+  const sheet = gate && (frozen || !useLiveReview) ? (
+    <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} since={sinceRevs && lastRead !== null ? { from: lastRead, changes: sinceRevs } : null} onShowChanges={() => setTab("history")} />
+  ) : undefined;
+
+  // Who reviews it, and sharing it: over the page from the toolbar's Share, not a row of the header.
+  const reviewersPanel = (
+    <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
+      <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={reviewWrite} reviewVersion={reviewVersion} reviewBlocked={reviewBlocked} />
+    </dl>
+  );
+  const canShare = !!gate || (!!sharing && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
+  const presence = docLive && (
+    <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={myName} onState={setLiveState} onCapability={setLiveCapability} onText={setLiveTexts} refreshes={refreshes}
+      mode={mode} stripHost={stripHost} reviewers={reviewerNames} onHistory={() => { if (collapsed) collapse(false); setTab("history"); }} />
+  );
   return (
     <>
+      {chrome && (
+        <ReaderBar lead={chrome.lead} badges={chrome.badges} actions={chrome.actions}
+          version={<span className="whitespace-nowrap text-xs text-ink-3" title={`${plan.id} · rendered by brindle from the plan's own text${frozen ? ` · rev ${plan.rev}` : ""}`} data-testid="plan-rev">{versionLabel}</span>}
+          presence={presence}
+          markdown={{ pressed: raw, onToggle: () => setRaw((r) => !r) }}
+          modes={{ current: mode, picker: <ModePicker modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} /> }}
+          share={canShare && !historical && <Popover label="Share" open={sharingOpen} onOpenChange={setSharingOpen} testid="plan-share">{reviewersPanel}</Popover>} />
+      )}
+      {!chrome && presence && <div className="hidden">{presence}</div>}
+      {top}
+      <div ref={setStripHost} className="contents" />
+      {typing && !historical && <FormatBar hint={raw ? "The buttons write the Markdown for you: Bold wraps the selection in **." : undefined} />}
       <div className="flex min-h-0 flex-1">
-        <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" onMouseUp={pick} onKeyUp={pick} onClick={followAnchor}>
-          <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
+        <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" data-mode={historical ? "viewing" : mode} onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
+          {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
-              <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">{plan.title}</h1>
-              {docLive && <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={teammate?.me ? nameOf(teammate.me) : me ? nameOf(me) : "Author"} onState={setLiveState} onCapability={setLiveCapability} />}
-              <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
-                <dt className="text-ink-3">Status</dt>
-                <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state} data-held={policyHeld ? "policy" : undefined}>
-                  <span className={`${pill} ${plan.state === "approved" || gate?.state === "ready" ? "text-pass" : "text-sap"}`}>{!open && !teammate ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested") : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off"}</span>
-                  <span>{teammate ? (teammate.signedOff ? `You signed off r${plan.rev}` : "Its author builds it once every required reviewer signs off") : !open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it") : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off"}</span>
-                </dd>
-                {plan.team_ended && (
-                  <>
-                    <dt className="text-ink-3">Sharing</dt>
-                    <dd className="m-0" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</dd>
-                  </>
-                )}
-                {open && gate?.unconfirmed && (
-                  <>
-                    <dt className="text-ink-3">Library</dt>
-                    <dd className="m-0 grid gap-1" data-testid="plan-unconfirmed" data-reason={gate.unconfirmed.reason} data-held={gate.unconfirmed.approval_held || undefined}>
-                      <span>{gate.unconfirmed.message}</span>
-                      {gate.unconfirmed.approval_held && <span>Your approval is saved. The build starts by itself once the Library confirms this revision is ready.</span>}
-                      {(gate.unconfirmed.reason === "sign_in" || gate.unconfirmed.reason === "other_account") && <LibrarySignIn />}
-                      {gate.unconfirmed.can_stop_sharing && !next && sharing?.stopSharingPlan && (
-                        <span>
-                          <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this doc the next time brindle reaches the Library" onClick={() => void stopSharing()}>Stop sharing and build</button>
-                        </span>
-                      )}
-                    </dd>
-                  </>
-                )}
-                {open && gate?.approval_refused && (
-                  <>
-                    <dt className="text-ink-3">Approval</dt>
-                    <dd className="m-0" data-testid="plan-approval-refused">{gate.approval_refused}</dd>
-                  </>
-                )}
-                <dt className="text-ink-3">{teammate ? "Author" : "Authors"}</dt>
-                <dd className="m-0">{teammate ? (teammate.author ? personName(nameOf(teammate.author)) : "Unknown") : "You and the supervisor"}</dd>
-                <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} reviewVersion={reviewVersion} reviewBlocked={reviewBlocked} />
-                {plan.ask && (
-                  <>
-                    <dt className="text-ink-3">Understood</dt>
-                    <dd id="plan-ask" className="m-0 flex flex-wrap items-baseline gap-x-2" data-testid="plan-ask">
-                      <span className="max-w-[78ch]">{plan.ask}</span>
-                      {commentButton(() => comment({ kind: "section", section: "ask" }, partName("ask")), "Correct it")}
-                    </dd>
-                  </>
-                )}
-              </dl>
+              <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
+                {plan.title} <DocReference reference={plan.reference} className="ml-1 font-sans" />
+              </h1>
+              <DocStatus stage={stage} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
+                reviewers={statusReviewers} frozen={!!frozen} byline={byline} workItem={workItem}
+                brief={!!plan.ask} briefOpen={briefOpen} onBrief={() => setBriefOpen((o) => !o)}
+                state={plan.state} held={policyHeld ? "policy" : undefined} />
+              {plan.team_ended && <p className="m-0 text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</p>}
+              {open && gate?.unconfirmed && (
+                <div className="grid gap-1 text-[12.5px] text-ink-2" data-testid="plan-unconfirmed" data-reason={gate.unconfirmed.reason} data-held={gate.unconfirmed.approval_held || undefined}>
+                  <span>{gate.unconfirmed.message}</span>
+                  {gate.unconfirmed.approval_held && <span>Your approval is saved. The build starts by itself once the Library confirms this revision is ready.</span>}
+                  {(gate.unconfirmed.reason === "sign_in" || gate.unconfirmed.reason === "other_account") && <LibrarySignIn />}
+                  {gate.unconfirmed.can_stop_sharing && !next && sharing?.stopSharingPlan && (
+                    <span>
+                      <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this doc the next time brindle reaches the Library" onClick={() => void stopSharing()}>Stop sharing and build</button>
+                    </span>
+                  )}
+                </div>
+              )}
+              {open && gate?.approval_refused && <p className="m-0 text-[12.5px] text-sap" data-testid="plan-approval-refused">{gate.approval_refused}</p>}
+              {!chrome && reviewersPanel}
+              {plan.ask && briefOpen && (
+                <p id="plan-ask" className="m-0 flex flex-wrap items-baseline gap-x-2 border-l-2 border-line-strong pl-3 text-[12.5px] text-ink-2" data-testid="plan-ask">
+                  <span className="text-ink-3">What the supervisor understood:</span>
+                  <span className="max-w-[78ch]">{plan.ask}</span>
+                  {commentButton(() => comment({ kind: "section", section: "ask" }, partName("ask")), "Correct it")}
+                </p>
+              )}
             </div>
-            {plan.lede && (
+            {raw ? (
+              <DocMarkdown plan={textPlan} state={markdownState} version={frozen ? `version ${frozen.id}` : undefined}
+                editorFor={(s, title) => (live ? liveEditor(s, title, "source") : editing?.section === s ? editBox(title) : null)} />
+            ) : <>
+            {textPlan.lede && (
               <div id="plan-lede" className="grid gap-2.5">
-                {editable && editing?.section !== LEDE && <span className={`${aside} justify-self-end`}>{editControl(LEDE, "the overview")}</span>}
+                {mode === "editing" && editing?.section !== LEDE && <span className={`${aside} justify-self-end`}>{editControl(LEDE, "the overview")}</span>}
                 {textBody(LEDE, "the overview")}
               </div>
             )}
@@ -724,37 +977,72 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
                 </section>
               );
             })}
-          </article>
-          {picked && (
+            </>}
+          </article>}
+          {picked && !historical && (
             <div role="toolbar" aria-label="For the highlighted text" className="absolute z-10 inline-flex -translate-y-[calc(100%+6px)] gap-0.5 rounded-md border border-line-strong bg-canvas-2 p-[3px] font-sans text-xs shadow-lg" style={{ left: picked.x, top: picked.y }}
               onMouseDown={(e) => e.preventDefault()} onMouseUp={(e) => e.stopPropagation()}>
               {canComment && <button type="button" className="cursor-pointer rounded-[3px] bg-branch-soft px-[9px] py-0.5 font-medium text-branch" onClick={() => offer("comment")}>Comment</button>}
               {picked.kind === "text" && plan.state !== "approved" && canSuggest && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("suggest")}>Suggest edit</button>}
-              {canComment && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("ask")}>Ask the supervisor</button>}
+              {canComment && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("ask")}>{teammate?.author ? `Ask ${authorName}` : "Ask the supervisor"}</button>}
+              {picked.kind === "text" && work && Object.values(work.state?.connected ?? {}).some(Boolean) && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink hover:bg-surface-2" onClick={createFromPassage}>Create work item</button>}
             </div>
           )}
         </div>
         {columnOpen ? (
-          <Review plan={plan} tab={draft ? "review" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
-            onDraftSend={(text, after) => void sendDraft(text, after)} onDraftCancel={() => setDraft(null)} actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }} />
+          <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
+            onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
+            actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
+            active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
+            historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
+              onCompare={(comparison, close) => setHistorical(comparison ? { comparison, close } : null)} />}
+            history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} work={work} canLink={!teammate || canComment} />
         ) : (
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />
         )}
       </div>
       <footer className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2.5 border-t border-line-strong bg-canvas-2 px-s2 py-3" data-testid="plan-verdict">
-        {teammate ? (
+        {draft?.kind === "suggest" ? (
+          <>
+            <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="suggesting">
+              <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
+                <span className={`${label} text-[11px]`}>Suggesting</span>
+                <span className="truncate">{suggestionReady ? "1 change not sent" : "Type your change in the doc"}</span>
+              </span>
+              <span className="text-xs text-ink-3">{teammate ? `Your edits are suggestions. ${authorName} accepts or rejects each one.` : "Your edits are suggestions. You accept or reject each one."}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" className={quiet} onClick={() => setDraft(null)}>Discard all</button>
+              <button type="button" className={main} disabled={busy || draftStale || !suggestionReady}
+                onClick={() => doc.current?.ownerDocument.querySelector<HTMLFormElement>('[data-testid="thread-draft"]')?.requestSubmit()}>Send 1 suggestion</button>
+            </div>
+          </>
+        ) : live && (editing || raw) ? (
+          <>
+            <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="editing">
+              <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
+                <span className={`${label} text-[11px]`}>Editing</span>
+                <span className="truncate">{raw ? "The Markdown" : editing ? partName(editing.section) : ""}</span>
+              </span>
+              <span className="text-xs text-ink-3">Sign-offs wait for a frozen version: nobody signs text that is still moving.</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" className={button} onClick={() => { setEditing(null); chrome?.onMode("viewing"); }}>Done editing</button>
+            </div>
+          </>
+        ) : teammate ? (
           <>
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Next</span>
-                <span className="truncate">{next ? next.title : teammate.signedOff ? `You signed off r${plan.rev}` : teammate.rights.signOff ? "Sign off this revision" : gateWhy || "Read and comment"}</span>
+                <span className="truncate">{next ? next.title : teammate.signedOff ? (frozen ? `You signed off version ${frozen.id}` : `You signed off r${plan.rev}`) : teammate.rights.signOff ? (frozen ? signName : "Sign off this revision") : gateWhy || "Read and comment"}</span>
               </span>
               <span className="text-xs text-ink-3">{summary}</span>
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               {next ? nextOptionConfirm : teammate.rights.signOff && !teammate.signedOff && (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>Sign off</LoadingButton>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>{signName}</LoadingButton>
               )}
             </div>
           </>
@@ -767,18 +1055,18 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
               </span>
               <span className="text-xs text-ink-3">
                 {summary}
-                {sharedFiles.size > 0 && <span className="text-sap">{`${summary ? " · " : ""}${plural(sharedFiles.size, "file is", "files are")} in more than one worker`}</span>}
+                {sharedFiles.size > 0 && <span className="text-sap">{`${summary ? " " : ""}${plural(sharedFiles.size, "file is", "files are")} in more than one worker.`}</span>}
               </span>
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
-              <LoadingButton className={button} busy={sending === "changes"} disabled={busy || !canRequest || uploading > 0}
+              <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
                 title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
                 Request changes
               </LoadingButton>
               {/* One main action at a time: the next decision's confirmation, then the sign-off. */}
               {next ? nextOptionConfirm : (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
                   data-testid="plan-build" data-gate={gate?.state} onClick={() => void decide(true)}>
                   {gate ? "Start building" : "Sign off"}
                 </LoadingButton>
