@@ -467,7 +467,6 @@ RESUME_TRIES = 2       # starts that may fail to bring one session back before i
 RESUME_PARALLEL = 4    # sessions a start brings back at once (resume_after_start)
 RESUME_BUSY_WAIT = 3.0  # seconds a session other than the person's own waits on a machine short of CPU only
 RESUME_PROMPT_WAIT = 90.0   # seconds to wait for Claude's input box after its pane is launched
-VIEWED_HEAD_START = 8.0     # seconds the session on screen comes back alone before the others start, if it hangs
 
 
 class Recovery:
@@ -506,8 +505,6 @@ class Recovery:
         self.handed_over = False        # stop has returned: the record is the way out's now
         self.ordered = False            # ``lanes`` is in place: a prioritize moves them at once
         self.wanted: list[str] = []     # sessions opened before then, in order, under lock
-        self.viewed: str | None = None  # the session on screen, which comes back first (resume_after_start)
-        self.alone = threading.Event()  # its head start is over: the others may start
 
     def _save(self) -> bool:
         if self.handed_over:
@@ -549,15 +546,12 @@ class Recovery:
         """Bring session ``root_id``'s lane to the front of those not yet begun
         (the person has opened it). Nothing, if it has begun or none is under way.
         Opened before the start has put its sessions in order, it goes first
-        once it has (order). Another than the one on screen ends that one's
-        head start: the person isn't looking at it any more."""
+        once it has (order)."""
         with self.lock:
             if not self.ordered:
                 self.wanted.append(root_id)
                 return
-            lane = self._forward(root_id)
-            if lane is not None and not any(e["id"] == self.viewed for e in lane):
-                self.alone.set()
+            self._forward(root_id)
 
     def _forward(self, root_id: str) -> list[dict] | None:
         for lane in self.lanes:
@@ -567,17 +561,12 @@ class Recovery:
                 return lane
         return None
 
-    def order(self, lanes: deque[list[dict]], viewed: str | None) -> bool:
-        """The start's ``lanes`` in place, behind any session opened meanwhile:
-        whether ``viewed``'s still comes first, alone (its head start)."""
+    def order(self, lanes: deque[list[dict]]) -> None:
+        """The start's ``lanes`` in place, behind any session opened meanwhile."""
         with self.lock:
-            self.lanes, self.ordered, self.viewed = lanes, True, viewed
+            self.lanes, self.ordered = lanes, True
             for root_id in self.wanted:
                 self._forward(root_id)
-            head = bool(lanes) and any(e["id"] == viewed for e in lanes[0])
-            if not head:
-                self.alone.set()
-            return head
 
     def progress(self) -> dict | None:
         """How far the start's resume has come (the app's "3 of 6"): sessions
@@ -774,9 +763,10 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
     (the person is waiting for them; workers keep their gate, spawn.no_room);
     sessions sharing a tmux session go one after
     another (_lanes). A session that fails doesn't hold up the others.
-    The session the app showed last (record_viewed) goes before all of them,
-    alone, so it is back sooner: the others start once it is, or after
-    VIEWED_HEAD_START seconds if it hangs.
+    The session the app showed last (record_viewed) is taken first, and the
+    others come back beside it: N sessions take about as long as the slowest.
+    Their launches share each model check and preflight per provider and
+    identity (agents.shared_launch_checks), rather than run them per agent.
 
     ``recovery``: the daemon's (serve), which may be stopped meanwhile: then
     nothing more is launched, and what is left stays on the record."""
@@ -816,18 +806,17 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                 bus.publish_agent(db, "session.changed", root_id)
         finally:
             db.conn.close()
-        # The session the app showed last comes back first, before its lane's others, and alone.
+        # The session the app showed last is taken first, before its lane's others.
         viewed = _read_viewed()
         first = next((lane for lane in lanes if any(e["id"] == viewed for e in lane)), None)
         if first is not None:
             lanes.remove(first)
             first.sort(key=lambda e: e["id"] != viewed)
             lanes.appendleft(first)
-        alone = recovery.alone      # the viewed session's turn is over: the others may start
-        head = recovery.order(lanes, viewed)     # behind any session the person opened meanwhile
+        recovery.order(lanes)     # behind any session the person opened meanwhile
         ordered = time.monotonic() - began
 
-        def work(lead: bool = False) -> None:
+        def work() -> None:
             db = DB()       # its own: SQLite connections stay on their thread
             try:
                 while not recovery.stopping.is_set():
@@ -857,27 +846,17 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                             log.warning("brindle: couldn't resume session %s", entry["id"], exc_info=True)
                         recovery.finished(entry)
                         bus.publish_agent(db, "session.changed", entry["id"])
-                        if entry["id"] == viewed:
-                            alone.set()
             finally:
-                if lead:
-                    alone.set()
                 db.conn.close()
 
-        # A copy of this context each (one can't be entered twice at once): a new thread starts with none.
-        threads = [threading.Thread(target=contextvars.copy_context().run, args=(work, n == 0),
-                                    name=f"brindle-resume-{n}", daemon=True)
-                   for n in range(min(RESUME_PARALLEL, len(lanes)))]
-        rest = threads
-        if head:
-            # The CPU and the keychain to itself, for the head start at most: one that hangs holds up no other.
-            threads[0].start()
-            if not alone.wait(VIEWED_HEAD_START):
-                log.warning("brindle: session %s not back after %gs; the others start", viewed, VIEWED_HEAD_START)
-            rest = threads[1:]
-        for thread in rest:
-            thread.start()
-        _join(threads, recovery)
+        with agents.shared_launch_checks():
+            # A copy of this context each (one can't be entered twice at once): a new thread starts with none.
+            threads = [threading.Thread(target=contextvars.copy_context().run, args=(work,),
+                                        name=f"brindle-resume-{n}", daemon=True)
+                       for n in range(min(RESUME_PARALLEL, len(lanes)))]
+            for thread in threads:
+                thread.start()
+            _join(threads, recovery)
     finally:
         recovery.idle.set()
         debuglog.recovery_timing(log, "brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",

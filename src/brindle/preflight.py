@@ -182,6 +182,23 @@ def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | 
     return items
 
 
+def bind_launch(items: list[Item], launch: dict[str, str] | None) -> list[Item]:
+    """``items`` from check(..., launch=None), as check(..., launch=``launch``)
+    would have given them: the actions that carry the launch (a cloud sign-in
+    or its check, the key consent) name it. What a launch adds to the probes
+    stops there, so launches of one identity can share them (agents.launch_blockers)."""
+    if not launch:
+        return list(items)
+    out = []
+    for item in items:
+        action = item.action
+        if action is not None and (item.id == f"{item.provider}.cloud" or
+                                   (item.id == "claude.api_key" and action.name == "consent")):
+            item = dataclasses.replace(item, action=dataclasses.replace(action, body={**action.body, **launch}))
+        out.append(item)
+    return out
+
+
 def _claude_consents(env: dict[str, str] | None, launch: dict[str, str]) -> list[Item]:
     from brindle import providers
 
