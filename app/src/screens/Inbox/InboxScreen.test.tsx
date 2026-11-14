@@ -194,7 +194,6 @@ describe("inbox", () => {
     // The PR brindle prepared (its checks passed, nothing pushed): one press of Open PR opens it, no review sheet.
     expect(card("pr_ready").textContent).toContain("PR ready");
     expect(card("pr_ready").textContent).toContain("Ship ls --json");
-    expect(within(card("pr_ready")).queryByRole("button", { name: "Review & open PR" })).toBeNull();
     expect(within(card("pr_ready")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
     daemon.readyForPr("sup1");
     fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Open PR" }));

@@ -380,10 +380,13 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       </>
     );
   } else if (item.kind === "pr_ready") {
-    // One press opens it (the sheet's open-PR call, no diffs); the person's press is still the only push.
+    // Review stays available before opening the PR; only Open PR pushes.
     acts = (
       <>
         <OpenPr item={item} actions={actions} onDone={onDone} openUrl={openUrl} />
+        {onReview && <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
+          Review &amp; open PR
+        </button>}
         {act("Dismiss", "pr-not-now", {}, GHOST)}
       </>
     );

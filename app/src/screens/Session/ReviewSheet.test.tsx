@@ -178,7 +178,6 @@ describe("review", () => {
     daemon.readyForPr("sup1", READY);
     await waitFor(() => expect(notes).toEqual([READY_TITLE]));
     await waitFor(() => expect(within(context()).getByTestId("goal-phase").textContent).toBe("Ready for PR"));
-    expect(within(context()).queryByTestId("goal-review")).toBeNull();
     expect(screen.queryByTestId("pr-ready")).toBeNull();
     expect(context().textContent!.match(/Ready for PR/g)).toHaveLength(1);
     await new Promise((r) => setTimeout(r, 50));

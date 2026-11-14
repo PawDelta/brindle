@@ -582,9 +582,7 @@ describe("GoalPanel", () => {
     expect(sidebar.getAllByTestId("milestone").map((li) => li.querySelector(".t")!.getAttribute("title"))).toEqual(titles);
   });
 
-  /* One row per goal phase: the panel's one status in both views, and the step that phase has (PR open's link,
-     Done's Close session), nothing of either in any other phase. Ready for PR is only its label: the session's
-     ready notice offers the PR. */
+  /* One row per goal phase: the panel's status and that phase's action in both views. */
   const PR = "https://github.com/example/proj/pull/7";
   it.each<[string, string, "pr" | "close" | null]>([
     ["in_progress", "In progress", null],
@@ -603,7 +601,7 @@ describe("GoalPanel", () => {
     await waitFor(() => expect(sidebar.getByRole("region", { name: "Goal" }).dataset.phase).toBe(phase));
     // The sidebar's count line names only the steps after In progress; Done is the green count itself.
     expect(sidebar.queryByTestId("goal-phase")?.textContent ?? null).toBe(phase === "in_progress" || phase === "done" ? null : label);
-    expect(sidebar.queryByTestId("goal-review")).toBeNull();
+    expect(!!sidebar.queryByTestId("goal-review")).toBe(phase === "ready_for_pr");
     expect(!!sidebar.queryByTestId("goal-pr")).toBe(step === "pr");
     expect(!!sidebar.queryByTestId("goal-close")).toBe(step === "close");
     if (step === "close") {
@@ -625,7 +623,7 @@ describe("GoalPanel", () => {
 
     const full = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} onReview={onReview} openUrl={openUrl} onCloseSession={onCloseSession} />);
     await waitFor(() => expect(full.getByTestId("goal-phase").textContent).toBe(label));
-    expect(full.queryByTestId("goal-review")).toBeNull();
+    expect(!!full.queryByTestId("goal-review")).toBe(phase === "ready_for_pr");
     expect(!!full.queryByTestId("goal-pr")).toBe(step === "pr");
     expect(!!full.queryByTestId("goal-close")).toBe(step === "close");
     if (step === "close") {
