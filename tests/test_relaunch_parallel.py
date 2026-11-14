@@ -25,6 +25,7 @@ class _Launched(Exception):
     """The launch got past its checks to where it would change what runs."""
 
 
+@pytest.mark.variant("catches sessions recovered one after another and per-agent duplicate checks: timing and call counts, not lines")
 def test_recovery_overlaps_sessions_and_checks_each_identity_once(db, repo, tmp_path, monkeypatch):
     """Reported: a relaunch with 3 sessions took the sum of their resumes
     (10s), the one on screen coming back alone first, and every agent ran its
