@@ -122,7 +122,7 @@ def test_orphan_servers_leaves_a_hung_server_and_its_socket_alone(monkeypatch):
 
 
 @pytest.mark.parametrize("denied", [
-    "connect",
+    pytest.param("connect", marks=pytest.mark.variant("a sandbox that denies connecting keeps a live server's socket")),
     pytest.param("metadata", marks=pytest.mark.variant("a sandbox that also denies reading the socket's metadata")),
     pytest.param(None, marks=pytest.mark.variant("a live server whose list-sessions failed for another reason")),
 ])

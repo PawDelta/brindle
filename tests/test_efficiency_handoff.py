@@ -13,6 +13,7 @@ from test_routing import everything_available
 from test_stuck_workers import T0, boss, told
 
 
+@pytest.mark.variant("routing must keep headroom below a provider's limit in proportion to the task's size")
 def test_routing_reserves_headroom_for_task_size(db, repo, boss, everything_available, monkeypatch):
     from brindle import quota
 

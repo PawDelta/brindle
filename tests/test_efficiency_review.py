@@ -17,10 +17,10 @@ from test_routing import config
 
 
 @pytest.mark.parametrize("stop,new_commit", [
-    (True, True),
+    pytest.param(True, True, marks=pytest.mark.variant("repeated findings on a new commit past the cap stop the fix loop")),
     pytest.param(False, True, marks=pytest.mark.variant(
         "opting out preserves fix dispatch even when findings repeat past the cap")),
-    (True, False),
+    pytest.param(True, False, marks=pytest.mark.variant("repeated findings with no new commit past the cap still stall")),
     pytest.param("late", True, marks=pytest.mark.variant(
         "enabling the guard after the continue-fixing notice still sends a separate stall notice")),
 ])
@@ -67,7 +67,7 @@ def test_review_stall_stops_only_repeated_findings_past_cap(db, repo, monkeypatc
 
 
 @pytest.mark.parametrize("changed_slot,new_commit", [
-    (None, True),
+    pytest.param(None, True, marks=pytest.mark.variant("both slots repeating their findings stall the branch once")),
     pytest.param("", True, marks=pytest.mark.variant("progress in the first slot must prevent a stall")),
     pytest.param("reviewer-codex", True, marks=pytest.mark.variant(
         "progress arriving in the second verdict must prevent a premature stall")),
@@ -130,7 +130,7 @@ def test_review_stall_waits_for_both_slots(db, repo, monkeypatch, changed_slot, 
             break
 
 
-@pytest.mark.parametrize("terminal", [False, pytest.param(True, marks=pytest.mark.variant(
+@pytest.mark.parametrize("terminal", [pytest.param(False, marks=pytest.mark.variant("an unfinished second slot is relaunched rather than waited on forever")), pytest.param(True, marks=pytest.mark.variant(
     "the replacement's death must escalate once instead of waiting forever on the unfinished slot"))])
 def test_review_stall_recovers_unfinished_slot(db, repo, monkeypatch, terminal):
     from brindle import launch_health
@@ -191,7 +191,7 @@ def commit(repo, path, text):
 
 
 @pytest.mark.parametrize("writer_provider,light_profile", [
-    ("codex", "reviewer-light"),
+    pytest.param("codex", "reviewer-light", marks=pytest.mark.variant("a Codex writer gets the Claude light reviewer, not its own provider")),
     ("claude", "reviewer-codex-light"),
     ("native", "reviewer-codex"),
 ])
@@ -328,7 +328,7 @@ def test_pack_includes_callers_of_changed_and_deleted_functions(repo, monkeypatc
         assert "removed()" in pack.split("Grep call-site candidates")[1]
 
 
-@pytest.mark.parametrize("model", ["haiku", "sonnet"])
+@pytest.mark.parametrize("model", ["haiku", pytest.param("sonnet", marks=pytest.mark.variant("a Sonnet light reviewer is still refused for risky changes"))])
 def test_sizing_keeps_strong_reviewer_when_light_is_unsafe_or_unavailable(db, tmp_path, monkeypatch, model):
     ws = SimpleNamespace(id="ws", path=str(tmp_path), repo_root=str(tmp_path), base_branch="main", branch="feature")
     monkeypatch.setattr(git, "out", lambda *a: "1\t0\tdocs/a.md\0")
