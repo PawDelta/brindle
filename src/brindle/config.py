@@ -149,6 +149,7 @@ class RepoConfig:
     supervisor_state: bool = False
     supervisor_restart_tokens: int = 120_000
     review_rounds: int = 2             # suggested fix-round cap; notify the supervisor once, then keep fixing
+    review_stall_stop: bool = False    # past the cap, hand repeated findings to the supervisor
     # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
     # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
     # which may not have Fable; true or false forces it (see brindle.pipeline.fable_enabled).
@@ -496,7 +497,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
                 "usage_limit", "limit_headroom", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
-                "review_rounds", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "fast_path",
+                "review_rounds", "review_stall_stop", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "fast_path",
                 "supervisor_state", "supervisor_restart_tokens", "overlap",
                 "overlap_granularity", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "auto_merge_session_prs", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
