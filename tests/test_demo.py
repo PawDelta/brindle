@@ -254,7 +254,7 @@ def test_app_demo_starts_workers_and_reviewer(db, monkeypatch):
                                               done_when=m.check_cmd))
     workers = [a for a in db.list_agents() if a.parent_id == supervisor.id]
     assert len(workers) == 2
-    assert all(a.status == "processing" and a.provider == only for a in workers)
+    assert [(a.status, a.provider) for a in workers] == [("processing", only)] * 2
     assert len({a.workspace_id for a in workers}) == 2
 
     reviewer = config.load_repo_config(ws.repo_root).review_profile
