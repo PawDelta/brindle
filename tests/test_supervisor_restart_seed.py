@@ -5,6 +5,8 @@ Each test is a failure seen in a live restart."""
 import json
 from dataclasses import replace
 
+import pytest
+
 from brindle import bus, supervisor_state
 from fast_repo import repo, repo_template  # noqa: F401
 from test_efficiency_supervisor import session  # noqa: F401
@@ -64,6 +66,7 @@ def test_seed_carries_the_supervisors_own_pushes_and_prs(db, session, tmp_path):
     assert "head fix/three" in seed and "opened PR #415" not in seed
 
 
+@pytest.mark.variant("catches messages clipped mid-sentence and the person's newest message dropped: text kept, not lines run")
 def test_seed_keeps_latest_messages_whole_and_the_persons_newest(db, session, tmp_path):
     session(supervisor_state=True)
     request = "Please change the restart seed. " + "Here is the detail of it. " * 120 + "REQUEST-ENDS-HERE"

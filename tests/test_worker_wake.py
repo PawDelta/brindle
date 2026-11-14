@@ -44,6 +44,7 @@ def _commands(group):
     return [h["command"] for g in group for h in g["hooks"]]
 
 
+@pytest.mark.variant("catches a worker launched without the waiter, or losing its report_result Stop hook beside it")
 def test_a_claude_worker_launches_with_the_waiter_beside_its_stop_hook():
     hooks = _hooks()
     for event in ("SessionStart", "Stop"):
