@@ -13258,6 +13258,10 @@
       "path": "/v1/launch-env"
     },
     {
+      "method": "GET",
+      "path": "/v1/library/designs/{id}/plan"
+    },
+    {
       "method": "POST",
       "path": "/v1/library/designs/{id}/question"
     },
