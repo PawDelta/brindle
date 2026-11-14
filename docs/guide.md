@@ -775,8 +775,8 @@ Goal driving, merge gates and cleanup:
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
 | `fast_path` | `true` | the supervisor may send a small request straight to one light or medium worker (`assign(fast_path=true)`): no goal, milestones or audit; one light review and the checks before it merges |
-| `supervisor_state` | `true` | brindle keeps a compact goal state for the supervisor and, past `supervisor_restart_tokens` of context, restarts it as a fresh session seeded with that state |
-| `supervisor_restart_tokens` | `0` | the supervisor context (tokens its last turn read) that triggers that restart; 0 (the default) never restarts |
+| `supervisor_state` | `true` | brindle keeps a compact goal state for the supervisor; automatic restarts require an enterprise admin's org-policy opt-in |
+| `supervisor_restart_tokens` | `0` (off) | dangerous, enterprise-admin-only org policy (`dangerous.supervisor_restart_tokens`); the context tokens that trigger a fresh supervisor session. 0 (the default) never restarts. Can make the supervisor lose track of work. Repo, local and user config values have no effect |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `permission_policy` | `"on"` | `"on"`: brindle answers agents' permission requests from its rules, on every plan (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. A value you set always wins over the default. The only permission switch: a leftover `permission_essentials` key is ignored |
@@ -1628,8 +1628,13 @@ session costs more per turn the longer it runs. With `supervisor_state` on (the
 default), brindle keeps a compact state of the session from what it already sees: the
 milestones and their status, each branch and where it stands (in review, approved,
 merged), the decisions recorded, the questions still open for you and each worker's
-last result. If `supervisor_restart_tokens` is set above 0 (it is off by default)
-and the supervisor's context passes it, brindle ends its turn and starts a fresh session of it, seeded
+last result. Automatic supervisor restarts are off by default. Only an enterprise
+org admin can enable them with a positive `dangerous.supervisor_restart_tokens`
+in the org policy (under the `managed_rollout` entitlement). This is dangerous:
+it can make the supervisor lose track of work. An absent or zero org-policy limit
+keeps restarts off; values in `.brindle/config.json`, `config.local.json` or
+`~/.brindle/config.json` have no effect. When enabled and the supervisor's context
+passes that limit, brindle ends its turn and starts a fresh session of it, seeded
 with that state, the request it started from and the latest messages, instead of
 carrying the full chat. Workers keep running, queued messages wait for the fresh
 session, and nothing in the state is cleared by a restart. It uses only what the

@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 from conftest import sh
 from fast_repo import repo, repo_template  # noqa: F401
 from brindle import agents, autopilot, cli, mcp_server, procs, providers, supervisor_state, wake, workspaces
+from brindle.pro import rollout, team_policy
 from test_merge_order import add, quiet_removal, worktree
 
 
@@ -97,6 +98,9 @@ def restarting(db, session, tmp_path, monkeypatch):
     would. The launch is faked from its preflight (``calls.preflight``, run
     first) to its commit, which holds the resume's gate as the real one does."""
     calls = SimpleNamespace(detached=[], stopped=[], launched=[], preflight=lambda: None)
+    monkeypatch.setattr(rollout, "current", lambda root: team_policy.parse_policy(
+        "org_restart", {"version": 1, "policy": {
+            "dangerous": {"supervisor_restart_tokens": 50_000}}}))
     monkeypatch.setattr(agents, "_detach_orphan", lambda argv: calls.detached.append(list(argv)))
     monkeypatch.setattr(agents, "_stop", lambda db_, a: calls.stopped.append(a.id))
     monkeypatch.setattr(procs, "stop", lambda *a, **kw: None)
@@ -112,7 +116,7 @@ def restarting(db, session, tmp_path, monkeypatch):
 
     def start(on: bool = True, around_stop=lambda end_turn: end_turn()) -> SimpleNamespace:
         """``around_stop(end_turn)``: what else happens as the turn ends."""
-        session(supervisor_state=on, supervisor_restart_tokens=50_000)
+        session(supervisor_state=on)
         decide_and_ask("storage", "Ship on Friday or Monday?")
         db.update_agent("boss", session_ref="old-long-chat")
         db.set_status("boss", "processing")
