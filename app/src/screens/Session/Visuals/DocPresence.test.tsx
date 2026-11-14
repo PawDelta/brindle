@@ -32,7 +32,7 @@ it("shows the author a Freeze the daemon refused and leaves the document editabl
   daemon.seedLive("doc", { lede: "Text" }, { canFreeze: false });
   render(<DocPresence client={daemon.client()} visual="doc" isAuthor name="Ann" />);
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   const panel = screen.getByRole("region", { name: "Live document" });
   expect(within(panel).getByRole("alert").dataset.state).toBe("freeze-refused");
@@ -59,6 +59,7 @@ it("preserves HTTP review and build controls when the document has no live text"
   const reviewerClient = { visualLive: client.visualLive, libraryPeople: client.libraryPeople, sharedDesign: async () => design(), writeSharedDesign: async () => { signedOff = true; return design(); } };
   const reviewer = render(<SharedDesignReader client={reviewerClient} docId="http-doc" onBack={() => {}} />);
   await settle();
+  fireEvent.click(within(author.container).getByRole("button", { name: "Share" }));
   expect(within(author.container).getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
   expect((within(author.container).getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   expect(within(reviewer.container).queryByTestId("plan-sign-off")).toBeNull();
@@ -124,7 +125,8 @@ it("withdraws the rendered review and build gate when a signed live version is r
   const author = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   const authorUI = within(author.container);
   await settle();
-  fireEvent.click(authorUI.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(authorUI.getByRole("button", { name: "Share" }));
+  fireEvent.click(authorUI.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   const firstVersion = daemon.liveState("doc").version!.id;
   fireEvent.click(within(authorUI.getByTestId("plan-reviewer-Bo")).getByRole("button", { name: "Sign off" }));
@@ -151,7 +153,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   expect((reviewerUI.getByTestId("plan-sign-off") as HTMLButtonElement).disabled).toBe(true);
   expect((await live.plan("doc")).gate?.reviewers?.[0].status).toBe("waiting");
   expect((await live.sharedDesign("doc")).signed_off).toBe(false);
-  fireEvent.click(authorUI.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(authorUI.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   // A delayed request for the withdrawn version cannot sign the replacement or build it.
   await expect(live.signOffPlan("doc", 7, firstVersion)).rejects.toMatchObject({ status: 409 });
@@ -183,7 +185,7 @@ it("shows awareness colours, freezes credited text for everyone and withdraws si
   const bo = editor("Bo's text");
   await act(async () => ann.dispatch({ changes: { from: 0, insert: "New " } }));
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   expect(screen.getByRole("region", { name: "Live document" }).dataset.state).toBe("sign_off");
   expect(within(screen.getByRole("list", { name: "Credited writers" })).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Ann"]);
@@ -207,7 +209,7 @@ it("shows awareness colours, freezes credited text for everyone and withdraws si
   expect(ann.state.facet(EditorState.readOnly)).toBe(false);
   await act(async () => bo.dispatch({ changes: { from: 0, insert: "Again " } }));
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
   expect(daemon.liveState("doc").version?.id).toBeGreaterThan(frozen.id);
   expect(daemon.liveState("doc").version?.signOffs).toEqual([]);
@@ -258,4 +260,45 @@ it("locks others' text while the author is offline and still sends comments and 
   fireEvent.change(screen.getByRole("textbox", { name: /Replace/ }), { target: { value: "Agents" } });
   await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
   expect(sent).toEqual(["comments", "suggestions"]);
+});
+
+/* The Markdown switch changes the view, never the mode: read-only while Viewing, the live text while
+   Editing (where the formatting toolbar writes the syntax into the draft), read-only and marked while
+   a version is locked for sign-off. */
+it.each([
+  ["viewing", () => {}],
+  ["editing", () => fireEvent.click(screen.getByRole("radio", { name: "Editing" }))],
+  ["locked", () => fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }))],
+] as const)("shows the doc's Markdown %s", async (state, enter) => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "doc", session: "boss", title: "Workers", rev: 1, state: "open", markdown: "", lede: "", decisions: [], split: [], queued: 0, created_at: 1,
+    sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["Bo"], reviewers: [{ sub: "Bo", required: true, status: "waiting" }] } };
+  daemon.seedLive("doc", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: live.plan.bind(live), decidePlan: live.decidePlan.bind(live),
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await settle();
+  enter();
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
+  await settle();
+  const source = screen.getByTestId("doc-markdown");
+  expect(source.dataset.state).toBe(state);
+  expect(screen.queryByRole("toolbar", { name: "Formatting" }) !== null).toBe(state === "editing");
+  expect(source.querySelector('[contenteditable="true"]') !== null).toBe(state === "editing");
+  expect(within(source).queryByTestId("doc-markdown-readonly") !== null).toBe(state === "locked");
+  if (state !== "editing") return;
+  const text = EditorView.findFromDOM(source.querySelector<HTMLElement>(".cm-editor")!)!;
+  expect(text.state.doc.toString()).toBe("Workers run here.");
+  text.dispatch({ selection: { anchor: 0, head: 7 } });
+  fireEvent.focus(text.contentDOM);
+  fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+  await settle();
+  expect(daemon.liveText("doc", "summary")).toBe("**Workers** run here.");
 });

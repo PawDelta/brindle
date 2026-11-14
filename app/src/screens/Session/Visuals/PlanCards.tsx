@@ -5,6 +5,7 @@
 import type { Plan } from "../../../api/client";
 import type { PlanDecisionDTO, PlanWorkerDTO } from "../../../api/schema";
 import { alert, chip, pill } from "../../../components/ui";
+import { peerClass } from "./docAwareness";
 
 const card = "flex min-w-0 flex-col gap-2 rounded-lg border bg-canvas p-3 text-[12.5px] text-ink-2";
 const cardTitle = "text-[13.5px] font-semibold leading-5 text-ink";
@@ -17,11 +18,19 @@ export const passChip = `${chip} whitespace-nowrap border border-pass/40 bg-pass
 /* Who wrote or voted: the engine's "person" is the one reading, "supervisor" the session's. */
 export const personName = (who: string) => (who === "person" ? "You" : who === "supervisor" ? "Supervisor" : who);
 
-export function Avatar({ who, small }: { who: string; small?: boolean }) {
-  const tone = who === "person" ? "bg-branch" : who === "supervisor" ? "bg-pass" : "bg-[var(--group-1)]";
+/* Two letters for a person: "Maya Chen" → MC, "dana.okafor@…" → DO, "ravi@…" → RA. */
+export const initials = (who: string) => {
+  const words = who.split("@")[0].split(/[\s._-]+/).filter(Boolean);
+  return (words.length > 1 ? `${words[0][0]}${words[1][0]}` : (words[0] ?? who).slice(0, 2)).toUpperCase();
+};
+
+/* Everyone has a colour of their own, the same as their caret's in a live doc (docAwareness.ts). */
+export function Avatar({ who, small, ring }: { who: string; small?: boolean; ring?: "wait" | "done" | "dim" }) {
+  const colour = who === "person" ? "var(--branch)" : who === "supervisor" ? "var(--pass)" : `var(--group-${Number(peerClass(who).slice("loro-peer-".length)) + 2})`;
+  const rings = ring === "wait" ? "shadow-[0_0_0_1.5px_var(--canvas),0_0_0_3px_var(--sap)]" : ring === "done" ? "shadow-[0_0_0_1.5px_var(--canvas),0_0_0_3px_var(--pass)]" : ring === "dim" ? "opacity-45" : "";
   return (
-    <span title={personName(who)} className={`inline-grid flex-none place-items-center rounded-full font-mono font-semibold leading-none text-canvas ${small ? "size-4 text-[7.5px]" : "size-5 text-[9px]"} ${tone}`}>
-      {who === "person" ? "Y" : who.slice(0, who === "supervisor" ? 1 : 2).toUpperCase()}
+    <span title={personName(who)} style={{ backgroundColor: colour }} className={`inline-grid flex-none place-items-center rounded-full font-mono font-semibold leading-none text-canvas ${small ? "size-4 text-[7.5px]" : "size-5 text-[9px]"} ${rings}`}>
+      {who === "person" ? "Y" : who === "supervisor" ? "S" : initials(who)}
     </span>
   );
 }

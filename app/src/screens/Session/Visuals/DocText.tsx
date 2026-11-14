@@ -16,6 +16,10 @@ export interface Mark {
   kind: "anchor" | "del" | "sel";
   thread?: number;
   ins?: string;
+  /* The thread's number, shown just after the range (the same number its card carries). */
+  ref?: number;
+  /* The thread followed from its card: lit, as the card is. */
+  lit?: boolean;
 }
 
 /* Rendered text and, for each of its characters, its offset in the source. */
@@ -34,6 +38,7 @@ const inserted = "rounded-sm bg-pass-soft text-pass no-underline";
 function leaves(marks: Mark[]): Leaf {
   const cuts = new Set(marks.flatMap((m) => [m.start, m.end]));
   const shown = new Set<Mark>();
+  const refs = new Set<Mark>();
   return ({ text, at }, key) => {
     const out: ReactNode[] = [];
     // A suggestion's new text goes in once, where its range ends (or at the first text after
@@ -43,6 +48,11 @@ function leaves(marks: Mark[]): Leaf {
         if (m.ins === undefined || m.end > pos || shown.has(m)) continue;
         shown.add(m);
         if (m.ins) out.push(<ins key={`${key}.i${m.thread ?? out.length}`} data-thread={m.thread} className={inserted}>{m.ins}</ins>);
+      }
+      for (const m of marks) {
+        if (m.ref === undefined || m.end !== pos || refs.has(m)) continue;
+        refs.add(m);
+        out.push(<sup key={`${key}.r${m.ref}`} data-ref={m.thread} className="ml-px cursor-pointer font-mono text-[9px] font-semibold text-sap">{m.ref}</sup>);
       }
     };
     for (let from = 0; from < text.length;) {
@@ -54,7 +64,8 @@ function leaves(marks: Mark[]): Leaf {
       const anchor = here.find((m) => m.kind === "anchor");
       const tone = del ? "bg-fail-soft text-fail line-through"
         : here.some((m) => m.kind === "sel") ? "rounded-sm bg-branch/30 text-ink"
-        : anchor ? "cursor-pointer border-b border-sap bg-sap-soft" : undefined;
+        : anchor?.lit ? "cursor-pointer rounded-[1px] border-b-[1.5px] border-branch bg-branch-soft"
+        : anchor ? "cursor-pointer rounded-[1px] border-b-[1.5px] border-sap bg-sap-soft" : undefined;
       const Tag = del ? "del" : "span";
       insert(o);
       out.push(<Tag key={`${key}.${from}`} data-o={o} data-thread={(del ?? anchor)?.thread} className={tone}>{text.slice(from, to)}</Tag>);

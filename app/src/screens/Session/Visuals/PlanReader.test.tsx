@@ -14,6 +14,9 @@ afterEach(() => {
   localStorage.removeItem(REVIEW_COLLAPSED_KEY);
 });
 
+/* Who reviews the doc, and sharing it, open over the page from the toolbar's Share. */
+const openShare = async () => fireEvent.click(await screen.findByRole("button", { name: "Share" }));
+
 const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Presets", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
 const visuals: VisualsClient = {
   visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual,
@@ -155,7 +158,7 @@ it("design doc reader", async () => {
   expect(doc.querySelectorAll('[data-thread="2"]').length).toBe(2);
 
   // A suggestion shows its before and after, on its card and in the text; accepted, the text
-  // is the new revision's and the card moves to Resolved.
+  // is the new revision's and the card moves under Resolved.
   expect(within(screen.getByTestId("thread-1")).getByTestId("suggestion-change").querySelectorAll("del, ins").length).toBe(2);
   expect(api.querySelector("del")?.textContent).toBe('"token"');
   expect(api.querySelector("ins")?.textContent).toBe('"lease"');
@@ -163,9 +166,7 @@ it("design doc reader", async () => {
   expect(calls.pop()).toEqual(["accept", 1, 1]);
   expect(api.querySelector("del, ins")).toBeNull();
   expect(api.textContent).toContain('"lease"');
-  expect(screen.queryByTestId("thread-1")).toBeNull();
-  fireEvent.click(screen.getByRole("tab", { name: /Resolved/ }));
-  expect(screen.getByTestId("thread-1").getAttribute("data-status")).toBe("accepted");
+  expect(within(screen.getByTestId("plan-resolved")).getByTestId("thread-1").getAttribute("data-status")).toBe("accepted");
 
   // Editing: a section's text opens in its box, and saving sends only what changed, as a direct edit.
   fireEvent.click(screen.getByRole("radio", { name: "Editing" }));
@@ -190,6 +191,7 @@ it("design doc reader", async () => {
   // The decision: the bottom bar leads to it, and confirms the option picked in its table.
   const section = () => within(screen.getByTestId("plan-doc")).getByRole("region", { name: /Where cloud workers run/ });
   expect(decision.getAttribute("data-next")).toBe("true");
+  fireEvent.click(screen.getByRole("tab", { name: /Decisions/ }));
   expect(within(screen.getByTestId("plan-todo")).getByRole("button").getAttribute("data-state")).toBe("current");
   fireEvent.click(within(section()).getByRole("radio", { name: "B · PawDelta-hosted" }));
   await act(async () => fireEvent.click(within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Confirm B" })));
@@ -320,6 +322,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   const build = (await screen.findByTestId("plan-build")) as HTMLButtonElement;
   expect(build.disabled).toBe(true);
   expect(build.title).toContain("u_a");
+  await openShare();
   expect(screen.getByTestId("plan-reviewer-u_a").dataset.status).toBe("waiting");
   expect(screen.getByTestId("plan-reviewer-u_c").dataset.required).toBe("false");
 
@@ -377,6 +380,7 @@ it("org policies are locked rows that show a waiver, and only an admin of that o
   const waive = (body: Override) => (plan = policyDoc(1, { status: "waived", waiver: { by: "you", reason: body.reason } }, [waived]));
 
   const member = render(policyReader(() => plan, { admin_org: null, people: [{ sub: "sam", email: "sam@x" }] }, waive)(visual));
+  await openShare();
   const row = await screen.findByTestId("plan-policy-security");
   expect(screen.getByTestId("plan-status").dataset.held).toBe("policy");
   expect(screen.queryByTestId("plan-reviewer-security")).toBeNull();
@@ -387,6 +391,7 @@ it("org policies are locked rows that show a waiver, and only an admin of that o
   member.unmount();
 
   render(policyReader(() => plan, { admin_org: "org_1", people: [{ sub: "sam", email: "sam@x" }] }, waive)(visual));
+  await openShare();
   const adminRow = await screen.findByTestId("plan-policy-security");
   await within(adminRow).findByRole("button", { name: "Waive once" });
   expect(within(screen.getByTestId("plan-policy-staff")).queryByRole("button", { name: "Waive once" })).toBeNull();
@@ -402,6 +407,7 @@ it("a waiver begun on one revision can't be sent over a newer one", async () => 
   let sent = 0;
   const reader = policyReader(() => plan, { admin_org: "org_1" }, () => { sent += 1; return plan; });
   const view = render(reader(visual));
+  await openShare();
   const row = await screen.findByTestId("plan-policy-security");
   fireEvent.click(await within(row).findByRole("button", { name: "Waive once" }));
   fireEvent.change(within(row).getByRole("textbox", { name: "Reason" }), { target: { value: "Fine as it stood" } });
@@ -422,6 +428,7 @@ it("an admin can name themself as the only stand-in, and the rule waits until th
     (body) => (plan = policyDoc(1, { stand_ins: [{ stand_in: body.stand_in!, until: body.until! }] })),
     () => (plan = policyDoc(1, { status: "signed_off", met_by: [me], stand_ins: [{ stand_in: me, until: 4_000_000_000 }] })));
   render(reader(visual));
+  await openShare();
   const row = await screen.findByTestId("plan-policy-security");
   fireEvent.click(await within(row).findByRole("button", { name: "Name a stand-in" }));
   fireEvent.change(within(row).getByRole("combobox", { name: "Stand-in" }), { target: { value: me } });
@@ -486,6 +493,7 @@ it("the policies shown before a first share are those of the revision on screen,
     previewPlanPolicies: () => new Promise<{ policies: ReturnType<typeof row>[] }>((resolve) => { asked.push({ rev: now.rev, reply: (names) => resolve({ policies: names.map(row) }) }); }) };
   const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
   const view = render(reader(visual));
+  await openShare();
   fireEvent.click(await screen.findByRole("button", { name: "Share for review" }));
   await waitFor(() => expect(asked).toHaveLength(1));
 
