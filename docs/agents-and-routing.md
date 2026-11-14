@@ -66,9 +66,9 @@ tiers you leave out keep theirs:
 `brindle doctor` shows the list in effect for each tier and the file it came
 from.
 
-To reserve Fable for design-heavy work, set `"fable_for_design_only": true`
-in one of those config files. It defaults to `false`, preserving today's
-routing. The supervisor marks tasks where Fable best fits shared designs,
+brindle reserves Fable for design-heavy work (`fable_for_design_only`, on by
+default; set `"fable_for_design_only": false` in one of those config files to
+let any task in a tier that lists Fable use it). The supervisor marks tasks where Fable best fits shared designs,
 interfaces or tricky architecture with `assign(design_heavy=true, ...)`.
 This flag is independent of task size: it makes `developer-fable` eligible
 within the task's routing tier without changing its weight. For example,
