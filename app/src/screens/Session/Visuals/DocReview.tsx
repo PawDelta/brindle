@@ -202,7 +202,7 @@ function DraftCard({ draft, number, stale, busy, onSend, onCancel, change }: {
 
 const TABS: [ReviewTab, string][] = [["comments", "Comments"], ["decisions", "Decisions"], ["history", "History"], ["tasks", "Tasks"]];
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, workItems, work, canLink }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink }: {
   plan: Plan;
   /* The design's items in the tracker, with what can be done to them (WorkPanel); replaces `workItems`. */
   work?: Work;
@@ -236,6 +236,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   /* The sign-off sheet, under the decisions, once the doc is in sign-off. */
   sheet?: ReactNode;
   history?: HistoryEvent[] | null;
+  historyPanel?: ReactNode;
   historyRev?: number | null;
   onHistoryPick?(rev: number): void;
   workItems?: WorkItem[] | null;
@@ -259,7 +260,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
       </>
     );
   } else if (tab === "history") {
-    body = <DocHistory events={history ?? null} current={historyRev} onPick={onHistoryPick} />;
+    body = historyPanel ?? <DocHistory events={history ?? null} current={historyRev} onPick={onHistoryPick} />;
   } else if (tab === "decisions") {
     body = (
       <>

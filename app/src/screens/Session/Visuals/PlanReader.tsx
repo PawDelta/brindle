@@ -29,7 +29,7 @@
 
 import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { LoroDoc } from "loro-crdt";
-import { DaemonError, fromBase64, type DaemonClient, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { DaemonError, fromBase64, type DaemonClient, type DocRevisionComparison, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
 import { liveReviewGate } from "../../../api/liveReview";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { DocReference } from "../../../components/DocReference";
@@ -44,7 +44,7 @@ import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack }
 import { Popover, ReaderBar } from "./DocBar";
 import { Diagram } from "./DocDiagram";
 import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
-import type { HistoryEvent, WorkItem } from "./DocHistory";
+import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { DocMarkdown } from "./DocMarkdown";
 import { Review, ReviewStrip, SignOffSheet, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
@@ -397,6 +397,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // A suggestion's section text as it is being typed on the page (SuggestEditor).
   const [draftText, setDraftText] = useState<string | null>(null);
   const [historyRev, setHistoryRev] = useState<number | null>(null);
+  const [historical, setHistorical] = useState<{ comparison: DocRevisionComparison; close(): void } | null>(null);
   const lastRead = useLastRead(receivedPlan.id, receivedPlan.rev);
   const plan = useLiveReview ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
   const teammate = receivedTeammate && useLiveReview ? { ...receivedTeammate, signedOff: !!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me) } : receivedTeammate;
@@ -708,7 +709,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const canRequest = said;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
   const decide = async (approved: boolean) => {
-    if (!client || (approved && reviewBlocked)) return;
+    if (historical || !client || (approved && reviewBlocked)) return;
     setSending(approved ? "approve" : "changes");
     const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(reviewVersion === undefined ? {} : { version: reviewVersion }), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
@@ -722,6 +723,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   const stopSharing = async () => {
+    if (historical) return;
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
     if (now) await decide(true);
@@ -729,19 +731,20 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   const confirm = async () => {
     const option = next && chosen(next);
-    if (!next || !option) return;
+    if (historical || !next || !option) return;
     setSending("confirm");
     await write(() => source.vote(plan.rev, next.id, option));
     if (alive.current) setSending(null);
   };
   const signOff = async () => {
-    if (!source.signOff || reviewBlocked) return;
+    if (historical || !source.signOff || reviewBlocked) return;
     setSending("approve");
     if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes((n) => n + 1);
     if (alive.current) setSending(null);
   };
   // A write that may change the review (the Share panel's sign-off) asks for the frozen version again.
   const reviewWrite = async (work: () => Promise<Plan>) => {
+    if (historical) return false;
     const done = await write(work);
     if (done && frozen) setRefreshes((n) => n + 1);
     return done;
@@ -767,7 +770,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // it reads (live) or its markdown in a box.
   const commentButton = (on: () => void, name = "Comment") => canComment && <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={on}>{name}</button>;
   const nextOptionConfirm = next && (
-    <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={busy || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
+    <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={!!historical || busy || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
       <span className="truncate">{nextOption ? `Confirm ${shortName(nextOption.label)}` : "Confirm"}</span>
     </LoadingButton>
   );
@@ -906,15 +909,15 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           presence={presence}
           markdown={{ pressed: raw, onToggle: () => setRaw((r) => !r) }}
           modes={{ current: mode, picker: <ModePicker modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} /> }}
-          share={canShare && <Popover label="Share" open={sharingOpen} onOpenChange={setSharingOpen} testid="plan-share">{reviewersPanel}</Popover>} />
+          share={canShare && !historical && <Popover label="Share" open={sharingOpen} onOpenChange={setSharingOpen} testid="plan-share">{reviewersPanel}</Popover>} />
       )}
       {!chrome && presence && <div className="hidden">{presence}</div>}
       {top}
       <div ref={setStripHost} className="contents" />
-      {typing && <FormatBar hint={raw ? "The buttons write the Markdown for you: Bold wraps the selection in **." : undefined} />}
+      {typing && !historical && <FormatBar hint={raw ? "The buttons write the Markdown for you: Bold wraps the selection in **." : undefined} />}
       <div className="flex min-h-0 flex-1">
-        <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" data-mode={mode} onMouseUp={pick} onKeyUp={pick} onClick={followAnchor}>
-          <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
+        <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" data-mode={historical ? "viewing" : mode} onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
+          {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
                 {plan.title} <DocReference reference={plan.reference} className="ml-1 font-sans" />
@@ -975,8 +978,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               );
             })}
             </>}
-          </article>
-          {picked && (
+          </article>}
+          {picked && !historical && (
             <div role="toolbar" aria-label="For the highlighted text" className="absolute z-10 inline-flex -translate-y-[calc(100%+6px)] gap-0.5 rounded-md border border-line-strong bg-canvas-2 p-[3px] font-sans text-xs shadow-lg" style={{ left: picked.x, top: picked.y }}
               onMouseDown={(e) => e.preventDefault()} onMouseUp={(e) => e.stopPropagation()}>
               {canComment && <button type="button" className="cursor-pointer rounded-[3px] bg-branch-soft px-[9px] py-0.5 font-medium text-branch" onClick={() => offer("comment")}>Comment</button>}
@@ -991,6 +994,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
             active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
+            historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
+              onCompare={(comparison, close) => setHistorical(comparison ? { comparison, close } : null)} />}
             history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} work={work} canLink={!teammate || canComment} />
         ) : (
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />
@@ -1037,7 +1042,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               {next ? nextOptionConfirm : teammate.rights.signOff && !teammate.signedOff && (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>{signName}</LoadingButton>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>{signName}</LoadingButton>
               )}
             </div>
           </>
@@ -1055,13 +1060,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
-              <LoadingButton className={button} busy={sending === "changes"} disabled={busy || !canRequest || uploading > 0}
+              <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
                 title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
                 Request changes
               </LoadingButton>
               {/* One main action at a time: the next decision's confirmation, then the sign-off. */}
               {next ? nextOptionConfirm : (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
                   data-testid="plan-build" data-gate={gate?.state} onClick={() => void decide(true)}>
                   {gate ? "Start building" : "Sign off"}
                 </LoadingButton>

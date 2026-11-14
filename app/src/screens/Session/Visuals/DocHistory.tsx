@@ -93,7 +93,7 @@ export function historyEvents(entries: DocHistoryEntry[]): HistoryEvent[] {
    after a live action or sync. No writes are made when selecting or opening an old revision. */
 export function DocumentHistory({ client, planId, refresh, onCompare }: {
   client: HistoryClient; planId: string; refresh?: unknown;
-  onCompare?(comparison: DocRevisionComparison | null): void;
+  onCompare?(comparison: DocRevisionComparison | null, close: () => void): void;
 }) {
   const [events, setEvents] = useState<HistoryEvent[] | null>(null);
   const [comparison, setComparison] = useState<DocRevisionComparison | null>(null);
@@ -104,15 +104,20 @@ export function DocumentHistory({ client, planId, refresh, onCompare }: {
   compareCallback.current = onCompare;
   const identity = useRef({ client, planId });
   identity.current = { client, planId };
+  // Comparisons are immutable: reloading the timeline must not cancel or close one.
+  useEffect(() => {
+    request.current++;
+    setComparison(null); setLoading(false);
+    compareCallback.current?.(null, close);
+    return () => { request.current++; compareCallback.current?.(null, close); };
+  }, [client, planId]);
   useEffect(() => {
     let active = true;
-    request.current++;
-    setEvents(null); setComparison(null); setError(false); setLoading(false);
-    compareCallback.current?.(null);
+    setEvents(null); setError(false);
     void client.planHistory(planId).then((result) => {
       if (active && identity.current.client === client && identity.current.planId === planId) setEvents(historyEvents(result.events));
     }, () => { if (active && identity.current.client === client && identity.current.planId === planId) setError(true); });
-    return () => { active = false; request.current++; };
+    return () => { active = false; };
   }, [client, planId, refresh]);
   const pick = async (rev: number) => {
     const sequence = ++request.current;
@@ -121,14 +126,14 @@ export function DocumentHistory({ client, planId, refresh, onCompare }: {
     try {
       const result = await client.planRevisionChanges(planId, rev);
       if (!isCurrent()) return;
-      setComparison(result); compareCallback.current?.(result);
+      setComparison(result); compareCallback.current?.(result, close);
     } catch {
       if (isCurrent()) setError(true);
     } finally {
       if (isCurrent()) setLoading(false);
     }
   };
-  const close = () => { request.current++; setLoading(false); setComparison(null); compareCallback.current?.(null); };
+  const close = () => { request.current++; setLoading(false); setComparison(null); compareCallback.current?.(null, close); };
   return <div aria-busy={loading}>
     {error && <p role="alert" className="px-3.5 py-3 text-sap">History could not be loaded.</p>}
     <DocHistory events={events} current={comparison?.revision.rev} onPick={(rev) => { void pick(rev); }} />

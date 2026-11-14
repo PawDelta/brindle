@@ -1009,14 +1009,20 @@ def comparison(db: DB, plan_id: str, rev: Any) -> dict:
     A legacy revision with no retained baseline opens without invented additions.
     No draft or plan state changes while reading history.
     """
-    from difflib import SequenceMatcher
-
     p = _plan(db, plan_id)
     current = revision_dto(db, p["id"], rev)
     n = current["rev"]
     retained = db.conn.execute("SELECT MAX(rev) FROM plan_revisions WHERE plan_id=? AND rev<?",
                                (p["id"], n)).fetchone()[0]
     previous = revision_dto(db, plan_id, str(retained)) if retained is not None else None
+    return compare_revisions(current, previous)
+
+
+def compare_revisions(current: dict, previous: dict | None) -> dict:
+    """Compare validated revisions from either the local plan or the Library."""
+    from difflib import SequenceMatcher
+
+    n = current["rev"]
     baseline_available = previous is not None or n == 1
     before = {s["id"]: s for s in previous["sections"]} if previous else {}
     after = {s["id"]: s for s in current["sections"]}

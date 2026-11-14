@@ -47,6 +47,31 @@ def _home_files():
     return {p: p.read_bytes() for p in brindle_home().rglob("*") if p.is_file() and p.suffix not in (".db", ".db-wal", ".db-shm")}
 
 
+def test_shared_history_compares_library_revisions_without_a_local_plan(db, lib, app):
+    revisions = [{"rev": n, "author": "u_author", "source": "edit", "at": n} for n in (1, 2)]
+    old = copy.deepcopy(CONTENT)
+    old["sections"][0]["markdown"] = "Earlier passage."
+    new = copy.deepcopy(CONTENT)
+    new["sections"][0]["markdown"] = "Revised passage."
+    lib.calls.routes.update({
+        f"GET {DESIGN}": lambda f, h: (200, {**lib.view(), "rev": 2, "revisions": revisions}),
+        f"GET {DESIGN}/revisions/1": lambda f, h: (200, {**old, **revisions[0]}),
+        f"GET {DESIGN}/revisions/2": lambda f, h: (200, {**new, **revisions[1]}),
+    })
+    before = db.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+    events = app.get(f"{ROUTE}/history").json()["events"]
+    assert [event["rev"] for event in events] == [2, 1]
+    comparison = app.get(f"{ROUTE}/revisions/2/changes").json()
+    assert comparison["revision"]["rev"] == 2 and comparison["previous"]["rev"] == 1
+    assert comparison["changes"][0]["spans"]
+    assert comparison["changes"][0]["before"]["markdown"] == "Earlier passage."
+    assert comparison["changes"][0]["after"]["markdown"] == "Revised passage."
+    lib.calls.routes[f"GET {DESIGN}"] = lambda f, h: (403, {"error": "forbidden"})
+    assert app.get(f"{ROUTE}/history").status_code == 403
+    assert app.get(f"{ROUTE}/revisions/2/changes").status_code == 403
+    assert db.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == before
+
+
 def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
     before = _home_files()
     plans_before = db.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]

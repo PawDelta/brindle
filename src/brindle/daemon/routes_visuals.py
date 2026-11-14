@@ -644,6 +644,18 @@ def shared_design(db: DB, request: Request) -> Any:
     return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc))
 
 
+@_json
+def shared_design_history(db: DB, request: Request) -> Any:
+    return _shared_design(request.query_params.get("repo") or None,
+                          lambda r: r.timeline(request.path_params["doc_id"]))
+
+
+@_json
+def shared_design_comparison(db: DB, request: Request) -> Any:
+    return _shared_design(request.query_params.get("repo") or None,
+                          lambda r: r.comparison(request.path_params["doc_id"], request.path_params["n"]))
+
+
 def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
     """A comment, a reply (``parent``), or a question for the person's own
     supervisor, which starts it only once this answer has been written."""
@@ -783,6 +795,8 @@ ROUTES = [
     Route("/v1/review-policies/draft-impact", _endpoint(review_policies_impact), methods=["POST"]),
     Route("/v1/library/people", library_people),
     Route("/v1/shared-designs/{doc_id}", shared_design),
+    Route("/v1/shared-designs/{doc_id}/history", shared_design_history),
+    Route("/v1/shared-designs/{doc_id}/revisions/{n:int}/changes", shared_design_comparison),
     Route("/v1/shared-designs/{doc_id}/comments", _endpoint(shared_design_comment), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/suggestions", _endpoint(shared_design_suggest), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/threads/{tid:int}", _endpoint(shared_design_thread), methods=["POST"]),
