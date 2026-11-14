@@ -2305,7 +2305,8 @@ class Antigravity(Provider):
             # dontAsk (nobody watches, e.g. a reviewer) brindle's hook decides
             # every call, as under agy_approvals "brindle" (unset, for workers).
             strict = ctx.mode == "doc_question" or ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
-            antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
+            antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict,
+                                hidden=ctx.profile.hidden_brindle_tools)
             antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]
         if strict:

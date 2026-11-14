@@ -315,6 +315,15 @@ def short_lived_tools(agent: Agent, ws: Workspace) -> tuple[str, ...] | None:
     return None
 
 
+def _agy_neighbour_needs_more(db: DB, agent: Agent, ws: Workspace, keep: tuple[str, ...]) -> bool:
+    """Whether another agy agent at work in ``ws``'s checkout (a reviewer's
+    worker, say) uses brindle tools ``keep`` leaves out: agy reads its MCP
+    tool list from the checkout (antigravity.install), shared by both."""
+    return any(other.id != agent.id and other.provider == "antigravity" and alive_or_starting(other)
+               and short_lived_tools(other, ws) != keep
+               for other in db.list_agents(ws.id))
+
+
 def _hidden_brindle_tools(keep: tuple[str, ...]) -> list[str]:
     """Every brindle tool not in ``keep``, sorted so the list is the same at
     every start; each provider names them its own way (Profile.hidden_brindle_tools).
@@ -865,6 +874,8 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
         except Exception:  # noqa: BLE001 - a smaller tool list is only a saving
             log.warning("could not list brindle's tools; %s keeps them all", agent.id, exc_info=True)
             hidden = None
+        if hidden and agent.provider == "antigravity" and _agy_neighbour_needs_more(db, agent, ws, keep):
+            hidden = None   # agy's tool list is the checkout's: never narrow a live neighbour's
         profile = replace(profile, hidden_brindle_tools=hidden, short_cache=True)
     autopilot_on = db.get_autopilot(agent.id) is not None
     if autopilot_on:
