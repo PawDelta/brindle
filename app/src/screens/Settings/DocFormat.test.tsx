@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DocFormat as Format, DocFormatView } from "../../api/client";
 import { DocFormat } from "./DocFormat";
@@ -6,7 +6,7 @@ import { DocFormat } from "./DocFormat";
 afterEach(cleanup);
 
 const EMPTY: Format = { templates: [], naming: { title_hint: null, reference: null }, blocks: ["sign_off"] };
-const view = (resolved: Format, next: string | null = null): DocFormatView => ({ level: "org", format: resolved, resolved, next_reference: next, used: {} });
+const view = (resolved: Format, next: string | null = null): DocFormatView => ({ level: "org", format: resolved, resolved, source: "local", editable: true, next_reference: next, used: {} });
 
 describe("DocFormat", () => {
   it("makes a first template from the starter, edits a section, the naming and what is blocked, and saves it", async () => {
@@ -34,6 +34,19 @@ describe("DocFormat", () => {
     expect(saved.naming.reference).toBe("DES-{number}");
     expect(saved.blocks).toEqual(["sign_off", "share"]);
     expect((await screen.findByTestId("next-reference")).textContent).toContain("DES-0001");
+  });
+
+  it("keeps what was typed while a save was on its way", async () => {
+    let answer: (v: DocFormatView) => void = () => {};
+    const setDocFormat = vi.fn(() => new Promise<DocFormatView>((resolve) => (answer = resolve)));
+    render(<DocFormat client={{ docFormat: vi.fn().mockResolvedValue(view(EMPTY)), setDocFormat }} />);
+    fireEvent.change(await screen.findByLabelText("Reference"), { target: { value: "DES-{number}" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.change(screen.getByLabelText("Title hint"), { target: { value: "What it does" } });
+    await act(async () => answer(view({ ...EMPTY, naming: { title_hint: null, reference: "DES-{number}" } }, "DES-0001")));
+    expect((screen.getByLabelText("Title hint") as HTMLInputElement).value).toBe("What it does");
+    expect(screen.getByTestId("next-reference").textContent).toContain("DES-0001");
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("shows the daemon's refusal and keeps the draft", async () => {

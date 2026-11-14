@@ -2648,7 +2648,7 @@ export class FakeDaemon {
   private docFormatView(): DocFormatView {
     const resolved: DocFormat = { templates: [], naming: { title_hint: null, reference: null }, blocks: ["sign_off"], ...this.docFormat };
     const reference = resolved.naming.reference;
-    return { level: "org", format: this.docFormat, resolved, next_reference: reference ? reference.replace("{number}", "0001") : null, used: {} };
+    return { level: "org", format: this.docFormat, resolved, source: "local", editable: true, next_reference: reference ? reference.replace("{number}", "0001") : null, used: {} };
   }
 
   /* The goal's POST route, answering as the engine does (routes_actions.py):
@@ -2738,7 +2738,10 @@ export class FakeDaemon {
       if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
       if (path === "/doc-format") {
-        this.docFormat = { ...this.docFormat, ...((body ?? {}) as { format?: Partial<DocFormat> }).format };
+        // The engine replaces what the level sets (doc_templates.save), keeping no key the body leaves out.
+        const format = ((body ?? {}) as { format?: Partial<DocFormat> }).format;
+        if (!format || typeof format !== "object") return error("invalid", "format is required", 400);
+        this.docFormat = format;
         return json(this.docFormatView());
       }
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);

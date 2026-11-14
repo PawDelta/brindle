@@ -6888,6 +6888,18 @@
           "title": "Queued",
           "type": "integer"
         },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
+        },
         "rev": {
           "title": "Rev",
           "type": "integer"
@@ -12189,6 +12201,18 @@
         "queued": {
           "title": "Queued",
           "type": "integer"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
         },
         "rev": {
           "title": "Rev",

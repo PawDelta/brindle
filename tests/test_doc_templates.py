@@ -29,8 +29,8 @@ def as_the_person(monkeypatch):
 
 
 def _format(blocks=("sign_off",), reference="DES-{number}"):
-    doc_templates.save(doc_templates.ORG, {"templates": [DESIGN], "naming": {"reference": reference},
-                                           "blocks": list(blocks)})
+    doc_templates.save(doc_templates.ORG, {"templates": [DESIGN], "blocks": list(blocks),
+                                           "naming": {"reference": reference, "title_hint": "What it does"}})
 
 
 def _propose(db, boss, markdown="# Presets\n\n## Summary\n\nPresets per org.", plan_id=None):
@@ -42,13 +42,18 @@ def _propose(db, boss, markdown="# Presets\n\n## Summary\n\nPresets per org.", p
 def test_new_plan_starts_from_the_template_and_gets_the_next_reference(db, session):
     boss, _ = session
     _format()
-    pid, reply = _propose(db, boss, "# Presets\n\n## Risks\n\nNone.\n\n## Summary\n\nPresets per org.")
+    pid, reply = _propose(db, boss, "# Presets\n\n## Risks\n\nNone.\n\n## Architecture\n\nOne box.\n\n"
+                                    "## Notes\n\nSee chat.\n\n## Summary\n\nPresets per org.")
     titles = [s["title"] for s in plan_docs.revision(db, pid)["sections"]]
-    # The supervisor's own sections and order stay; the template's missing headings come in after the one before.
-    assert titles == ["Risks", "Summary", "Architecture", "Rollout"]
+    # The template's order wins; the supervisor's own sections stay after the one they followed
+    # (Risks, before any, stays first), and a missing template heading comes in empty.
+    assert titles == ["Risks", "Summary", "Architecture", "Notes", "Rollout"]
     assert "## Rollout" in plans.get(db, pid)["markdown"]
-    assert "DES-0001" in reply and "Rollout (Numbered steps" in reply and "Summary (" not in reply
+    # The supervisor is told the whole template: every section's kind and hint, and the title hint.
+    assert "DES-0001" in reply and "Title: What it does" in reply and "Architecture (diagram)" in reply
+    assert "Summary (text, required): What changes for the user." in reply and "still empty: Rollout" in reply
     assert doc_templates.view(db)["next_reference"] == "DES-0002"
+    assert plans.to_dto(db, plans.get(db, pid))["reference"] == "DES-0001"
 
     # The plan keeps the template it was written with: a later change doesn't reach it.
     doc_templates.save(doc_templates.ORG, {"templates": [{**DESIGN, "sections": DESIGN["sections"][:1]}]})
@@ -79,15 +84,41 @@ def test_empty_required_section_blocks_sign_off(db, session, blocks, refused):
     assert plans.get(db, pid)["state"] == "approved"
 
 
-def test_empty_required_section_blocks_sharing(db, session):
+def test_a_doc_follows_its_teams_format(db, session):
+    """Sharing to a team checks that team's format, and the doc's sign-off follows it from then on."""
     from brindle.pro import shared_docs
 
     boss, _ = session
-    _format(["share"])
+    _format([])                                               # the org's format stops nothing
+    doc_templates.save("team:t1", {"blocks": ["share", "sign_off"]})
     pid, _ = _propose(db, boss)
+    with pytest.raises(RuntimeError, match="not logged in"):   # past the check: the org's format lets it through
+        shared_docs.share(db, pid, {"kind": "org", "id": "o1"})
     with pytest.raises(ServiceError) as e:
-        shared_docs.share(db, pid, {"kind": "org"})
+        shared_docs.share(db, pid, {"kind": "group", "id": "t1"})
     assert e.value.code == "required_sections_missing"
+    doc_templates.set_team(db, pid, "t1")                     # as a share to t1 records it
+    with pytest.raises(ServiceError, match="Rollout"):
+        plans.decide(db, pid, 1, True, person=True)
+
+
+def test_an_orgs_format_never_comes_from_this_machine(db, session, monkeypatch):
+    """A Team or Enterprise member's format is their org's, from the Library: until it can be
+    read, no format at all (not the person's local one, which another org may have set)."""
+    from types import SimpleNamespace
+
+    from brindle.pro import license, shared_docs
+
+    boss, _ = session
+    _format()
+    monkeypatch.setattr(license, "current", lambda **kw: SimpleNamespace(
+        org_id="o1", features=frozenset({shared_docs.TEAM_FEATURE})))
+    assert doc_templates.view(db)["source"] == "org" and doc_templates.resolve()["templates"] == []
+    with pytest.raises(ServiceError) as e:
+        doc_templates.save(doc_templates.ORG, {"blocks": []})
+    assert e.value.code == "org_format"
+    pid, _ = _propose(db, boss)
+    assert doc_templates.of(db, pid) is None and "Rollout" not in plans.get(db, pid)["markdown"]
 
 
 def test_reference_pattern_and_levels(db, tmp_path):

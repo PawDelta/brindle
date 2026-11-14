@@ -824,6 +824,9 @@ export interface DocFormatView {
   level: string;
   format: Partial<DocFormat>;
   resolved: DocFormat;
+  /* Where it is kept: the person's own config, or their org's in the Library; whether this brindle can save it. */
+  source: "local" | "org";
+  editable: boolean;
   next_reference: string | null;
   used: Record<string, number>;
 }

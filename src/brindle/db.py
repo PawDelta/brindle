@@ -1137,6 +1137,7 @@ CREATE TABLE IF NOT EXISTS plan_formats (
     plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
     template TEXT,                 -- JSON {id, name, default, sections}; NULL with a reference only
     reference TEXT,
+    team TEXT,                     -- the team it was shared with, whose format its gates follow
     created_at REAL NOT NULL
 );
 -- The next number of each reference pattern (DES-{number}) on this machine.

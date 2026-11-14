@@ -7,7 +7,7 @@
    Edits are a draft until Save, which replaces what the org level sets.
    An engine without the route shows nothing. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DaemonClient, DocFormat as Format, DocFormatBlock, DocFormatView, DocSectionKind, DocTemplate, DocTemplateSection } from "../../api/client";
 import { plain } from "../../api/wording";
 import { alert, card, field, h2, label, main, notice, quiet } from "../../components/ui";
@@ -49,6 +49,9 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /* The draft as last rendered: a save compares it with what it sent. */
+  const latest = useRef<Format | null>(null);
+  latest.current = draft;
 
   const load = (v: DocFormatView) => {
     setView(v);
@@ -100,10 +103,14 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
   const save = async () => {
     setBusy(true);
     setError(null);
+    const sent = draft;
     try {
-      const naming = { title_hint: draft.naming.title_hint?.trim() || null, reference: draft.naming.reference?.trim() || null };
-      const templates = draft.templates.map((t) => ({ ...t, sections: t.sections.map((s) => ({ ...s, hint: s.hint?.trim() || null })) }));
-      load(await client.setDocFormat({ templates, naming, blocks: draft.blocks }));
+      const naming = { title_hint: sent.naming.title_hint?.trim() || null, reference: sent.naming.reference?.trim() || null };
+      const templates = sent.templates.map((t) => ({ ...t, sections: t.sections.map((s) => ({ ...s, hint: s.hint?.trim() || null })) }));
+      const got = await client.setDocFormat({ templates, naming, blocks: sent.blocks });
+      // What was typed while it saved stays as the draft; only an untouched draft takes the saved format.
+      if (latest.current === sent) load(got);
+      else setView(got);
       setSaved(true);
     } catch (e) {
       setError(message(e));
@@ -270,10 +277,15 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
             <button type="button" className={quiet} disabled={!dirty || busy} onClick={() => change(view.resolved)}>
               Discard
             </button>
-            <button type="button" className={main} disabled={!dirty || busy} onClick={() => void save()}>
+            <button type="button" className={main} disabled={!dirty || busy || !view.editable} onClick={() => void save()}>
               Save
             </button>
           </div>
+          {!view.editable && (
+            <p role="status" className={notice} data-testid="doc-format-org">
+              Your organization keeps its doc format in the Library; this brindle can't change it yet.
+            </p>
+          )}
           {saved && !dirty && (
             <p role="status" className={notice}>
               Saved.

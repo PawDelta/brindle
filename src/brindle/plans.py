@@ -478,7 +478,7 @@ def to_dto(db: DB, p: dict) -> dict:
                    state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=_board(db, p),
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
-                   **plan_docs.fields(db, p)).to_json()
+                   reference=doc_templates.reference_of(db, p["id"]), **plan_docs.fields(db, p)).to_json()
 
 
 def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
@@ -1033,6 +1033,7 @@ def answer_offer(db: DB, root_id: str, offer_id: Any, accept: bool) -> None:
 
     if not isinstance(offer_id, str) or not offer_id:
         raise ServiceError("invalid", "offer (the offer on screen) is required", 400)
+    told = OFFER_YES + doc_templates.planning_brief() if accept else OFFER_NO   # read before the transaction
     with db.tx() as c:
         claimed = c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer=?",
                             (OFFER_ACCEPTED if accept else OFFER_DISMISSED, root_id,
@@ -1040,7 +1041,7 @@ def answer_offer(db: DB, root_id: str, offer_id: Any, accept: bool) -> None:
         if claimed:
             if accept:
                 visual_offers._grant(c, root_id, "plan")
-            queued = _queue_message(c, root_id, OFFER_YES if accept else OFFER_NO)
+            queued = _queue_message(c, root_id, told)
     if not claimed:
         raise ServiceError("stale", "this offer is no longer open", 409)
     bus.publish_agent(db, "autopilot.goal", root_id)

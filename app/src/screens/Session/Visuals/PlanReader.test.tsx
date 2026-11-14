@@ -101,7 +101,7 @@ it("asks immediately in the thread without turning the question into a change re
 it("design doc reader", async () => {
   // An emoji leads each section: the engine's offsets count it as one character, the screen as two.
   const summary = "🚀 Workers run on a **machine** the customer controls.";
-  let plan: Plan = { id: visual.id, session: "boss", title: "Cloud workers", rev: 1, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
+  let plan: Plan = { id: visual.id, session: "boss", title: "Cloud workers", rev: 1, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [], reference: "DES-0042",
     sections: [{ id: "summary", title: "Summary", markdown: summary }, { id: "api", title: "API sketch", markdown: 'POST 🚀 with a "token" in the body.' }],
     decisions: [{ id: "where", title: "Where cloud workers run", mine: "own", options: [{ id: "own", label: "A · Your own server" }, { id: "hosted", label: "B · PawDelta-hosted" }] }],
     threads: [{ id: 1, kind: "suggestion", rev: 1, author: "supervisor", text: "Tokens end up in logs.", status: "open", at: 1, before: '"token"', after: '"lease"',
@@ -133,6 +133,8 @@ it("design doc reader", async () => {
   const view = open();
   // One scrolling doc: every section and the decision are on the page at once.
   const doc = await screen.findByTestId("plan-doc");
+  // Its reference sits beside the title.
+  expect(within(screen.getByRole("heading", { level: 1 })).getByTestId("doc-reference").textContent).toBe("DES-0042");
   const api = within(doc).getByRole("region", { name: "API sketch" });
   const decision = within(doc).getByRole("region", { name: /Where cloud workers run/ });
   expect(within(doc).getByRole("region", { name: "Summary" })).toBeTruthy();

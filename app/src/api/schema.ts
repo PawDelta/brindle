@@ -884,6 +884,7 @@ export interface PlanDTO {
   lede: string;
   markdown: string;
   queued: number;
+  reference?: string | null;
   rev: number;
   revisions?: PlanRevisionDTO[];
   sections: PlanSectionDTO[];
@@ -1460,6 +1461,7 @@ export interface SharedDesignDTO {
   markdown: string;
   me: string;
   queued: number;
+  reference?: string | null;
   rev: number;
   revisions?: PlanRevisionDTO[];
   sections: PlanSectionDTO[];

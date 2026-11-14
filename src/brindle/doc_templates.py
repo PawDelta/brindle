@@ -14,10 +14,12 @@ A *format* is ``{templates, naming, blocks}``:
   never stopped.
 
 Formats are kept per *level*: ``org`` and ``team:<id>``, a team's keys over
-its org's (:func:`resolve`), so a team can default to its own template. For
-now every level lives in the person's ``~/.brindle/config.json``
-(``doc_format``): a solo person's own setting; Team and Enterprise orgs will
-keep theirs in the Library, read through the same levels.
+its org's (:func:`resolve`), so a team can default to its own template; a
+doc follows the team it was shared with (:func:`team_of`). A
+:class:`FormatStore` keeps the levels: a solo person's in their
+``~/.brindle/config.json`` (``doc_format``, :class:`LocalStore`); a Team or
+Enterprise org's in the Library (:class:`ProStore`), which fails closed to
+no format while it can't be read.
 
 A new plan (brindle.plans.propose) starts from the default template: its
 headings the supervisor left out are added, empty, in the template's order,
@@ -27,9 +29,10 @@ good: a later change to the template never rewrites a doc already written."""
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
-from typing import Any
+from typing import Any, Protocol
 
 from brindle import config
 from brindle.db import DB
@@ -53,6 +56,7 @@ _TEAM_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 # Unset in every level: no template, no reference, and a missing section
 # (there are none without a template) would stop the sign-off.
 DEFAULT: dict = {"templates": [], "naming": {"title_hint": None, "reference": None}, "blocks": [SIGN_OFF]}
+log = logging.getLogger(__name__)
 
 
 # -- checking a format -------------------------------------------------------------------
@@ -157,41 +161,139 @@ def _level(level: Any) -> str:
     raise ServiceError("invalid", f"level is {ORG} or {TEAM}<id>", 400)
 
 
-def _stored() -> dict:
-    found = config.user_settings().get(KEY)
-    return found if isinstance(found, dict) else {}
-
-
-def load(level: str = ORG) -> dict:
-    """What one level sets (a level that sets nothing is ``{}``)."""
-    found = _stored().get(_level(level))
+def _checked(found: Any) -> dict:
     if not isinstance(found, dict):
         return {}
     try:
         return check(found)
     except ServiceError:
-        return {}       # a hand-edited file that no longer checks sets nothing
+        return {}       # a stored value that no longer checks sets nothing
 
 
-def save(level: str, raw: Any) -> dict:
+class FormatStore(Protocol):
+    """Where the levels' formats are kept. ``source`` is "local" (this
+    person's own config) or "org" (their organization's, in the Library);
+    ``editable`` says whether this brindle can save it."""
+
+    source: str
+    editable: bool
+
+    def load(self, level: str) -> dict: ...
+
+    def save(self, level: str, fmt: dict) -> None: ...
+
+
+class LocalStore:
+    """A solo person's format: ``doc_format`` in ~/.brindle/config.json, by level."""
+
+    source, editable = "local", True
+
+    def load(self, level: str) -> dict:
+        found = config.user_settings().get(KEY)
+        return _checked(found.get(level) if isinstance(found, dict) else None)
+
+    def save(self, level: str, fmt: dict) -> None:
+        def change(now: Any) -> dict:
+            levels = dict(now) if isinstance(now, dict) else {}
+            levels[level] = fmt
+            return levels
+
+        config.update_user(KEY, change)
+
+
+class ProStore:
+    """A Team or Enterprise org's format, kept by the Library per org and team
+    (pawdelta-web), never in this machine's config: one person can belong to
+    several orgs. ``ROUTE`` is the Library's doc-format route, ``{org}`` and
+    ``{level}`` filled in. Until it is set, or when the Library can't be
+    reached, an org has no format here (fail closed: never another org's, nor
+    the person's own local one), and saving is refused."""
+
+    ROUTE: str | None = None
+    source, editable = "org", False
+
+    def __init__(self, org_id: str):
+        self.org_id = org_id
+        self.editable = self.ROUTE is not None
+
+    def _path(self, level: str) -> str:
+        from urllib.parse import quote
+
+        assert self.ROUTE is not None
+        return self.ROUTE.format(org=quote(self.org_id, safe=""), level=quote(level, safe=""))
+
+    def load(self, level: str) -> dict:
+        if self.ROUTE is None:
+            return {}
+        from brindle.pro import analysis_docs as ad
+
+        try:
+            status, got = ad._call("GET", self._path(level))
+        except Exception:  # noqa: BLE001 - unreachable or signed out: no format, not someone else's
+            log.warning("brindle: couldn't read the org's doc format", exc_info=True)
+            return {}
+        return _checked(got.get("format")) if status == 200 and isinstance(got, dict) else {}
+
+    def save(self, level: str, fmt: dict) -> None:
+        if self.ROUTE is None:
+            raise ServiceError("org_format", "your organization's doc format is kept in the Library, and this "
+                               "brindle can't change it yet", 409)
+        from brindle.pro import analysis_docs as ad
+
+        status, got = ad._call("PUT", self._path(level), {"format": fmt})
+        if status != 200:
+            raise ServiceError("upstream", f"the Library refused it: {got.get('error') or f'HTTP {status}'}", 502)
+
+
+def store() -> FormatStore:
+    """The store for the person signed in here: their org's when its plan
+    shares design docs (Team and Enterprise), else their own local one."""
+    from brindle.pro import license, shared_docs
+
+    try:
+        ent = license.current(refresh=False)
+    except Exception:  # noqa: BLE001 - not signed in to brindle Pro: a solo person's own format
+        return LocalStore()
+    return ProStore(ent.org_id) if shared_docs.TEAM_FEATURE in ent.features else LocalStore()
+
+
+def load(level: str = ORG, where: FormatStore | None = None) -> dict:
+    """What one level sets (a level that sets nothing is ``{}``)."""
+    return (where or store()).load(_level(level))
+
+
+def save(level: str, raw: Any, where: FormatStore | None = None) -> dict:
     """Replace what ``level`` sets; returns it as stored."""
     level, fmt = _level(level), check(raw)
-
-    def change(now: Any) -> dict:
-        levels = dict(now) if isinstance(now, dict) else {}
-        levels[level] = fmt
-        return levels
-
-    config.update_user(KEY, change)
+    (where or store()).save(level, fmt)
     return fmt
 
 
-def resolve(team: str | None = None) -> dict:
+def resolve(team: str | None = None, where: FormatStore | None = None) -> dict:
     """The format in force: the defaults, the org's keys over them, then the team's."""
+    where = where or store()
     out = {k: (list(v) if isinstance(v, list) else dict(v)) for k, v in DEFAULT.items()}
     for level in [ORG] + ([TEAM + team] if team else []):
-        out.update(load(level))
+        out.update(where.load(level))
     return out
+
+
+def team_of(db: DB, plan_id: str | None) -> str | None:
+    """The team a doc belongs to: the one it was shared with, else none (the org's format)."""
+    if not plan_id:
+        return None
+    row = db.conn.execute("SELECT team FROM plan_formats WHERE plan_id=?", (plan_id,)).fetchone()
+    return row["team"] if row else None
+
+
+def set_team(db: DB, plan_id: str, team: str | None) -> None:
+    """Record that plan ``plan_id`` was shared with ``team`` (a group), so its
+    gates follow that team's format from now on."""
+    if not team or not _TEAM_ID.fullmatch(team):
+        return
+    with db.tx() as c:
+        c.execute("INSERT INTO plan_formats (plan_id, team, created_at) VALUES (?,?,?)"
+                  " ON CONFLICT(plan_id) DO UPDATE SET team=excluded.team", (plan_id, team, time.time()))
 
 
 def default_template(fmt: dict) -> dict | None:
@@ -203,11 +305,12 @@ def default_template(fmt: dict) -> dict | None:
 def view(db: DB, level: str = ORG) -> dict:
     """Settings › Doc format's view of ``level``: what it sets, the format in
     force there, the next reference, and how many docs each template wrote."""
-    level = _level(level)
-    resolved = resolve(level[len(TEAM):] if level.startswith(TEAM) else None)
+    level, where = _level(level), store()
+    resolved = resolve(level[len(TEAM):] if level.startswith(TEAM) else None, where)
     used = {r[0]: r[1] for r in db.conn.execute(
         "SELECT json_extract(template, '$.id'), count(*) FROM plan_formats WHERE template IS NOT NULL GROUP BY 1")}
-    return {"level": level, "format": load(level), "resolved": resolved,
+    return {"level": level, "format": where.load(level), "resolved": resolved,
+            "source": where.source, "editable": where.editable,
             "next_reference": next_reference(db, resolved["naming"]["reference"]),
             "used": {t["id"]: used.get(t["id"], 0) for t in resolved["templates"]}}
 
@@ -249,26 +352,33 @@ def _slug(title: str, taken: set[str]) -> str:
 
 
 def apply(template: dict | None, parts: list[dict]) -> tuple[list[dict], bool]:
-    """The supervisor's ``parts`` with each of ``template``'s sections they
-    left out added, empty, after the template section before it (or first):
-    their own sections and their order stay. Returns the sections and
-    whether any were added."""
+    """The supervisor's ``parts`` laid out in ``template``'s order: each
+    template section where the template puts it (the supervisor's own text
+    when they wrote one, else an empty heading), and each section of their
+    own kept right after the template section they wrote it after (ones
+    before any stay first). Returns the sections and whether that changed them."""
     if not template:
         return parts, False
-    out = list(parts)
-    taken = {s["id"] for s in out}
-    at, added = 0, False
-    for t in template["sections"]:
-        found = next((i for i, s in enumerate(out) if _key(s["title"]) == _key(t["title"])), None)
-        if found is not None:
-            at = found + 1
-            continue
-        sid = _slug(t["title"], taken)
-        taken.add(sid)
-        out.insert(at, {"id": sid, "title": t["title"], "kind": "markdown", "markdown": "", "caption": None})
-        at += 1
-        added = True
-    return out, added
+    wanted = [_key(t["title"]) for t in template["sections"]]
+    matched: dict[str, dict] = {}
+    extras: dict[str | None, list[dict]] = {None: []}
+    after = None
+    for s in parts:
+        k = _key(s["title"])
+        if k in wanted and k not in matched:
+            matched[k] = s
+            after = k
+        else:
+            extras.setdefault(after, []).append(s)
+    taken = {s["id"] for s in parts}
+    out = list(extras[None])
+    for t, k in zip(template["sections"], wanted):
+        if k not in matched:
+            sid = _slug(t["title"], taken)
+            taken.add(sid)
+            matched[k] = {"id": sid, "title": t["title"], "kind": "markdown", "markdown": "", "caption": None}
+        out += [matched[k], *extras.get(k, [])]
+    return out, [s["id"] for s in out] != [s["id"] for s in parts]
 
 
 def missing(template: dict | None, sections: list[dict]) -> list[str]:
@@ -301,12 +411,18 @@ def of(db: DB, plan_id: str) -> dict | None:
     return {"template": json.loads(row["template"]) if row["template"] else None, "reference": row["reference"]}
 
 
-def require(db: DB, plan_id: str, action: str, sections: list[dict]) -> None:
+def reference_of(db: DB, plan_id: str) -> str | None:
+    """Plan ``plan_id``'s reference (DES-0042), shown beside its title, or None."""
+    return (of(db, plan_id) or {}).get("reference")
+
+
+def require(db: DB, plan_id: str, action: str, sections: list[dict], team: str | None = None) -> None:
     """Refuse ``action`` (sign_off or share) on a plan whose template's
     required sections aren't all filled in ``sections``, when the format in
-    force says a missing one stops it."""
+    force for its team (``team``, else the one it was shared with) says a
+    missing one stops it."""
     kept = of(db, plan_id)
-    if kept is None or action not in resolve()["blocks"]:
+    if kept is None or not kept["template"] or action not in resolve(team or team_of(db, plan_id))["blocks"]:
         return
     gone = missing(kept["template"], sections)
     if gone:
@@ -317,22 +433,45 @@ def require(db: DB, plan_id: str, action: str, sections: list[dict]) -> None:
                            f"{'it' if len(gone) == 1 else 'them'} in before this is {what}", 409, missing=gone)
 
 
+def outline(template: dict | None, title_hint: str | None = None) -> str:
+    """The template as the supervisor is told it: every section in order,
+    with its kind, whether it is required and what belongs there, and the
+    title hint."""
+    out = f"Title: {title_hint}." if title_hint else ""
+    if template:
+        parts = [f"{t['title']} ({t['kind']}{', required' if t['required'] else ''})"
+                 + (f": {t['hint']}" if t["hint"] else "") for t in template["sections"]]
+        out += (" " if out else "") + (f"Write it to the {template['name']} template, its ## sections in this "
+                                       f"order: {'; '.join(parts)}. Decisions come last; you may add sections.")
+    return out
+
+
 def brief(db: DB, plan_id: str, markdown: str) -> str:
     """What the supervisor is told after proposing: the plan's reference,
-    and its template's required sections still empty, with their hints."""
+    the template it follows (every section, its kind and what belongs
+    there), the title hint, and the required sections still empty."""
     from brindle import plan_docs
 
     s = summary(db, plan_id, plan_docs.from_markdown(markdown)[1])
     if s is None:
         return ""
+    fmt = resolve(team_of(db, plan_id))
     out = f" Reference: {s['reference']}." if s["reference"] else ""
-    hints = {t["title"]: t["hint"] for t in s["sections"]}
+    kept = of(db, plan_id)["template"]
+    told = outline(kept, fmt["naming"]["title_hint"])
+    out += f" {told}" if told else ""
     if s["missing"]:
-        out += (f" The {s['template']} template's required sections are still empty: "
-                + "; ".join(f"{t} ({hints[t]})" if hints.get(t) else t for t in s["missing"])
-                + ". Fill them in your next revision"
-                + (": an empty one stops the sign-off." if SIGN_OFF in resolve()["blocks"] else "."))
+        out += (f" Required and still empty: {', '.join(s['missing'])}. Fill them in your next revision"
+                + (": an empty one stops the sign-off." if SIGN_OFF in fmt["blocks"] else "."))
     return out
+
+
+def planning_brief() -> str:
+    """The default template, for a supervisor about to write a plan: empty
+    without one."""
+    fmt = resolve()
+    told = outline(default_template(fmt), fmt["naming"]["title_hint"])
+    return f" {told}" if told else ""
 
 
 def summary(db: DB, plan_id: str, sections: list[dict]) -> dict | None:
