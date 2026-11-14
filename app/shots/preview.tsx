@@ -19,6 +19,7 @@ import { startSync } from "../src/store/sync";
 import { usageScenario } from "../src/test/usage";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
 import { ORGS, REPO, data } from "./fixtures";
+import { installLibrary, libraryInbox } from "./library";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
 import "../src/styles.css";
 
@@ -79,6 +80,8 @@ const SCENES: Record<string, Route> = {
   knowledge: { screen: "knowledge" },
   // The Library open from the foot's button: the sidebar is its navigation; then one of its Sources.
   library: { screen: "knowledge" },
+  // The same Library as columns by stage (the List / Board switch, remembered).
+  "library-board": { screen: "knowledge" },
   "library-decisions": { screen: "knowledge", view: "decisions" },
   "knowledge-map": { screen: "knowledge", view: "map" },
   "knowledge-record": { screen: "knowledge" },
@@ -271,7 +274,14 @@ if (scene.startsWith("update-") || scene === "sidebar-foot-busy") {
     watch: () => Promise.resolve(() => {}),
   };
 }
+// The Library's designs (shots/library.ts), two waiting on the person; the board scene opens on Board.
+const libraryScene = scene === "library" || scene === "library-board";
+if (libraryScene) {
+  daemon.data.inbox = [...libraryInbox, ...daemon.data.inbox];
+  localStorage.setItem("brindle.library.view", scene === "library-board" ? "board" : "list");
+}
 const client = daemon.client();
+if (libraryScene) installLibrary(client);
 const sync = startSync({ client, store, connect: daemon.connect });
 
 // No StrictMode here: its second mount trips an xterm.js timer on the disposed

@@ -521,6 +521,23 @@ def _board(db: DB, p: dict) -> list[dict]:
     return out
 
 
+def doc_tasks(db: DB, doc_id: str) -> list[dict] | None:
+    """The split of the plan shared as Library doc ``doc_id``, each task with
+    its state as the plan's board has it (queued, working, in review, merged
+    or cancelled): what the Library reads Building and Shipped from. None when
+    no plan on this machine is that doc."""
+    from brindle.service.dto import DesignTaskDTO
+
+    row = db.conn.execute("SELECT plan_id FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        p = _row(db, row["plan_id"])
+    except ServiceError:
+        return None
+    return [DesignTaskDTO(id=w["id"], title=w.get("title") or w["id"], state=w["state"]).to_json() for w in _board(db, p)]
+
+
 def _page(title: str, markdown: str) -> str:
     """The plan's page in the visuals store, what Keep copies: brindle's own
     HTML, the markdown escaped as text (it is never parsed as HTML)."""

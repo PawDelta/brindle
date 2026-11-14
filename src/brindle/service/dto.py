@@ -525,6 +525,24 @@ class PlanGateDTO(_DTO):
     approval_refused: str | None = None
 
 
+class LibraryFolderDTO(_DTO):
+    """A Library folder (GET /v1/library/folders): the server's, plus ``repo``,
+    the repo it was made for as this machine recorded it (None: not known here)."""
+    id: str
+    name: str
+    visibility: Literal["private", "shared"] = "private"
+    repo: str | None = None
+    created_at: float | None = None
+
+
+class DesignTaskDTO(_DTO):
+    """One task of a design's plan (GET /v1/analysis-docs/{id} ``tasks``), in
+    its board state: queued, working, in review, merged or cancelled."""
+    id: str
+    title: str
+    state: str
+
+
 class PlanDTO(_DTO):
     """A planning doc (brindle.plans): markdown brindle renders itself, split
     into its ``##`` sections. ``state``: open (the person hasn't decided),
