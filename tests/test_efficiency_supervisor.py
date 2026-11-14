@@ -185,7 +185,7 @@ def turn_completed(db, tmp_path) -> None:
 
 @pytest.mark.parametrize("meanwhile, stopped, status", [
     # Looks like the claimed turn by status and session: only the claim's cancel tells them apart.
-    ("turn completed", [], "idle"),
+    pytest.param("turn completed", [], "idle", marks=pytest.mark.variant("a turn completed since the claim cancels the restart")),
     pytest.param("paused", [], "paused", marks=pytest.mark.variant(
         "a pause before the helper starts must not be undone by it")),
     pytest.param("paused during launch", ["boss"], "paused", marks=pytest.mark.variant(

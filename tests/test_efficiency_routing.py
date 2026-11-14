@@ -10,7 +10,7 @@ from test_routing import boss, clear_cache, config, everything_available, instal
 
 
 @pytest.mark.parametrize("enabled,design_heavy,expected", [
-    (True, False, "developer-heavy"),
+    pytest.param(True, False, "developer-heavy", marks=pytest.mark.variant("non-design advanced work routes away from Fable")),
     pytest.param(True, True, "developer-fable",
                  marks=pytest.mark.variant("design-heavy work remains eligible for Fable")),
     pytest.param(False, False, "developer-fable",
@@ -24,8 +24,8 @@ def test_advanced_design_routing(db, repo, boss, enabled, design_heavy, expected
 
 
 @pytest.mark.parametrize("weight,default,design_heavy", [
-    ("advanced", "developer-heavy", False),
-    (None, "developer-heavy", False),
+    pytest.param("advanced", "developer-heavy", False, marks=pytest.mark.variant("the learner is never offered Fable for non-design weighted work")),
+    pytest.param(None, "developer-heavy", False, marks=pytest.mark.variant("the learner is never offered Fable for non-design unweighted work")),
     (None, "developer-fable", False),
     pytest.param("advanced", "developer-heavy", True,
                  marks=pytest.mark.variant("weighted routing must pass design eligibility to the learner")),
@@ -54,6 +54,7 @@ def test_learner_respects_design_eligibility(db, repo, boss, monkeypatch, weight
     assert offered and all(("developer-fable" in names) == design_heavy for names in offered)
 
 
+@pytest.mark.variant("assign(design_heavy=True) must reach routing, or Fable is never eligible")
 def test_assign_marks_design_heavy_work(db, repo, boss, monkeypatch):
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     config(repo, fable_for_design_only=True, learning="off", pipeline=False)

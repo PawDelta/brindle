@@ -77,7 +77,7 @@ def assign(db, repo, **kw) -> tuple[str, str]:
     return reply, t.agent_id
 
 
-@pytest.mark.parametrize("on", [True, False])
+@pytest.mark.parametrize("on", [pytest.param(True, marks=pytest.mark.variant("the fast path skips the second review a repo asks for on light work")), False])
 def test_small_request_merges_after_one_light_review_and_the_checks(db, repo, session, detached, on):
     # On: a second review the repo asks for on light work is skipped too (one light review).
     checks = session(fast_path=on, **({"second_review": {"light": "reviewer-codex"}} if on else {}))

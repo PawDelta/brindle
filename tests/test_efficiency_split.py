@@ -60,8 +60,8 @@ def edit_line(db, t: tasks.Task, line: int, commit: bool = True) -> None:
 
 
 @pytest.mark.parametrize("granularity, second, starts", [
-    ("hunk", "big.py:60-70", True),
-    ("file", "big.py:60-70", False),
+    pytest.param("hunk", "big.py:60-70", True, marks=pytest.mark.variant("disjoint regions of one file start in parallel")),
+    pytest.param("file", "big.py:60-70", False, marks=pytest.mark.variant("file granularity still queues disjoint regions")),
     ("hunk", "big.py:5-20", False),
     pytest.param("file", "big.py:5-20", False, marks=pytest.mark.variant(
         "the brief's matrix: overlapping regions queue under file granularity too")),
@@ -80,6 +80,7 @@ def test_parts_of_one_file_start_in_parallel_only_on_disjoint_regions(db, repo, 
         assert other.state == "pending" and tasks._loads(other.depends_on) == [first.agent_id]
 
 
+@pytest.mark.variant("a worker's uncommitted edits hold their region")
 def test_uncommitted_changes_hold_a_region_like_committed_ones(db, repo, supervisor):
     """A worker's edits it hasn't committed yet are as much its work as its
     commits: a committed hunk elsewhere in the file must not hide them."""
