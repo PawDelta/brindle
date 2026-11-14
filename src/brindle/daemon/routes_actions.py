@@ -2370,6 +2370,101 @@ def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
         params["id"], kind, scope_id, _get(body, "folder", required=True), api=api))
 
 
+def _work_call(params: dict, body: Body, run: Callable) -> Any:
+    """Run a pro/work_items function for the signed-in org: ``run(org_id, api, who)``, ``who`` naming the account
+    (server and subject) whose cache it may use. A caller that says which org it loaded (``org_id``) is refused
+    with 409, before anything is sent, when the active one is another. Bad input is a 400; the Library's or
+    tracker's refusal keeps its own 4xx (see upstream_error), anything unreachable a 502."""
+    from brindle.pro import auth, credentials
+
+    repo = params.get("repo") or _get(body, "repo")
+    ent = _docs_entitlement(repo)
+    loaded = params.get("org_id") or _get(body, "org_id")
+    if loaded and loaded != ent.org_id:
+        raise ServiceError("org_changed", "your active organization changed since this was loaded; reload it", 409)
+    who = f"{auth.base_url((credentials.default_store().load() or {}).get('base_url'))}|{ent.sub}"
+    try:
+        return run(ent.org_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo), who)
+    except ValueError as e:
+        raise ServiceError("invalid", str(e)) from e
+
+
+def design_work_items(db: DB, params: dict, body: Body) -> Any:
+    """A design's linked items and their states. Fail-soft: the tracker or server unreachable answers the last
+    read with ``unreachable`` true (see pro/work_items.items)."""
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.items(org, params["id"], api=api, who=who))
+
+
+def create_design_work_items(db: DB, params: dict, body: Body) -> Any:
+    """Make items from the design (``kind`` design), one task or every task without one (task), or a passage
+    (``section`` and ``quote``)."""
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.create(
+        org, params["id"], _get(body, "kind", required=True), api=api, who=who, task=_get(body, "task"),
+        section=_get(body, "section"), quote_text=_get(body, "quote"), title=_get(body, "title")))
+
+
+def link_design_work_item(db: DB, params: dict, body: Body) -> Any:
+    """Link an existing ``item`` (key or pasted link) to the design, or to a ``target`` section or task."""
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.link(
+        org, params["id"], _get(body, "item", required=True), api=api, who=who, tracker=_get(body, "tracker"),
+        target=_get(body, "target", dict)))
+
+
+def unlink_design_work_item(db: DB, params: dict, body: Body) -> Any:
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.unlink(org, params["id"], params["link_id"], api=api, who=who))
+
+
+def library_work_items(db: DB, params: dict, body: Body) -> Any:
+    """``{"items": {doc_id: {epic, done, total, read_at, stale?}}, "remaining": [doc_id]}`` for the designs in
+    ``ids`` (comma separated, at most 50), for the Library list and board: from the cache, reading up to 10 never
+    read or out-of-date designs now. ``remaining`` are due a read this call didn't make: ask again with them."""
+    from brindle.pro import work_items as wi
+
+    ids = [i for i in (params.get("ids") or "").split(",") if i]
+    if len(ids) > 50:
+        raise ServiceError("invalid", "ask for at most 50 designs at a time")
+    return _work_call(params, body, lambda org, api, who: wi.summaries(org, ids, api=api, who=who, fetch=10))
+
+
+def tracker_integrations(db: DB, params: dict, body: Body) -> Any:
+    """Settings › Integrations: connections and settings (an org admin; the Library checks), and the page
+    where an admin signs in to a tracker."""
+    from brindle.pro import auth, credentials, work_items as wi
+
+    got = _work_call(params, body, lambda org, api, who: dict(wi.integrations(org, api=api)))
+    base = ((credentials.default_store().load() or {}).get("base_url"))
+    org = _docs_entitlement(params.get("repo")).org_id
+    roots = sorted({ws.repo_root for ws in db.find_workspaces(None)})
+    return dict(got, connect_url=wi.connect_url(auth.base_url(base), org), repos=wi.local_repos(roots, org))
+
+
+def put_tracker_settings(db: DB, params: dict, body: Body) -> Any:
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.save_settings(
+        org, {k: v for k, v in body.items() if k not in ("repo", "org_id")}, api=api))
+
+
+def check_tracker(db: DB, params: dict, body: Body) -> Any:
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.check_connection(org, params["tracker"], api=api))
+
+
+def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.disconnect(org, params["tracker"], api=api))
+
+
 def delete_doc(db: DB, params: dict, body: Body) -> Any:
     return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
 
@@ -3088,6 +3183,16 @@ ROUTES = [
     Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
     Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
     _post("/library/folders", create_library_folder),
+    Route("/v1/library/designs/{id}/work-items", _endpoint(design_work_items), methods=["GET"]),
+    Route("/v1/library/designs/{id}/work-items", _endpoint(create_design_work_items), methods=["POST"]),
+    Route("/v1/library/designs/{id}/work-items/links", _endpoint(link_design_work_item), methods=["POST"]),
+    Route("/v1/library/designs/{id}/work-items/links/{link_id}", _endpoint(unlink_design_work_item),
+          methods=["DELETE"]),
+    Route("/v1/library/work-items", _endpoint(library_work_items), methods=["GET"]),
+    Route("/v1/integrations/trackers", _endpoint(tracker_integrations), methods=["GET"]),
+    Route("/v1/integrations/trackers/settings", _endpoint(put_tracker_settings), methods=["PUT"]),
+    _post("/integrations/trackers/{tracker}/test", check_tracker),
+    Route("/v1/integrations/trackers/{tracker}", _endpoint(disconnect_tracker), methods=["DELETE"]),
     Route("/v1/analysis-docs/{id}/folder", _endpoint(move_doc_to_folder), methods=["PUT"]),
     _post("/analysis-docs/{id}/share", share_doc),
     Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),

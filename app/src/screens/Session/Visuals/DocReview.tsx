@@ -18,6 +18,7 @@ import { ChevronRightIcon, CommentIcon } from "../../../components/icons";
 import { button, field, label, main, quiet } from "../../../components/ui";
 import { DocHistory, WorkItems, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { Avatar, Tasks, personName } from "./PlanCards";
+import { WorkPanel, type Work } from "./WorkPanel";
 
 export type ReviewTab = "comments" | "decisions" | "history" | "tasks";
 
@@ -201,8 +202,12 @@ function DraftCard({ draft, number, stale, busy, onSend, onCancel, change }: {
 
 const TABS: [ReviewTab, string][] = [["comments", "Comments"], ["decisions", "Decisions"], ["history", "History"], ["tasks", "Tasks"]];
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, workItems }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, workItems, work, canLink }: {
   plan: Plan;
+  /* The design's items in the tracker, with what can be done to them (WorkPanel); replaces `workItems`. */
+  work?: Work;
+  /* Whether this person may link and create items (the Library checks too). */
+  canLink?: boolean;
   limits?: ThreadLimits;
   tab: ReviewTab;
   onTab(tab: ReviewTab): void;
@@ -248,9 +253,9 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
         <div className="flex flex-col gap-2.5 px-3.5 py-3" data-testid="plan-tasks">
           {plan.split.length === 0 ? <p className="text-ink-3">This design has no split yet.</p>
             : plan.state === "approved" ? <p className="text-ink-3">Its tasks are the live board above.</p>
-            : <Tasks plan={plan} shared={shared} />}
+            : work ? null : <Tasks plan={plan} shared={shared} />}
         </div>
-        <WorkItems items={workItems ?? null} />
+        {work ? <WorkPanel work={work} split={plan.split} can={canLink ?? true} /> : <WorkItems items={workItems ?? null} />}
       </>
     );
   } else if (tab === "history") {

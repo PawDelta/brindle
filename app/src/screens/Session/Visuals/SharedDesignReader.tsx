@@ -14,6 +14,7 @@ import { BackButton, useEscBack } from "./chrome";
 import { sharedSource } from "./docSource";
 import { ReaderBar } from "./DocBar";
 import { DesignDoc, MODES, useDoc, type Mode, type Teammate } from "./PlanReader";
+import type { Work } from "./WorkPanel";
 
 /* How often a design open here is read again: what teammates wrote, and whether it can still be opened. */
 const READ_EVERY_MS = 30_000;
@@ -30,8 +31,10 @@ function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
   };
 }
 
-export function SharedDesignReader({ client, docId, title, repo, onBack, backLabel }: {
+export function SharedDesignReader({ client, docId, title, repo, onBack, backLabel, work }: {
   client: SharedDesignClient & Partial<LiveClient>;
+  /* The design's work items, when it was opened from the Library. */
+  work?: Work;
   docId: string;
   /* The card's title, while the first read is out. */
   title?: string;
@@ -75,7 +78,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="shared-design-reader">
       {shown && teammate ? (
-        <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} liveClient={client.visualLive ? client as LiveClient : undefined}
+        <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work} liveClient={client.visualLive ? client as LiveClient : undefined}
           chrome={{ lead, modes: client.visualLive ? MODES : COLUMN_MODES, allowed, onMode: setMode }} />
       ) : (
         <>

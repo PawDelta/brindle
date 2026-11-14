@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { AnalysisDoc, FolderGroup } from "../../api/client";
-import { docQueue, folderTree, groupDocs, placedFolders, stageCounts, stageOf, type DesignRecord } from "./libraryStages";
+import { docQueue, folderTree, groupDocs, loadRecords, loadWorkItems, placedFolders, stageCounts, stageOf, type DesignRecord } from "./libraryStages";
 
 const task = (id: string, state: string) => ({ id, title: id, state });
 const TEAM = { kind: "group", id: "t1", name: "Founding Team" };
@@ -62,4 +62,44 @@ it("the sidebar groups folders by the repo each was made for, newest first, and 
     ["brindle", 1, [["Releases", 1, true]]],
     ["My folders", 0, [["Designs", 0, true]]],
   ]);
+});
+
+it("the list's and board's work item is the design's own item with the tracker's state; a failed read leaves it empty", async () => {
+  const doc = (id: string) => ({ id }) as AnalysisDoc;
+  const detail = { design: null, tasks: [], threads: [], decisions: [], verdict: null };
+  const epic = { link_id: "wl_1", tracker: "azure_devops", key: "4810", display: "AB#4810", target: { kind: "design" }, state: "Active", done: false } as const;
+  const base = { doc: async () => detail as never };
+  const withItems = await loadRecords({ ...base, libraryWorkItems: async () => ({ items: { a: { epic, done: 2, total: 3 } } }) }, [doc("a"), doc("b")]);
+  expect(withItems.get("a")?.work_item).toMatchObject({ key: "AB#4810", state: "Active", tone: "active" });
+  expect(withItems.get("b")?.work_item).toBeUndefined();
+  const failed = await loadRecords({ ...base, libraryWorkItems: async () => { throw new Error("offline"); } }, [doc("a")]);
+  expect(failed.get("a")).toBeDefined();
+  expect(failed.get("a")?.work_item).toBeUndefined();
+});
+
+it("a design the daemon stops listing on a later page (refused since) loses the item an earlier page gave it", async () => {
+  const epic = { link_id: "wl", tracker: "azure_devops", key: "1", display: "AB#1", target: { kind: "design" }, state: "New" } as const;
+  const pages = [
+    { items: { a: { epic, done: 0, total: 0 }, b: { epic, done: 0, total: 0 } }, remaining: ["b"] },     // b was cached, due a read
+    { items: { }, remaining: [] },                                                                         // the read of b was refused
+  ];
+  const got = await loadWorkItems(async () => pages.shift() as never, ["a", "b"]);
+  expect(Object.keys(got)).toEqual(["a"]);
+});
+
+it("work items of a listing longer than one request are all asked for, the daemon's few reads at a time", async () => {
+  const docs = Array.from({ length: 120 }, (_, n) => ({ id: `d${n}` }) as AnalysisDoc);
+  const epic = { link_id: "wl", tracker: "azure_devops", key: "1", display: "AB#1", target: { kind: "design" }, state: "New" } as const;
+  const unread = new Set(docs.map((d) => d.id));
+  const asked: number[] = [];
+  const libraryWorkItems = async (ids: string[]) => {
+    asked.push(ids.length);
+    if (ids.length > 50) throw new Error("too many");
+    const now = ids.filter((id) => unread.has(id)).slice(0, 10);          // the daemon reads ten, names the rest
+    now.forEach((id) => unread.delete(id));
+    return { items: Object.fromEntries(ids.filter((id) => !unread.has(id)).map((id) => [id, { epic, done: 0, total: 0 }])), remaining: ids.filter((id) => unread.has(id)) };
+  };
+  const got = await loadRecords({ doc: async () => ({ design: null, tasks: [], threads: [], decisions: [], verdict: null }) as never, libraryWorkItems }, docs);
+  expect([...got.values()].filter((r) => r.work_item?.key === "AB#1")).toHaveLength(120);
+  expect(Math.max(...asked)).toBeLessThanOrEqual(50);
 });

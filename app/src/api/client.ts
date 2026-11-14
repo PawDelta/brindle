@@ -710,6 +710,70 @@ export interface WorkItemLink {
   title?: string | null;
 }
 
+export type TrackerName = "jira" | "azure_devops";
+
+/* One item linked to a design (GET /library/designs/{id}/work-items): what the tracker said when it
+   was last read. `target` is what it is linked to; `done` is the org's own list of done states. */
+export interface TrackerLink {
+  link_id: string;
+  tracker: TrackerName;
+  key: string;
+  /* "AB#4810" or "BRN-88": what people say. */
+  display: string;
+  type?: string | null;
+  target: { kind: "design" | "section" | "task" | "passage"; id?: string | null };
+  url?: string | null;
+  state?: string | null;
+  done?: boolean;
+  /* Not read just now: the last known state. */
+  stale?: boolean;
+  created?: boolean;
+  linked_by?: string;
+  linked_at?: number;
+  read_at?: number | null;
+}
+
+export interface DesignWorkItems {
+  items: TrackerLink[];
+  connected: Partial<Record<TrackerName, boolean>>;
+  read_at?: number | null;
+  /* The design's own item, and how many of the others are done. */
+  epic: TrackerLink | null;
+  done: number;
+  total: number;
+  /* The tracker or the Library couldn't be reached: this is the last read. */
+  unreachable?: boolean;
+}
+
+export interface TrackerConnection {
+  tracker: TrackerName;
+  label: string;
+  configured: boolean;
+  connected: boolean;
+  site?: string | null;
+  connected_by?: string | null;
+  connected_at?: number | null;
+  last_error?: { at: number; error: string } | null;
+}
+
+export interface TrackerSettings {
+  repos: { repo_key: string; repo: string; tracker: TrackerName; project: string; area?: string | null }[];
+  types: Partial<Record<TrackerName, { design: string; task: string; passage: string }>>;
+  done_states: Partial<Record<TrackerName, string[]>>;
+  allow: { create_items: boolean; link_back: boolean; close_on_merge: boolean; include_text: boolean };
+  who_can_create: "authors_and_reviewers" | "editors" | "members" | "admins";
+}
+
+export interface TrackerIntegrations {
+  org_id: string;
+  settings: Partial<TrackerSettings>;
+  trackers: Record<TrackerName, TrackerConnection>;
+  /* Where an admin signs in to a tracker: a page on the Library's site. */
+  connect_url: string;
+  /* The repos on this machine, by the key the Library knows a design's repo by. */
+  repos: { repo: string; repo_key: string; repo_root: string }[];
+}
+
 /* A design's folder, as its review state names it: the scope and the folder's id. */
 export interface DesignFolderRef {
   scope: DocScope;
@@ -2118,6 +2182,50 @@ export class DaemonClient {
      the author's own design, opened in the author's reader. A 404 for anyone else's. */
   libraryDesignPlan(doc: string) {
     return this.get<VisualDTO>(`/library/designs/${encodeURIComponent(doc)}/plan`);
+  }
+
+  /* Work items (Jira, Azure DevOps) on a design. Reads answer the last read with `unreachable` when the
+     tracker or Library can't be reached; writes raise (the Library's refusal keeps its own status). */
+  designWorkItems(doc: string, repo?: string) {
+    return this.get<DesignWorkItems>(`/library/designs/${encodeURIComponent(doc)}/work-items`, { repo });
+  }
+
+  createWorkItems(doc: string, body: { kind: "design" | "task" | "passage"; task?: string; section?: string; quote?: string; title?: string }, repo?: string) {
+    return this.post<{ created: TrackerLink[]; remaining?: number }>(`/library/designs/${encodeURIComponent(doc)}/work-items`, { ...body, ...(repo ? { repo } : {}) });
+  }
+
+  linkWorkItem(doc: string, item: string, target: TrackerLink["target"] = { kind: "design" }, repo?: string) {
+    return this.post<TrackerLink>(`/library/designs/${encodeURIComponent(doc)}/work-items/links`, { item, target, ...(repo ? { repo } : {}) });
+  }
+
+  unlinkWorkItem(doc: string, linkId: string, repo?: string) {
+    return this.delete<{ unlinked: boolean }>(`/library/designs/${encodeURIComponent(doc)}/work-items/links/${encodeURIComponent(linkId)}${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
+  /* For the Library list and board: each design's own item with how many others are done, from what was
+     read before, reading some never-read or old ones now (at most 50 ids). `remaining` are due a read this
+     answer didn't make: ask again with them. */
+  libraryWorkItems(ids: string[], repo?: string) {
+    return this.get<{ items: Record<string, { epic: TrackerLink | null; done: number; total: number }>; remaining?: string[] }>("/library/work-items", { ids: ids.join(","), repo });
+  }
+
+  /* Settings › Integrations (org admins). */
+  trackerIntegrations(repo?: string) {
+    return this.get<TrackerIntegrations>("/integrations/trackers", { repo });
+  }
+
+  /* `org` is the organization the page was loaded for: the daemon refuses (409) when the active one has
+     changed since, so a draft for one org never lands on another. */
+  saveTrackerSettings(settings: Partial<TrackerSettings>, org: string) {
+    return this.put<TrackerIntegrations>("/integrations/trackers/settings", { ...settings, org_id: org });
+  }
+
+  testTracker(tracker: TrackerName, org: string) {
+    return this.post<{ tracker: TrackerName; ok: boolean }>(`/integrations/trackers/${tracker}/test`, { org_id: org });
+  }
+
+  disconnectTracker(tracker: TrackerName, org: string) {
+    return this.delete<{ provider_grant?: string }>(`/integrations/trackers/${tracker}`, { org_id: org });
   }
 
   writeSharedDesign(doc: string, tail: string, body: Record<string, unknown>) {
