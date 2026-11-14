@@ -581,10 +581,12 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRep
     return (
       <section className="flex min-h-0 flex-1 flex-col" aria-label="Library">
         <DocsView key={stage ?? ""} stage={stage} folder={folder} inRepo={inRepo} queue={docQueue(inbox)} repos={repos} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder}
-          design={design} designReader={(id, title, back) => (
-            // The reader fills the Library's page, its bottom bar in view.
+          design={design} designReader={(id, title, back, place) => (
+            // The reader fills the Library's page, its bottom bar in view. Its project (where a
+            // question to the supervisor goes): the one the person came with (a review card's, a
+            // session's), else the design's own (the repo picked, or its folder's), else this page's.
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-              <LibraryDesign key={id} client={client} docId={id} title={title} repo={repo ?? fromRepo ?? undefined} onBack={back} />
+              <LibraryDesign key={id} client={client} docId={id} title={title} repo={fromRepo ?? place ?? repo ?? undefined} onBack={back} />
             </div>
           )} />
       </section>

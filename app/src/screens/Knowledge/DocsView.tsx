@@ -48,7 +48,7 @@ export interface DocsViewProps {
   onBack?(): void;
   /* A design opens in the design reader (Session/Visuals/SharedDesignReader), here in the Library:
      Back comes back to this list as it was. `design`: `doc` is one, before the list says so. */
-  designReader?(id: string, title: string | undefined, onBack: () => void): ReactNode;
+  designReader?(id: string, title: string | undefined, onBack: () => void, repo: string | undefined): ReactNode;
   design?: boolean;
 }
 
@@ -595,7 +595,8 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   if (sourceOpen) return scroll(<Reader client={client} repo={repo} id={sourceOpen.id} targets={[]} titles={new Map()} local={{ title: sourceOpen.title, markdown: sourceOpen.text }} onBack={() => setSourceOpen(null)} onDeleted={() => undefined} onOpen={setOpen} onScopes={learn} />);
 
   const listed = open ? docs.find((d) => d.id === open) : undefined;
-  if (open && designReader && (listed?.kind === "design" || (design && open === doc))) return designReader(open, listed?.title, () => setOpen(null));
+  // The design's project: the repo picked in the sidebar, else the one its own folder is in.
+  if (open && designReader && (listed?.kind === "design" || (design && open === doc))) return designReader(open, listed?.title, () => setOpen(null), inRepo ?? placeOf(open)?.repo ?? undefined);
   if (open) {
     return scroll(
       <Reader
