@@ -26,7 +26,13 @@ def _spawned(db, ws, task, monkeypatch, launched):
     return db.get_agent(agent.id), launched[-1]
 
 
-@pytest.mark.parametrize("on", [True, False])
+@pytest.mark.parametrize("on", [
+    pytest.param(True, marks=pytest.mark.variant(
+        "compares two workers' real launch argv: per-task text leaking into the system prompt "
+        "breaks the shared prefix while every line still runs")),
+    pytest.param(False, marks=pytest.mark.variant(
+        "the setting turned off keeps the repo brief in the task and out of the system prompt")),
+])
 def test_same_profile_workers_share_their_start_prefix(db, repo, monkeypatch, on):
     monkeypatch.setattr("brindle.providers.trust_folder", lambda path: None)
     (Path(repo) / ".brindle" / "rules").mkdir(parents=True, exist_ok=True)
