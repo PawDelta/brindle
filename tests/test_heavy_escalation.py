@@ -120,7 +120,7 @@ def test_merge_checks_timing_out_go_to_the_supervisor_not_developer_heavy(db, he
 @pytest.mark.parametrize("queued", [False, True])
 def test_heavy_escalation_preserves_cap_notice(db, heavy, monkeypatch, queued):
     ws, retries, configure = heavy
-    configure(fable_escalation=True, review_rounds=0)
+    configure(fable_escalation=True, review_rounds=0, review_stall_stop=False)
     cfg = workspaces.config_for(db, ws)
     alive, delegate = agents.is_alive, agents.delegate
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)

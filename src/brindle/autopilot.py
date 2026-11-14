@@ -872,7 +872,11 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
                 else f"{cli} isn't installed, skipped {name}")
     if p.provider in quota.PROVIDERS:
         room = quota.headroom(p.provider, cfg, repo_root)
-        if room <= 100 - cfg.usage_limit:
+        # Reserve enough allowance to finish the expected size of task. Unknown
+        # weights get the full margin; a local server has no usage allowance.
+        margin = (0 if p.provider == "native" else max(0, min(100, cfg.limit_headroom))
+                  * {"light": 0.25, "medium": 0.5}.get(weight, 1))
+        if room <= 100 - cfg.usage_limit + margin:
             label = quota.NAMES.get(p.provider, p.provider)
             if p.provider == "native":
                 return f"local model server not answering, skipped {name}"
@@ -885,7 +889,7 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
 def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
                      files: list[str] | None,
                      decision: dict | None = None, gate=None,
-                     ceiling: str | None = None) -> tuple[str | None, bool, str]:
+                     ceiling: str | None = None, design_heavy: bool = False) -> tuple[str | None, bool, str]:
     """(profile, learned, why) for a task of ``weight``; profile is None when
     every candidate for the tier is out. ``decision`` gets the ``baseline``
     (the pick without learning), and ``over_budget`` (why each candidate was
@@ -902,6 +906,9 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if effective_ceiling:
         order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:
+        if not cfg.routing_allows(name, design_heavy):
+            skipped.append(f"Fable is reserved for design-heavy tasks, skipped {name}")
+            continue
         why = _unavailable(name, cfg, repo_root, gate, weight)
         if why:
             skipped.append(why)
@@ -921,8 +928,9 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if cfg.routing_locked.get(weight):
         pick, reason = None, None   # the owner pinned this tier: learning never overrides it
     else:
+        options = {"design_heavy": True} if design_heavy else {}
         pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
-                                           weight=weight, default=remaining[0])
+                                           weight=weight, default=remaining[0], **options)
     name = pick or remaining[0]
     if decision is not None:
         decision["baseline"] = remaining[0]
@@ -1062,7 +1070,8 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
                    task: str | None = None, files: list[str] | None = None,
                    weight: str | None = None, why: list[str] | None = None,
-                   decision: dict | None = None) -> tuple[str, bool]:
+                   decision: dict | None = None, *, design_heavy: bool = False,
+                   max_tier: str | None = None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
     ``requested`` if given, else (when no ``weight`` is given) the first
     unverified milestone's profile in the caller's session, else the repo's
@@ -1072,10 +1081,17 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     ``default_agent``. Raises AutopilotError if it doesn't exist. An
     explanation of a routed pick is appended to ``why``. ``decision`` is
     filled with what ``brindle.savings`` records: the ``profile``, the
-    ``baseline`` (the pick without learning), ``learned`` and the ``weight``."""
+    ``baseline`` (the pick without learning), ``learned`` and the ``weight``.
+    ``design_heavy`` allows Fable when ``fable_for_design_only`` is enabled;
+    it does not change the task's weight. ``max_tier``: a ceiling for this
+    delegation alone (a fast-path task's "medium"), applied like the repo's
+    ``max_weight`` to routing, its fallbacks and the final pick; the tighter wins."""
     cfg = load_repo_config(repo_root)
+    options = {"design_heavy": True} if design_heavy else {}
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
+    if max_tier in weight_order and (ceiling is None or weight_order[max_tier] < weight_order[ceiling]):
+        ceiling = max_tier
 
     if requested:
         req = requested.strip()
@@ -1135,7 +1151,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             from brindle import budget
 
             gate = budget.Gate(db, cfg, repo_root, caller_id)
-            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate, ceiling=ceiling)
+            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate, ceiling=ceiling, **options)
             if routed.get("over_budget"):
                 message = budget.refusal(routed["over_budget"])
                 try:
@@ -1149,6 +1165,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 candidates = [cfg.default_agent]
                 if ceiling and weight_order[profile_weight(cfg.default_agent, cfg, repo_root)] > weight_order[ceiling]:
                     candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
+                candidates = [n for n in candidates if cfg.routing_allows(n, design_heavy)]
                 fallback = next((n for n in candidates if not _excluded(n, cfg, repo_root)), None)
                 if not fallback and candidates:
                     raise AutopilotError(f"no agent profile left for a {weight} task: every candidate runs on a "
@@ -1161,16 +1178,24 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 why.append(note)
         if not name:
             name = learning.choose(db, cfg, repo_root, task, files, weight=weight,
-                                   default=cfg.default_agent) or ""
+                                   default=cfg.default_agent, **options) or ""
             learned = bool(name)
             name = name or cfg.default_agent
+            if not cfg.routing_allows(name, design_heavy):
+                name, learned, note = _route_by_weight(
+                    db, cfg, repo_root, ceiling or weight or "advanced", task, files, routed,
+                    ceiling=ceiling, **options)
+                if not name:
+                    raise AutopilotError("no available agent for a task without design-heavy routing")
+                if why is not None:
+                    why.append(note)
             if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
                 candidates = cfg.routing.get(ceiling, [cfg.default_agent])
                 orig_name = name
                 name = candidates[0] if candidates else cfg.default_agent
                 if why is not None:
                     why.append(f"fallback profile {orig_name} capped to {name} by max_weight {ceiling}")
-            routed["baseline"] = cfg.default_agent
+            routed.setdefault("baseline", cfg.default_agent)
         routed["prior"] = learned and learning.used_prior(cfg, repo_root)
     if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
         permissible = [
@@ -1204,6 +1229,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         tier = weight or profile_weight(name, cfg, repo_root)
         alternatives = list(dict.fromkeys([*cfg.routing.get(tier, []), *selected.fallback]))
         replacement = next((n for n in alternatives if n != name and
+                            cfg.routing_allows(n, design_heavy) and
                             (not ceiling or weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]) and
                             not _unavailable(n, cfg, repo_root, weight=tier)), None)
         if replacement is None:
@@ -1740,7 +1766,7 @@ def record_accepted_decision(db: DB, root_id: str, decision: str) -> None:
     entry = f"Accepted decision / scope exclusion:\n{decision.strip()}"
     new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
     db.update_autopilot(root_id, audit_history=new_history, audit_sha=None, audit_ok=None, auditor_id=None, state="running")
-    bus.publish_agent(db, "autopilot.audit_decision", root_id)
+    bus.publish_agent(db, "autopilot.audit_decision", root_id, decision=decision.strip()[:1000])
 
 
 def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
@@ -2819,8 +2845,23 @@ def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
     return f"{text} Allowed their commands in {settings_path}."
 
 
+FAST_PATH_GUIDE = """- Fast path (this repo's `fast_path` setting is on): a small request goes
+  straight to one worker with `assign(fast_path=true, weight="light" or
+  "medium", done_when=<the targeted tests>)`. Small means one area, no design
+  decisions, and roughly under 15 minutes of work. It needs no `set_goal`, no
+  milestones and no `check_milestone`, and gets no completion audit: brindle
+  gives the branch one light review and the repo's checks, then merges it.
+  That is its finish: don't run the full suite yourself afterwards, relay the
+  merged result to the user in one line. The user's word overrides
+  your sizing: "fast path" sends a request this way, "full path" (or asking
+  for a plan or milestones) sends it through the goal.
+"""
+
+
 def guide(cfg: RepoConfig, repo_root: str | None = None) -> str:
     text = GUIDE.format(max_agents=cfg.max_agents or "any number of")
+    if cfg.fast_path:
+        text += FAST_PATH_GUIDE
     if repo_root and not cfg.checks:
         from brindle import detect
 
