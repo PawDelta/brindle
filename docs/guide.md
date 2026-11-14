@@ -324,8 +324,8 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    different model on purpose. With hosted learning on, the learner may
    choose `reviewer-codex` or `reviewer-local` instead when they can run here
    and its evidence says they review this kind of work better.
-   Opt in to `review_sizing` to give reviews a bounded diff, touched-file list
-   and caller context from graphify (or git grep). Re-reviews get only the
+   `review_sizing` (on by default; `false` turns it off) gives reviews a bounded
+   diff, touched-file list and caller context from graphify (or git grep). Re-reviews get only the
    current round's diff. Automatic reviews of docs/test-only branches, or
    branches within both `review_small_max_files` and `review_small_max_lines`,
    use `reviewer-light` (Sonnet, low effort). When the writer used Claude and
@@ -753,7 +753,7 @@ Goal driving, merge gates and cleanup:
 | `review` | required for sessions | require a reviewer's approval before merging |
 | `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |
 | `review_profile` | none | force `request_review`'s profile, skipping its automatic cross-model pick (see below) |
-| `review_sizing` | `false` | scoped review context and cheaper profiles preserving existing cross-vendor pairings; explicit profile requests still win |
+| `review_sizing` | `true` | scoped review context and cheaper profiles preserving existing cross-vendor pairings; explicit profile requests still win |
 | `review_small_max_files` | `5` | maximum touched files for a small review |
 | `review_small_max_lines` | `200` | maximum added + deleted lines for a small review; docs/test-only branches also qualify |
 | `review_risky_paths` | `*auth*`, `*permission*`, `*daemon*`, `*concurr*`, `*thread*`, `*lock*`, `*async*` | globs over repo-relative paths that retain the usual reviewer, including deleted paths |
@@ -774,8 +774,8 @@ Goal driving, merge gates and cleanup:
 | `pipeline` | `true` | brindle reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
-| `fast_path` | `false` | the supervisor may send a small request straight to one light or medium worker (`assign(fast_path=true)`): no goal, milestones or audit; one light review and the checks before it merges |
-| `supervisor_state` | `false` | brindle keeps a compact goal state for the supervisor and, past `supervisor_restart_tokens` of context, restarts it as a fresh session seeded with that state |
+| `fast_path` | `true` | the supervisor may send a small request straight to one light or medium worker (`assign(fast_path=true)`): no goal, milestones or audit; one light review and the checks before it merges |
+| `supervisor_state` | `true` | brindle keeps a compact goal state for the supervisor and, past `supervisor_restart_tokens` of context, restarts it as a fresh session seeded with that state |
 | `supervisor_restart_tokens` | `120000` | the supervisor context (tokens its last turn read) that triggers that restart |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
@@ -785,7 +785,7 @@ Goal driving, merge gates and cleanup:
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
 | `overlap` | unset | a task whose `files` overlap a running task's: `"block"` refuses it, `"warn"` starts it with a warning, `"queue"` queues it until that task merges. Unset, it is refused within a session and queued behind another session's task (both sessions' supervisors are told; the other session's work is never cancelled), and the queued task starts from that task's merge commit |
-| `overlap_granularity` | `"file"` | what counts as an overlap. `"file"`: any shared file. `"hunk"`: a shared file only when the line regions the tasks declare in `files` (`"src/a.py:120-180"`) meet each other or the hunks the running task has actually changed (committed or not), so parts of one file can run in parallel. Regions are line numbers of the commit the supervisor's checkout was on when the task was queued, and are moved across later commits before they're compared; a file declared without a region, or whose lines can't be moved, still counts whole. Overlapping regions are handled by `overlap` as before, and a merge (by hand or by the pipeline) warns when the merged branch's hunks meet a running task's |
+| `overlap_granularity` | `"hunk"` | what counts as an overlap. `"file"`: any shared file. `"hunk"`: a shared file only when the line regions the tasks declare in `files` (`"src/a.py:120-180"`) meet each other or the hunks the running task has actually changed (committed or not), so parts of one file can run in parallel. Regions are line numbers of the commit the supervisor's checkout was on when the task was queued, and are moved across later commits before they're compared; a file declared without a region, or whose lines can't be moved, still counts whole. Overlapping regions are handled by `overlap` as before, and a merge (by hand or by the pipeline) warns when the merged branch's hunks meet a running task's |
 | `protected_paths` | `[]` | paths or globs (`"migrations/"`, `"*.lock"`) whose merge conflicts brindle never hands to a worker to resolve: the branch waits for you instead (see "Conflict-aware merging") |
 | `live_check_ignore` | `[]` | names of processes (`["my-sync-daemon"]`) that never run in your projects, so a worktree is removed even though Linux won't show brindle their folder. Anything else whose folder can't be read keeps every worktree; systemd's user manager, `ssh-agent` and `gpg-agent` are excused already |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
@@ -1590,14 +1590,14 @@ them as a message and keeps working until a fresh audit approves.
 `"goal_audit": false` turns it off.
 
 **The fast path.** For a small request, the goal, milestones, milestone checks and
-completion audit can cost more than the work itself. With `"fast_path": true` the
-supervisor sends a small, well-scoped request (one area, no design decisions, roughly
+completion audit can cost more than the work itself. With `fast_path` on (the
+default) the supervisor sends a small, well-scoped request (one area, no design decisions, roughly
 under 15 minutes of work) straight to one light or medium worker with a finish line:
 `assign(fast_path=true, weight="medium", done_when=...)`. There is no goal, no
 milestones and no audit. The branch gets one light review (blockers only, no second
 review) and the repo's checks, then merges, and the supervisor relays the result in
 one line. The supervisor decides what counts as small. Say "fast path" or "full path"
-to override it. It's off by default.
+to override it. `"fast_path": false` turns it off.
 
 **Spending fewer tokens.** Workers run only the tests that cover their change while
 they work. The full suite runs once: as the repo's `checks` before a branch merges,
@@ -1624,8 +1624,8 @@ Set `"graphify_auto_refresh": false` in `.brindle/config.json` to also disable
 automatic rebuilds and session seeding for untracked graphs while keeping queries.
 
 **A lean supervisor.** A supervisor rereads its whole chat on every turn, so a long
-session costs more per turn the longer it runs. With `"supervisor_state": true`,
-brindle keeps a compact state of the session from what it already sees: the
+session costs more per turn the longer it runs. With `supervisor_state` on (the
+default), brindle keeps a compact state of the session from what it already sees: the
 milestones and their status, each branch and where it stands (in review, approved,
 merged), the decisions recorded, the questions still open for you and each worker's
 last result. Once the supervisor's context passes `supervisor_restart_tokens`
@@ -1633,7 +1633,8 @@ last result. Once the supervisor's context passes `supervisor_restart_tokens`
 with that state, the request it started from and the latest messages, instead of
 carrying the full chat. Workers keep running, queued messages wait for the fresh
 session, and nothing in the state is cleared by a restart. It uses only what the
-Claude CLI already supports (a new session with a first prompt). It's off by default.
+Claude CLI already supports (a new session with a first prompt).
+`"supervisor_state": false` turns it off.
 
 When `pool_size` is greater than `0`, a claimed worktree keeps the path and
 port block it was built with -- it's never moved, and its port block is fixed

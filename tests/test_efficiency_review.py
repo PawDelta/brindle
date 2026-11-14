@@ -261,7 +261,7 @@ def test_disabled_review_preserves_prompt_and_explicit_profile(db, repo, monkeyp
     with monkeypatch.context() as disabled:
         disabled.setattr(review_scope, "small_branch", lambda *a: pytest.fail("sizing was not requested"))
         disabled.setattr(review_scope, "context_pack", lambda *a: pytest.fail("pack was not requested"))
-        reviewer = agents.request_review(db, None, ws, cfg=RepoConfig(learning="off"))
+        reviewer = agents.request_review(db, None, ws, cfg=RepoConfig(review_sizing=False, learning="off"))
         assert reviewer.profile == "reviewer"
         assert "Scoped review context pack:" not in reviewer.task
         # Explicit selection also bypasses automatic sizing when the feature is on.
