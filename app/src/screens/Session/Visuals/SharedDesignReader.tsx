@@ -30,13 +30,15 @@ function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
   };
 }
 
-export function SharedDesignReader({ client, docId, title, repo, onBack }: {
+export function SharedDesignReader({ client, docId, title, repo, onBack, backLabel }: {
   client: SharedDesignClient & Partial<LiveClient>;
   docId: string;
   /* The card's title, while the first read is out. */
   title?: string;
   repo?: string;
   onBack(): void;
+  /* Where Back goes, in words ("Library"). */
+  backLabel?: string;
 }) {
   useEscBack(onBack);
   const source = useMemo(() => sharedSource(client, docId, repo), [client, docId, repo]);
@@ -65,7 +67,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack }: {
   } : undefined;
   const lead = (
     <>
-      <BackButton onBack={onBack} />
+      <BackButton onBack={onBack} label={backLabel} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
       <h2 className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Design doc"}</h2>
     </>

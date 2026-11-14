@@ -37,6 +37,7 @@ import type { KnowledgeView, LibraryStage } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
+import { SharedDesignReader } from "../Session/Visuals/SharedDesignReader";
 import { docStages } from "./libraryStages";
 import { ImportedLibrary } from "./ImportedLibrary";
 import { KeptVisuals } from "./KeptVisuals";
@@ -58,6 +59,8 @@ export interface KnowledgeScreenProps {
   onCounts?(counts: Pick<LibraryCounts, "imported" | "decisions" | "kept">): void;
   /* A library doc (its id) to open in the reader, or an imported one (its number). */
   doc?: number | string;
+  /* `doc` is a design: it opens in the design reader. */
+  design?: boolean;
   /* Docs only of this session (its root agent id). */
   session?: string;
   /* Back to the session the person came from (Docs' Back to session). */
@@ -403,7 +406,7 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCounts, doc, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
+export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCounts, doc, design, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
   const pick = useRepo(fromRepo);
   const { repo, repos } = pick;
   const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
@@ -577,7 +580,13 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCou
       </PageHeader>
       {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
       {tab === "kept" && <KeptVisuals client={client} />}
-      {tab === "docs" && <DocsView key={stage ?? ""} stage={stage} stages={docStages(inbox)} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
+      {tab === "docs" && <DocsView key={stage ?? ""} stage={stage} stages={docStages(inbox)} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder}
+        design={design} designReader={(id, title, back) => (
+          // The reader keeps to the window under the Library's header, its bottom bar in view.
+          <div className="flex h-[calc(100vh-12rem)] min-h-[480px] flex-col overflow-hidden">
+            <SharedDesignReader key={id} client={client} docId={id} title={title} repo={repo ?? undefined} onBack={back} backLabel="Library" />
+          </div>
+        )} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>

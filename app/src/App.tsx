@@ -59,7 +59,6 @@ import { escapeOwned } from "./escape";
 import { HOME, inLibrary, inProfileRail, inRail, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
-import { SharedDesignReader } from "./screens/Session/Visuals/SharedDesignReader";
 import { NewSession } from "./screens/New";
 import { BrindleSignIn, Onboarding, Permissions, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
 import { AgentsScreen } from "./screens/Agents";
@@ -132,6 +131,12 @@ export function landing(repos: { repo_root: string }[], sessions: Record<string,
 /* Agents' "Connect …" links and the Inbox's rule links: each press asks Settings to scroll (and open the rule) again. */
 let providerAsks = 0;
 
+/* A route kept for links made before it moved: it goes on to where it lives now. */
+function OpenInLibrary({ navigate, to }: { navigate(route: Route): void; to: Route }) {
+  useEffect(() => navigate(to), []); // eslint-disable-line react-hooks/exhaustive-deps -- once, on arrival
+  return null;
+}
+
 function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, onLibraryCounts }: {
   /* The Library's screen says what it holds, for its sidebar's counts. */
   onLibraryCounts?(counts: LibraryCounts): void;
@@ -171,13 +176,15 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           onView={(view) => navigate({ ...route, view })}
           onCounts={onLibraryCounts}
           doc={route.doc}
+          design={route.design}
           session={route.session}
           fromRepo={docsFrom?.repo}
           onBackToSession={docsFrom && (() => navigate({ screen: "session", root: docsFrom.root, repo: docsFrom.repo, agent: docsFrom.root }))}
         />
       );
     case "shared-design":
-      return <SharedDesignReader key={route.doc} client={client} docId={route.doc} title={route.title} repo={route.repo} onBack={() => navigate({ screen: "inbox" })} />;
+      // A shared design opens in the Library's reader, with the Library around it.
+      return <OpenInLibrary navigate={navigate} to={{ screen: "knowledge", view: "docs", doc: route.doc, design: true }} />;
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     /* One Settings, in tabs: the older Account and Project settings routes open it on their tab. */

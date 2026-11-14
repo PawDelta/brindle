@@ -4,7 +4,7 @@
    the saved text beside its available record. Results live below the list;
    unavailable review/folder metadata is not presented as a working control. */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { DaemonError, type AnalysisDoc, type AnalysisDocDetail, type DaemonClient, type DocResults, type DocScope, type DocTopic } from "../../api/client";
 import type { PickFolder } from "../../api/open";
 import { plain } from "../../api/wording";
@@ -34,6 +34,10 @@ export interface DocsViewProps {
   stages?: Map<string, LibraryStage>;
   /* Back to the session the person came from; the filter's chip clears only the filter. */
   onBack?(): void;
+  /* A design opens in the design reader (Session/Visuals/SharedDesignReader), here in the Library:
+     Back comes back to this list as it was. `design`: `doc` is one, before the list says so. */
+  designReader?(id: string, title: string | undefined, onBack: () => void): ReactNode;
+  design?: boolean;
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -443,7 +447,7 @@ type Listing = { state: "loading" } | { state: "loaded"; docs: AnalysisDoc[] } |
 const EMPTY_DOCS: AnalysisDoc[] = [];
 const EMPTY_QUEUE = new Map<string, LibraryStage>();
 
-export function DocsView({ client, repo, session: initialSession, doc, pickFolder, stage: initialStage, stages, onBack }: DocsViewProps) {
+export function DocsView({ client, repo, session: initialSession, doc, pickFolder, stage: initialStage, stages, onBack, designReader, design }: DocsViewProps) {
   const [stage, setStage] = useState<LibraryStage | "">(initialStage ?? "");
   const [scope, setScope] = useState("");
   const [topic, setTopic] = useState("");
@@ -580,6 +584,8 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   if (sourceOpen?.kept) return <div className="flex h-[70vh] flex-col"><ReaderChrome title={sourceOpen.title} meta={sourceOpen.kept.from_session_name} source={{ kind: "kept", id: sourceOpen.kept.id }} onBack={() => setSourceOpen(null)} backLabel="Library" /></div>;
   if (sourceOpen) return <Reader client={client} repo={repo} id={sourceOpen.id} targets={[]} titles={new Map()} local={{ title: sourceOpen.title, markdown: sourceOpen.text }} onBack={() => setSourceOpen(null)} onDeleted={() => undefined} onOpen={setOpen} onScopes={learn} />;
 
+  const listed = open ? docs.find((d) => d.id === open) : undefined;
+  if (open && designReader && (listed?.kind === "design" || (design && open === doc))) return designReader(open, listed?.title, () => setOpen(null));
   if (open) {
     return (
       <Reader
