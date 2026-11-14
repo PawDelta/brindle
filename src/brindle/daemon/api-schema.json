@@ -13087,6 +13087,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/agents/{id}/transcript"
+    },
+    {
+      "method": "GET",
       "path": "/v1/analysis-docs"
     },
     {
