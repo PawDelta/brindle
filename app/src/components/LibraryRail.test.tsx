@@ -10,16 +10,23 @@ afterEach(() => {
 });
 
 const folders: FolderGroup[] = [
-  { scope: { kind: "user", id: "u1" }, folders: [{ id: "fld_a", name: "Drafts", visibility: "private" }] },
+  { scope: { kind: "user", id: "u1" }, folders: [{ id: "fld_a", name: "Drafts", visibility: "private", repo: "/src/app" }] },
   { scope: { kind: "group", id: "t1", name: "Platform team" }, folders: [{ id: "fld_b", name: "Cloud", visibility: "shared" }] },
 ];
+const repos = [{ name: "app", repo_root: "/src/app" }];
 
-it("lists folders by scope, creates one once even when submitted twice, and moves the design open in the reader", async () => {
+it("groups folders by their repo (else their scope), opens a repo or folder, creates one once for a repo, and moves the design open in the reader", async () => {
   let finish!: () => void;
   const onCreateFolder = vi.fn().mockReturnValue(new Promise<void>((resolve) => (finish = resolve)));
   const onMoveDoc = vi.fn().mockRejectedValueOnce(new Error("refused")).mockResolvedValue(undefined);
-  render(<LibraryRail route={{ screen: "knowledge" }} folders={folders} navigate={vi.fn()} onBack={vi.fn()} onCreateFolder={onCreateFolder} onMoveDoc={onMoveDoc} />);
+  const navigate = vi.fn();
+  render(<LibraryRail route={{ screen: "knowledge" }} folders={folders} repos={repos} navigate={navigate} onBack={vi.fn()} onCreateFolder={onCreateFolder} onMoveDoc={onMoveDoc} />);
+  expect(screen.getByTestId("folders-/src/app").textContent).toContain("Drafts");
   expect(screen.getByTestId("folders-team:t1").textContent).toContain("Cloud");
+  fireEvent.click(screen.getByRole("button", { name: "app" }));
+  expect(navigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", repo: "/src/app" });
+  fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+  expect(navigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", folder: "user:u1/fld_a", repo: "/src/app" });
   expect(screen.queryByText("Move here")).toBeNull(); // no design open: nothing to move
 
   fireEvent.click(screen.getByText("+ New"));
@@ -32,7 +39,7 @@ it("lists folders by scope, creates one once even when submitted twice, and move
   fireEvent.submit(form);
   expect((screen.getByText("Create folder") as HTMLButtonElement).disabled).toBe(true);
   await act(async () => finish());
-  expect(onCreateFolder.mock.calls).toEqual([["team:t1", "Cloud 2", "shared", "owner"]]);
+  expect(onCreateFolder.mock.calls).toEqual([["team:t1", "Cloud 2", "shared", "owner", "/src/app"]]);
   await waitFor(() => expect(screen.queryByRole("form", { name: "New folder" })).toBeNull());
 
   // The design open in the reader (opened, switched, or closed there) is the one moved.

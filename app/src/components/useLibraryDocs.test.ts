@@ -1,23 +1,24 @@
 import { act, renderHook } from "@testing-library/react";
 import { expect, it } from "vitest";
 import type { DaemonClient } from "../api/client";
-import { docStages, stageCounts } from "../screens/Knowledge/libraryStages";
-import { recentEntries, useLibraryDocs } from "./useLibraryDocs";
+import { useLibraryDocs } from "./useLibraryDocs";
 
-it("library sidebar recent and stages: the newest designs are Recent, and the queue only decides Needs you over each design's own review state", async () => {
-  const docs = [1, 2, 3, 4].map((n) => ({ id: `d${n}`, title: n === 2 ? "" : `Design ${n}`, updated_at: n * 10 }));
-  const review = { d1: { ready: true }, d3: { ready: false, reviewers: [{ sub: "sam" }] }, d4: { ready: false } };
-  const client = { docs: () => Promise.resolve({ docs }), doc: (id: string) => Promise.resolve({ design: review[id as keyof typeof review] ?? null }) } as unknown as DaemonClient;
-  const { result, rerender } = renderHook(({ active }) => useLibraryDocs(client, active), { initialProps: { active: false } });
-  expect(result.current.docs).toEqual([]);     // nothing is read while the Library is closed
-  rerender({ active: true });
+it("library sidebar designs: nothing is read while the Library is closed, then each design's record, and again when asked", async () => {
+  const docs = [1, 2].map((n) => ({ id: `d${n}`, title: `Design ${n}` }));
+  let reads = 0;
+  const client = {
+    docs: () => { reads++; return Promise.resolve({ docs }); },
+    doc: (id: string) => (id === "d2" ? Promise.reject(new Error("gone")) : Promise.resolve({ design: { ready: true }, tasks: [{ id: "w1", title: "w1", state: "merged" }] })),
+  } as unknown as DaemonClient;
+  const { result, rerender } = renderHook(({ active, again }) => useLibraryDocs(client, active, again), { initialProps: { active: false, again: 0 } });
+  expect(result.current.docs).toEqual([]);
+  rerender({ active: true, again: 0 });
   await act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); });
-  expect(recentEntries(result.current.docs)).toEqual([{ id: "d4", title: "Design 4" }, { id: "d3", title: "Design 3" }, { id: "d2", title: "d2" }]);
-
-  const queue = docStages([
-    { kind: "review_requested", reason: "r", doc: "d3" },
-    { kind: "plan", reason: "r" },                      // no doc: not a Library design
-  ]);
-  // d3 needs the person; d4 is in review without an Inbox card; d1 is approved; d2 is personal.
-  expect(stageCounts(result.current.docs, queue, result.current.designs)).toEqual({ "needs-you": 1, "in-review": 1, approved: 1 });
+  expect(result.current.docs).toEqual(docs);
+  // A detail that can't be read is skipped, not fatal to the rest.
+  expect([...result.current.records.keys()]).toEqual(["d1"]);
+  expect(result.current.records.get("d1")?.tasks?.[0].state).toBe("merged");
+  rerender({ active: true, again: 1 });
+  await act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); });
+  expect(reads).toBe(2);
 });

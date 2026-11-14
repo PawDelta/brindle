@@ -88,9 +88,11 @@ import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PRO
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
+import { DocFormat } from "./DocFormat";
 import { DocSwitches } from "./DocSwitches";
 import { Storage } from "./Storage";
 import { TeamDestination } from "./TeamDestination";
+import { Integrations } from "./Integrations";
 import { OrgApprovals } from "./OrgApprovals";
 import { ReviewPolicies } from "./ReviewPolicies";
 import { Permissions } from "./Permissions";
@@ -175,6 +177,7 @@ const LEDE: Record<SettingsTab, string> = {
   general: "Your settings apply to every project; a project can override them.",
   providers: "How brindle reaches each model and your repositories.",
   permissions: "How Claude's permission requests are handled, your rules, and your organization's limits.",
+  format: "The templates designs start from, how they are named, and what an empty required section stops.",
   storage: "What brindle keeps on this machine.",
   project: "This repo's settings: what the team sets, what is just for you, and what follows your own.",
   about: "The engine's version and health, and this app.",
@@ -1449,6 +1452,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
 
       <DocSwitches client={client} />
       <TeamDestination client={client} />
+      <Integrations client={client} />
       </Pane>
 
       <Pane id="permissions" {...panes}>
@@ -1592,6 +1596,10 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       <Section id="github" title="GitHub" blurb="How brindle reaches your private repositories over HTTPS." testId="github">
         <GithubRow client={client} />
       </Section>
+      </Pane>
+
+      <Pane id="format" {...panes}>
+        <DocFormat client={client} />
       </Pane>
 
       <Pane id="storage" {...panes}>

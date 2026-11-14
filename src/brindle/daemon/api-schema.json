@@ -2066,6 +2066,30 @@
       "title": "DecisionDTO",
       "type": "object"
     },
+    "DesignTaskDTO": {
+      "description": "One task of a design's plan (GET /v1/analysis-docs/{id} ``tasks``), in\nits board state: queued, working, in review, merged or cancelled.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "state"
+      ],
+      "title": "DesignTaskDTO",
+      "type": "object"
+    },
     "GcloudOptionsDTO": {
       "properties": {
         "adc": {
@@ -3135,6 +3159,58 @@
         "kept_at"
       ],
       "title": "KeptVisualDTO",
+      "type": "object"
+    },
+    "LibraryFolderDTO": {
+      "description": "A Library folder (GET /v1/library/folders): the server's, plus ``repo``,\nthe repo it was made for as this machine recorded it (None: not known here).",
+      "properties": {
+        "created_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repo"
+        },
+        "visibility": {
+          "default": "private",
+          "enum": [
+            "private",
+            "shared"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "LibraryFolderDTO",
       "type": "object"
     },
     "MilestoneDTO": {
@@ -6887,6 +6963,18 @@
         "queued": {
           "title": "Queued",
           "type": "integer"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
         },
         "rev": {
           "title": "Rev",
@@ -12190,6 +12278,18 @@
           "title": "Queued",
           "type": "integer"
         },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
+        },
         "rev": {
           "title": "Rev",
           "type": "integer"
@@ -13115,6 +13215,14 @@
     },
     {
       "method": "GET",
+      "path": "/v1/doc-format"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/doc-format"
+    },
+    {
+      "method": "GET",
       "path": "/v1/doctor"
     },
     {
@@ -13191,6 +13299,22 @@
     },
     {
       "method": "GET",
+      "path": "/v1/integrations/trackers"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/integrations/trackers/settings"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/integrations/trackers/{tracker}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/integrations/trackers/{tracker}/test"
+    },
+    {
+      "method": "GET",
       "path": "/v1/kb/docs/{id}"
     },
     {
@@ -13258,8 +13382,28 @@
       "path": "/v1/launch-env"
     },
     {
+      "method": "GET",
+      "path": "/v1/library/designs/{id}/plan"
+    },
+    {
       "method": "POST",
       "path": "/v1/library/designs/{id}/question"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/library/designs/{id}/work-items"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/designs/{id}/work-items"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/designs/{id}/work-items/links"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/library/designs/{id}/work-items/links/{link_id}"
     },
     {
       "method": "GET",
@@ -13272,6 +13416,10 @@
     {
       "method": "GET",
       "path": "/v1/library/people"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/library/work-items"
     },
     {
       "method": "GET",
@@ -13382,6 +13530,10 @@
       "path": "/v1/plans/{id}/edit"
     },
     {
+      "method": "GET",
+      "path": "/v1/plans/{id}/history"
+    },
+    {
       "method": "POST",
       "path": "/v1/plans/{id}/policy-ask"
     },
@@ -13400,6 +13552,10 @@
     {
       "method": "GET",
       "path": "/v1/plans/{id}/revisions/{n}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}/revisions/{n}/changes"
     },
     {
       "method": "POST",
@@ -13652,6 +13808,14 @@
     {
       "method": "POST",
       "path": "/v1/shared-designs/{doc_id}/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared-designs/{doc_id}/history"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared-designs/{doc_id}/revisions/{n:int}/changes"
     },
     {
       "method": "POST",

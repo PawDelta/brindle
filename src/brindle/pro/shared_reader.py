@@ -133,6 +133,7 @@ def _dto(doc_id: str, view: dict, me: str) -> dict:
                     "changed": r.get("changed") or [], "at": _at(r.get("at"))} for r in history],
         threads=[t for t in (_thread(x, me) for x in view.get("threads") or []) if t], gate=_gate(view, me), me=me,
         author=_who(author, me) if isinstance(author, str) else None,
+        can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
         can_comment=_can(view, me, "can_comment"), can_suggest=_can(view, me, "can_suggest"),
         can_sign_off=_can_sign(view, me, author),
         signed_off=any(isinstance(s, dict) and s.get("sub") == me and s.get("rev") == view["rev"]
@@ -160,6 +161,36 @@ def _text(text: Any) -> str:
 def read(doc_id: str, *, client=None, store=None) -> dict:
     """The design as this account may read it now."""
     return _ask(doc_id, "GET", "", None, client, store)
+
+
+def timeline(doc_id: str, *, client=None, store=None) -> dict:
+    """Read the Library's retained revision metadata and sign-offs without keeping a copy."""
+    client, store = ad._session(client, store)
+    me = ad.require_entitlement(store).sub
+    view = ad.api("GET", sd._path(doc_id), client=client, store=store)
+    events = [{"id": f"revision:{r['rev']}", "kind": "revision", "actor": _who(r.get("author"), me),
+               "rev": r["rev"], "version": None, "at": _at(r.get("at")),
+               "source": r.get("source"), "changed": r.get("changed") or []}
+              for r in view.get("revisions") or [] if isinstance(r, dict) and isinstance(r.get("rev"), int)]
+    events += [{"id": f"sign_off:{s['rev']}:{s['sub']}", "kind": "sign_off", "actor": _who(s["sub"], me),
+                "rev": s["rev"], "version": None, "at": _at(s.get("at"))}
+               for s in view.get("sign_offs") or []]
+    return {"events": sorted(events, key=lambda e: (e["at"], e["id"]), reverse=True)}
+
+
+def comparison(doc_id: str, rev: int, *, client=None, store=None) -> dict:
+    """Fetch immutable Library revisions under this account's current access checks."""
+    client, store = ad._session(client, store)
+    ad.require_entitlement(store)
+    view = ad.api("GET", sd._path(doc_id), client=client, store=store)
+    retained = [r["rev"] for r in view.get("revisions") or [] if isinstance(r, dict)
+                and isinstance(r.get("rev"), int) and r["rev"] < rev]
+
+    def revision(n: int) -> dict:
+        content = ad.api("GET", sd._path(doc_id, f"/revisions/{n}"), client=client, store=store)
+        return {"rev": n, **sd._readable(content)}
+
+    return plan_docs.compare_revisions(revision(rev), revision(max(retained)) if retained else None)
 
 
 def comment(doc_id: str, rev: Any, anchor: Any, text: Any, *, question: bool = False, client=None, store=None) -> dict:

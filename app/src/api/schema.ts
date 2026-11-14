@@ -23,12 +23,14 @@ export interface ApiSchema {
   CloudOptionsDTO: CloudOptionsDTO;
   ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
+  DesignTaskDTO: DesignTaskDTO;
   GcloudOptionsDTO: GcloudOptionsDTO;
   GitHubConnectionDTO: GitHubConnectionDTO;
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
   KeptVisualDTO: KeptVisualDTO;
+  LibraryFolderDTO: LibraryFolderDTO;
   MilestoneDTO: MilestoneDTO;
   NativeSubagentDTO: NativeSubagentDTO;
   OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
@@ -437,6 +439,18 @@ export interface DecisionDTO {
   topic: string;
 }
 /**
+ * One task of a design's plan (GET /v1/analysis-docs/{id} ``tasks``), in
+ * its board state: queued, working, in review, merged or cancelled.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "DesignTaskDTO".
+ */
+export interface DesignTaskDTO {
+  id: string;
+  state: string;
+  title: string;
+}
+/**
  * brindle's own GitHub sign-in (brindle.github_connect), as every
  * /v1/github/connection route answers. ``route``: how the person connected (a
  * copy of the GitHub CLI's sign-in, or a token they pasted). ``needs_reconnect``:
@@ -632,6 +646,20 @@ export interface VisualAnswerDTO {
   attachments?: string[];
   note?: string | null;
   option: string | null;
+}
+/**
+ * A Library folder (GET /v1/library/folders): the server's, plus ``repo``,
+ * the repo it was made for as this machine recorded it (None: not known here).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "LibraryFolderDTO".
+ */
+export interface LibraryFolderDTO {
+  created_at?: number | null;
+  id: string;
+  name: string;
+  repo?: string | null;
+  visibility?: "private" | "shared";
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -884,6 +912,7 @@ export interface PlanDTO {
   lede: string;
   markdown: string;
   queued: number;
+  reference?: string | null;
   rev: number;
   revisions?: PlanRevisionDTO[];
   sections: PlanSectionDTO[];
@@ -1460,6 +1489,7 @@ export interface SharedDesignDTO {
   markdown: string;
   me: string;
   queued: number;
+  reference?: string | null;
   rev: number;
   revisions?: PlanRevisionDTO[];
   sections: PlanSectionDTO[];

@@ -14,8 +14,10 @@ import type {
   AskGroupDTO,
   CloudOptionsDTO,
   DecisionDTO,
+  DesignTaskDTO,
   GoalDTO,
   InboxItemDTO,
+  LibraryFolderDTO,
   OrgApprovalPolicyDTO,
   OrgAssignmentDTO,
   OrgAssignmentRequestDTO,
@@ -425,6 +427,32 @@ export interface PlanChange {
   after: string;
 }
 
+export interface DocHistoryEntry {
+  id: string;
+  kind: "revision" | "freeze" | "reopen" | "sign_off" | "changes";
+  actor: string;
+  at: number;
+  rev: number | null;
+  version: number | null;
+  source?: string;
+  changed?: string[];
+  observed?: boolean;
+}
+
+export type DocRevision = Pick<Plan, "rev" | "lede" | "sections" | "markdown" | "decisions" | "split" | "ask">;
+export interface DocRevisionComparison {
+  revision: DocRevision;
+  previous: DocRevision | null;
+  baseline_available?: boolean;
+  document?: { id: string; title: string; markdown: string }[];
+  changes: {
+    section: string;
+    before: { title: string; markdown: string; kind?: string; caption?: string } | null;
+    after: { title: string; markdown: string; kind?: string; caption?: string } | null;
+    spans: { kind: string; before_start: number; before_end: number; start: number; end: number; before: string; after: string }[];
+  }[];
+}
+
 export type Repo = RepoDTO;
 
 export interface Diff {
@@ -590,13 +618,10 @@ export interface DocScope {
   can_share?: boolean;
 }
 
-/* A Library folder as the server lists it: private (its creator only) or shared (the scope's members). */
+/* A Library folder as the server lists it: private (its creator only) or shared (the scope's
+   members), with `repo`, the repo it was made for (null when this machine doesn't know). */
 export type FolderVisibility = "private" | "shared";
-export interface LibraryFolder {
-  id: string;
-  name: string;
-  visibility: FolderVisibility;
-}
+export type LibraryFolder = LibraryFolderDTO & { visibility: FolderVisibility };
 /* One scope's folders (GET /library/folders). */
 export interface FolderGroup {
   scope: DocScope;
@@ -697,6 +722,88 @@ export interface AnalysisDoc {
   related?: string[];
   supersedes?: string[];
   superseded_by?: string | null;
+  /* The tracker item (Azure Boards, Jira) the design is linked to, with its state as last read:
+     absent until a link is made. */
+  work_item?: WorkItemLink | null;
+}
+
+/* A linked work item: its key ("AB#4810", "BRN-88"), the tracker's own word for its state, and
+   whether that state is active or done (for its dot). */
+export interface WorkItemLink {
+  key: string;
+  state?: string | null;
+  tone?: "active" | "done" | null;
+  title?: string | null;
+}
+
+export type TrackerName = "jira" | "azure_devops";
+
+/* One item linked to a design (GET /library/designs/{id}/work-items): what the tracker said when it
+   was last read. `target` is what it is linked to; `done` is the org's own list of done states. */
+export interface TrackerLink {
+  link_id: string;
+  tracker: TrackerName;
+  key: string;
+  /* "AB#4810" or "BRN-88": what people say. */
+  display: string;
+  type?: string | null;
+  target: { kind: "design" | "section" | "task" | "passage"; id?: string | null };
+  url?: string | null;
+  state?: string | null;
+  done?: boolean;
+  /* Not read just now: the last known state. */
+  stale?: boolean;
+  created?: boolean;
+  linked_by?: string;
+  linked_at?: number;
+  read_at?: number | null;
+}
+
+export interface DesignWorkItems {
+  items: TrackerLink[];
+  connected: Partial<Record<TrackerName, boolean>>;
+  read_at?: number | null;
+  /* The design's own item, and how many of the others are done. */
+  epic: TrackerLink | null;
+  done: number;
+  total: number;
+  /* The tracker or the Library couldn't be reached: this is the last read. */
+  unreachable?: boolean;
+}
+
+export interface TrackerConnection {
+  tracker: TrackerName;
+  label: string;
+  configured: boolean;
+  connected: boolean;
+  site?: string | null;
+  connected_by?: string | null;
+  connected_at?: number | null;
+  last_error?: { at: number; error: string } | null;
+}
+
+export interface TrackerSettings {
+  repos: { repo_key: string; repo: string; tracker: TrackerName; project: string; area?: string | null }[];
+  types: Partial<Record<TrackerName, { design: string; task: string; passage: string }>>;
+  done_states: Partial<Record<TrackerName, string[]>>;
+  allow: { create_items: boolean; link_back: boolean; close_on_merge: boolean; include_text: boolean };
+  who_can_create: "authors_and_reviewers" | "editors" | "members" | "admins";
+}
+
+export interface TrackerIntegrations {
+  org_id: string;
+  settings: Partial<TrackerSettings>;
+  trackers: Record<TrackerName, TrackerConnection>;
+  /* Where an admin signs in to a tracker: a page on the Library's site. */
+  connect_url: string;
+  /* The repos on this machine, by the key the Library knows a design's repo by. */
+  repos: { repo: string; repo_key: string; repo_root: string }[];
+}
+
+/* A design's folder, as its review state names it: the scope and the folder's id. */
+export interface DesignFolderRef {
+  scope: DocScope;
+  id: string;
 }
 
 /* GET /analysis-docs/{id}: the files as written and what the server read from them. */
@@ -708,12 +815,16 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   shared_with: DocScope[];
   /* Optional plan record fields, using the plan engine's DTO names. */
   revisions?: { rev: number; author: string; source: string; changed: string[]; at: number }[];
-  threads?: { id: number; author: string; text: string; replies: { text: string }[] }[];
+  threads?: { id: number; author: string; text: string; replies: { text: string }[]; status?: string }[];
   decisions?: { id: string; title: string; mine?: string | null; confirmed?: string | null; options: { id: string; label: string }[] }[];
   verdict?: { approved: boolean; picks?: Record<string, string> } | null;
   /* A shared design's review state (shared-designs-api.md: GET /analysis-docs/{id} `design`):
      the revision on screen, who is asked to review (`required` or optional) and who has signed it. */
-  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean } | null;
+  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean; folder?: DesignFolderRef | null; threads?: { status?: string }[];
+    /* The design's decisions as the server keeps them; `confirmed` is the option this reader chose. */
+    decisions?: { id: string; title?: string; confirmed?: string | null }[] } | null;
+  /* The plan's tasks when the design is a plan on this machine, in their board state (GET /analysis-docs/{id} `tasks`). */
+  tasks?: DesignTaskDTO[];
 }
 
 export interface DocTopic {
@@ -789,6 +900,48 @@ export interface DocSwitch {
   choice: "on" | "off" | null;
   locked: boolean;
   org: "enforced_on" | "enforced_off" | null;
+}
+
+/* Settings › Doc format (brindle.doc_templates): a template's sections in
+   order, each with its kind, whether it is required, and the line the
+   supervisor is told; naming; and what an empty required section stops. */
+export type DocSectionKind = "text" | "diagram" | "table";
+export type DocFormatBlock = "sign_off" | "share";
+
+export interface DocTemplateSection {
+  title: string;
+  kind: DocSectionKind;
+  required: boolean;
+  hint: string | null;
+}
+
+export interface DocTemplate {
+  id: string;
+  name: string;
+  default: boolean;
+  sections: DocTemplateSection[];
+}
+
+export interface DocFormat {
+  templates: DocTemplate[];
+  naming: { title_hint: string | null; reference: string | null };
+  blocks: DocFormatBlock[];
+}
+
+/* GET /doc-format: what `level` sets (only its own keys), the format in
+   force there, the reference the next new doc gets, and how many docs each
+   template wrote. */
+export interface DocFormatView {
+  level: string;
+  format: Partial<DocFormat>;
+  /* The version a save names back: the Library refuses one saved over a change made since. */
+  version: number;
+  resolved: DocFormat;
+  /* Where it is kept: the person's own config, or their org's in the Library (its admins save it). */
+  source: "local" | "org";
+  editable: boolean;
+  next_reference: string | null;
+  used: Record<string, number>;
 }
 
 /* GET /analysis-docs/export-config */
@@ -1371,6 +1524,8 @@ export interface LiveChannel {
   sendAwareness(section: string, bytes: Uint8Array): void;
   freeze(): void;
   reopen(): void;
+  /* This window's person changed the review (signed off): every window is told the frozen version again. */
+  refresh(): void;
   close(): void;
 }
 
@@ -1947,6 +2102,7 @@ export class DaemonClient {
       sendAwareness: (section, bytes) => send({ awareness: toBase64(bytes), section }),
       freeze: () => send({ freeze: true }),
       reopen: () => send({ reopen: true }),
+      refresh: () => send({ refresh: true }),
       close() {
         if (closed) return;
         closed = true;
@@ -1958,6 +2114,14 @@ export class DaemonClient {
   /* A planning doc: the visual of kind "plan" with the same id. */
   plan(id: string) {
     return this.get<Plan>(`/plans/${encodeURIComponent(id)}`);
+  }
+
+  planHistory(id: string) {
+    return this.get<{ events: DocHistoryEntry[] }>(`/plans/${encodeURIComponent(id)}/history`);
+  }
+
+  planRevisionChanges(id: string, rev: number) {
+    return this.get<DocRevisionComparison>(`/plans/${encodeURIComponent(id)}/revisions/${rev}/changes`);
   }
 
   /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
@@ -2048,6 +2212,64 @@ export class DaemonClient {
     return this.get<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}`, { repo });
   }
 
+  sharedDesignHistory(doc: string, repo?: string) {
+    return this.get<{ events: DocHistoryEntry[] }>(`/shared-designs/${encodeURIComponent(doc)}/history`, { repo });
+  }
+
+  sharedDesignRevisionChanges(doc: string, rev: number, repo?: string) {
+    return this.get<DocRevisionComparison>(`/shared-designs/${encodeURIComponent(doc)}/revisions/${rev}/changes`, { repo });
+  }
+
+  /* The plan a Library design was shared from, when it was shared from this machine (its visual):
+     the author's own design, opened in the author's reader. A 404 for anyone else's. */
+  libraryDesignPlan(doc: string) {
+    return this.get<VisualDTO>(`/library/designs/${encodeURIComponent(doc)}/plan`);
+  }
+
+  /* Work items (Jira, Azure DevOps) on a design. Reads answer the last read with `unreachable` when the
+     tracker or Library can't be reached; writes raise (the Library's refusal keeps its own status). */
+  designWorkItems(doc: string, repo?: string) {
+    return this.get<DesignWorkItems>(`/library/designs/${encodeURIComponent(doc)}/work-items`, { repo });
+  }
+
+  createWorkItems(doc: string, body: { kind: "design" | "task" | "passage"; task?: string; section?: string; quote?: string; title?: string }, repo?: string) {
+    return this.post<{ created: TrackerLink[]; remaining?: number }>(`/library/designs/${encodeURIComponent(doc)}/work-items`, { ...body, ...(repo ? { repo } : {}) });
+  }
+
+  linkWorkItem(doc: string, item: string, target: TrackerLink["target"] = { kind: "design" }, repo?: string) {
+    return this.post<TrackerLink>(`/library/designs/${encodeURIComponent(doc)}/work-items/links`, { item, target, ...(repo ? { repo } : {}) });
+  }
+
+  unlinkWorkItem(doc: string, linkId: string, repo?: string) {
+    return this.delete<{ unlinked: boolean }>(`/library/designs/${encodeURIComponent(doc)}/work-items/links/${encodeURIComponent(linkId)}${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
+  /* For the Library list and board: each design's own item with how many others are done, from what was
+     read before, reading some never-read or old ones now (at most 50 ids). `remaining` are due a read this
+     answer didn't make: ask again with them. */
+  libraryWorkItems(ids: string[], repo?: string) {
+    return this.get<{ items: Record<string, { epic: TrackerLink | null; done: number; total: number }>; remaining?: string[] }>("/library/work-items", { ids: ids.join(","), repo });
+  }
+
+  /* Settings › Integrations (org admins). */
+  trackerIntegrations(repo?: string) {
+    return this.get<TrackerIntegrations>("/integrations/trackers", { repo });
+  }
+
+  /* `org` is the organization the page was loaded for: the daemon refuses (409) when the active one has
+     changed since, so a draft for one org never lands on another. */
+  saveTrackerSettings(settings: Partial<TrackerSettings>, org: string) {
+    return this.put<TrackerIntegrations>("/integrations/trackers/settings", { ...settings, org_id: org });
+  }
+
+  testTracker(tracker: TrackerName, org: string) {
+    return this.post<{ tracker: TrackerName; ok: boolean }>(`/integrations/trackers/${tracker}/test`, { org_id: org });
+  }
+
+  disconnectTracker(tracker: TrackerName, org: string) {
+    return this.delete<{ provider_grant?: string }>(`/integrations/trackers/${tracker}`, { org_id: org });
+  }
+
   writeSharedDesign(doc: string, tail: string, body: Record<string, unknown>) {
     return this.post<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}/${tail}`, body);
   }
@@ -2109,8 +2331,8 @@ export class DaemonClient {
   }
 
   /* `scope` is the daemon's spelling: user, team:<id> or org:<id>. */
-  createLibraryFolder(scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members" = "owner") {
-    return this.post<LibraryFolder>("/library/folders", { scope, name, visibility, can_add: canAdd });
+  createLibraryFolder(scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members" = "owner", repo?: string) {
+    return this.post<LibraryFolder>("/library/folders", { scope, name, visibility, can_add: canAdd, ...(repo ? { repo } : {}) });
   }
 
   moveDocToFolder(id: string, scope: string, folder: string) {
@@ -2171,6 +2393,16 @@ export class DaemonClient {
   /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked. */
   async setDocSwitch(name: DocSwitchName, on: boolean) {
     return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
+  }
+
+  /* Settings › Doc format for one level (org, or team:<id>). */
+  docFormat(level = "org") {
+    return this.get<DocFormatView>("/doc-format", { level });
+  }
+
+  /* Replaces what one level of the doc format sets. */
+  setDocFormat(format: Partial<DocFormat>, version: number, level = "org") {
+    return this.put<DocFormatView>("/doc-format", { level, format, version });
   }
 
   /* brindle's disk use (slow: the daemon measures every worktree). */

@@ -8,6 +8,7 @@ import base64
 import json
 import secrets
 import sqlite3
+import threading
 
 import loro
 import pytest
@@ -400,6 +401,39 @@ def test_a_window_edit_racing_the_first_join_is_carried_onto_the_relays_draft(tm
 
         assert relay.refusals == []
         assert reloaded.text("body") == a.sections()["body"] == relay.sections()["body"] == "World remote local again"
+
+    asyncio.run(run())
+
+
+def test_an_older_review_read_answering_last_never_takes_back_a_newer_sign_off(tmp_path):
+    """Two refreshes of a frozen version overlap: the first one's Library read
+    is answered last, without the sign-off the second one already showed. The
+    windows keep the sign-off, and the link's version too."""
+    asked, release = threading.Event(), threading.Event()
+    calls: list[str] = []
+
+    def review(doc_id):
+        calls.append(doc_id)
+        if len(calls) == 1:             # the older read: held until the newer one has answered
+            asked.set()
+            release.wait(5)
+            return {"sign_offs": []}
+        return {"sign_offs": [{"sub": "reviewer", "rev": 2}]}
+
+    async def run():
+        manager = live_docs.Manager(FakeRelay(Clock()).transport("bob"), db_factory=lambda: DB(str(tmp_path / "b.db")),
+                                    available=lambda: True, drive=False, review=review)
+        link = manager.link("doc1")
+        link.frozen = 2
+        window = Window()
+        link.windows.append(live_docs.Lease("doc1", window))
+        older = asyncio.create_task(link.refresh())
+        assert await asyncio.to_thread(asked.wait, 5)
+        await link.refresh()
+        release.set()
+        await older
+        told = [f["state"]["version"]["signOffs"] for f in window.frames if "state" in f]
+        assert told == [["reviewer"]] and link.version["signOffs"] == ["reviewer"]
 
     asyncio.run(run())
 

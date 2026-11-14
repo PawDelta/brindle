@@ -331,8 +331,11 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     your own words, which they confirm or correct. A plan co-edited in a
     live draft: revise the text read_plan gave you and pass its base; your
     changes go into the draft, and one to words someone else changed since
-    becomes your suggestion instead."""
-    from brindle import plans
+    becomes your suggestion instead. With a doc template set (Settings ›
+    Doc format), a template heading you leave out is added empty and the
+    reply names the required ones still empty, with what belongs in each:
+    they must be filled before the plan is signed off."""
+    from brindle import doc_templates, plans
     from brindle.service.errors import ServiceError
 
     db = DB()
@@ -351,7 +354,7 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     return (f"Proposed plan {p['id']} r{p['rev']} (brindle://visual/{p['id']}). Assign calls queue behind it "
             "until the person approves; their decision arrives as a message. "
             f"For each split card, pass plan_worker=\"{p['id']}:<split-id>\" to assign or handoff; "
-            "use the exact proving check command as its test.")
+            "use the exact proving check command as its test." + doc_templates.brief(db, p["id"], p["markdown"]))
 
 
 @mcp.tool()

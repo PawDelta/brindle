@@ -1,18 +1,24 @@
 import { inTestStore } from "../../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
-import { DaemonError, type DaemonClient, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
+import { EditorView } from "@codemirror/view";
+import { afterEach, expect, it, vi } from "vitest";
+import { DaemonError, type DaemonClient, type DocRevisionComparison, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
 import { DaemonContext } from "../../../api/context";
 import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
 import { changeBetween } from "./DocText";
 import { PlanReader, REVIEW_COLLAPSED_KEY } from "./PlanReader";
+import { SharedDesignReader } from "./SharedDesignReader";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   localStorage.removeItem(REVIEW_COLLAPSED_KEY);
 });
+
+/* Who reviews the doc, and sharing it, open over the page from the toolbar's Share. */
+const openShare = async () => fireEvent.click(await screen.findByRole("button", { name: "Share" }));
 
 const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Presets", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
 const visuals: VisualsClient = {
@@ -23,6 +29,72 @@ const visuals: VisualsClient = {
 const docWrites = (now: () => Plan): PlanDocClient => ({
   commentPlan: async () => now(), replyPlan: async () => now(), resolvePlanThread: async () => now(), suggestPlan: async () => now(),
   acceptPlanSuggestion: async () => now(), rejectPlanSuggestion: async () => now(), editPlan: async () => now(), confirmPlan: async () => now(),
+});
+
+it.each(["author", "shared"])("opens %s history through the reader and shows the selected changes in the document pane", async (reader) => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const plan = doc(3, "Latest passage.");
+  const comparison: DocRevisionComparison = {
+    revision: { ...plan, rev: 2, sections: [{ id: "summary", title: "Summary", markdown: "Revised passage." }] },
+    previous: { ...plan, rev: 1, sections: [{ id: "summary", title: "Summary", markdown: "Earlier passage." }] },
+    changes: [{ section: "summary", before: { title: "Summary", markdown: "Earlier passage." }, after: { title: "Summary", markdown: "Revised passage." },
+      spans: [{ kind: "replace", before_start: 0, before_end: 7, start: 0, end: 7, before: "Earlier", after: "Revised" }] }],
+  };
+  const history = async () => ({ events: [{ id: "r2", kind: "revision" as const, actor: "person", at: 2, rev: 2, version: null }] });
+  let finishComparison!: (value: DocRevisionComparison) => void;
+  const revisionChanges = () => new Promise<DocRevisionComparison>((resolve) => { finishComparison = resolve; });
+  let reads = 0;
+  const verdicts: number[] = [];
+  const client = {
+    ...visuals, ...docWrites(() => plan), plan: async () => { reads++; return { ...plan }; },
+    decidePlan: async (_id: string, verdict: { rev: number }) => { verdicts.push(verdict.rev); return plan; },
+    planHistory: history, planRevisionChanges: revisionChanges,
+    sharedDesign: async () => { reads++; return { ...plan, me: "me", author: "author", can_comment: true, can_suggest: true, can_sign_off: true, signed_off: false }; },
+    writeSharedDesign: async (_id: string, _tail: string, body: Record<string, unknown>) => { verdicts.push(body.rev as number); return { ...plan, me: "me" }; }, libraryPeople: async () => ({ people: [] }),
+    sharedDesignHistory: history, sharedDesignRevisionChanges: revisionChanges,
+  };
+  const store = createAppStore();
+  const refresh = async () => {
+    const before = reads;
+    await act(async () => {
+      if (reader === "shared") vi.advanceTimersByTime(30_000);
+      else store.dispatch({ type: "stream", message: { type: "event", id: reads, ts: reads, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: {} } });
+    });
+    expect(reads).toBe(before + 1);
+  };
+  render(inTestStore(reader === "author"
+    ? <PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />
+    : <SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />, store));
+  await screen.findByText("Latest passage.");
+  const verdictButton = () => screen.getByTestId(reader === "author" ? "plan-build" : "plan-sign-off") as HTMLButtonElement;
+  expect(verdictButton().disabled).toBe(false);
+  fireEvent.click(screen.getByRole("tab", { name: "History" }));
+  await act(async () => {});
+  const timeline = screen.getByTestId("doc-history");
+  expect(timeline.dataset.state).toBe("ready");
+  fireEvent.click(within(timeline).getByRole("button"));
+  // A background read must preserve the request for an immutable revision.
+  await refresh();
+  await act(async () => finishComparison(comparison));
+  const pane = screen.getByTestId("plan-doc");
+  const shown = within(pane).getByRole("region", { name: "Revision comparison" });
+  expect(shown.dataset.revision).toBe("2");
+  expect(shown.querySelector("del")?.textContent).toBe("Earlier");
+  expect(shown.querySelector("ins")?.textContent).toBe("Revised");
+  expect(within(pane).queryByText("Latest passage.")).toBeNull();
+  expect(within(pane).queryByRole("button", { name: "Edit Summary" })).toBeNull();
+  await act(async () => fireEvent.click(verdictButton()));
+  expect(verdicts).toEqual([]);
+  expect(verdictButton().disabled).toBe(true);
+  // Nor should another read replace the comparison once it is displayed.
+  await refresh();
+  expect(within(pane).getByRole("region", { name: "Revision comparison" })).toBe(shown);
+  fireEvent.click(within(shown).getByRole("button", { name: "Back to the latest" }));
+  expect(within(pane).queryByRole("region", { name: "Revision comparison" })).toBeNull();
+  expect(within(pane).getByText("Latest passage.")).toBeTruthy();
+  expect(verdictButton().disabled).toBe(false);
+  await act(async () => fireEvent.click(verdictButton()));
+  expect(verdicts).toEqual([3]);
 });
 
 it("keeps an approved plan board live from recorded worker events and drops stale reads", async () => {
@@ -101,7 +173,7 @@ it("asks immediately in the thread without turning the question into a change re
 it("design doc reader", async () => {
   // An emoji leads each section: the engine's offsets count it as one character, the screen as two.
   const summary = "🚀 Workers run on a **machine** the customer controls.";
-  let plan: Plan = { id: visual.id, session: "boss", title: "Cloud workers", rev: 1, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
+  let plan: Plan = { id: visual.id, session: "boss", title: "Cloud workers", rev: 1, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [], reference: "DES-0042",
     sections: [{ id: "summary", title: "Summary", markdown: summary }, { id: "api", title: "API sketch", markdown: 'POST 🚀 with a "token" in the body.' }],
     decisions: [{ id: "where", title: "Where cloud workers run", mine: "own", options: [{ id: "own", label: "A · Your own server" }, { id: "hosted", label: "B · PawDelta-hosted" }] }],
     threads: [{ id: 1, kind: "suggestion", rev: 1, author: "supervisor", text: "Tokens end up in logs.", status: "open", at: 1, before: '"token"', after: '"lease"',
@@ -133,6 +205,8 @@ it("design doc reader", async () => {
   const view = open();
   // One scrolling doc: every section and the decision are on the page at once.
   const doc = await screen.findByTestId("plan-doc");
+  // Its reference sits beside the title.
+  expect(within(screen.getByRole("heading", { level: 1 })).getByTestId("doc-reference").textContent).toBe("DES-0042");
   const api = within(doc).getByRole("region", { name: "API sketch" });
   const decision = within(doc).getByRole("region", { name: /Where cloud workers run/ });
   expect(within(doc).getByRole("region", { name: "Summary" })).toBeTruthy();
@@ -155,7 +229,7 @@ it("design doc reader", async () => {
   expect(doc.querySelectorAll('[data-thread="2"]').length).toBe(2);
 
   // A suggestion shows its before and after, on its card and in the text; accepted, the text
-  // is the new revision's and the card moves to Resolved.
+  // is the new revision's and the card moves under Resolved.
   expect(within(screen.getByTestId("thread-1")).getByTestId("suggestion-change").querySelectorAll("del, ins").length).toBe(2);
   expect(api.querySelector("del")?.textContent).toBe('"token"');
   expect(api.querySelector("ins")?.textContent).toBe('"lease"');
@@ -163,9 +237,7 @@ it("design doc reader", async () => {
   expect(calls.pop()).toEqual(["accept", 1, 1]);
   expect(api.querySelector("del, ins")).toBeNull();
   expect(api.textContent).toContain('"lease"');
-  expect(screen.queryByTestId("thread-1")).toBeNull();
-  fireEvent.click(screen.getByRole("tab", { name: /Resolved/ }));
-  expect(screen.getByTestId("thread-1").getAttribute("data-status")).toBe("accepted");
+  expect(within(screen.getByTestId("plan-resolved")).getByTestId("thread-1").getAttribute("data-status")).toBe("accepted");
 
   // Editing: a section's text opens in its box, and saving sends only what changed, as a direct edit.
   fireEvent.click(screen.getByRole("radio", { name: "Editing" }));
@@ -190,6 +262,7 @@ it("design doc reader", async () => {
   // The decision: the bottom bar leads to it, and confirms the option picked in its table.
   const section = () => within(screen.getByTestId("plan-doc")).getByRole("region", { name: /Where cloud workers run/ });
   expect(decision.getAttribute("data-next")).toBe("true");
+  fireEvent.click(screen.getByRole("tab", { name: /Decisions/ }));
   expect(within(screen.getByTestId("plan-todo")).getByRole("button").getAttribute("data-state")).toBe("current");
   fireEvent.click(within(section()).getByRole("radio", { name: "B · PawDelta-hosted" }));
   await act(async () => fireEvent.click(within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Confirm B" })));
@@ -320,6 +393,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   const build = (await screen.findByTestId("plan-build")) as HTMLButtonElement;
   expect(build.disabled).toBe(true);
   expect(build.title).toContain("u_a");
+  await openShare();
   expect(screen.getByTestId("plan-reviewer-u_a").dataset.status).toBe("waiting");
   expect(screen.getByTestId("plan-reviewer-u_c").dataset.required).toBe("false");
 
@@ -377,6 +451,7 @@ it("org policies are locked rows that show a waiver, and only an admin of that o
   const waive = (body: Override) => (plan = policyDoc(1, { status: "waived", waiver: { by: "you", reason: body.reason } }, [waived]));
 
   const member = render(policyReader(() => plan, { admin_org: null, people: [{ sub: "sam", email: "sam@x" }] }, waive)(visual));
+  await openShare();
   const row = await screen.findByTestId("plan-policy-security");
   expect(screen.getByTestId("plan-status").dataset.held).toBe("policy");
   expect(screen.queryByTestId("plan-reviewer-security")).toBeNull();
@@ -387,6 +462,7 @@ it("org policies are locked rows that show a waiver, and only an admin of that o
   member.unmount();
 
   render(policyReader(() => plan, { admin_org: "org_1", people: [{ sub: "sam", email: "sam@x" }] }, waive)(visual));
+  await openShare();
   const adminRow = await screen.findByTestId("plan-policy-security");
   await within(adminRow).findByRole("button", { name: "Waive once" });
   expect(within(screen.getByTestId("plan-policy-staff")).queryByRole("button", { name: "Waive once" })).toBeNull();
@@ -402,6 +478,7 @@ it("a waiver begun on one revision can't be sent over a newer one", async () => 
   let sent = 0;
   const reader = policyReader(() => plan, { admin_org: "org_1" }, () => { sent += 1; return plan; });
   const view = render(reader(visual));
+  await openShare();
   const row = await screen.findByTestId("plan-policy-security");
   fireEvent.click(await within(row).findByRole("button", { name: "Waive once" }));
   fireEvent.change(within(row).getByRole("textbox", { name: "Reason" }), { target: { value: "Fine as it stood" } });
@@ -422,6 +499,7 @@ it("an admin can name themself as the only stand-in, and the rule waits until th
     (body) => (plan = policyDoc(1, { stand_ins: [{ stand_in: body.stand_in!, until: body.until! }] })),
     () => (plan = policyDoc(1, { status: "signed_off", met_by: [me], stand_ins: [{ stand_in: me, until: 4_000_000_000 }] })));
   render(reader(visual));
+  await openShare();
   const row = await screen.findByTestId("plan-policy-security");
   fireEvent.click(await within(row).findByRole("button", { name: "Name a stand-in" }));
   fireEvent.change(within(row).getByRole("combobox", { name: "Stand-in" }), { target: { value: me } });
@@ -486,6 +564,7 @@ it("the policies shown before a first share are those of the revision on screen,
     previewPlanPolicies: () => new Promise<{ policies: ReturnType<typeof row>[] }>((resolve) => { asked.push({ rev: now.rev, reply: (names) => resolve({ policies: names.map(row) }) }); }) };
   const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
   const view = render(reader(visual));
+  await openShare();
   fireEvent.click(await screen.findByRole("button", { name: "Share for review" }));
   await waitFor(() => expect(asked).toHaveLength(1));
 
@@ -497,4 +576,36 @@ it("the policies shown before a first share are those of the revision on screen,
   await act(async () => asked[1].reply(["fresh-rule"]));
   expect(screen.getByTestId("plan-policy-preview-fresh-rule")).toBeTruthy();
   expect(screen.queryByTestId("plan-policy-preview-stale-rule")).toBeNull();
+});
+
+it("types a suggestion on the page as a tracked change, formats it there, and sends it with the card's reason", async () => {
+  const plan = doc(1, "Workers run on your machine.");
+  const sent: unknown[] = [];
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
+    suggestPlan: async (_id, rev, change, text) => { sent.push([rev, change, text]); return plan; } };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const words = (await screen.findByText("Workers run on your machine.")).firstChild!;
+  const range = document.createRange();
+  range.setStart(words, 0);
+  range.setEnd(words, 7);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+  fireEvent.click(within(screen.getByRole("toolbar", { name: "For the highlighted text" })).getByRole("button", { name: "Suggest edit" }));
+  // The section opens where it reads, the highlighted word selected: typing replaces it, tracked.
+  const box = await screen.findByLabelText("Suggestion to Summary");
+  const editor = EditorView.findFromDOM(box.closest<HTMLElement>(".cm-editor")!)!;
+  await act(async () => editor.dispatch(editor.state.replaceSelection("Agents")));
+  // Only what differs is tracked: the two words share their "s".
+  expect(box.querySelector(".cm-sg-del")?.textContent).toBe("Worker");
+  expect(box.querySelector(".cm-sg-ins")?.textContent).toBe("Agent");
+  // The formatting toolbar writes into it: the new word made bold.
+  await act(async () => editor.dispatch({ selection: { anchor: 0, head: 6 } }));
+  fireEvent.focus(editor.contentDOM);
+  await act(async () => fireEvent.click(within(screen.getByRole("toolbar", { name: "Formatting" })).getByRole("button", { name: "Bold" })));
+  const card = screen.getByTestId("thread-draft");
+  expect(within(card).getByTestId("suggestion-change").textContent).toBe("Workers → **Agents**");
+  fireEvent.change(within(card).getByRole("textbox", { name: "Why (optional)" }), { target: { value: "They are agents now." } });
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Send 1 suggestion" })));
+  expect(sent).toEqual([[1, { section: "summary", start: 0, before: "Workers", after: "**Agents**" }, "They are agents now."]]);
 });

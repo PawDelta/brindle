@@ -54,6 +54,35 @@ const paneWaits = () => screen.queryByTestId("state-card")?.dataset.kind === "re
 
 describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
+  /* A design opened in the Library on the second project: from an Inbox review card on it, or with
+     it picked in the Library's sidebar. Either way its reader reads and asks in that project. */
+  const OTHER = "/home/me/other";
+  it.each([
+    ["an Inbox review card's design", { screen: "shared-design", doc: "lib-1", title: "Workers", repo: OTHER }],
+    ["a design opened with a project picked in the Library's sidebar", { screen: "knowledge", view: "docs", repo: OTHER, doc: "lib-1", design: true }],
+  ] as const)("opens %s in the Library on that project, and a question to the supervisor stays in it", async (_, route) => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [], workspaces: [], inbox: [] });
+    const plan = { id: "lib-1", session: "", title: "Workers", rev: 1, state: "open" as const, markdown: "", lede: "Workers run here.", sections: [], decisions: [], split: [], queued: 0, created_at: 1 };
+    daemon.seedLive("lib-1", { lede: "Workers run here." }, { plan, me: "Bo", author: "Ann" });
+    const { client, store, sync } = connectDaemon(daemon);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={route} />);
+    const words = (await screen.findByText("Workers run here.")).firstChild!;
+    // In the Library, with its navigation, on the card's repo.
+    expect(screen.getByRole("region", { name: "Library" })).toBeTruthy();
+    expect(daemon.requests.find((r) => r.path === "/shared-designs/lib-1")?.query.repo).toBe(OTHER);
+    const range = document.createRange();
+    range.setStart(words, 0);
+    range.setEnd(words, 7);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "For the highlighted text" })).getByRole("button", { name: /^Ask/ }));
+    fireEvent.change(within(screen.getByTestId("thread-draft")).getByRole("textbox"), { target: { value: "Which machine?" } });
+    await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
+    const asked = daemon.requests.find((r) => r.method === "POST" && r.path === "/shared-designs/lib-1/comments");
+    expect(asked?.body).toMatchObject({ question: true, repo: OTHER });
+    sync.stop();
+  });
   it("keeps recovery visible in the session row and header until it succeeds or fails", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: "paused" }], workspaces: [], inbox: [{ ...question, kind: "failed", agent_id: "sup1", root_id: "sup1" }], preflight: { claude: [{ id: "trust", kind: "trust", label: "Trust folder", done: false }] } });
     const { client, store, sync } = connectDaemon(daemon);
@@ -598,20 +627,22 @@ describe("App", () => {
     expect(button.getAttribute("aria-pressed")).toBe("true");
     expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
     const rail = within(nav()).getByRole("navigation", { name: "Library" });
-    // Only what is real is listed: the plans waiting on the person, and the Sources. No tab strip on the page.
-    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["Needs you", "Map", "Imported docs", "Decisions", "Kept visuals"]);
+    // All designs, Needs you and the five stages, then the Sources. No tab strip on the page, and no repo picker on the designs.
+    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["All designs", "Needs you", "Drafting", "In review", "Approved", "Building", "Shipped", "Map", "Imported docs", "Decisions", "Kept visuals"]);
     expect(within(screen.getByRole("main")).queryByRole("tablist")).toBeNull();
-    // The repo picked on the page stays picked as the sidebar moves between a stage and a Source.
-    const picked = () => screen.getByRole<HTMLSelectElement>("combobox", { name: "Repo" }).value;
-    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: OTHER } });
-    fireEvent.click(within(rail).getByRole("button", { name: /^Needs you/ }));
-    expect(within(rail).getByRole("button", { name: /^Needs you/ }).getAttribute("aria-current")).toBe("page");
-    expect(picked()).toBe(OTHER);
+    expect(screen.queryByRole("combobox", { name: "Repo" })).toBeNull();
     // A Source's row counts what it holds, opens today's view of it, and is marked.
     await waitFor(() => expect(within(rail).getByRole("button", { name: /^Decisions/ }).textContent).toContain("1"));
     fireEvent.click(within(rail).getByRole("button", { name: /^Decisions/ }));
     expect(await screen.findByTestId("decisions")).toBeTruthy();
     expect(within(rail).getByRole("button", { name: /^Decisions/ }).getAttribute("aria-current")).toBe("page");
+    // The repo picked for a Source stays picked as the sidebar moves to a stage and back.
+    const picked = () => screen.getByRole<HTMLSelectElement>("combobox", { name: "Repo" }).value;
+    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: OTHER } });
+    fireEvent.click(within(rail).getByRole("button", { name: /^Needs you/ }));
+    expect(within(rail).getByRole("button", { name: /^Needs you/ }).getAttribute("aria-current")).toBe("page");
+    fireEvent.click(within(rail).getByRole("button", { name: /^Decisions/ }));
+    expect(await screen.findByTestId("decisions")).toBeTruthy();
     expect(picked()).toBe(OTHER);
     expect(daemon.requests.filter((r) => r.path === "/decisions").at(-1)?.query).toEqual({ repo: OTHER });
 
@@ -639,7 +670,7 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("library sidebar recent and stages: shared designs with no Inbox card are counted from their own review state, and the rail lists the newest", async () => {
+  it("library sidebar stages: shared designs with no Inbox card are counted from their own review state, and a stage row lists what it counted", async () => {
     const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
     const libraryDocs = [
       { doc_id: "a1", title: "Waiting on sam", updated_at: 30, design: { rev: 1, ready: false, reviewers: [{ sub: "sam", required: true }], sign_offs: [] } },
@@ -656,17 +687,18 @@ describe("App", () => {
     await screen.findByRole("region", { name: "Session" }, { timeout: 4000 });
     fireEvent.click(await within(screen.getByTestId("sidebar-foot-row")).findByRole("button", { name: /^Library/ }));
     const rail = await within(nav()).findByRole("navigation", { name: "Library" });
-    await waitFor(() => expect(within(rail).getByRole("button", { name: /^In review/ }).textContent).toContain("1"));
+    // a4 waits on the person and is still in review; the unrelated plan isn't a Library design; a3 is a draft.
+    await waitFor(() => expect(within(rail).getByRole("button", { name: /^In review/ }).textContent).toContain("2"));
     expect(within(rail).getByRole("button", { name: /^Approved/ }).textContent).toContain("1");
-    expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");     // a4, in the queue; the unrelated plan isn't a Library design
-    expect([...rail.querySelectorAll("button")].slice(0, 3).map((row) => row.textContent?.replace(/^\W+/, "").trim())).toEqual(["Asked of me", "Waiting on sam", "All signed"]);
-    // Choosing a stage opens the Library's results narrowed to it, and they are the designs its count counted.
+    expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");
+    expect(within(rail).getByRole("button", { name: /^Drafting/ }).textContent).toContain("1");
+    expect(within(rail).getByRole("button", { name: /^All designs/ }).textContent).toContain("4");
+    // Choosing a stage opens the Library narrowed to it, and they are the designs its count counted.
     const listed = () => [...screen.getByTestId("docs").querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"));
     fireEvent.click(within(rail).getByRole("button", { name: /^In review/ }));
-    await waitFor(() => expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Stage" }).value).toBe("in-review"));
-    await waitFor(() => expect(listed()).toEqual(["a1"]));
+    expect(within(rail).getByRole("button", { name: /^In review/ }).getAttribute("aria-current")).toBe("page");
+    await waitFor(() => expect(listed()).toEqual(["a4", "a1"]));
     fireEvent.click(within(rail).getByRole("button", { name: /^Needs you/ }));
-    await waitFor(() => expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Stage" }).value).toBe("needs-you"));
     await waitFor(() => expect(listed()).toEqual(["a4"]));
     sync.stop();
   });
