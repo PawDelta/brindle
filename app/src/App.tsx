@@ -56,7 +56,7 @@ import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
 import { alert, button } from "./components/ui";
 import { escapeOwned } from "./escape";
-import { HOME, inLibrary, inProfileRail, inRail, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
+import { HOME, inLibrary, inProfileRail, inRail, libraryView, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
 import { SharedDesignReader } from "./screens/Session/Visuals/SharedDesignReader";
@@ -168,6 +168,8 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           pickFolder={pickFolder}
           view={route.view}
           stage={route.stage}
+          folder={route.folder}
+          inRepo={route.repo}
           onView={(view) => navigate({ ...route, view })}
           onCounts={onLibraryCounts}
           doc={route.doc}
@@ -379,7 +381,8 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   // fills it, a sheet lies over it), the Inbox too (its queue scrolls, a
   // sheet lies over it); the pages scroll.
   const shown = route ?? HOME;
-  const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox";
+  // The Library's designs fill it too: their table header and results line stay put while the rows scroll.
+  const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox" || (shown.screen === "knowledge" && libraryView(shown) === "docs");
   // A visual open in the session takes the whole window (design/visualizer-build-plan-amendments.md
   // item 1): the sidebar hides, still mounted, so Back finds it as it was (folds, scroll, split).
   const reading = shown.screen === "session" && shown.sheet?.kind === "visual";

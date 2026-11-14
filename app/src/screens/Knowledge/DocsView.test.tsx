@@ -3,6 +3,7 @@ import { useReaderDoc } from "../../store/libraryReader";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonClient, type DocResults } from "../../api/client";
 import { DocsView } from "./DocsView";
+import { docQueue } from "../Library/libraryStages";
 
 afterEach(cleanup);
 
@@ -101,22 +102,13 @@ describe("docs view", () => {
     } });
     render(<DocsView client={api} repo="/r" />);
     await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
-    await waitFor(() => expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["decision:dec", "kept:k1"]));
-    // A reviewer narrows designs, and drops the sources that have no reviewer; clearing restores everything.
+    // The Sources are listed only for a search; a reviewer narrows the designs, and clearing it restores them.
     const hits = () => [...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"));
+    expect(hits()).toEqual([]);
     fireEvent.change(await screen.findByRole("combobox", { name: "Reviewer" }), { target: { value: "sam" } });
     expect(shown()).toEqual(["d2"]);
-    expect(hits()).toEqual([]);
     fireEvent.change(screen.getByRole("combobox", { name: "Reviewer" }), { target: { value: "" } });
     expect(shown()).toEqual(["d1", "d2"]);
-    expect(hits()).toEqual(["decision:dec", "kept:k1"]);
-    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "decisions" } });
-    expect(shown()).toEqual([]);
-    expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["decision:dec"]);
-    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "kept" } });
-    expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["kept:k1"]);
-    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
-    expect(screen.queryByTestId("results")).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Author" }), { target: { value: "person" } });
     expect(shown()).toEqual(["d1"]);
     fireEvent.change(screen.getByRole("combobox", { name: "Changed" }), { target: { value: "7" } });
@@ -132,19 +124,16 @@ describe("docs view", () => {
     await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(6));
     expect([...screen.getByTestId("docs").querySelectorAll('[data-library-hit^="imported:"]')].map((li) => li.getAttribute("data-library-hit"))).toEqual(["imported:c1", "imported:c2", "imported:c3", "imported:c4"]);
     expect(screen.getByTestId("docs").querySelector('[data-library-hit="kept:k2"]')).toBeNull();
-    fireEvent.change(screen.getByRole("combobox", { name: "Shared" }), { target: { value: "user" } });
+    // A scope narrows the search to designs (the Sources can't say whose they are); Everyone's brings them back.
+    const scope = screen.getByRole("group", { name: "Scope" });
+    fireEvent.click(within(scope).getByRole("button", { name: "Mine" }));
     expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(0);
-    fireEvent.click(screen.getByRole("button", { name: "Search whole Library" }));
+    fireEvent.click(within(scope).getByRole("button", { name: "Everyone's" }));
     await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(6));
-    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "imported" } });
-    expect(shown()).toEqual([]);
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('[data-library-hit="imported:c1"]')!).getByRole("button"));
     expect((await screen.findByTestId("doc-body")).textContent).toContain("SQLite recovery procedure");
     fireEvent.click(screen.getByRole("button", { name: "← Library" }));
-    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "decisions" } });
-    expect(shown()).toEqual([]);
-    expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(1);
-    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>("[data-library-hit]")!).getByRole("button"));
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('[data-library-hit="decision:dec"]')!).getByRole("button"));
     expect((await screen.findByTestId("doc-body")).textContent).toContain("Atomic journal");
     fireEvent.click(screen.getByRole("button", { name: "← Library" }));
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
@@ -168,7 +157,6 @@ describe("docs view", () => {
     cleanup();
     render(<DocsView client={client(() => ({}), RESULTS, [])} repo="/r" />);
     expect(await screen.findByTestId("library-empty")).toBeTruthy();
-    expect(screen.getByRole("combobox", { name: "Type" })).toBeTruthy();
   });
 
   it("library search stage and reviewer: stages come from each shared design's review state, Reviewer selects and clears, and the record lists every signer", async () => {
@@ -178,17 +166,18 @@ describe("docs view", () => {
       d3: { rev: 1, ready: false, reviewers: [{ sub: "sam", required: true }], sign_offs: [] },
     };
     // d3 is in the person's queue; d1 and d2 have no Inbox card at all. d4 is a personal design.
-    const queue = new Map<string, "needs-you">([["d3", "needs-you"]]);
+    const queue = docQueue([{ kind: "review_requested", reason: "r", doc: "d3" }]);
     const api = client((id) => view(DOCS.find((d) => d.doc_id === id)!, designs[id] ? { design: designs[id] } : {}));
-    render(<DocsView client={api} stage="in-review" stages={queue} />);
-    await waitFor(() => expect(shown()).toEqual(["d1"]));
-    const pick = (name: string, value: string) => fireEvent.change(screen.getByRole("combobox", { name }), { target: { value } });
-    pick("Stage", "approved");
+    const { rerender } = render(<DocsView client={api} stage="in-review" queue={queue} />);
+    // Waiting on the person doesn't take a design out of its stage: d3 is in review too.
+    await waitFor(() => expect(shown()).toEqual(["d3", "d1"]));
+    rerender(<DocsView client={api} stage="approved" queue={queue} />);
     expect(shown()).toEqual(["d2"]);
-    pick("Stage", "needs-you");
+    rerender(<DocsView client={api} stage="needs-you" queue={queue} />);
     expect(shown()).toEqual(["d3"]);
-    pick("Stage", "");
+    rerender(<DocsView client={api} queue={queue} />);
     expect(shown()).toHaveLength(4);
+    const pick = (name: string, value: string) => fireEvent.change(screen.getByRole("combobox", { name }), { target: { value } });
     pick("Reviewer", "sam");
     expect(shown().sort()).toEqual(["d1", "d3"]);
     pick("Reviewer", "");
@@ -200,19 +189,14 @@ describe("docs view", () => {
     expect(rows).toEqual(["sam@2:yes", "dana@1:no", "ops@1:no", "ops@2:yes", "dana@waiting:no"]);
   });
 
-  it("lists one session's docs as cards, narrows them by category and search, and opens one in the reader", async () => {
-    const docs = DOCS.map((d) => ({ ...d, category: d.doc_id === "d2" ? "Fees" : "Checkout" }));
-    render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!), RESULTS, docs)} repo="/r" session="root1" />);
-    await waitFor(() => expect(shown()).toEqual(["d1", "d4", "d2"]));
+  it("lists one session's docs, narrows them by search, and opens one in the reader", async () => {
+    render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!))} repo="/r" session="root1" />);
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d4"]));
     // Scopes without documents still remain available.
     await within(screen.getByRole("group", { name: "Scope" })).findByRole("button", { name: "Platform" });
     expect(screen.getByTestId("docs").querySelector('li[data-doc="d4"]')!.textContent).toContain(SCOPES[1].name);
-    const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
-    fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
-    expect(shown()).toEqual(["d2"]);
     fireEvent.change(screen.getByRole("searchbox", { name: "Search the library" }), { target: { value: "pricing" } });
-    await waitFor(() => expect(shown()).toEqual([]));
-    fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
+    await waitFor(() => expect(shown()).toEqual(["d1"]));
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
     const body = await screen.findByTestId("doc-body");
     expect(body.textContent).toContain("Body.");
@@ -225,37 +209,6 @@ describe("docs view", () => {
     expect(readerDoc()).toBe("d2");
     fireEvent.click(screen.getByRole("button", { name: /Library/ }));
     await waitFor(() => expect(readerDoc()).toBeNull());
-  });
-
-  it("groups docs under their categories, largest first and uncategorised last, and remembers a collapsed one", async () => {
-    const docs = [
-      { ...DOCS[0], category: "Security" }, { ...DOCS[1], category: " " }, { ...DOCS[2], category: "Security" }, { ...DOCS[3], category: "Desktop updates" },
-    ];
-    const at = (repo: string, listed: object[] = docs) => <DocsView client={client(() => ({}), RESULTS, listed)} repo={repo} />;
-    const open = () => render(at("/r"));
-    open();
-    await waitFor(() => expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label")).filter((name) => name !== "Docs" && name !== "Results")).toEqual(["Security", "Desktop updates", "Uncategorised"]));
-    expect([...screen.getByRole("region", { name: "Security" }).querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"))).toEqual(["d1", "d3"]);
-    fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
-    expect(shown()).toEqual(["d4", "d2"]);
-    cleanup();
-    const { rerender } = open();
-    await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
-    // The rail lists the categories with their counts; picking a collapsed one opens and filters to it, and its header still collapses.
-    const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
-    fireEvent.click(within(rail).getByRole("button", { name: /^Security/ }));
-    expect(shown()).toEqual(["d1", "d3"]);
-    fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
-    expect(shown()).toEqual([]);
-    // A repo without that category drops the filter, so its docs stay reachable.
-    rerender(at("/other", DOCS));
-    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d3", "d4"]));
-    // Collapsed headers are each repo's own.
-    rerender(at("/third"));
-    await waitFor(() => expect(shown()).toEqual(["d1", "d3", "d4", "d2"]));
-    rerender(at("/r"));
-    await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
-    localStorage.clear();
   });
 
   it("reads a real doc: raw HTML and images stay text, mentions are listed, and Share offers every team of the person's", async () => {

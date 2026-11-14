@@ -14,8 +14,10 @@ import type {
   AskGroupDTO,
   CloudOptionsDTO,
   DecisionDTO,
+  DesignTaskDTO,
   GoalDTO,
   InboxItemDTO,
+  LibraryFolderDTO,
   OrgApprovalPolicyDTO,
   OrgAssignmentDTO,
   OrgAssignmentRequestDTO,
@@ -590,13 +592,10 @@ export interface DocScope {
   can_share?: boolean;
 }
 
-/* A Library folder as the server lists it: private (its creator only) or shared (the scope's members). */
+/* A Library folder as the server lists it: private (its creator only) or shared (the scope's
+   members), with `repo`, the repo it was made for (null when this machine doesn't know). */
 export type FolderVisibility = "private" | "shared";
-export interface LibraryFolder {
-  id: string;
-  name: string;
-  visibility: FolderVisibility;
-}
+export type LibraryFolder = LibraryFolderDTO & { visibility: FolderVisibility };
 /* One scope's folders (GET /library/folders). */
 export interface FolderGroup {
   scope: DocScope;
@@ -697,6 +696,24 @@ export interface AnalysisDoc {
   related?: string[];
   supersedes?: string[];
   superseded_by?: string | null;
+  /* The tracker item (Azure Boards, Jira) the design is linked to, with its state as last read:
+     absent until a link is made. */
+  work_item?: WorkItemLink | null;
+}
+
+/* A linked work item: its key ("AB#4810", "BRN-88"), the tracker's own word for its state, and
+   whether that state is active or done (for its dot). */
+export interface WorkItemLink {
+  key: string;
+  state?: string | null;
+  tone?: "active" | "done" | null;
+  title?: string | null;
+}
+
+/* A design's folder, as its review state names it: the scope and the folder's id. */
+export interface DesignFolderRef {
+  scope: DocScope;
+  id: string;
 }
 
 /* GET /analysis-docs/{id}: the files as written and what the server read from them. */
@@ -708,12 +725,16 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   shared_with: DocScope[];
   /* Optional plan record fields, using the plan engine's DTO names. */
   revisions?: { rev: number; author: string; source: string; changed: string[]; at: number }[];
-  threads?: { id: number; author: string; text: string; replies: { text: string }[] }[];
+  threads?: { id: number; author: string; text: string; replies: { text: string }[]; status?: string }[];
   decisions?: { id: string; title: string; mine?: string | null; confirmed?: string | null; options: { id: string; label: string }[] }[];
   verdict?: { approved: boolean; picks?: Record<string, string> } | null;
   /* A shared design's review state (shared-designs-api.md: GET /analysis-docs/{id} `design`):
      the revision on screen, who is asked to review (`required` or optional) and who has signed it. */
-  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean } | null;
+  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean; folder?: DesignFolderRef | null; threads?: { status?: string }[];
+    /* The design's decisions as the server keeps them; `confirmed` is the option this reader chose. */
+    decisions?: { id: string; title?: string; confirmed?: string | null }[] } | null;
+  /* The plan's tasks when the design is a plan on this machine, in their board state (GET /analysis-docs/{id} `tasks`). */
+  tasks?: DesignTaskDTO[];
 }
 
 export interface DocTopic {
@@ -2109,8 +2130,8 @@ export class DaemonClient {
   }
 
   /* `scope` is the daemon's spelling: user, team:<id> or org:<id>. */
-  createLibraryFolder(scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members" = "owner") {
-    return this.post<LibraryFolder>("/library/folders", { scope, name, visibility, can_add: canAdd });
+  createLibraryFolder(scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members" = "owner", repo?: string) {
+    return this.post<LibraryFolder>("/library/folders", { scope, name, visibility, can_add: canAdd, ...(repo ? { repo } : {}) });
   }
 
   moveDocToFolder(id: string, scope: string, folder: string) {

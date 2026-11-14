@@ -168,6 +168,11 @@ def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkey
     assert len(started) == 2
     assert first["agent_id"] == db.get_task(first["task_id"]).agent_id
     assert first["state"] == second["state"] == "working"
+    # Shared to the Library, the plan's doc carries the board's states (what Building is read from).
+    _shared(db, pid, {})
+    assert plans.doc_tasks(db, "doc") == [{"id": "schema", "title": "Schema", "state": "working"},
+                                          {"id": "ui", "title": "UI", "state": "working"}]
+    assert plans.doc_tasks(db, "another doc") is None
     asyncio.run(mcp_server.assign("developer", "duplicate while working", plan_worker=f"{pid}:schema"))
     assert len(db.list_tasks()) == 4 and len(started) == 2
     ws = replace(db.get_workspace(boss.workspace_id), id="worker-ws", name="worker")

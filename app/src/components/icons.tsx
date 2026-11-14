@@ -179,6 +179,22 @@ export const InboxIcon = (p: Props) => (
   </Icon>
 );
 
+/* Only you see it: a padlock. */
+export const LockIcon = (p: Props) => (
+  <Icon {...p}>
+    <rect x="5.5" y="10.5" width="13" height="9.5" rx="1.5" />
+    <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3" />
+  </Icon>
+);
+
+/* Search: a magnifier. */
+export const SearchIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <path d="M15.5 15.5 21 21" />
+  </Icon>
+);
+
 /* Settings: a gear. */
 export const GearIcon = (p: Props) => (
   <Icon {...p}>

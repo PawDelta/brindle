@@ -68,6 +68,39 @@ def create(kind: str, scope_id: str, name: str, visibility: str = "private", can
                                             "visibility": visibility, "can_add": can_add})
 
 
+def remember_repo(db, kind: str, scope_id: str, folder_id: str, repo: str | None) -> None:
+    """Keep which repo a folder was made for (the server refuses a repo field,
+    so it is this machine's record, table library_folder_repos)."""
+    if not repo or not folder_id:
+        return
+    scope = _scope(kind, scope_id)
+    with db.tx() as c:
+        c.execute("INSERT INTO library_folder_repos (scope_kind, scope_id, folder_id, repo) VALUES (?,?,?,?) "
+                  "ON CONFLICT (scope_kind, scope_id, folder_id) DO UPDATE SET repo=excluded.repo",
+                  (scope["kind"], scope["id"], folder_id, repo))
+
+
+def with_repos(db, groups: list[dict]) -> list[dict]:
+    """``groups`` (as list_all gives them) with each folder's ``repo``: the one
+    it was made for here, or None when this machine doesn't know (a folder made
+    elsewhere, or a scope's default Designs folder)."""
+    from brindle.service.dto import LibraryFolderDTO
+
+    known = {(r["scope_kind"], r["scope_id"], r["folder_id"]): r["repo"]
+             for r in db.conn.execute("SELECT * FROM library_folder_repos")}
+    out = []
+    for g in groups:
+        folders = []
+        for f in g["folders"]:
+            try:
+                folders.append(LibraryFolderDTO.model_validate(
+                    dict(f, repo=known.get((g["scope"]["kind"], g["scope"]["id"], f["id"])))).to_json())
+            except ValueError:
+                continue    # a folder the server sent without a name is left out, not shown raw
+        out.append(dict(g, folders=folders))
+    return out
+
+
 def move_doc(doc_id: str, kind: str, scope_id: str, folder_id: str, *, api: Api = _default_api) -> dict:
     """Place a design in a folder (the design keeps exactly one)."""
     if not doc_id or not folder_id:
