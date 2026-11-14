@@ -101,20 +101,41 @@ REPORT_ONLY_BRIEF = _BRIEF_HEAD + _REPORT_ONLY_STEPS
 TASK_TAIL = """
 
 ---
-You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
+You are running as a brindle {role} (agent id {agent_id}) on branch `{branch}`.
 When you have finished, {finish}, as your brief says.
 """
 _WORKER_FINISH = "commit your work and call the brindle `report_result` tool"
 _REPORT_ONLY_FINISH = "call the brindle `report_result` tool with your findings"
+_REVIEW_FINISH = "call the brindle `submit_review` tool (don't edit files)"
+
+_REVIEW_STEPS = """Don't edit files. When you have finished, call the `submit_review` tool from
+the `brindle` MCP server: approved=true only if you'd merge it as is, with a
+summary of your findings (most severe first, each with file:line and a fix).
+"""
 
 REVIEW_FOOTER = """
 
 ---
 You are running as a brindle reviewer (agent id {agent_id}) on branch `{branch}`.
-Don't edit files. When you have finished, call the `submit_review` tool from
-the `brindle` MCP server: approved=true only if you'd merge it as is, with a
-summary of your findings (most severe first, each with file:line and a fix).
-"""
+""" + _REVIEW_STEPS
+
+# How a branch review (request_review) classifies its findings and decides:
+# after its task's checks results, or in its brief (review_brief).
+REVIEW_CLASSIFY = (
+    "Classify each finding into one of:\n"
+    "- `blocker`: must be fixed before the branch can merge.\n"
+    "- `minor`: style nits, minor comments or suggestions that do not block merging.\n"
+    "- `needs supervisor action: <details>`: an issue the worker cannot fix within its allowed tools or permissions (e.g. network access, elevated migrations, scope decisions).\n\n"
+    "Check whether your findings are actionable by the worker: if a fix requires capabilities outside the worker's brief, flag it as `needs supervisor action`. Check the finish line (`done_when`) for substance, not just placeholder presence (e.g. data populated, not merely keys existing)."
+)
+REVIEW_CHECKS_NOTE = ("If you judged checks without running Bash, state clearly which checks you ran "
+                      "and which you read from history.")
+REVIEW_APPROVAL = (
+    "Approve (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
+    "\n\nIf you request changes and every finding concerns test code only, pass `tests_only=true` to `submit_review`, with `finding_paths` listing the test files, and cite only those files in your summary. If any finding concerns product code, leave `tests_only` false."
+)
+_REVIEW_BRIEF_HEAD = ("Your brief as a brindle reviewer (your agent id, branch and what to review "
+                      "follow in your first message):")
 
 
 SUBAGENT_FOOTER = """
@@ -232,8 +253,10 @@ def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
 
 # Providers whose agents read the profile's prompt ahead of their task: Claude
 # Code's --append-system-prompt, the head of Codex's first message, the native
-# loop's system prompt. Only there does a worker's brief move into it.
-_BRIEF_IN_PROFILE = ("claude", "codex", "native")
+# loop's system prompt, OpenCode's instructions, agy's warm-up turn (the task
+# is the turn after it). Only there does an agent's brief move into it; a
+# plain shell reads neither.
+_BRIEF_IN_PROFILE = ("claude", "codex", "native", "opencode", "antigravity")
 
 # The brindle tools each short-lived role uses (prompt_cache_prefix): the rest
 # are taken out of its context, so its tool definitions are smaller and the
@@ -256,11 +279,12 @@ def prompt_cache_prefix(ws: Workspace) -> bool:
         return True
 
 
-def brief_in_profile(ws: Workspace, provider_name: str) -> bool:
-    """Whether a worker's stable brief (worker_brief) goes in its profile's
-    prompt, after the role prompt and rule packs, rather than in its task:
-    so every worker of a profile starts with the same prefix."""
-    return provider_name in _BRIEF_IN_PROFILE and prompt_cache_prefix(ws)
+def brief_in_profile(ws: Workspace, provider_name: str, on: bool | None = None) -> bool:
+    """Whether a worker's or reviewer's stable brief (worker_brief,
+    review_brief) goes in its profile's prompt, after the role prompt and
+    rule packs, rather than in its task: so every agent of a profile starts
+    with the same prefix. ``on``: the setting, if the caller has read it."""
+    return provider_name in _BRIEF_IN_PROFILE and (prompt_cache_prefix(ws) if on is None else on)
 
 
 def worker_brief(ws: Workspace, report_only: bool = False) -> str:
@@ -269,6 +293,16 @@ def worker_brief(ws: Workspace, report_only: bool = False) -> str:
     finish. No agent id, branch or other per-task text."""
     template = REPORT_ONLY_BRIEF if report_only else WORKER_BRIEF
     return template.format(guidance=worker_guidance(ws, report_only)).strip()
+
+
+def review_brief(ws: Workspace, branch_review: bool) -> str:
+    """A reviewer's stable brief: the code map and how to finish, and for a
+    branch review (request_review, which leaves them out of its task) how to
+    classify findings and decide. No agent id, branch or other per-review text."""
+    from brindle import codemap
+
+    brief = "\n".join(p for p in (_REVIEW_BRIEF_HEAD, codemap.guidance(ws), _REVIEW_STEPS.strip()) if p)
+    return f"{brief}\n\n{REVIEW_CLASSIFY}\n\n{REVIEW_APPROVAL}" if branch_review else brief
 
 
 def short_lived_tools(agent: Agent, ws: Workspace) -> tuple[str, ...] | None:
@@ -282,13 +316,13 @@ def short_lived_tools(agent: Agent, ws: Workspace) -> tuple[str, ...] | None:
 
 
 def _hidden_brindle_tools(keep: tuple[str, ...]) -> list[str]:
-    """Claude Code's names for every brindle tool not in ``keep``, sorted so
-    the list is the same at every start. All of the server's tools, whoever
-    asks: not its per-caller list."""
+    """Every brindle tool not in ``keep``, sorted so the list is the same at
+    every start; each provider names them its own way (Profile.hidden_brindle_tools).
+    All of the server's tools, whoever asks: not its per-caller list."""
     from brindle.mcp_server import mcp
 
     names = {t.name for t in mcp._tool_manager.list_tools()}
-    return [f"mcp__brindle__{name}" for name in sorted(names - set(keep))]
+    return sorted(names - set(keep))
 
 
 def managed(repo_root: str):
@@ -475,7 +509,7 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
     if brief_in_profile(ws, provider.name):
         # The stable brief is in the profile's prompt (_profile_for): the
         # task carries only what is this worker's own.
-        prompt += TASK_TAIL.format(agent_id=agent_id, branch=ws.branch,
+        prompt += TASK_TAIL.format(role="worker", agent_id=agent_id, branch=ws.branch,
                                    finish=_REPORT_ONLY_FINISH if report_only else _WORKER_FINISH)
     else:
         footer = REPORT_ONLY_FOOTER if report_only else WORKER_FOOTER
@@ -576,7 +610,10 @@ def spawn(
                                         chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
                                                                       codemap.graph_path(ws)))
     elif prompt and mode == "review":
-        prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
+        tail = (TASK_TAIL.format(role="reviewer", agent_id=agent_id, branch=ws.branch, finish=_REVIEW_FINISH)
+                if brief_in_profile(ws, provider.name)   # the rest is in its review_brief
+                else REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch))
+        prompt = raw_task = prompt + tail
 
     from brindle import preflight, provider_homes
 
@@ -813,20 +850,22 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if rules:
         profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{rules}".strip())
     cfg = load_repo_config(ws.repo_root)
-    if agent.mode in _WORKER_MODES and agent.provider in _BRIEF_IN_PROFILE and cfg.prompt_cache_prefix:
-        # brief_in_profile: role prompt, rule packs, then the repo brief, the
-        # same for every worker of this profile; decorate_worker_prompt
-        # leaves it out of the task.
-        brief = worker_brief(ws, is_review_profile(agent.profile, ws.repo_root))
+    if brief_in_profile(ws, agent.provider, cfg.prompt_cache_prefix) and \
+            (agent.mode in _WORKER_MODES or agent.mode == "review"):
+        # Role prompt, rule packs, then the repo brief: the same for every
+        # agent of this profile. decorate_worker_prompt, spawn and
+        # _request_review leave it out of the task.
+        brief = (review_brief(ws, branch_review=bool(agent.review_sha)) if agent.mode == "review"
+                 else worker_brief(ws, is_review_profile(agent.profile, ws.repo_root)))
         profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{brief}".strip())
-    keep = short_lived_tools(agent, ws) if cfg.prompt_cache_prefix and agent.provider == "claude" else None
+    keep = short_lived_tools(agent, ws) if cfg.prompt_cache_prefix else None
     if keep is not None:
         try:
             hidden = _hidden_brindle_tools(keep)
         except Exception:  # noqa: BLE001 - a smaller tool list is only a saving
             log.warning("could not list brindle's tools; %s keeps them all", agent.id, exc_info=True)
             hidden = None
-        profile = replace(profile, disallowed_tools=hidden, short_cache=True)
+        profile = replace(profile, hidden_brindle_tools=hidden, short_cache=True)
     autopilot_on = db.get_autopilot(agent.id) is not None
     if autopilot_on:
         profile = replace(profile, prompt=profile.prompt + pilot.guide(cfg, ws.repo_root))
@@ -5038,19 +5077,22 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if focus:
         task += f"\n\nFocus: {focus}"
 
-    task += (
-        "\n\nClassify each finding into one of:\n"
-        "- `blocker`: must be fixed before the branch can merge.\n"
-        "- `minor`: style nits, minor comments or suggestions that do not block merging.\n"
-        "- `needs supervisor action: <details>`: an issue the worker cannot fix within its allowed tools or permissions (e.g. network access, elevated migrations, scope decisions).\n\n"
-        "Check whether your findings are actionable by the worker: if a fix requires capabilities outside the worker's brief, flag it as `needs supervisor action`. Check the finish line (`done_when`) for substance, not just placeholder presence (e.g. data populated, not merely keys existing)."
-    )
-    if check_summary:
-        task += " If you judged checks without running Bash, state clearly which checks you ran and which you read from history."
-    task += (
-        "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
-        "\n\nIf you request changes and every finding concerns test code only, pass `tests_only=true` to `submit_review`, with `finding_paths` listing the test files, and cite only those files in your summary. If any finding concerns product code, leave `tests_only` false."
-    )
+    from brindle import profiles as profile_files   # load_profile is a local name in this function
+
+    try:
+        provider_name = profile_files.load_profile(profile, ws.repo_root).provider
+    except KeyError:   # spawn reports an unknown profile
+        provider_name = ""
+    if brief_in_profile(ws, provider_name):
+        # How to classify and decide is in the reviewer's brief (review_brief),
+        # ahead of this task: only this review's own text follows.
+        if check_summary:
+            task += f"\n\n{REVIEW_CHECKS_NOTE}"
+    else:
+        task += f"\n\n{REVIEW_CLASSIFY}"
+        if check_summary:
+            task += f" {REVIEW_CHECKS_NOTE}"
+        task += f"\n\n{REVIEW_APPROVAL}"
     # Automatic reviews share the primary slot even if the learner changes
     # its pick. Explicit profiles and required second reviews have their own
     # claims, so a different live holder cannot swallow the requested identity.

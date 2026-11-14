@@ -1233,12 +1233,12 @@ class ClaudeCode(Provider):
                                         # `//` makes the path absolute; reads only.
                                         *(f"Read(/{d.rstrip('/')}/**)" for d in p.read_dirs or [])]),
         ]
-        if p.disallowed_tools:
+        if p.hidden_brindle_tools:
             # The brindle tools a short-lived agent's role doesn't use
             # (agents.short_lived_tools): out of its context, so its tool
             # definitions are smaller and the same at every start. Variadic
             # like --allowedTools: --append-system-prompt always follows.
-            argv += ["--disallowedTools", ",".join(p.disallowed_tools)]
+            argv += ["--disallowedTools", ",".join(f"mcp__brindle__{t}" for t in p.hidden_brindle_tools)]
         # Lightweight workers. --settings (brindle's hooks) is its own setting
         # source, so --setting-sources never drops them; --strict-mcp-config
         # keeps the --mcp-config servers (brindle) and ignores all others.
@@ -2176,6 +2176,10 @@ class Codex(Provider):
             # Codex's default MCP startup timeout (10s) is too short on a loaded
             # machine; without it a worker can start without brindle's tools (#159).
             "-c", "mcp_servers.brindle.startup_timeout_sec=120",
+            # The brindle tools a short-lived agent's role doesn't use
+            # (agents.short_lived_tools): Codex leaves them out of its context.
+            *(("-c", f"mcp_servers.brindle.disabled_tools={json.dumps(ctx.profile.hidden_brindle_tools)}")
+              if ctx.profile.hidden_brindle_tools else ()),
             "-c", f"notify={json.dumps(notify)}",
             # Only this launch's shell commands; the person's config.toml is untouched.
             *(a for k, v in {**_uv_cache_env(ctx), **_venv_path_env(ctx)}.items()
