@@ -337,6 +337,7 @@ _PR_PASSED = ("SUCCESS", "NEUTRAL", "SKIPPED")
 _pr_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pr-checks")
 _pr_lock = threading.RLock()
 _pr_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_pr_closed: set[str] = set()        # confirmed CLOSED, distinct from MERGED and an unavailable read
 _pr_flights: dict[str, Future] = {}
 _pr_changed: set[str] = set()      # PRs whose line changed, until refresh_pr_states announces them
 
@@ -380,18 +381,24 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
 
 
 def _read_pr_state(url: str, cwd: str) -> None:
+    payload = None
     try:
         # The pool's threads copy no context: bound the read with its own slot.
         with spawn.deadline(workspaces.PR_CHECKS_SECONDS):
-            state = pr_state_of(url, workspaces.pull_request_checks(url, cwd))
+            payload = workspaces.pull_request_checks(url, cwd)
+            state = pr_state_of(url, payload)
     except Exception:  # noqa: BLE001 - an unreadable PR is just unknown
         log.exception("brindle: couldn't read a session PR's checks")
         state = pr_state_of(url, None)
-    _set_pr_state(url, state)
+    _set_pr_state(url, state, closed=bool(payload and payload.get("state") == "CLOSED"))
 
 
-def _set_pr_state(url: str, state: dict[str, Any] | None) -> None:
+def _set_pr_state(url: str, state: dict[str, Any] | None, *, closed: bool = False) -> None:
     with _pr_lock:
+        if closed:
+            _pr_closed.add(url)
+        else:
+            _pr_closed.discard(url)
         before = _pr_cache[url][1] if url in _pr_cache else pr_state_of(url, None)
         _pr_cache[url] = (time.monotonic(), state)
         _pr_flights.pop(url, None)
@@ -665,6 +672,23 @@ def refresh_pr_states(db: DB) -> None:
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is not None:
             _ask_pr_state(row["url"], ws.repo_root)
+            with _pr_lock:
+                closed = row["url"] in _pr_closed
+            if closed:
+                # A closed, unmerged PR cannot accept the session's next work.
+                # A HEAD search alone cannot prove this: an open PR may merely
+                # be behind the local branch. Only its own CLOSED result retires
+                # the record that would otherwise suppress preparation forever.
+                with db.tx() as c:
+                    retired = c.execute("UPDATE session_prs SET url = NULL WHERE root_id = ? AND branch = ?"
+                                        " AND url = ? AND merged_at IS NULL",
+                                        (row["root_id"], row["branch"], row["url"])).rowcount
+                    if retired:
+                        c.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?",
+                                  (row["root_id"], row["branch"]))
+                if retired:
+                    bus.publish_agent(db, "session.pr_checks", row["root_id"], url=row["url"], closed=True)
+                continue
             _auto_merge_session_pr(db, row, ws)
     with _pr_lock:
         found = {_head_roots[k] for k in _head_changed if k in _head_roots}
