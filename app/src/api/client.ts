@@ -730,7 +730,9 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   verdict?: { approved: boolean; picks?: Record<string, string> } | null;
   /* A shared design's review state (shared-designs-api.md: GET /analysis-docs/{id} `design`):
      the revision on screen, who is asked to review (`required` or optional) and who has signed it. */
-  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean; folder?: DesignFolderRef | null; threads?: { status?: string }[] } | null;
+  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean; folder?: DesignFolderRef | null; threads?: { status?: string }[];
+    /* The design's decisions as the server keeps them; `confirmed` is the option this reader chose. */
+    decisions?: { id: string; title?: string; confirmed?: string | null }[] } | null;
   /* The plan's tasks when the design is a plan on this machine, in their board state (GET /analysis-docs/{id} `tasks`). */
   tasks?: DesignTaskDTO[];
 }

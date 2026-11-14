@@ -11,7 +11,7 @@
    folder form: its name, the repo it is for, where it lives and who sees and adds to it. */
 
 import { useMemo, useRef, useState, type FormEvent } from "react";
-import { useReaderDoc } from "../store/libraryReader";
+import { libraryPicked, useReaderDoc } from "../store/libraryReader";
 import type { AnalysisDoc, FolderGroup, FolderVisibility } from "../api/client";
 import type { RepoDTO } from "../api/schema";
 import { LIBRARY_STAGES, libraryView, type KnowledgeView, type LibraryStage, type Route } from "../routes";
@@ -160,7 +160,10 @@ export function LibraryRail({ route, counts = {}, folders = [], docs = NO_DOCS, 
   const designs = view === "docs";
   const picked = designs && !route.stage && !route.folder && !route.repo;
   // The switch to List or Board keeps the folder picked: a row's route carries only what it picks.
-  const go = (pick: Pick<LibraryRoute, "stage" | "folder" | "repo">) => navigate({ screen: "knowledge", view: "docs", ...pick });
+  const go = (pick: Pick<LibraryRoute, "stage" | "folder" | "repo">) => {
+    libraryPicked();     // closes a design open in the reader: what was picked shows
+    navigate({ screen: "knowledge", view: "docs", ...pick });
+  };
   const move = async (folder: string, scope: string) => {
     try {
       await onMoveDoc?.(readerDoc!, scope, folder);

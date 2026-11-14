@@ -36,9 +36,10 @@ const rows: Row[] = [
   { id: "d_cloud", title: "Cloud workers for Pro", scope: TEAM, updated_at: hours(5), created_by: "maya@pawdelta.com",
     summary: "Pro sessions keep running on a machine the customer controls; results land as reviewed pull requests.",
     work_item: { key: "AB#4810", state: "Active", tone: "active", title: "Azure Boards epic" },
-    detail: { design: { rev: 3, ready: false, reviewers: [{ sub: "dana.ortiz@pawdelta.com" }, { sub: "sam.rivera@pawdelta.com" }], sign_offs: [], folder: at(TEAM, "f_engine") },
-      threads: [thread(1, "dana"), thread(2, "sam"), thread(3, "ravi"), thread(4, "maya")],
-      decisions: [{ id: "where", title: "Where", options: [] }, { id: "lease", title: "Lease", options: [] }, { id: "relay", title: "Relay", confirmed: "daemon", options: [] }] } },
+    // A shared design's threads and decisions are its review state's, under `design`, as GET /analysis-docs/{id} gives them.
+    detail: { design: { rev: 3, ready: false, reviewers: [{ sub: "dana.ortiz@pawdelta.com" }, { sub: "sam.rivera@pawdelta.com" }], sign_offs: [], folder: at(TEAM, "f_engine"),
+      threads: [thread(1, "dana"), thread(2, "sam"), thread(3, "ravi"), thread(4, "maya"), thread(5, "dana", "resolved")],
+      decisions: [{ id: "where", title: "Where" }, { id: "lease", title: "Lease" }, { id: "relay", title: "Relay", confirmed: "daemon" }] } } },
   { id: "d_perm", title: "Permission prompts: read safe shell forms", scope: ORG, updated_at: hours(9), created_by: "ravi@pawdelta.com",
     summary: "The checker reads pipes, redirects and globs it can prove are read-only, so fewer commands stop for a person.",
     open_questions: ["Should `find -exec` ever be read as safe?", "Do we log what was auto-allowed?"],

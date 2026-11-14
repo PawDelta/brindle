@@ -25,7 +25,7 @@ function Row({ doc, record, queue, scopes, match, onOpen }: { doc: AnalysisDoc; 
   const need = needsYou(doc.id, queue);
   const work = record?.work_item ?? doc.work_item;
   return (
-    <li data-doc={doc.id} data-stage={stage} data-needs-you={need ?? undefined}>
+    <li data-doc={doc.id} data-stage={stage} data-needs-you={need ?? undefined} data-to-decide={openItems(doc, record).decide}>
       <button type="button" className={`${COLUMNS} w-full border-b border-line py-[9px] text-left hover:bg-surface-2`} onClick={onOpen}>
         <span className="min-w-0">
           <span className="block truncate text-[13.5px] font-semibold text-ink">{doc.title || doc.id}</span>

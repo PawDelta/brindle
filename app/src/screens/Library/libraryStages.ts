@@ -112,11 +112,12 @@ export function signOffs(design?: DesignReview | null): { people: { sub: string;
   return { people, signed: required.filter((p) => p.signed).length, required: required.length };
 }
 
-/* What is still open on a design: unresolved threads, decisions nobody has confirmed yet, and the
-   open questions the server read from it. */
+/* What is still open on a design: unresolved threads, decisions not yet confirmed (a shared
+   design's own, under `design`, else a local plan's), and the open questions the server read from it. */
 export function openItems(doc: AnalysisDoc, record?: DesignRecord | null): { threads: number; decide: number; questions: number } {
-  const threads = (record?.threads ?? record?.design?.threads ?? []).filter((t) => t.status !== "resolved").length;
-  const decide = record?.verdict?.approved ? 0 : (record?.decisions ?? []).filter((d) => !d.confirmed).length;
+  const threads = (record?.design?.threads ?? record?.threads ?? []).filter((t) => t.status !== "resolved").length;
+  const decisions = record?.design?.decisions ?? record?.decisions ?? [];
+  const decide = record?.verdict?.approved ? 0 : decisions.filter((d) => !d.confirmed).length;
   return { threads, decide, questions: doc.open_questions?.length ?? 0 };
 }
 

@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DaemonClient, FolderGroup, FolderVisibility } from "../api/client";
+import { libraryChanged } from "../store/libraryReader";
 
 export type CanAdd = "owner" | "members";
 
@@ -34,6 +35,7 @@ export function useLibraryFolders(client: DaemonClient | null | undefined, activ
     async (scope: string, name: string, visibility: FolderVisibility, canAdd: CanAdd, repo?: string) => {
       const started = epoch.current;
       await client!.createLibraryFolder(scope, name, visibility, canAdd, repo);
+      libraryChanged();     // the list and board read the folders again too
       if (started === epoch.current) await load();
     },
     [client, load],
@@ -42,6 +44,7 @@ export function useLibraryFolders(client: DaemonClient | null | undefined, activ
     async (doc: string, scope: string, folder: string) => {
       const started = epoch.current;
       await client!.moveDocToFolder(doc, scope, folder);
+      libraryChanged();     // the design's folder changed: its record is read again wherever it is shown
       if (started === epoch.current) await load();
     },
     [client, load],

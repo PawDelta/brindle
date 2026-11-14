@@ -37,6 +37,7 @@ import { GearIcon, InboxIcon, LibraryIcon } from "./icons";
 import { LibraryRail, type LibraryCounts } from "./LibraryRail";
 import { useLibraryFolders } from "./useLibraryFolders";
 import { useLibraryDocs } from "./useLibraryDocs";
+import { useLibraryChanges } from "../store/libraryReader";
 import { docQueue, stageCounts } from "../screens/Library/libraryStages";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
@@ -748,17 +749,12 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
   }, [onToggleLibrary, libraryOpen, back, navigate]);
   // The Library's folders (see useLibraryFolders); a daemon that can't say shows none.
   const folderClient = useContext(DaemonContext);
-  const { folders, create: createFolder, move: moveFolderDoc } = useLibraryFolders(folderClient, libraryOpen);
+  const { folders, create: createFolder, move: moveDoc } = useLibraryFolders(folderClient, libraryOpen);
   // Designs waiting on the person: the plans in the Inbox.
   const plansWaiting = useAppState((s) => s.inbox.filter((item) => item.kind === "plan").length);
   // The designs, with what each one's detail says: the stage counts (with what the Inbox says waits on
   // the person) and the folders' counts. A move reads them again, the design's folder having changed.
-  const [moves, setMoves] = useState(0);
-  const moveDoc = useCallback(async (doc: string, scope: string, folder: string) => {
-    await moveFolderDoc(doc, scope, folder);
-    setMoves((n) => n + 1);
-  }, [moveFolderDoc]);
-  const libraryDocs = useLibraryDocs(folderClient, libraryOpen, moves);
+  const libraryDocs = useLibraryDocs(folderClient, libraryOpen, useLibraryChanges());
   const inbox = useAppState((s) => s.inbox);
   const docStageCounts = useMemo(() => stageCounts(libraryDocs.docs, docQueue(inbox), libraryDocs.records), [inbox, libraryDocs]);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();

@@ -19,7 +19,7 @@ import { ExportMenu, type ExportClient } from "./ExportMenu";
 import { Markdown } from "./Markdown";
 import { docMatch, useLibrarySearch, type LibraryHit, type SearchClient } from "./librarySearch";
 import { ReaderChrome } from "../Session/Visuals/VisualReader";
-import { setReaderDoc } from "../../store/libraryReader";
+import { setReaderDoc, useLibraryChanges, useLibraryPicks } from "../../store/libraryReader";
 import { LIBRARY_STAGES, type LibraryStage } from "../../routes";
 import { atStage, folderOf, groupDocs, loadRecords, placedFolders, repoName, signOffRows, type DesignRecord, type GroupBy, type Queue } from "../Library/libraryStages";
 import { LibraryList } from "../Library/LibraryList";
@@ -454,6 +454,16 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   const [results, setResults] = useState<DocResults | null>(null);
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(doc ?? null);
+  // A row picked in the sidebar (a stage, a repo, a folder, All designs, even the one already picked)
+  // closes whatever is open here and shows what was picked; the search and filters stay. Going to
+  // Settings and back is not a pick: the design stays open.
+  const picks = useLibraryPicks();
+  const [seenPicks, setSeenPicks] = useState(picks);
+  if (picks !== seenPicks) {
+    setSeenPicks(picks);
+    setOpen(null);
+    setSourceOpen(null);
+  }
   // The Library rail moves the design that is open here, so it is told which, and when none.
   useEffect(() => {
     setReaderDoc(sourceOpen ? null : open);
@@ -489,7 +499,9 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   }, [client, repo, scope, session]);
   useEffect(load, [load]);
 
-  /* The folders, for the groups' names and the folder or repo the sidebar picked. */
+  /* The folders, for the groups' names and the folder or repo the sidebar picked; read again with
+     every design's record when the sidebar makes a folder or moves a design (libraryChanged). */
+  const changes = useLibraryChanges();
   const [folderGroups, setFolderGroups] = useState<FolderGroup[]>(NO_FOLDERS);
   useEffect(() => {
     let live = true;
@@ -500,7 +512,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
     return () => {
       live = false;
     };
-  }, [client]);
+  }, [client, changes]);
 
   useEffect(() => {
     let live = true;
@@ -522,7 +534,8 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   }, [client, repo]);
 
   const docs = listing.state === "loaded" ? listing.docs : EMPTY_DOCS;
-  /* What each listed design's detail says (its review, its plan's tasks, its folder), read once per listing. */
+  /* What each listed design's detail says (its review, its plan's tasks, its folder): read once per
+     listing, and again after a change in the sidebar. */
   const [records, setRecords] = useState<Map<string, DesignRecord>>(() => new Map());
   useEffect(() => {
     let live = true;
@@ -531,7 +544,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
     return () => {
       live = false;
     };
-  }, [client, docs, repo]);
+  }, [client, docs, repo, changes]);
   const placed = useMemo(() => placedFolders(folderGroups), [folderGroups]);
   const placeOf = useCallback((id: string) => {
     const key = folderOf(records.get(id));

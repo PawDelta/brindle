@@ -13,7 +13,7 @@ export interface LibraryDocs {
 }
 const NONE: LibraryDocs = { docs: [], records: new Map() };
 
-/* `again`: bumped to read them again (a design moved to another folder). */
+/* `again`: bumped to read them again (libraryReader.libraryChanged: a folder made, a design moved). */
 export function useLibraryDocs(client: DaemonClient | null | undefined, active: boolean, again = 0): LibraryDocs {
   const [got, setGot] = useState<LibraryDocs>(NONE);
   useEffect(() => {
