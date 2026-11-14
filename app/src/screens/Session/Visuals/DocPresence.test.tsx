@@ -262,6 +262,37 @@ it("locks others' text while the author is offline and still sends comments and 
   expect(sent).toEqual(["comments", "suggestions"]);
 });
 
+it("shows a frozen version's own text, as typed live before the freeze, on the page and in the Markdown view", async () => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "doc", session: "boss", title: "Workers", rev: 1, state: "open", markdown: "", lede: "", decisions: [], split: [], queued: 0, created_at: 1,
+    sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["Bo"], reviewers: [{ sub: "Bo", required: true, status: "waiting" }] } };
+  daemon.seedLive("doc", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: async () => plan, decidePlan: live.decidePlan.bind(live),
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await settle();
+  fireEvent.click(screen.getByRole("radio", { name: "Editing" }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+  await settle();
+  const text = editor("Text of Summary");
+  await act(async () => text.dispatch({ changes: { from: text.state.doc.length - 1, insert: ", on the customer's machine" } }));
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Done editing" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  await settle();
+  // The revision still says "Workers run here."; the version signed is what was typed.
+  const typed = "Workers run here, on the customer's machine.";
+  expect(within(screen.getByRole("region", { name: "Summary" })).getByText(typed)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
+  expect(screen.getByTestId("doc-markdown").textContent).toContain(typed);
+});
+
 /* The Markdown switch changes the view, never the mode: read-only while Viewing, the live text while
    Editing (where the formatting toolbar writes the syntax into the draft), read-only and marked while
    a version is locked for sign-off. */

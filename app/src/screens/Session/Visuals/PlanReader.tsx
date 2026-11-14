@@ -28,7 +28,8 @@
    who publishes a new revision. A write names the revision on screen: a newer one is a 409. */
 
 import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
-import { DaemonError, type DaemonClient, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { LoroDoc } from "loro-crdt";
+import { DaemonError, fromBase64, type DaemonClient, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
 import { liveReviewGate } from "../../../api/liveReview";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { LoadingButton } from "../../../components/LoadingButton";
@@ -357,6 +358,18 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const locked = useLiveReview && liveState?.lock === "sign_off";
   const mode: Mode = locked ? "viewing" : chosenMode;
   const frozen = useLiveReview && liveState?.lock === "sign_off" ? liveState.version : null;
+  // A frozen version reads as its own text (its snapshot), which may have moved on from the
+  // revision's: what is signed is what is shown, on the page and in the Markdown view.
+  const frozenTexts = useMemo(() => {
+    if (!frozen?.snapshot) return null;
+    try {
+      const snapshot = new LoroDoc();
+      snapshot.import(fromBase64(frozen.snapshot));
+      return new Map(Object.entries(snapshot.toJSON() as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string"));
+    } catch {
+      return null;
+    }
+  }, [frozen?.snapshot]);
   const [raw, setRaw] = useState(false);
   const [sharingOpen, setSharingOpen] = useState(false);
   const [briefOpen, setBriefOpen] = useState(false);
@@ -448,7 +461,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // The doc's order: the overview, each section under its number, then each decision under its own.
   const numbers = new Map(plan.sections.map((s, i): [string, number] => [s.id, i + 1]));
   const figures = new Map(plan.sections.filter((s) => s.kind === "mermaid" || s.kind === "svg").map((s, i): [string, number] => [s.id, i + 1]));
-  const bodyOf = (section: string) => (section === LEDE ? plan.lede : plan.sections.find((s) => s.id === section)?.markdown) ?? "";
+  const textPlan: Plan = frozenTexts ? {
+    ...plan, lede: frozenTexts.get(LEDE) ?? plan.lede,
+    sections: plan.sections.map((s) => (s.kind === "mermaid" || s.kind === "svg" ? s : { ...s, markdown: frozenTexts.get(s.id) ?? s.markdown })),
+  } : plan;
+  const bodyOf = (section: string) => (section === LEDE ? textPlan.lede : textPlan.sections.find((s) => s.id === section)?.markdown) ?? "";
   // What an anchor is on, as text: a draft is stale once this differs from what it was begun on.
   const decisionSource = (id: string) => {
     const d = plan.decisions.find((x) => x.id === id);
@@ -502,6 +519,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       if (a.kind !== "text" || a.section !== section || a.state === "detached" || a.start == null || a.end == null) continue;
       // The engine's offsets count code points; the text on screen, UTF-16 units.
       const range = { start: toUnits(body, a.start), end: toUnits(body, a.end), thread: t.id, ref: t.id, lit: followed?.thread === String(t.id) };
+      // On a frozen version's own text a range is only drawn where its words still are.
+      if (frozenTexts?.has(section) && a.quote != null && body.slice(range.start, range.end) !== a.quote) continue;
       out.push(t.kind === "suggestion" ? { ...range, kind: "del", ins: t.after ?? "" } : { ...range, kind: "anchor" });
     }
     const on = draft && !draftStale ? anchorOf(draft) : null;
@@ -854,10 +873,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               )}
             </div>
             {raw ? (
-              <DocMarkdown plan={plan} state={markdownState} version={frozen ? `version ${frozen.id}` : undefined}
+              <DocMarkdown plan={textPlan} state={markdownState} version={frozen ? `version ${frozen.id}` : undefined}
                 editorFor={(s, title) => (live ? liveEditor(s, title, "source") : editing?.section === s ? editBox(title) : null)} />
             ) : <>
-            {plan.lede && (
+            {textPlan.lede && (
               <div id="plan-lede" className="grid gap-2.5">
                 {mode === "editing" && editing?.section !== LEDE && <span className={`${aside} justify-self-end`}>{editControl(LEDE, "the overview")}</span>}
                 {textBody(LEDE, "the overview")}
