@@ -357,7 +357,8 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
         _review_open(p)
     scope = _scope(scope)
     team = scope["id"] if scope["kind"] == "group" else None
-    doc_templates.require(db, p["id"], doc_templates.SHARE, plan_docs.current(db, p)["sections"], team)
+    doc_templates.require(db, p["id"], doc_templates.SHARE, plan_docs.current(db, p)["sections"], team,
+                          folder if isinstance(folder, dict) else None)
     client, store = ad._session(client, store)
     ent = _require_team(store)
     people = None if reviewers is None else _reviewers(reviewers)

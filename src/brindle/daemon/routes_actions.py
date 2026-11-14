@@ -2266,12 +2266,14 @@ def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
 
 
 def put_doc_format(db: DB, params: dict, body: Body) -> Any:
-    """Replace what one level (``level``: org or team:<id>) of Settings › Doc
-    format sets with ``format`` (brindle.doc_templates); returns the GET's view."""
+    """Replace what one level (``level``: org, team:<id> or a level of the
+    org's structure) of Settings › Doc format sets with ``format``
+    (brindle.doc_templates); ``version``: the one the GET gave, so an org's
+    format changed meanwhile is refused. Returns the GET's view."""
     from brindle import doc_templates
 
     level = _get(body, "level", default=doc_templates.ORG)
-    doc_templates.save(level, _get(body, "format", dict, required=True))
+    doc_templates.save(level, _get(body, "format", dict, required=True), version=_get(body, "version", int))
     return doc_templates.view(db, level)
 
 

@@ -823,8 +823,10 @@ export interface DocFormat {
 export interface DocFormatView {
   level: string;
   format: Partial<DocFormat>;
+  /* The version a save names back: the Library refuses one saved over a change made since. */
+  version: number;
   resolved: DocFormat;
-  /* Where it is kept: the person's own config, or their org's in the Library; whether this brindle can save it. */
+  /* Where it is kept: the person's own config, or their org's in the Library (its admins save it). */
   source: "local" | "org";
   editable: boolean;
   next_reference: string | null;
@@ -2219,8 +2221,8 @@ export class DaemonClient {
   }
 
   /* Replaces what one level of the doc format sets. */
-  setDocFormat(format: Partial<DocFormat>, level = "org") {
-    return this.put<DocFormatView>("/doc-format", { level, format });
+  setDocFormat(format: Partial<DocFormat>, version: number, level = "org") {
+    return this.put<DocFormatView>("/doc-format", { level, format, version });
   }
 
   /* brindle's disk use (slow: the daemon measures every worktree). */

@@ -940,8 +940,9 @@ def analysis_doc_switches(db: DB, request: Request) -> Any:
 @_json
 def doc_format(db: DB, request: Request) -> Any:
     """Settings › Doc format (brindle.doc_templates): what ``level`` (org, the
-    default, or team:<id>) sets, the format in force there, the reference
-    the next new doc gets, and how many docs were written with each template."""
+    default, team:<id>, or a level of the org's structure) sets and its
+    version, the format in force there, where it is kept, the reference this
+    machine's next new doc gets, and how many docs each template wrote."""
     from brindle import doc_templates
 
     level = request.query_params.get("level") or doc_templates.ORG

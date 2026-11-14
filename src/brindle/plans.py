@@ -566,9 +566,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         lede, parts = plan_docs.from_markdown(markdown)
     # The doc format: a new plan starts from the default template, a revision keeps the one
     # its plan was written with; either way a required heading left out comes back, empty.
-    fmt = doc_templates.resolve()
-    template = (doc_templates.of(db, plan_id) or {}).get("template") if plan_id else \
-        doc_templates.default_template(fmt)
+    where = doc_templates.store()
+    fmt = None if plan_id else doc_templates.resolve(where=where)
+    template = doc_templates.default_template(fmt) if fmt else (doc_templates.of(db, plan_id) or {}).get("template")
     parts, added = doc_templates.apply(template, parts)
     if added:
         markdown = plan_docs.render(lede, parts)
@@ -614,6 +614,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         drafted.update(plan_docs.supervise(c, current, replica, base, replaced, lede, parts, off_draft))
 
     settled: list[int] = []
+    numbered: list[bool] = []
 
     def write(c, vid: str, visual_rev: int) -> None:
         now = time.time()
@@ -624,7 +625,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         if visual_rev == 1:
             c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                       " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
-            doc_templates.start(c, vid, template, fmt["naming"]["reference"], now)
+            numbered.append(doc_templates.start(c, vid, template, fmt and fmt["naming"]["reference"], now))
             # The plan now holds the session's tasks: the offer to plan first is settled
             # (an open one too: the person asked for a plan in their own words).
             # A plan asked for directly, with no offer before it, settles the goal too, so growing
@@ -655,6 +656,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                "only after they asked for a planning doc, said yes to planning the goal "
                                "first, or redirected this one", 403) from e
         raise
+    if any(numbered):
+        # Taken once the plan exists, so a refused proposal never spends a number.
+        doc_templates.number(db, v["id"], where)
     if any(settled):
         bus.publish_agent(db, "autopilot.goal", root.id)   # the offer's card goes
     if replica is not None:

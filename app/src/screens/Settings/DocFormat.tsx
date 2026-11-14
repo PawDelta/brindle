@@ -107,7 +107,7 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
     try {
       const naming = { title_hint: sent.naming.title_hint?.trim() || null, reference: sent.naming.reference?.trim() || null };
       const templates = sent.templates.map((t) => ({ ...t, sections: t.sections.map((s) => ({ ...s, hint: s.hint?.trim() || null })) }));
-      const got = await client.setDocFormat({ templates, naming, blocks: sent.blocks });
+      const got = await client.setDocFormat({ templates, naming, blocks: sent.blocks }, view.version);
       // What was typed while it saved stays as the draft; only an untouched draft takes the saved format.
       if (latest.current === sent) load(got);
       else setView(got);
@@ -172,7 +172,11 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
               <input className={`${field} font-mono`} value={draft.naming.reference ?? ""} placeholder="DES-{number}" onChange={(e) => change({ ...draft, naming: { ...draft.naming, reference: e.target.value } })} />
             </label>
             <p className="text-[11px] text-ink-3" data-testid="next-reference">
-              {view.next_reference ? `Next: ${view.next_reference}. Shown beside the title.` : "Use {number} where the doc's number goes."}
+              {view.next_reference
+                ? `Next: ${view.next_reference}. Shown beside the title.`
+                : view.source === "org" && view.resolved.naming.reference
+                  ? "Your organization numbers them in order. Shown beside the title."
+                  : "Use {number} where the doc's number goes."}
             </p>
           </div>
         </div>
@@ -281,9 +285,9 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
               Save
             </button>
           </div>
-          {!view.editable && (
-            <p role="status" className={notice} data-testid="doc-format-org">
-              Your organization keeps its doc format in the Library; this brindle can't change it yet.
+          {view.source === "org" && (
+            <p className="text-xs text-ink-3" data-testid="doc-format-org">
+              Your organization keeps this format in the Library for every member; its admins change it.
             </p>
           )}
           {saved && !dirty && (

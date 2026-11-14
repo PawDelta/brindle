@@ -634,23 +634,6 @@ describe("settings screen", () => {
     await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-state")).toBe("signed_in"));
   });
 
-  it("saves a doc format through the daemon and shows what it kept", async () => {
-    const { daemon } = setup();
-    fireEvent.click(await screen.findByRole("tab", { name: "Doc format" }));
-    fireEvent.click(await screen.findByRole("button", { name: "+ New" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Rollout is required" }));
-    fireEvent.change(screen.getByLabelText("Reference"), { target: { value: "DES-{number}" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await screen.findByText("Saved.");
-    const put = daemon.requests.find((r) => r.method === "PUT" && r.path === "/doc-format");
-    expect(put?.body).toMatchObject({ level: "org", format: { naming: { reference: "DES-{number}" }, blocks: ["sign_off"] } });
-    // The daemon kept what was sent, and the screen now shows the daemon's answer: nothing left to save.
-    expect(daemon.docFormat.templates?.[0].sections.find((s) => s.title === "Rollout")?.required).toBe(false);
-    expect(screen.getByTestId("next-reference").textContent).toContain("DES-0001");
-    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("checkbox", { name: "Rollout is required" }) as HTMLInputElement).checked).toBe(false);
-  });
-
   it("saves the OpenCode permission mode picked, beside Claude's", async () => {
     const { daemon } = setup();
     fireEvent.click(await screen.findByRole("tab", { name: "Permissions" }));

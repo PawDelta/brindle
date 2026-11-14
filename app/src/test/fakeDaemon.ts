@@ -2648,7 +2648,7 @@ export class FakeDaemon {
   private docFormatView(): DocFormatView {
     const resolved: DocFormat = { templates: [], naming: { title_hint: null, reference: null }, blocks: ["sign_off"], ...this.docFormat };
     const reference = resolved.naming.reference;
-    return { level: "org", format: this.docFormat, resolved, source: "local", editable: true, next_reference: reference ? reference.replace("{number}", "0001") : null, used: {} };
+    return { level: "org", format: this.docFormat, version: 0, resolved, source: "local", editable: true, next_reference: reference ? reference.replace("{number}", "0001") : null, used: {} };
   }
 
   /* The goal's POST route, answering as the engine does (routes_actions.py):
