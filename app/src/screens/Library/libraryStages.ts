@@ -81,7 +81,7 @@ export async function loadRecords(client: Pick<DaemonClient, "doc"> & Partial<Pi
   const [got, work] = await Promise.all([
     Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item }), () => null))),
     // The linked work item is a nicety: a failed or refused read leaves the column empty, never the list.
-    docs.length && client.libraryWorkItems ? client.libraryWorkItems(docs.map((d) => d.id), repo).then((r) => r.items, () => ({} as Record<string, never>)) : Promise.resolve({}),
+    docs.length && client.libraryWorkItems ? client.libraryWorkItems(docs.map((d) => d.id), repo).then((r) => r?.items ?? {}, () => ({} as Record<string, never>)) : Promise.resolve({}),
   ]);
   const records = new Map<string, DesignRecord>();
   docs.forEach((d, i) => {
