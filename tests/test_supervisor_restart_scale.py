@@ -29,10 +29,12 @@ def test_large_seed_keeps_current_work_before_completed_history(db, session, tmp
         db.add_workspace(ws)
         add(db, ws, wid, "assign", parent="boss", status="processing" if i >= 170 else "idle")
         db.set_result(wid, f"result-{i}: " + "long findings and implementation notes " * 100)
-        bus.publish_agent(db, "pipeline.merged" if i < 170 else "pipeline.reported", wid, branch=branch)
-    # Workers sharing a branch have separate in-flight work and no results yet.
-    for i in range(2):
-        add(db, root_ws, f"shared-{i}", "assign", parent="boss", status="processing")
+        bus.publish_agent(db, "pipeline.merged" if i < 169 else "pipeline.reported", wid, branch=branch)
+    # Completed non-isolated handoffs never merge the supervisor's branch.
+    for i in range(60):
+        wid = f"completed-shared-{i}"
+        add(db, root_ws, wid, "handoff", parent="boss", status="idle")
+        db.set_result(wid, f"old-shared-result-{i}: " + "completed investigation " * 100)
     for i in range(12):
         db.add_task(Task(f"queued-{i}", root_ws.repo_root, None, "boss", root_ws.id,
                          "developer", f"Implement queued work {i}", "assign", 1,
@@ -47,11 +49,19 @@ def test_large_seed_keeps_current_work_before_completed_history(db, session, tmp
         "content": f"latest-{i}: " + "instructions " * 100}}) + "\n" for i in range(80)))
 
     seed = supervisor_state.seed_prompt(db, "boss", path)
+    assert len(seed.encode()) < 32_000
+    assert "old-shared-result-0:" not in seed
+    # Starting new work on that same branch must not revive its old results.
+    for i in range(2):
+        add(db, root_ws, f"shared-{i}", "assign", parent="boss", status="processing")
+    db.set_result("shared-0", "successor-result: current investigation")
+    seed = supervisor_state.seed_prompt(db, "boss", path)
     assert "shared-0" in seed and "shared-1" in seed
+    assert "successor-result:" in seed and "old-shared-result-0:" not in seed
     assert len(seed.encode()) < 32_000  # comfortably below a 120k-token context, even at one byte/token
     for milestone in db.milestones("boss")[35:]:
         assert milestone.title in seed
-    for i in range(170, 180):
+    for i in range(169, 180):
         assert f"feat/scale-{i}" in seed and f"worker-{i}" in seed and f"result-{i}:" in seed
     for i in range(12):
         assert f"queued-{i}" in seed and f"Implement queued work {i}" in seed
@@ -63,6 +73,7 @@ def test_large_seed_keeps_current_work_before_completed_history(db, session, tmp
     # Compaction is a view: the detailed state is still available after a restart.
     full = supervisor_state.render(db, "boss")
     assert "result-0:" in full and db.milestones("boss")[0].title in full
+    assert "old-shared-result-0:" in full
 
 
 def test_fresh_supervisor_does_not_immediately_restart_again(db, restarting, tmp_path, monkeypatch):

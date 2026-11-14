@@ -215,9 +215,17 @@ def render(db: DB, root_id: str, state: dict | None = None, *, max_bytes: int | 
         sections.append(("## Recently answered (the reply may be in the latest messages)", [
             (f"- {q['text']}", 0) for q in state["answered"]]))
     if state["workers"]:
+        # Results belong to workers, not branches. A completed handoff on the
+        # supervisor's branch is history, even when a successor uses that branch.
+        # Keep a reported result awaiting review/merge only for its current owner.
+        outstanding_results = live_workers | {
+            info.get("worker") for branch, info in state["branches"].items()
+            if info["state"] not in FINISHED_BRANCHES
+            and branches.get(branch, {}).get("worker") == info.get("worker")
+        }
         sections.append(("## Last result per worker", [
             (f"- {wid} ({w.get('profile')}, {w.get('branch') or 'no branch'}): {w['result']}",
-             1 if wid not in live_workers and (finished(w.get("branch")) or w.get("branch") not in branches) else -1)
+             -1 if wid in outstanding_results else 1)
             for wid, w in state["workers"].items()]))
     omitted = ("Older completed work and decisions omitted. Fetch the rest with get_progress, "
                "list_agents and read_messages.")
