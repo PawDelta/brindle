@@ -21,9 +21,11 @@ from test_routing import config
     pytest.param(False, True, marks=pytest.mark.variant(
         "opting out preserves fix dispatch even when findings repeat past the cap")),
     (True, False),
+    pytest.param("late", True, marks=pytest.mark.variant(
+        "enabling the guard after the continue-fixing notice still sends a separate stall notice")),
 ])
 def test_review_stall_stops_only_repeated_findings_past_cap(db, repo, monkeypatch, stop, new_commit):
-    config(repo, review_stall_stop=stop, review_rounds=2)
+    config(repo, review_stall_stop=stop is True, review_rounds=2)
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     ws = workspaces.create(db, str(repo), "stall").workspace
@@ -36,6 +38,8 @@ def test_review_stall_stops_only_repeated_findings_past_cap(db, repo, monkeypatc
     first = "- blocker: src/auth.py accepts missing credentials."
     changed = "- blocker: src/auth.py accepts expired credentials."
     for round_, summary in enumerate((first, first, changed, changed), 1):
+        if stop == "late" and round_ == 4:
+            config(repo, review_stall_stop=True, review_rounds=2)
         sha = f"commit-{round_}" if new_commit else "unchanged-commit"
         monkeypatch.setattr(gates, "head", lambda ws_: sha)
         db.update_agent("writer", pipeline="reviewing")
@@ -50,7 +54,8 @@ def test_review_stall_stops_only_repeated_findings_past_cap(db, repo, monkeypatc
         if stop and round_ == 4:
             assert db.get_agent("writer").pipeline is None
             assert len(launched) == 3
-            assert len(messages) == len(notices) == 1
+            assert len(messages) == 1
+            assert len(notices) == (2 if stop == "late" else 1)
             assert not pipeline.on_review(db, reviewer, ws, False, summary)
             assert drain(db) == []
             assert len(bus.tail(db, kinds=("pipeline.escalated",))) == 1
@@ -59,6 +64,70 @@ def test_review_stall_stops_only_repeated_findings_past_cap(db, repo, monkeypatc
             assert len(launched) == round_
             if not stop:
                 assert len(messages) == (1 if round_ == 3 else 0)
+
+
+@pytest.mark.parametrize("changed_slot,new_commit", [
+    (None, True),
+    pytest.param("", True, marks=pytest.mark.variant("progress in the first slot must prevent a stall")),
+    pytest.param("reviewer-codex", True, marks=pytest.mark.variant(
+        "progress arriving in the second verdict must prevent a premature stall")),
+    pytest.param("approved", True, marks=pytest.mark.variant(
+        "an approval delivered last must still dispatch the other slot's rejection")),
+    pytest.param(None, False, marks=pytest.mark.variant(
+        "two slots reviewing the same commit again must compare complete rounds")),
+])
+def test_review_stall_waits_for_both_slots(db, repo, monkeypatch, changed_slot, new_commit):
+    cfg = RepoConfig(review_stall_stop=True, review_rounds=2,
+                     second_review={"": "reviewer-codex"}, review_profile="reviewer", learning="off")
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **kw: cfg)
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    ws = workspaces.create(db, str(repo), "two-slots").workspace
+    add(db, ws, "writer", "assign", parent="boss", result="done", pipeline="reviewing")
+    db.update_agent("writer", pipeline_rounds=2)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **kw: db_.enqueue(to, body, None))
+    slots = ("", "reviewer-codex")
+    findings = {"": "src/auth.py: missing credentials accepted",
+                "reviewer-codex": "src/cache.py: stale credentials accepted"}
+    for round_ in range(3):
+        sha = f"commit-{round_}" if new_commit else "unchanged-commit"
+        monkeypatch.setattr(gates, "head", lambda ws_: sha)
+        db.update_agent("writer", pipeline="reviewing")
+        reviewers = []
+        for index, slot in enumerate(slots):
+            rid = f"reviewer-{round_}-{index}"
+            add(db, ws, rid, "review", "reviewer", parent="boss", review_sha=sha)
+            db.update_agent(rid, review_slot=slot)
+            reviewers.append(db.get_agent(rid))
+        if round_ == 1 and changed_slot in slots:
+            findings[changed_slot] += " after refresh"
+        for index, reviewer in enumerate(reviewers):
+            summary = findings[slots[index]]
+            approved = changed_slot == "approved" and round_ > 0 and index == 1
+            db.add_review(ws.id, sha, reviewer.id, approved, summary)
+            if round_ == 0:
+                continue  # the complete preceding round
+            assert pipeline.on_review(db, reviewer, ws, approved, summary)
+            if index == 0:
+                assert db.get_agent("writer").pipeline == "reviewing"
+                assert drain(db, "writer") == []
+        if round_ == 0:
+            continue
+        if round_ == 1 and changed_slot is not None:
+            assert db.get_agent("writer").pipeline == "fixing"
+            messages = drain(db, "writer")
+            open_findings = [f for slot, f in findings.items()
+                             if changed_slot != "approved" or slot == ""]
+            assert len(messages) == 1 and all(f in messages[0] for f in open_findings)
+            assert drain(db) == []
+        else:
+            assert db.get_agent("writer").pipeline is None
+            assert drain(db, "writer") == []
+            assert len(drain(db)) == 1
+            assert not pipeline.on_review(db, reviewers[-1], ws, approved, summary)
+            assert drain(db) == []
+            break
 
 
 def commit(repo, path, text):

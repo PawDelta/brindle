@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS review_cap_notices (
     workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS review_stall_notices (
+    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -2023,14 +2026,15 @@ class DB:
         row = self.conn.execute("SELECT * FROM workspaces WHERE id=?", (ws_id,)).fetchone()
         return _load(Workspace, row) if row else None
 
-    def claim_review_cap_notice(self, workspace_id: str) -> bool:
-        """Claim a workspace's cap notice once, across worker replacements.
+    def claim_review_cap_notice(self, workspace_id: str, *, stalled: bool = False) -> bool:
+        """Claim a workspace's cap or stall notice once, across worker replacements.
 
         Consult persisted state rather than a worker's round count or a
         caller's workspace snapshot; removal clears the claim by cascade.
         """
+        table = "review_stall_notices" if stalled else "review_cap_notices"
         with self.tx() as c:
-            return c.execute("INSERT OR IGNORE INTO review_cap_notices (workspace_id) VALUES (?)",
+            return c.execute(f"INSERT OR IGNORE INTO {table} (workspace_id) VALUES (?)",
                              (workspace_id,)).rowcount == 1
 
     def find_workspaces(self, repo_root: str | None = None) -> list[Workspace]:

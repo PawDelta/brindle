@@ -1327,6 +1327,21 @@ def _superseded(ws: Workspace, worker: Agent, reviewer: Agent) -> bool:
         return False
 
 
+def _review_round_pending(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig,
+                          sha: str, reviews: list[Review]) -> bool:
+    """Wait for each configured or already-started review slot to give a verdict."""
+    second = second_profile(db, cfg, worker, ws)
+    expected = {"", second} if second else set()
+    latest: dict[str, Agent] = {}
+    for a in sorted(db.list_agents(ws.id), key=lambda a: a.created_at):
+        if a.mode == "review" and a.review_sha == sha and (slot := _review_slot(db, a)) is not None:
+            latest[slot] = a
+    expected.update(latest)
+    completed = {r.review_slot for r in reviews}
+    return not expected <= completed or any(
+        not any(r.reviewer_id == a.id for r in reviews) for a in latest.values())
+
+
 def _review_stalled(db: DB, ws: Workspace, reviewer: Agent) -> bool:
     """Compare standing findings with the preceding review round.
 
@@ -1342,25 +1357,24 @@ def _review_stalled(db: DB, ws: Workspace, reviewer: Agent) -> bool:
         return {" ".join(line.split()) for r in reviews
                 if not r.approved for line in r.summary.splitlines() if line.strip()}
 
-    # A worker can report again without committing. Compare successive
-    # reviewers in its slot, without confusing a second review with a round.
-    own = [r for r in history if r.review_slot == reviewer.review_slot]
-    if len(own) >= 2 and own[-1].reviewer_id == reviewer.id and own[-2].sha == sha \
-            and own[-2].reviewer_id != reviewer.id:
-        standing = gates.standing_reviews(db, ws.id, sha)
-        if any(not r.approved and r.review_slot != reviewer.review_slot for r in standing):
-            return False
-        return bool(lines(own[-1:])) and lines(own[-1:]) == lines(own[-2:-1])
-    first = next((i for i, r in enumerate(history) if r.sha == sha), 0)
+    standing = gates.standing_reviews(db, ws.id, sha)
+    current_ids = {r.id for r in standing}
+    first = next((i for i, r in enumerate(history) if r.id in current_ids), 0)
     if not first:
         return False
-    previous = history[first - 1].sha
-
-    def findings(commit: str) -> set[str]:
-        return lines(gates.standing_reviews(db, ws.id, commit))
-
-    current = findings(sha)
-    return bool(current) and current == findings(previous)
+    previous_sha = history[first - 1].sha
+    if previous_sha == sha:
+        # No new commit: recover the preceding round before any of this
+        # round's standing verdicts, one verdict per slot.
+        previous = {}
+        for r in history[:first]:
+            if r.sha == sha:
+                previous[r.review_slot if r.review_slot is not None else r.reviewer_id] = r
+        prior = list(previous.values())
+    else:
+        prior = gates.standing_reviews(db, ws.id, previous_sha)
+    current = lines(standing)
+    return bool(current) and current == lines(prior)
 
 
 def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
@@ -1414,6 +1428,19 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         db.update_agent(worker.id, pipeline="reviewing")
         worker = db.get_agent(worker.id)
     report = worker.result or ""
+    if cfg.review_stall_stop and worker.pipeline == "reviewing" \
+            and (worker.pipeline_rounds or 0) + 1 > cfg.review_rounds \
+            and reviewer.review_sha and gates.head(ws) == reviewer.review_sha \
+            and not has_supervisor_action(summary):
+        reviews = gates.standing_reviews(db, ws.id, reviewer.review_sha)
+        if _review_round_pending(db, ws, worker, cfg, reviewer.review_sha, reviews):
+            return True, False
+        rejected = [r for r in reviews if not r.approved]
+        if rejected:
+            # The last verdict may be an approval; earlier rejections still
+            # need one combined fix dispatch or a stall handoff.
+            approved = False
+            summary = "\n\n".join(r.summary for r in rejected)
     if approved:
         if not cfg.auto_merge_default_branch and ws.base_branch \
                 and ws.base_branch == git.default_branch(ws.repo_root):
@@ -1467,7 +1494,7 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             and _review_stalled(db, ws, reviewer):
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
-        if db.claim_review_cap_notice(ws.id):
+        if db.claim_review_cap_notice(ws.id, stalled=True):
             _tell(db, parent_id,
                   agents.condense(
                       f"[brindle pipeline] `{ws.branch}` stopped automatic fixes: the same review "
