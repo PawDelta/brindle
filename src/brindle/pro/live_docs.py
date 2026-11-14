@@ -157,6 +157,43 @@ def _base_version(row) -> bytes | None:
     return row["relay_version"] if row["relay_version"] is not None else row["seed_version"]
 
 
+def _frozen_version(db: DB, doc_id: str, frozen: Any) -> dict | None:
+    """The version out for sign-off, as the app's live contract has it
+    (``LiveDocState.version``): its number, who wrote in it, who signed it,
+    and its text as a Loro snapshot. The text is the relay's draft as this
+    machine last knew the relay to hold it (a freeze is of that, and nothing
+    typed here since reaches it); the sign-offs are the plan's review as last
+    read from the Library, for this version. Writers are the ones this
+    machine can name from its own numbers: "you" (this account's replica and
+    windows) and "the supervisor". The relay doesn't say which account each
+    other number is (and the revision's own text is under one too), so
+    nobody else is credited here."""
+    if not frozen:
+        return None
+    share = db.conn.execute("SELECT review FROM plan_shares WHERE doc_id=?", (doc_id,)).fetchone()
+    review = json.loads(share["review"]) if share is not None and share["review"] else {}
+    rev = frozen if isinstance(frozen, int) and not isinstance(frozen, bool) else review.get("rev")
+    rev = rev if isinstance(rev, int) else 0
+    replica = _replica(db, doc_id)
+    sections: dict[str, str] = {}
+    writers: list[str] = []
+    if replica is not None:
+        sections = _base(replica, _link(db, doc_id)) or replica.sections()
+        ours = {replica.peer_id, *_peers(db, doc_id)}
+        draft = db.conn.execute("SELECT supervisor_peer FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
+        supervisor = draft["supervisor_peer"] if draft is not None else None
+        seen: set[str] = set()
+        for section in sections:
+            for peer in replica.editors(section):
+                who = "the supervisor" if peer is not None and peer == supervisor else "you" if peer in ours else None
+                if who and who not in seen:
+                    seen.add(who)
+                    writers.append(who)
+    signed = [s["sub"] for s in review.get("sign_offs") or []
+              if isinstance(s, dict) and isinstance(s.get("sub"), str) and s.get("rev") == rev]
+    return {"id": rev, "writers": writers, "signOffs": signed, "snapshot": _b64(SharedDoc.new(sections).export_snapshot())}
+
+
 def unsent(db: DB, doc_id: str) -> bool:
     """Whether the replica holds edits the relay has not acknowledged."""
     replica, row = _replica(db, doc_id), _link(db, doc_id)
@@ -501,6 +538,7 @@ class DocLink:
     conn: Connection | None = None
     author: str = ""
     frozen: Any = None
+    version: dict | None = None     # the frozen version as windows are told it (_frozen_version)
     author_offline: Any = None
     blocked: bool = False       # a lock or freeze holds the outbox back
     freezing: bool = False      # a Freeze or Reopen is being asked of the Library: hold the outbox (only it clears this)
@@ -523,7 +561,11 @@ class DocLink:
 
     def state_frame(self) -> dict:
         lock = "sign_off" if self.frozen else "author_offline" if self.author_offline else None
-        return {"state": {"author": self.author, "lock": lock, "version": None}}
+        return {"state": {"author": self.author, "lock": lock, "version": self.version if self.frozen else None}}
+
+    async def note_version(self) -> None:
+        """Read the frozen version again, from the replica and the plan's review."""
+        self.version = await self.manager.work(_frozen_version, self.doc_id, self.frozen) if self.frozen else None
 
     async def _to_windows(self, frame: dict, skip: Lease | None = None) -> None:
         for w in tuple(self.windows):
@@ -607,6 +649,7 @@ class DocLink:
         replaced, missed = await self.manager.work(_take_state, self.doc_id, _unb64(said.get("snapshot")),
                                                    self.claimed, claims, self.rebase, marks)
         self.rebase = False
+        await self.note_version()
         if replaced:
             await self._reload_windows()
         else:
@@ -694,6 +737,7 @@ class DocLink:
             await self._to_windows(self.state_frame())
         elif error == "frozen":
             self.frozen, self.blocked = said.get("rev") or True, True
+            await self.note_version()
             await self._to_windows(self.state_frame())
         elif error == "batch_refused":
             # Changes the relay can't take as they are (not under this account's
@@ -920,6 +964,7 @@ class Manager:
             finally:
                 link.freezing = False
             link.blocked = bool(link.frozen or link.author_offline)
+            await link.note_version()
             await link._to_windows(link.state_frame())
             await link.flush()
             return refused

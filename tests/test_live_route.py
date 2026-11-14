@@ -281,12 +281,21 @@ def test_the_authors_freeze_and_reopen_frames_lock_the_draft_for_sign_off_and_op
             client.portal.call(here.changed, "doc1")
             client.portal.call(here.link("doc1").reconcile)
             assert not stashed.is_set() and not held        # nothing went to race the freeze
+            with db.tx() as c:                              # the review as last read from the Library
+                c.execute("UPDATE plan_shares SET review=? WHERE doc_id='doc1'",
+                          (json.dumps({"sign_offs": [{"sub": "u_dana", "rev": 2}, {"sub": "u_old", "rev": 1}]}),))
             answer.set()
-            assert window.receive_json()["state"]["lock"] == "sign_off"
+            state = window.receive_json()["state"]
+            assert state["lock"] == "sign_off"
             assert versions[False] == ["World!"]           # the version has "!", not "#"
+            # The window is told the version itself: its number, its text, who wrote and who signed it.
+            version = state["version"]
+            assert (version["id"], version["signOffs"], version["writers"]) == (2, ["u_dana"], ["you"])
+            assert SharedDoc.load(base64.b64decode(version["snapshot"])).text("body") == "World!"
             types("?")
             window.send_json({"reopen": True})
-            assert window.receive_json()["state"]["lock"] is None
+            reopened = window.receive_json()["state"]
+            assert (reopened["lock"], reopened["version"]) == (None, None)
             assert stashed.wait(FIRST_FRAME_TIMEOUT)        # what waited goes once it is open
             client.portal.call(time_passes, 0)
             body = relay.sections()["body"]
