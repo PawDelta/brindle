@@ -59,9 +59,9 @@ def publish_ws(db: DB, kind: str, ws: Workspace, **fields) -> int | None:
 
 
 def tail(db: DB, since_id: int = 0, *, kinds: tuple[str, ...] | None = None,
-         repo_root: str | None = None, limit: int = 500) -> list[dict]:
-    """Events with an id above ``since_id``, oldest first. ``kinds`` and
-    ``repo_root`` narrow them; None means any."""
+         repo_root: str | None = None, root_id: str | None = None, limit: int = 500) -> list[dict]:
+    """Events with an id above ``since_id``, oldest first. ``kinds``,
+    ``repo_root`` and ``root_id`` (a session) narrow them; None means any."""
     sql, args = "SELECT * FROM events WHERE id > ?", [since_id]
     if kinds:
         sql += f" AND kind IN ({','.join('?' * len(kinds))})"
@@ -69,6 +69,9 @@ def tail(db: DB, since_id: int = 0, *, kinds: tuple[str, ...] | None = None,
     if repo_root is not None:
         sql += " AND repo_root = ?"
         args.append(repo_root)
+    if root_id is not None:
+        sql += " AND root_id = ?"
+        args.append(root_id)
     rows = db.conn.execute(sql + " ORDER BY id LIMIT ?", (*args, limit)).fetchall()
     return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
 

@@ -33,6 +33,8 @@ def told(monkeypatch):
     monkeypatch.setattr(agents, "command_running", lambda db, a: False)
     monkeypatch.setattr(agents, "transcript_active", lambda a, now=None: False)
     monkeypatch.setattr(cull, "_last_edit", lambda ws: 0)
+    monkeypatch.setattr(disk, "live_in", lambda *a, **k: False)
+    monkeypatch.setattr(cull.procs, "table", lambda: {})
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes())
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: "")
     return sent
@@ -179,7 +181,7 @@ def test_a_stuck_worker_is_taken_over_after_the_hour(db, boss, takeover, told, v
         assert "feat/stuck" in mcp_server.requeue("w1")
 
     assert takeover["removed"] == [("w", {"force": True, "delete_branch": False})]
-    assert [ws for ws, _ in takeover["started"]] == [boss.workspace_id]   # cut from the supervisor's branch
+    assert [ws for ws, _ in takeover["started"]] == [boss.workspace_id]   # launched on behalf of the supervisor
     assert "Build the thing" in takeover["started"][0][1] and "feat/stuck" in takeover["started"][0][1]
     assert db.open_items("boss") == []
 

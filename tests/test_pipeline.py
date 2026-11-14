@@ -646,6 +646,8 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     the supervisor "after 0 fix round(s)" instead of starting a fix round.
     The worker is reopened (its own session, else a fresh start on its task)
     with the findings past the suggested cap, which notifies the supervisor once."""
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"review_stall_stop": False}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
     ws = workspaces.create(db, str(repo), "feat").workspace

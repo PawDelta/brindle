@@ -227,6 +227,9 @@ def test_app_demo_starts_workers_and_reviewer(db, monkeypatch):
     # The machine's own CLI setup (is codex installed here?) is preflight's job, not this test's.
     monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
     monkeypatch.setattr(doctor, "preflight", lambda *a, **k: [])
+    # No real panes back these fake launches; detached cleanup would race
+    # assignments and can pause the workers as dead processes.
+    monkeypatch.setattr(routes_actions.svc, "cull_detached", lambda repo_root=None: None)
     launched = []
 
     def launch(db, agent, ws, **kwargs):
