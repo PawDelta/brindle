@@ -88,8 +88,6 @@ def test_messages_go_to_the_waiter_not_the_peer_inbox(db, boss, peer_inbox, monk
         [w] = _waiters(hooks[event])
         assert w["asyncRewake"] is True and w["timeout"] == wake.TIMEOUT
         assert "--agent a1" in w["command"]
-    worker = _settings("assign")["hooks"]
-    assert not _waiters(worker["SessionStart"]) and not _waiters(worker["Stop"])
 
     pasted = []
     monkeypatch.setattr(agents.tmux, "paste", lambda *a, **k: pasted.append(a))

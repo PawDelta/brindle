@@ -145,9 +145,10 @@ class RepoConfig:
     # or completion audit; one light review and the checks, then the merge (assign(fast_path=true)).
     fast_path: bool = True
     # The supervisor works from a compact goal state brindle keeps (brindle.supervisor_state):
-    # once its context passes supervisor_restart_tokens, it restarts fresh, seeded with that state.
+    # Automatic restarts require an enterprise admin's dangerous org-policy opt-in.
     supervisor_state: bool = True
-    supervisor_restart_tokens: int = 0     # off by default: restarts hurt long sessions
+    # Off by default: restarts hurt long sessions. Only org policy can enable them.
+    supervisor_restart_tokens: int = 0  # legacy config key
     # Cheaper agent start: a worker's or reviewer's stable brief (role prompt, rule packs,
     # repo brief) leads its prompt and the per-task text follows; reviewers and light
     # workers get only the brindle tools their role uses and the 5-minute prompt cache.

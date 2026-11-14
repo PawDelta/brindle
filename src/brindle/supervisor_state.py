@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
+import shlex
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,9 +43,11 @@ KINDS = ("autopilot.need_user", "autopilot.answered", "autopilot.audit_decision"
          "pipeline.removed", "agent.result")
 WORKER_MODES = ("handoff", "handoff_detached", "assign")
 RESULT_CHARS = 600         # of each worker's last result
-MESSAGE_CHARS = 800        # of each latest message
-LATEST_MESSAGES = 8
-KEEP_ANSWERED = 3          # answered questions kept, for the replies in the latest messages
+MESSAGES_BYTES = 10_000    # of the latest messages, kept whole, newest first (the person's newest always)
+ACTIONS_BYTES = 3_000      # of the digest of the supervisor's own recent outward actions
+ACTION_CHARS = 300         # of each action in that digest
+PROMISES = 3               # open promises ("I'm watching CI on #N") kept in that digest
+KEEP_ANSWERED = 3         # answered questions kept, for the replies in the latest messages
 TAIL_BYTES = 512 * 1024    # of the transcript read for its context size and latest messages
 RESTART_CLAIM = 600.0      # seconds a restart claim (and its hold on the queue) lasts at most
 RESTART_LOCK_WAIT = 120.0  # seconds a pause waits for a restart's launch to commit (restart_lock)
@@ -149,6 +153,30 @@ def _fold(db: DB, root_id: str, state: dict, ev: dict) -> None:
 # -- what the fresh session is told -------------------------------------------------
 
 
+PIPELINE_STATES = {
+    "reviewing": "reported, in review",
+    "fixing": "fixing review findings",
+    "resolving": "resolving merge conflicts",
+    "ready": "approved, ready to merge",
+    "sync_wait": "waiting to sync with its base",
+}
+
+
+def _row_state(a: Agent) -> str:
+    """Where worker ``a`` stands now, from its own row."""
+    if a.plan_state == "proposed":
+        return f"waiting for your plan approval (approve_plan agent_id={a.id})"
+    if a.plan_state == "revise":
+        return "revising its plan"
+    if a.merge_failed:
+        return "approved, but its merge failed: " + _clip(a.merge_failed, 200)
+    if a.pipeline:
+        return PIPELINE_STATES.get(a.pipeline, a.pipeline)
+    if a.status == "idle" and a.result is not None:
+        return "reported"
+    return a.status
+
+
 def render(db: DB, root_id: str, state: dict | None = None, *, max_bytes: int | None = None) -> str:
     """The state as the supervisor reads it: the goal and milestones (live),
     branches, decisions, questions and workers' last results. With a budget,
@@ -177,13 +205,19 @@ def render(db: DB, root_id: str, state: dict | None = None, *, max_bytes: int | 
         ws = db.get_workspace(a.workspace_id)
         if a.mode not in WORKER_MODES:
             continue
-        if not agents.finished_reporting(a) or a.status == "processing":
+        now = _row_state(a)
+        if not agents.finished_reporting(a) or a.status == "processing" or a.plan_state == "proposed":
             live_workers.add(a.id)
             live_rows.append((f"- {a.id} ({a.profile}, {ws.branch if ws else 'no branch'}): "
-                              f"{a.pipeline or a.status}; {_clip(a.task, RESULT_CHARS)}", -1))
+                              f"{now}; {_clip(a.task, RESULT_CHARS)}", -1))
         if ws and ws.branch:
-            if ws.branch not in branches or a.id in live_workers:
-                branches[ws.branch] = {"state": a.pipeline or a.status, "worker": a.id}
+            folded = branches.get(ws.branch)
+            # The pipeline's events go stale (a branch "in review" whose worker is back at
+            # work or waiting on its plan): while a branch is still open, its worker's own
+            # row says where it stands.
+            if (folded is None or a.id in live_workers
+                    or (folded.get("worker") == a.id and folded.get("state") not in FINISHED_BRANCHES)):
+                branches[ws.branch] = {"state": now, "worker": a.id}
 
     def finished(branch: str | None) -> bool:
         info = branches.get(branch, {})
@@ -304,10 +338,30 @@ def context_tokens(path: Path) -> int | None:
     return None
 
 
-def latest_messages(path: Path | None, n: int = LATEST_MESSAGES) -> list[tuple[str, str]]:
-    """The chat's last ``n`` text messages, oldest first, as (who, text):
-    what was typed in ("message": the person, or brindle's deliveries) and
-    what the supervisor said ("you"). Tool calls and their results are left out."""
+_SYSTEM_INPUT = ("[brindle", "<details><summary>Message from", "<task-notification>", "<system-reminder>",
+                 "<command-", "<local-command-")
+
+
+def _from_person(who: str, text: str) -> bool:
+    """Whether a typed-in message may be the person's own. Their messages from
+    the app arrive with brindle's delivery line too (agents.message_lead), so
+    only input known to come from an agent or brindle itself is ruled out."""
+    if who != "message" or text.startswith("brindle delivered this message from "):
+        return False
+    body = text.removeprefix("brindle delivered this message:").lstrip()
+    return not body.startswith(_SYSTEM_INPUT)
+
+
+def _line(who: str, text: str) -> str:
+    return f"- {who}: {text}"
+
+
+def latest_messages(path: Path | None, max_bytes: int = MESSAGES_BYTES) -> list[tuple[str, str]]:
+    """The chat's latest text messages, oldest first, as (who, text): what was
+    typed in ("message": the person, or brindle's deliveries) and what the
+    supervisor said ("you"). Each is whole: the oldest are left out to fit
+    ``max_bytes``, but never the person's newest message. Tool calls and their
+    results are left out (recent_actions digests them)."""
     if path is None:
         return []
     found = []
@@ -315,10 +369,203 @@ def latest_messages(path: Path | None, n: int = LATEST_MESSAGES) -> list[tuple[s
         message = entry.get("message")
         if entry.get("isMeta") or entry.get("type") not in ("user", "assistant") or not isinstance(message, dict):
             continue
-        text = _text_of(message.get("content")).strip()
+        text = " ".join(_text_of(message.get("content")).split())
         if text and not text.startswith(RESTART_HEAD):
-            found.append(("you" if entry["type"] == "assistant" else "message", _clip(text, MESSAGE_CHARS)))
-    return found[-n:]
+            found.append(("you" if entry["type"] == "assistant" else "message", text))
+    person = next((i for i in range(len(found) - 1, -1, -1) if _from_person(*found[i])), None)
+    keep = {person} if person is not None else set()
+    used = len(_line(*found[person]).encode()) + 1 if person is not None else 0
+    for i in range(len(found) - 1, -1, -1):
+        if i == person:
+            continue
+        size = len(_line(*found[i]).encode()) + 1
+        if used + size > max_bytes:
+            break
+        keep.add(i)
+        used += size
+    return [m for i, m in enumerate(found) if i in keep]
+
+
+_PR_URL = re.compile(r"https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
+_PROMISE = re.compile(r"[^.!?\n]*\b(?:I'll|I will|I'm|I am)\b[^.!?\n]*"
+                      r"\b(?:watch|watching|monitor|monitoring|keep an eye|check back|follow up|wait for CI)"
+                      r"[^.!?\n]*[.!?]?", re.IGNORECASE)
+_OPERATORS = {"&&", "||", ";", "|", "&", "(", ")"}
+
+
+def _commands(command: str) -> list[tuple[list[str], str]]:
+    """The simple commands in a shell command line, as words (leading
+    ``VAR=x`` assignments dropped), each with the operator that follows it
+    (``;`` at a line's end)."""
+    out = []
+    for line in command.splitlines():
+        lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        try:
+            words = list(lex)
+        except ValueError:   # an unclosed quote: a multi-line argument
+            words = line.split()
+        current: list[str] = []
+        redirect = False
+        for word in [*words, ";"]:
+            if redirect:     # a redirection's target
+                redirect = False
+                continue
+            if word and word[0] in "<>" and set(word) <= set("<>&|"):
+                if current and current[-1].isdigit():
+                    current.pop()   # 2>&1's file descriptor
+                redirect = True
+                continue
+            if word and (word in _OPERATORS or set(word) <= set("&|;()")):
+                while current and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", current[0]):
+                    current = current[1:]
+                if current:
+                    out.append((current, word))
+                current = []
+            else:
+                current.append(word)   # a quoted empty argument stays one
+    return out
+
+
+def _option(words: list[str], *names: str) -> str | None:
+    for i, word in enumerate(words):
+        for name in names:
+            if word == name and i + 1 < len(words):
+                return words[i + 1]
+            if name.startswith("--") and word.startswith(name + "="):
+                return word[len(name) + 1:]
+    return None
+
+
+def _git_sub(words: list[str]) -> tuple[str | None, list[str]]:
+    """A git command's subcommand and the words after it (past ``-C dir`` and the like)."""
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in ("-C", "-c") else 1
+    return (words[i], words[i + 1:]) if i < len(words) else (None, [])
+
+
+_PUSH_FAILED = ("[rejected]", "[remote rejected]", "error:", "fatal:")
+
+
+def _action(words: list[str], output: str, last_push: str | None) -> dict | None:
+    """What one command would do outwardly, if anything: ``did`` (said once
+    it is confirmed), ``tried`` (said otherwise), ``proven`` (its own output
+    shows it succeeded) and ``pushed`` (the ref a push targets)."""
+    shown = " ".join(w if w and " " not in w else repr(w) for w in words)
+    if words[0] == "git":
+        sub, rest = _git_sub(words)
+        if sub == "push":
+            positional = [w for w in rest if w and not w.startswith("-")]
+            dst = positional[-1].split(":")[-1] if len(positional) > 1 else None
+            proven = bool(dst) and f"-> {dst}" in output and not any(m in output for m in _PUSH_FAILED)
+            return {"did": "pushed: " + shown, "tried": shown, "proven": proven, "pushed": dst}
+        if sub == "worktree" and rest[:1] == ["add"]:
+            return {"did": "added a worktree: " + shown, "tried": shown}
+        return None
+    if words[0] != "gh" or len(words) < 3:
+        return None
+    noun, verb = words[1], words[2]
+    if (noun, verb) == ("pr", "create"):
+        url = _PR_URL.search(output)
+        head = _option(words, "--head", "-H")
+        base = _option(words, "--base", "-B")
+        repo = _option(words, "--repo", "-R") or (url.group(1) if url else None)
+        where = [f"head {head}" if head else
+                 f"head: your current branch (last pushed: {last_push})" if last_push else "head: your current branch"]
+        if base:
+            where.append(f"base {base}")
+        if repo:
+            where.append(f"repo {repo}")
+        title = _option(words, "--title", "-t")
+        about = f"({', '.join(where)})" + (f": {title}" if title else "")
+        if url:   # the PR's link is the proof it exists
+            return {"did": f"opened PR #{url.group(2)} {about}", "proven": True}
+        return {"did": f"ran gh pr create, PR number unknown {about}", "tried": f"gh pr create {about}"}
+    if noun == "pr" and verb == "merge":
+        return {"did": "merged: " + shown, "tried": shown}
+    if (noun == "pr" and verb == "checks") or (noun == "run" and verb in ("watch", "view")):
+        # A failing check fails the command: still CI watched, not a broken action.
+        return {"did": "watched CI: " + shown, "tried": shown, "failed": "watched CI, which failed or hadn't finished: "}
+    return None
+
+
+def _outcome(action: dict, result: tuple[str, bool] | None, chained: bool) -> tuple[str, bool]:
+    """How a command's action reads in the digest, and whether it is
+    confirmed. ``chained``: only ``&&`` follows it, so the whole command line
+    succeeding means it did too."""
+    if action.get("proven"):
+        return action["did"], True
+    tried = action.get("tried", action["did"])
+    if result is None:
+        return "no result seen yet: " + tried, False
+    if result[1]:
+        return action.get("failed", "not confirmed, the command failed: ") + tried, False
+    if chained:
+        return action["did"], True
+    return "ran, outcome not confirmed (piped or followed by other commands): " + tried, False
+
+
+def recent_actions(path: Path | None) -> list[str]:
+    """A digest of the supervisor's own recent outward actions, oldest first,
+    from its transcript's tool calls and results: the PRs it opened (number,
+    head and base branch), pushes, worktrees it added, CI it watched, and the
+    open promises it made ("I'm watching CI on #N"). Bounded by ACTIONS_BYTES,
+    newest kept."""
+    if path is None:
+        return []
+    entries = _tail_entries(path)
+    results: dict[str, tuple[str, bool]] = {}   # a tool call's output, and whether it failed
+    for entry in entries:
+        content = (entry.get("message") or {}).get("content") if isinstance(entry.get("message"), dict) else None
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id"):
+                results[block["tool_use_id"]] = (_text_of(block.get("content")), bool(block.get("is_error")))
+    actions: list[str] = []
+    promises: list[str] = []
+    last_push = None
+    for entry in entries:
+        message = entry.get("message")
+        if entry.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                promises += [" ".join(m.group(0).split()) for m in _PROMISE.finditer(block.get("text") or "")]
+                continue
+            command = (block.get("input") or {}).get("command") if block.get("type") == "tool_use" else None
+            if block.get("name") not in ("Bash", "Monitor") or not isinstance(command, str):
+                continue
+            result = results.get(block.get("id"))
+            commands = _commands(command)
+            # Only a plain `a && b && c` line that succeeded ran every command in it.
+            chained = all(op == "&&" for _, op in commands[:-1])
+            # The call's output proves a command (a PR link, a push's refs) only when no
+            # other command could have printed it: it heads the line, and all that follows
+            # it filters its output (`git push … 2>&1 | tail -3`).
+            attributable = all(op == "|" for _, op in commands[:-1])
+            for i, (words, _) in enumerate(commands):
+                output = result[0] if result and i == 0 and attributable else ""
+                action = _action(words, output, last_push)
+                if action is None:
+                    continue
+                said, confirmed = _outcome(action, result, chained)
+                if confirmed and action.get("pushed"):
+                    last_push = action["pushed"]
+                actions.append(_clip(said, ACTION_CHARS))
+    lines = [*actions, *(f"you said: {_clip(p, ACTION_CHARS)}" for p in promises[-PROMISES:])]
+    out: list[str] = []
+    used = 0
+    for line in reversed(lines):   # newest first; a repeat counts once, at its latest
+        if line in out:
+            continue
+        used += len(line.encode()) + 3
+        if used > ACTIONS_BYTES:
+            break
+        out.append(line)
+    return out[::-1]
 
 
 SEED = (f"{RESTART_HEAD} to keep it small: this is a fresh session of the same supervisor "
@@ -334,20 +581,30 @@ class SeedTooLarge(ValueError):
 
 def seed_prompt(db: DB, root_id: str, transcript: Path | None = None) -> str:
     """The first prompt of a restarted supervisor: the state and the latest messages."""
+    from brindle.pro.team_policy import effective_supervisor_restart_tokens
+
     root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    limit = effective_supervisor_restart_tokens(ws.repo_root) if ws else 0
+    budget = min(SEED_BYTES, limit // 4) if limit else SEED_BYTES
+    state = refresh(db, root_id)
     parts = [SEED.format(root_id=root_id)]
     if root and root.task:
         parts.append("## The request this session started from\n" + _clip(root.task, 2000))
-    latest = latest_messages(transcript)
+    at = len(parts)
+    actions = recent_actions(transcript)
+    if actions:
+        parts.append("## Your recent actions (from this chat's tool calls: check them before you push, "
+                     "open a PR or watch CI again)\n" + "\n".join(f"- {a}" for a in actions))
+    # Current work first, then the latest messages, then history with what is left.
+    essential = render(db, root_id, state, max_bytes=0)
+    heading = "## Latest messages\n"
+    room = budget - len("\n\n".join([*parts, essential]).encode()) - 2 - len(heading.encode())
+    latest = latest_messages(transcript, max_bytes=max(0, min(MESSAGES_BYTES, room)))
     if latest:
-        parts.append("## Latest messages\n" + "\n".join(f"- {who}: {text}" for who, text in latest))
-    from brindle.config import load_repo_config
-
-    ws = db.get_workspace(root.workspace_id) if root else None
-    limit = load_repo_config(ws.repo_root).supervisor_restart_tokens if ws else 0
-    budget = min(SEED_BYTES, limit // 4) if limit else SEED_BYTES
+        parts.append(heading + "\n".join(_line(who, text) for who, text in latest))
     remaining = budget - len("\n\n".join(parts).encode()) - 2
-    parts.insert(2 if root and root.task else 1, render(db, root_id, max_bytes=remaining))
+    parts.insert(at, render(db, root_id, state, max_bytes=remaining))
     seed = "\n\n".join(parts)
     if len(seed.encode()) > budget:
         raise SeedTooLarge("the supervisor's current work exceeds its restart seed budget")
@@ -489,7 +746,7 @@ def on_turn_end(db: DB, agent: Agent, payload: dict) -> bool:
     is, leaving queued messages for the fresh session."""
     if not enabled(db, agent):
         return False
-    from brindle.config import load_repo_config
+    from brindle.pro.team_policy import effective_supervisor_restart_tokens
 
     refresh(db, agent.id)
     path = payload.get("transcript_path")
@@ -497,7 +754,7 @@ def on_turn_end(db: DB, agent: Agent, payload: dict) -> bool:
         return False
     tokens = context_tokens(Path(path))
     ws = db.get_workspace(agent.workspace_id)
-    limit = load_repo_config(ws.repo_root).supervisor_restart_tokens
+    limit = effective_supervisor_restart_tokens(ws.repo_root)
     if tokens is None or not limit or tokens < limit:
         return False
     last_restart = db.mark(agent.id, "supervisor-restarted-at")

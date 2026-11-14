@@ -6417,7 +6417,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             if decision and inbox.send(agent, decision["reason"]):
                 return None
             return decision  # nothing to say, or the inbox failed: block after all
-        return _stop_decision(db, agent, payload)
+        # A worker with the waiter: its queued mail goes to the waiter this
+        # Stop just started, framed like a supervisor's; its own reminders
+        # (report_result) still block the stop.
+        return _stop_decision(db, agent, payload, waiter=wake.enabled(agent))
     elif event == "codex-notify":
         # Codex's notify command runs when a turn completes; it can't block the
         # stop, so a queued message is typed into the pane instead.
