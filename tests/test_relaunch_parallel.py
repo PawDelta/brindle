@@ -44,6 +44,8 @@ def test_recovery_overlaps_sessions_and_checks_each_identity_once(db, repo, tmp_
     db.add_agent(Agent("worker", "ws-viewed", "developer", "claude", "viewed", "assign", "paused", "", None,
                        time.time(), time.time(), "t", tmux_server=here))
     db.update_agent("worker", config_home=str(tmp_path / "home-a"))
+    for aid in ("viewed", "recent"):    # the same key stored on two sessions: one identity, two launches to name
+        db.set_session_credential(aid, "ANTHROPIC_API_KEY", "test-shared-key")
     lifecycle._record_resume([{"id": aid, "server": here} for aid in homes])
     lifecycle.record_viewed("viewed")
     monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
@@ -96,6 +98,9 @@ def test_recovery_overlaps_sessions_and_checks_each_identity_once(db, repo, tmp_
     assert sorted(lifecycle.resume_after_start()) == ["other", "recent", "viewed"]     # keyed: refused
     # Model: home-a's supervisors, its developer, home-b, the gateway. Preflight: one per home.
     assert checks == {"model": 4, "preflight": 2}
-    assert consents == {aid: [{"id": "claude.api_key", "key": "fp", "repo": str(repo), "profile": profile}]
-                        for aid, profile in [("viewed", "supervisor"), ("recent", "supervisor"),
-                                             ("other", "supervisor"), ("worker", "developer")]}
+    # Each consent names its own launch: its profile, and the session whose stored key it gets.
+    named = {"id": "claude.api_key", "key": "fp", "repo": str(repo)}
+    assert consents == {"viewed": [{**named, "profile": "supervisor", "session": "viewed"}],
+                        "recent": [{**named, "profile": "supervisor", "session": "recent"}],
+                        "worker": [{**named, "profile": "developer", "session": "viewed"}],
+                        "other": [{**named, "profile": "supervisor"}]}
