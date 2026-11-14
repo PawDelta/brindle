@@ -18,6 +18,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
@@ -1420,6 +1421,63 @@ def consent_identity(db: DB, repo: str, profile: str, provider: str, session: st
     return launch_identity(who, ws)[0]
 
 
+class _SharedChecks:
+    """The read-only launch checks (model check, preflight) of one daemon
+    start's recovery, each worked out once per provider and identity and
+    reused by every launch of that recovery: sessions and their workers
+    coming back side by side mostly sign in as the same account. One check
+    under way is waited for, not run again beside it; one that raised is
+    left unrecorded, so the next launch runs it afresh."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._results: dict[tuple, tuple] = {}     # key: (its lock, [its result once known])
+
+    def get(self, key: tuple, check):
+        with self._lock:
+            lock, box = self._results.setdefault(key, (threading.Lock(), []))
+        with lock:
+            if not box:
+                box.append(check())
+            return box[0]
+
+
+_shared_checks: ContextVar[_SharedChecks | None] = ContextVar("brindle_shared_checks", default=None)
+
+
+@contextmanager
+def shared_launch_checks():
+    """Within it, launches share their model checks and preflights (_SharedChecks):
+    a daemon start's recovery, whose threads each run in a copy of this context."""
+    token = _shared_checks.set(_SharedChecks())
+    try:
+        yield
+    finally:
+        _shared_checks.reset(token)
+
+
+def _identity_digest(identity: tuple) -> str:
+    """Who a launch signs in as (launch_identity), hashed: the key's credentials stay out of it."""
+    env, org_key, deny = identity
+    return hashlib.sha256(json.dumps([sorted(env.items()), org_key, sorted(deny)]).encode()).hexdigest()
+
+
+def _shared_check(kind: str, agent: Agent, ws: Workspace, profile, identity, check, extra=lambda who: ()):
+    """``check()``'s result, shared within shared_launch_checks by every launch
+    of the same provider, config home, profile, repo and identity (and
+    ``extra(identity)``, what else the check depends on); run as is outside it, or
+    when the identity can't be told (``identity`` raises)."""
+    shared = _shared_checks.get()
+    if shared is None:
+        return check()
+    try:
+        who = identity()
+    except AgentError:
+        return check()
+    return shared.get((kind, agent.provider, agent.config_home, agent.profile, profile.model,
+                       profile.base_url, ws.repo_root, _identity_digest(who), *extra(who)), check)
+
+
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False,
             model_checked: bool = False) -> None:
@@ -1486,7 +1544,11 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     provider = get_provider(agent.provider)
     if not model_checked:
         with _launch_step("model_check_s"):
-            why = model_problem(agent.profile, ws, agent=agent, profile=profile, m=m)
+            why = _shared_check(
+                "model", agent, ws, profile, lambda: launch_identity(agent, ws, profile, m),
+                lambda: model_problem(agent.profile, ws, agent=agent, profile=profile, m=m),
+                # The CLI's catalog may read project settings from the worktree up.
+                lambda who: (provisioning_context(agent.provider, ws.path, who[0]),))
         if why:
             raise AgentError(why)
     if not provider.launches_process:
@@ -1521,7 +1583,10 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     # with the identity it runs as. A person starting their own chat from a
     # terminal answers its first-run screens there; nobody watches a worker's.
     with _launch_step("preflight_s"):
-        blocking = launch_blockers(agent, ws, profile, m, identity=(env, org_key, deny))
+        identity = (env, org_key, deny)
+        blocking = _shared_check("preflight", agent, ws, profile, lambda: identity,
+                                 lambda: launch_blockers(agent, ws, profile, m, identity=identity),
+                                 lambda who: (credentials_session(agent),))
     # Installing a CLI or tmux shows when the window opens, as before.
     blocking = [b for b in blocking if b.kind != "setup"]
     if agent.parent_id is None and agent.mode == "interactive":
