@@ -92,6 +92,7 @@ import { DocFormat } from "./DocFormat";
 import { DocSwitches } from "./DocSwitches";
 import { Storage } from "./Storage";
 import { TeamDestination } from "./TeamDestination";
+import { Integrations } from "./Integrations";
 import { OrgApprovals } from "./OrgApprovals";
 import { ReviewPolicies } from "./ReviewPolicies";
 import { Permissions } from "./Permissions";
@@ -1451,6 +1452,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
 
       <DocSwitches client={client} />
       <TeamDestination client={client} />
+      <Integrations client={client} />
       </Pane>
 
       <Pane id="permissions" {...panes}>

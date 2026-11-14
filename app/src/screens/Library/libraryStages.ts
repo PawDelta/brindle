@@ -8,7 +8,7 @@
    server's list carries none of this, so each design's detail is read once (loadRecords); the
    filter, the rows, the cards and the sidebar's counts all use these same functions. */
 
-import type { AnalysisDoc, AnalysisDocDetail, DaemonClient, DocScope, FolderGroup, LibraryFolder } from "../../api/client";
+import type { AnalysisDoc, AnalysisDocDetail, DaemonClient, DocScope, FolderGroup, LibraryFolder, TrackerLink, WorkItemLink } from "../../api/client";
 import type { DesignTaskDTO, InboxItemDTO, RepoDTO } from "../../api/schema";
 import type { LibraryStage } from "../../routes";
 
@@ -77,11 +77,60 @@ export function stageCounts(docs: AnalysisDoc[], queue: Queue, records: Map<stri
 }
 
 /* Each listed design's record (from its detail). A failed read is skipped: the design shows as Drafting. */
-export async function loadRecords(client: Pick<DaemonClient, "doc">, docs: AnalysisDoc[], repo?: string): Promise<Map<string, DesignRecord>> {
-  const got = await Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item }), () => null)));
+export async function loadRecords(client: Pick<DaemonClient, "doc"> & Partial<Pick<DaemonClient, "libraryWorkItems">>, docs: AnalysisDoc[], repo?: string): Promise<Map<string, DesignRecord>> {
+  const [got, work] = await Promise.all([
+    Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item }), () => null))),
+    // The linked work item is a nicety: a failed or refused read leaves the column empty, never the list.
+    client.libraryWorkItems ? loadWorkItems(client.libraryWorkItems.bind(client), docs.map((d) => d.id), repo) : Promise.resolve({}),
+  ]);
   const records = new Map<string, DesignRecord>();
-  docs.forEach((d, i) => got[i] && records.set(d.id, got[i]!));
+  docs.forEach((d, i) => {
+    const record = got[i];
+    if (!record) return;
+    const mine = (work as Record<string, WorkSummary>)[d.id];
+    records.set(d.id, mine?.epic ? { ...record, work_item: epicLink(mine.epic, mine.done, mine.total) } : record);
+  });
   return records;
+}
+
+type WorkSummary = { epic: TrackerLink | null; done: number; total: number };
+const WORK_BATCH = 50;
+const WORK_ROUNDS = 20;
+
+/* Every listed design's own item, 50 designs a request: the daemon reads only a few uncached ones per
+   answer and names the rest, which are asked for again while that makes progress. A batch that fails
+   leaves only its own designs without one. */
+export async function loadWorkItems(read: NonNullable<DaemonClient["libraryWorkItems"]>, ids: string[], repo?: string): Promise<Record<string, WorkSummary>> {
+  const out: Record<string, WorkSummary> = {};
+  const batch = async (first: string[]) => {
+    let ask = first;
+    for (let round = 0; round < WORK_ROUNDS && ask.length; round++) {
+      let got: Awaited<ReturnType<typeof read>> | undefined;
+      try { got = await read(ask, repo); } catch { return; }
+      if (!got) return;
+      // This answer is authoritative for every design it was asked about: one it no longer lists (refused
+      // or gone since an earlier page) must not keep the value an earlier page gave it.
+      for (const id of ask) delete out[id];
+      Object.assign(out, got.items ?? {});
+      const next = got.remaining ?? [];
+      if (next.length >= ask.length) return;
+      ask = next;
+    }
+  };
+  const batches: string[][] = [];
+  for (let i = 0; i < ids.length; i += WORK_BATCH) batches.push(ids.slice(i, i + WORK_BATCH));
+  await Promise.all(batches.map(batch));
+  return out;
+}
+
+/* A design's own item as the list's and board's chip shows it: its key and the tracker's word for its state. */
+export function epicLink(epic: TrackerLink, done: number, total: number): WorkItemLink {
+  return {
+    key: epic.display,
+    state: epic.state ?? null,
+    tone: epic.done ? "done" : epic.state ? "active" : null,
+    title: total ? `${epic.display}: ${done} of its ${total} items done` : epic.display,
+  };
 }
 
 /* The plan's progress once it is building: tasks merged, in review, and in all (cancelled ones left out). */
