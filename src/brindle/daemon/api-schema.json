@@ -6964,6 +6964,18 @@
           "title": "Queued",
           "type": "integer"
         },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
+        },
         "rev": {
           "title": "Rev",
           "type": "integer"
@@ -12266,6 +12278,18 @@
           "title": "Queued",
           "type": "integer"
         },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
+        },
         "rev": {
           "title": "Rev",
           "type": "integer"
@@ -13188,6 +13212,14 @@
     {
       "method": "POST",
       "path": "/v1/developer-tools/install"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/doc-format"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/doc-format"
     },
     {
       "method": "GET",

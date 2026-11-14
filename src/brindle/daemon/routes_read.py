@@ -939,6 +939,18 @@ def analysis_doc_switches(db: DB, request: Request) -> Any:
 
 
 @_json
+def doc_format(db: DB, request: Request) -> Any:
+    """Settings › Doc format (brindle.doc_templates): what ``level`` (org, the
+    default, team:<id>, or a level of the org's structure) sets and its
+    version, the format in force there, where it is kept, the reference this
+    machine's next new doc gets, and how many docs each template wrote."""
+    from brindle import doc_templates
+
+    level = request.query_params.get("level") or doc_templates.ORG
+    return doc_templates.view(db, level)
+
+
+@_json
 def analysis_doc_policy(db: DB, request: Request) -> Any:
     """The org's doc policy, including ``export_destinations`` (a subset of download, google_docs, sharepoint)."""
     return docs_org_api("GET", "policy", repo=_repo(request))
@@ -1059,6 +1071,7 @@ ROUTES = [
     Route("/v1/profiles/{name}", get_profile),
     Route("/v1/rules", list_rules),
     Route("/v1/config", get_config),
+    Route("/v1/doc-format", doc_format),
     Route("/v1/user-settings", get_user_settings),
     Route("/v1/permissions", get_permissions),
     Route("/v1/permissions/asks", get_permission_asks),

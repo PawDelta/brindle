@@ -569,6 +569,9 @@ class PlanDTO(_DTO):
     threads: list[PlanThreadDTO] = []
     # The person may change the text now (direct edits, accepting suggestions): only while open.
     can_edit: bool = False
+    # Its reference from Settings › Doc format's naming (DES-0042), shown beside the
+    # title; null for a plan written without one (brindle.doc_templates).
+    reference: str | None = None
     # Set once the plan is shared for team review (brindle.pro.shared_docs).
     gate: PlanGateDTO | None = None
     # The Team plan it was shared under has ended: a personal doc, with no gate, until it comes back.

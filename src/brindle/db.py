@@ -1130,6 +1130,21 @@ CREATE TABLE IF NOT EXISTS plan_votes (
     at REAL NOT NULL,
     PRIMARY KEY (plan_id, decision_id, voter)
 );
+-- The doc format a plan was written with (brindle.doc_templates): its
+-- template, kept as it was so a later change never rewrites the doc, and
+-- its reference (DES-0042). No row: the plan was written without a format.
+CREATE TABLE IF NOT EXISTS plan_formats (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
+    template TEXT,                 -- JSON {id, name, default, sections}; NULL with a reference only
+    reference TEXT,
+    team TEXT,                     -- the team it was shared with, whose format its gates follow
+    created_at REAL NOT NULL
+);
+-- The next number of each reference pattern (DES-{number}) on this machine.
+CREATE TABLE IF NOT EXISTS doc_references (
+    pattern TEXT PRIMARY KEY,
+    next INTEGER NOT NULL
+);
 -- A plan shared through the Library (brindle.pro.shared_docs): its document,
 -- which local revision the Library's head holds, and the last review state.
 CREATE TABLE IF NOT EXISTS plan_shares (

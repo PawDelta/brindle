@@ -72,7 +72,7 @@ import time
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
-from brindle import plan_docs, plans, visuals
+from brindle import doc_templates, plan_docs, plans, visuals
 from brindle.crdt import CrdtError
 from brindle.db import DB
 from brindle.plan_drafts import DraftReplica
@@ -355,9 +355,12 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     p = plan_docs._plan(db, plan_id)
     if reviewers is not None:
         _review_open(p)
+    scope = _scope(scope)
+    team = scope["id"] if scope["kind"] == "group" else None
+    doc_templates.require(db, p["id"], doc_templates.SHARE, plan_docs.current(db, p)["sections"], team,
+                          folder if isinstance(folder, dict) else None)
     client, store = ad._session(client, store)
     ent = _require_team(store)
-    scope = _scope(scope)
     people = None if reviewers is None else _reviewers(reviewers)
     cur = plan_docs.revision(db, p["id"])
     content = _content(cur)          # a plan the API would refuse takes no claim
@@ -365,6 +368,7 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     _own(row, ent)
     doc_id = row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
     review_policies.ask(db, p, "POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
+    doc_templates.set_team(db, p["id"], team)       # its gates follow that team's format from now on
     if people or permissions:
         _grant(db, p, doc_id, people or [], permissions, client, store)
     if people is not None:
@@ -1124,6 +1128,7 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict
     p = plan_docs._plan(db, plan_id)
     _review_open(p)
     plan_docs._on_screen(p, rev)
+    doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     client, store = ad._session(client, store)
     share_ = sync(db, p["id"], client=client, store=store)
     if share_["local_rev"] != p["rev"]:

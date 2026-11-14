@@ -153,6 +153,18 @@ async def visual_live(socket: WebSocket) -> None:
             return replica.receive(data)[1]
         return None
 
+    def unfilled():
+        """Why the author's Freeze can't go: its template's required sections
+        still empty in the text typed so far (brindle.doc_templates), else None."""
+        from brindle import doc_templates, plan_docs
+
+        p = current_plan()
+        try:
+            doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p, replica)["sections"])
+        except ServiceError as e:
+            return e.message
+        return None
+
     def close_db():
         if db is not None:
             db.conn.close()
@@ -189,7 +201,9 @@ async def visual_live(socket: WebSocket) -> None:
                 # The author's Freeze or Reopen: the Library makes or withdraws the version (it
                 # refuses anyone else); not under the room's lock, so typing here never waits on it.
                 reopen = said.get("reopen") is True
-                refused = await relay.freeze(doc_id, reopen=reopen)
+                refused = None if reopen or teammate else await work(unfilled)
+                if refused is None:
+                    refused = await relay.freeze(doc_id, reopen=reopen)
                 if refused is not None:     # to this window only: its Freeze or Reopen didn't happen
                     await socket.send_json({"refused": {"action": "reopen" if reopen else "freeze", "reason": refused}})
                 continue
