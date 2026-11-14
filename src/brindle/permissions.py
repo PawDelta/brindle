@@ -5196,6 +5196,7 @@ class _PartReader:
         self.unread = False   # the splitter couldn't read the whole command (parts are what scan() found)
         self.named: list[str] = []    # assignment values and loop lists, resolved (_Flattener.named)
         self.wrote = False    # an earlier part may have made files a later pattern would match
+        self.glob_options = False    # an inner shell's options may change pattern expansion
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
         # The subshell the part being read runs in (_Flattener.scopes), and dotglob as each
         # subshell last left it: one starts from its parent's, and its changes stay in it.
@@ -5502,7 +5503,14 @@ class _PartReader:
             if source is None and fed:
                 raise _Unverifiable(f"{name} runs what it is fed")
             if code:
-                self.inner(source)
+                # nullglob drops unmatched words instead of passing them literally.
+                # Keep pattern proofs conservative inside that shell.
+                previous = self.glob_options
+                self.glob_options |= "nullglob" in args[:args.index(source)]
+                try:
+                    self.inner(source)
+                finally:
+                    self.glob_options = previous
         elif name == "sqlite3" and len(args) > 1 and not any(arg.startswith("-") for arg in args):
             return    # a database and its SQL: it reads nothing it's fed
         elif fed and (name in _RUNS_ITS_INPUT or name in _COMMAND_READERS):
@@ -5553,7 +5561,8 @@ class _PartReader:
             self.expanded = self.tilde = True    # bash may expand it (path=~/x) or not
         if names and re.search(r"[*?]|\[.+\]", bare):    # an unclosed [ (test's) is literal
             names = self.expand(value)
-            # One that matches nothing stays as written (--include=*.py): the program gets it as is.
+            # An unmatched pattern stays literal to the shell, but a program
+            # may still interpret it (git push's wildcard refspecs).
             self.expanded |= names != []
             return ([raw], False, value) if names is None else (names or [value], True, value)
         return [value], True, None
@@ -5561,6 +5570,8 @@ class _PartReader:
     def expand(self, pattern: str) -> list[str] | None:
         """The names ``pattern`` matches where it runs, None when brindle
         can't know them before it runs."""
+        if self.glob_options:
+            raise _Unverifiable("a shell option may remove unmatched words")
         if self.wrote or self.cwd is None and not os.path.isabs(pattern):
             return None
         if "[:" in pattern or "[=" in pattern or "[." in pattern:
@@ -5697,6 +5708,52 @@ def _without_pattern(part: ShellPart, *, scripts: bool = False) -> list[str]:
     return [*words[:at], "pattern", *words[at + 1:]]
 
 
+def _glob_patterns_overlap(left: str, right: str) -> bool:
+    """Whether two * / ? patterns may share a string. Unsupported classes
+    and a proof too large to finish are overlap, never proof of disjointness.
+    Stars may also consume spaces and slashes: this overestimates shell globs."""
+    if "[" in left or "[" in right:
+        return True
+    pending = [(0, 0)]
+    seen = set()
+    while pending:
+        i, j = pending.pop()
+        if (i, j) in seen:
+            continue
+        seen.add((i, j))
+        if len(seen) > 4096:
+            return True
+        if i == len(left) and j == len(right):
+            return True
+        a, b = left[i:i + 1], right[j:j + 1]
+        if a == "*":
+            pending.append((i + 1, j))
+        if b == "*":
+            pending.append((i, j + 1))
+        if a and b and (a == b or a in "*?" or b in "*?"):
+            pending.append((i if a == "*" else i + 1, j if b == "*" else j + 1))
+    return False
+
+
+def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
+    """Only exclude a restriction when a required literal fragment cannot
+    occur in any argument. Multiple glob matches add spaces between words,
+    so cannot create a missing fragment. Ignore order and word boundaries
+    deliberately: possible overlap keeps the existing conservative proof."""
+    # Classes and shell quoting need more than this fragment proof. Quoting
+    # introduced when joining arguments may itself match a textual rule.
+    if rule.match_type in _LISTING_SAFE:
+        literals = ["rm" if rule.match_type == "rm-destructive" else "git"]
+    elif rule.match_type not in MATCH_TYPES or any(c in rule.match for c in "[\\\"'"):
+        return True
+    else:
+        literals = re.split(r"[*?]", rule.match) if rule.match_type == "glob" else [rule.match]
+    words = [*zip(part.written, part.patterned), *((path, False) for path in [*part.writes, *part.reads])]
+    return all(any(_glob_patterns_overlap(word, f"*{fragment}*") if patterned else fragment in word
+                   for word, patterned in words)
+               for literal in literals for fragment in literal.split())
+
+
 def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                why: list[ValueError] | None = None) -> tuple[list[ShellPart], Decision | None] | None:
     """``req``'s shell command as ShellParts with the deny (else ask) a rule
@@ -5729,7 +5786,19 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             return None
         if part.data and any(_could_cover(rule, " ".join(part.words[:2])) for rule in restrictions):
             return None    # the message may be one a rule names
-        if restrictions and (part.redirect_glob or part.globs and not (places and (
+        # With the files it redirects to too: a deny on a name sees them.
+        spans = [part.words, [*part.words, *part.writes, *part.reads]]
+        texts = [replace(at, command=_joined(words)) for words in spans]
+        matched = _matching_restriction(texts, checks, restrictions, spans)
+        # An unmatched pattern (an API URL's ? too) needs no expansion proof
+        # when neither its unchanged words nor a possible expansion can match
+        # a restriction: a matching file can appear before the command runs. The
+        # bounded matcher does not prove recursive ** forms unmatched: shells
+        # can expand **/ across zero directories as well as several levels.
+        literal_patterns = (not part.expanded and not part.unknown and matched is None
+                            and not any(_patterns_may_restrict(rule, part) for rule in restrictions)
+                            and not any("**" in word for word in part.written))
+        if restrictions and (part.redirect_glob or part.globs and not literal_patterns and not (places and (
                 _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
                                                         [part.assigned], [("<", path) for path in part.reads])
                                         for place in places)))):
@@ -5746,10 +5815,6 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             if not places or not all(_reads_clear(place, operands, kept) for place in places):
                 covered("it may read a file a deny covers, or where brindle can't tell")
             return None
-        # With the files it redirects to too: a deny on a name sees them.
-        spans = [part.words, [*part.words, *part.writes, *part.reads]]
-        texts = [replace(at, command=_joined(words)) for words in spans]
-        matched = _matching_restriction(texts, checks, restrictions, spans)
         if matched is not None and matched.decision == "deny":
             return parts, matched
         for path in part.reads:
