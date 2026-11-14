@@ -31,6 +31,8 @@ export interface TodoItem {
   id: string;
   title: string;
   state: "done" | "current" | "todo";
+  /* The option it was decided for, short ("A"). */
+  pick?: string;
 }
 
 export interface ThreadActions {
@@ -157,7 +159,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
 const draftWords = {
   comment: { name: "Comment", placeholder: "What should change here?", send: "Comment" },
   ask: { name: "Ask the supervisor", placeholder: "What do you want to know?", send: "Ask" },
-  suggest: { name: "Why (optional)", placeholder: "Why (optional)", send: "Suggest" },
+  suggest: { name: "Why (optional)", placeholder: "Why (optional)", send: "Send suggestion" },
 };
 
 function DraftCard({ draft, number, stale, busy, onSend, onCancel, onAfter, replaceBox }: {
@@ -278,7 +280,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
               <button key={d.id} type="button" data-state={d.state} aria-current={d.state === "current" ? "step" : undefined} onClick={() => onJump(d.id)}
                 className={`flex cursor-pointer items-center gap-2 text-left hover:text-ink ${d.state === "current" ? "font-semibold text-ink" : d.state === "done" ? "text-ink-3 line-through" : "text-ink-2"}`}>
                 <i className={`${box} ${d.state === "done" ? "border-pass bg-pass" : d.state === "current" ? "border-branch" : "border-line-strong"}`} />
-                {d.title}
+                {d.pick ? `${d.title} · ${d.pick}` : d.title}
               </button>
             ))}
           </div>
@@ -350,8 +352,8 @@ export function SignOffSheet({ version, rows, since, onShowChanges }: {
             <Avatar who={r.who} ring={r.state === "signed" ? "done" : r.state === "waiting" && r.required ? "wait" : r.required ? undefined : "dim"} />
             <span className="min-w-0 truncate"><b className="font-medium text-ink">{r.name}</b>{` · ${r.required ? "required" : "optional"}`}</span>
             <span className="flex-1" />
-            <span className={`whitespace-nowrap ${r.state === "signed" ? "text-pass" : r.state === "waiting" || r.state === "changes" ? "text-sap" : "text-ink-3"}`}>
-              {r.state === "signed" ? `✓ signed${r.note ? ` ${r.note}` : ""}` : r.state === "changes" ? "changes requested" : r.state === "waived" ? "waived" : r.state === "earlier" ? r.note ?? "signed earlier" : "waiting"}
+            <span className={`flex-none whitespace-nowrap ${r.state === "signed" ? "text-pass" : (r.state === "waiting" && r.required) || r.state === "changes" ? "text-sap" : "text-ink-3"}`}>
+              {r.state === "signed" ? `✓ signed${r.note ? ` ${r.note}` : ""}` : r.state === "changes" ? "changes requested" : r.state === "waived" ? "waived" : r.state === "earlier" ? r.note ?? "signed earlier" : r.required ? "waiting" : "not signed"}
             </span>
           </span>
         ))}

@@ -472,7 +472,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const settled = (d: PlanDecisionDTO) => !open || (!!d.confirmed && (drafted(d) ?? d.confirmed) === d.confirmed);
   const next = plan.decisions.find((d) => !settled(d));
   const decided = plan.decisions.filter(settled).length;
-  const todo: TodoItem[] = plan.decisions.map((d) => ({ id: d.id, title: d.title, state: settled(d) ? "done" : d === next ? "current" : "todo" }));
+  const todo: TodoItem[] = plan.decisions.map((d) => {
+    const label = settled(d) ? d.options.find((o) => o.id === chosen(d))?.label : undefined;
+    return { id: d.id, title: d.title, state: settled(d) ? "done" : d === next ? "current" : "todo", pick: label && shortName(label) !== label ? shortName(label) : undefined };
+  });
   const openThreads = threads.filter((t) => t.status === "open");
   const suggestions = openThreads.filter((t) => t.kind === "suggestion").length;
 
@@ -691,7 +694,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     suggestions > 0 && !teammate && `${plural(suggestions, "suggestion")} to accept.`,
     openThreads.length - suggestions > 0 && `${plural(openThreads.length - suggestions, "comment")} open.`,
     plan.queued > 0 && `${plural(plan.queued, "assigned task waits", "assigned tasks wait")} on this design.`,
-  ].filter(Boolean).join(" ");
+  ].filter(Boolean).slice(0, 2).join(" ");
   const signName = frozen ? `Sign off version ${frozen.id}` : "Sign off";
 
   // A text section: its text with the threads' ranges drawn in, or, being edited, its text where
@@ -711,7 +714,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // A doc in team review, in Editing mode, is edited live with everyone writing in it: its text
   // is the daemon's live document (DocEditor), each change going out as it is typed.
   const live = mode === "editing" && useLiveReview ? docLive : null;
-  const myName = teammate?.me ? nameOf(teammate.me) : me ? nameOf(me) : "Author";
+  // What teammates see beside this person's caret and in the doc's presence.
+  const myName = personName(teammate?.me ? nameOf(teammate.me) : me ? nameOf(me) : "Author");
   const liveEditor = (section: string, title: string, variant: "page" | "source") => live && (
     <div className="grid font-sans" data-testid="plan-live-box">
       <Suspense fallback={<p className="text-xs text-ink-3" role="status">Opening the live text…</p>}>
@@ -915,17 +919,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 onClick={() => doc.current?.ownerDocument.querySelector<HTMLFormElement>('[data-testid="thread-draft"]')?.requestSubmit()}>Send 1 suggestion</button>
             </div>
           </>
-        ) : live && editing ? (
+        ) : live && (editing || raw) ? (
           <>
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="editing">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Editing</span>
-                <span className="truncate">{partName(editing.section)}</span>
+                <span className="truncate">{raw ? "The Markdown" : editing ? partName(editing.section) : ""}</span>
               </span>
               <span className="text-xs text-ink-3">Sign-offs wait for a frozen version: nobody signs text that is still moving.</span>
             </div>
             <div className="flex items-center gap-2">
-              <button type="button" className={button} onClick={() => setEditing(null)}>Done editing</button>
+              <button type="button" className={button} onClick={() => { setEditing(null); chrome?.onMode("viewing"); }}>Done editing</button>
             </div>
           </>
         ) : teammate ? (

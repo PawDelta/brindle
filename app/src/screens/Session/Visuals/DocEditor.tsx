@@ -89,6 +89,8 @@ export type EditorVariant = "page" | "source";
 
 const shared = {
   "&.cm-focused": { outline: "none" },
+  // A teammate's name sits above the line, never over the text it is next to.
+  ".loro-cursor::before": { top: "auto", bottom: "100%", padding: "0 5px", fontFamily: "var(--font-sans, ui-sans-serif, system-ui, sans-serif)", fontSize: "10px", fontWeight: "600", lineHeight: "15px", borderRadius: "3px 3px 3px 0", opacity: "1" },
   ".cm-md-mk": { color: "var(--ink-3)" },
   ".cm-md-b": { fontWeight: "600", color: "var(--ink)" },
   ".cm-md-i": { fontStyle: "italic" },

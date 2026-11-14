@@ -10,7 +10,7 @@ import { getUserEphemeralKey, type EphemeralState, type UserState } from "loro-c
 import { LIVE_RELOAD, type LiveChannel, type LiveDocState, type LiveRefusal } from "../../../api/client";
 import type { LiveClient } from "./DocEditor";
 import { LiveStrip, LockStrip, OfflineStrip } from "./DocFreeze";
-import { Avatar } from "./PlanCards";
+import { Avatar, personName } from "./PlanCards";
 import { PRESENCE_TTL, peerClass } from "./docAwareness";
 
 export type LiveCapability = "unknown" | "live" | "unsupported";
@@ -19,7 +19,7 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
   client: LiveClient; visual: string; isAuthor: boolean; name: string;
   onState?(state: LiveDocState | null): void;
   onCapability?(capability: LiveCapability): void;
-  /* The reader's mode: the live strip is for writing (and for the author, who freezes). */
+  /* The reader's mode: the live strip is for Editing (and for the author, who freezes). */
   mode?: "viewing" | "suggesting" | "editing";
   stripHost?: HTMLElement | null;
   /* Who signs a frozen version, by name: Freeze says it asks them. */
@@ -107,15 +107,16 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
   const author = state?.author ?? "";
   const freeze = () => { setRefused(null); channel.current?.freeze(); };
   const reopen = () => { setRefused(null); channel.current?.reopen(); };
-  const here = ["You", ...peers.map((p) => p.name)];
+  // Who is here, by first name: "You, Dana and Maya".
+  const here = ["You", ...new Set(peers.map((p) => personName(p.name).split(" ")[0]))];
   const strip = state?.lock === "sign_off" && state.version
     ? <LockStrip version={state.version} author={author} writers={state.version.writers} isAuthor={isAuthor} connected={connected} refused={refused} onReopen={reopen} onHistory={onHistory} />
     : state?.lock === "sign_off"
       ? <LockStrip version={{ id: 0, writers: [], signOffs: [], snapshot: "" }} author={author} writers={[]} isAuthor={isAuthor} connected={connected} refused={refused} onReopen={reopen} onHistory={onHistory} />
       : state?.lock === "author_offline"
         ? <OfflineStrip author={author} />
-        : mode !== "viewing" || isAuthor || refused
-          ? <LiveStrip isAuthor={isAuthor} author={author} here={here} reviewers={reviewers} editing={mode !== "viewing"} connected={connected} refused={refused} onFreeze={freeze} />
+        : mode === "editing" || isAuthor || refused
+          ? <LiveStrip isAuthor={isAuthor} author={author} here={here} reviewers={reviewers} editing={mode === "editing"} connected={connected} refused={refused} onFreeze={freeze} />
           : null;
   return (
     <>
