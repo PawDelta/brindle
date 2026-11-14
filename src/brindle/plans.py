@@ -41,7 +41,7 @@ import re
 import time
 from typing import Any
 
-from brindle import bus, redact, visual_offers, visuals
+from brindle import bus, doc_templates, redact, visual_offers, visuals
 from brindle.db import DB, Agent
 from brindle.service.errors import ServiceError
 
@@ -564,6 +564,14 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     else:
         markdown = markdown.strip()
         lede, parts = plan_docs.from_markdown(markdown)
+    # The doc format: a new plan starts from the default template, a revision keeps the one
+    # its plan was written with; either way a required heading left out comes back, empty.
+    fmt = doc_templates.resolve()
+    template = (doc_templates.of(db, plan_id) or {}).get("template") if plan_id else \
+        doc_templates.default_template(fmt)
+    parts, added = doc_templates.apply(template, parts)
+    if added:
+        markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     given = [name for name, raw in (("decisions", decisions), ("split", split), ("ask", ask)) if raw]
@@ -616,6 +624,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         if visual_rev == 1:
             c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                       " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
+            doc_templates.start(c, vid, template, fmt["naming"]["reference"], now)
             # The plan now holds the session's tasks: the offer to plan first is settled
             # (an open one too: the person asked for a plan in their own words).
             # A plan asked for directly, with no offer before it, settles the goal too, so growing
@@ -904,6 +913,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
+    if approved:
+        doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     unconfirmed, was_ready = None, False
     if approved and not confirmed:
         before = gate(db, p)            # what the person pressed Approve on, before asking can change it

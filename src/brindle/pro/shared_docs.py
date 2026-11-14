@@ -72,7 +72,7 @@ import time
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
-from brindle import plan_docs, plans, visuals
+from brindle import doc_templates, plan_docs, plans, visuals
 from brindle.crdt import CrdtError
 from brindle.db import DB
 from brindle.plan_drafts import DraftReplica
@@ -355,6 +355,7 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     p = plan_docs._plan(db, plan_id)
     if reviewers is not None:
         _review_open(p)
+    doc_templates.require(db, p["id"], doc_templates.SHARE, plan_docs.current(db, p)["sections"])
     client, store = ad._session(client, store)
     ent = _require_team(store)
     scope = _scope(scope)
@@ -1124,6 +1125,7 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict
     p = plan_docs._plan(db, plan_id)
     _review_open(p)
     plan_docs._on_screen(p, rev)
+    doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     client, store = ad._session(client, store)
     share_ = sync(db, p["id"], client=client, store=store)
     if share_["local_rev"] != p["rev"]:

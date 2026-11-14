@@ -791,6 +791,43 @@ export interface DocSwitch {
   org: "enforced_on" | "enforced_off" | null;
 }
 
+/* Settings › Doc format (brindle.doc_templates): a template's sections in
+   order, each with its kind, whether it is required, and the line the
+   supervisor is told; naming; and what an empty required section stops. */
+export type DocSectionKind = "text" | "diagram" | "table";
+export type DocFormatBlock = "sign_off" | "share";
+
+export interface DocTemplateSection {
+  title: string;
+  kind: DocSectionKind;
+  required: boolean;
+  hint: string | null;
+}
+
+export interface DocTemplate {
+  id: string;
+  name: string;
+  default: boolean;
+  sections: DocTemplateSection[];
+}
+
+export interface DocFormat {
+  templates: DocTemplate[];
+  naming: { title_hint: string | null; reference: string | null };
+  blocks: DocFormatBlock[];
+}
+
+/* GET /doc-format: what `level` sets (only its own keys), the format in
+   force there, the reference the next new doc gets, and how many docs each
+   template wrote. */
+export interface DocFormatView {
+  level: string;
+  format: Partial<DocFormat>;
+  resolved: DocFormat;
+  next_reference: string | null;
+  used: Record<string, number>;
+}
+
 /* GET /analysis-docs/export-config */
 export interface DocExportConfig {
   google_client_id: string | null;
@@ -2171,6 +2208,16 @@ export class DaemonClient {
   /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked. */
   async setDocSwitch(name: DocSwitchName, on: boolean) {
     return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
+  }
+
+  /* Settings › Doc format for one level (org, or team:<id>). */
+  docFormat(level = "org") {
+    return this.get<DocFormatView>("/doc-format", { level });
+  }
+
+  /* Replaces what one level of the doc format sets. */
+  setDocFormat(format: Partial<DocFormat>, level = "org") {
+    return this.put<DocFormatView>("/doc-format", { level, format });
   }
 
   /* brindle's disk use (slow: the daemon measures every worktree). */

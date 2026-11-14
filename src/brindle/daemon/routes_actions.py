@@ -2265,6 +2265,16 @@ def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
     return doc_switches(repo)
 
 
+def put_doc_format(db: DB, params: dict, body: Body) -> Any:
+    """Replace what one level (``level``: org or team:<id>) of Settings › Doc
+    format sets with ``format`` (brindle.doc_templates); returns the GET's view."""
+    from brindle import doc_templates
+
+    level = _get(body, "level", default=doc_templates.ORG)
+    doc_templates.save(level, _get(body, "format", dict, required=True))
+    return doc_templates.view(db, level)
+
+
 def docs_scopes(repo: str | None = None) -> list[dict]:
     """Every scope the person reads, as the server lists them
     (``{kind, id, name, can_share}``; their teams too, docs or not)."""
@@ -3037,6 +3047,7 @@ ROUTES = [
     _post("/kb/sources/{id}/library", kb_library),
     Route("/v1/kb/sources/{id}/library", _endpoint(unlibrary_kb_source), methods=["DELETE"]),
     Route("/v1/config", _endpoint(patch_config), methods=["PATCH"]),
+    Route("/v1/doc-format", _endpoint(put_doc_format), methods=["PUT"]),
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
     Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),
     Route("/v1/routing", _endpoint(put_routing), methods=["PUT"]),

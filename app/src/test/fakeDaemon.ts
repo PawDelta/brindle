@@ -41,6 +41,7 @@ import type {
 } from "../api/schema";
 import { LOGIN_PROVIDERS } from "../api/client";
 import { hunksOf, parseDiff } from "../screens/Branch/parseDiff";
+import type { DocFormat, DocFormatView } from "../api/client";
 import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
 
 export const BASE_URL = "http://127.0.0.1:47321";
@@ -2641,6 +2642,15 @@ export class FakeDaemon {
     return socket.repo === null || event.repo_root === socket.repo;
   }
 
+  /* GET /doc-format (brindle.doc_templates.view) for the org level: what it sets over the defaults. */
+  docFormat: Partial<DocFormat> = {};
+
+  private docFormatView(): DocFormatView {
+    const resolved: DocFormat = { templates: [], naming: { title_hint: null, reference: null }, blocks: ["sign_off"], ...this.docFormat };
+    const reference = resolved.naming.reference;
+    return { level: "org", format: this.docFormat, resolved, next_reference: reference ? reference.replace("{number}", "0001") : null, used: {} };
+  }
+
   /* The goal's POST route, answering as the engine does (routes_actions.py):
      /goal/enabled answers {enabled}. It needs the session's `root`, as the
      engine's _root lookup does. */
@@ -2727,6 +2737,10 @@ export class FakeDaemon {
       if (connection && this.holdConnections) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>))));
       if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
+      if (path === "/doc-format") {
+        this.docFormat = { ...this.docFormat, ...((body ?? {}) as { format?: Partial<DocFormat> }).format };
+        return json(this.docFormatView());
+      }
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);
       if (key && this.holdKeys) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putKey(key[1], (body ?? {}) as Record<string, unknown>))));
       if (key) return this.putKey(key[1], (body ?? {}) as Record<string, unknown>);
@@ -2884,6 +2898,8 @@ export class FakeDaemon {
         return json(d.debug);
       case "/doctor":
         return json(d.doctor);
+      case "/doc-format":
+        return json(this.docFormatView());
       case "/account":
         return json(d.account);
       case "/cost":
