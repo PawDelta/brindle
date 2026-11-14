@@ -87,10 +87,10 @@ def test_same_profile_agents_share_their_start_prefix(db, repo, monkeypatch, kin
         assert guidance not in system_a and guidance in first_a
 
 
-def _hidden(db, ws, agent):
-    """The brindle tools ``agent``'s launch takes out of its context, as its
-    provider is told, by bare name."""
-    profile = agents._profile_for(db, agent, ws)
+def _hidden(db, ws, agent, profile=None):
+    """The brindle tools ``agent``'s launch (with ``profile``, else the one
+    built now) takes out of its context, as its provider is told, by bare name."""
+    profile = profile or agents._profile_for(db, agent, ws)
     ctx = LaunchContext(agent.id, profile, None, cwd=ws.path, mode=agent.mode)
     if agent.provider == "codex":
         flag = next(a for a in Codex().command(ctx) if a.startswith("mcp_servers.brindle.disabled_tools="))
@@ -128,11 +128,15 @@ def test_short_lived_agents_get_a_fixed_subset_of_brindle_tools(db, repo, provid
     assert starts[0] == starts[1]   # the same tool list at every start
     assert every - set(starts[0]) == set(keep) and set(keep) < every
     if provider == "antigravity":
-        # The tool list is the checkout's: with an agy worker at work beside
-        # it, the reviewer's launch leaves that worker's tools alone.
+        # The tool list is the checkout's. The reviewer's profile is built
+        # while it is alone; an agy worker then registers and writes its
+        # config before the reviewer's launch writes: the worker keeps its tools.
+        stale = agents._profile_for(db, db.get_agent("a1"), ws)
+        assert stale.hidden_brindle_tools
         db.add_agent(Agent("w1", ws.id, "developer-gemini", provider, None, "assign", "starting", "", None,
                            time.time()))
-        assert _hidden(db, ws, db.get_agent("a1")) == []
+        assert _hidden(db, ws, db.get_agent("w1")) == []
+        assert _hidden(db, ws, db.get_agent("a1"), stale) == []
     if provider == "claude":   # a worker on a normal task keeps every tool and the default cache
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "starting", "", None,
                            time.time()))
