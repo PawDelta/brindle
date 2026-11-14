@@ -387,6 +387,24 @@ def _release(db: DB, root_id: str, token: str) -> None:
             c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=?", (root_id, RESTART_HOLD))
 
 
+def previous_sessions(db: DB, root_id: str) -> list[dict]:
+    """Transcripts retained across CLI restarts, oldest first."""
+    return json.loads(db.mark(root_id, "restart-history") or "[]")
+
+
+def _remember_transcript(db: DB, root: Agent, transcript: Path | None) -> None:
+    # Kept separately from the folded state so a concurrent refresh cannot
+    # overwrite it. The resume/restart locks serialize additions per root.
+    if not root.session_ref:
+        return
+    history = previous_sessions(db, root.id)
+    if any(item["session_ref"] == root.session_ref for item in history):
+        return
+    history.append({"session_ref": root.session_ref, "provider": root.provider,
+                    "transcript_path": str(transcript) if transcript else root.transcript_path})
+    db.set_mark(root.id, "restart-history", json.dumps(history))
+
+
 def on_turn_end(db: DB, agent: Agent, payload: dict) -> bool:
     """The supervisor's turn ended (its Stop hook): bring its state up to
     date and, once its context is past the repo's threshold, start its
@@ -449,6 +467,9 @@ def restart(db: DB, root_id: str, token: str, transcript: Path | None = None) ->
                         or db.deliveries_in_flight(root_id)):
                     log.info("brindle: supervisor %s's restart no longer applies; left as it is", root_id)
                     return None
+                # Persist before the launch's hooks can replace the transcript.
+                # Readers exclude the active ref, including after a failed launch.
+                _remember_transcript(db, root, transcript)
                 # Paused before its CLI stops, so the stop isn't taken for the person closing the chat
                 # (agents.ended).
                 db.set_status(root_id, "paused")

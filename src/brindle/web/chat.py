@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from brindle import agents
-from brindle.db import Agent
+from brindle.db import DB, Agent
 from brindle.web.server import Request, Response, json_response, route
 
-# The most messages one transcript response carries (the newest, when more).
+# The most messages in an ordinary recent snapshot. Restart history is kept
+# in full so a long fresh conversation cannot push the earlier ones out.
 MAX_MESSAGES = 200
 
 
@@ -57,7 +59,10 @@ def _read_items(agent: Agent) -> tuple[list, object]:
     path = agent.transcript_path
     if agent.provider != "claude" or not path or not Path(path).is_file():
         return [], _claude_message
-    raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    try:
+        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [], _claude_message
     lines = raw.split("\n")[:-1]  # only complete lines; a partial tail waits for next poll
     items = []
     for line in lines:
@@ -79,21 +84,42 @@ def _generation(items: list) -> str:
     return hashlib.sha1(raw).hexdigest()[:12]
 
 
-def transcript(agent: Agent, after: int | str = 0) -> dict:
+def transcript(agent: Agent, after: int | str = 0, *, db: DB | None = None) -> dict:
     """Messages after cursor ``after`` and the cursor to pass next time.
     When ``after``'s generation doesn't match (e.g. a native conversation
     folded), returns ``reset=True`` and a recent snapshot."""
     items, parse = _read_items(agent)
     gen = _generation(items)
+    folded = len(items) > 2 and isinstance(items[1], dict) and bool(items[1].get("summary"))
+    history = []
+    if db is not None:
+        from brindle.supervisor_state import previous_sessions
+
+        history = [s for s in previous_sessions(db, agent.id) if s["session_ref"] != agent.session_ref]
+    if history:
+        earlier = []
+        generations = []
+        for session in history:
+            old, old_parse = _read_items(replace(agent, **session))
+            generations.append([len(old), _generation(old)])
+            earlier.extend({**m, "history": True} for m in map(old_parse, old) if m)
+            earlier.append({"role": "restart", "text": "Supervisor restarted", "history": True})
+        # Session hooks may have replaced the ref but not its path yet.
+        if any(s["transcript_path"] == agent.transcript_path for s in history):
+            items = []
+        items = earlier + [parse(item) for item in items]
+        parse = lambda item: item
+        gen = hashlib.sha1(json.dumps([history, generations, agent.session_ref, gen],
+                                     sort_keys=True).encode()).hexdigest()[:12]
     given_gen, sep, count_s = str(after or 0).rpartition(":")
     count = int(count_s or 0)
-    folded = len(items) > 2 and isinstance(items[1], dict) and bool(items[1].get("summary"))
     mismatch = count < 0 or count > len(items) or (
         bool(sep) and given_gen != gen and not (given_gen == "0" and count <= 1 and not folded)
     )
     start = 0 if mismatch else count
     messages = [m for m in map(parse, items[start:]) if m]
-    return {"messages": messages[-MAX_MESSAGES:], "cursor": f"{gen}:{len(items)}", "reset": mismatch}
+    return {"messages": messages if history else messages[-MAX_MESSAGES:],
+            "cursor": f"{gen}:{len(items)}", "reset": mismatch}
 
 
 @route("GET", "/api/agents/{id}/transcript")
@@ -101,8 +127,12 @@ def api_transcript(req: Request) -> Response:
     agent = req.db.get_agent(req.params["id"])
     if agent is None:
         return json_response({"error": "no such agent"}, 404)
+    from brindle import identity_lock
+
+    if identity_lock.locked_by(agent.id):
+        return json_response({"error": "session belongs to another identity"}, 403)
     try:
-        return json_response(transcript(agent, req.query.get("after") or 0))
+        return json_response(transcript(agent, req.query.get("after") or 0, db=req.db))
     except ValueError:
         return json_response({"error": "bad cursor"}, 400)
 
