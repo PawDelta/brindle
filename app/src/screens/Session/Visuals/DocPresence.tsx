@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { EphemeralStore, LoroDoc } from "loro-crdt";
 import { getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
-import { LIVE_RELOAD, type LiveChannel, type LiveDocState } from "../../../api/client";
+import { LIVE_RELOAD, type LiveChannel, type LiveDocState, type LiveRefusal } from "../../../api/client";
 import { quiet } from "../../../components/ui";
 import type { LiveClient } from "./DocEditor";
 import { Avatar } from "./PlanCards";
@@ -20,6 +20,8 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
   const [connected, setConnected] = useState(false);
   const [peers, setPeers] = useState<UserState[]>([]);
   const [unsupported, setUnsupported] = useState(false);
+  // The author's last Freeze or Reopen that didn't happen, and why (cleared by the next one).
+  const [refused, setRefused] = useState<LiveRefusal | null>(null);
   // Bumped when the daemon replaced the text (LIVE_RELOAD): the channel opens again.
   const [opened, setOpened] = useState(0);
   const known = useRef({ client, visual, live: false });
@@ -41,12 +43,14 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
     onState?.(null);
     onCapability?.(known.current.live ? "live" : "unknown");
     setUnsupported(false);
+    setRefused(null);
     setConnected(false);
     setPeers([]);
     let stopRefresh = () => {};
     const live = client.visualLive(visual, {
       onUpdate() { confirm(); },
       onState(next) { confirm(); setState(next); onState?.(next); setConnected(true); },
+      onRefused(why) { setRefused(why); },
       onAwareness(section, bytes) {
         let store = stores.get(section);
         if (!store) {
@@ -100,9 +104,12 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
       {state?.lock === "author_offline" && <p role="status" className="m-0 text-sap">{state.author} went offline while editing · comments and suggestions only</p>}
       {state?.lock === "sign_off" ? <div className="flex items-center gap-2">
         <span>Locked for sign-off</span>
-        {isAuthor && <button type="button" className={quiet} disabled={!connected} onClick={() => channel.current?.reopen()}>Reopen</button>}
-      </div> : isAuthor ? <button type="button" className={`${quiet} justify-self-start`} disabled={!connected || !!state?.lock} onClick={() => channel.current?.freeze()}>Freeze</button>
+        {isAuthor && <button type="button" className={quiet} disabled={!connected} onClick={() => { setRefused(null); channel.current?.reopen(); }}>Reopen</button>}
+      </div> : isAuthor ? <button type="button" className={`${quiet} justify-self-start`} disabled={!connected || !!state?.lock} onClick={() => { setRefused(null); channel.current?.freeze(); }}>Freeze</button>
         : <p role="status" data-state="author-required" className="m-0 text-ink-3">Ask the author to freeze</p>}
+      {refused && <p role="alert" data-state={`${refused.action}-refused`} className="m-0 text-sap">
+        {refused.action === "freeze" ? "Not frozen" : "Not reopened"}{refused.reason ? `: ${refused.reason}` : ""}
+      </p>}
       {state?.version && <div data-testid="doc-version" data-version={state.version.id}>
         <span>Version {state.version.id} · Credited writers</span>
         <ul aria-label="Credited writers" className="m-0 list-none p-0">{state.version.writers.map((writer) => <li key={writer}>{writer}</li>)}</ul>

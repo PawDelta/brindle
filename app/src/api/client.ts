@@ -1334,6 +1334,12 @@ export interface LiveDocState {
   gate?: Plan["gate"];
 }
 
+/* A Freeze or Reopen the daemon couldn't do, sent to the window that asked. */
+export interface LiveRefusal {
+  action: "freeze" | "reopen";
+  reason: string;
+}
+
 /* What a shared design doc's live channel delivers (DaemonClient.visualLive). */
 export interface LiveHandlers {
   /* Loro update bytes to import: the doc as it is first (a snapshot), then each other writer's change. */
@@ -1345,6 +1351,9 @@ export interface LiveHandlers {
      LoroDoc.setPeerId once the snapshot is in and before the first edit. null: none is free yet,
      so the text stays read only until one arrives. Never sent: write under the doc's own number. */
   onPeer?(peer: `${number}` | null): void;
+  /* This window's Freeze or Reopen didn't happen (refused, or its edits couldn't reach the relay
+     first): the lock and the text stay as they were, and `reason` says why. */
+  onRefused?(refused: LiveRefusal): void;
   /* The channel closed: 4401 a wrong token, 4404 no live text for this visual,
      1006 the connection dropped, LIVE_RELOAD the daemon replaced the text (open the channel
      again for the new one). Locks arrive as state and keep the channel open. */
@@ -1886,7 +1895,9 @@ export class DaemonClient {
        review controls blocked until the channel is available again.
      - author → daemon: {"freeze": true} snapshots the text and credits its writers, then
        locks it for sign-off; {"reopen": true} withdraws that version and its sign-offs.
-       The daemon authorizes these commands and rejects text updates while locked.
+       The daemon authorizes these commands and rejects text updates while locked. One it can't
+       do (refused, or this machine's edits couldn't reach the relay first) is answered to the
+       window that sent it with {"refused": {"action": "freeze" | "reopen", "reason": text}}.
      Importing is idempotent, so a frame relayed twice (or echoed back) changes nothing. */
   visualLive(id: string, handlers: LiveHandlers): LiveChannel {
     const url = new URL(this.url(`/visuals/${encodeURIComponent(id)}/live`));
@@ -1908,7 +1919,7 @@ export class DaemonClient {
     };
     socket.onmessage = (ev) => {
       if (closed || typeof ev.data !== "string") return;
-      let said: { update?: string; awareness?: string; section?: string; state?: LiveDocState; peer?: string | null };
+      let said: { update?: string; awareness?: string; section?: string; state?: LiveDocState; peer?: string | null; refused?: LiveRefusal };
       try {
         said = JSON.parse(ev.data) as typeof said;
       } catch {
@@ -1921,6 +1932,9 @@ export class DaemonClient {
       } else if (typeof said.update === "string") handlers.onUpdate(fromBase64(said.update));
       else if (typeof said.awareness === "string" && typeof said.section === "string") handlers.onAwareness(said.section, fromBase64(said.awareness));
       else if (said.state) handlers.onState?.(said.state);
+      else if (said.refused && (said.refused.action === "freeze" || said.refused.action === "reopen")) {
+        handlers.onRefused?.({ action: said.refused.action, reason: typeof said.refused.reason === "string" ? said.refused.reason : "" });
+      }
     };
     socket.onclose = (ev) => {
       if (closed) return;
