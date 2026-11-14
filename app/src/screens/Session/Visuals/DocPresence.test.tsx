@@ -257,7 +257,9 @@ it("locks others' text while the author is offline and still sends comments and 
   await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
   highlight();
   fireEvent.click(within(screen.getByRole("toolbar")).getByRole("button", { name: "Suggest edit" }));
-  fireEvent.change(screen.getByRole("textbox", { name: /Replace/ }), { target: { value: "Agents" } });
+  await settle();
+  const suggestion = editor("Suggestion to the overview");
+  await act(async () => suggestion.dispatch(suggestion.state.replaceSelection("Agents")));
   await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
   expect(sent).toEqual(["comments", "suggestions"]);
 });

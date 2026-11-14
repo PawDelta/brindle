@@ -18,12 +18,13 @@
 
 import { Annotation, Compartment, EditorState, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import { defaultKeymap } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { EphemeralStore, LoroDoc, UndoManager } from "loro-crdt";
 import { LoroEphemeralPlugin, getCursorEphemeralKey, getUserEphemeralKey, type EphemeralState, type UserState } from "loro-codemirror";
 import { useEffect, useRef, useState } from "react";
 import { LIVE_RELOAD, type DaemonClient } from "../../../api/client";
 import { formatEdit, useFormatTarget, type FormatCommand } from "./DocFormat";
+import { changeBetween, toUnits } from "./DocText";
 import { PEER_COLOURS, PRESENCE_TTL, peerClass } from "./docAwareness";
 
 export type LiveClient = Pick<DaemonClient, "visualLive">;
@@ -362,4 +363,96 @@ export function DocEditor({ client, visual, section, name, label, isAuthor = fal
       )}
     </div>
   );
+}
+
+/* A suggestion typed on the page (PlanReader's Suggesting): the section's own text, in its page
+   look, that only this person changes and nothing is sent until the suggestion is. What differs
+   from the text it was opened on is shown tracked: what goes struck through, what comes in green.
+   One suggestion is one replaced range (changeBetween), as the engine takes it. */
+class Struck extends WidgetType {
+  constructor(readonly text: string) { super(); }
+  eq(other: Struck) { return other.text === this.text; }
+  toDOM() {
+    const el = document.createElement("del");
+    el.className = "cm-sg-del";
+    el.textContent = this.text;
+    return el;
+  }
+}
+
+function tracked(source: string): Extension {
+  const build = (view: EditorView): DecorationSet => {
+    const change = changeBetween(source, view.state.doc.toString());
+    if (!change.before && !change.after) return Decoration.none;
+    const at = toUnits(source, change.start);
+    const out: Range<Decoration>[] = [];
+    if (change.before) out.push(Decoration.widget({ widget: new Struck(change.before), side: -1 }).range(at));
+    if (change.after) out.push(Decoration.mark({ class: "cm-sg-ins" }).range(at, at + change.after.length));
+    return Decoration.set(out, true);
+  };
+  return ViewPlugin.fromClass(class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) { this.decorations = build(view); }
+    update(u: ViewUpdate) {
+      if (u.docChanged) this.decorations = build(u.view);
+    }
+  }, { decorations: (v) => v.decorations });
+}
+
+const trackedLook = EditorView.theme({
+  ".cm-sg-del": { background: "var(--fail-soft)", color: "var(--fail)", textDecoration: "line-through" },
+  ".cm-sg-ins": { background: "var(--pass-soft)", color: "var(--pass)" },
+});
+
+export function SuggestEditor({ source, select, label, onText }: {
+  /* The section's text the suggestion is made on. */
+  source: string;
+  /* What to select at first (UTF-16 offsets): the highlighted words, or a caret. */
+  select: { from: number; to: number };
+  label: string;
+  onText(text: string): void;
+}) {
+  const host = useRef<HTMLDivElement>(null);
+  const command = useRef<(c: FormatCommand) => void>(() => {});
+  const format = useFormatTarget({ apply: (c) => command.current(c) });
+  const focused = useRef(format.focused);
+  focused.current = format.focused;
+  const told = useRef(onText);
+  told.current = onText;
+  useEffect(() => {
+    if (!host.current) return;
+    const view = new EditorView({
+      parent: host.current,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: Math.min(select.from, source.length), head: Math.min(select.to, source.length) },
+        extensions: [
+          history(),
+          keymap.of([...historyKeymap, ...defaultKeymap]),
+          EditorView.lineWrapping,
+          EditorView.contentAttributes.of({ "aria-label": label, "aria-multiline": "true" }),
+          EditorView.domEventHandlers({ focus: () => { focused.current(); } }),
+          EditorView.updateListener.of((u) => { if (u.docChanged) told.current(u.state.doc.toString()); }),
+          pageLook,
+          markdownLook(true),
+          trackedLook,
+          tracked(source),
+        ],
+      }),
+    });
+    command.current = (c) => {
+      const { from, to } = view.state.selection.main;
+      const e = formatEdit(view.state.doc.toString(), from, to, c);
+      view.dispatch({ changes: { from: e.from, to: e.to, insert: e.insert }, selection: { anchor: e.anchor, head: e.head }, userEvent: "input.format" });
+      view.focus();
+    };
+    view.focus();
+    return () => {
+      command.current = () => {};
+      view.destroy();
+    };
+    // The editor is opened once on its text: a new source is a new suggestion (the reader keys it).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return <div ref={host} data-testid="doc-suggest-editor" className="min-h-[1.65em]" />;
 }

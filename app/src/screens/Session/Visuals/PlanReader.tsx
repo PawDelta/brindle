@@ -62,6 +62,7 @@ type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient
    revision never reopens, so a response with less progress than the one on screen is stale. */
 /* The live editor brings CodeMirror and Loro's WebAssembly: loaded when a section is first edited live. */
 const DocEditor = lazy(() => import("./DocEditor").then((m) => ({ default: m.DocEditor })));
+const SuggestEditor = lazy(() => import("./DocEditor").then((m) => ({ default: m.SuggestEditor })));
 
 const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
 const noSubscribe = () => () => {};
@@ -374,7 +375,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [sharingOpen, setSharingOpen] = useState(false);
   const [briefOpen, setBriefOpen] = useState(false);
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
-  const [draftAfter, setDraftAfter] = useState<string | null>(null);
+  // A suggestion's section text as it is being typed on the page (SuggestEditor).
+  const [draftText, setDraftText] = useState<string | null>(null);
   const [historyRev, setHistoryRev] = useState<number | null>(null);
   const lastRead = useLastRead(receivedPlan.id, receivedPlan.rev);
   const plan = useLiveReview ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
@@ -523,11 +525,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       if (frozenTexts?.has(section) && a.quote != null && body.slice(range.start, range.end) !== a.quote) continue;
       out.push(t.kind === "suggestion" ? { ...range, kind: "del", ins: t.after ?? "" } : { ...range, kind: "anchor" });
     }
-    const on = draft && !draftStale ? anchorOf(draft) : null;
-    if (on?.kind === "text" && on.section === section) {
-      const changed = draft?.kind === "suggest" && draftAfter !== null && draftAfter !== on.quote;
-      out.push(changed ? { start: on.start, end: on.start + on.quote.length, kind: "del", ins: draftAfter } : { start: on.start, end: on.start + on.quote.length, kind: "sel" });
-    }
+    // A suggestion is typed on the page in its own editor; a comment's words are lit while it is written.
+    const on = draft && draft.kind !== "suggest" && !draftStale ? anchorOf(draft) : null;
+    if (on?.kind === "text" && on.section === section) out.push({ start: on.start, end: on.start + on.quote.length, kind: "sel" });
     return out;
   };
 
@@ -578,33 +578,44 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   const begin = (next: Draft) => {
     setDrafting({ draft: next, source: sourceOf(anchorOf(next)) });
-    setDraftAfter(null);
+    setDraftText(next.kind === "suggest" ? bodyOf(next.section) : null);
     setPicked(null);
     setTab("comments");
     window.getSelection()?.removeAllRanges();
+  };
+  // Suggesting is typed on the page: the section opens in its suggestion editor, with the
+  // highlighted words (or a caret) selected, and Suggesting is the mode while it is.
+  const suggestAt = (section: string, start: number, quote: string) => {
+    if (chrome && mode !== "suggesting" && chrome.allowed("suggesting")) chrome.onMode("suggesting");
+    begin({ kind: "suggest", section, start, before: quote, where: partName(section) });
   };
   const offer = (kind: "comment" | "ask" | "suggest") => {
     if (!picked) return;
     if (picked.kind === "diagram") return begin({ kind: kind === "ask" ? "ask" : "comment", anchor: { kind: "diagram", section: picked.section }, where: `Figure ${figures.get(picked.section) ?? "?"}` });
     const { section, start, quote } = picked;
-    if (kind === "suggest") return begin({ kind, section, start, before: quote, where: partName(section) });
+    if (kind === "suggest") return suggestAt(section, start, quote);
     begin({ kind, anchor: { kind: "text", section, start, quote }, where: partName(section) });
   };
   const comment = (anchor: PlanAnchor, on: string) => begin({ kind: "comment", anchor, where: on });
   const setDraft = (_: null) => {
     setDrafting(null);
-    setDraftAfter(null);
+    setDraftText(null);
   };
+  // What the suggestion being typed changes: one replaced range of its section (start in code points).
+  const draftChange = draft?.kind === "suggest" && draftText !== null ? changeBetween(bodyOf(draft.section), draftText) : null;
+  const suggestionReady = !!draftChange && (!!draftChange.before || !!draftChange.after);
   // The draft's offsets are the screen's (UTF-16); the engine is sent code points. A draft whose
   // text changed under it (a newer revision) isn't sent: its range no longer says what was meant.
-  const sendDraft = async (text: string, after: string) => {
+  const sendDraft = async (text: string) => {
     if (!draft || draftStale) return;
+    if (draft.kind === "suggest") {
+      if (!draftChange || !suggestionReady) return;
+      if ((await write(() => source.suggest(plan.rev, { section: draft.section, ...draftChange }, text))) && alive.current) setDraft(null);
+      return;
+    }
     const on = anchorOf(draft);
     const start = on.kind === "text" ? toPoints(bodyOf(on.section), on.start) : 0;
-    const sent = draft.kind === "suggest"
-      ? () => source.suggest(plan.rev, { section: draft.section, start, before: draft.before, after }, text)
-      : () => source.comment(plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask");
-    if ((await write(sent)) && alive.current) setDraft(null);
+    if ((await write(() => source.comment(plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask"))) && alive.current) setDraft(null);
   };
 
   // A section's box, saved: only what changed between the text it was opened on and the box is
@@ -755,11 +766,31 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       </div>
     </div>
   );
-  const textBody = (section: string, title: string) => editing?.section === section ? (live ? liveEditor(section, title, "page") : editBox(title)) : (
-    <div data-section={section} className="grid gap-2.5" onClick={() => mode === "editing" && !editing && !window.getSelection()?.toString() && setEditing({ section, text: bodyOf(section), source: bodyOf(section) })}>
-      <DocText body={bodyOf(section)} marks={marksOf(section)} />
-    </div>
-  );
+  // Where a click lands in a section's text (its offset in the source), for a suggestion's caret.
+  const caretIn = (section: string) => {
+    const selection = window.getSelection();
+    const node = selection?.anchorNode;
+    const leaf = (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>("[data-o]");
+    return leaf ? Number(leaf.dataset.o) + (selection?.anchorOffset ?? 0) : bodyOf(section).length;
+  };
+  const opened = (section: string) => {
+    if (window.getSelection()?.toString() || editing || draft) return;
+    if (mode === "editing") setEditing({ section, text: bodyOf(section), source: bodyOf(section) });
+    else if (mode === "suggesting" && canSuggest && plan.state !== "approved") suggestAt(section, caretIn(section), "");
+  };
+  const textBody = (section: string, title: string) => editing?.section === section ? (live ? liveEditor(section, title, "page") : editBox(title))
+    : draft?.kind === "suggest" && draft.section === section && !draftStale ? (
+      <div className="grid font-sans" data-testid="plan-suggest-box">
+        <Suspense fallback={<DocText body={bodyOf(section)} />}>
+          <SuggestEditor key={`${drafting!.source}:${draft.start}`} source={bodyOf(section)} select={{ from: draft.start, to: draft.start + draft.before.length }}
+            label={`Suggestion to ${title}`} onText={setDraftText} />
+        </Suspense>
+      </div>
+    ) : (
+      <div data-section={section} className="grid gap-2.5" onClick={() => opened(section)}>
+        <DocText body={bodyOf(section)} marks={marksOf(section)} />
+      </div>
+    );
   // The section being edited live wears a blue rule in the margin.
   const editingRule = "relative before:absolute before:-left-10 before:bottom-0 before:top-3.5 before:w-0.5 before:rounded-sm before:bg-[var(--group-1)]";
   const section = (s: PlanSectionDTO): ReactNode => {
@@ -913,8 +944,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         </div>
         {columnOpen ? (
           <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
-            onDraftSend={(text, after) => void sendDraft(text, after)} onDraftCancel={() => setDraft(null)} onDraftAfter={setDraftAfter}
-            replaceBox={(after, setAfter) => <FormatTextarea className={`${field} min-h-16 w-full text-[12.5px]`} aria-label="Replace with" autoFocus value={after} onValue={setAfter} />}
+            onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
             active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
             history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} />
@@ -928,13 +958,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="suggesting">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Suggesting</span>
-                <span className="truncate">{draftAfter !== null && draftAfter !== draft.before ? "1 change not sent" : "Type the new text in its card"}</span>
+                <span className="truncate">{suggestionReady ? "1 change not sent" : "Type your change in the doc"}</span>
               </span>
               <span className="text-xs text-ink-3">{teammate ? `Your edits are suggestions. ${authorName} accepts or rejects each one.` : "Your edits are suggestions. You accept or reject each one."}</span>
             </div>
             <div className="flex items-center gap-2">
               <button type="button" className={quiet} onClick={() => setDraft(null)}>Discard all</button>
-              <button type="button" className={main} disabled={busy || draftStale || draftAfter === null || draftAfter === draft.before}
+              <button type="button" className={main} disabled={busy || draftStale || !suggestionReady}
                 onClick={() => doc.current?.ownerDocument.querySelector<HTMLFormElement>('[data-testid="thread-draft"]')?.requestSubmit()}>Send 1 suggestion</button>
             </div>
           </>

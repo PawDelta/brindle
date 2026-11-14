@@ -86,7 +86,8 @@ try {
       doc.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     });
     await page.click('[role="toolbar"][aria-label="For the highlighted text"] button:has-text("Suggest edit")');
-    await page.fill('[data-testid="thread-draft"] textarea[aria-label="Replace with"]', "and so ");
+    await page.waitForSelector('[data-testid="plan-suggest-box"] .cm-editor');
+    await page.keyboard.type("and so ");     // typed on the page, over the highlighted words
     await shot("6-doc-suggesting");
     await page.click(`${bar} button:has-text("Discard all")`);
     // Take the two open decisions as recommended, then sign off: the live board.

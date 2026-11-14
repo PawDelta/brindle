@@ -1,5 +1,6 @@
 import { inTestStore } from "../../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { EditorView } from "@codemirror/view";
 import { afterEach, expect, it } from "vitest";
 import { DaemonError, type DaemonClient, type LibraryPerson, type Plan, type VisualDTO } from "../../../api/client";
 import { DaemonContext } from "../../../api/context";
@@ -505,4 +506,36 @@ it("the policies shown before a first share are those of the revision on screen,
   await act(async () => asked[1].reply(["fresh-rule"]));
   expect(screen.getByTestId("plan-policy-preview-fresh-rule")).toBeTruthy();
   expect(screen.queryByTestId("plan-policy-preview-stale-rule")).toBeNull();
+});
+
+it("types a suggestion on the page as a tracked change, formats it there, and sends it with the card's reason", async () => {
+  const plan = doc(1, "Workers run on your machine.");
+  const sent: unknown[] = [];
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
+    suggestPlan: async (_id, rev, change, text) => { sent.push([rev, change, text]); return plan; } };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const words = (await screen.findByText("Workers run on your machine.")).firstChild!;
+  const range = document.createRange();
+  range.setStart(words, 0);
+  range.setEnd(words, 7);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+  fireEvent.click(within(screen.getByRole("toolbar", { name: "For the highlighted text" })).getByRole("button", { name: "Suggest edit" }));
+  // The section opens where it reads, the highlighted word selected: typing replaces it, tracked.
+  const box = await screen.findByLabelText("Suggestion to Summary");
+  const editor = EditorView.findFromDOM(box.closest<HTMLElement>(".cm-editor")!)!;
+  await act(async () => editor.dispatch(editor.state.replaceSelection("Agents")));
+  // Only what differs is tracked: the two words share their "s".
+  expect(box.querySelector(".cm-sg-del")?.textContent).toBe("Worker");
+  expect(box.querySelector(".cm-sg-ins")?.textContent).toBe("Agent");
+  // The formatting toolbar writes into it: the new word made bold.
+  await act(async () => editor.dispatch({ selection: { anchor: 0, head: 6 } }));
+  fireEvent.focus(editor.contentDOM);
+  await act(async () => fireEvent.click(within(screen.getByRole("toolbar", { name: "Formatting" })).getByRole("button", { name: "Bold" })));
+  const card = screen.getByTestId("thread-draft");
+  expect(within(card).getByTestId("suggestion-change").textContent).toBe("Workers → **Agents**");
+  fireEvent.change(within(card).getByRole("textbox", { name: "Why (optional)" }), { target: { value: "They are agents now." } });
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Send 1 suggestion" })));
+  expect(sent).toEqual([[1, { section: "summary", start: 0, before: "Workers", after: "**Agents**" }, "They are agents now."]]);
 });

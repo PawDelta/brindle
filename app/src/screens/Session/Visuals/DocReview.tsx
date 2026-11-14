@@ -162,24 +162,17 @@ const draftWords = {
   suggest: { name: "Why (optional)", placeholder: "Why (optional)", send: "Send suggestion" },
 };
 
-function DraftCard({ draft, number, stale, busy, onSend, onCancel, onAfter, replaceBox }: {
+function DraftCard({ draft, number, stale, busy, onSend, onCancel, change }: {
   draft: Draft; number: number; stale: boolean; busy: boolean;
-  onSend(text: string, after: string): void; onCancel(): void;
-  /* A suggestion's new text as it is typed: the doc draws it as a tracked change. */
-  onAfter?(after: string): void;
-  /* The suggestion's new text box, given by the reader so the formatting toolbar can write into it. */
-  replaceBox?(after: string, setAfter: (after: string) => void): ReactNode;
+  onSend(text: string): void; onCancel(): void;
+  /* A suggestion's change as it is typed on the page (null: nothing changed yet). */
+  change?: { before: string; after: string } | null;
 }) {
   const [text, setText] = useState("");
-  const [after, setAfterState] = useState(draft.kind === "suggest" ? draft.before : "");
-  const setAfter = (next: string) => {
-    setAfterState(next);
-    onAfter?.(next);
-  };
   const words = draftWords[draft.kind];
-  const ready = !stale && (draft.kind === "suggest" ? after !== draft.before : !!text.trim());
+  const ready = !stale && (draft.kind === "suggest" ? !!change && (!!change.before || !!change.after) : !!text.trim());
   const send = () => {
-    if (ready && !busy) onSend(text.trim(), after);
+    if (ready && !busy) onSend(text.trim());
   };
   return (
     <form className={`${card} bg-canvas-2`} aria-label={draft.kind === "suggest" ? "New suggestion" : "New comment"} data-testid="thread-draft" data-stale={stale || undefined}
@@ -191,12 +184,9 @@ function DraftCard({ draft, number, stale, busy, onSend, onCancel, onAfter, repl
         <span className="flex-1" />
         <span>not sent</span>
       </span>
-      {draft.kind === "suggest" && (
-        <>
-          <Change before={draft.before} after={after === draft.before ? "" : after} />
-          {replaceBox ? replaceBox(after, setAfter) : <textarea className={`${field} min-h-16 w-full text-[12.5px]`} aria-label="Replace with" autoFocus value={after} onChange={(e) => setAfter(e.target.value)} />}
-        </>
-      )}
+      {draft.kind === "suggest" && (change && (change.before || change.after)
+        ? <Change before={change.before} after={change.after} />
+        : <span className="text-xs text-ink-3">Type your change in the doc: what you delete is struck through, what you type is green.</span>)}
       <textarea className={`${field} ${draft.kind === "suggest" ? "min-h-8" : "min-h-16"} w-full text-[12.5px]`} aria-label={words.name} placeholder={words.placeholder} autoFocus={draft.kind !== "suggest"} value={text} onChange={(e) => setText(e.target.value)} />
       {stale && <p role="alert" className="text-xs text-sap">This part of the doc changed in a newer revision. Cancel, and start again on the new text.</p>}
       <div className="flex items-center gap-1.5">
@@ -211,7 +201,7 @@ function DraftCard({ draft, number, stale, busy, onSend, onCancel, onAfter, repl
 
 const TABS: [ReviewTab, string][] = [["comments", "Comments"], ["decisions", "Decisions"], ["history", "History"], ["tasks", "Tasks"]];
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, onDraftAfter, replaceBox, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, workItems }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, workItems }: {
   plan: Plan;
   limits?: ThreadLimits;
   tab: ReviewTab;
@@ -225,10 +215,10 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   /* What the draft is on changed in a newer revision: it can't be sent. */
   draftStale: boolean;
   busy: boolean;
-  onDraftSend(text: string, after: string): void;
+  onDraftSend(text: string): void;
   onDraftCancel(): void;
-  onDraftAfter?(after: string): void;
-  replaceBox?(after: string, setAfter: (after: string) => void): ReactNode;
+  /* A suggestion's change, typed on the page. */
+  draftChange?: { before: string; after: string } | null;
   actions: ThreadActions;
   /* Bring a thread's place in the doc into view. */
   onShow(thread: PlanThreadDTO): void;
@@ -291,7 +281,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   } else {
     body = (
       <>
-        {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} onSend={onDraftSend} onCancel={onDraftCancel} onAfter={onDraftAfter} replaceBox={replaceBox} />}
+        {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} onSend={onDraftSend} onCancel={onDraftCancel} change={draftChange} />}
         {open.map(thread)}
         {open.length === 0 && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the doc to comment on it.</p>}
         {answered.length > 0 && (
