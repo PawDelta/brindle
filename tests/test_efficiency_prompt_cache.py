@@ -59,8 +59,11 @@ def _two_starts(db, repo, monkeypatch, kind):
         "breaks the shared prefix while every line still runs")),
     pytest.param("worker", False, marks=pytest.mark.variant(
         "the setting turned off keeps the repo brief in the task and out of the system prompt")),
-    ("reviewer", True),
-    ("opencode", True),
+    pytest.param("reviewer", True, marks=pytest.mark.variant(
+        "two branch reviews through request_review: its fixed classification text must lead, "
+        "in the shared brief, not follow each review's checks results")),
+    pytest.param("opencode", True, marks=pytest.mark.variant(
+        "a provider other than Claude: the brief must reach OpenCode's instructions, not stay after the task")),
 ])
 def test_same_profile_agents_share_their_start_prefix(db, repo, monkeypatch, kind, on):
     (Path(repo) / ".brindle" / "rules").mkdir(parents=True, exist_ok=True)
@@ -101,7 +104,8 @@ def _hidden(db, ws, agent):
 
 
 @pytest.mark.parametrize("provider,profile,mode,weight,keep", [
-    ("claude", "reviewer", "review", None, agents.REVIEWER_TOOLS),
+    pytest.param("claude", "reviewer", "review", None, agents.REVIEWER_TOOLS, marks=pytest.mark.variant(
+        "Claude Code's own rendering (--disallowedTools, the 5-minute cache) and a medium worker kept whole")),
     ("codex", "reviewer-codex", "review", None, agents.REVIEWER_TOOLS),
     ("opencode", "developer-opencode", "assign", "light", agents.LIGHT_WORKER_TOOLS),
 ])
