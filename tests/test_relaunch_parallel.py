@@ -7,7 +7,7 @@ from collections import Counter
 
 import pytest
 
-from brindle import agents, company_identity, procs, spawn, tmux, upgrade, workspaces
+from brindle import agents, company_identity, preflight, procs, spawn, tmux, upgrade, workspaces
 from brindle.daemon import lifecycle
 from brindle.db import Agent
 from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
@@ -28,50 +28,74 @@ class _Launched(Exception):
 def test_recovery_overlaps_sessions_and_checks_each_identity_once(db, repo, tmp_path, monkeypatch):
     """Reported: a relaunch with 3 sessions took the sum of their resumes
     (10s), the one on screen coming back alone first, and every agent ran its
-    own model check and preflight. All three must be under way at once, the
-    viewed one included, and the two signed in alike share one check."""
+    own model check and preflight. All sessions must be under way at once,
+    the viewed one included; launches signed in alike share one check, a
+    returning worker of another profile its session's preflight; and an
+    identity that differs only in its tmux session's environment, refused,
+    is never let through on another's answer."""
     root = workspaces.adopt_root(db, str(repo))
     here = tmux.current_server()
-    homes = {"viewed": tmp_path / "home-a", "recent": tmp_path / "home-a", "other": tmp_path / "home-b"}
+    homes = {"viewed": "home-a", "recent": "home-a", "other": "home-b", "keyed": "home-a"}
     for aid, home in homes.items():
         db.add_workspace(dataclasses.replace(root, id=f"ws-{aid}", name=aid, tmux_session=aid))
         db.add_agent(Agent(aid, f"ws-{aid}", "supervisor", "claude", None, "interactive", "paused", "", None,
                            time.time(), time.time(), "t", tmux_server=here))
-        db.update_agent(aid, config_home=str(home))
+        db.update_agent(aid, config_home=str(tmp_path / home))
+    db.add_agent(Agent("worker", "ws-viewed", "developer", "claude", "viewed", "assign", "paused", "", None,
+                       time.time(), time.time(), "t", tmux_server=here))
+    db.update_agent("worker", config_home=str(tmp_path / "home-a"))
     lifecycle._record_resume([{"id": aid, "server": here} for aid in homes])
     lifecycle.record_viewed("viewed")
     monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
     monkeypatch.setattr(tmux, "capture", lambda *a, **kw: "❯ \n? for shortcuts")
+    monkeypatch.setattr(tmux, "inherited_env",
+                        lambda session: {"ANTHROPIC_BASE_URL": "https://gateway.test"} if session == "keyed" else {})
     monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
     monkeypatch.setattr(agents, "panes_match", lambda *a, **kw: True)
     monkeypatch.setattr(upgrade, "check_launch", lambda: None)
     monkeypatch.setattr(company_identity, "launch_check", lambda *a, **kw: (None, None, None))
 
-    lock, checks, overlapped = threading.Lock(), Counter(), []
+    lock, checks, consents = threading.Lock(), Counter(), {}
     together = threading.Barrier(len(homes))
 
-    def counted(kind):
-        def check(*a, **kw):
-            with lock:
-                checks[kind] += 1
-            return None if kind == "model" else []
-        return check
+    def model_problem(name, ws, *, agent, **kw):
+        with lock:
+            checks["model"] += 1
+        return "refused for this gateway" if agent.id == "keyed" else None
+
+    def probe(provider, repo_root, **kw):       # a key the CLI asks about once: its consent names the launch
+        with lock:
+            checks["preflight"] += 1
+        return [preflight.Item("consent", "claude.api_key", "claude", "Use the key?", "",
+                               preflight._consent("claude", "claude.api_key", key="fp"))]
+
+    real_blockers = agents.launch_blockers
+
+    def launch_blockers(agent, ws, *a, **kw):
+        items = real_blockers(agent, ws, *a, **kw)
+        consents[agent.id] = [i.action.body for i in items]
+        return items
 
     def gate_commit(hold):
         raise _Launched
 
-    monkeypatch.setattr(agents, "model_problem", counted("model"))
-    monkeypatch.setattr(agents, "launch_blockers", counted("preflight"))
+    monkeypatch.setattr(agents, "model_problem", model_problem)
+    monkeypatch.setattr(preflight, "check", probe)
+    monkeypatch.setattr(agents, "launch_blockers", launch_blockers)
     monkeypatch.setattr(agents, "_gate_commit", gate_commit)
 
     def resume(db_, root_id, **kw):
         together.wait(5)        # every session's resume under way at once, the viewed one's too
-        overlapped.append(root_id)
-        a = db_.get_agent(root_id)
-        with pytest.raises(_Launched):
-            agents._launch(db_, a, db_.get_workspace(a.workspace_id), prompt=None, resume=None, watch_pane=False)
+        for a in agents.tree(db_, root_id):
+            # The worker's consent stops it; the chat answers its own at its input box.
+            with pytest.raises(agents.PreflightBlocked if a.parent_id else _Launched):
+                agents._launch(db_, a, db_.get_workspace(a.workspace_id), prompt=None, resume=None,
+                               watch_pane=False)
 
     monkeypatch.setattr(agents, "resume", resume)
-    assert sorted(lifecycle.resume_after_start()) == sorted(homes)
-    assert sorted(overlapped) == sorted(homes)
-    assert checks == {"model": 2, "preflight": 2}    # once for each of the two homes, not for each of the three
+    assert sorted(lifecycle.resume_after_start()) == ["other", "recent", "viewed"]     # keyed: refused
+    # Model: home-a's supervisors, its developer, home-b, the gateway. Preflight: one per home.
+    assert checks == {"model": 4, "preflight": 2}
+    assert consents == {aid: [{"id": "claude.api_key", "key": "fp", "repo": str(repo), "profile": profile}]
+                        for aid, profile in [("viewed", "supervisor"), ("recent", "supervisor"),
+                                             ("other", "supervisor"), ("worker", "developer")]}
