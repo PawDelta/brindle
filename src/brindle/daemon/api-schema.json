@@ -13810,6 +13810,14 @@
       "path": "/v1/shared-designs/{doc_id}/comments"
     },
     {
+      "method": "GET",
+      "path": "/v1/shared-designs/{doc_id}/history"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared-designs/{doc_id}/revisions/{n:int}/changes"
+    },
+    {
       "method": "POST",
       "path": "/v1/shared-designs/{doc_id}/sign-offs"
     },
