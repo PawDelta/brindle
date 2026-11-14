@@ -1782,7 +1782,13 @@ def _sessions_in_use(closing: Closing) -> set[str]:
 
 def _record_pause(db: DB, root_id: str) -> Closing:
     """A pause's first step: ``root_id`` and everything it started marked
-    paused (done, for a worker that had finished), nothing closed yet."""
+    paused (done, for a worker that had finished), nothing closed yet.
+    Every pause, one by one or all at once (record_pauses), comes through here."""
+    from brindle import supervisor_state
+
+    # A supervisor restart under way gives way to the pause: a launch it has
+    # begun commits first (so its window is among those closed), and none follows.
+    supervisor_state.cancel(db, root_id)
     agents, paused, sessions = tree(db, root_id), [], set()
     for a in agents:
         ws = db.get_workspace(a.workspace_id)
@@ -1898,13 +1904,16 @@ def resume_lock(root_id: str):
 def resume(db: DB, root_id: str, *, watch_pane: bool = True,
            only: set[str] | list[str] | None = None,
            recovery_env: dict[str, str] | None = None, gate=None, settle: bool = False,
-           unstarted: set[str] | None = None, window_size: tuple[int, int] | None = None) -> list[Agent]:
+           unstarted: set[str] | None = None, window_size: tuple[int, int] | None = None,
+           prompts: dict[str, str] | None = None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task. A
     worker or reviewer is told to carry on (``_needs_a_turn``): resumed
     conversations otherwise sit at their input box.
-    With ``only``, just those agents (if paused) restart.
+    With ``only``, just those agents (if paused) restart. ``prompts``: agent
+    id -> the first prompt of a fresh session for it, instead of resuming its
+    conversation (brindle.supervisor_state's restart).
 
     ``gate``: a context manager factory the caller can stop this resume
     with (lifecycle.Recovery.launching), which raises Cancelled once
@@ -1936,7 +1945,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     try:
         with resume_lock(root_id), debuglog.recovery_timings(_launch_gate.get() is not None):
             return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env,
-                           settle=settle, unstarted=unstarted)
+                           settle=settle, unstarted=unstarted, prompts=prompts)
     finally:
         _resume_window_size.reset(size)
         if token is not None:
@@ -2089,7 +2098,8 @@ def _launch_step(name: str):
         steps[name] = steps.get(name, 0.0) + time.monotonic() - began
 
 
-def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settle=False, unstarted=None) -> list[Agent]:
+def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settle=False, unstarted=None,
+            prompts: dict[str, str] | None = None) -> list[Agent]:
     from brindle import identity_lock, providers
 
     _gate_check()
@@ -2217,6 +2227,8 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE + note)
             if ref and _needs_a_turn(db, a):
                 prompt = HEADLESS_CONTINUE + note   # the same words, for any worker resumed at its input box
+            if prompts and a.id in prompts:
+                ref, prompt = None, prompts[a.id]   # a fresh session, seeded by the caller
         _gate_check()
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
@@ -2693,6 +2705,8 @@ def _hand_over(db: DB, agent: Agent, message_id: int, text: str, sender_id: str 
 
     if login_pause.holding(db, agent.id):
         return "queued"  # its session waits on an expired cloud login
+    if db.restart_holding(agent.id):
+        return "queued"  # a supervisor restart: it goes to the fresh session
     from brindle import wake
 
     if wake.enabled(agent):
@@ -3043,7 +3057,9 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
     try:
         sent = _send_to_inbox(db, agent, text, who)
     finally:
-        if not sent:
+        if sent:
+            db.finish_delivery(message_id)   # no longer in flight (a supervisor restart waits for that)
+        else:
             db.release_delivery(message_id, claimed)
     return sent
 
@@ -3109,12 +3125,14 @@ def delivery_lock(agent_id: str):
 def _delivery_held(db: DB, agent: Agent | None, waiter: bool = True) -> bool:
     """Whether ``flush`` must leave the queue alone: the agent is gone or
     headless (its runner takes messages from the inbox itself), its session
-    waits on an expired cloud login (resuming flushes it), or, with
-    ``waiter``, a live waiter hands the queue over (brindle.wake)."""
+    waits on an expired cloud login (resuming flushes it), a supervisor
+    restart holds its queue for the fresh session (brindle.supervisor_state),
+    or, with ``waiter``, a live waiter hands the queue over (brindle.wake)."""
     from brindle import login_pause
     from brindle import wake
 
     return (agent is None or agent.headless or login_pause.holding(db, agent.id)
+            or db.restart_holding(agent.id)
             or (waiter and wake.enabled(agent) and wake.live(agent)))
 
 
@@ -4310,6 +4328,41 @@ def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig)
     return name
 
 
+def _sized_review_profile(pick: str, worker: Agent | None, repo_root: str) -> str | None:
+    """A cheaper profile that preserves an existing cross-vendor pairing.
+
+    This is the selection point for a future org review-policy hook. Native
+    and third-party providers can serve several vendors: without a known
+    relationship, keep the current reviewer rather than guess.
+    """
+    from brindle import review_scope
+
+    name = review_scope.LIGHT_PROFILE
+    current = None
+    try:
+        if worker is not None:
+            current = load_profile(pick, repo_root)
+            known = {"claude", "codex", "antigravity"}
+            if worker.provider not in known or current.provider not in known:
+                return None
+            if worker.provider == "claude" and current.provider != "claude":
+                if current.provider != "codex":
+                    return None
+                name = review_scope.CODEX_LIGHT_PROFILE
+        cheap = load_profile(name, repo_root)
+    except KeyError:
+        # Let normal candidate validation handle the original pick and fallbacks.
+        return None
+    if name == review_scope.CODEX_LIGHT_PROFILE:
+        # Keep the same model capacity, reducing effort only. A custom profile
+        # must not replace that model with a mini/other smaller verifier.
+        return name if current is not None and cheap.provider == "codex" and cheap.model == current.model else None
+    # Local overrides must not silently turn a verifier into Haiku.
+    if cheap.provider == "claude" and re.fullmatch(r"(?:claude-)?sonnet(?:[-.\d]+)?", cheap.model or ""):
+        return name
+    return None
+
+
 def _review_choice(db: DB, ws: Workspace, profile: str | None,
                    cfg: RepoConfig) -> tuple[str, str | None]:
     """The reviewer profile to use, checked to be one that can run, rather than
@@ -4326,6 +4379,13 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
         worker = workspace_worker(db, ws)
         pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
         candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
+        if cfg.review_sizing and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
+            from brindle import review_scope
+
+            if review_scope.small_branch(ws, cfg):
+                cheap = _sized_review_profile(pick, worker, ws.repo_root)
+                if cheap:
+                    candidates.insert(0, cheap)
     first: AgentError | None = None
     for name in candidates:
         try:
@@ -4728,6 +4788,13 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     _review_kill_switch(ws)
     cfg = cfg or workspaces.config_for(db, ws)
     slot = _review_claim_slot(profile, slot)
+    if cfg.review_sizing and slot == "" and not second:
+        from brindle import review_scope
+
+        # Recheck a queued cheap pick against the current branch. Keep explicit
+        # strong profiles, including the pipeline's recovery fallback.
+        if profile in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE):
+            profile = None
     profile = _review_profile(db, ws, profile, cfg)
     if second and not slot:
         slot = profile
@@ -4755,9 +4822,11 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     worker = workspace_worker(db, ws)
 
     base = ws.base_branch or "the base branch"
+    diff_instruction = ("start with the scoped context pack below. " if cfg.review_sizing and ws.base_branch else
+                        f"use the brindle workspace_diff tool, or run `git diff {base}...HEAD` (no `$(...)`: "
+                        "it isn't pre-approved). ")
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
-            f"use the brindle workspace_diff tool, or run `git diff {base}...HEAD` (no `$(...)`: "
-            "it isn't pre-approved). "
+            + diff_instruction +
             "Look for correctness bugs, missing tests, security problems and unclear code.")
 
     worker_files = []
@@ -4829,10 +4898,12 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
 
+    pack_base = None
     prev = _prior_round(db, ws, sha, profile if second else "")
     if prev:
         prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
         rb = review_base(ws, prev.sha)
+        pack_base = rb.sha
         if rb.sha == prev.sha:
             task += (prior + f"Review only what changed since then (`git diff {prev.sha}..HEAD`), "
                      "not the whole branch. " + DELTA_SCOPE)
@@ -4855,6 +4926,15 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
             task += ("\n\nA merge commit was edited by hand in these files, so check those edits "
                      "(where a conflict was resolved, the old side of the diff shows git's "
                      "conflict markers): " + ", ".join(rb.edited))
+
+    if cfg.review_sizing and ws.base_branch:
+        from brindle import review_scope
+
+        try:
+            pack_base = pack_base or git.out(["merge-base", ws.base_branch, sha], ws.path)
+            task += review_scope.context_pack(ws, pack_base, sha)
+        except git.GitError:
+            task += f"\n\nContext pack unavailable; read `git diff {base}...HEAD`."
 
     if focus:
         task += f"\n\nFocus: {focus}"
@@ -5955,9 +6035,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if event == "prompt-submit" or unreported_note_expired(agent):
             db.update_agent(agent_id, unreported_noted=None)
     if event == "prompt-submit":
-        from brindle import open_items
+        from brindle import open_items, supervisor_state
 
         open_items.close(db, agent_id)   # at work again: a later stop is a new item
+        if agent.mode == "interactive":
+            # A new turn in the session a restart was claimed for: that restart no longer applies.
+            supervisor_state.cancel(db, agent_id, session=payload.get("session_id"))
 
     if event == "session-start":
         from brindle import inbox
@@ -6047,6 +6130,19 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # before anything below could start its next turn.
         snapshot_turn(db, agent)
         analysis_docs_turn(db, agent)
+
+        if agent.mode == "interactive":
+            # The supervisor's goal state is brought up to date; past the repo's
+            # context threshold it restarts fresh from it (brindle.supervisor_state),
+            # and this turn ends as it is: queued messages wait for the fresh session.
+            from brindle import supervisor_state
+
+            try:
+                if supervisor_state.on_turn_end(db, agent, payload):
+                    db.set_status(agent_id, "idle")
+                    return None
+            except Exception:  # noqa: BLE001 -- must never break the Stop hook
+                log.exception("brindle: supervisor state update failed")
 
         # Claude Code shows any blocked stop as "Stop hook error" in the chat.
         # Where a person watches (an interactive agent), brindle lets the stop

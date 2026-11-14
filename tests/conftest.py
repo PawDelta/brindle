@@ -88,6 +88,8 @@ def _reap_run_leftovers(known: set[str]) -> list[str]:
             listening = tmux.server_homes(name) is not None
         except tmux.TmuxError:
             continue  # not answering: nothing to be done with it from here
+        if not listening and not tmux.abandoned(name):
+            continue  # running, but this process can't reach it (a sandbox): not dead
         if listening and not name.startswith(("brindle-test-", "brindle-e2e-")):
             continue
         try:

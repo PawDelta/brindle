@@ -113,6 +113,12 @@ class RepoConfig:
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
+    review_sizing: bool = True        # scoped context and cheaper profiles for small or docs/test-only reviews
+    review_small_max_files: int = 5
+    review_small_max_lines: int = 200  # additions + deletions; binary changes keep the usual reviewer
+    review_risky_paths: list[str] = field(default_factory=lambda: [
+        "*auth*", "*permission*", "*daemon*", "*concurr*", "*thread*", "*lock*", "*async*",
+    ])
     # Weight -> reviewer profile for a second, independent review of work of that weight;
     # the pipeline merges only when both approve. Empty: one review (see brindle.pipeline).
     second_review: dict[str, str] = field(default_factory=dict)
@@ -123,6 +129,7 @@ class RepoConfig:
     room_wait_max: int = 300           # seconds a worker waits for room before its supervisor is told once (it never starts early)
     check_concurrency: int = 4         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
+    limit_headroom: float = 10         # percentage points reserved for a heavy task; medium uses half, light a quarter
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
     graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
@@ -134,7 +141,15 @@ class RepoConfig:
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
+    # A small request goes straight to one light/medium worker: no goal, milestones
+    # or completion audit; one light review and the checks, then the merge (assign(fast_path=true)).
+    fast_path: bool = True
+    # The supervisor works from a compact goal state brindle keeps (brindle.supervisor_state):
+    # once its context passes supervisor_restart_tokens, it restarts fresh, seeded with that state.
+    supervisor_state: bool = True
+    supervisor_restart_tokens: int = 120_000
     review_rounds: int = 2             # suggested fix-round cap; notify the supervisor once, then keep fixing
+    review_stall_stop: bool = True     # past the cap, hand repeated findings to the supervisor
     # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
     # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
     # which may not have Fable; true or false forces it (see brindle.pipeline.fable_enabled).
@@ -184,6 +199,10 @@ class RepoConfig:
     # A task whose files overlap a running one: "block", "warn" or "queue" (wait
     # for it to merge). None: block within a session, queue behind another session's.
     overlap: str | None = None
+    # What counts as an overlap: "hunk" (default: a shared file only when the
+    # regions the tasks declare, "path:120-180", or the hunks the running one
+    # has changed, meet) or "file" (any shared file).
+    overlap_granularity: str | None = "hunk"
     coordinator: bool | None = None    # None: on when the plan includes it; False: off, including after coordinator stop
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
@@ -236,6 +255,7 @@ class RepoConfig:
     airgap: bool = False
     # Weight routing: task weight -> profiles to try, in order (see autopilot.choose_profile).
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
+    fable_for_design_only: bool = True
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
     exclude_providers: list[str] = field(default_factory=list)  # providers weight routing never picks
@@ -262,6 +282,10 @@ class RepoConfig:
     # their names (see agent_env_report, `brindle doctor`); "enforce": they're dropped.
     # Secret-looking names are dropped in either mode.
     agent_env_mode: str = "report"
+
+    def routing_allows(self, name: str, design_heavy: bool = False) -> bool:
+        """Explicit profile choices bypass this automatic-routing restriction."""
+        return not self.fable_for_design_only or name != "developer-fable" or design_heavy
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -469,10 +493,13 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
+                "review_sizing", "review_small_max_files", "review_small_max_lines", "review_risky_paths",
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
-                "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
+                "usage_limit", "limit_headroom", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "long_command_alert_after", "idle_supervisor_days", "superseded_after",
-                "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
+                "review_rounds", "review_stall_stop", "review_start_delay", "fable_escalation", "fable_for_design_only", "goal_audit", "fast_path",
+                "supervisor_state", "supervisor_restart_tokens", "overlap",
+                "overlap_granularity", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "auto_merge_session_prs", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",

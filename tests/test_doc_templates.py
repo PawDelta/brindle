@@ -67,7 +67,7 @@ def test_new_plan_starts_from_the_template_and_gets_the_next_reference(db, sessi
 
 @pytest.mark.parametrize("blocks, refused", [
     pytest.param(["sign_off"], True, id="blocks-sign-off"),
-    pytest.param(["share"], False, id="blocks-share-only"),
+    pytest.param(["share"], False, id="blocks-share-only", marks=pytest.mark.variant("A share-only rule must not block sign-off")),
 ])
 def test_empty_required_section_blocks_sign_off(db, session, blocks, refused):
     boss, _ = session
@@ -86,6 +86,7 @@ def test_empty_required_section_blocks_sign_off(db, session, blocks, refused):
     assert plans.get(db, pid)["state"] == "approved"
 
 
+@pytest.mark.variant("A team format, not the org default, governs a doc shared to that team")
 def test_a_doc_follows_its_teams_format(db, session):
     """Sharing to a team checks that team's format, and the doc's sign-off follows it from then on."""
     from brindle.pro import shared_docs
@@ -242,6 +243,7 @@ def test_reference_pattern_and_levels(db, tmp_path):
     assert local.take(db, "team:t1") == "TEAM-0001"                                # numbered per pattern
 
 
+@pytest.mark.variant("Solo users with no format configured see no change to new docs")
 def test_without_a_format_nothing_changes(db, session):
     boss, _ = session
     pid, reply = _propose(db, boss, "# Presets\n\nOne page.\n\n## Goal\n\nPresets.")
