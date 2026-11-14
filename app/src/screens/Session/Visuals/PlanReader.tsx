@@ -212,12 +212,14 @@ export function ModePicker({ modes, current, allowed, onPick }: { modes: typeof 
   );
 }
 
-export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: {
+export function PlanReader({ client, visual, repo, onBack, asking, onChanged, backLabel }: {
   client: Client;
   visual: VisualDTO;
   repo?: string;
   onBack(): void;
   asking?: boolean;
+  /* Where Back goes, in words ("Library"). */
+  backLabel?: string;
   /* The engine's row after a Keep, ahead of the bus. */
   onChanged(visual: VisualDTO): void;
 }) {
@@ -239,7 +241,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
   const current = allowed(mode) ? mode : "viewing";
   const lead = (
     <>
-      <BackButton onBack={onBack} asking={asking} />
+      <BackButton onBack={onBack} asking={asking} label={backLabel} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
       <h2 className="min-w-0 truncate text-[13px] font-semibold">{visual.title}</h2>
     </>

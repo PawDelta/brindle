@@ -37,7 +37,7 @@ import type { KnowledgeView, LibraryStage } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
-import { SharedDesignReader } from "../Session/Visuals/SharedDesignReader";
+import { LibraryDesign } from "../Session/Visuals/LibraryDesign";
 import { docStages } from "./libraryStages";
 import { ImportedLibrary } from "./ImportedLibrary";
 import { KeptVisuals } from "./KeptVisuals";
@@ -584,7 +584,7 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCou
         design={design} designReader={(id, title, back) => (
           // The reader keeps to the window under the Library's header, its bottom bar in view.
           <div className="flex h-[calc(100vh-12rem)] min-h-[480px] flex-col overflow-hidden">
-            <SharedDesignReader key={id} client={client} docId={id} title={title} repo={repo ?? fromRepo ?? undefined} onBack={back} backLabel="Library" />
+            <LibraryDesign key={id} client={client} docId={id} title={title} repo={repo ?? fromRepo ?? undefined} onBack={back} />
           </div>
         )} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}

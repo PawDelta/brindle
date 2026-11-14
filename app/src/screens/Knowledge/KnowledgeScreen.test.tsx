@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DecisionDTO } from "../../api/schema";
 import { SessionsProvider } from "../../store/sessions";
@@ -181,3 +182,52 @@ describe("knowledge screen", () => {
     stop();
   });
 });
+
+describe("a design opened in the Library", () => {
+  it("is the author's own reader for a design shared from here: live Editing and Freeze, with Back to the Library", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], libraryDocs: [{ doc_id: "lib-1", title: "Workers", kind: "design" }] });
+    const visual = { id: "v_plan", session: "boss", title: "Workers", by: "supervisor", kind: "plan" as const, rev: 1, kept: false, unread: false, created_at: 1 };
+    const plan = { id: "v_plan", session: "boss", title: "Workers", rev: 1, state: "open" as const, markdown: "", lede: "", decisions: [], split: [], queued: 0, created_at: 1,
+      sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
+      gate: { state: "waiting" as const, required: 1, signed: 0, waiting_on: ["Bo"], reviewers: [{ sub: "Bo", required: true, status: "waiting" as const }] } };
+    daemon.visualRows.push(visual);
+    daemon.libraryPlans.set("lib-1", "v_plan");
+    daemon.seedLive("v_plan", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    render(
+      <StoreContext.Provider value={store}>
+        <SessionsProvider client={client}>
+          <KnowledgeScreen client={client} view="docs" />
+        </SessionsProvider>
+      </StoreContext.Provider>,
+    );
+    const row = await waitFor(() => {
+      const found = screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="lib-1"]');
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    fireEvent.click(within(row).getByRole("button"));
+    await screen.findByTestId("plan-reader");
+    expect(screen.getByTestId("visual-back").textContent).toContain("Library");
+    await settle();
+    fireEvent.click(screen.getByRole("radio", { name: "Editing" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+    await settle();
+    const text = EditorView.findFromDOM((await screen.findByLabelText("Text of Summary")).closest<HTMLElement>(".cm-editor")!)!;
+    await act(async () => text.dispatch({ changes: { from: 0, insert: "Our " } }));
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+    await settle();
+    expect(screen.getByTestId("doc-version").textContent).toContain("Version 1 is locked");
+    expect(daemon.liveText("v_plan", "summary")).toBe("Our Workers run here.");
+    fireEvent.click(screen.getByTestId("visual-back"));
+    await waitFor(() => expect(screen.getByTestId("docs").querySelector('li[data-doc="lib-1"]')).toBeTruthy());
+    sync.stop();
+  });
+});
+
+const settle = async () => {
+  for (let i = 0; i < 10; i++) await act(async () => {});
+};

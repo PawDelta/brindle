@@ -54,6 +54,9 @@ def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
     read = app.get(ROUTE).json()
     assert read["markdown"].startswith("Why we are doing this.") and SUMMARY in read["sections"][0]["markdown"]
     assert (read["me"], read["author"], read["can_comment"], read["can_sign_off"]) == ("user_1", "u_author", True, True)
+    assert read["can_edit"] is False
+    lib.permissions["user_1"]["can_edit"] = True            # granted writing in the live draft
+    assert app.get(ROUTE).json()["can_edit"] is True
     assert read["gate"]["waiting_on"] == ["user_1", "u_other"] and [r["you"] for r in read["gate"]["reviewers"]] == [True, False]
 
     commented = app.post(f"{ROUTE}/comments", json={"rev": 1, "anchor": SECTION, "text": "Which VM?"}).json()

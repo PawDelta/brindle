@@ -133,6 +133,7 @@ def _dto(doc_id: str, view: dict, me: str) -> dict:
                     "changed": r.get("changed") or [], "at": _at(r.get("at"))} for r in history],
         threads=[t for t in (_thread(x, me) for x in view.get("threads") or []) if t], gate=_gate(view, me), me=me,
         author=_who(author, me) if isinstance(author, str) else None,
+        can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
         can_comment=_can(view, me, "can_comment"), can_suggest=_can(view, me, "can_suggest"),
         can_sign_off=_can_sign(view, me, author),
         signed_off=any(isinstance(s, dict) and s.get("sub") == me and s.get("rev") == view["rev"]

@@ -2051,6 +2051,12 @@ export class DaemonClient {
     return this.get<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}`, { repo });
   }
 
+  /* The plan a Library design was shared from, when it was shared from this machine (its visual):
+     the author's own design, opened in the author's reader. A 404 for anyone else's. */
+  libraryDesignPlan(doc: string) {
+    return this.get<VisualDTO>(`/library/designs/${encodeURIComponent(doc)}/plan`);
+  }
+
   writeSharedDesign(doc: string, tail: string, body: Record<string, unknown>) {
     return this.post<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}/${tail}`, body);
   }

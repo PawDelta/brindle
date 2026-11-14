@@ -657,6 +657,20 @@ def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
 
 
 @_json
+def library_design_plan(db: DB, request: Request) -> Any:
+    """The plan a Library design was shared from, when it was shared from this
+    machine: its visual, so the Library opens it in the author's own reader
+    (sharing, Freeze, the build). A 404 for anyone else's design."""
+    visuals.require_enabled()
+    row = db.conn.execute("SELECT plan_id FROM plan_shares WHERE doc_id=?", (request.path_params["id"],)).fetchone()
+    if row is None:
+        raise ServiceError("not_found", "this design wasn't shared from here", 404)
+    v = visuals.get(db, row["plan_id"])
+    visuals._unlocked(v["root_id"])
+    return visuals.to_dto(db, v)
+
+
+@_json
 def library_people(db: DB, request: Request) -> Any:
     """The people of the person's org, to pick reviewers from, leaving out
     the person (``me``). ``admin_org``: the org whose review rules the doc
@@ -694,6 +708,7 @@ def kept_page(db: DB, request: Request) -> Path:
 ROUTES = [
     WebSocketRoute("/v1/visuals/{id}/live", visual_live),
     Route("/v1/library/designs/{id}/question", _endpoint(doc_question), methods=["POST"]),
+    Route("/v1/library/designs/{id}/plan", library_design_plan),
     Route("/v1/sessions/{id:path}/visual-input", _endpoint(visual_input), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-offer", session_offer),
     Route("/v1/sessions/{id:path}/visual-offer", _endpoint(resolve_offer), methods=["POST"]),

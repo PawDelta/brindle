@@ -40,6 +40,16 @@ def joined(socket):
     return SharedDoc.load(base64.b64decode(socket.receive_json()["update"]))
 
 
+def test_a_library_design_shared_from_here_finds_its_plan_and_anyone_elses_does_not(db, live_doc):
+    """The Library opens an author's own design in the author's reader: by its
+    doc id, the plan (its visual) it was shared from on this machine."""
+    from test_plans import AUTH
+
+    with TestClient(build_app(TOKEN), headers=AUTH) as client:
+        assert client.get("/v1/library/designs/doc1/plan").json()["id"] == live_doc
+        assert client.get("/v1/library/designs/ad_someone_elses/plan").status_code == 404
+
+
 def test_two_local_sockets_converge_and_rejoin_the_persisted_replica(db, live_doc):
     path = f"/v1/visuals/{live_doc}/live"
     with TestClient(build_app(TOKEN)) as client:
