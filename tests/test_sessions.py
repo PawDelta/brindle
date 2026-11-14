@@ -584,55 +584,38 @@ def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, roo
     assert set(began[:2]) == {"recent", "older"} and set(began[2:]) == {"same-tmux", "oldest"}
 
 
-@pytest.mark.parametrize("case", [pytest.param("back", marks=pytest.mark.variant("The viewed session must recover ahead of more recently active sessions")), "hung", pytest.param("switched", marks=pytest.mark.variant("reported wait: switching sessions during the head start kept the new one waiting")), pytest.param("unreadable", marks=pytest.mark.variant(
+@pytest.mark.parametrize("case", [pytest.param("back", marks=pytest.mark.variant("The viewed session must recover ahead of more recently active sessions")), pytest.param("switched", marks=pytest.mark.variant("reported wait: a session opened during recovery waited behind those not yet begun")), pytest.param("unreadable", marks=pytest.mark.variant(
     "a viewed-session file that isn't UTF-8 raised past the OSError handler and stopped every session coming back"))])
 def test_viewed_session_comes_back_first(db, root, monkeypatch, case):
-    """The session the app showed last comes back first and alone, though it
-    was the least recently at work; if it hangs, the others start once its
-    head start is over rather than wait on it, and at once if the person opens
-    another meanwhile. A record of it that can't be read loses nothing."""
-    import threading
-
+    """The session the app showed last is taken first, though it was the
+    least recently at work (the others come back beside it: see
+    test_relaunch_parallel), and one the person opens meanwhile goes before
+    those not yet begun. A record of it that can't be read loses nothing."""
     from brindle.daemon import lifecycle
 
     _recorded_sessions(db, root, monkeypatch, [("recent", "a"), ("older", "b"), ("viewed", "c")])
     lifecycle.record_viewed("viewed")
-    hangs = case in ("hung", "switched")
-    monkeypatch.setattr(lifecycle, "VIEWED_HEAD_START", 0 if case == "hung" else 60)
     if case == "unreadable":
         lifecycle._viewed_path().write_bytes(b"\xff\xfe")
-    recovery, lock = lifecycle.Recovery(), threading.Lock()
-    others_begun, viewed_done = threading.Event(), threading.Event()
-    waiting, began = [], []
+    monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 1)     # one at a time: the order they're taken in shows
+    recovery, began = lifecycle.Recovery(), []
 
     def resume(db_, root_id, **kw):
-        if root_id == "viewed":
-            waiting.append(len(recovery.lanes))     # the others' lanes, not begun yet
-            if case == "switched":
-                recovery.prioritize("older")
-            if hangs:
-                others_begun.wait(10)
-            waiting.append(len(recovery.lanes))
-            viewed_done.set()
-            return
-        with lock:
-            began.append((root_id, viewed_done.is_set()))
-            if len(began) == 2:
-                others_begun.set()
+        began.append(root_id)
+        if root_id == "viewed" and case == "switched":
+            recovery.prioritize("older")
 
     monkeypatch.setattr(agents, "resume", resume)
     assert sorted(lifecycle.resume_after_start(recovery)) == ["older", "recent", "viewed"]
-    if hangs:
-        assert sorted(began) == [("older", False), ("recent", False)]  # begun while it hung
-    elif case == "back":
-        assert waiting == [2, 2] and all(done for _, done in began)     # none begun beside it
+    assert began == {"back": ["viewed", "recent", "older"], "switched": ["viewed", "older", "recent"],
+                     "unreadable": ["recent", "older", "viewed"]}[case]
 
 
 @pytest.mark.variant("real incident: after an update the person's sessions each waited ~3 s for room on a busy CPU")
 def test_on_a_busy_cpu_the_persons_sessions_come_back_viewed_first_without_waiting_for_room(db, monkeypatch):
     """Reported: after an update every session sat 3 s waiting for room on a
     loaded machine before it even began. The person's own sessions only wait
-    for critical memory: the viewed one first, then the rest at once."""
+    for critical memory, all at once."""
     from brindle.daemon import lifecycle
     from brindle.db import Workspace
 
@@ -653,8 +636,7 @@ def test_on_a_busy_cpu_the_persons_sessions_come_back_viewed_first_without_waiti
     monkeypatch.setattr(spawn, "_has_room", has_room)
     monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: None)
     monkeypatch.setattr(agents, "panes_match", lambda *a, **kw: True)
-    resumed = lifecycle.resume_after_start(recovery)
-    assert resumed[0] == "viewed" and sorted(resumed[1:]) == ["older", "recent"]
+    assert sorted(lifecycle.resume_after_start(recovery)) == ["older", "recent", "viewed"]
 
 
 @pytest.mark.variant("stop racing concurrent recovery must finish an in-flight launch and retain preflight and unstarted sessions")

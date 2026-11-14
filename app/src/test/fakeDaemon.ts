@@ -2927,6 +2927,9 @@ export class FakeDaemon {
       const extra = d.profileDetails[name] ?? {};
       return json({ ...p, source: `built-in profile ${name}`, extends: [], rules: [], prompt: "", lint: { errors: [], warnings: [] }, ...extra });
     }
+    if ((m = path.match(/^\/agents\/([^/]+)\/transcript$/))) {
+      return json({ messages: [], cursor: "0:0", reset: false });
+    }
     if ((m = path.match(/^\/agents\/([^/]+)$/))) {
       const id = m[1];
       const agent =[...d.workspaces.flatMap((ws) => ws.agents ?? []), ...d.closed].find((a: AgentDTO) => a.id === id);

@@ -1,4 +1,4 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render, waitFor, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import type { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
@@ -16,13 +16,23 @@ it("typed_words_reach_the_engine", async () => {
   const agent = { id: "sup1", provider: "claude", status: "idle", window: "s:@1", tmux_server: "brindle" } as AgentDTO;
   const vouched: string[] = [], written: string[] = [];
   const client = { meta: async () => ({ visuals: true }), agent: async () => agent,
+    transcript: async () => ({ cursor: "history:3", reset: true, messages: [
+      { role: "user", text: "Keep my earlier request", history: true },
+      { role: "restart", text: "", history: true },
+      { role: "assistant", text: "Only in the live terminal" },
+    ] }),
     visualTypedWords: async (_root: string, text: string) => { vouched.push(text); return { observed: true }; } } as unknown as DaemonClient;
   let handlers: PtyViewHandlers | undefined;
   const views = { status: { kind: "ready", tmux: "tmux 3.8" }, recheck() {}, copy: async () => {}, paste: async () => "",
     open: (_at, _size, given) => { handlers = given; return { write: (d: string) => written.push(d), resize() {}, focus() {}, close() {} }; } } as PtyViews;
   const recovery = { resume: async () => {}, busy: false, notice: null, preflight: null, setPreflight() {}, attempt: 0 };
-  render(<DaemonContext.Provider value={client}><PtyViewsProvider value={views}><ProviderSurface repo="/repo" root="sup1" agent={agent} alive sessionStatus="idle" recovery={recovery} /></PtyViewsProvider></DaemonContext.Provider>);
+  const shown = render(<DaemonContext.Provider value={client}><PtyViewsProvider value={views}><ProviderSurface repo="/repo" root="sup1" agent={agent} alive sessionStatus="idle" recovery={recovery} /></PtyViewsProvider></DaemonContext.Provider>);
   await waitFor(() => expect(handlers).toBeTruthy());
+  const history = await shown.findByTestId("restart-history");
+  expect(within(history).getByText("Keep my earlier request")).toBeTruthy();
+  expect(within(history).getByRole("separator")).toBeTruthy();
+  expect(within(history).queryByText("Only in the live terminal")).toBeNull();
+  expect(within(history).queryByRole("textbox")).toBeNull();
   const term = xterms.at(-1)!;
   // What tmux 3.8 asks its client's terminal on every attach (captured from `tmux attach`), answered by xterm.js.
   const attach = "\x1b[?1049h\x1b[?2004h\x1b[?996n\x1b[c\x1b[>c\x1b[>q\x1b[?2026$p\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[18t\x1b[14t";
