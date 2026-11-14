@@ -2564,7 +2564,10 @@ export class FakeDaemon {
     if (!live) return;
     const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string; freeze?: boolean; reopen?: boolean };
     if (said.freeze || said.reopen) {
-      if (!live.canFreeze) return;
+      if (!live.canFreeze) {    // as the daemon answers a Freeze or Reopen the Library refused: to the asking window
+        from.push({ refused: { action: said.freeze ? "freeze" : "reopen", reason: "only the design's author can freeze its draft" } });
+        return;
+      }
       if (said.freeze && !live.state.lock) this.setLiveState(from.visual, {
         lock: "sign_off",
         version: { id: live.nextVersion++, writers: [...live.writers], signOffs: [], snapshot: toBase64(live.doc.export({ mode: "snapshot" })) },

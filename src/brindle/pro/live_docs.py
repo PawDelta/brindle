@@ -78,6 +78,8 @@ MAX_CLAIMS = 8              # analysis_live.MAX_REPLICAS: numbers one connection
 MAX_REGISTER = 2            # analysis_live: "register" lists at most two marks
 SPARE_WINDOWS = 1           # numbers kept free, so a window opened offline can still type
 MAX_AWARENESS = 4000        # under the relay's 4096-character awareness state
+DRAIN_FOR = 10.0            # seconds a Freeze waits for the edits typed before it to reach the relay
+DRAIN_STEP = 0.1            # between looks
 MARK = "person"             # whom a number writes for: the person (replica and windows) ...
 SUPERVISOR = "supervisor"   # ... or the session's supervisor (plan_drafts.supervisor_peer)
 
@@ -240,8 +242,9 @@ def _take_state(db: DB, doc_id: str, snapshot: bytes, issued: list[int], claimed
     theirs = next((n for n, r in roles.items() if r == "supervisor"), None)
     replica, row = _replica(db, doc_id), _link(db, doc_id)
     if replica is None:
+        # The first text here (a teammate's window waits on it, holding nothing): windows load it.
         _rebuild(db, doc_id, snapshot, mine, carry=False, supervisor=theirs)
-        return False, None
+        return True, None
     stored = db.conn.execute("SELECT supervisor_peer FROM plan_drafts WHERE doc_id=?", (doc_id,)).fetchone()
     # A supervisor that wrote under an id of its own: its letters are re-typed under its relay number.
     other_supervisor = theirs is not None and stored["supervisor_peer"] not in (None, theirs)
@@ -500,6 +503,8 @@ class DocLink:
     frozen: Any = None
     author_offline: Any = None
     blocked: bool = False       # a lock or freeze holds the outbox back
+    freezing: bool = False      # a Freeze or Reopen is being asked of the Library: hold the outbox (only it clears this)
+    freeze_lock: asyncio.Lock = field(default_factory=asyncio.Lock)    # one Freeze or Reopen at a time
     reader: bool = False        # this account can't write in the doc
     rebase: bool = False        # the next join rebuilds the replica from the relay's draft
     claimed: list[int] = field(default_factory=list)
@@ -579,10 +584,12 @@ class DocLink:
             text = await conn.recv()
         except BaseException:
             self.conn = None
+            await conn.close(CLOSE_CLEAN)
             raise
         said = _parse(text) if text is not None else {"type": "error", "error": "closed"}
         if said.get("type") != "state":
             self.conn = None
+            await conn.close(CLOSE_CLEAN)
             error = said.get("error") if isinstance(said.get("error"), str) else "refused"
             if error == "writer":       # a number is no longer this account's: start again under new ones
                 await self.manager.work(_forget_peers, self.doc_id)
@@ -630,7 +637,7 @@ class DocLink:
     async def flush(self) -> None:
         """Send the next batch of the outbox, if nothing is in flight."""
         async with self.lock:
-            if self.conn is None or self.inflight or self.blocked or self.reader:
+            if self.conn is None or self.inflight or self.blocked or self.freezing or self.reader:
                 self._unsent = await self.manager.work(unsent, self.doc_id)
                 return
             batch = await self.manager.work(_next_batch, self.doc_id)
@@ -739,10 +746,13 @@ class DocLink:
 
     async def drive(self) -> None:
         """Keep the link up while it is wanted (the manager's task for it)."""
+        if not await self.manager.prepare(self.doc_id):
+            return
         attempt = 0
         while self.wanted() and not self.manager.stopping:
             try:
-                await self.connect()
+                if self.conn is None:
+                    await self.connect()
                 attempt = 0
                 await self.serve()
             except (RelayError, OSError, ValueError) as e:
@@ -790,6 +800,8 @@ class Manager:
         self._available = available or _signed_in_to_a_team
         self._drive = drive
         self.links: dict[str, DocLink] = {}
+        self._probes: dict[str, asyncio.Task[bool]] = {}
+        self._unsupported: set[str] = set()
         self._sweeper: asyncio.Task | None = None
 
     async def work(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -807,11 +819,39 @@ class Manager:
         return self.links[doc_id]
 
     def _ensure(self, link: DocLink) -> None:
-        if self._drive and not self.stopping and (link.task is None or link.task.done()):
+        if (self._drive and not self.stopping and link.doc_id not in self._unsupported
+                and (link.task is None or link.task.done())):
             link.task = asyncio.get_running_loop().create_task(link.drive())
 
     async def available(self) -> bool:
         return await self.work(lambda _db: self._available())
+
+    async def prepare(self, doc_id: str) -> bool:
+        """Confirm the relay before a window advertises live text or state.
+
+        A missing or refusing relay leaves the reader on its HTTP controls.
+        Share one initial probe across windows and remember its failure until
+        the daemon restarts, so opening readers and sweeping cannot hammer an
+        undeployed relay. Once confirmed, ordinary drops keep the live outbox.
+        """
+        if self.stopping or not await self.available():
+            return False
+
+        async def probe() -> bool:
+            link = self.link(doc_id)
+            try:
+                if link.conn is None:
+                    await asyncio.wait_for(link.connect(), DRAIN_FOR)
+                return True
+            except Exception:  # noqa: BLE001 - live capability is optional; HTTP remains available
+                self._unsupported.add(doc_id)
+                await link.close()
+                log.debug("brindle: live unavailable for %s; using HTTP", doc_id, exc_info=True)
+                return False
+
+        if doc_id not in self._probes:
+            self._probes[doc_id] = asyncio.create_task(probe())
+        return await asyncio.shield(self._probes[doc_id])
 
     async def open_window(self, doc_id: str, sink: Sink) -> Lease | None:
         """An app window opened ``doc_id``: its lease, with the number it
@@ -851,6 +891,53 @@ class Manager:
         if link is not None:
             await link.awareness(lease, section, data)
 
+    async def freeze(self, doc_id: str, reopen: bool = False) -> str | None:
+        """An app window's Freeze (or Reopen): the Library makes the draft's
+        text a version out for sign-off (or withdraws it), for the author only.
+        The relay tells nobody of either, so this machine's windows are told
+        here. Returns why it was refused (for the window that asked), else
+        None; a refusal leaves the state, and every unsent edit, as they were.
+
+        A freeze is of what was typed here before it: those edits reach the
+        relay (acknowledged) first, else the Library is never asked. While it
+        is asked, edits are held (``freezing``: nothing but this clears it, so
+        a reconnect or a lock check can't let one race the freeze), and they go
+        once it is refused or the version is reopened. One Freeze or Reopen
+        runs at a time per doc."""
+        from brindle.redact import mask
+
+        link = self.link(doc_id)
+        async with link.freeze_lock:
+            refused = None
+            try:
+                if not reopen and not link.frozen:
+                    await self._drain(link)
+                link.freezing = True
+                link.frozen = await asyncio.to_thread(_library_freeze, doc_id, reopen)
+            except Exception as e:  # noqa: BLE001 - refused or unreachable: the windows keep the state they had
+                refused = mask(str(e)) or "the Library couldn't be reached"
+                log.warning("brindle: couldn't %s %s: %s", "reopen" if reopen else "freeze", doc_id, refused)
+            finally:
+                link.freezing = False
+            link.blocked = bool(link.frozen or link.author_offline)
+            await link._to_windows(link.state_frame())
+            await link.flush()
+            return refused
+
+    async def _drain(self, link: DocLink) -> None:
+        """Until every edit this machine holds of the doc is acknowledged by
+        the relay; raises RelayError if that can't happen now (no connection,
+        a lock holding the outbox back, or not within DRAIN_FOR)."""
+        waited = 0.0
+        while True:
+            await link.flush()
+            if not link.inflight and not link._unsent:
+                return
+            if link.conn is None or link.blocked or waited >= DRAIN_FOR:
+                raise RelayError("edits made here haven't reached the relay yet: nothing was frozen")
+            await self.wait(DRAIN_STEP)
+            waited += DRAIN_STEP
+
     async def sweep(self) -> None:
         """File edits typed offline that aren't on their plan yet, and start a
         link for every doc whose replica holds unsent edits."""
@@ -883,6 +970,10 @@ class Manager:
             await link.close()
             if link.task is not None:
                 link.task.cancel()
+        for probe in self._probes.values():
+            if not probe.done():
+                probe.cancel()
+        await asyncio.gather(*self._probes.values(), return_exceptions=True)
 
         def close_db() -> None:
             if self._db is not None:
@@ -891,6 +982,26 @@ class Manager:
 
         await asyncio.get_running_loop().run_in_executor(self._pool, close_db)
         self._pool.shutdown(wait=False)
+
+
+def _library_freeze(doc_id: str, reopen: bool) -> Any:
+    """Freeze the draft as it stands at the Library (its ``rev`` on screen
+    being the draft's), or reopen the version out for sign-off. Returns the
+    frozen revision, or None once it is open. Raises with the Library's refusal."""
+    from brindle.pro import analysis_docs as ad
+
+    def ask(method: str, tail: str, body: dict | None = None) -> dict:
+        status, got = ad._call(method, ad._doc_path(doc_id, "/design" + tail), body)
+        if status != 200:
+            raise RelayError(f"the Library refused it: {got.get('error') or f'HTTP {status}'}", got.get("error"))
+        return got
+
+    draft = ask("GET", "/draft")
+    if reopen and draft.get("frozen"):
+        ask("POST", "/reopen", {"rev": draft["frozen"]})
+    elif not reopen and not draft.get("frozen"):
+        ask("POST", "/freeze", {"rev": draft["rev"]})
+    return ask("GET", "/draft").get("frozen")
 
 
 def _signed_in_to_a_team() -> bool:

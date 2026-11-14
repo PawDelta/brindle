@@ -27,6 +27,19 @@ it("requires the author to freeze a teammate's document", async () => {
   expect(within(panel).queryByRole("button")).toBeNull();
 });
 
+it("shows the author a Freeze the daemon refused and leaves the document editable", async () => {
+  const daemon = new FakeDaemon();
+  daemon.seedLive("doc", { lede: "Text" }, { canFreeze: false });
+  render(<DocPresence client={daemon.client()} visual="doc" isAuthor name="Ann" />);
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Freeze" }));
+  await settle();
+  const panel = screen.getByRole("region", { name: "Live document" });
+  expect(within(panel).getByRole("alert").dataset.state).toBe("freeze-refused");
+  expect(panel.dataset.state).toBe("editing");
+  expect(daemon.liveState("doc").lock).toBeNull();
+});
+
 it("preserves HTTP review and build controls when the document has no live text", async () => {
   const daemon = new FakeDaemon();
   const live = daemon.client();
