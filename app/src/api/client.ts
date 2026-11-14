@@ -2203,9 +2203,10 @@ export class DaemonClient {
   }
 
   /* For the Library list and board: each design's own item with how many others are done, from what was
-     read before (a design never read is read now). */
+     read before, reading some never-read or old ones now (at most 50 ids). `remaining` are due a read this
+     answer didn't make: ask again with them. */
   libraryWorkItems(ids: string[], repo?: string) {
-    return this.get<{ items: Record<string, { epic: TrackerLink | null; done: number; total: number }> }>("/library/work-items", { ids: ids.join(","), repo });
+    return this.get<{ items: Record<string, { epic: TrackerLink | null; done: number; total: number }>; remaining?: string[] }>("/library/work-items", { ids: ids.join(","), repo });
   }
 
   /* Settings › Integrations (org admins). */
@@ -2213,16 +2214,18 @@ export class DaemonClient {
     return this.get<TrackerIntegrations>("/integrations/trackers", { repo });
   }
 
-  saveTrackerSettings(settings: Partial<TrackerSettings>) {
-    return this.put<TrackerIntegrations>("/integrations/trackers/settings", settings);
+  /* `org` is the organization the page was loaded for: the daemon refuses (409) when the active one has
+     changed since, so a draft for one org never lands on another. */
+  saveTrackerSettings(settings: Partial<TrackerSettings>, org: string) {
+    return this.put<TrackerIntegrations>("/integrations/trackers/settings", { ...settings, org_id: org });
   }
 
-  testTracker(tracker: TrackerName) {
-    return this.post<{ tracker: TrackerName; ok: boolean }>(`/integrations/trackers/${tracker}/test`, {});
+  testTracker(tracker: TrackerName, org: string) {
+    return this.post<{ tracker: TrackerName; ok: boolean }>(`/integrations/trackers/${tracker}/test`, { org_id: org });
   }
 
-  disconnectTracker(tracker: TrackerName) {
-    return this.delete<{ provider_grant?: string }>(`/integrations/trackers/${tracker}`, {});
+  disconnectTracker(tracker: TrackerName, org: string) {
+    return this.delete<{ provider_grant?: string }>(`/integrations/trackers/${tracker}`, { org_id: org });
   }
 
   writeSharedDesign(doc: string, tail: string, body: Record<string, unknown>) {

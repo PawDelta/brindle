@@ -36,6 +36,8 @@ const ALLOW: [keyof TrackerSettings["allow"], string][] = [
 
 const when = (v?: number | null) => (v ? new Date(v * 1000).toLocaleDateString() : null);
 
+const parseStates = (text: string) => text.split(",").map((s) => s.trim()).filter(Boolean);
+
 function complete(s: Partial<TrackerSettings> | undefined, connected: TrackerName[]): TrackerSettings {
   const types: TrackerSettings["types"] = {};
   const done: TrackerSettings["done_states"] = {};
@@ -56,6 +58,8 @@ export function Integrations({ client, open = openExternal }: { client: Integrat
   const [admin, setAdmin] = useState(false);
   const [state, setState] = useState<TrackerIntegrations | null>(null);
   const [draft, setDraft] = useState<TrackerSettings | null>(null);
+  /* The done states as typed: split only when saved, so a comma or a space can be typed. */
+  const [doneText, setDoneText] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -64,7 +68,10 @@ export function Integrations({ client, open = openExternal }: { client: Integrat
     client.trackerIntegrations().then((got) => {
       if (!live()) return;
       setState(got);
-      setDraft(complete(got.settings, (Object.keys(got.trackers) as TrackerName[]).filter((t) => got.trackers[t].connected)));
+      const connected = (Object.keys(got.trackers) as TrackerName[]).filter((t) => got.trackers[t].connected);
+      const next = complete(got.settings, connected);
+      setDraft(next);
+      setDoneText(Object.fromEntries(connected.map((t) => [t, (next.done_states[t] ?? []).join(", ")])));
     }, (e) => live() && setError(message(e)));
 
   useEffect(() => {
@@ -123,8 +130,8 @@ export function Integrations({ client, open = openExternal }: { client: Integrat
             <div className="flex flex-wrap items-center justify-between gap-s1">
               <span><strong>{NAMES[t]}</strong> <span className="text-ink-3">{c.connected ? `Connected · ${[c.site, c.connected_by && `by ${c.connected_by}`, when(c.connected_at)].filter(Boolean).join(" · ")}` : c.configured ? "Not connected" : "Not available on this server yet"}</span></span>
               <span className="flex gap-1">
-                {c.connected && <button type="button" className={button} disabled={busy} onClick={() => void run(async () => { await client.testTracker(t); return `${NAMES[t]} answered.`; }, true)}>Test</button>}
-                {c.connected && <button type="button" className={button} disabled={busy} onClick={() => void run(async () => { await client.disconnectTracker(t); return `${NAMES[t]} is disconnected. Its sign-in is deleted here; revoke brindle in ${NAMES[t]}'s own app list too.`; }, true)}>Disconnect</button>}
+                {c.connected && <button type="button" className={button} disabled={busy} onClick={() => void run(async () => { await client.testTracker(t, state!.org_id); return `${NAMES[t]} answered.`; }, true)}>Test</button>}
+                {c.connected && <button type="button" className={button} disabled={busy} onClick={() => void run(async () => { await client.disconnectTracker(t, state!.org_id); return `${NAMES[t]} is disconnected. Its sign-in is deleted here; revoke brindle in ${NAMES[t]}'s own app list too.`; }, true)}>Disconnect</button>}
                 {c.configured && <button type="button" className={button} disabled={busy} onClick={() => void open(state!.connect_url)}>{c.connected ? "Reconnect…" : `Connect ${NAMES[t]}…`}</button>}
               </span>
             </div>
@@ -163,7 +170,7 @@ export function Integrations({ client, open = openExternal }: { client: Integrat
                 ))}
               </div>
               <label className="flex items-center gap-1 text-xs">Counted as done:
-                <input className={field} aria-label={`${NAMES[t]} done states`} value={(draft.done_states[t] ?? []).join(", ")} onChange={(e) => setDraft({ ...draft, done_states: { ...draft.done_states, [t]: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } })} />
+                <input className={field} aria-label={`${NAMES[t]} done states`} value={doneText[t] ?? ""} onChange={(e) => setDoneText({ ...doneText, [t]: e.target.value })} />
               </label>
             </div>
           ))}
@@ -181,7 +188,7 @@ export function Integrations({ client, open = openExternal }: { client: Integrat
             </select>
           </label>
           <div>
-            <button type="button" className={button} disabled={busy} onClick={() => void run(async () => { await client.saveTrackerSettings(draft); return "Saved."; }, true)}>Save</button>
+            <button type="button" className={button} disabled={busy} onClick={() => void run(async () => { await client.saveTrackerSettings({ ...draft, done_states: Object.fromEntries(connected.map((t) => [t, parseStates(doneText[t] ?? "")])) }, state!.org_id); return "Saved."; }, true)}>Save</button>
           </div>
         </div>
       )}

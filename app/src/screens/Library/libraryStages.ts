@@ -81,16 +81,43 @@ export async function loadRecords(client: Pick<DaemonClient, "doc"> & Partial<Pi
   const [got, work] = await Promise.all([
     Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item }), () => null))),
     // The linked work item is a nicety: a failed or refused read leaves the column empty, never the list.
-    docs.length && client.libraryWorkItems ? client.libraryWorkItems(docs.map((d) => d.id), repo).then((r) => r?.items ?? {}, () => ({} as Record<string, never>)) : Promise.resolve({}),
+    client.libraryWorkItems ? loadWorkItems(client.libraryWorkItems.bind(client), docs.map((d) => d.id), repo) : Promise.resolve({}),
   ]);
   const records = new Map<string, DesignRecord>();
   docs.forEach((d, i) => {
     const record = got[i];
     if (!record) return;
-    const mine = (work as Record<string, { epic: TrackerLink | null; done: number; total: number }>)[d.id];
+    const mine = (work as Record<string, WorkSummary>)[d.id];
     records.set(d.id, mine?.epic ? { ...record, work_item: epicLink(mine.epic, mine.done, mine.total) } : record);
   });
   return records;
+}
+
+type WorkSummary = { epic: TrackerLink | null; done: number; total: number };
+const WORK_BATCH = 50;
+const WORK_ROUNDS = 20;
+
+/* Every listed design's own item, 50 designs a request: the daemon reads only a few uncached ones per
+   answer and names the rest, which are asked for again while that makes progress. A batch that fails
+   leaves only its own designs without one. */
+export async function loadWorkItems(read: NonNullable<DaemonClient["libraryWorkItems"]>, ids: string[], repo?: string): Promise<Record<string, WorkSummary>> {
+  const out: Record<string, WorkSummary> = {};
+  const batch = async (first: string[]) => {
+    let ask = first;
+    for (let round = 0; round < WORK_ROUNDS && ask.length; round++) {
+      let got: Awaited<ReturnType<typeof read>> | undefined;
+      try { got = await read(ask, repo); } catch { return; }
+      if (!got) return;
+      Object.assign(out, got.items ?? {});
+      const next = got.remaining ?? [];
+      if (next.length >= ask.length) return;
+      ask = next;
+    }
+  };
+  const batches: string[][] = [];
+  for (let i = 0; i < ids.length; i += WORK_BATCH) batches.push(ids.slice(i, i + WORK_BATCH));
+  await Promise.all(batches.map(batch));
+  return out;
 }
 
 /* A design's own item as the list's and board's chip shows it: its key and the tracker's word for its state. */

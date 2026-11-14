@@ -76,3 +76,20 @@ it("the list's and board's work item is the design's own item with the tracker's
   expect(failed.get("a")).toBeDefined();
   expect(failed.get("a")?.work_item).toBeUndefined();
 });
+
+it("work items of a listing longer than one request are all asked for, the daemon's few reads at a time", async () => {
+  const docs = Array.from({ length: 120 }, (_, n) => ({ id: `d${n}` }) as AnalysisDoc);
+  const epic = { link_id: "wl", tracker: "azure_devops", key: "1", display: "AB#1", target: { kind: "design" }, state: "New" } as const;
+  const unread = new Set(docs.map((d) => d.id));
+  const asked: number[] = [];
+  const libraryWorkItems = async (ids: string[]) => {
+    asked.push(ids.length);
+    if (ids.length > 50) throw new Error("too many");
+    const now = ids.filter((id) => unread.has(id)).slice(0, 10);          // the daemon reads ten, names the rest
+    now.forEach((id) => unread.delete(id));
+    return { items: Object.fromEntries(ids.filter((id) => !unread.has(id)).map((id) => [id, { epic, done: 0, total: 0 }])), remaining: ids.filter((id) => unread.has(id)) };
+  };
+  const got = await loadRecords({ doc: async () => ({ design: null, tasks: [], threads: [], decisions: [], verdict: null }) as never, libraryWorkItems }, docs);
+  expect([...got.values()].filter((r) => r.work_item?.key === "AB#1")).toHaveLength(120);
+  expect(Math.max(...asked)).toBeLessThanOrEqual(50);
+});

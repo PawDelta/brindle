@@ -84,23 +84,33 @@ def _save(data: dict) -> None:
         pass
 
 
-def _key(org_id: str, doc_id: str) -> str:
-    return f"{org_id}/{doc_id}"
+def _key(who: str, org_id: str, doc_id: str) -> str:
+    # The signed-in account (server and subject) is part of the key: what was read for one member is never
+    # shown to another who signs in on this machine.
+    return f"{who}|{org_id}/{doc_id}"
 
 
-def cached(org_id: str, doc_id: str) -> dict | None:
+def cached(org_id: str, doc_id: str, *, who: str = "") -> dict | None:
     with _lock:
-        return _load().get("docs", {}).get(_key(org_id, doc_id))
+        return _load().get("docs", {}).get(_key(who, org_id, doc_id))
 
 
-def _store(org_id: str, doc_id: str, change: Callable[[dict], dict]) -> dict:
+def _store(who: str, org_id: str, doc_id: str, change: Callable[[dict], dict]) -> dict:
     """Apply ``change`` to the doc's cached record and keep it."""
     with _lock:
         data = _load() or {"docs": {}}
-        rec = change(dict(data["docs"].get(_key(org_id, doc_id)) or {"items": [], "connected": {}}))
-        data["docs"][_key(org_id, doc_id)] = rec
+        k = _key(who, org_id, doc_id)
+        rec = change(dict(data["docs"].get(k) or {"items": [], "connected": {}}))
+        data["docs"][k] = rec
         _save(data)
         return rec
+
+
+def _forget(who: str, org_id: str, doc_id: str) -> None:
+    with _lock:
+        data = _load()
+        if data.get("docs", {}).pop(_key(who, org_id, doc_id), None) is not None:
+            _save(data)
 
 
 # -- one design ---------------------------------------------------------------------------------
@@ -119,24 +129,30 @@ def _view(rec: dict, **extra) -> dict:
             **summary(items), **extra}
 
 
-def items(org_id: str, doc_id: str, *, api: Api, now: Callable[[], float] = time.time) -> dict:
+DENIED = (401, 403, 404)
+
+
+def items(org_id: str, doc_id: str, *, api: Api, who: str = "", now: Callable[[], float] = time.time) -> dict:
     """The design's linked items with their states. Unreachable: the last read, every item marked stale
-    (``unreachable`` true; an empty list when nothing was ever read)."""
+    (``unreachable`` true; an empty list when nothing was ever read). A refusal saying this account may not
+    see the design drops what was kept for it."""
     try:
         got = api("GET", _base(org_id, doc_id))
     except Exception as e:  # noqa: BLE001
         if not unreachable(e):
+            if (getattr(e, "http_status", None) or getattr(e, "status", None)) in DENIED:
+                _forget(who, org_id, doc_id)
             raise
-        rec = cached(org_id, doc_id) or {}
+        rec = cached(org_id, doc_id, who=who) or {}
         stale = dict(rec, items=[dict(i, stale=True) for i in rec.get("items") or [] if isinstance(i, dict)])
         return _view(stale, unreachable=True)
     listed = [i for i in got.get("items") or [] if isinstance(i, dict)]
     connected = got.get("connected") if isinstance(got.get("connected"), dict) else {}
-    rec = _store(org_id, doc_id, lambda r: dict(r, items=listed, connected=connected, read_at=now()))
+    rec = _store(who, org_id, doc_id, lambda r: dict(r, items=listed, connected=connected, read_at=now()))
     return _view(rec, unreachable=False)
 
 
-def link(org_id: str, doc_id: str, item: str, *, api: Api, tracker: str | None = None,
+def link(org_id: str, doc_id: str, item: str, *, api: Api, who: str = "", tracker: str | None = None,
          target: dict | None = None) -> dict:
     """Link an existing item (a key like BRN-88 or AB#4810, or a pasted link) to the design, a section or a task."""
     item = (item or "").strip()
@@ -148,12 +164,12 @@ def link(org_id: str, doc_id: str, item: str, *, api: Api, tracker: str | None =
     if tracker:
         body["tracker"] = tracker
     made = api("POST", _base(org_id, doc_id, "/links"), body)
-    _store(org_id, doc_id, lambda r: dict(r, items=[*(r.get("items") or []), made]))
+    _store(who, org_id, doc_id, lambda r: dict(r, items=[*(r.get("items") or []), made]))
     return made
 
 
-def create(org_id: str, doc_id: str, kind: str, *, api: Api, task: str | None = None, section: str | None = None,
-           quote_text: str | None = None, title: str | None = None) -> dict:
+def create(org_id: str, doc_id: str, kind: str, *, api: Api, who: str = "", task: str | None = None,
+           section: str | None = None, quote_text: str | None = None, title: str | None = None) -> dict:
     """Make items from the design (its epic), one task of its split (every task without an item when ``task`` is
     left out) or a passage (a quote from ``section``). The server keeps what it made if a later one fails."""
     if kind not in KINDS:
@@ -165,34 +181,50 @@ def create(org_id: str, doc_id: str, kind: str, *, api: Api, task: str | None = 
     got = api("POST", _base(org_id, doc_id), body)
     made = [i for i in got.get("created") or [] if isinstance(i, dict)]
     if made:
-        _store(org_id, doc_id, lambda r: dict(r, items=[*(r.get("items") or []), *made]))
+        _store(who, org_id, doc_id, lambda r: dict(r, items=[*(r.get("items") or []), *made]))
     return got
 
 
-def unlink(org_id: str, doc_id: str, link_id: str, *, api: Api) -> dict:
+def unlink(org_id: str, doc_id: str, link_id: str, *, api: Api, who: str = "") -> dict:
     got = api("DELETE", _base(org_id, doc_id, f"/links/{quote(link_id, safe='')}"))
-    _store(org_id, doc_id, lambda r: dict(r, items=[i for i in r.get("items") or []
-                                                    if not (isinstance(i, dict) and i.get("link_id") == link_id)]))
+    _store(who, org_id, doc_id, lambda r: dict(r, items=[i for i in r.get("items") or []
+                                                         if not (isinstance(i, dict) and i.get("link_id") == link_id)]))
     return got
 
 
-def summaries(org_id: str, doc_ids: list[str], *, api: Api | None = None, fetch_missing: int = 0) -> dict[str, dict]:
-    """``{doc_id: {epic, done, total, stale}}`` for the Library list and board, from the cache (nothing sent).
-    With ``api``, up to ``fetch_missing`` designs never read are read now; one that fails stays out."""
+FRESH_FOR = 300.0      # seconds a design's summary is trusted before the next list reads it again
+
+
+def summaries(org_id: str, doc_ids: list[str], *, api: Api | None = None, who: str = "", fetch: int = 0,
+              now: Callable[[], float] = time.time) -> dict:
+    """``{"items": {doc_id: {epic, done, total, read_at}}, "remaining": [doc_id]}`` for the Library list and
+    board. A design never read, or last read over ``FRESH_FOR`` seconds ago, is read now, up to ``fetch`` of them
+    (never read first); the rest are named in ``remaining`` for the caller to ask again. One that can't be read
+    keeps its last value marked ``stale``; one never read, or refused, stays out."""
     data = _load().get("docs", {})
     out: dict[str, dict] = {}
-    missing: list[str] = []
+    due: list[tuple[float, str]] = []
+    t = now()
     for d in doc_ids:
-        rec = data.get(_key(org_id, d))
-        if rec is None:
-            missing.append(d)
-        else:
+        rec = data.get(_key(who, org_id, d))
+        if rec is not None:
             out[d] = _brief(_view(rec), rec)
-    for d in missing[:fetch_missing] if api else ():
-        got = items(org_id, d, api=api)
-        if not got["unreachable"]:
+        if rec is None or t - (rec.get("read_at") or 0) > FRESH_FOR:
+            due.append((-1.0 if rec is None else rec.get("read_at") or 0.0, d))
+    due.sort()
+    attempt = [d for _, d in due][:fetch] if api else []
+    for d in attempt:
+        try:
+            got = items(org_id, d, api=api, who=who, now=now)
+        except Exception:  # noqa: BLE001 - one design's refusal leaves the others alone
+            out.pop(d, None)
+            continue
+        if got["unreachable"]:
+            if d in out:
+                out[d] = dict(out[d], stale=True)
+        else:
             out[d] = _brief(got, got)
-    return out
+    return {"items": out, "remaining": [d for _, d in due if api and d not in attempt]}
 
 
 def _brief(view: dict, rec: dict) -> dict:

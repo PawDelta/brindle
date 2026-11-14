@@ -80,13 +80,55 @@ def test_unreachable_server_shows_the_last_read_marked_stale():
         wi.items(ORG, DOC, api=lambda *a, **k: (_ for _ in ()).throw(ServiceError("not_entitled", "no plan", 402)))
 
 
-def test_summaries_come_from_the_cache_and_read_a_design_never_seen():
-    server = FakeServer()
+def test_summaries_are_read_in_batches_and_refreshed_when_old():
+    server, clock = FakeServer(), [1000.0]
     wi.link(ORG, DOC, "AB#4810", api=server)
-    wi.items(ORG, DOC, api=server)
+    wi.items(ORG, DOC, api=server, now=lambda: clock[0])
     server.calls.clear()
-    got = wi.summaries(ORG, [DOC, "doc/2"], api=None)
-    assert list(got) == [DOC] and got[DOC]["epic"]["display"] == "AB#4810" and server.calls == []
+    fresh = wi.summaries(ORG, [DOC], api=server, fetch=10, now=lambda: clock[0])    # fresh: nothing is sent
+    assert fresh["items"][DOC]["epic"]["state"] == "Active" and server.calls == []
+    server.state = "Closed"                                                           # the tracker moved on
+    clock[0] += wi.FRESH_FOR + 1
+    assert wi.summaries(ORG, [DOC], api=server, fetch=10, now=lambda: clock[0])["items"][DOC]["epic"]["state"] == "Closed"
+    server.down, clock[0] = True, clock[0] + wi.FRESH_FOR + 1                         # unreachable: last value, stale
+    assert wi.summaries(ORG, [DOC], api=server, fetch=10, now=lambda: clock[0])["items"][DOC]["stale"] is True
+    # more designs than one call reads: the rest come back as remaining and are read by the next call
+    server.down = False
+    ids = [f"d{n}" for n in range(12)]
+    seen = {}
+
+    def api(method, path, body=None):
+        seen[path] = True
+        return {"items": [], "connected": {}}
+    first = wi.summaries(ORG, ids, api=api, fetch=10)
+    assert len(first["items"]) == 10 and len(first["remaining"]) == 2
+    second = wi.summaries(ORG, ids, api=api, fetch=10)
+    assert len(second["items"]) == 12 and second["remaining"] == []
+
+
+def test_another_account_never_sees_what_was_read_for_the_first():
+    server = FakeServer()
+    wi.link(ORG, DOC, "AB#4810", api=server, who="a")
+    wi.items(ORG, DOC, api=server, who="a")
+    assert wi.summaries(ORG, [DOC], who="b")["items"] == {}
+    server.down = True
+    assert wi.items(ORG, DOC, api=server, who="b")["items"] == []
+    assert wi.cached(ORG, DOC, who="a") is not None
+    denied = lambda *a, **k: (_ for _ in ()).throw(ServiceError("forbidden", "no", 403))    # noqa: E731
+    with pytest.raises(ServiceError):
+        wi.items(ORG, DOC, api=denied, who="a")
+    assert wi.cached(ORG, DOC, who="a") is None                                       # a refusal drops what was kept
+
+
+def test_a_write_for_an_org_that_is_no_longer_the_active_one_sends_nothing(monkeypatch):
+    server = FakeServer()
+    monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(org_id="org-B", sub="u1"))
+    monkeypatch.setattr(actions, "docs_api", lambda m, p, b=None, repo=None: server(m, p, b))
+    for call in (actions.put_tracker_settings, actions.check_tracker, actions.disconnect_tracker):
+        with pytest.raises(ServiceError) as err:
+            call(None, {"tracker": "jira"}, {"org_id": "org-A", "repos": []})
+        assert err.value.http_status == 409
+    assert server.calls == []
 
 
 def test_only_repos_the_server_can_tell_apart_are_offered_for_mapping():

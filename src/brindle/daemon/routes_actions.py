@@ -2371,12 +2371,20 @@ def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
 
 
 def _work_call(params: dict, body: Body, run: Callable) -> Any:
-    """Run a pro/work_items function for the signed-in org: ``run(org_id, api)``. Bad input is a 400; the
-    Library's or tracker's refusal keeps its own 4xx (see upstream_error), anything unreachable a 502."""
+    """Run a pro/work_items function for the signed-in org: ``run(org_id, api, who)``, ``who`` naming the account
+    (server and subject) whose cache it may use. A caller that says which org it loaded (``org_id``) is refused
+    with 409, before anything is sent, when the active one is another. Bad input is a 400; the Library's or
+    tracker's refusal keeps its own 4xx (see upstream_error), anything unreachable a 502."""
+    from brindle.pro import auth, credentials
+
     repo = params.get("repo") or _get(body, "repo")
-    org_id = _docs_entitlement(repo).org_id
+    ent = _docs_entitlement(repo)
+    loaded = params.get("org_id") or _get(body, "org_id")
+    if loaded and loaded != ent.org_id:
+        raise ServiceError("org_changed", "your active organization changed since this was loaded; reload it", 409)
+    who = f"{auth.base_url((credentials.default_store().load() or {}).get('base_url'))}|{ent.sub}"
     try:
-        return run(org_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo))
+        return run(ent.org_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo), who)
     except ValueError as e:
         raise ServiceError("invalid", str(e)) from e
 
@@ -2386,7 +2394,7 @@ def design_work_items(db: DB, params: dict, body: Body) -> Any:
     read with ``unreachable`` true (see pro/work_items.items)."""
     from brindle.pro import work_items as wi
 
-    return _work_call(params, body, lambda org, api: wi.items(org, params["id"], api=api))
+    return _work_call(params, body, lambda org, api, who: wi.items(org, params["id"], api=api, who=who))
 
 
 def create_design_work_items(db: DB, params: dict, body: Body) -> Any:
@@ -2394,8 +2402,8 @@ def create_design_work_items(db: DB, params: dict, body: Body) -> Any:
     (``section`` and ``quote``)."""
     from brindle.pro import work_items as wi
 
-    return _work_call(params, body, lambda org, api: wi.create(
-        org, params["id"], _get(body, "kind", required=True), api=api, task=_get(body, "task"),
+    return _work_call(params, body, lambda org, api, who: wi.create(
+        org, params["id"], _get(body, "kind", required=True), api=api, who=who, task=_get(body, "task"),
         section=_get(body, "section"), quote_text=_get(body, "quote"), title=_get(body, "title")))
 
 
@@ -2403,24 +2411,27 @@ def link_design_work_item(db: DB, params: dict, body: Body) -> Any:
     """Link an existing ``item`` (key or pasted link) to the design, or to a ``target`` section or task."""
     from brindle.pro import work_items as wi
 
-    return _work_call(params, body, lambda org, api: wi.link(
-        org, params["id"], _get(body, "item", required=True), api=api, tracker=_get(body, "tracker"),
+    return _work_call(params, body, lambda org, api, who: wi.link(
+        org, params["id"], _get(body, "item", required=True), api=api, who=who, tracker=_get(body, "tracker"),
         target=_get(body, "target", dict)))
 
 
 def unlink_design_work_item(db: DB, params: dict, body: Body) -> Any:
     from brindle.pro import work_items as wi
 
-    return _work_call(params, body, lambda org, api: wi.unlink(org, params["id"], params["link_id"], api=api))
+    return _work_call(params, body, lambda org, api, who: wi.unlink(org, params["id"], params["link_id"], api=api, who=who))
 
 
 def library_work_items(db: DB, params: dict, body: Body) -> Any:
-    """``{"items": {doc_id: {epic, done, total, read_at}}}`` for the designs in ``ids`` (comma separated), for the
-    Library list and board: from the cache, reading up to 10 never-read designs now."""
+    """``{"items": {doc_id: {epic, done, total, read_at, stale?}}, "remaining": [doc_id]}`` for the designs in
+    ``ids`` (comma separated, at most 50), for the Library list and board: from the cache, reading up to 10 never
+    read or out-of-date designs now. ``remaining`` are due a read this call didn't make: ask again with them."""
     from brindle.pro import work_items as wi
 
-    ids = [i for i in (params.get("ids") or "").split(",") if i][:100]
-    return {"items": _work_call(params, body, lambda org, api: wi.summaries(org, ids, api=api, fetch_missing=10))}
+    ids = [i for i in (params.get("ids") or "").split(",") if i]
+    if len(ids) > 50:
+        raise ServiceError("invalid", "ask for at most 50 designs at a time")
+    return _work_call(params, body, lambda org, api, who: wi.summaries(org, ids, api=api, who=who, fetch=10))
 
 
 def tracker_integrations(db: DB, params: dict, body: Body) -> Any:
@@ -2428,7 +2439,7 @@ def tracker_integrations(db: DB, params: dict, body: Body) -> Any:
     where an admin signs in to a tracker."""
     from brindle.pro import auth, credentials, work_items as wi
 
-    got = _work_call(params, body, lambda org, api: dict(wi.integrations(org, api=api)))
+    got = _work_call(params, body, lambda org, api, who: dict(wi.integrations(org, api=api)))
     base = ((credentials.default_store().load() or {}).get("base_url"))
     org = _docs_entitlement(params.get("repo")).org_id
     roots = sorted({ws.repo_root for ws in db.find_workspaces(None)})
@@ -2438,19 +2449,20 @@ def tracker_integrations(db: DB, params: dict, body: Body) -> Any:
 def put_tracker_settings(db: DB, params: dict, body: Body) -> Any:
     from brindle.pro import work_items as wi
 
-    return _work_call(params, body, lambda org, api: wi.save_settings(org, {k: v for k, v in body.items() if k != "repo"}, api=api))
+    return _work_call(params, body, lambda org, api, who: wi.save_settings(
+        org, {k: v for k, v in body.items() if k not in ("repo", "org_id")}, api=api))
 
 
 def check_tracker(db: DB, params: dict, body: Body) -> Any:
     from brindle.pro import work_items as wi
 
-    return _work_call(params, body, lambda org, api: wi.check_connection(org, params["tracker"], api=api))
+    return _work_call(params, body, lambda org, api, who: wi.check_connection(org, params["tracker"], api=api))
 
 
 def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
     from brindle.pro import work_items as wi
 
-    return _work_call(params, body, lambda org, api: wi.disconnect(org, params["tracker"], api=api))
+    return _work_call(params, body, lambda org, api, who: wi.disconnect(org, params["tracker"], api=api))
 
 
 def delete_doc(db: DB, params: dict, body: Body) -> Any:
