@@ -147,7 +147,7 @@ class RepoConfig:
     # The supervisor works from a compact goal state brindle keeps (brindle.supervisor_state):
     # once its context passes supervisor_restart_tokens, it restarts fresh, seeded with that state.
     supervisor_state: bool = True
-    supervisor_restart_tokens: int = 120_000
+    supervisor_restart_tokens: int = 0     # off by default: restarts hurt long sessions
     # Cheaper agent start: a worker's or reviewer's stable brief (role prompt, rule packs,
     # repo brief) leads its prompt and the per-task text follows; reviewers and light
     # workers get only the brindle tools their role uses and the 5-minute prompt cache.

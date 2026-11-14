@@ -776,7 +776,7 @@ Goal driving, merge gates and cleanup:
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
 | `fast_path` | `true` | the supervisor may send a small request straight to one light or medium worker (`assign(fast_path=true)`): no goal, milestones or audit; one light review and the checks before it merges |
 | `supervisor_state` | `true` | brindle keeps a compact goal state for the supervisor and, past `supervisor_restart_tokens` of context, restarts it as a fresh session seeded with that state |
-| `supervisor_restart_tokens` | `120000` | the supervisor context (tokens its last turn read) that triggers that restart |
+| `supervisor_restart_tokens` | `0` | the supervisor context (tokens its last turn read) that triggers that restart; 0 (the default) never restarts |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `permission_policy` | `"on"` | `"on"`: brindle answers agents' permission requests from its rules, on every plan (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. A value you set always wins over the default. The only permission switch: a leftover `permission_essentials` key is ignored |
@@ -1628,8 +1628,8 @@ session costs more per turn the longer it runs. With `supervisor_state` on (the
 default), brindle keeps a compact state of the session from what it already sees: the
 milestones and their status, each branch and where it stands (in review, approved,
 merged), the decisions recorded, the questions still open for you and each worker's
-last result. Once the supervisor's context passes `supervisor_restart_tokens`
-(120,000 by default), brindle ends its turn and starts a fresh session of it, seeded
+last result. If `supervisor_restart_tokens` is set above 0 (it is off by default)
+and the supervisor's context passes it, brindle ends its turn and starts a fresh session of it, seeded
 with that state, the request it started from and the latest messages, instead of
 carrying the full chat. Workers keep running, queued messages wait for the fresh
 session, and nothing in the state is cleared by a restart. It uses only what the
