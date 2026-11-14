@@ -2305,8 +2305,15 @@ class Antigravity(Provider):
             # dontAsk (nobody watches, e.g. a reviewer) brindle's hook decides
             # every call, as under agy_approvals "brindle" (unset, for workers).
             strict = ctx.mode == "doc_question" or ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
-            antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict,
-                                hidden=ctx.profile.hidden_brindle_tools)
+            from brindle import agents
+
+            # The MCP config is the checkout's: whether to hide a short-lived
+            # agent's unused tools is decided again under the lock that every
+            # agy launch here writes it under, so a neighbour that started
+            # since its profile was built keeps its tools.
+            with agents.agy_config_lock(ctx.cwd):
+                antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict,
+                                    hidden=agents.agy_tools_to_hide(ctx.agent_id, ctx.profile.hidden_brindle_tools))
             antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]
         if strict:

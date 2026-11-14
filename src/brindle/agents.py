@@ -324,6 +324,34 @@ def _agy_neighbour_needs_more(db: DB, agent: Agent, ws: Workspace, keep: tuple[s
                for other in db.list_agents(ws.id))
 
 
+def agy_config_lock(checkout: str):
+    """Held by an agy launch while it decides which brindle tools to hide and
+    writes the checkout's MCP config (antigravity.install), across launch
+    processes: two launches sharing a checkout never interleave the two."""
+    from brindle import pipeline
+
+    key = hashlib.sha1(os.path.realpath(checkout).encode()).hexdigest()[:16]
+    return pipeline._reentrant_lock("agy-config-" + key)
+
+
+def agy_tools_to_hide(agent_id: str, hidden: list[str] | None) -> list[str] | None:
+    """``hidden`` (the launch profile's hidden_brindle_tools) for agent
+    ``agent_id``'s agy launch, or None once another agy agent at work in its
+    checkout needs more (one that registered after the profile was built
+    included). Called under agy_config_lock, right before the write."""
+    if not hidden:
+        return hidden
+    db = DB()
+    try:
+        agent = db.get_agent(agent_id)
+        ws = db.get_workspace(agent.workspace_id) if agent else None
+        if agent is None or ws is None:
+            return None
+        return None if _agy_neighbour_needs_more(db, agent, ws, short_lived_tools(agent, ws)) else hidden
+    finally:
+        db.conn.close()
+
+
 def _hidden_brindle_tools(keep: tuple[str, ...]) -> list[str]:
     """Every brindle tool not in ``keep``, sorted so the list is the same at
     every start; each provider names them its own way (Profile.hidden_brindle_tools).
@@ -874,8 +902,8 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
         except Exception:  # noqa: BLE001 - a smaller tool list is only a saving
             log.warning("could not list brindle's tools; %s keeps them all", agent.id, exc_info=True)
             hidden = None
-        if hidden and agent.provider == "antigravity" and _agy_neighbour_needs_more(db, agent, ws, keep):
-            hidden = None   # agy's tool list is the checkout's: never narrow a live neighbour's
+        # agy's tool list is the checkout's: agy_tools_to_hide checks its
+        # neighbours again as the launch writes it.
         profile = replace(profile, hidden_brindle_tools=hidden, short_cache=True)
     autopilot_on = db.get_autopilot(agent.id) is not None
     if autopilot_on:
