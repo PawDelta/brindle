@@ -125,7 +125,7 @@ describe("Sidebar", () => {
   it.each([
     ["processing", null, undefined, "Working", "working"],
     ["idle", "working", undefined, "Working", "working"],
-    ["idle", "checks", undefined, "Working", "working"],
+    ["idle", "checks", undefined, "Checking", "checks"],
     ["idle", "review", undefined, "Reviewing", "review"],
     ["idle", "merging", undefined, "Merging", "merging"],
     ["idle", null, undefined, "Idle", null],
@@ -372,12 +372,10 @@ describe("Sidebar", () => {
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("c1"))).toBe(true);
     // The rows read: a dot for the CLI's status, "id · role", the label; the branch is in the tooltip.
     expect(agentRow("w1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("work");
-    const workingClass = within(agentRow("w1")!).getByTestId("agent-status").className;
-    const workingDot = agentRow("w1")!.querySelector(".side-dot")!.className;
     for (const review_state of ["checks running", "waiting for checks", "checks waiting for room: 2 running"]) {
       act(() => store.dispatch({ type: "snapshot", workspaces: [root, { ...worker, review_state, agents: [...worker.agents!, child] }], inbox: [waiting] }));
-      expect(within(agentRow("w1")!).getByTestId("agent-status").className).toBe(workingClass);
-      expect(agentRow("w1")!.querySelector(".side-dot")!.className).toBe(workingDot);
+      expect(within(agentRow("w1")!).getByTestId("agent-status").dataset.state).toBe("checks");
+      expect(agentRow("w1")!.querySelector(".side-dot")!.classList.contains("st-checks")).toBe(true);
     }
     expect(within(session).queryByTestId("needs-you")).toBeNull();
     expect(screen.queryByTestId("summary")).toBeNull();

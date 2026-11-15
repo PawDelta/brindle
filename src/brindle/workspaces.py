@@ -16,6 +16,7 @@ import filecmp
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -959,10 +960,48 @@ def merge_pull_request(url: str, cwd: str, head: str) -> None:
         raise WorkspaceError("GitHub refused the automatic PR merge. Check the PR's merge requirements.")
 
 
+def _pr_patch(base: str, head: str, cwd: str) -> str | None:
+    diff = git.run(["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color",
+                    "--full-index", "--binary", f"{base}...{head}"], cwd).stdout
+    if not diff:
+        return None
+    # Keep coordinates and function context: identical edits to repeated
+    # blocks are different work. When the PR base advanced, require its edits
+    # to preserve line locations and stay outside our full context ranges.
+    ancestor = git.out(["merge-base", base, head], cwd)
+    base_files = {}
+    if ancestor != base:
+        delta = git.run(["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color",
+                         "--unified=0", f"{ancestor}..{base}"], cwd).stdout
+        base_files = {p.split("\n", 1)[0]: p for p in re.split(r"(?=^diff --git )", delta, flags=re.MULTILINE) if p}
+
+    def ranges(patch):
+        return [(int(start), int(count) if count else 1, int(new_count) if new_count else 1)
+                for start, count, new_count in re.findall(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@", patch, re.MULTILINE)]
+
+    files = re.split(r"(?=^diff --git )", diff, flags=re.MULTILINE)
+    for i, patch in enumerate(files):
+        changed_base = base_files.get(patch.split("\n", 1)[0])
+        if changed_base:
+            ours, theirs = ranges(patch), ranges(changed_base)
+            if not ours or not theirs:
+                raise ValueError("PR base changes have no safe line mapping")
+            for start, count, new_count in theirs:
+                if count != new_count or any(start < pos + size and pos < start + count for pos, size, _ in ours):
+                    raise ValueError("PR base changes may shift or overlap the session patch")
+        # Only text blob IDs are presentation differences. Retain whitespace,
+        # modes, binary data and every hunk's location and function context.
+        if "\nGIT binary patch\n" not in patch and "\nBinary files " not in patch:
+            patch = re.sub(r"^index [^\n]+\n", "", patch, flags=re.MULTILINE)
+        files[i] = patch
+    return "".join(files)
+
+
 def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
     """The open PR (``{number, title, url, headRefName}``) that contains commit
-    ``sha``, whatever its head branch; ``{}`` when GitHub says none is open; None
-    when ``gh`` is missing or couldn't say (nothing is known)."""
+    ``sha``, whatever its head branch, or a unique PR carrying the same complete
+    changes under new commit identities. ``{}`` when none matches; None when
+    ``gh`` is missing or couldn't say (nothing is known)."""
     if not shutil.which("gh"):
         return None
     try:
@@ -973,7 +1012,44 @@ def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
         return None
     if not isinstance(found, list):
         return None
-    return found[0] if found and isinstance(found[0], dict) else {}
+    if found:
+        return found[0] if isinstance(found[0], dict) else {}
+    # A supervisor may copy the session's changes onto a fresh branch from
+    # main. Its commits have new identities, so GitHub's SHA search misses it.
+    # Bind only a unique PR with the same complete diff against its base. All
+    # objects must already be local; discovery never fetches someone else's PR.
+    try:
+        limit = 30
+        while True:
+            out = spawn.read(["gh", "pr", "list", "--state", "open", "--limit", str(limit), "--json",
+                              "number,title,url,headRefName,headRefOid,baseRefOid"],
+                             cwd=cwd, text=True, timeout=PR_CHECKS_SECONDS)
+            candidates = json.loads(out.stdout) if out.returncode == 0 else None
+            if not isinstance(candidates, list):
+                return None
+            if len(candidates) < limit:
+                break
+            # gh paginates internally up to --limit. A full result could be
+            # truncated, so ask for more before deciding a match is unique.
+            limit *= 2
+        matches = []
+        identities: dict[tuple[str, str], str | None] = {}
+        for pr in candidates:
+            if not isinstance(pr, dict) or not pr.get("headRefOid") or not pr.get("baseRefOid"):
+                continue
+            base, head = pr["baseRefOid"], pr["headRefOid"]
+            try:
+                for commit in (sha, head):
+                    if (base, commit) not in identities:
+                        identities[base, commit] = _pr_patch(base, commit, cwd)
+                identity = identities[base, sha]
+                if identity and identity == identities[base, head]:
+                    matches.append(pr)
+            except git.GitError:
+                return None  # An unreadable candidate prevents proving uniqueness.
+        return matches[0] if len(matches) == 1 else {}
+    except (OSError, subprocess.SubprocessError, spawn.Busy, ValueError):
+        return None
 
 
 def pull_request_merge_commit(url: str, cwd: str) -> str | None:
