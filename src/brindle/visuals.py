@@ -33,7 +33,7 @@ from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
 
 MAX_BYTES = 2 * 1024 * 1024     # one revision's page
-MAX_REVISIONS = 20
+KEEP_REVISIONS = 50            # newest pages kept per visual; older ones are pruned
 MAX_OPTIONS = 12
 MAX_TITLE = 120
 MAX_QUESTION = 500
@@ -294,9 +294,6 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
             if row is None or row["root_id"] != root.id or row["kind"] != kind:
                 raise ServiceError("not_found", "no such visual in this session", 404)
             vid, rev = visual_id, row["rev"] + 1
-            if rev > MAX_REVISIONS:
-                raise ServiceError("too_many_revisions", f"a visual may have at most {MAX_REVISIONS} "
-                                   "revisions; publish a new one", 400)
         path = page_path(ws.repo_root, root.id, vid, rev)
         _write_atomic(path, data)
         try:
@@ -314,6 +311,11 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
         except BaseException:
             path.unlink(missing_ok=True)
             raise
+        # Revisions are unlimited, but only the latest KEEP_REVISIONS pages stay
+        # on disk; numbering carries on, and a pruned revision's page 404s.
+        old = rev - KEEP_REVISIONS
+        if old >= 1:
+            page_path(ws.repo_root, root.id, vid, old).unlink(missing_ok=True)
     bus.publish(db, "visual.published", repo_root=ws.repo_root, root_id=root.id, agent_id=caller.id,
                 visual=vid, rev=rev)
     return get(db, vid)

@@ -235,7 +235,7 @@ def publish_visual(title: str, html: str | None = None, question: str | None = N
     Pass exactly one of html or html_path. html_path reads a UTF-8 file inside
     your own worktree or session scratchpad, including after symlinks resolve;
     relative paths start at your worktree.
-    At most 2 MB per page, 20 revisions; a page or text that looks like a
+    At most 2 MB per page; no limit on revisions (only the newest 50 pages are kept); a page or text that looks like a
     secret is refused."""
     from brindle import visuals
     from brindle.service.errors import ServiceError

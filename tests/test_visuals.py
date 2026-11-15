@@ -386,6 +386,20 @@ def test_a_revision_published_meanwhile_keeps_its_page(db, session, monkeypatch)
     assert visuals.page_path(ws.repo_root, boss.id, v["id"], 3).read_text() == "<p>later</p>"
 
 
+def test_a_visual_can_be_revised_past_the_old_cap_and_old_pages_are_pruned(db, session, monkeypatch):
+    ws, boss, _ = session
+    monkeypatch.setattr(visuals, "KEEP_REVISIONS", 5)
+    v = visuals.publish(db, boss, "Board", "<p>r1</p>")
+    for n in range(2, 26):
+        v = visuals.publish(db, boss, "Board", f"<p>r{n}</p>", visual_id=v["id"])
+    assert v["rev"] == 25
+    kept = [n for n in range(1, 26) if visuals.page_path(ws.repo_root, boss.id, v["id"], n).exists()]
+    assert kept == [21, 22, 23, 24, 25]
+    with pytest.raises(ServiceError) as e:
+        visuals.page(db, v["id"], "3")
+    assert e.value.code == "not_found"
+
+
 def test_failed_answer_removes_the_claim_from_a_concurrently_kept_copy(db, session, monkeypatch):
     _, boss, _ = session
     v = visuals.publish(db, boss, "Flow", "<p>flow</p>", "Which?", OPTIONS)
