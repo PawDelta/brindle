@@ -698,6 +698,15 @@ CREATE TABLE IF NOT EXISTS session_pr_prep (
     prepared_at REAL NOT NULL,
     PRIMARY KEY (root_id, branch)
 );
+-- Notification acknowledgements, separate from the requests they describe.
+CREATE TABLE IF NOT EXISTS inbox_dismissed (
+    key TEXT PRIMARY KEY
+);
+-- Recurring requests whose Inbox presentation alone has no occurrence id.
+CREATE TABLE IF NOT EXISTS inbox_occurrences (
+    source TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL
+);
 -- Inbox's Not now choice: only hides a ready PR at this branch head.
 -- Separate from preparation so rechecking the same head preserves the choice.
 CREATE TABLE IF NOT EXISTS session_pr_declined (
@@ -3319,6 +3328,11 @@ class DB:
         goal_at = fields.pop("offer_goal_at", None)
         cols = ", ".join(f"{k}=?" for k in fields)
         with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
+            if fields.keys() & {"state", "note", "question"}:
+                before = c.execute("SELECT state, note, question FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
+                if before and any(fields[k] != before[k] for k in fields.keys() & {"state", "note", "question"}):
+                    c.execute("INSERT INTO inbox_occurrences (source, generation) VALUES (?,1) "
+                              "ON CONFLICT(source) DO UPDATE SET generation=generation+1", (f"question:{root_id}",))
             if has_summary:
                 if summary is None:
                     c.execute("DELETE FROM goal_summaries WHERE root_id=?", (root_id,))
@@ -3680,6 +3694,11 @@ class DB:
         marks = ", ".join("?" for _ in fields)
         update = ", ".join(f"{k}=excluded.{k}" for k in fields)
         with self.tx() as c:
+            if fields.keys() & {"state", "expired_at"}:
+                before = c.execute("SELECT state, expired_at FROM login_state WHERE root_id=?", (root_id,)).fetchone()
+                if before is None or any(fields[k] != before[k] for k in fields.keys() & {"state", "expired_at"}):
+                    c.execute("INSERT INTO inbox_occurrences (source, generation) VALUES (?,1) "
+                              "ON CONFLICT(source) DO UPDATE SET generation=generation+1", (f"login:{root_id}",))
             c.execute(f"INSERT INTO login_state (root_id, {cols}) VALUES (?, {marks}) "
                       f"ON CONFLICT(root_id) DO UPDATE SET {update}", (root_id, *fields.values()))
 

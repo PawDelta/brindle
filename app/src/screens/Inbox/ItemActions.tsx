@@ -52,7 +52,6 @@ export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, com
           <>
             <button type="button" className={`${button} ${size}`} disabled={item.doc == null || !onNavigate} onClick={() => onNavigate?.({ screen: "knowledge", view: "docs", doc: item.doc!, section: item.section ?? undefined })}>Open</button>
             {onGo && <button type="button" className={`${quiet} ${size}`} onClick={onGo}>Reply</button>}
-            <button type="button" className={`${quiet} ${size}`} disabled={actions.busy.has(key)} onClick={() => actions.now(item, "dismiss")}>Dismiss</button>
           </>
         )}
         {REVIEW_KINDS.includes(item.kind) && (
@@ -80,6 +79,7 @@ export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, com
             Go to it ↗
           </button>
         )}
+        <DismissAction item={item} actions={actions} compact={compact} />
       </div>
       {item.kind === "login" && <CloudLoginStatus job={cloud.job} compact={compact} />}
       {note && (
@@ -89,4 +89,9 @@ export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, com
       )}
     </div>
   );
+}
+
+export function DismissAction({ item, actions, compact = false }: Pick<ItemActionsProps, "item" | "actions" | "compact">) {
+  return <button type="button" className={`${quiet} ${compact ? "px-s1 py-0.5 text-xs" : ""}`} disabled={actions.busy.has(itemKey(item))}
+    onClick={() => actions.now(item, "dismiss", item.kind === "doc" ? {} : { item })}>Dismiss</button>;
 }

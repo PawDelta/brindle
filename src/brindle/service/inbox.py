@@ -11,6 +11,7 @@ screen can't show reliably which request it is."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -275,12 +276,46 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
             for r in rows]
 
 
+def permission_dismiss_key(agent_id: str, request_id: str) -> str:
+    return json.dumps(["permission", agent_id, request_id])
+
+
+def _dismiss_key(item: InboxItemDTO) -> str:
+    if item.kind == "permission" and item.agent_id and item.permission and item.permission.request_id:
+        return permission_dismiss_key(item.agent_id, item.permission.request_id)
+    return hashlib.sha256(json.dumps(item.to_json(), sort_keys=True).encode()).hexdigest()
+
+
+def dismissed_keys(db: DB) -> set[str]:
+    return {r["key"] for r in db.conn.execute("SELECT key FROM inbox_dismissed")}
+
+
+def dismiss_item(db: DB, value: dict) -> dict:
+    """Hide this notification only; never answer its underlying request.
+
+    Bind the marker to the snapshot shown, so a newer proposal still appears.
+    Hook requests use their own identity across grouped and individual cards.
+    """
+    try:
+        item = InboxItemDTO.model_validate(value)
+    except ValueError as e:
+        raise ServiceError("invalid", "invalid inbox item", 400) from e
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO inbox_dismissed (key) VALUES (?)", (_dismiss_key(item),))
+    if item.agent_id:
+        bus.publish_agent(db, "inbox.dismissed", item.agent_id)
+    else:
+        bus.publish(db, "inbox.dismissed")
+    return {"dismissed": True}
+
+
 def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[InboxItemDTO]:
     """Everything waiting on a person in ``repo_root``'s sessions (every
     session when None), then the org's unread notices. Each agent's item
     names its session (``root_id``), so the app can link into it."""
     out: list[InboxItemDTO] = []
     shown: set[str] = set()
+    occurrences = {r["source"]: r["generation"] for r in db.conn.execute("SELECT source, generation FROM inbox_occurrences")}
     for ws in view.snapshot(db, repo_root, panes=panes):
         shown.update(a["id"] for a in ws["agents"])
         for a in ws["agents"]:
@@ -304,6 +339,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             if reason and not asking:
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
+                                        request_id=str(occurrences.get(f"question:{a['id']}", 0)) if kind == "question"
+                                        else str(row.status_since) if kind in ("waiting", "credentials", "failed") else None,
                                         detail=row.failed_why.removeprefix("review: ")
                                         if (row.failed_why or "").startswith("review: ") else None,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
@@ -317,7 +354,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             # The workspace holds one asking id; each root's own state is the truth.
             if ap and ap.state == "blocked" and not any(
                     i.kind == "question" and i.agent_id == a["id"] for i in out):
-                out.append(InboxItemDTO(kind="question", reason="has a question", **link))
+                out.append(InboxItemDTO(kind="question", reason="has a question", **link,
+                                        request_id=str(occurrences.get(f"question:{a['id']}", 0))))
             if ap and autopilot.proposing(ap):
                 checks = json.loads(ap.proposal).get("checks") or []
                 out.append(InboxItemDTO(kind="proposed_checks", reason="checks proposed", **link,
@@ -331,6 +369,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             login = db.get_login_state(row.id)
             if login and login.state == "auth_paused":
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
+                                        request_id=str(occurrences.get(f"login:{a['id']}", 0)),
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
     all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _review_items(db, repo_root)
@@ -340,8 +379,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
     # Requests can outlive the live snapshot (notably document requests).
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask
     # for attention again just because a historical request is still stored.
-    return [i for i in all_items if not i.agent_id
-            or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a)]
+    hidden = dismissed_keys(db)
+    return [i for i in all_items if _dismiss_key(i) not in hidden and (not i.agent_id
+            or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a))]
 
 
 def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:

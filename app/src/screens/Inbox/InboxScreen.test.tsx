@@ -9,6 +9,7 @@ import { AppUpdateBanner, AppUpdateProvider } from "../../components/AppUpdateBa
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { Permissions } from "../Settings/Permissions";
+import { forgetReclaimable } from "../../store/storage";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
 import { tauriSink, watchInbox } from "./notify";
 import { usePermissionAsks } from "./PermissionAsks";
@@ -50,6 +51,46 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
+  it.each([
+    "doc", "review_requested", "changes_requested", "signed_off", "waiting", "question", "plan",
+    "review", "merge_failed", "pr_ready", "pr_failed", "pr_opened", "proposed_checks", "credentials",
+    "login", "org_notice", "org_blocked", "setup", "idle_stopped", "plan_offer", "visual", "failed",
+    "sync_conflict", "permission", "permission-window", "permission-group", "update-pending", "update-updated", "storage",
+  ])("offers Dismiss for %s", async (kind) => {
+    forgetReclaimable();
+    const item: InboxItemDTO = kind.startsWith("permission") ? (kind === "permission-window" ? permissionInTerminal : permission)
+      : { kind, reason: "Needs attention", agent_id: "w1", workspace_id: worker.id, root_id: "sup1", request_id: "dr1", notice_id: "n1", doc: "d1" };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: kind.startsWith("update-") || kind === "storage" ? [] : [item], asks: kind === "permission-group" ? [pushes] : [] });
+    const client = daemon.client();
+    if (kind === "storage") vi.spyOn(client, "storage").mockResolvedValue({ worktrees: [], categories: [], reclaimable: 10 * 1024 ** 3, free_bytes: null, low_disk: null, dead_branches: [] });
+    const { store, sync } = mount(daemon, client, { appUpdates: {} as AppUpdates });
+    if (kind.startsWith("update-")) act(() => store.dispatch({ type: "app_update", status: { version: "0.6.2", automatic: true, available: null, pending: kind === "update-pending" ? "0.6.3" : null, updated: kind === "update-updated" ? "0.6.2" : null, later: false, checking: false, last_checked: null } }));
+    const target = kind === "storage" ? await screen.findByTestId("storage-nudge")
+      : kind.startsWith("update-") ? await screen.findByTestId("app-update-card")
+      : kind === "permission-group" ? await screen.findByRole("article", { name: pushes.title })
+      : kind.startsWith("permission") ? await screen.findByTestId("permission-card")
+      : await waitFor(() => { expect(card(kind)).toBeTruthy(); return card(kind); });
+    expect(within(target).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    if (kind === "permission-group") {
+      fireEvent.click(within(target).getByRole("button", { name: "Dismiss" }));
+      await waitFor(() => expect(screen.queryByRole("article", { name: pushes.title })).toBeNull());
+      expect(daemon.permissionAnswers).toEqual([]);
+    }
+    sync.stop();
+  });
+
+  it("dismisses a notification through the daemon and keeps it gone after another snapshot", async () => {
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [question] });
+    const { sync } = mount(daemon);
+    await waitFor(() => expect(card("question")).toBeTruthy());
+    fireEvent.click(within(card("question")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(card("question")).toBeNull());
+    expect(daemon.data.inbox).toEqual([]);
+    await act(async () => sync.refresh());
+    expect(card("question")).toBeNull();
+    sync.stop();
+  });
+
   it("keeps a deferred update actionable, then replaces the offer with the installed card", async () => {
     const updates = { updateNow: async () => null } as unknown as AppUpdates;
     const { store } = mount(new FakeDaemon(), undefined, { appUpdates: updates });
@@ -427,8 +468,9 @@ describe("inbox", () => {
     const setup = card("setup");
     expect(setup.textContent).toContain("Codex's trust of brindle's permission hook was removed");
     expect(setup.textContent).toContain("Fix makes Codex trust brindle's permission hook again");
-    // One button, inline: no confirmation, no sheet, no Go to session (it has none).
-    expect(within(setup).getAllByRole("button").map((b) => b.textContent)).toEqual(["Fix"]);
+    // Inline repair and dismissal; setup has no session to open.
+    expect(within(setup).getByRole("button", { name: "Fix" })).toBeTruthy();
+    expect(within(setup).queryByRole("button", { name: "Go to session ›" })).toBeNull();
     fireEvent.click(within(setup).getByRole("button", { name: "Fix" }));
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/setup/codex-hook", query: {}, body: {} }]));
     expect(screen.queryByRole("dialog")).toBeNull();

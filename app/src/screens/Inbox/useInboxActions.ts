@@ -93,7 +93,7 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
         setDismissing((s) => new Map(s).set(key, chosen));
       }
       void client
-        .inboxAction(actionId(item), action, body)
+        .inboxAction(actionId(item) || "item", action, body)
         .then(() => {
           setSettled((s) => new Map(s).set(key, chosen));
           void refresh();

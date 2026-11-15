@@ -9,7 +9,7 @@ import { useState } from "react";
 import type { OpenUrl } from "../../api/open";
 import { releaseNotesUrl, type AppUpdates } from "../../api/tauri";
 import { plain } from "../../api/wording";
-import { card } from "../../components/ui";
+import { card, quiet } from "../../components/ui";
 import type { AppUpdateItem } from "../../store/appUpdates";
 
 const ACT = "inline-flex h-6 items-center whitespace-nowrap rounded-md border px-2 text-[13px] font-medium disabled:opacity-50";
@@ -46,11 +46,10 @@ export function AppUpdateCard({ item, updates, openUrl }: { item: AppUpdateItem;
           <button type="button" className={`${ACT} ${PLAIN}`} disabled={busy} onClick={() => void run(updates.restart)}>
             Restart to update
           </button>
-        ) : (
-          <button type="button" className={`${ACT} ${PLAIN}`} disabled={busy} onClick={() => void run(updates.dismiss)}>
-            Dismiss
-          </button>
-        )}
+        ) : null}
+        <button type="button" className={`${quiet} px-s1 py-0.5 text-xs`} disabled={busy} onClick={() => void run(updates.dismiss)}>
+          Dismiss
+        </button>
         <button type="button" className={LINK} onClick={() => void openUrl(releaseNotesUrl(item.version))}>
           What's new
         </button>

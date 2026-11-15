@@ -463,6 +463,8 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
     """``id`` is the item's agent (an org notice's ``notice_id`` for "read")."""
     item, action = params["id"], params["action"]
     if action == "dismiss":
+        if "item" in body:
+            return inbox.dismiss_item(db, _get(body, "item", dict, required=True))
         return inbox.dismiss_doc_read(db, item)
     if action == "read":
         from brindle.pro import status
