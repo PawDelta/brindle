@@ -2,6 +2,8 @@
 import subprocess
 import time
 
+import pytest
+
 from brindle import agents, cull, tmux
 from brindle.db import Agent, Workspace
 
@@ -18,6 +20,7 @@ def _commit(path, name):
     return _git(path, "rev-parse", "HEAD")
 
 
+@pytest.mark.variant("catches the false unreported-commits alarm on a merged branch whose base was merged back")
 def test_base_merged_back_after_report_is_not_unreported(db, tmp_path, monkeypatch):
     repo = tmp_path / "repo"  # apart from the test database, which lives in tmp_path
     repo.mkdir()
