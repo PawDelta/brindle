@@ -152,13 +152,23 @@ _REQUEST = re.compile(
 # "show me the flow visually": a plain object phrase, no joining word that could add a second instruction.
 _SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?show\s+(?:me|us)"
                             r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}\s+visually[.!?]*", re.I)
+# Plan wordings: a writing verb plus the plan, or "plan it first". A bare "plan" needs the verb, so
+# "I want the plan to use X" and "the plan looks good" grant nothing; a purpose clause is fine.
+_PLAN_REQUEST = re.compile(
+    r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
+    r"(?:(?:write|draft|prepare|put together|draw up|do|make|create|build)\s+(?:(?:me|us)\s+)?(?:up\s+)?"
+    r"(?:(?:a|an|the|my|our)\s+)?(?:(?:simple|quick|short|small|new|first)\s+)*"
+    r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
+    r"|plan\s+(?:it|this|that)\s+first\b)", re.I)
 _CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
-_CANCEL_ARTIFACT = r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan document|request)\b"
+_CANCEL_ARTIFACT = (r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan docs?|"
+                    r"plan document|plans?|request)\b")
 # Names the artifact, or says not to make it: a cancel in any clause of a message.
 _CANCEL_REQUEST = re.compile(
     _CANCEL_LEAD + r"(?:(?:cancel|stop|skip|drop|scratch|never\s*mind|forget(?:\s+about)?)\s+(?:(?:the|this|that|my)\s+)?" + _CANCEL_ARTIFACT
-    + r"|(?:don['’]?t|do not)\s+(?:make|create|show|draw|build|generate|render)\b(?:\s+(?:me|us|a|an|the|it|this|that))*"
-    r"(?:\s+" + _CANCEL_ARTIFACT + r"|\W*$)|no\s+(?:need\s+for\s+)?(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + ")", re.I)
+    + r"|(?:don['’]?t|do not)\s+(?:make|create|show|draw|build|generate|render|write|draft|prepare|put together|draw up)\b"
+    r"(?:\s+(?:me|us|a|an|the|it|this|that))*(?:\s+" + _CANCEL_ARTIFACT + r"|\W*$)"
+    r"|(?:don['’]?t|do not)\s+do\s+(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + r"|no\s+(?:need\s+for\s+)?(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + ")", re.I)
 # Says only "stop", or "never mind I found it": it cancels unless a new ask follows, as in "never mind, render it".
 _CANCEL_BARE = re.compile(_CANCEL_LEAD + r"(?:(?:never\s*mind|nvm)\s+(?:i|i['’]m|i['’]ve|we|we['’]re|it['’]s|its|got|found|figured|all)\b"
                           r"|(?:never\s*mind|nvm|forget\s+(?:it|that|about\s+it)|scratch\s+that|"
@@ -213,6 +223,8 @@ def request_intent(text: str) -> str | None:
         match = _REQUEST.match(sentence)
         if match:
             scope = "plan" if (match["artifact"] or "").lower().startswith(("planning", "plan ")) else "visual"
+        elif _PLAN_REQUEST.match(sentence):
+            scope = "plan"
         elif _SHOW_VISUALLY.fullmatch(sentence):
             scope = "visual"
     return scope
