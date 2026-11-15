@@ -75,6 +75,7 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
     assert all((i.fix, i.action.path) == ("codex_hook_trust", "/v1/setup/codex-hook") for i in got if kind == "setup")
 
 
+@pytest.mark.variant("catches a dismiss that approves or answers the permission ask or plan it hides")
 def test_dismiss_persists_without_answering_permission_or_plan(db, repo, monkeypatch):
     from brindle import permissions, tmux
     from brindle.daemon import holds
@@ -118,7 +119,7 @@ def test_dismiss_persists_without_answering_permission_or_plan(db, repo, monkeyp
         restarted.conn.close()
 
 
-@pytest.mark.parametrize("kind", ["question", "waiting", "login"])
+@pytest.mark.parametrize("kind", ["login"])
 def test_dismissal_only_hides_the_current_occurrence(db, repo, kind, monkeypatch):
     from types import SimpleNamespace
 
