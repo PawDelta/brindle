@@ -23,7 +23,7 @@ const SCENES = [
   "library", "library-board", "library-decisions", "knowledge", "knowledge-record", "knowledge-search", "knowledge-empty", "knowledge-add", "settings", "settings-edit", "settings-key", "settings-signin", "settings-health", "account", "account-team", "account-enterprise", "account-free", "account-signed-out",
 ];
 const THEMES = ["dark", "light"];
-const VIEWPORT = "1440,960";
+const VIEWPORT = (args0 => { const i = args0.indexOf("--viewport"); return i >= 0 && args0[i + 1] ? args0[i + 1] : "1440,960"; })(process.argv.slice(2));
 /* How long the page gets to fetch its snapshot, draw the terminal and play
    its scene's presses before the shot (preview.tsx: ~1.5s after the first
    snapshot, longer on a busy machine). */
