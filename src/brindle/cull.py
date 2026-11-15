@@ -694,6 +694,16 @@ def _tell_once(db: DB, a: Agent, key: str, body: str) -> bool:
     return sent
 
 
+def count_unreported_commits(path: str, base_branch: str, reported: str | None) -> int:
+    """Commits on HEAD that neither its base branch nor the last delivered
+    report already has. Base commits merged into the branch after the report
+    (or after a merge by the pipeline) are not the worker's, so they never count."""
+    excludes = [f"^{base_branch}"]
+    if reported and git.ok(["merge-base", "--is-ancestor", reported, "HEAD"], path):
+        excludes.append(f"^{reported}")
+    return len(git.run(["rev-list", "HEAD", *excludes], path).stdout.split())
+
+
 def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     """Tell each supervisor, once, about a worker whose report may have been
     lost (a broken MCP connection, then back to waiting, with nobody told the
@@ -744,9 +754,7 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
             head = head or gates.head(ws)
             if head == reported or db.mark(a.id, f"commits:{head}") == "told":
                 continue
-            span = f"{reported}..HEAD" if reported and git.ok(["merge-base", "--is-ancestor", reported, "HEAD"], ws.path) \
-                else f"{ws.base_branch}..HEAD"
-            covered = len(git.run(["rev-list", span], ws.path).stdout.split())
+            covered = count_unreported_commits(ws.path, ws.base_branch, reported)
         except git.GitError:
             continue
         if not covered and counted:
