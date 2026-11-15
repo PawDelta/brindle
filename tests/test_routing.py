@@ -95,13 +95,19 @@ def test_invalid_weight_is_refused(db, repo, boss):
         choose(db, repo, weight="enormous")
 
 
-def test_native_down_is_skipped(db, repo, boss, monkeypatch):
+@pytest.mark.parametrize("weight,candidates,expected", [
+    ("light", ["developer-local", "developer"], "developer"),
+    pytest.param("medium", ["developer-heavy", "developer-sonnet"], "developer-sonnet",
+                 marks=pytest.mark.variant("medium work prefers available Sonnet even when Opus is listed first")),
+])
+def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch, weight, candidates, expected):
     monkeypatch.setattr(quota, "headroom",
                         lambda provider, cfg=None, repo_root=None: 0.0 if provider == "native" else 100.0)
-    config(repo, routing={"light": ["developer-local", "developer"]})
+    config(repo, routing={weight: candidates})
     why = []
-    assert choose(db, repo, weight="light", why=why)[0] == "developer"
-    assert "local model server not answering" in why[0]
+    assert choose(db, repo, weight=weight, why=why)[0] == expected
+    if "developer-local" in candidates:
+        assert "local model server not answering" in why[0]
 
 
 @pytest.mark.variant("nondefault learner choice: weighted routing must select the eligible profile chosen by the learner")

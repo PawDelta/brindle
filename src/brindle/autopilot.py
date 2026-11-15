@@ -903,6 +903,13 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
     order = cfg.routing.get(weight, [])
+    preferred = {
+        "light": ["developer-light", "developer-codex", "developer-sonnet"],
+        "medium": ["developer-sonnet", "developer-codex"],
+        "heavy": ["developer-heavy", "developer-gemini"],
+    }.get(weight, [])
+    # Prefer the proven cheaper workers; keep other candidates in their configured order.
+    order = sorted(order, key=lambda name: preferred.index(name) if name in preferred else len(preferred))
     if effective_ceiling:
         order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:

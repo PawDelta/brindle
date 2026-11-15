@@ -235,7 +235,7 @@ def test_workers_screen_offers_only_allowed_models_and_sets_one_up(monkeypatch):
     out, wm = _workers(acc, ["1", "3", "1", "3", "2", "1", "q"], is_ready=lambda m: False,
                        local_setup=lambda model: next(steps),
                        cli_setup=lambda p: signed.append(p) or True)
-    assert [m.id for m in wm.offered(acc, "medium")] == ["claude-sonnet", "claude-opus", "local-qwen3-coder"]
+    assert [m.id for m in wm.offered(acc, "medium")] == ["claude-sonnet", "local-qwen3-coder"]
     text = "\n".join(out)
     assert "Codex" not in text and "OpenRouter" not in text and "✗ needs 24 GB" in text
     assert user_settings()["routing_light"] == "local-qwen3-coder"      # the failed setup saved nothing

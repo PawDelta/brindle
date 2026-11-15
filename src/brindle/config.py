@@ -87,8 +87,8 @@ def normalize_weight(weight: str | None) -> str | None:
 # Nothing here prefers another provider for its own sake: all-Claude, all-Codex
 # or all-Gemini may well be best, and that's the learner's call.
 DEFAULT_ROUTING = {
-    "light": ["developer-sonnet", "developer-light", "developer", "developer-codex", "developer-local"],
-    "medium": ["developer-sonnet", "developer", "developer-codex", "developer-heavy"],
+    "light": ["developer-light", "developer-codex", "developer-sonnet", "developer", "developer-local"],
+    "medium": ["developer-sonnet", "developer-codex", "developer"],
     "heavy": ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
     "advanced": ["developer-fable", "developer-heavy", "developer-gemini"],
 }
