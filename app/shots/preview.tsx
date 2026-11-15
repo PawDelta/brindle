@@ -20,6 +20,7 @@ import { usageScenario } from "../src/test/usage";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
 import { ORGS, REPO, data } from "./fixtures";
 import { installLibrary, libraryInbox } from "./library";
+import { wideCheckout, wideDiff } from "./wideDiff";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
 import "../src/styles.css";
 
@@ -96,6 +97,8 @@ const SCENES: Record<string, Route> = {
   "sidebar-foot-busy": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "sidebar-resize": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "session-review": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
+  "session-review-diff": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
+  "session-review-diff-split": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
   // One scene per agent of the session: the supervisor, each worker, the reviewer, in the state its row shows.
   "agent-supervisor": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
   "agent-working": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
@@ -178,10 +181,16 @@ if (scene === "flow") {
     antigravity: [{ id: "antigravity.signin", kind: "signin", label: "Sign in to Antigravity", detail: "Antigravity isn't signed in on this Mac.", done: false }],
   };
 }
-if (scene === "session-review") {
+if (scene === "session-review" || scene.startsWith("session-review-diff")) {
   daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
   daemon.data.sessionBase["sup-42"] = { "src/session.ts": "export const ready = false;\n" };
   daemon.data.sessionFiles["sup-42"] = { "src/session.ts": "export const ready = true;\n", "src/review.ts": "export const review = 'PR';\n" };
+  if (scene.startsWith("session-review-diff")) {
+    // A realistic diff (shots/wideDiff.ts): the plain two-file one hides layout overlaps.
+    delete daemon.data.sessionBase["sup-42"];
+    daemon.data.sessionReview["sup-42"].diff = wideDiff();
+    daemon.data.sessionFiles["sup-42"] = wideCheckout();
+  }
   if (daemon.data.goal) {
     daemon.data.goal.goal_phase = "ready_for_pr";
     daemon.data.goal.milestones.forEach((m) => { m.status = "passed"; m.state = "passed"; });
@@ -309,6 +318,8 @@ const OPENS: Record<string, string> = {
   "new-conflict": 'css:button[aria-label="Other ways to start"]',
   "new-codex-only": "Options ▾",
   "knowledge-add": "Add folder",
+  "session-review-diff": "Review changes →",
+  "session-review-diff-split": "Review changes →",
   "update-downloading": 'css:[data-testid="app-update-now"]',
 };
 
@@ -325,6 +336,8 @@ const THEN: Record<string, () => void> = {
   "agents-make": () => [...document.querySelectorAll("button")].find((b) => b.textContent?.startsWith("+ Make a custom agent"))?.click(),
   // The settings page scrolled to its foot: the engine's health list.
   "settings-health": () => document.getElementById("engine")?.scrollIntoView({ block: "end" }),
+  // The PR diff in its Split layout.
+  "session-review-diff-split": () => press("Split"),
   // The sign-in card, up in its provider's row, brought into view.
   "settings-signin": () => document.querySelector('[data-testid="provider-codex"]')?.scrollIntoView({ block: "center" }),
   // A search that finds a decision and the documents' chunks alike.
