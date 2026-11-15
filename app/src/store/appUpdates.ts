@@ -16,7 +16,7 @@ export interface AppUpdateItem {
 /* The item the status calls for, if any. */
 export function appUpdateItem(status: AppUpdateStatus | null): AppUpdateItem | null {
   if (!status?.automatic) return null;
-  if (status.pending) return { kind: "pending", version: status.pending };
+  if (status.pending && !status.pending_dismissed) return { kind: "pending", version: status.pending };
   if (status.updated) return { kind: "updated", version: status.updated };
   return null;
 }

@@ -23,6 +23,7 @@ import { button, card, field, mainTone, quiet } from "../../components/ui";
 import { formatAge } from "../../store/overview";
 import { askKey, describeItem, itemKey, permissionAnswer, permissionLine, seenAt } from "./items";
 import type { useInboxActions } from "./useInboxActions";
+import { DismissAction } from "./ItemActions";
 
 const message = (e: unknown) => {
   const text = e instanceof Error ? e.message : String(e);
@@ -390,6 +391,10 @@ function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: 
         </>
       }
     >
+      <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={() => void run(async () => {
+        await Promise.all(g.items.map((a) => client.inboxAction(a.agent_id, "dismiss", { item: { kind: "permission", reason: "asks permission", agent_id: a.agent_id, permission: { via: "hook", request_id: a.request_id } } })));
+        return "Dismissed. Requests remain pending.";
+      })}>Dismiss</button>
       {modes.length > 0 && (
         <div className="mt-1 flex flex-wrap items-center justify-end gap-2" role="group" aria-label="Decision">
           {modes.includes("deny") && (
@@ -503,6 +508,7 @@ export function PermissionItemCard({ item, isNew, actions, who, onGo }: { item: 
         </>
       }
     >
+      <DismissAction item={item} actions={actions} compact />
       {!window && (
         <div className="mt-1 flex flex-wrap items-center justify-end gap-2" role="group" aria-label="Decision">
           {deny && (

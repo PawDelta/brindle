@@ -167,6 +167,9 @@ def group_dto(g: grants.Group) -> AskGroupDTO:
 
 
 def asks(db: DB, repo_root: str | None) -> list[AskGroupDTO]:
+    from brindle.service.inbox import dismissed_keys, permission_dismiss_key
+
+    hidden = dismissed_keys(db)
     pending = grants.pending_asks(db, repo_root)
     if pending:
         # Holds can outlive a worker's pane and its replacement. Apply the
@@ -178,7 +181,8 @@ def asks(db: DB, repo_root: str | None) -> list[AskGroupDTO]:
             rows = db.list_agents(ws.id)
             shown = view.current_agents(rows, alive) if ws.kind == "worktree" else rows
             current.update(a.id for a in shown if not view.past_worker(a))
-        pending = [a for a in pending if a.agent_id in current]
+        pending = [a for a in pending if a.agent_id in current
+                   and permission_dismiss_key(a.agent_id, a.request_id) not in hidden]
     return [group_dto(g) for g in grants.groups(pending)]
 
 

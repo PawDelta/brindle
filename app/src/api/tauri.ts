@@ -151,6 +151,8 @@ export const appUpdater: AppUpdater = {
    updated to, until dismissed; when this machine last checked (seconds since
    the epoch); a check under way. */
 export interface AppUpdateStatus {
+  /* A dismissed Inbox card still leaves the installed update ready in Settings. */
+  pending_dismissed?: boolean;
   version: string;
   automatic: boolean;
   pending: string | null;
@@ -168,7 +170,7 @@ export interface AppUpdateStatus {
    `progress` how it goes, then the app restarts into it; answers its
    version, or null when there is nothing newer), `later` (set the offer
    aside until a newer one), `restart` into an installed update, `dismiss`
-   "Updated to brindle X", and `watch` each change the shell announces (a
+   its Inbox card, and `watch` each change the shell announces (a
    look in the background), resolving once it listens, to a function that
    stops watching. */
 export interface AppUpdates {

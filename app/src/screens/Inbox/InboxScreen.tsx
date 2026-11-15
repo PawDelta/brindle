@@ -19,7 +19,9 @@
    longer trusts brindle's permission hook; the card goes when the job is
    done, or shows the job's error). Everything else (an agent waiting at
    its own prompt, a failure, a branch to review or merge again) says so in
-   one quiet line and only goes to the session. Requests brindle's hook
+   one quiet line and goes to the session. Every card also offers Dismiss,
+   which hides its notification without answering the underlying request.
+   Requests brindle's hook
    holds come grouped, above the rest: one item per kind and general form,
    decided at once for every request in it, under the stall banner.
 
@@ -48,7 +50,7 @@ import type { Route } from "../../routes";
 import { useJob } from "../Branch/useJob";
 import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
-import { ItemActions } from "./ItemActions";
+import { DismissAction, ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { StorageNudge } from "./StorageNudge";
 import { FIXES, KIND_SHORT, REVIEW_KINDS, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, opensVisual, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
@@ -426,6 +428,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       )}
       <div className="col-span-2 mt-1 flex flex-wrap items-center gap-1.5">
         {acts}
+        {!["credentials", "login", "doc", ...REVIEW_KINDS, "pr_ready", "pr_opened", "pr_failed"].includes(item.kind) && <DismissAction item={item} actions={actions} compact />}
         <span className="flex-1" />
         {onGo && item.kind !== "doc" && !REVIEW_KINDS.includes(item.kind) && !opensVisual(item) && (
           <button type="button" className={`${button} text-xs whitespace-nowrap`} onClick={onGo}>

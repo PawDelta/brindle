@@ -2816,8 +2816,19 @@ export class FakeDaemon {
         const [id, action] = [m[1], m[2]];
         const answer = INBOX_ACTIONS[action];
         if (!answer) return error("invalid", `unknown inbox action '${action}'`, 400);
-        const item = d.inbox.find((i) => (action === "dismiss" ? i.request_id : action === "read" ? i.notice_id : i.agent_id) === id
+        const dismissed = action === "dismiss" ? fields.item as InboxItemDTO | undefined : undefined;
+        if (dismissed?.kind === "permission" && dismissed.permission?.request_id) {
+          d.asks = d.asks.map((g) => ({ ...g, items: g.items.filter((a) => a.agent_id !== dismissed.agent_id || a.request_id !== dismissed.permission?.request_id) })).filter((g) => g.items.length > 0);
+        }
+        const item = d.inbox.find((i) => (dismissed ? i.kind === dismissed.kind && i.agent_id === dismissed.agent_id
+          && i.permission?.request_id === dismissed.permission?.request_id && i.request_id === dismissed.request_id
+          && i.visual_id === dismissed.visual_id && i.fix === dismissed.fix && i.notice_id === dismissed.notice_id && i.doc === dismissed.doc
+          : (action === "dismiss" ? i.request_id : action === "read" ? i.notice_id : i.agent_id) === id)
           && (action !== "pr-not-now" || i.kind === "pr_ready" || i.kind === "pr_opened" || i.kind === "pr_failed"));
+        if (!item && dismissed) {
+          this.publish("inbox.dismissed", { agent_id: dismissed.agent_id ?? null });
+          return json(answer);
+        }
         if (!item) return error("not_found", `no agent ${id}`, 404);
         // The action settles the item, and the bus row it writes sends clients for a fresh inbox.
         d.inbox = d.inbox.filter((i) => i !== item);

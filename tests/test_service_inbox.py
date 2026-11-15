@@ -75,6 +75,102 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
     assert all((i.fix, i.action.path) == ("codex_hook_trust", "/v1/setup/codex-hook") for i in got if kind == "setup")
 
 
+@pytest.mark.variant("catches a dismiss that approves or answers the permission ask or plan it hides")
+def test_dismiss_persists_without_answering_permission_or_plan(db, repo, monkeypatch):
+    from brindle import permissions, tmux
+    from brindle.daemon import holds
+    from brindle.daemon.routes_actions import inbox_action
+    from brindle.service import permissions as svc_permissions
+
+    ws = workspaces.create(db, str(repo), "feat/dismiss").workspace
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "r1", "assign", "waiting", "@2", None, time.time()))
+    db.update_agent("w1", plan_first=1, plan_state="proposed", plan_text="Keep the database")
+    live = holds.Holds(clock=lambda: 100.0)
+    monkeypatch.setattr(holds, "HOLDS", live)
+    monkeypatch.setattr(inbox, "HOLDS", live)
+    panes = tmux.PaneSnapshot()
+    panes.update({"@1": True, "@2": True})
+    monkeypatch.setattr(tmux, "list_panes", lambda: panes)
+    req = permissions.Request("claude", "bash", "Bash", command="npm test")
+    db.add_permission_request("w1", "ask-1", json.dumps(req.to_dict()), "", None, "hook")
+    digest = permissions.request_digest(json.dumps(req.to_dict()), None)
+    live.register("w1", "ask-1", digest, "nonce", 200.0)
+    cards = [i for i in inbox.items(db, str(repo)) if i.kind in ("permission", "plan")]
+    assert {i.kind for i in cards} == {"permission", "plan"}
+    assert svc_permissions.asks(db, str(repo))
+    before = dict(db.permission_requests_of("w1")[0])
+    for item in cards:
+        inbox_action(db, {"id": "w1", "action": "dismiss"}, {"item": item.to_json()})
+    restarted = DB(db.path)
+    try:
+        assert not [i for i in inbox.items(restarted, str(repo)) if i.kind in ("permission", "plan")]
+        assert svc_permissions.asks(restarted, str(repo)) == []
+        assert dict(restarted.permission_requests_of("w1")[0]) == before
+        assert live.held("w1", "ask-1").answer is None
+        assert restarted.get_agent("w1").plan_state == "proposed"
+        # A new proposal and a different request still need their own attention.
+        restarted.update_agent("w1", plan_text="A different plan")
+        restarted.add_permission_request("w1", "ask-2", json.dumps(req.to_dict()), "", None, "hook")
+        live.register("w1", "ask-2", digest, "nonce", 200.0)
+        assert {i.kind for i in inbox.items(restarted, str(repo)) if i.kind in ("permission", "plan")} == {"permission", "plan"}
+        assert [a.request_id for g in svc_permissions.asks(restarted, str(repo)) for a in g.items] == ["ask-2"]
+    finally:
+        restarted.conn.close()
+
+
+@pytest.mark.parametrize("kind", ["login"])
+def test_dismissal_only_hides_the_current_occurrence(db, repo, kind, monkeypatch):
+    from types import SimpleNamespace
+
+    from brindle import agents, autopilot
+    from brindle.daemon.routes_actions import inbox_action
+
+    ws = workspaces.create(db, str(repo), "feat/recurring-inbox").workspace
+    clock = [100.0]
+    monkeypatch.setattr("brindle.db.time", SimpleNamespace(time=lambda: clock[0]))
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.add_autopilot("r1")
+
+    def start(database, question):
+        if kind == "question":
+            autopilot.need_user(database, "r1", question, ask=True)
+        elif kind == "waiting":
+            database.set_status("r1", "waiting")
+        else:
+            database.set_login_state("r1", state="auth_paused", refresh_cmd="aws sso login")
+
+    def cards(database):
+        return [i for i in inbox.items(database, str(repo), panes={"@1": True}) if i.kind == kind]
+
+    start(db, "May I commit the change?")
+    first = cards(db)[0]
+    inbox_action(db, {"id": "r1", "action": "dismiss"}, {"item": first.to_json()})
+    restarted = DB(db.path)
+    try:
+        assert cards(restarted) == []
+        start(restarted, "May I commit the change?")
+        assert cards(restarted) == []
+        for question in ("Which deployment target should I use?", "May I commit the change?"):
+            clock[0] += 1
+            if kind == "question":
+                agents.handle_hook(restarted, "r1", "prompt-submit", {"prompt": "yes"})
+            elif kind == "waiting":
+                restarted.set_status("r1", "processing")
+            else:
+                restarted.set_login_state("r1", state="ok")
+            clock[0] += 1
+            start(restarted, question)
+            assert len(cards(restarted)) == 1
+            # Replaying the old dismissal cannot hide a distinct request, even with identical text.
+            inbox_action(restarted, {"id": "r1", "action": "dismiss"}, {"item": first.to_json()})
+            current = cards(restarted)
+            assert len(current) == 1
+            inbox_action(restarted, {"id": "r1", "action": "dismiss"}, {"item": current[0].to_json()})
+    finally:
+        restarted.conn.close()
+
+
 def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(db, repo):
     from brindle import agents, autopilot
 

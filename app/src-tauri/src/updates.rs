@@ -564,6 +564,8 @@ struct Record {
     #[serde(default)]
     updated: Option<String>,
     #[serde(default)]
+    dismissed_pending: Option<String>,
+    #[serde(default)]
     later: Option<String>,
     /// The engine's last word was Off, until it says On (`engine_allows`).
     #[serde(default)]
@@ -762,6 +764,8 @@ pub struct UpdateStatus {
     automatic: bool,
     /// An update installed, waiting for the restart.
     pending: Option<String>,
+    /// The installed update's Inbox card was dismissed; restart is still available in Settings.
+    pending_dismissed: bool,
     /// An update found and not yet installed, for "Update now" (`app_update_now`).
     available: Option<Offer>,
     /// The person set `available` aside ("Later"): it shows small until a
@@ -786,6 +790,7 @@ fn status<R: Runtime>(app: &AppHandle<R>) -> UpdateStatus {
     UpdateStatus {
         version: version(app),
         automatic: checks_at_launch(&version(app)),
+        pending_dismissed: pending.is_some() && pending == seen.record.dismissed_pending,
         pending,
         available: seen.available.clone(),
         later: seen.available.as_ref().is_some_and(|a| seen.record.later.as_ref() == Some(&a.version)),
@@ -917,13 +922,18 @@ pub async fn app_update_check<R: Runtime>(app: AppHandle<R>) -> Result<UpdateSta
     Ok(status(&app))
 }
 
-/// The person has read "Updated to brindle X": it goes.
+/// Dismiss the Inbox card without changing an installed update or restarting.
 #[tauri::command]
 pub fn app_update_dismiss<R: Runtime>(app: AppHandle<R>) {
+    let pending = match app.state::<Installs>().state().clone() {
+        Install::Installed(version) => Some(version),
+        _ => None,
+    };
     {
         let seen = app.state::<Seen>();
         let mut seen = seen.state();
         seen.record.updated = None;
+        seen.record.dismissed_pending = pending;
         seen.save();
     }
     announce(&app);
@@ -1950,8 +1960,16 @@ mod tests {
         }
         app_update_dismiss(app.handle().clone());
         assert_eq!(status(app.handle()).updated, None);
-        *seen.state() = SeenState::load(Some(path), &current);
+        *seen.state() = SeenState::load(Some(path.clone()), &current);
         assert_eq!(status(app.handle()).updated, None);
+        *app.state::<Installs>().state() = Install::Installed("99.0.0".into());
+        assert!(!status(app.handle()).pending_dismissed);
+        app_update_dismiss(app.handle().clone());
+        *seen.state() = SeenState::load(Some(path), &current);
+        assert!(status(app.handle()).pending_dismissed);
+        assert_eq!(status(app.handle()).pending.as_deref(), Some("99.0.0"));
+        *app.state::<Installs>().state() = Install::Installed("99.0.1".into());
+        assert!(!status(app.handle()).pending_dismissed);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

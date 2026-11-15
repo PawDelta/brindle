@@ -247,7 +247,7 @@ class InboxItemDTO(_DTO):
     root_id: str | None = None     # the agent's session: with agent_id, where the app links to
     detail: str | None = None
     notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
-    request_id: str | None = None  # a doc request's: POST /inbox/{request_id}/dismiss
+    request_id: str | None = None  # a doc request's id, or a recurring notification's source occurrence
     doc: int | str | None = None   # integer kb_docs id or opaque analysis-doc library id
     section: str | None = None
     fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
