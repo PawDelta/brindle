@@ -47,7 +47,7 @@ def test_learner_respects_design_eligibility(db, repo, boss, monkeypatch, weight
     config(repo, fable_for_design_only=True, learning="cloud", default_agent=default,
            routing={"advanced": ["developer-heavy", "developer-fable", "developer-gemini"]},
            learning_candidates=["developer-fable", "developer-heavy", "developer-gemini"])
-    expected = ("developer-fable", weight is None) if design_heavy else ("developer-heavy", False)
+    expected = ("developer-fable", True) if design_heavy else ("developer-heavy", False)
     options = {"design_heavy": True} if design_heavy else {}
     assert autopilot.choose_profile(db, "boss", str(repo), task="Implement storage",
                                     weight=weight, **options) == expected

@@ -904,9 +904,10 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
     order = cfg.routing.get(weight, [])
-    preferred = TIER_PREFERENCES.get(weight, ())
-    # Follow the tier ranking; keep unranked candidates in their configured order.
-    order = sorted(order, key=lambda name: preferred.index(name) if name in preferred else len(preferred))
+    if cfg.routing_sources.get(weight) == "DEFAULT_ROUTING" and not cfg.routing_locked.get(weight):
+        preferred = TIER_PREFERENCES.get(weight, ())
+        # Follow the built-in tier ranking; explicit routing keeps its configured order.
+        order = sorted(order, key=lambda name: preferred.index(name) if name in preferred else len(preferred))
     if effective_ceiling:
         order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:

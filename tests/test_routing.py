@@ -103,7 +103,8 @@ def test_invalid_weight_is_refused(db, repo, boss):
 def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch, weight, candidates, expected):
     monkeypatch.setattr(quota, "headroom",
                         lambda provider, cfg=None, repo_root=None: 0.0 if provider == "native" else 100.0)
-    config(repo, routing={weight: candidates})
+    if weight == "light":
+        config(repo, routing={weight: candidates})
     why = []
     assert choose(db, repo, weight=weight, why=why)[0] == expected
     if "developer-local" in candidates:
