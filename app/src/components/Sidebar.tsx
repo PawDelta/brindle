@@ -321,14 +321,14 @@ function modelOf(a: { model?: string | null; profile: string; provider: string }
 }
 
 /* The stage word and colour a row shares with the milestones view; none when at rest. */
-type RowStage = "code" | "review" | "done";
-const STAGE_CLASS: Record<RowStage, string> = { code: "working", review: "review", done: "done" };
+type RowStage = "code" | "checks" | "review" | "done";
+const STAGE_CLASS: Record<RowStage, string> = { code: "working", checks: "checks", review: "review", done: "done" };
 
 function stageOf(tone: DotTone, a: { mode: string }, reviewState?: string | null): RowStage | null {
   if (tone === "done") return "done";
   if (a.mode === "review") return tone === "work" ? "review" : null;
   if (reviewState?.startsWith("reviewer")) return "review";
-  if (reviewState?.startsWith("checks") || reviewState?.startsWith("waiting for checks")) return "code";
+  if (reviewState?.startsWith("checks") || reviewState?.startsWith("waiting for checks")) return "checks";
   return tone === "work" ? "code" : null;
 }
 
@@ -367,7 +367,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
         <span className="min-w-0 flex-1 truncate text-xs text-ink">
           <span className="text-ink-3" data-testid="agent-role">{[role, modelOf(a)].filter(Boolean).join(" · ")}</span>
         </span>
-        <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status">
+        <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status" data-state={stage ?? undefined}>
           {stage ?? plainLabel(status, a.status)}
         </span>
       </SessionGoal>
@@ -437,8 +437,8 @@ function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined
   if (session.status === "failed") return "Failed";
   if (isPaused(session)) return "Paused";
   switch (goal?.stage) {
-    case "working":
-    case "checks": return "Working";
+    case "working": return "Working";
+    case "checks": return "Checking";
     case "review": return "Reviewing";
     case "merging": return "Merging";
   }
@@ -449,6 +449,7 @@ function sessionStageClass(word: string) {
   switch (word) {
     case "Resuming": return "st-resuming";
     case "Working": return "st-working";
+    case "Checking": return "st-checks";
     case "Reviewing": return "st-review";
     case "Merging": return "st-merging";
     case "Done": return "st-done";

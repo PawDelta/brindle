@@ -279,13 +279,16 @@ def adopt_head_pr(db: DB, root_id: str) -> None:
     if not head:
         return
     found = open_pr_for_head(head, ws.path, root_id)
+    with _pr_lock:
+        if found and found.get("url") in _pr_closed:
+            return  # An older in-flight HEAD lookup may still report the retired PR.
     if found and found.get("url"):
         # head_ref: where the PR really lives, when that isn't the session's branch: a Push must not go to ws.branch.
         db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
                         " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
                         " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at,"
                         " merged_at = CASE WHEN url = excluded.url THEN merged_at END",
-                        (root_id, ws.branch, found["url"], head, time.time()))
+                        (root_id, ws.branch, found["url"], found.get("headRefOid") or head, time.time()))
         db.conn.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?", (root_id, ws.branch))
         # Every adopted PR is managed outside brindle (its head may be another branch or a fork): Push is refused.
         db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) VALUES (?, ?, ?)",
@@ -454,6 +457,7 @@ _head_changed: set[tuple[str, str]] = set()      # lookups whose answer changed,
 
 def _read_head_pr(key: tuple[str, str]) -> None:
     sha, cwd = key
+    started = time.monotonic()
     try:
         with spawn.deadline(workspaces.PR_CHECKS_SECONDS):
             found = workspaces.open_pull_request_for_commit(sha, cwd)
@@ -461,6 +465,15 @@ def _read_head_pr(key: tuple[str, str]) -> None:
         log.exception("brindle: couldn't look up the PR holding a session's HEAD")
         found = None
     with _pr_lock:
+        url = (found or {}).get("url")
+        if url in _pr_closed:
+            closed_at = _pr_cache.get(url, (0, None))[0]
+            if closed_at > started:
+                found = None  # This lookup predates the confirmed closure.
+            else:
+                # A fresh open-only search confirmed the PR was reopened.
+                _pr_closed.discard(url)
+                _pr_cache.pop(url, None)
         before = _head_cache[key][1] if key in _head_cache else None
         _head_cache[key] = (time.monotonic(), found)
         _head_flights.discard(key)
@@ -687,6 +700,10 @@ def refresh_pr_states(db: DB) -> None:
                         c.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?",
                                   (row["root_id"], row["branch"]))
                 if retired:
+                    with _pr_lock:
+                        for key, cached in list(_head_cache.items()):
+                            if (cached[1] or {}).get("url") == row["url"]:
+                                del _head_cache[key]
                     bus.publish_agent(db, "session.pr_checks", row["root_id"], url=row["url"], closed=True)
                 continue
             _auto_merge_session_pr(db, row, ws)
