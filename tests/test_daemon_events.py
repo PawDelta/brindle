@@ -109,8 +109,9 @@ def test_missing_gh_is_not_confirmed_absence(db, monkeypatch, recorded, expected
     assert review._pr_open_state(db, "s") is expected    # not "none open": nothing was asked of GitHub
 
 
-def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
+def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch, caplog):
     import threading
+    from concurrent.futures import ThreadPoolExecutor
     from brindle import spawn, workspaces
     from brindle.daemon import session_review as review
     from brindle.db import DB
@@ -119,11 +120,11 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     started, lock = [], threading.Lock()
     # Only the merged-PR polling is under test: the checks refresh has its own pool.
     monkeypatch.setattr(review, "refresh_pr_states", lambda db: None)
-    # Nor do the git sweeps (they touch the fake /repo, and their spawn.read calls would count as gh reads).
-    # Shown on the unstubbed scenario: with refresh_drift_flags held on an event, `both` is not set within 1s
-    # (the CI failure); without `slow`'s deadline assert, the sweep's `git remote` blocks on release before any gh read.
+    # Other sweep steps touch the fake /repo outside the merge-check deadline.
+    # In particular, fetch notices resolve its git directory through spawn.read.
     monkeypatch.setattr(review.session_sync, "refresh_drift_flags", lambda *a, **kw: None)
     monkeypatch.setattr(review.session_sync, "refresh_idle_sessions", lambda *a, **kw: None)
+    monkeypatch.setattr(review.session_sync, "tell_refused_fetches", lambda db: None)
     # Module-level state of earlier rows must not decide whether a read is submitted.
     monkeypatch.setattr(review, "_merge_checks", {})
     monkeypatch.setattr(review, "_merge_order", {})
@@ -142,6 +143,9 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     monkeypatch.setattr(spawn, "room", lambda: 2)
     monkeypatch.setattr(review, "_merge_polled", 0)
     monkeypatch.setattr(review, "MERGE_CHECK_SECONDS", 0.05, raising=False)
+    # Own the pool so every gh read finishes before patches and log capture end.
+    pool = ThreadPoolExecutor(max_workers=2)
+    monkeypatch.setattr(review, "_merge_pool", pool)
     def sweep():
         connection = DB(db.path)
         try:
@@ -160,6 +164,11 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     finally:
         release.set()
         worker.join(30)
+        pool.shutdown(wait=True, cancel_futures=True)
+    assert not worker.is_alive()
+    for future in review._merge_checks.values():
+        assert future.result() is False
+    assert not any(record.exc_info for record in caplog.records)
 
 
 @pytest.mark.variant("a race from a real incident: the pool thread read gh with no slot (main CI run 42855607818)")
