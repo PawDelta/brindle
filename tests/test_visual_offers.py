@@ -158,6 +158,16 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
                  marks=pytest.mark.variant("a named planning-document request retains plan scope")),
     pytest.param("Please render a planning document", "plan",
                  marks=pytest.mark.variant("render must preserve the named plan scope")),
+    ("write a planning doc for David's feedback", "plan"),
+    ("write the plan, dont do that 9 run test though yet", "plan"),
+    ("draft a plan", "plan"),
+    ("can you draw up a plan", "plan"),
+    ("plan it first", "plan"),
+    ("write a plan to address the feedback", "plan"),
+    ("I want the plan to use X", None),
+    ("the plan looks good", None),
+    ("don't write a plan", None),
+    ("don't do a plan", None),
 ])
 def test_complete_request_intent(db, session, text, scope):
     boss, _ = session
