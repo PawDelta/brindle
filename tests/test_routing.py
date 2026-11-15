@@ -97,8 +97,8 @@ def test_invalid_weight_is_refused(db, repo, boss):
 
 @pytest.mark.parametrize("weight,candidates,expected", [
     ("light", ["developer-local", "developer"], "developer"),
-    pytest.param("medium", ["developer-heavy", "developer-sonnet"], "developer-sonnet",
-                 marks=pytest.mark.variant("medium work prefers available Sonnet even when Opus is listed first")),
+    pytest.param("medium", ["developer-sonnet", "developer-heavy"], "developer-sonnet",
+                 marks=pytest.mark.variant("changing the tier preference ranking changes the routed worker")),
 ])
 def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch, weight, candidates, expected):
     monkeypatch.setattr(quota, "headroom",
@@ -108,6 +108,14 @@ def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch
     assert choose(db, repo, weight=weight, why=why)[0] == expected
     if "developer-local" in candidates:
         assert "local model server not answering" in why[0]
+    if weight == "medium":
+        from brindle import worker_models
+
+        ranked = list(worker_models.TIER_PREFERENCES[weight])
+        first, second = (ranked.index(name) for name in candidates)
+        ranked[first], ranked[second] = ranked[second], ranked[first]
+        monkeypatch.setitem(worker_models.TIER_PREFERENCES, weight, tuple(ranked))
+        assert choose(db, repo, weight=weight)[0] == "developer-heavy"
 
 
 @pytest.mark.variant("nondefault learner choice: weighted routing must select the eligible profile chosen by the learner")

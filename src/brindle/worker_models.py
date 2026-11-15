@@ -23,6 +23,15 @@ HOW = {CLI: "a signed-in CLI", LOCAL: "local (Ollama)", KEY: "hosted, with an AP
 OPENROUTER_KEY = "OPENROUTER_API_KEY"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
+# Ranked worker profiles for each tier. Availability checks fall through this
+# order; the learner may choose another eligible candidate when enabled.
+TIER_PREFERENCES: dict[str, tuple[str, ...]] = {
+    "light": ("developer-sonnet", "developer-light", "developer", "developer-codex", "developer-local"),
+    "medium": ("developer-sonnet", "developer", "developer-codex", "developer-heavy"),
+    "heavy": ("developer-heavy", "developer-gemini", "developer", "developer-codex"),
+    "advanced": ("developer-fable", "developer-heavy", "developer-gemini"),
+}
+
 
 @dataclass(frozen=True)
 class Model:
@@ -39,9 +48,9 @@ class Model:
 CATALOG: tuple[Model, ...] = (
     Model("claude-haiku", "Claude Haiku", CLI, "claude", "developer-light", ("light",)),
     Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "developer-sonnet", ("light", "medium")),
-    Model("claude-opus", "Claude Opus", CLI, "claude", "developer-heavy", ("heavy",)),
+    Model("claude-opus", "Claude Opus", CLI, "claude", "developer-heavy", ("medium", "heavy")),
     Model("codex", "Codex", CLI, "codex", "developer-codex"),
-    Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "developer-gemini", ("heavy",)),
+    Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "developer-gemini", ("medium", "heavy")),
     Model("local-qwen3-coder", "Qwen3 Coder 30B", LOCAL, "native", "developer-local", ("light", "medium"),
           "qwen3-coder:30b"),
     Model("or-qwen3-coder", "Qwen3 Coder", KEY, "native", "developer-or-qwen3-coder", ("light", "medium"),

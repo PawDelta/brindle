@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from brindle import spawn
+from brindle.worker_models import TIER_PREFERENCES
 
 CONFIG_DIR = ".brindle"
 CONFIG_FILE = "config.json"
@@ -86,12 +87,7 @@ def normalize_weight(weight: str | None) -> str | None:
 # brindle Pro's learner may pick instead when its evidence says they do better.
 # Nothing here prefers another provider for its own sake: all-Claude, all-Codex
 # or all-Gemini may well be best, and that's the learner's call.
-DEFAULT_ROUTING = {
-    "light": ["developer-light", "developer-codex", "developer-sonnet", "developer", "developer-local"],
-    "medium": ["developer-sonnet", "developer-codex", "developer"],
-    "heavy": ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
-    "advanced": ["developer-fable", "developer-heavy", "developer-gemini"],
-}
+DEFAULT_ROUTING = {tier: list(names) for tier, names in TIER_PREFERENCES.items()}
 
 
 @dataclass
