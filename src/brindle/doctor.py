@@ -34,6 +34,7 @@ class Check:
 
 VERSION_SECONDS = 15
 TMUX_SECONDS = 10
+FAILED_PROBE_SECONDS = 30.0
 
 _background_probes = contextvars.ContextVar("doctor_background_probes", default=False)
 _probe_lock = threading.Lock()
@@ -45,6 +46,7 @@ def _cached_probe(path: str, args: tuple, scope: tuple, probe, max_age: float | 
     """Return an available answer; share background work for this binary revision.
 
     A changed or missing executable never inherits the previous binary's answer.
+    Undetermined answers expire even when successful answers have no age limit.
     Background work owns no request context or database connection.
     """
     try:
@@ -55,6 +57,8 @@ def _cached_probe(path: str, args: tuple, scope: tuple, probe, max_age: float | 
     now = time.monotonic()
     with _probe_lock:
         hit = _probe_cache.get(key)
+        if hit and hit[1] is None and max_age is None:
+            max_age = FAILED_PROBE_SECONDS
         if hit and (max_age is None or now - hit[0] < max_age):
             return hit[1]
         if key in _probe_pending:

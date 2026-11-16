@@ -100,10 +100,15 @@ def test_doctor_reuses_probes_until_binary_changes(tmp_path, monkeypatch):
     assert len(calls) == 6
 
     broken[0] = False
-    stamp[0] = 4
+    # A transient failure must expire even if the executable is unchanged.
+    clock[0] += 60
+    assert request()["claude"].level == doctor.WARN
     request()
+    assert len(calls) == 6
     finish()
+    assert len(calls) == 8
     assert request()["claude"].level == doctor.OK
+    assert "v3" in request()["claude"].detail
     assert request()["claude identity"].level == doctor.OK
 
     # A login can change without reinstalling the CLI: refresh its status,
