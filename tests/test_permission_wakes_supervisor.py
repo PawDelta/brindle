@@ -24,6 +24,7 @@ def notices(team):
     ("deploy prod", False),     # person-only: the person's from the start
     ("make build", True),       # the supervisor's first, until its window runs out
 ])
+@pytest.mark.variant("person-only commands skip the supervisor's hold; ordinary ones wake it only after the window")
 def test_a_request_left_to_the_person_wakes_the_idle_supervisor(db, team, monkeypatch, command, window_runs_out):
     set_local(team.ws.repo_root, "permission_supervisor_hold_seconds", 30)
     db.set_status("boss", "idle")
