@@ -2908,7 +2908,12 @@ def goal_reminder(db: DB, caller_id: str) -> str | None:
 
 def worker_goal(prompt: str, done_when: str, branch: str) -> str | None:
     """A worker's first message as a Claude Code ``/goal``: Claude keeps working
-    until a small model judges the finish line met. None if too long for one."""
+    until a small model judges the finish line met. None if too long for one.
+    A worker that can't meet it, and has sent its supervisor the question or
+    reported what blocks it, is done too: otherwise it asks in its own pane,
+    which nobody reads, until Claude Code's stop-hook cap ends the turn."""
     text = (f"/goal Finish line: {done_when.strip()} The work is committed on branch "
-            f"`{branch}` and reported with the brindle report_result tool.\n\nTask:\n{prompt}")
+            f"`{branch}` and reported with the brindle report_result tool; or, when the finish "
+            "line can't be met or needs a decision, the question was sent to the supervisor with "
+            f"send_message or what blocks it was reported with report_result.\n\nTask:\n{prompt}")
     return text if len(text) - len("/goal ") <= MAX_GOAL_CHARS else None

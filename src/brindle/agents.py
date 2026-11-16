@@ -525,10 +525,19 @@ supervisor's decision, which arrives as a message. Don't edit files until the
 plan is approved; if it comes back with feedback, revise it and call
 `submit_plan` again."""
 
+# Follows a worker's finish line: a question asked in its own pane is read by
+# nobody, and a /goal it can't meet keeps it asking until Claude Code's
+# stop-hook cap ends the turn (cull.note_goal_loops).
+FINISH_LINE_ESCALATION = (
+    "If this finish line can't be met as written, or meeting it needs a decision, never ask "
+    "in your own pane: nobody reads it. Send the question to your supervisor with the brindle "
+    "`send_message` tool{to}, or call `report_result` saying what blocks you.")
+
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
                            provider, headless: bool, plan_first: bool = False,
-                           decisions: str = "", chunks: str = "", report_only: bool = False) -> str:
+                           decisions: str = "", chunks: str = "", report_only: bool = False,
+                           supervisor_id: str | None = None) -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
     ``task``, the ``decisions`` block that covers its files, its finish line,
     the WORKER_FOOTER reminder to report (just its TASK_TAIL when the rest is
@@ -541,7 +550,8 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
     prompt = assemble([Block(TASK_AND_RULES, task), Block(DECISIONS, decisions),
                        Block(DOCUMENT_CHUNKS, chunks)])
     if done_when:
-        prompt += f"\n\nFinish line: {done_when.strip()}"
+        to = f" (to_agent_id={supervisor_id})" if supervisor_id else ""
+        prompt += f"\n\nFinish line: {done_when.strip()}\n{FINISH_LINE_ESCALATION.format(to=to)}"
     if plan_first:
         prompt += PLAN_FIRST_NOTE
     if brief_in_profile(ws, provider.name):
@@ -642,7 +652,7 @@ def spawn(
     elif prompt and mode in ("handoff", "assign"):
         from brindle import codemap
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
-                                        plan_first=plan_first,
+                                        plan_first=plan_first, supervisor_id=parent_id,
                                         report_only=is_review_profile(profile.name, ws.repo_root),
                                         decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files),
                                         chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
@@ -2630,6 +2640,7 @@ def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) ->
         return decorate_worker_prompt(
             a.task, a.id, ws, a.done_when, provider, bool(a.headless),
             plan_first=bool(a.plan_first) and a.plan_state != "approved",
+            supervisor_id=a.parent_id,
             report_only=is_review_profile(a.profile, ws.repo_root),
             decisions=knowledge.replay_decisions(db, a.id),
             chunks=knowledge.replay_chunks(db, a.id)) + note
