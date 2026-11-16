@@ -64,6 +64,36 @@ LOCK_MAX_AGE = 24 * 3600   # a lock file untouched this long is cleaned up
 FLUSH_RETRY_AFTER = 30.0
 
 
+# What runs the sweep on a clock (each sidebar, the daemon's watch) runs one a
+# minute between all of them, on the clock SWEEP_STAMP keeps (``claim``).
+SWEEP_SECONDS = 60.0
+SWEEP_STAMP = "cull.stamp"
+
+
+def claim(now: float) -> bool:
+    """Claim this minute's sweep. Every caller of this brindle home is due
+    once a minute; under a lock they all take, the shared stamp is read and,
+    when a sweep is due, set to ``now`` before the lock is let go, so with N
+    callers one sweeps a minute, not N. A stamp that can't be used (an
+    unwritable home) claims nothing: this caller sweeps."""
+    stamp = brindle_home() / SWEEP_STAMP
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        with open(stamp.with_name(stamp.name + ".lock"), "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                swept = stamp.stat().st_mtime
+            except FileNotFoundError:
+                swept = 0.0
+            if 0 <= now - swept < SWEEP_SECONDS:   # a stamp from the future: a clock set back
+                return False
+            stamp.touch()
+            os.utime(stamp, (now, now))
+    except OSError:
+        pass
+    return True
+
+
 def _root(db: DB, a: Agent) -> str:
     from brindle import autopilot
 
@@ -295,6 +325,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     # nobody is answering, or gone silent.
     decline_environment_setups(db, panes)
     done.extend(settle_startups(db, now, panes))
+    done.extend(read_busy_screens(db, panes))
     done.extend(note_stuck(db, now, panes))
     # Before the idle reminder: a stop on an API error is told with its kind.
     done.extend(note_api_errors(db, now, panes))
@@ -532,6 +563,26 @@ def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         if prompt_answer.finish_launch(db, a):
             done.append(f"{a.id} past its startup prompts")
+    return done
+
+
+def read_busy_screens(db: DB, panes: dict[str, bool]) -> list[str]:
+    """Read the screen of each running worker marked busy, as the sidebar's
+    render does (agents.reconcile, one sample), so a wait no hook reports (a
+    Codex approval prompt with no permission hook) is marked 'waiting' for
+    note_stuck even where no sidebar runs. Each worker's row is read again
+    just before its screen: one a hook or a sweep moved on is left alone."""
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for listed in db.list_agents():
+        a = db.get_agent(listed.id)
+        if (a is None or a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.status != "processing" or a.headless
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        if agents.reconcile(db, a, samples=1).status == "waiting":
+            done.append(f"{a.id}'s screen shows it waiting on a prompt")
     return done
 
 

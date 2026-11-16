@@ -8,7 +8,6 @@ single render without curses.
 from __future__ import annotations
 
 import curses
-import fcntl
 import os
 import re
 import shutil
@@ -30,9 +29,8 @@ REFRESH_SECONDS = 2.0
 REPAINT = 12  # Ctrl-L: redraw everything; the follow hook sends it after a session switch
 # How often the running dashboards cull leftover processes and stale workers
 # (see brindle.cull), on a thread of its own so the screen never waits on it:
-# one sweep a minute between all of them, on the clock CULL_STAMP keeps.
+# one sweep a minute between all of them and the daemon (cull.claim).
 CULL_SECONDS = 60.0
-CULL_STAMP = "cull.stamp"
 HOME_SECONDS = 3.0       # how often a sidebar checks it isn't stranded (agents.sidebar_come_home)
 # While nothing changes (no key, no database commit) a tick does no work; the view
 # ("ago" ages, git status from status_cache) is re-read this often instead.
@@ -77,30 +75,11 @@ _cull_thread: threading.Thread | None = None
 
 
 def _claim_cull() -> bool:
-    """Claim this minute's cull for this sidebar. Every sidebar of this
-    brindle home is due once a minute; under a lock they all take, the shared
-    stamp is read and, when a sweep is due, set to now before the lock is
-    let go, so with N sidebars one sweeps a minute, not N. A stamp that can't
-    be used (an unwritable home) claims nothing: this sidebar sweeps."""
-    from brindle.config import brindle_home
+    """Claim this minute's cull for this sidebar, on the stamp every sidebar
+    and the daemon's watch share (cull.claim)."""
+    from brindle import cull
 
-    stamp = brindle_home() / CULL_STAMP
-    try:
-        stamp.parent.mkdir(parents=True, exist_ok=True)
-        with open(stamp.with_name(stamp.name + ".lock"), "a") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            now = time.time()
-            try:
-                culled = stamp.stat().st_mtime
-            except FileNotFoundError:
-                culled = 0.0
-            if 0 <= now - culled < CULL_SECONDS:   # a stamp from the future: a clock set back
-                return False
-            stamp.touch()
-            os.utime(stamp, (now, now))
-    except OSError:
-        pass
-    return True
+    return cull.claim(time.time())
 
 
 def _cull_in_background() -> None:
