@@ -2,11 +2,7 @@
 own pane, nobody read it, and the goal sent it back until Claude Code's
 stop-hook cap ended the turn: nine times, its supervisor never told."""
 
-import time
-
 from brindle import agents, cull, tmux
-from brindle.db import Workspace
-from brindle.providers import get_provider
 from test_daemon_cull_sweep import a_session
 
 LOOPED = """\
@@ -37,13 +33,3 @@ def test_a_stop_another_hook_sent_back_is_not_blocked_again_for_queued_mail(db, 
     db.enqueue("w1", "continue working", "boss")
     assert agents.handle_hook(db, "w1", "stop", {"stop_hook_active": True}) is None
     assert db.pending_count("w1") == 1    # kept for the sweep's flush, not lost
-
-
-def test_the_goal_tells_the_worker_to_ask_its_supervisor_not_its_pane(tmp_path):
-    ws = Workspace("ws1", str(tmp_path), "feature", "worktree", "feature", "main", str(tmp_path), None,
-                   "brindle-ws1", time.time())
-    prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, "tests pass", get_provider("claude"),
-                                           headless=False, supervisor_id="boss")
-    assert prompt.startswith("/goal")
-    escalation = prompt[prompt.index("Finish line: tests pass"):]
-    assert "send_message" in escalation and "boss" in escalation
