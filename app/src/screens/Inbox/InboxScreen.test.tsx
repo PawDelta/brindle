@@ -92,8 +92,8 @@ describe("inbox", () => {
     const { sync } = mount(daemon);
     const row = await waitFor(() => { expect(card("provider_switch_back")).toBeTruthy(); return card("provider_switch_back"); });
     expect(within(row).getByTestId("provider-switch").dataset.variant).toBe("notice");
-    expect(row.textContent).toContain("codex");
-    expect(row.textContent).toContain("09:30");
+    expect(row.textContent).toContain("Switched to Codex · Claude was out of quota, back at 09:30");
+    expect(row.textContent).not.toContain("has quota again");
     expect(within(row).queryByRole("button", { name: "Switch" })).toBeNull();
     fireEvent.click(within(row).getByRole("button", { name: "Switch back now" }));
     await waitFor(() => expect(answers).toEqual([{ offer: "sw1", accept: true }]));
