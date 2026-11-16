@@ -517,11 +517,12 @@ def no_signed_in_providers(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_claude_usage_command(monkeypatch):
-    """The sidebar never runs the real `claude -p /usage`: it reads as just
-    asked (a test calls refresh_claude_usage(force=True) and fakes the run)."""
+    """The sidebar's Claude and agy /usage readers look freshly queried.
+    Tests that need a refresh reset its clock or force it and fake the CLI."""
     from brindle import quota
 
     monkeypatch.setattr(quota, "_claude_usage_at", float("inf"))
+    monkeypatch.setattr(quota, "_antigravity_usage_at", float("inf"), raising=False)
 
 
 @pytest.fixture(autouse=True)
