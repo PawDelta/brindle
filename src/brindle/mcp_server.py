@@ -1839,10 +1839,12 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
             pass
     worker = agents.workspace_worker(db, ws)
     abandoned = bool(worker and worker.result is None and not db.merged_sha(ws.id))
-    # reported, yet nothing of its own on the branch and no merge recorded: it
-    # produced nothing, which the learner counts as a failure (not a merge)
+    # reported, yet its branch never moved from where it started (not merely
+    # level with its base, which a plain-git merge also leaves) and no merge
+    # recorded: it produced nothing, which the learner counts as a failure
     empty = bool(worker and worker.result is not None and ahead == 0
-                 and not db.merged_sha(ws.id) and not learning.settled(worker.id))
+                 and not db.merged_sha(ws.id) and not learning.settled(worker.id)
+                 and learning.produced_nothing(worker, ws))
     its_agents = [a.id for a in db.list_agents(ws.id)]
     if unmerged or abandoned or empty:
         # the worktree and the reviewers' rows go with the removal

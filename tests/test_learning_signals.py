@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, learning, mcp_server, pipeline, plugins, pricing, procs, usage, workspaces
+from brindle import (agents, learning, mcp_server, pipeline, plugins, pricing, procs, rewind, usage,
+                     workspaces)
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.pro import learning as pro_learning
@@ -61,23 +62,31 @@ def test_an_idle_worker_without_a_report_is_recorded_as_a_stalled_failure(db, ws
     assert body["parts"] == 3
 
 
-@pytest.mark.parametrize("committed, failure", [(False, "no_commits"), (True, None)])
+@pytest.mark.parametrize("branch, failure", [
+    ("untouched", "no_commits"),
+    ("committed", None),
+    ("merged_by_git", "no record"),   # level with its base, but its commits are in it
+])
 def test_removal_records_what_the_worktree_and_reviewers_showed_before_teardown(
-        db, repo, recorder, monkeypatch, committed, failure):
-    """The real remove_workspace: a reported worker with nothing on its branch is
-    a no_commits failure (not a merge), and its reviewers' spend survives the
-    deletion of their rows."""
+        db, repo, recorder, monkeypatch, branch, failure):
+    """The real remove_workspace: a reported worker whose branch never moved is
+    a no_commits failure (not a merge), one merged by plain git is not, and the
+    reviewers' spend survives the deletion of their rows."""
     model = "claude-sonnet-5-5"
     price = pricing.price_for(model)
     root = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
     ws = workspaces.create(db, str(repo), "feat").workspace
-    if committed:
+    w = Agent("w1", ws.id, "developer", "claude", "boss", "assign", "idle", "@0",
+              "done", time.time() - 30, task="the task")
+    db.add_agent(w)
+    rewind.mark_baseline(w, ws)   # what its session start records
+    if branch != "untouched":
         (Path(ws.path) / "new.py").write_text("x = 1\n")
         sh("git add new.py && git commit -qm work", Path(ws.path))
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "idle", "@0",
-                       "done", time.time() - 30, task="the task"))
+    if branch == "merged_by_git":
+        sh(f"git merge -q --ff-only {ws.branch}", Path(repo))
     db.add_agent(Agent("r1", ws.id, "reviewer", "claude", "boss", "review", "idle", "@0",
                        "verdict", time.time() - 10))
     monkeypatch.setattr(usage, "agent_usage",
@@ -88,7 +97,11 @@ def test_removal_records_what_the_worktree_and_reviewers_showed_before_teardown(
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
 
     assert mcp_server.remove_workspace(ws.id).startswith("Removed")
-    [(task, outcome)] = [e for e in recorder.events if e[0].agent_id == "w1"]
+    mine = [e for e in recorder.events if e[0].agent_id == "w1"]
+    if failure == "no record":   # removed as merged: the learner heard nothing new
+        assert not [o for _, o in mine if o.failure or o.event == "removed_unmerged"]
+        return
+    [(task, outcome)] = mine
     assert outcome.event == "removed_unmerged" and outcome.failure == failure
     assert outcome.review_cost_usd == pytest.approx(price.cost(500, 100, 0, 0))
 

@@ -212,21 +212,35 @@ def _queue_seconds(db: DB, worker: Agent, repo_root: str) -> float:
 def _failure(db: DB, worker: Agent, ws: Workspace) -> tuple[str | None, float]:
     """(failure, idle seconds) for a worker whose task ended unmerged: "idle"
     (idle with no report), "no_report" (never reported), "no_commits" (reported
-    but its branch has nothing ahead of base), else None."""
+    but its branch never moved from where it started), else None."""
     current = db.get_agent(worker.id) or worker
     if current.result is None:
         if current.status == "idle":
             since = current.status_since or current.created_at
             return "idle", max(0.0, time.time() - since)
         return "no_report", 0.0
-    try:
-        from brindle import git, workspaces
-
-        if not git.ahead_behind(ws.path, workspaces.require_base(ws))[1]:
-            return "no_commits", 0.0
-    except Exception:  # noqa: BLE001 - no worktree or base to compare: say nothing
-        pass
+    if produced_nothing(worker, ws):
+        return "no_commits", 0.0
     return None, 0.0
+
+
+def produced_nothing(worker: Agent | None, ws: Workspace) -> bool:
+    """Whether ``worker``'s branch is still exactly where it started: its
+    recorded start (rewind's baseline ref, set at session start) equals the
+    branch head. False whenever that can't be shown, e.g. no recorded start:
+    a branch level with its base may just have been merged by plain git."""
+    if worker is None:
+        return False
+    try:
+        from brindle import git, rewind
+
+        ref = rewind.baseline_ref(worker.id)
+        if not git.ok(["rev-parse", "--verify", "-q", ref], ws.repo_root):
+            return False
+        start = git.out(["rev-parse", ref], ws.repo_root)
+        return bool(start) and start == git.out(["rev-parse", f"refs/heads/{ws.branch}"], ws.repo_root)
+    except Exception:  # noqa: BLE001 - no evidence: don't claim it did nothing
+        return False
 
 
 def _ending(db: DB, worker: Agent, ws: Workspace, merged: bool = False) -> dict:
