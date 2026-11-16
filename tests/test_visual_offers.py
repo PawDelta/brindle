@@ -365,6 +365,7 @@ def app_saw_enter(boss, typed=True):
             "submitted_at": offers.time.time()})
 
 
+@pytest.mark.variant("catches an accepted Claude Code suggestion being refused as the person's words")
 def test_accepted_suggestion_backs_a_visual(db, session):
     """Real incident: Claude Code sends its own suggestion when the person accepts it (Tab, or Enter
     on an empty box), so the app saw their keys but not the words. The prompt's hook says what they were."""
@@ -393,9 +394,11 @@ PASTE, SUGGESTION = "put the pasted plan in a separate visual", "make a separate
 
 @pytest.mark.parametrize("texts,reported,sent,suggestion_backed", [
     # Each Enter reported, then sent, the suggestion's both in the same millisecond (a transcript says .001 for both).
-    pytest.param((PASTE, SUGGESTION), (0.0002, 0.0012), (0.0004, 0.0015), True, id="send-in-the-report's-millisecond"),
+    pytest.param((PASTE, SUGGESTION), (0.0002, 0.0012), (0.0004, 0.0015), True, id="send-in-the-report's-millisecond",
+                 marks=pytest.mark.variant("catches a send in the report's own millisecond losing a valid suggestion after a paste")),
     # The next Enter is reported exactly as the suggestion's send millisecond (.000) ends: it came after.
-    pytest.param((SUGGESTION, PASTE), (0.0002, 0.0010), (0.0004, 0.0015), True, id="next-report-at-the-tick's-end"),
+    pytest.param((SUGGESTION, PASTE), (0.0002, 0.0010), (0.0004, 0.0015), True, id="next-report-at-the-tick's-end",
+                 marks=pytest.mark.variant("catches an inclusive tick bound letting a later paste steal an earlier suggestion's mark")),
     # Both reports and both sends in one millisecond: which Enter sent which can't be told, so neither counts.
     pytest.param((PASTE, SUGGESTION), (0.0002, 0.0006), (0.0004, 0.0008), False, id="ambiguous",
                  marks=pytest.mark.variant("two Enters in the tick a prompt went in: claim neither")),
@@ -784,6 +787,7 @@ def test_visual_request_stress(db, session, monkeypatch, said, asked, published)
             mcp_server.publish_visual("Not asked", "<p>no</p>", asked=asked)
 
 
+@pytest.mark.variant("catches a message taken in mid-turn closing an open visual offer")
 def test_message_taken_mid_turn_leaves_the_offer_open(db, session, tmp_path):
     """Real incident: a reply to something else, sent while the turn that made the offer still ran,
     closed the offer a second after it was made. Only a prompt after the turn answers it."""
