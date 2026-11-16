@@ -102,8 +102,50 @@ def test_storage_report_begun_before_a_clean_is_not_kept(brindle_home):
     from brindle.daemon.storage_reports import StorageReports
 
     pending = []
-    reports = StorageReports(measure=lambda repo: {**disk_report(), "reclaimable": 7}, start=pending.append)
+
+    def measure(repo):
+        reports.forget()        # a clean, while this measurement runs
+        return {**disk_report(), "reclaimable": 7}
+
+    reports = StorageReports(measure=measure, start=pending.append)
     reports.get(None)
-    reports.forget()        # a clean, while that measurement runs
     pending.pop()()
     assert reports.get(None)["measured_at"] is None
+
+
+def test_storage_reads_for_other_repos_queue_behind_one_measuring_thread(brindle_home, repo):
+    from brindle.daemon.storage_reports import StorageReports
+
+    pending, measured = [], []
+    reports = StorageReports(measure=lambda r: measured.append(r) or disk_report(), start=pending.append)
+    for asked in (None, str(repo), str(repo / "not-a-repo"), "/no/such/place", str(repo)):
+        assert reports.get(asked)["refreshing"] is True
+    assert len(pending) == 1        # one thread for the home, however many repos are asked for
+    pending.pop()()
+    assert measured == [None, str(repo.resolve())]      # one after another; made-up repos read as none
+    assert reports.get(str(repo))["refreshing"] is False
+
+
+def test_storage_failure_stops_measuring_until_asked_and_keeps_the_last_report(brindle_home):
+    from brindle.daemon.storage_reports import StorageReports
+
+    pending, outcomes = [], [{**disk_report(), "reclaimable": 7}, OSError("disk gone"), {**disk_report(), "reclaimable": 3}]
+
+    def measure(repo):
+        got = outcomes.pop(0)
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    reports = StorageReports(measure=measure, start=pending.append, clock=lambda: NOW)
+    reports.get(None)
+    pending.pop()()
+    reports.get(None, fresh=True)
+    pending.pop()()
+    failed = reports.get(None)
+    assert (failed["reclaimable"], failed["refreshing"], bool(failed["error"])) == (7, False, True)
+    assert reports.get(None)["refreshing"] is False and pending == []    # polling doesn't walk again
+    assert reports.get(None, fresh=True)["refreshing"] is True
+    pending.pop()()
+    again = reports.get(None)
+    assert (again["reclaimable"], again["error"]) == (3, None)

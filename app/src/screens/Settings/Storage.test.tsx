@@ -87,6 +87,23 @@ describe("Storage", () => {
     }
   });
 
+  it("stops reading when the engine's measurement failed, and lets the person ask again", async () => {
+    vi.useFakeTimers();
+    try {
+      const failed: StorageReport = { worktrees: [], categories: [], reclaimable: 0, free_bytes: null, low_disk: null, dead_branches: [], measured_at: null, refreshing: false, error: "OSError: disk gone" };
+      const client = { storage: vi.fn().mockResolvedValue(failed), cleanStorage: vi.fn() };
+      render(<Storage client={client} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(client.storage).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("alert")).toBeTruthy();
+      expect((screen.getByRole("button", { name: "Measure again" }) as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows only the newest read when two land out of order, and keeps the shared figure from it", async () => {
     const reads: Record<string, (r: StorageReport) => void> = {};
     const client = { storage: vi.fn((repo?: string) => new Promise<StorageReport>((resolve) => (reads[repo!] = resolve))), cleanStorage: vi.fn() };

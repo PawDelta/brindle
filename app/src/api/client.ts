@@ -1475,13 +1475,16 @@ export interface StorageReport {
   /* Epoch seconds the report shown was measured; null: none yet (the fields
      above are then empty). Older engines leave both fields out. */
   measured_at?: number | null;
-  /* A measurement is under way (on its own thread): read again for its result. */
+  /* A measurement is under way or queued (on its own thread): read again for its result. */
   refreshing?: boolean;
+  /* Why the last measurement failed (the report shown, if any, is the last good one);
+     the engine tries again only when asked (`fresh`) or a while later. */
+  error?: string | null;
 }
 
-/* A report with nothing measured yet, or one about to be replaced: read again shortly. */
+/* A report about to be replaced, or with nothing measured and no failure: read again shortly. */
 export function storagePending(r: StorageReport): boolean {
-  return r.refreshing === true || r.measured_at === null;
+  return r.refreshing === true || (r.measured_at === null && !r.error);
 }
 
 /* POST /storage/clean (disk.clean): what went, and what was kept and why

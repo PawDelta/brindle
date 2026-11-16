@@ -66,6 +66,7 @@ function read(client: Pick<DaemonClient, "storage">): void {
   reading = client.storage().then(
     (r) => {
       if (r.measured_at !== null) noteReclaimable(r.reclaimable, started);
+      if (r.error) failedAt = Date.now();
       pending = storagePending(r);
     },
     () => {

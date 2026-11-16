@@ -60,7 +60,7 @@ export function Storage({ client, repo }: { client: StorageClient; repo?: string
       if (newest.current !== started) return;
       // Nothing measured yet: the report on screen stays until one is.
       if (r.measured_at !== null) setReport(r);
-      setError(null);
+      setError(r.error ? `Couldn't measure brindle's disk use: ${plain(r.error)}` : null);
       pending = storagePending(r);
       if (pending) setFollow((n) => n + 1);
     } catch (e) {
