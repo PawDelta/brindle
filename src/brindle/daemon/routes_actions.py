@@ -460,17 +460,31 @@ def provider_switch(db: DB, params: dict, body: Body) -> Any:
     """The person's Switch / Not now on a provider-switch Inbox card (kind
     provider_switch or provider_switch_back): ``{"offer": id, "accept": bool}``.
     Accept runs brindle.provider_switch.switch for either kind and answers
-    the session now driving; a second press answers the same session."""
-    from brindle import provider_switch as ps
+    the session now driving; a second press answers the same session.
+    ``always: true`` saves quota_switch="auto" before switching."""
+    from brindle import config, provider_switch as ps
 
     root, _ = _root(db, params["root"])
     offer = ps.get(db, _get(body, "offer", required=True))
-    if offer is None or offer.root_id != root.id:
+    notice = offer is not None and offer.kind == "switch" and offer.state == "done" and offer.new_root_id == root.id
+    if offer is None or (offer.root_id != root.id and not notice):
         raise ServiceError("not_found", "no such provider switch offer for this session", 404)
     now = time.time()
     if not _get(body, "accept", bool, required=True):
-        ps.dismiss(db, offer.id, now)
+        if notice:
+            ps.dismiss_notice(db, offer.id)
+        else:
+            ps.dismiss(db, offer.id, now)
         return {"accepted": False}
+    if _get(body, "always", bool, default=False):
+        config.set_user("quota_switch", "auto")
+    if notice:
+        original = offer
+        ps.maybe_offer_back(db, now, switch_id=original.id)
+        row = db.conn.execute("SELECT id FROM provider_switches WHERE back_of=?", (original.id,)).fetchone()
+        if row is None:
+            raise ServiceError("unavailable", "the original provider is unavailable", 409)
+        offer = ps.get(db, row["id"])
     new = ps.switch(db, offer.id, now)
     return SessionDTO.from_agent(new).to_json()
 
@@ -1558,13 +1572,16 @@ PERMISSION_MODES = ("default", "auto")
 
 def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
     """``visuals`` ("on" or "off", offers only), ``claude_permission_mode`` ("default" or "auto"),
-    ``opencode_permission_mode`` ("ask", "auto" or "autonomous") and/or ``login_shell_env``
+    ``opencode_permission_mode`` ("ask", "auto" or "autonomous"), ``quota_switch``
+    ("ask" or "auto") and/or ``login_shell_env``
     ("on" or "off": the login shell's proxy and certificate settings for launched CLIs;
     "off" applies to the next launch, "on" from the next daemon start) into
     ~/.brindle/config.json; its other keys are kept."""
     from brindle import config
+    from brindle.provider_switch import quota_switch
 
     allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"), "login_shell_env": ("on", "off"),
+               "quota_switch": ("ask", "auto"),
                "claude_permission_mode": PERMISSION_MODES,
                "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES}
     changes = {key: _get(body, key) for key in allowed if body.get(key) is not None}
@@ -1581,6 +1598,7 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
         for row in db.conn.execute("SELECT DISTINCT repo_root FROM workspaces"):
             bus.publish(db, "visual.offers_setting", repo_root=row["repo_root"])
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
+            "quota_switch": quota_switch(),
             "opencode_permission_mode": config.opencode_permission_mode(),
             "visuals_enabled": "on" if config.visuals_enabled_setting() else "off",
             "login_shell_env": "on" if config.login_shell_env_setting() else "off"}
