@@ -5,7 +5,7 @@
 import { LOGIN_PROVIDERS, type InboxAction, type LoginProvider } from "../../api/client";
 import type { InboxItemDTO } from "../../api/schema";
 import { providerLabel } from "../../api/providers";
-import { offerOf, switchLine } from "../../components/ProviderSwitch/ProviderSwitch";
+import { isNotice, offerOf, switchLine } from "../../components/ProviderSwitch/ProviderSwitch";
 
 /* The provider a credentials item is about: the sign-in route the engine
    names on the item (`action`: POST /v1/providers/{p}/login, engine branch
@@ -135,7 +135,7 @@ export function describeItem(item: InboxItemDTO): string {
       return "This looks big: plan it first?";
     case "provider_switch":
     case "provider_switch_back":
-      return switchLine(offerOf(item));
+      return switchLine(offerOf(item), isNotice(item) ? "notice" : "offer");
     case "org_notice":
     /* An org Block, every request it stopped in one notice (service/inbox._org_blocks): "Blocked by <org> policy: <why>". */
     case "org_blocked":

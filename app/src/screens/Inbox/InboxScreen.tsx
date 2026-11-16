@@ -50,7 +50,7 @@ import type { Route } from "../../routes";
 import { useJob } from "../Branch/useJob";
 import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
-import { PROVIDER_SWITCH_KINDS, ProviderSwitchCard, answerProviderSwitch, offerOf } from "../../components/ProviderSwitch/ProviderSwitch";
+import { PROVIDER_SWITCH_KINDS, ProviderSwitchCard, answerProviderSwitch, isNotice, offerOf } from "../../components/ProviderSwitch/ProviderSwitch";
 import { DismissAction, ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { StorageNudge } from "./StorageNudge";
@@ -452,6 +452,7 @@ function ProviderSwitchActions({ item, actions, onDone }: { item: InboxItemDTO; 
   return (
     <ProviderSwitchCard
       showLine={false}
+      variant={isNotice(item) ? "notice" : "offer"}
       offer={offerOf(item)}
       onAnswer={(accept, always) => answerProviderSwitch(client, item, accept, undefined, always).then(
         () => { actions.settle(item); onDone(); },
