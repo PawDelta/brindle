@@ -459,9 +459,8 @@ _TRANSFERRING: dict[str, tuple[Job, tuple[str, str | None]]] = {}     # scratch 
 def provider_switch(db: DB, params: dict, body: Body) -> Any:
     """The person's Switch / Not now on a provider-switch Inbox card (kind
     provider_switch or provider_switch_back): ``{"offer": id, "accept": bool}``.
-    Accept runs brindle.provider_switch.switch (or switch_back) and answers
-    the session now driving; a second press answers the same session.
-    DESIGN STUB: see docs/provider-switch-design.md."""
+    Accept runs brindle.provider_switch.switch for either kind and answers
+    the session now driving; a second press answers the same session."""
     from brindle import provider_switch as ps
 
     root, _ = _root(db, params["root"])
@@ -472,7 +471,7 @@ def provider_switch(db: DB, params: dict, body: Body) -> Any:
     if not _get(body, "accept", bool, required=True):
         ps.dismiss(db, offer.id, now)
         return {"accepted": False}
-    new = (ps.switch_back if offer.kind == "back" else ps.switch)(db, offer.id, now)
+    new = ps.switch(db, offer.id, now)
     return SessionDTO.from_agent(new).to_json()
 
 
