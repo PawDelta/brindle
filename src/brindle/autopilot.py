@@ -886,10 +886,9 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     return None
 
 
-def tier_order(cfg: RepoConfig, weight: str, *, allowed_only: bool = True) -> list[str]:
+def tier_order(cfg: RepoConfig, weight: str) -> list[str]:
     """``weight``'s candidates in the order routing tries them: the built-in
-    tier ranking for the default lists, the configured order otherwise;
-    ``allowed_only``: without those routing reserves for design-heavy tasks."""
+    tier ranking for the default lists, the configured order otherwise."""
     from brindle.worker_models import TIER_PREFERENCES
 
     order = list(cfg.routing.get(weight, []))
@@ -897,7 +896,36 @@ def tier_order(cfg: RepoConfig, weight: str, *, allowed_only: bool = True) -> li
         preferred = TIER_PREFERENCES.get(weight, ())
         # Follow the built-in tier ranking; explicit routing keeps its configured order.
         order = sorted(order, key=lambda name: preferred.index(name) if name in preferred else len(preferred))
-    return [n for n in order if cfg.routing_allows(n, False)] if allowed_only else order
+    return order
+
+
+def eligible(cfg: RepoConfig, repo_root: str, weight: str, gate=None, *, ceiling: str | None = None,
+             design_heavy: bool = False) -> tuple[list[str], list[str], list[str], dict[str, str]]:
+    """(order, remaining, skipped, over) for a ``weight`` task: the tier's
+    candidates in routing's order under the ceiling (``ceiling``, else the
+    repo's ``max_weight``), those it can run now, why each other was
+    skipped, and which a budget (``gate``) ruled out. Read-only: routing and
+    the goal preview both judge candidates by it."""
+    skipped: list[str] = []
+    remaining: list[str] = []
+    over: dict[str, str] = {}
+    weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
+    effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
+    order = tier_order(cfg, weight)
+    if effective_ceiling:
+        order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
+    for name in order:
+        if not cfg.routing_allows(name, design_heavy):
+            skipped.append(f"Fable is reserved for design-heavy tasks, skipped {name}")
+            continue
+        why = _unavailable(name, cfg, repo_root, gate, weight)
+        if why:
+            skipped.append(why)
+            if why.startswith("over budget"):
+                over[name] = why
+        else:
+            remaining.append(name)
+    return order, remaining, skipped, over
 
 
 def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
@@ -912,25 +940,8 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     when it moved the task to a cheaper candidate."""
     from brindle import learning, routing_goal
 
-    skipped: list[str] = []
-    remaining: list[str] = []
-    over: dict[str, str] = {}
-    weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
-    effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
-    order = tier_order(cfg, weight, allowed_only=False)
-    if effective_ceiling:
-        order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
-    for name in order:
-        if not cfg.routing_allows(name, design_heavy):
-            skipped.append(f"Fable is reserved for design-heavy tasks, skipped {name}")
-            continue
-        why = _unavailable(name, cfg, repo_root, gate, weight)
-        if why:
-            skipped.append(why)
-            if why.startswith("over budget"):
-                over[name] = why
-        else:
-            remaining.append(name)
+    order, remaining, skipped, over = eligible(cfg, repo_root, weight, gate, ceiling=ceiling,
+                                               design_heavy=design_heavy)
     if over and decision is not None:
         if not remaining:
             decision["over_budget"] = list(over.values())

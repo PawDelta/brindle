@@ -25,10 +25,10 @@ without hosted learning and the default the learner must beat. A tier the
 owner locked keeps its order.
 
 The triangle (§6a) places a *setup* (an outcome: $ a task, minutes, first try)
-against a yardstick, Fable alone, at the centre. The preview's own point is
-this repo's routing under the goal, on its recent mix of tiers, against Fable
-on the same mix; the reference setups ship in
-``brindle/data/reference_setups.json``.
+against one yardstick, the shipped Fable 5.2 alone reference, at the centre.
+The reference setups ship in ``brindle/data/reference_setups.json``; the
+preview's own setup is this repo's routing under the goal, put on the same
+footing (see :func:`preview`).
 """
 
 from __future__ import annotations
@@ -387,44 +387,52 @@ def preview(weights: dict | None, repo_root: str, db=None) -> dict:
     for (Balanced without a goal). ``roles``: each worker tier's first pick
     under the goal (``profile``) and without it (``previous``); the reviewer
     and supervisor stay as they are until they have evidence of their own
-    (§4). ``you``: what those picks cost, take and merge first time on this
-    repo's recent mix of tiers, from the shipped priors (``measured`` false:
-    not yet measured on your tasks; ``runs``: the tasks the mix is from).
-    ``landed``: where ``you`` sits against Fable alone on the same mix."""
+    (§4). Candidates are judged as routing judges them (autopilot.eligible:
+    excluded providers, sign-in, model access, headroom, the repo's
+    ceiling), so a pick here is one a delegation could run.
+
+    ``you`` is on the same footing as the ``references``: the shipped Fable
+    alone numbers scaled by how your picks compare with a Fable worker on
+    this repo's recent mix of tiers, both from the shipped priors (``measured``
+    false: not yet measured on your tasks; ``runs``: the tasks the mix is
+    from). ``landed`` places ``you`` against that same Fable reference (§6a),
+    so the point and the table's numbers always agree."""
     from brindle import autopilot, config
 
     cfg = config.load_repo_config(repo_root)
     pri = priors()
     mix, runs = tier_mix(db, repo_root)
-    roles, you, yard, covered = [], dict.fromkeys(("usd", "minutes", "first_try"), 0.0), \
-        dict.fromkeys(("usd", "minutes", "first_try"), 0.0), 0.0
+    mine_sum, fable_sum = dict.fromkeys(("usd", "minutes", "first_try"), 0.0), \
+        dict.fromkeys(("usd", "minutes", "first_try"), 0.0)
+    roles, covered = [], 0.0
     for t in config.WEIGHTS:
-        order = autopilot.tier_order(cfg, t)
-        previous = order[0] if order else None
+        _, usable, _, _ = autopilot.eligible(cfg, repo_root, t)
+        previous = usable[0] if usable else None
         locked = bool(cfg.routing_locked.get(t))
-        pick = previous if (weights is None or locked) else (rank(order, t, weights, repo_root) or [None])[0]
+        pick = previous if (weights is None or locked) else (rank(usable, t, weights, repo_root) or [None])[0]
         roles.append({"kind": t, "profile": pick, "previous": previous})
         if pick is None or t not in mix:
             continue
-        mine = estimates(order, t, repo_root, pri)[pick]
-        fable = estimates(list(dict.fromkeys([YARDSTICK_PROFILE, *order])), t, repo_root, pri)[YARDSTICK_PROFILE]
-        for k in you:
-            you[k] += mix[t] * mine[k]
-            yard[k] += mix[t] * fable[k]
+        mine = estimates(usable, t, repo_root, pri)[pick]
+        fable = estimates(list(dict.fromkeys([YARDSTICK_PROFILE, *usable])), t, repo_root, pri)[YARDSTICK_PROFILE]
+        for k in mine_sum:
+            mine_sum[k] += mix[t] * mine[k]
+            fable_sum[k] += mix[t] * fable[k]
         covered += mix[t]
     reviewer = cfg.review_profile or cfg.reviewer
     supervisor = cfg.supervisor_profile or "supervisor"
     roles += [{"kind": "reviewer", "profile": reviewer, "previous": reviewer},
               {"kind": "supervisor", "profile": supervisor, "previous": supervisor}]
     data = references()
+    ref = next(s for s in data["setups"] if s["name"] == data["yardstick"])
+    you = {"usd": ref["usd"], "minutes": ref["minutes"], "first_try": ref["first_try"]}
     if covered:
-        you = {k: v / covered for k, v in you.items()}
-        yard = {k: v / covered for k, v in yard.items()}
-        landed = place(you, yard, data.get("stretch", 2))
-    else:
-        landed = {k: round(1 / 3, 4) for k in KEYS}
+        odds = _odds(ref["first_try"]) * _odds(mine_sum["first_try"] / covered) / _odds(fable_sum["first_try"] / covered)
+        you = {"usd": ref["usd"] * mine_sum["usd"] / fable_sum["usd"],
+               "minutes": ref["minutes"] * mine_sum["minutes"] / fable_sum["minutes"],
+               "first_try": odds / (1 + odds)}
     return {"aim": dict(weights or PRESETS["balanced"]),
-            "landed": landed,
+            "landed": place(you, ref, data.get("stretch", 2)),
             "you": {"usd": round(you["usd"], 2), "minutes": round(you["minutes"], 1),
                     "first_try": round(you["first_try"], 3), "measured": False, "runs": runs},
             "references": [{k: s[k] for k in SETUP_FIELDS} for s in data["setups"]],

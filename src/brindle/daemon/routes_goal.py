@@ -23,7 +23,7 @@ from starlette.routing import Route
 
 from brindle import config, routing_goal
 from brindle.daemon.routes_actions import _endpoint, _get
-from brindle.daemon.routes_read import _json, _need_repo
+from brindle.daemon.routes_read import _heavy_json, _need_repo
 from brindle.db import DB
 from brindle.service.errors import ServiceError
 
@@ -35,7 +35,7 @@ def goal_view(db: DB, repo: str, session: str | None) -> dict:
             "preview": routing_goal.preview(got.weights, repo, db)}
 
 
-@_json
+@_heavy_json      # the preview judges each candidate as routing does: sign-in probes included
 def get_goal(db: DB, request: Request) -> Any:
     return goal_view(db, _need_repo(request), request.query_params.get("session") or None)
 

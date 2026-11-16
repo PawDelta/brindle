@@ -154,13 +154,23 @@ def test_without_hosted_learning_the_goal_orders_the_tier_by_the_priors(db, repo
     assert autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium", **kw)[0] == picked
 
 
+def _medium(preview: dict) -> dict:
+    return {r["kind"]: r for r in preview["roles"]}["medium"]
+
+
 def test_the_preview_reflects_this_repos_routing_and_goal(db, repo, offline):
     cheap = routing_goal.preview(CHEAP, str(repo), db)
     fast = routing_goal.preview(routing_goal.PRESETS["fast"], str(repo), db)
-    medium = {r["kind"]: r for r in cheap["roles"]}["medium"]
-    assert (medium["profile"], medium["previous"]) == ("developer-codex", "developer-sonnet")
-    assert (cheap["you"]["usd"], fast["you"]["usd"]) == (1.0, 4.0)
-    assert cheap["landed"]["cost"] > fast["landed"]["cost"]
+    assert (_medium(cheap)["profile"], _medium(cheap)["previous"]) == ("developer-codex", "developer-sonnet")
+    assert fast["you"]["usd"] / cheap["you"]["usd"] == pytest.approx(4.0, rel=0.01)
+    # The point and the table share one yardstick: the shipped Fable alone reference.
+    fable = next(r for r in cheap["references"] if r["name"] == "Fable 5.2 alone")
+    assert cheap["landed"] == pytest.approx(routing_goal.place(cheap["you"], fable), abs=0.01)
+    # A candidate routing can't run is never proposed: the preview's pick is dispatch's.
+    config.set_repo(str(repo), "exclude_providers", ["codex"])
+    proposed = _medium(routing_goal.preview(CHEAP, str(repo), db))["profile"]
+    assert proposed == "developer-sonnet" == autopilot.choose_profile(
+        db, "boss", str(repo), None, "task", None, "medium", goal="cheap")[0]
 
 
 @pytest.mark.parametrize("weights,signals,sent", [
