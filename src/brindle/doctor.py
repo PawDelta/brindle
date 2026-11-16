@@ -35,11 +35,63 @@ class Check:
 VERSION_SECONDS = 15
 TMUX_SECONDS = 10
 
+_background_probes = contextvars.ContextVar("doctor_background_probes", default=False)
+_probe_lock = threading.Lock()
+_probe_cache: dict[tuple, tuple[float, object]] = {}
+_probe_pending: set[tuple] = set()
+
+
+def _cached_probe(path: str, args: tuple, scope: tuple, probe, max_age: float | None = None):
+    """Return an available answer; share background work for this binary revision.
+
+    A changed or missing executable never inherits the previous binary's answer.
+    Background work owns no request context or database connection.
+    """
+    try:
+        revision = Path(path).stat().st_mtime_ns
+    except OSError:
+        return None
+    key = (path, revision, args, scope)
+    now = time.monotonic()
+    with _probe_lock:
+        hit = _probe_cache.get(key)
+        if hit and (max_age is None or now - hit[0] < max_age):
+            return hit[1]
+        if key in _probe_pending:
+            return hit[1] if hit else None
+        _probe_pending.add(key)
+
+    def refresh():
+        answer = None
+        try:
+            answer = probe()
+        except Exception:  # noqa: BLE001 - failed probes remain undetermined
+            pass
+        finally:
+            with _probe_lock:
+                _probe_cache[key] = (time.monotonic(), answer)
+                _probe_pending.discard(key)
+
+    try:
+        threading.Thread(target=refresh, name="doctor-probe", daemon=True).start()
+    except Exception:  # noqa: BLE001 - a later request can start it again
+        with _probe_lock:
+            _probe_pending.discard(key)
+    return hit[1] if hit else None
+
 
 def _version(cmd: list[str]) -> str | None:
+    if _background_probes.get():
+        return _cached_probe(cmd[0], tuple(cmd[1:]), (), lambda: _read_version(cmd))
+    return _read_version(cmd)
+
+
+def _read_version(cmd: list[str]) -> str | None:
     try:
         out = spawn.read(cmd, timeout=VERSION_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode:
         return None
     text = (out.stdout or out.stderr).strip().splitlines()
     return text[-1].strip() if text else ""
@@ -58,7 +110,10 @@ def _tool(name: str, required: bool, why: str, version_args: list[str] | None = 
                          f"Linux install. Install: {install or 'the Linux version of ' + name}")
         level = FAIL if required else WARN
         return Check(level, name, f"not found: {why}." + (f" Install: {install}" if install else ""))
-    version = _version([path, *(version_args or ["--version"])]) or ""
+    version = _version([path, *(version_args or ["--version"])])
+    if version is None:
+        return Check(WARN, name, f"{path}: version unavailable (checking in background or CLI failed)"
+                     if _background_probes.get() else f"{path}: version check failed")
     return Check(OK, name, f"{path}" + (f" ({version[:40]})" if version else ""))
 
 
@@ -695,8 +750,16 @@ def stream(repo_root: str | None, db: DB | None = None, disk: bool = False, cwd:
 
 
 def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
-    """Run diagnostics, borrowing ``db`` or closing each connection we open."""
-    return [c for group in stream(repo_root, db) for c in group]
+    """Run diagnostics with cached, background CLI probes for the daemon.
+
+    Borrow ``db`` or close each connection we open. The CLI uses ``stream``
+    directly so an explicit terminal diagnostic still waits for fresh probes.
+    """
+    token = _background_probes.set(True)
+    try:
+        return [c for group in stream(repo_root, db) for c in group]
+    finally:
+        _background_probes.reset(token)
 
 
 def disk_checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
