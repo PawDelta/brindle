@@ -32,6 +32,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from brindle import identity_lock, quota
 from brindle.db import DB, Agent
@@ -286,15 +287,38 @@ def handoff_note(db: DB, root_id: str, now: float) -> str:
 
 def _transcript_tail(db: DB, root: Agent) -> list[str]:
     """Only conversation text from the files already used for usage tracking."""
-    from brindle import usage
+    from brindle import provider_homes, usage
     from brindle.web.chat import _claude_message
 
     tail: deque[str] = deque(maxlen=TRANSCRIPT_TAIL_ENTRIES)
+    omitted = ["Transcript tail omitted: no readable conversation transcript verified for this session."]
     try:
-        paths = usage.agent_transcripts(db, root)
+        if root.provider == "codex":
+            # Usage tracking may infer a rollout from cwd/time. A handoff must
+            # never export another session's text on that weaker association,
+            # or look in whichever provider home happens to be current now.
+            paths = []
+            if root.session_ref and root.config_home is not None:
+                home = Path(root.config_home) if root.config_home else provider_homes.source("codex")
+                path = usage.find_codex_rollout(root.session_ref, None, root.created_at, home)
+                if path:
+                    paths = [path]
+        else:
+            paths = usage.agent_transcripts(db, root)
         # Claude's additional paths belong to subagents, not this conversation.
         if paths:
             with paths[0].open(encoding="utf-8", errors="replace") as transcript:
+                if root.provider == "codex":
+                    # Verify the header on the same open file used for the
+                    # tail: a matching filename alone is not ownership proof.
+                    try:
+                        header = json.loads(transcript.readline())
+                    except ValueError:
+                        return omitted
+                    meta = header.get("payload") if isinstance(header, dict) else None
+                    if (not isinstance(meta, dict) or header.get("type") != "session_meta"
+                            or meta.get("id") != root.session_ref):
+                        return omitted
                 for line in transcript:
                     if not line.endswith("\n"):
                         continue  # the CLI may still be writing this entry
@@ -324,7 +348,7 @@ def _transcript_tail(db: DB, root: Agent) -> list[str]:
                         tail.append(f"{message['role']}: {message['text']}")
     except OSError:
         return ["Transcript tail omitted: the recorded transcript could not be read."]
-    return list(tail) or ["Transcript tail omitted: no readable conversation text in the recorded transcript."]
+    return list(tail) or omitted
 
 
 def switch(db: DB, offer_id: str, now: float) -> Agent:

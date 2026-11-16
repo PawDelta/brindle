@@ -391,26 +391,64 @@ def test_handoff_failed_start_is_consumed_and_route_scopes_the_offer(db, repo, w
 
 
 def test_handoff_transcripts_use_recorded_paths_and_omit_unreadable_text(db, repo, world, tmp_path, monkeypatch):
+    from datetime import datetime, timezone
     from pathlib import Path
 
     from brindle import usage
 
     _session(db, repo, provider="codex")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    db.update_agent("root", session_ref="known-session")
-    monkeypatch.setattr(usage, "_codex_sessions", lambda home=None: tmp_path)
-    rollout = tmp_path / "2026" / "11" / "16" / "rollout-test-known-session.jsonl"
+    source_home = tmp_path / "source-codex"
+    db.update_agent("root", session_ref="known-session", config_home=str(source_home))
+    monkeypatch.setattr(quota, "codex_home", lambda: source_home)
+    monkeypatch.setattr(usage.time, "time", lambda: NOW)
+    day = usage.time.strftime("%Y/%m/%d", usage.time.localtime(NOW))
+    meta = {"id": "known-session", "cwd": str(repo),
+            "timestamp": datetime.fromtimestamp(NOW, timezone.utc).isoformat()}
+    rollout = source_home / "sessions" / day / "rollout-test-known-session.jsonl"
     rollout.parent.mkdir(parents=True)
-    rollout.write_text("\n".join(json.dumps(entry) for entry in [
+    recorded = "\n".join(json.dumps(entry) for entry in [
+        {"type": "session_meta", "payload": meta},
         {"type": "response_item", "payload": {"type": "message", "role": "user",
          "content": [{"type": "input_text", "text": "user handoff context"}]}},
         {"type": "response_item", "payload": {"type": "message", "role": "assistant",
          "content": [{"type": "output_text", "text": "assistant handoff context"}]}},
         {"type": "response_item", "payload": {"type": "function_call", "arguments": "private tool traffic"}},
-    ]) + "\n{broken\n[]\n{\"unfinished\"")
+    ]) + "\n{broken\n[]\n{\"unfinished\""
+    rollout.write_text(recorded)
     note = provider_switch.handoff_note(db, "root", NOW)
     assert "user handoff context" in note and "assistant handoff context" in note
     assert "private tool traffic" not in note and "unfinished" not in note
+
+    # Same checkout and start time cannot establish transcript ownership.
+    sibling = rollout.with_name("rollout-test-sibling-session.jsonl")
+    foreign = "\n".join(json.dumps(entry) for entry in [
+        {"type": "session_meta", "payload": {**meta, "id": "sibling-session"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "private sibling conversation"}]}},
+    ]) + "\n"
+    sibling.write_text(foreign)
+    rollout.unlink()
+    missing_source = provider_switch.handoff_note(db, "root", NOW)
+    assert "private sibling conversation" not in missing_source
+    assert "user handoff context" not in missing_source
+    # Even a matching filename needs matching session metadata.
+    rollout.write_text(foreign)
+    assert provider_switch.handoff_note(db, "root", NOW) == missing_source
+    rollout.write_text(recorded)
+
+    # The current default home may have changed since the source was launched.
+    other_home = tmp_path / "other-codex"
+    other_rollout = other_home / "sessions" / day / rollout.name
+    other_rollout.parent.mkdir(parents=True)
+    other_rollout.write_text(recorded.replace("user handoff context", "private other-home conversation"))
+    monkeypatch.setattr(quota, "codex_home", lambda: other_home)
+    note = provider_switch.handoff_note(db, "root", NOW)
+    assert "user handoff context" in note and "private other-home conversation" not in note
+    db.update_agent("root", session_ref=None)
+    assert provider_switch.handoff_note(db, "root", NOW) == missing_source
+    db.update_agent("root", session_ref="known-session", config_home=None)
+    assert provider_switch.handoff_note(db, "root", NOW) == missing_source
 
     # Antigravity's recorded log can contain usage without conversation text.
     db.update_agent("root", provider="antigravity")
