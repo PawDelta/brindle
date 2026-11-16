@@ -393,10 +393,17 @@ def typed_into_cli(db, boss, text, vouched=True):
 ])
 def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, terminal):
     boss, _ = session
+    if typed == "the status is ready":
+        offers.person_spoke(db, boss, typed, typed=True)
+        with pytest.raises(ServiceError):
+            visuals.publish(db, boss, "Excerpt", "<p>no</p>", asked=asked)
+        return
     if terminal:
         token = "t" * 43
         with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
             assert terminal_input(client, boss.id)(typed, typed=True).status_code == 200
+    elif typed == "status":
+        offers.person_spoke(db, boss, typed, typed=True)
     else:
         typed_into_cli(db, boss, typed)
     assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
