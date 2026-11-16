@@ -94,6 +94,13 @@ def claim(now: float) -> bool:
     return True
 
 
+def _judged(a: Agent | None) -> tuple | None:
+    """What a destructive step judged ``a`` by: read again just before the
+    step, a different value means it moved on since (a resume, a new turn,
+    a close) and the step is skipped for it."""
+    return None if a is None else (a.status, a.status_since, a.dismissed_at)
+
+
 def _root(db: DB, a: Agent) -> str:
     from brindle import autopilot
 
@@ -171,22 +178,34 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     done.extend(note_dead_panes(db, now, panes))
 
     # 1. Processes of agents that shouldn't be running.
-    leftovers = []
+    def leftover(a: Agent | None, alive, here) -> bool:
+        return (a is None or a.status in ("paused", "done") or a.dismissed_at is not None
+                or (a.status == "failed" and here(a) and not alive(a)))
+
+    planned: dict[str, tuple | None] = {}    # agent id -> its row as judged (_judged)
     for aid in procs.all_agent_ids(table):
         a = db.get_agent(aid)
-        if (a is None or a.status in ("paused", "done") or a.dismissed_at is not None
-                or (a.status == "failed" and here(a) and not alive(a))):
-            leftovers.append(aid)
+        if leftover(a, alive, here):
+            planned[aid] = _judged(a)
         elif (agents.runs_process(a) and here(a) and not alive(a)
               and now - max(a.created_at, a.status_since or 0) > LAUNCH_GRACE):
             db.end_native_subagents(a.id)
             db.set_status(a.id, "done" if a.mode != "interactive" and a.result is not None
                           else "paused")
             agents._note_reviewer_end(db, a)
-            leftovers.append(aid)
-    if leftovers:
-        found = procs.agent_pids(leftovers, procs=table)
-        stopped = procs.terminate({p for pids in found.values() for p in pids})
+            planned[aid] = _judged(db.get_agent(aid))
+    if planned:
+        # Judged again just before the signal, from the rows and panes as they
+        # are now: one resumed (or otherwise moved on) since is spared.
+        now_panes = tmux.list_panes()
+        now_owners = agents.pane_owners(db, now_panes)
+        leftovers = [aid for aid, then in planned.items()
+                     if _judged(a := db.get_agent(aid)) == then
+                     and leftover(a, lambda a: (agents.is_alive(a, now_panes)
+                                                and agents.owns_pane(db, a, now_owners)),
+                                  lambda a: agents.same_server(a, now_panes))]
+        found = procs.agent_pids(leftovers, procs=procs.table()) if leftovers else {}
+        stopped = procs.terminate({p for pids in found.values() for p in pids}) if found else 0
         if stopped:
             done.append(f"stopped {stopped} leftover process(es) of {len(found)} agent(s)")
     # What closed panes left with launchd as its parent, its CLI gone (procs.hand_off):
@@ -298,7 +317,16 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
                     "brindle left it open. Check it's not stuck: send_message it what it needs.")))
             continue
         if finished or gone:
-            agents.close(db, a.id, panes)
+            # Judged again just before closing: a worker that took a message,
+            # started a turn, reported or came back since is left open.
+            now_panes = tmux.list_panes()
+            fresh = db.get_agent(a.id)
+            if (fresh is None or _judged(fresh) != _judged(a) or fresh.result != a.result
+                    or (agents.is_alive(fresh, now_panes)
+                        and agents.owns_pane(db, fresh, agents.pane_owners(db, now_panes))) != running
+                    or (finished and db.pending_count(a.id))):
+                continue
+            agents.close(db, a.id, now_panes)
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
                         f"after {int(idle_for // 60)} min")
 
