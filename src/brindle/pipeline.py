@@ -933,8 +933,8 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     falling back to ``cfg.reviewer``."""
     if cfg.review_profile:
         return cfg.review_profile, f"using {cfg.review_profile} (pinned by review_profile)"
-    default = cfg.reviewer or "reviewer"
-    if default != "reviewer" or _repo_pins_reviewer(repo_root):
+    default = cfg.reviewer or "reviewer-sonnet-high"
+    if default != "reviewer-sonnet-high" or _repo_pins_reviewer(repo_root):
         return default, f"using {default} (pinned by reviewer config)"
     from brindle import autopilot, pricing, profiles, review_scope
 

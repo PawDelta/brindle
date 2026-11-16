@@ -107,8 +107,8 @@ class RepoConfig:
     scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
     scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (0: no cap)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
-    reviewer: str = "reviewer"         # agent profile that reviews branches
-    review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
+    reviewer: str = "reviewer-sonnet-high"  # agent profile that reviews branches
+    review_profile: str | None = None  # force request_review's profile (skips automatic selection)
     review_sizing: bool = True        # scoped context and cheaper profiles for small or docs/test-only reviews
     review_small_max_files: int = 5
     review_small_max_lines: int = 200  # additions + deletions; binary changes keep the usual reviewer

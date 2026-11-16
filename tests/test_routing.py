@@ -8,7 +8,7 @@ import time
 import pytest
 
 from brindle import agents, autopilot, doctor, learning, mcp_server, plugins, quota, workspaces
-from brindle.config import load_repo_config, user_config_path
+from brindle.config import RepoConfig, load_repo_config, user_config_path
 from brindle.db import Agent
 from test_merge_order import fake_spawn
 
@@ -134,6 +134,31 @@ def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, ex
     monkeypatch.setattr(autopilot, "_unavailable",
                         lambda name, *args: "unavailable" if name in blocked else unavailable(name, *args))
     assert choose(db, repo, weight=weight)[0] == expected
+
+
+@pytest.mark.parametrize("unavailable,expected", [
+    (None, "reviewer-sonnet-high"),
+    pytest.param("policy", "reviewer", marks=pytest.mark.variant(
+        "an org refusal of the default reviewer must use the available baseline fallback")),
+    pytest.param("codex", "reviewer", marks=pytest.mark.variant(
+        "a default profile overridden to signed-out Codex must use the available baseline fallback")),
+])
+def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expected):
+    from brindle import policy, providers
+
+    db.add_agent(Agent("writer", boss.id, "developer-sonnet", "claude", None,
+                       "assign", "done", "@0", "done", time.time()))
+    monkeypatch.setattr(policy, "check_assign", lambda cfg, root, name, *args:
+                        policy.Decision(allowed=not (unavailable == "policy" and name == "reviewer-sonnet-high")))
+    if unavailable == "codex":
+        path = repo / ".brindle" / "agents" / "reviewer-sonnet-high.md"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("---\nextends: reviewer\nprovider: codex\n---\n")
+        monkeypatch.setattr(providers, "signed_out", lambda provider, env=None:
+                            "not signed in" if provider == "codex" else None)
+    chosen, note = agents._review_choice(db, boss, None, RepoConfig(review_sizing=False))
+    assert chosen == expected
+    assert (note is not None) == (unavailable is not None)
 
 
 @pytest.mark.variant("nondefault learner choice: weighted routing must select the eligible profile chosen by the learner")
