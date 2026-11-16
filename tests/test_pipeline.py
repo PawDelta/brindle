@@ -852,7 +852,8 @@ def test_supervisor_action_negations(summary):
     assert pipeline.has_supervisor_action(summary) is False
 
 
-@pytest.mark.parametrize("case", [None, "old reviewer", "recorded", "reviewer during run"])
+@pytest.mark.parametrize("case", [None, "old reviewer", "recorded", "reviewer during run",
+                                  "checks and reviewer"])
 def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypatch, case):
     """Both list tools and the sidebar expose the branch's actual review stage."""
     from dataclasses import replace
@@ -867,13 +868,17 @@ def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypat
         monkeypatch.setattr(gates, "head", lambda ws_: "current")
         add(db, ws, "w1", "assign", result="done", pipeline="reviewing")
         expected = "waiting for review: nothing is checking or reviewing it"
-        if case == "reviewer during run":
-            # A second review's checks hold the run while the first reviewer
-            # already reviews this commit: the sidebar must say Reviewing.
+        if case in ("reviewer during run", "checks and reviewer"):
+            # A run holds the lock while a reviewer already reviews this commit:
+            # it reads Reviewing, unless checks are really running (earlier step).
             add(db, ws, "r1", "review", status="processing")
             db.update_agent("r1", review_sha="current")
             with pipeline.review_run(ws.id):
-                assert pipeline.review_state(db, ws) == "reviewer running (r1)"
+                if case == "checks and reviewer":
+                    with gates.marker("checks-running", ws.id):
+                        assert pipeline.review_state(db, ws) == "checks running"
+                else:
+                    assert pipeline.review_state(db, ws) == "reviewer running (r1)"
             return
         if case == "old merge":
             db.set_merged(ws.id, "old")
