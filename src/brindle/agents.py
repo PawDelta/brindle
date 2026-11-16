@@ -5891,6 +5891,10 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
             holder.end()
             db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
                                          answer=answer)
+    else:
+        # Nothing to hold it in: the CLI's own prompt asks the person, in a pane nobody may be watching.
+        db.set_status(agent.id, "waiting")
+        permission_routing.tell_waiting_on_person(db, agent.id, req.summary())
     permission_asks.finish_ask(db, ask_id, ended, ended_at)
     # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
     # take the pairing meant for the same command asked again (note_permission_outcome).
@@ -5923,11 +5927,12 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
     The agent shows waiting meanwhile, as at that prompt. ``pane_shows``: False
     when the CLI draws no prompt while the hook holds the request (_subagent_of),
     so the pane is never looked at."""
-    from brindle.permission_routing import AS_ANSWER
+    from brindle.permission_routing import AS_ANSWER, tell_waiting_on_person
 
     db.set_status(agent.id, "waiting")
     if supervise_until is None:
         bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
+        tell_waiting_on_person(db, agent.id, req.summary())
     deadline, past, seen = time.monotonic() + hold_until - time.time(), 0, False
     while True:
         now = db.get_agent(agent.id)
@@ -5948,6 +5953,7 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
             supervise_until = None
             db.update_permission_request(agent.id, holder.request_id, channel="hook")
             bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
+            tell_waiting_on_person(db, agent.id, req.summary())
         # On the main thread its CLI shows its own prompt for as long as this hook holds the
         # request: a pane that showed it and is now past it was answered there. An allow runs
         # the tool (its PostToolUse comes once it is done), a deny or a dismissal none.

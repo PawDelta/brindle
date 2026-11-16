@@ -574,7 +574,9 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 done.append(f"told {a.parent_id} that worker {a.id} is waiting on input")
             continue
         since = a.status_since or a.created_at
-        if a.stuck_noted == since or (a.mode != "review" and now - since < STUCK_AFTER):
+        # A request held for the person waits on them, not on a prompt that may yet clear: told at once.
+        if a.stuck_noted == since or (a.mode != "review" and now - since < STUCK_AFTER
+                                      and permission_routing.waits_on_person(db, a) is None):
             continue
         ws = db.get_workspace(a.workspace_id)
         tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])

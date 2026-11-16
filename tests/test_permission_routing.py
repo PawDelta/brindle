@@ -261,8 +261,9 @@ def test_a_person_only_ask_skips_the_supervisor(db, team, monkeypatch):
         person_answers("allow_once")(holder)
     waiting(monkeypatch, boss_cannot)
     assert ask(db, "deploy prod") == "allow"
-    assert team.sent == []
+    assert not any("answer_permission" in m for m in team.sent)    # told it waits on the person, never asked
     assert history(db) == [("person", "allow")]
+    team.sent.clear()
 
     # While a supervisor can answer, a second notice saying only the user can
     # would wrongly escalate it. Once its window expires the notice is needed.
