@@ -6,8 +6,10 @@ offers to switch back once the original limit resets.
 
 **Code:** `src/brindle/provider_switch.py` (stubs), table `provider_switches` (db.py),
 route `POST /v1/sessions/{root}/provider-switch` (routes_actions.py),
-`app/src/components/ProviderSwitch/`. Tests: `tests/test_provider_switch.py`
-(`-k offer`, `-k handoff`, `-k switch_back`) and `ProviderSwitch.test.tsx`. All of them fail on the stubs for now.
+`app/src/components/ProviderSwitch/` (a stub card; its test comes with the app
+work). Tests: `tests/test_provider_switch.py` (`-k offer`, `-k handoff`,
+`-k switch_back`), marked `xfail(strict=True)` until built. Milestone checks run
+them with `--runxfail`.
 
 ## Decisions made (open to change)
 

@@ -15,6 +15,8 @@ from brindle.db import Agent, Task
 
 NOW = 1_800_000_000.0
 HOUR = 3600.0
+# The design's tests, ahead of the code: milestone checks run them with --runxfail.
+NOT_BUILT = pytest.mark.xfail(strict=True, reason="provider switch: not built yet")
 
 
 @pytest.fixture
@@ -71,6 +73,7 @@ def _offer_row(db, offer_id, root_id, kind, from_provider, to_provider, state, *
                    new_root_id, back_of, NOW, NOW))
 
 
+@NOT_BUILT
 def test_offer_when_supervisor_out_of_quota_names_an_in_quota_provider(db, repo, world):
     _session(db, repo)
     world["quotas"] = {"claude": _limited("claude", NOW + HOUR),
@@ -88,6 +91,7 @@ def test_offer_when_supervisor_out_of_quota_names_an_in_quota_provider(db, repo,
         ("root", offer.id, "/v1/sessions/root/provider-switch")]
 
 
+@NOT_BUILT
 @pytest.mark.parametrize("installed, other_quota", [
     ({"claude", "codex"}, _limited("codex", NOW + HOUR)),   # the only other CLI is limited too
     ({"claude"}, None),                                      # nothing else is installed or signed in
@@ -102,6 +106,7 @@ def test_no_offer_when_no_other_provider_in_quota(db, repo, world, installed, ot
     assert db.conn.execute("SELECT COUNT(*) FROM provider_switches").fetchone()[0] == 0
 
 
+@NOT_BUILT
 def test_handoff_note_carries_goal_workers_tasks_messages_and_transcript_tail(db, repo, world, tmp_path):
     ws = _session(db, repo)
     transcript = tmp_path / "root.jsonl"
@@ -127,6 +132,7 @@ def test_handoff_note_carries_goal_workers_tasks_messages_and_transcript_tail(db
     assert "turn-010" not in note
 
 
+@NOT_BUILT
 def test_handoff_switch_pressed_twice_starts_one_supervisor_on_the_target(db, repo, world, spawned):
     ws = _session(db, repo)
     world["quotas"] = {"claude": _limited("claude", NOW + HOUR)}
@@ -142,6 +148,7 @@ def test_handoff_switch_pressed_twice_starts_one_supervisor_on_the_target(db, re
     assert (row.state, row.new_root_id) == ("done", first.id)
 
 
+@NOT_BUILT
 def test_switch_back_once_original_limit_resets(db, repo, world, spawned):
     ws = _session(db, repo)
     db.update_agent("root", status="paused")
