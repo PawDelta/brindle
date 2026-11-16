@@ -50,6 +50,7 @@ import type { Route } from "../../routes";
 import { useJob } from "../Branch/useJob";
 import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
+import { PROVIDER_SWITCH_KINDS, ProviderSwitchCard, answerProviderSwitch, isNotice, offerOf } from "../../components/ProviderSwitch/ProviderSwitch";
 import { DismissAction, ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { StorageNudge } from "./StorageNudge";
@@ -330,7 +331,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     // What the button does, in a line; a fix this app doesn't know: the engine's detail, if any.
     const fix = item.fix ? FIXES[item.fix] : undefined;
     body = fix ? <span>{fix.help}</span> : item.detail ? <span className="line-clamp-3">{item.detail}</span> : null;
-  } else if (item.detail && item.kind !== "credentials" && item.kind !== "login") {
+  } else if (item.detail && item.kind !== "credentials" && item.kind !== "login" && !PROVIDER_SWITCH_KINDS.includes(item.kind)) {
     body = <span className="line-clamp-3">{item.detail}</span>;
   } else if (item.reason && item.reason !== describeItem(item)) {
     body = <span>{item.reason}</span>;
@@ -359,6 +360,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     );
   } else if (item.kind === "plan_offer") {
     acts = <PlanOfferActions item={item} actions={actions} onDone={onDone} onGo={onGo} />;
+  } else if (PROVIDER_SWITCH_KINDS.includes(item.kind)) {
+    acts = <ProviderSwitchActions item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "org_notice") {
     acts = act("Mark read", "read", {}, PLAIN);
   } else if (item.kind === "org_blocked") {
@@ -443,6 +446,22 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
 /* brindle's one-time offer to plan a big goal first: Yes / Not now, answered through the goal
    route with the offer id the item carries (request_id). A refusal (the offer was replaced
    meanwhile) is the one line on the card; either way the inbox is read again. */
+/* Switch / Not now on a provider-switch offer, through the item's own route; the card leaves once the engine took the answer. */
+function ProviderSwitchActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+  const client = useDaemon();
+  return (
+    <ProviderSwitchCard
+      showLine={false}
+      variant={isNotice(item) ? "notice" : "offer"}
+      offer={offerOf(item)}
+      onAnswer={(accept, always) => answerProviderSwitch(client, item, accept, undefined, always).then(
+        () => { actions.settle(item); onDone(); },
+        (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e)),
+      )}
+    />
+  );
+}
+
 function PlanOfferActions({ item, actions, onDone, onGo }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void; onGo?(): void }) {
   const client = useDaemon();
   const [saving, setSaving] = useState(false);

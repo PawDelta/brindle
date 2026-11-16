@@ -8,6 +8,8 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from brindle import agents, tmux
 from brindle.db import Agent, Workspace
 
@@ -119,3 +121,30 @@ def test_one_watch_tick_with_no_sidebar_tells_the_supervisor_of_a_codex_approval
 
     assert db.get_agent("w1").status == "waiting"
     assert [to for to, body in sent if "w1" in body and "Would you like to run" in body] == ["boss"]
+
+
+@pytest.mark.variant("audit gap: the provider switch sweep had no periodic caller")
+def test_one_watch_tick_runs_the_provider_switch_sweep(db, tmp_path, monkeypatch):
+    from brindle import provider_switch
+    from brindle.daemon import lifecycle, session_review
+    from brindle.upgrade import InstallWatch
+
+    a_session(db, tmp_path, monkeypatch, "processing")
+    swept = []
+    monkeypatch.setattr(provider_switch, "sweep", lambda db_, now: swept.append(db_) or [])
+    monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", lambda self: None)
+    monkeypatch.setattr(lifecycle, "_purge_typed_words", lambda: None)
+    monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: None)
+    monkeypatch.setattr(lifecycle, "_sync_shared_docs", lambda: None)
+    monkeypatch.setattr(lifecycle, "_cull_sweep", lambda: None)
+    monkeypatch.setattr(InstallWatch, "changed", lambda self: False)
+    now = [0.0]
+    server = SimpleNamespace(should_exit=False)
+
+    async def one_minute(seconds):
+        now[0] += 60.0
+        server.should_exit = True
+
+    asyncio.run(lifecycle._watch(server, None, False, wait=one_minute, clock=lambda: now[0]))
+
+    assert len(swept) == 1

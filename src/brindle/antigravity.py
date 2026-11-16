@@ -353,11 +353,12 @@ def end_turn(db, agent, base: dict, error: str, provider: str = "antigravity") -
         limited = bool(LIMIT_ERROR.search(error))
         autherr = bool(AUTH_ERROR.search(error))
         if limited:
-            from brindle import quota
+            from brindle import provider_switch, quota
             from brindle.config import RepoConfig, load_repo_config
 
             ws = db.get_workspace(agent.workspace_id)
             quota.record_limit(provider, load_repo_config(ws.repo_root) if ws else RepoConfig())
+            provider_switch.sweep(db, time.time())
         error_type = "rate_limit" if limited else ("auth" if autherr else "error")
         agents.handle_hook(db, agent_id, "stop-failure",
                            {**base, "error_type": error_type, "error": error})

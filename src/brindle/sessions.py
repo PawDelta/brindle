@@ -158,9 +158,9 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
 
 
 def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = None, *,
-                pause_old: bool = True) -> Handover:
+                pause_old: bool = True, provider: str | None = None) -> Handover:
     """Hand a supervisor session to a supervisor running in ``dest``: the
-    live one there, else a new one.
+    live one there on ``provider`` (the old session's by default), else a new one.
 
     Carries over the goal and milestones (with their last results), the
     workers (their ``parent_id``), queued and started tasks, and a handoff note
@@ -174,13 +174,14 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
     old = db.get_agent(old_root_id)
     if old is None:
         raise agents.AgentError(f"no session {old_root_id}")
+    provider = old.provider if provider is None else provider
     ap = db.get_autopilot(old_root_id)
     prompt = handover_prompt(db, old, note)
     # A live supervisor already in ``dest`` takes the session over: a second
     # one there would split the work. Only with none (or a dead or paused
     # one) is a new supervisor started -- or when that live one is busy with
     # an unfinished goal of its own, which taking over would overwrite.
-    new, why = _live_supervisor(db, dest, old_root_id), None
+    new, why = _live_supervisor(db, dest, old_root_id, provider), None
     own = db.get_autopilot(new.id) if new else None
     if own and own.goal and own.state != "done" and not handed_away(own):
         why = (f"{new.id} is live in {dest.id} with an unfinished goal of its own "
@@ -189,7 +190,7 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
     took_over = new is not None
     if not took_over:
         # Always a supervisor, even from a session started as something else.
-        new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=old.provider,
+        new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
                            watch_pane=True, background_setup=True, autopilot=True,
                            claim_goals=False)
     elif db.get_autopilot(new.id) is None:
@@ -274,13 +275,13 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
     return Handover(new, why)
 
 
-def _live_supervisor(db: DB, ws: Workspace, other_than: str) -> Agent | None:
+def _live_supervisor(db: DB, ws: Workspace, other_than: str, provider: str) -> Agent | None:
     """The newest live session chat (an interactive root) running in ``ws``,
-    other than ``other_than``: one whose pane is up and still its own."""
+    on ``provider``, other than ``other_than``: its pane is up and still its own."""
     panes = tmux.list_panes()
     owners = agents.pane_owners(db, panes)
     for a in reversed(db.list_agents(ws.id)):
-        if (a.id != other_than and a.mode == "interactive" and a.parent_id is None
+        if (a.id != other_than and a.provider == provider and a.mode == "interactive" and a.parent_id is None
                 and a.status not in ("paused", "done")
                 and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)):
             return a

@@ -205,6 +205,25 @@ CREATE TABLE IF NOT EXISTS goal_doc_requests (
                                 -- (open:<id> | accepted | dismissed: the retired analysis-doc offer; inert)
     goal_at REAL                -- when this goal began: only workers assigned since count toward its offer
 );
+-- brindle's offer to move an out-of-quota supervisor to another provider, and
+-- back once the original provider's limit resets (brindle.provider_switch).
+-- One open offer per session root; the person's Switch claims it (open ->
+-- switching) in one UPDATE, so a second press finds it taken.
+CREATE TABLE IF NOT EXISTS provider_switches (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,  -- the supervisor the offer is for
+    kind TEXT NOT NULL,          -- switch | back
+    from_provider TEXT NOT NULL, -- the root's provider when offered
+    to_provider TEXT NOT NULL,   -- where Switch moves it
+    state TEXT NOT NULL,         -- open | switching | done | dismissed | failed
+    limited_until REAL,          -- when from_provider's limit lifts (switch); when it lifted (back)
+    new_root_id TEXT,            -- the supervisor started on to_provider (state done)
+    back_of TEXT,                -- a back offer: the switch it undoes
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS provider_switches_open ON provider_switches(root_id)
+    WHERE state IN ('open', 'switching');
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
 CREATE TABLE IF NOT EXISTS session_repos (

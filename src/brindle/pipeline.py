@@ -645,12 +645,17 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     # A recorded verdict may precede the asynchronous pipeline transition.
     review = gates.verdict(db, ws.id, sha)
     if worker.pipeline == "reviewing":
-        if review_running(ws.id):
+        # The earlier step shows: checks that are really running (or waiting
+        # for room) come first, then a live reviewer on this commit. A run that
+        # only holds the lock doesn't hide a reviewer who is already reviewing.
+        if review_running(ws.id) and checks != "waiting for checks":
             return checks
         for a in db.list_agents(ws.id):
             if a.mode == "review" and a.status not in ("paused", "done") and a.result is None \
                     and a.dismissed_at is None and a.review_sha == sha:
                 return f"reviewer running ({a.id})"
+        if review_running(ws.id):
+            return checks
         if review is None:
             return "waiting for review: nothing is checking or reviewing it"
     if review is None:

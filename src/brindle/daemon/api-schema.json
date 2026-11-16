@@ -13795,6 +13795,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/sessions/{root}/provider-switch"
+    },
+    {
+      "method": "POST",
       "path": "/v1/sessions/{root}/rename"
     },
     {

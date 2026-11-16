@@ -485,7 +485,8 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
 
 
 def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = None,
-              answered: str | None = None, consented: bool = False) -> bool:
+              answered: str | None = None, consented: bool = False,
+              decision: bool = False, visual_id: str | None = None) -> bool:
     """Allow one publication or refuse it, in the publishing transaction.
     Whether the person consented to this one (a quote or a grant).
 
@@ -493,8 +494,19 @@ def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = 
     clears it, so an answer allows one revision. ``consented``: the visual
     being revised was published by this supervisor with the person's
     consent, so it stays theirs to update. These and ``asked`` are the
-    supervisor's own to use, and none reaches a planning document."""
+    supervisor's own to use, and none reaches a planning document.
+    A supervisor may ask one open decision without consent; that does not
+    earn consent for future revisions without a decision."""
     now = time.time()
+    if kind == "visual" and decision:
+        open_prompt = c.execute(
+            "SELECT id FROM visuals WHERE root_id=? AND kind='visual' AND question IS NOT NULL "
+            "AND options IS NOT NULL AND answer IS NULL AND dismissed_rev < rev AND id != ?",
+            (root, visual_id or "")).fetchone()
+        if open_prompt:
+            raise ServiceError("open_decision_prompt",
+                               f"decision prompt {open_prompt['id']} is still open; revise that prompt "
+                               "or wait for the person to answer or dismiss it", 409)
     if kind == "visual" and supervisor:
         if consented:
             return True
@@ -502,6 +514,8 @@ def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = 
             return False
         if asked is not None and _spend_quote(c, root, asked, now):
             return True
+        if decision:
+            return False
     consume(c, root, kind)
     return True
 

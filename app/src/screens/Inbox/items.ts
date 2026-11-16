@@ -5,6 +5,7 @@
 import { LOGIN_PROVIDERS, type InboxAction, type LoginProvider } from "../../api/client";
 import type { InboxItemDTO } from "../../api/schema";
 import { providerLabel } from "../../api/providers";
+import { isNotice, offerOf, switchLine } from "../../components/ProviderSwitch/ProviderSwitch";
 
 /* The provider a credentials item is about: the sign-in route the engine
    names on the item (`action`: POST /v1/providers/{p}/login, engine branch
@@ -46,6 +47,8 @@ export const KIND_LABEL: Record<string, string> = {
   setup: "Setup",
   idle_stopped: "Stopped while idle",
   plan_offer: "Plan first?",
+  provider_switch: "Provider switch",
+  provider_switch_back: "Provider switch",
 };
 
 /* What the app can repair itself for a `setup` item, by its `fix` (engine
@@ -88,6 +91,8 @@ export const KIND_SHORT: Record<string, string> = {
   setup: "setup",
   idle_stopped: "idle",
   plan_offer: "plan first?",
+  provider_switch: "provider",
+  provider_switch_back: "provider",
 };
 
 /* An item whose card opens a visual in its reader. */
@@ -128,6 +133,9 @@ export function describeItem(item: InboxItemDTO): string {
       return "brindle's cloud sign-in expired";
     case "plan_offer":
       return "This looks big: plan it first?";
+    case "provider_switch":
+    case "provider_switch_back":
+      return switchLine(offerOf(item), isNotice(item) ? "notice" : "offer");
     case "org_notice":
     /* An org Block, every request it stopped in one notice (service/inbox._org_blocks): "Blocked by <org> policy: <why>". */
     case "org_blocked":

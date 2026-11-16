@@ -2,8 +2,8 @@
 
 Everything here comes from what the CLIs themselves report: the status line
 data Claude Code hands brindle and its ``/usage`` command, Codex's session
-rollouts, and the limit errors Antigravity reports. brindle never reads a
-CLI's OAuth token or auth files and never calls a provider's backend.
+rollouts, and Antigravity's ``/usage`` command and limit errors. brindle never
+reads a CLI's OAuth token or auth files and never calls a provider's backend.
 
 State lives in ``~/.brindle/quota.json``, scoped to Claude's subscription
 identity and otherwise one entry per provider.
@@ -329,14 +329,14 @@ def parse_claude_usage(text: str, now: float | None = None) -> list[Window]:
     return windows
 
 
-def _claim_usage_refresh(force: bool, key: str) -> float | None:
+def _claim_usage_refresh(force: bool, key: str, *, stamp_name: str = CLAUDE_USAGE_STAMP) -> float | None:
     """Claim this refresh for this process: under a lock that every process
     of this brindle home takes, the shared stamp is read and, when a refresh
     is due (or ``force``), set to now before the lock is let go, so two
     sidebars looking at once can't both find it due. None when this process
     asks; otherwise when the other one did. A stamp that can't be used at
     all (an unwritable home) claims nothing: this process asks."""
-    stamp = brindle_home() / (CLAUDE_USAGE_STAMP + "." + key.split(":", 1)[1])
+    stamp = brindle_home() / (stamp_name + "." + key.split(":", 1)[1])
     try:
         stamp.parent.mkdir(parents=True, exist_ok=True)
         with open(stamp.with_name(stamp.name + ".lock"), "a") as lock:
@@ -390,6 +390,88 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
     if not windows or subscription_usage.cache_key("claude") != key:
         return False
     record("claude", windows, source="claude /usage", keep_limit=True, identity_key=key)
+    return True
+
+
+# -- Antigravity: ``agy -p /usage --output-format json`` ----------------------------------
+
+ANTIGRAVITY_USAGE_STAMP = "antigravity-usage.stamp"
+_antigravity_usage_at = 0.0
+
+
+def parse_antigravity_usage(text: str) -> list[Window]:
+    """Print-mode /usage returns command.data.groups[].buckets[].
+
+    Each model group has its own caps, so retain the group and window in
+    the name rather than presenting any one group's limit as plan-wide.
+    """
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return []
+    if not isinstance(body, dict) or body.get("status") != "SUCCESS":
+        return []
+    command = body.get("command")
+    if not isinstance(command, dict) or command.get("name") != "usage":
+        return []
+    data = command.get("data")
+    groups = data.get("groups") if isinstance(data, dict) else None
+    if not isinstance(groups, list):
+        return []
+    windows = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("name"), str):
+            continue
+        buckets = group.get("buckets")
+        if not isinstance(buckets, list):
+            continue
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            remaining = _number(bucket.get("remaining_fraction"))
+            span = bucket.get("window")
+            minutes = {"5h": 300, "weekly": 10080}.get(span) if isinstance(span, str) else None
+            if remaining is None or not 0 <= remaining <= 1 or minutes is None:
+                continue
+            resets = None
+            if isinstance(bucket.get("reset_time"), str):
+                try:
+                    reset = datetime.fromisoformat(bucket["reset_time"].replace("Z", "+00:00"))
+                    if reset.tzinfo is not None:
+                        resets = reset.timestamp()
+                except (ValueError, OverflowError, OSError):
+                    pass
+            windows.append(Window((1 - remaining) * 100, resets, minutes,
+                                  f"{group['name']} {window_short(minutes)}"))
+    return windows
+
+
+def refresh_antigravity_usage(*, force: bool = False) -> bool:
+    """Ask agy's read-only slash command on the same cadence as Claude's.
+
+    agy handles its own login; no auth files or backend calls belong here.
+    spawn.read bounds the run and reaps its language server process group.
+    """
+    global _antigravity_usage_at
+    import subprocess
+
+    from brindle import antigravity, spawn
+
+    if not force and time.time() - _antigravity_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
+        return False
+    asked = _claim_usage_refresh(force, "antigravity:default", stamp_name=ANTIGRAVITY_USAGE_STAMP)
+    _antigravity_usage_at = asked if asked is not None else time.time()
+    if asked is not None:
+        return False
+    try:
+        proc = spawn.read([antigravity.binary(), "-p", "/usage", "--output-format", "json"],
+                          timeout=CLAUDE_USAGE_TIMEOUT, cwd=str(brindle_home()), reap=True)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    windows = parse_antigravity_usage(proc.stdout) if proc.returncode == 0 else []
+    if not windows:
+        return False
+    record("antigravity", windows, source="agy /usage", keep_limit=True)
     return True
 
 

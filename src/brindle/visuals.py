@@ -284,6 +284,7 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
         same = row is not None and row["root_id"] == root.id and row["kind"] == kind
         consented = visual_offers.authorize(
             c, root.id, kind, supervisor=supervisor, asked=asked,
+            decision=bool(question and options), visual_id=visual_id if same else None,
             answered=row["answer"] if same else None,
             consented=same and supervisor and row["consented_by"] == caller.id)
         # Only the session's supervisor earns a visual it may keep updating.

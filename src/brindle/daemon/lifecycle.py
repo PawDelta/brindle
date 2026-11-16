@@ -52,6 +52,7 @@ WATCH_INTERVAL = 5.0     # seconds between the idle / upgrade checks
 CODEX_HOOK_EVERY = 60.0  # seconds between looks at the Codex hook's trust (codex_hook.keep_trusted)
 SHARED_DOCS_EVERY = 30.0  # seconds between bringing back what teammates wrote on shared plans
 CULL_EVERY = 60.0       # seconds between cull sweeps when no sidebar has run one (cull.claim)
+PROVIDER_SWITCH_EVERY = 30.0  # seconds between provider switch sweeps (offers, and automatic switches)
 CODEX_HOOK_SETTLE = 120.0    # and how long another install's fresh trust is left alone
 STOP_GRACE = 5.0         # seconds `daemon stop` waits before SIGKILL
 SHUTDOWN_GRACE = 1.0     # seconds for requests on shutdown, within the app's replacement budget
@@ -902,6 +903,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     hook_due = clock() + CODEX_HOOK_EVERY
     shared_due = clock() + SHARED_DOCS_EVERY
     cull_due = clock() + CULL_EVERY
+    switch_due = clock() + PROVIDER_SWITCH_EVERY
     sharing: asyncio.Task | None = None     # on its own task: a slow Library never holds up these checks
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
@@ -922,6 +924,9 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
         if clock() >= cull_due:
             cull_due = clock() + CULL_EVERY
             await asyncio.to_thread(_cull_sweep)
+        if clock() >= switch_due:
+            switch_due = clock() + PROVIDER_SWITCH_EVERY
+            await asyncio.to_thread(_provider_switch_sweep)
         if clock() >= shared_due and (sharing is None or sharing.done()):
             shared_due = clock() + SHARED_DOCS_EVERY
             sharing = asyncio.create_task(asyncio.to_thread(_sync_shared_docs))
@@ -952,6 +957,23 @@ def _cull_sweep() -> None:
             db.conn.close()
     except Exception:  # noqa: BLE001 - a sweep must never stop the watch
         log.debug("brindle: couldn't run the cull sweep", exc_info=True)
+
+
+def _provider_switch_sweep() -> None:
+    """provider_switch.sweep, off the daemon's way: offers, and automatic
+    switches, without a manual call. Run one tick at a time by the watch, so a
+    slow switch never overlaps the next; a failure is only logged."""
+    from brindle import provider_switch
+    from brindle.db import DB
+
+    try:
+        db = DB()
+        try:
+            provider_switch.sweep(db, time.time())
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a sweep must never stop the watch
+        log.debug("brindle: couldn't run the provider switch sweep", exc_info=True)
 
 
 def _purge_typed_words() -> None:
