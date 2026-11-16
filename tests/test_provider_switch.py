@@ -86,6 +86,7 @@ def test_auto_always_switch_persists_setting_and_get_reads_it(db, repo, world, s
     assert code == 200 and settings["quota_switch"] == "auto"
 
 
+@pytest.mark.variant("regression: the settings route rejected quota_switch, so the Settings row couldn't save")
 def test_auto_user_settings_patch_accepts_and_validates_quota_switch(db):
     from test_daemon_actions import _send
 
@@ -96,7 +97,9 @@ def test_auto_user_settings_patch_accepts_and_validates_quota_switch(db):
     assert config.user_settings()["quota_switch"] == "auto"
 
 
-@pytest.mark.parametrize("return_mode", ["automatic", "notice_action", "dismiss_notice"])
+@pytest.mark.parametrize("return_mode", [
+    pytest.param("automatic", marks=pytest.mark.variant("in auto mode the return happens by itself, with no press")),
+    "notice_action", "dismiss_notice"])
 def test_auto_sweep_switches_posts_notice_and_returns_when_quota_recovers(db, repo, world, spawned, return_mode):
     _session(db, repo)
     config.set_user("quota_switch", "auto")
@@ -138,7 +141,10 @@ def test_auto_sweep_switches_posts_notice_and_returns_when_quota_recovers(db, re
     assert len(spawned) == 2
 
 
-@pytest.mark.parametrize("billing", ["quota", "profile", "environment",
+@pytest.mark.parametrize("billing", [
+    pytest.param("quota", marks=pytest.mark.variant("a target with no quota left must not be switched to automatically")),
+    "profile",
+    pytest.param("environment", marks=pytest.mark.variant("an API key in the environment means per-token billing")),
     pytest.param("org_key_env", marks=pytest.mark.variant("org key metadata overrides a subscription-auth profile")),
     pytest.param("org_key_helper", marks=pytest.mark.variant("org helper metadata must block switching without running the helper")),
 ])
@@ -182,7 +188,8 @@ def test_auto_never_switches_to_key_billed_provider(db, repo, world, spawned, mo
     assert spawned == [] and provider_switch.open_offer(db, "root") is None
 
 
-@pytest.mark.parametrize("change", ["recovered",
+@pytest.mark.parametrize("change", [
+    pytest.param("recovered", marks=pytest.mark.variant("an offer whose source limit has lifted must not switch")),
     pytest.param("new_limit", marks=pytest.mark.variant("a replacement quota window must get its own current-limit record")),
     pytest.param("headroom", marks=pytest.mark.variant("an old ask offer must follow the current target ranking")),
     "recovered_at_dispatch",
@@ -219,6 +226,7 @@ def test_auto_existing_offer_revalidates_limit_and_target(db, repo, world, spawn
         assert [call["provider_name"] for call in spawned] == ["antigravity"]
 
 
+@pytest.mark.variant("audit regression: an alternatives suffix was read as the target provider's name")
 def test_offer_detail_names_one_target_even_with_alternatives(db, repo, world):
     _session(db, repo)
     world["quotas"] = {"claude": _limited("claude", NOW + HOUR),
@@ -265,8 +273,9 @@ def test_offer_when_supervisor_out_of_quota_names_an_in_quota_provider(db, repo,
 
 
 @pytest.mark.parametrize("installed, other_quota", [
-    ({"claude", "codex"}, _limited("codex", NOW + HOUR)),   # the only other CLI is limited too
-    ({"claude"}, None),                                      # nothing else is installed or signed in
+    pytest.param({"claude", "codex"}, _limited("codex", NOW + HOUR),
+                 marks=pytest.mark.variant("the only other CLI is limited too")),
+    pytest.param({"claude"}, None, marks=pytest.mark.variant("nothing else is installed or signed in")),
 ])
 def test_no_offer_when_no_other_provider_in_quota(db, repo, world, installed, other_quota):
     _session(db, repo)
@@ -430,6 +439,7 @@ def test_handoff_note_carries_goal_workers_tasks_messages_and_transcript_tail(db
     assert "unrelated message" not in note
 
 
+@pytest.mark.variant("a second press while the first switch is in flight must not start a second supervisor")
 def test_handoff_switch_pressed_twice_starts_one_supervisor_on_the_target(db, repo, world, spawned, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
@@ -685,6 +695,7 @@ def test_switch_back_requires_current_root_and_usable_original_provider(db, repo
     assert db.conn.execute("SELECT COUNT(*) FROM provider_switches WHERE kind='back'").fetchone()[0] == 0
 
 
+@pytest.mark.variant("a dismissed switch-back must stay dismissed for that switch")
 def test_switch_back_dismissal_is_not_offered_again(db, repo, world):
     ws = _session(db, repo)
     db.update_agent("root", status="paused")

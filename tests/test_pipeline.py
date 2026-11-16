@@ -852,8 +852,11 @@ def test_supervisor_action_negations(summary):
     assert pipeline.has_supervisor_action(summary) is False
 
 
-@pytest.mark.parametrize("case", [None, "old reviewer", "recorded", "reviewer during run",
-                                  "checks and reviewer"])
+@pytest.mark.parametrize("case", [None, "old reviewer", "recorded",
+    pytest.param("reviewer during run",
+                 marks=pytest.mark.variant("a run only holding the lock must not hide a live reviewer")),
+    pytest.param("checks and reviewer",
+                 marks=pytest.mark.variant("checks really running show before a live reviewer (earlier step)"))])
 def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypatch, case):
     """Both list tools and the sidebar expose the branch's actual review stage."""
     from dataclasses import replace

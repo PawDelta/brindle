@@ -8,6 +8,8 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from brindle import agents, tmux
 from brindle.db import Agent, Workspace
 
@@ -121,6 +123,7 @@ def test_one_watch_tick_with_no_sidebar_tells_the_supervisor_of_a_codex_approval
     assert [to for to, body in sent if "w1" in body and "Would you like to run" in body] == ["boss"]
 
 
+@pytest.mark.variant("audit gap: the provider switch sweep had no periodic caller")
 def test_one_watch_tick_runs_the_provider_switch_sweep(db, tmp_path, monkeypatch):
     from brindle import provider_switch
     from brindle.daemon import lifecycle, session_review

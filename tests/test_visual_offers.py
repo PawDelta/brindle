@@ -97,6 +97,7 @@ def test_offer_limits(db, session, monkeypatch, case, kind, counts, reason):
         assert offers.current(db, boss.id)["id"] == result["id"]
 
 
+@pytest.mark.variant("regression: a supervisor's decision prompt was refused without the person's quoted words")
 def test_supervisor_decision_needs_no_visual_consent(db, session):
     boss, worker = session
     choices = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
