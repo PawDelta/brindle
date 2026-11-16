@@ -8,7 +8,9 @@ supervisor on that provider in the *same* workspace and branch, hands it the
 session the way ``sessions.handover_to`` does (goal, milestones, workers,
 queued tasks), and gives it a handoff note built from brindle's own records,
 since the new CLI can't read the old one's conversation. Once the original
-provider's limit resets, brindle offers to switch back the same way.
+provider's limit resets, brindle offers to switch back the same way. With
+quota_switch="auto", sweeps carry out these switches and show a notice
+with an action to return early instead of asking first.
 
 Records live in the ``provider_switches`` table (see db.py): one row per
 offer, ``kind`` switch or back, ``state`` open -> switching -> done (or
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 import uuid
 from collections import deque
@@ -73,6 +76,29 @@ class Offer:
 # -- detection -------------------------------------------------------------------
 
 
+def quota_switch() -> str:
+    """User consent to automatic quota switching; unknown values keep asking."""
+    from brindle import config
+
+    return "auto" if config.user_settings().get("quota_switch") == "auto" else "ask"
+
+
+def _key_billed(profile) -> bool:
+    """Conservatively exclude per-token routes from unattended switches."""
+    from brindle import connections, pane_auth
+
+    # OpenCode's stored model credentials may bill without an environment
+    # key; there is no subscription billing signal for it here.
+    if profile.auth == "api_key" or profile.api_key_env or profile.provider == "opencode":
+        return True
+    if profile.auth == "subscription":
+        return False
+    return (quota._key_billed(profile.provider)
+            or any(profile.env.get(name) or os.environ.get(name)
+                   for name in pane_auth.API_KEYS.get(profile.provider, ()))
+            or connections._key(profile.provider)[0] is not None)
+
+
 def limited_until(provider: str, now: float) -> float | None:
     """When ``provider``'s limit lifts, or None while it is in quota.
     ``quota.get(provider).limited_until`` after ``now``; else the fullest
@@ -100,9 +126,9 @@ def usable(provider: str, repo_root: str | None) -> bool:
     return provider in SUPERVISOR_PROVIDERS and not preflight.check(provider, repo_root)
 
 
-def _targets(current: str, repo_root: str | None, now: float) -> list[str]:
+def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: bool = False) -> list[str]:
     """Eligible targets, ordered by headroom with a stable provider tie break."""
-    from brindle import agents, airgap, autopilot, policy
+    from brindle import agents, airgap, autopilot, connections, policy
     from brindle.config import load_repo_config
     from brindle.pro import managed_models
     from brindle.profiles import load_profile
@@ -115,7 +141,8 @@ def _targets(current: str, repo_root: str | None, now: float) -> list[str]:
     targets = []
     for provider in SUPERVISOR_PROVIDERS:
         if (provider == current or (cfg and provider in cfg.exclude_providers)
-                or not gate.access.allows(provider) or limited_until(provider, now) is not None
+                or not gate.access.allows(provider)
+                or (not allow_limited and limited_until(provider, now) is not None)
                 or not usable(provider, repo_root)):
             continue
         # Judge the identity a supervisor launched with this provider would use,
@@ -128,6 +155,9 @@ def _targets(current: str, repo_root: str | None, now: float) -> list[str]:
             if managed_models.refusal(gate.managed, profile):
                 continue
             profile = managed_models.apply_profile(gate.managed, profile)
+        profile = connections.apply(profile, repo_root)
+        if quota_switch() == "auto" and _key_billed(profile):
+            continue
         model = autopilot.effective_profile_model(profile, repo_root) or None
         if not gate.access.allows_profile(profile.name, provider, model):
             continue
@@ -202,20 +232,25 @@ def maybe_offer(db: DB, root_id: str, now: float) -> Offer | None:
     with db.tx() as c:
         # Serialize the history check and insert: dismissals and failed starts
         # consume this limit, and concurrent detections share the active offer.
+        # Follow handovers so an early switch back cannot repeat this limit.
         c.execute("INSERT OR IGNORE INTO provider_switches "
                   "(id, root_id, kind, from_provider, to_provider, state, limited_until, created_at, updated_at) "
                   "SELECT ?, ?, 'switch', ?, ?, 'open', ?, ?, ? WHERE NOT EXISTS "
-                  "(SELECT 1 FROM provider_switches WHERE root_id=? AND kind='switch' "
+                  "(SELECT 1 FROM provider_switches WHERE root_id IN ("
+                  "WITH RECURSIVE lineage(id) AS (SELECT ? UNION "
+                  "SELECT p.root_id FROM provider_switches p JOIN lineage l ON p.new_root_id=l.id "
+                  "WHERE p.state='done') SELECT id FROM lineage) AND kind='switch' "
                   "AND from_provider=? AND limited_until=?)",
                   (offer_id, root_id, root.provider, target, until, now, now,
                    root_id, root.provider, until))
     return open_offer(db, root_id)
 
 
-def maybe_offer_back(db: DB, now: float) -> list[Offer]:
+def maybe_offer_back(db: DB, now: float, *, switch_id: str | None = None) -> list[Offer]:
     """For each done switch whose ``from_provider`` is in quota again and
     whose new supervisor is still the session's, a back offer (once: an
-    open or dismissed back offer for that switch is not repeated)."""
+    open or dismissed back offer for that switch is not repeated).
+    An explicit switch_id is the notice's action to return before reset."""
     from brindle import sessions
 
     offers = []
@@ -224,6 +259,8 @@ def maybe_offer_back(db: DB, now: float) -> list[Offer]:
                            "WHERE back.back_of=provider_switches.id) ORDER BY created_at, id").fetchall()
     for row in rows:
         original = Offer(**dict(row))
+        if switch_id is not None and original.id != switch_id:
+            continue
         root = db.get_agent(original.new_root_id) if original.new_root_id else None
         if (root is None or root.parent_id is not None or root.mode != "interactive"
                 or root.status in ("paused", "done") or root.dismissed_at is not None
@@ -233,7 +270,8 @@ def maybe_offer_back(db: DB, now: float) -> list[Offer]:
         if (ap and sessions.handed_away(ap)) or open_offer(db, root.id) is not None:
             continue
         ws = db.get_workspace(root.workspace_id)
-        if ws is None or original.from_provider not in _targets(root.provider, ws.repo_root, now):
+        if ws is None or original.from_provider not in _targets(
+                root.provider, ws.repo_root, now, allow_limited=switch_id is not None):
             continue
         offer_id = uuid.uuid4().hex
         with db.tx() as c:
@@ -263,13 +301,29 @@ def dismiss(db: DB, offer_id: str, now: float) -> Offer:
 
 
 def sweep(db: DB, now: float) -> list[Offer]:
-    """New forward and back offers for active session roots."""
+    """New offers for active roots, or carry them out with automatic consent."""
+    from brindle import agents
+
     offers = maybe_offer_back(db, now)
+    automatic = quota_switch() == "auto"
     for root in db.list_agents():
-        if open_offer(db, root.id) is not None:
+        existing = open_offer(db, root.id)
+        if existing is not None:
+            if automatic and existing.state == "open" and existing not in offers:
+                offers.append(existing)
             continue
         if offer := maybe_offer(db, root.id, now):
             offers.append(offer)
+    if automatic:
+        for offer in offers:
+            if offer.kind == "back" and limited_until(offer.to_provider, now) is not None:
+                continue
+            try:
+                switch(db, offer.id, now)
+            except agents.AgentError:
+                # The failed row consumes this limit and exposes the failure.
+                continue
+        return []
     return offers
 
 
@@ -426,7 +480,8 @@ def switch(db: DB, offer_id: str, now: float) -> Agent:
                     or root.provider != offer.from_provider or identity_lock.locked_by(root.id)):
                 raise agents.AgentError("the session can no longer switch providers")
             ws = db.get_workspace(root.workspace_id)
-            if ws is None or offer.to_provider not in _targets(root.provider, ws.repo_root, now):
+            if ws is None or offer.to_provider not in _targets(
+                    root.provider, ws.repo_root, now, allow_limited=offer.kind == "back"):
                 raise agents.AgentError("the target provider is no longer available for this session")
             new = sessions.handover_to(db, root.id, ws, handoff_note(db, root.id, now),
                                        provider=offer.to_provider, pause_old=True).agent
@@ -460,8 +515,32 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
     """Open offers as Inbox cards: KIND_OFFER or KIND_BACK, ``request_id``
     the offer id, ``detail`` "<from> -> <to>", ``action`` POST
     /v1/sessions/{root}/provider-switch."""
+    from brindle import sessions
+
     now = time.time() if now is None else now
     items = []
+    for row in db.conn.execute(
+            "SELECT * FROM provider_switches WHERE kind='switch' AND state='done' "
+            "AND NOT EXISTS (SELECT 1 FROM provider_switches AS back WHERE back.back_of=provider_switches.id) "
+            "ORDER BY created_at, id"):
+        offer = Offer(**dict(row))
+        root = db.get_agent(offer.new_root_id) if offer.new_root_id else None
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if (root is None or ws is None or root.status in ("paused", "done")
+                or root.parent_id is not None or root.mode != "interactive" or root.dismissed_at is not None
+                or root.provider != offer.to_provider or identity_lock.locked_by(root.id)
+                or (repo_root is not None and ws.repo_root != repo_root)):
+            continue
+        ap = db.get_autopilot(root.id)
+        if ap and sessions.handed_away(ap):
+            continue
+        reset = time.strftime("%H:%M", time.localtime(offer.limited_until)) if offer.limited_until else "unknown"
+        items.append(InboxItemDTO(kind=KIND_BACK,
+                                  reason=f"Switched to {offer.to_provider} · {offer.from_provider} was out of quota, back at {reset}",
+                                  detail="Switch back now", agent_id=root.id, workspace_id=ws.id,
+                                  root_id=root.id, request_id=offer.id,
+                                  action=InboxActionDTO(method="POST",
+                                      path=f"/v1/sessions/{root.id}/provider-switch")))
     for row in db.conn.execute("SELECT * FROM provider_switches WHERE state IN ('open', 'failed') ORDER BY created_at, id"):
         offer = Offer(**dict(row))
         root = db.get_agent(offer.root_id)
@@ -472,7 +551,8 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
         if offer.state != "failed" and offer.kind == "switch" and (root.provider != offer.from_provider
                                        or out_of_quota(db, root.id, now) is None):
             continue
-        targets = _targets(offer.from_provider, ws.repo_root, now) if offer.state != "failed" else []
+        targets = _targets(offer.from_provider, ws.repo_root, now,
+                           allow_limited=offer.kind == "back") if offer.state != "failed" else []
         if offer.state != "failed" and offer.to_provider not in targets:
             continue
         detail = f"{offer.from_provider} → {offer.to_provider}"
