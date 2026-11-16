@@ -75,7 +75,7 @@ describe("routing goal", () => {
   });
 
   it("a reply for an aim moved away from doesn't overwrite the newer one", async () => {
-    const { held, slider } = await setup({}, true);
+    const { daemon, held, slider } = await setup({}, true);
     fireEvent.keyDown(slider, { key: "ArrowLeft" });
     await rest();
     const first = shown(slider);
@@ -92,6 +92,24 @@ describe("routing goal", () => {
     expect(shown(slider)).toBe(newer);
     expect(preview().getAttribute("data-preview-for")).toBe(newer);
     expect(preview().getAttribute("data-state")).toBe("current");
+
+    // Back to the same aim (Reset, a move, Reset): the older reply for those weights is stale too.
+    const reset = () => fireEvent.click(document.querySelector<HTMLButtonElement>('[data-action="reset"]')!);
+    reset();
+    fireEvent.keyDown(slider, { key: "ArrowLeft" });
+    await rest();
+    await settle();
+    const goal = daemon.data.routingGoal!;
+    daemon.data.routingGoal = { ...goal, preview: { ...goal.preview, roles: [{ key: "newer", label: "Medium", value: "Codex Sol" }] } };
+    reset();
+    await settle();
+    expect(held).toHaveLength(5);
+    held[4]();
+    await settle();
+    held[2]();
+    held[3]();
+    await settle();
+    expect(document.querySelector('[data-role="newer"]')).not.toBeNull();
   });
 
   it("an org lock disables the control", async () => {

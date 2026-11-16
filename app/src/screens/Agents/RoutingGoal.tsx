@@ -246,8 +246,11 @@ export function RoutingGoal({ client, repo }: RoutingGoalProps) {
   const [weights, setWeights] = useState<RoutingWeights | null>(null);
   const [task, setTask] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  /* The aim the newest change asked for: a reply for any other is stale. */
-  const latest = useRef<string | null>(null);
+  /* Counts the person's changes: a reply to a request sent before the newest
+     change is stale, even one for the same weights (A → B → A). */
+  const gen = useRef(0);
+  /* The request on its way for the newest change, if any. */
+  const inflight = useRef<{ gen: number; key: string } | null>(null);
   const timer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -255,7 +258,7 @@ export function RoutingGoal({ client, repo }: RoutingGoalProps) {
     client.routingGoal(repo).then(
       (g) => {
         // A move made while this loaded wins over what it read.
-        if (!live || latest.current !== null) return;
+        if (!live || gen.current !== 0) return;
         setGoal(g);
         setWeights(g.weights);
       },
@@ -269,16 +272,21 @@ export function RoutingGoal({ client, repo }: RoutingGoalProps) {
 
   const send = useCallback(
     (w: RoutingWeights, scope: RoutingGoalDTO["scope"]) => {
-      const asked = weightsKey(w);
+      const mine = gen.current;
+      inflight.current = { gen: mine, key: weightsKey(w) };
+      const settled = () => {
+        if (inflight.current?.gen === mine) inflight.current = null;
+        return gen.current === mine;
+      };
       client.putRoutingGoal({ repo, weights: w, scope }).then(
         (g) => {
-          if (latest.current !== asked) return;
+          if (!settled()) return;
           setGoal(g);
           setWeights(g.preview.aim ?? g.weights);
           setSaveError(null);
         },
         (e: unknown) => {
-          if (latest.current === asked) setSaveError(message(e));
+          if (settled()) setSaveError(message(e));
         },
       );
     },
@@ -294,7 +302,9 @@ export function RoutingGoal({ client, repo }: RoutingGoalProps) {
   /* Moves the aim now; the PUT goes once it rests (`now`: at once). */
   const change = (w: RoutingWeights, now = false) => {
     if (locked) return;
-    latest.current = weightsKey(w);
+    // The same aim already on its way, with nothing asked since (a second Reset): that reply will do.
+    if (now && inflight.current?.gen === gen.current && inflight.current.key === weightsKey(w)) return;
+    gen.current += 1;
     setWeights(w);
     window.clearTimeout(timer.current);
     if (now) send(w, goal.scope);
