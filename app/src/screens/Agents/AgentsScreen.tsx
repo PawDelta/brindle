@@ -67,6 +67,8 @@ import {
   type Kind,
   type KindState,
 } from "./agents";
+import { Mark } from "./Mark";
+import { RoutingGoal } from "./RoutingGoal";
 
 export interface AgentsScreenProps {
   client: DaemonClient;
@@ -99,18 +101,6 @@ function withLinks(text: string): ReactNode[] {
 
 /* What is open under a row: its list, its fallbacks, its More, or the builder. */
 type Panel = "pick" | "fb" | "more" | "make";
-
-const MARK: Record<string, string> = { claude: "bg-sap text-on-sap", codex: "bg-ink text-surface", opencode: "bg-ink-3 text-surface", antigravity: "bg-branch text-on-branch", native: "bg-pass text-surface" };
-
-/* A provider's small letter mark. */
-function Mark({ provider }: { provider: string }) {
-  if (!provider) return null;
-  return (
-    <span className={`inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-[10px] font-bold ${MARK[provider] ?? "bg-ink-3 text-surface"}`} aria-hidden>
-      {productName(provider)[0]}
-    </span>
-  );
-}
 
 function CostTag({ cost }: { cost: string | null }) {
   if (!cost) return null;
@@ -878,6 +868,8 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
         </div>
       )}
       {repo && !routing && !loadError && <p className="text-ink-3">Loading…</p>}
+
+      {repo && <RoutingGoal key={repo} client={client} repo={repo} />}
 
       <section className={`${card} flex flex-col gap-s2 px-s2 py-s2`} aria-labelledby="how-title">
         <header className="flex flex-wrap items-baseline gap-x-s2">

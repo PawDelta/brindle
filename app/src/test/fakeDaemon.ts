@@ -9,7 +9,7 @@
    has exited. */
 
 import { EphemeralStore, LoroDoc, decodeImportBlobMeta } from "loro-crdt";
-import { DaemonClient, fromBase64, toBase64, type GithubConnection, type LiveDocState, type Plan } from "../api/client";
+import { DaemonClient, fromBase64, toBase64, type GithubConnection, type LiveDocState, type Plan, type RoutingGoalDTO, type RoutingWeights } from "../api/client";
 import { liveReviewGate } from "../api/liveReview";
 import type { BusEvent, StreamMessage, WebSocketLike } from "../api/events";
 import { WS_UNAUTHORIZED } from "../api/events";
@@ -158,6 +158,11 @@ export interface DaemonData {
   debugLog: DebugEntry[];
   /* GET /doctor. */
   doctor: DoctorCheck[];
+  /* GET / PUT /routing/goal (engine branch feat/routing-goal-api): what
+     routing aims for and the preview at that point. None: the engine doesn't
+     have the route yet (404). A PUT stores the weights (refused while
+     `locked`) and answers with the preview's aim moved to them. */
+  routingGoal?: RoutingGoalDTO | null;
   /* GET /cost: refused (402 not_entitled, as cost.require_entitled does) unless `costEntitled`. */
   cost: Cost;
   costEntitled: boolean;
@@ -2254,6 +2259,15 @@ export class FakeDaemon {
   /* PUT /routing (routes_actions.put_routing): the tiers given replace theirs
      in the scope's file (the others stay), as do a reviewer or an exclusion
      list given; every name must be a known profile, every provider a known one. */
+  private putRoutingGoal(body: { weights?: RoutingWeights }): Response {
+    const goal = this.data.routingGoal;
+    if (!goal) return error("not_found", "no route PUT /routing/goal", 404);
+    if (goal.locked) return error("forbidden", goal.lock_reason ?? "your org locks what routing aims for", 403);
+    if (!body.weights) return error("invalid", "weights are required", 400);
+    this.data.routingGoal = { ...goal, weights: body.weights, preview: { ...goal.preview, aim: body.weights } };
+    return json(this.data.routingGoal);
+  }
+
   private putRouting(body: Record<string, unknown>): Response {
     const repo = body.repo;
     if (typeof repo !== "string") return error("invalid", "repo is required", 400);
@@ -2746,6 +2760,7 @@ export class FakeDaemon {
       if (connection && this.holdConnections) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>))));
       if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
+      if (path === "/routing/goal") return this.putRoutingGoal((body ?? {}) as { weights?: RoutingWeights });
       if (path === "/doc-format") {
         // The engine replaces what the level sets (doc_templates.save), keeping no key the body leaves out.
         const format = ((body ?? {}) as { format?: Partial<DocFormat> }).format;
@@ -2907,6 +2922,8 @@ export class FakeDaemon {
         return json((repo && d.profilesByRepo[repo]) || d.profiles);
       case "/routing":
         return needRepo() ?? json(this.routing(repo, query.scope === "user", query.learned !== "0"));
+      case "/routing/goal":
+        return needRepo() ?? (d.routingGoal ? json(d.routingGoal) : error("not_found", "no route GET /routing/goal", 404));
       case "/rules":
         return needRepo() ?? json(d.rulePacks);
       case "/config":

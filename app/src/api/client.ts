@@ -110,6 +110,81 @@ export interface ProfileCreated {
   path: string;
 }
 
+/* GET / PUT /routing/goal (engine branch feat/routing-goal-api): what routing
+   aims for, a point in the Cheaper / Faster / First try triangle. Each weight
+   is 0–1 and the three sum to 1; the names match POST /learning/suggest's. */
+export interface RoutingWeights {
+  cost: number;
+  speed: number;
+  first_try: number;
+}
+
+/* One benchmark task's numbers for a setup, ready to print ("$14.54–19.65",
+   "36–51", "1 of 3 runs", "—" where not measured). */
+export interface RoutingGoalFigures {
+  task: string;
+  /* The task toggle's label ("Large feature"). */
+  label: string;
+  usd: string;
+  minutes: string;
+  first_try: string;
+  /* How the figures were got ("measured, 3 runs", "estimated"). */
+  basis: string;
+}
+
+/* A setup to compare against: "you" (this point's routing), or one model
+   doing everything. Measured ones are solid on the triangle; estimated ones
+   hollow and dashed. `point` is where it sits on the triangle (null: not placed). */
+export interface RoutingGoalReference {
+  key: string;
+  name: string;
+  measured: boolean;
+  point: RoutingWeights | null;
+  tasks: RoutingGoalFigures[];
+}
+
+/* A role (a size, the reviewer, the supervisor) or a setting (at once,
+   review) and what it runs at this point. `was` is today's when it changes. */
+export interface RoutingGoalRole {
+  key: string;
+  label: string;
+  value: string;
+  provider?: string | null;
+  was?: string | null;
+  note?: string | null;
+}
+
+export interface RoutingGoalPreview {
+  /* The aim after org policy's clamp. */
+  aim: RoutingWeights;
+  /* Where what routing delivered lands ("Your routing"); null before any. */
+  landed: RoutingWeights | null;
+  /* The person's recent work at this point, and today's. */
+  you: { usd: number; minutes: number; first_try: number; today?: { usd: number; minutes: number; first_try: number } | null } | null;
+  references: RoutingGoalReference[];
+  roles: RoutingGoalRole[];
+  /* Lines under the comparison table and the basis of the estimates. */
+  notes?: string[];
+  basis?: string | null;
+}
+
+export interface RoutingGoalDTO {
+  weights: RoutingWeights;
+  scope: RoutingScope;
+  /* The org locks it: nothing here can change. */
+  locked: boolean;
+  lock_reason?: string | null;
+  /* What "Reset to Balanced" sets (the built-in default when missing). */
+  balanced?: RoutingWeights | null;
+  preview: RoutingGoalPreview;
+}
+
+export interface RoutingGoalPut {
+  repo: string;
+  weights: RoutingWeights;
+  scope: RoutingScope;
+}
+
 /* What was written (routing, reviewer, exclude_providers) and the file it went to. */
 export interface RoutingUpdated {
   updated: string[];
@@ -2624,6 +2699,16 @@ export class DaemonClient {
 
   putRouting(body: RoutingPut) {
     return this.put<RoutingUpdated>("/routing", body);
+  }
+
+  /* What routing aims for in the repo, with the preview at that point. */
+  routingGoal(repo: string) {
+    return this.get<RoutingGoalDTO>("/routing/goal", { repo });
+  }
+
+  /* Sets the aim; the reply is the goal as stored (org policy may clamp it) with its preview. */
+  putRoutingGoal(body: RoutingGoalPut) {
+    return this.put<RoutingGoalDTO>("/routing/goal", body);
   }
 
   doctor(repo?: string) {
