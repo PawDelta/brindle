@@ -2669,10 +2669,14 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if checking(ap):
         return None  # the check's result arrives as a message and wakes it up
     working, stalled = split_workers(db, agent.id, screen=True)
-    # A worker waiting on plan approval waits on the supervisor, so the supervisor
-    # can't stop for it (see nudge).
+    from brindle import permission_routing
+
+    # A worker waiting on plan approval waits on the supervisor, and one held on
+    # a permission ask the person must answer waits on them: neither sends a
+    # result that would wake the supervisor, so it can't stop for them (see nudge).
     if any(agents.runs_process(a) for a in working
-            if getattr(a, "plan_state", None) != "proposed"):
+            if getattr(a, "plan_state", None) != "proposed"
+            and permission_routing.waits_on_person(db, a) is None):
         return None  # their results arrive as messages and wake it up
     from brindle import tasks
 
@@ -2712,6 +2716,15 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
         pending += (f"Plans awaiting your approval: {', '.join(planning)}. Read each plan "
                     "(it arrived as a message) and call approve_plan, with feedback and "
                     "approved=false to ask for changes; the worker is waiting on you.\n\n")
+    from brindle import permission_routing
+
+    held = [a for a in working if permission_routing.waits_on_person(db, a) is not None]
+    if held:
+        lines = "\n".join(f"- {a.id}: {agents.pending_permission(db, a.id) or 'a permission request'}"
+                          for a in held)
+        pending += ("These workers are waiting for the person to answer a permission request and do "
+                    f"nothing until they do:\n{lines}\nTell the person exactly what is pending, and plan "
+                    "the work that doesn't depend on them meanwhile.\n\n")
     stuck = ""
     if stalled:
         seen = "\n".join(f"- {a.id}: {agents.liveness(db, a, db.get_workspace(a.workspace_id))}"
