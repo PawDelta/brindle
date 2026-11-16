@@ -1827,7 +1827,10 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
                 return (f"Not removed: {ws.id} shares its worktree {ws.path} with {other.id}, "
                         "which has a live worker; removing it would delete that worker's "
                         "checkout. Pass force=true to remove it anyway.")
+    from brindle import learning
+
     unmerged = False
+    ahead = None
     if ws.kind == "worktree" and ws.base_branch and os.path.isdir(ws.path):
         try:
             _behind, ahead = git.ahead_behind(ws.path, ws.base_branch)
@@ -1836,15 +1839,23 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
             pass
     worker = agents.workspace_worker(db, ws)
     abandoned = bool(worker and worker.result is None and not db.merged_sha(ws.id))
+    # reported, yet nothing of its own on the branch and no merge recorded: it
+    # produced nothing, which the learner counts as a failure (not a merge)
+    empty = bool(worker and worker.result is not None and ahead == 0
+                 and not db.merged_sha(ws.id) and not learning.settled(worker.id))
     its_agents = [a.id for a in db.list_agents(ws.id)]
+    if unmerged or abandoned or empty:
+        # the worktree and the reviewers' rows go with the removal
+        learning.capture(db, ws, worker)
     try:
         removed = workspaces.remove(db, ws, force=force, delete_branch=delete_branch)
     except workspaces.WorkspaceError as e:
+        learning.forget_capture(worker)
         return f"Not removed: {e}"
     # Removal can refuse dirty, busy or unwritable checkouts. Only settle
     # dependencies and publish its outcome after it succeeds. The worker's
     # row may already be gone, so use the identity captured above.
-    if unmerged or abandoned:
+    if unmerged or abandoned or empty:
         if unmerged:
             tasks.on_removed_unmerged(db, ws, worker=worker)
         pipeline.note_removed_unmerged(db, ws, actor=caller, worker=worker)

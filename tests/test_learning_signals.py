@@ -3,10 +3,12 @@ nothing counts as a failure, and a task's real dollars and time (its own and
 its reviewers') are in the record."""
 
 import time
+from pathlib import Path
 
 import pytest
 
-from brindle import learning, pipeline, plugins, pricing, usage, workspaces
+from conftest import sh
+from brindle import agents, learning, mcp_server, pipeline, plugins, pricing, procs, usage, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.pro import learning as pro_learning
@@ -57,6 +59,38 @@ def test_an_idle_worker_without_a_report_is_recorded_as_a_stalled_failure(db, ws
     body = pro_learning.record_payload(KEY, "repo", task, outcome, signals=True)
     assert body["stalled"] is True and body["failure"] == "idle"
     assert body["parts"] == 3
+
+
+@pytest.mark.parametrize("committed, failure", [(False, "no_commits"), (True, None)])
+def test_removal_records_what_the_worktree_and_reviewers_showed_before_teardown(
+        db, repo, recorder, monkeypatch, committed, failure):
+    """The real remove_workspace: a reported worker with nothing on its branch is
+    a no_commits failure (not a merge), and its reviewers' spend survives the
+    deletion of their rows."""
+    model = "claude-sonnet-5-5"
+    price = pricing.price_for(model)
+    root = workspaces.adopt_root(db, str(repo))
+    db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "processing",
+                       "@0", None, time.time()))
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    if committed:
+        (Path(ws.path) / "new.py").write_text("x = 1\n")
+        sh("git add new.py && git commit -qm work", Path(ws.path))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "idle", "@0",
+                       "done", time.time() - 30, task="the task"))
+    db.add_agent(Agent("r1", ws.id, "reviewer", "claude", "boss", "review", "idle", "@0",
+                       "verdict", time.time() - 10))
+    monkeypatch.setattr(usage, "agent_usage",
+                        lambda db, a: usage.Usage(500, 100, 0, 0, model) if a.id == "r1" else None)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    monkeypatch.setattr(procs, "cwds", dict)
+    monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
+    monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
+
+    assert mcp_server.remove_workspace(ws.id).startswith("Removed")
+    [(task, outcome)] = [e for e in recorder.events if e[0].agent_id == "w1"]
+    assert outcome.event == "removed_unmerged" and outcome.failure == failure
+    assert outcome.review_cost_usd == pytest.approx(price.cost(500, 100, 0, 0))
 
 
 def test_real_cost_and_time_are_in_the_record(db, ws, recorder, monkeypatch):

@@ -105,6 +105,8 @@ class LearningPlugin(ABC):
 _learners: dict[str, LearningPlugin] = {}
 _settled: set[str] = set()
 _no_verdict: set[str] = set()
+# worker id -> what its unmerged ending looked like before its worktree and rows went
+_captured: dict[str, dict] = {}
 
 
 def plugin(cfg: RepoConfig, repo_root: str) -> LearningPlugin | None:
@@ -125,6 +127,7 @@ def reset() -> None:
     _learners.clear()
     _settled.clear()
     _no_verdict.clear()
+    _captured.clear()
 
 
 def settled(agent_id: str) -> bool:
@@ -177,8 +180,11 @@ def _dollars(db: DB, agent: Agent, repo_root: str) -> float | None:
 
 
 def _review_dollars(db: DB, ws: Workspace) -> float | None:
-    """The summed spend of ``ws``'s reviewers; 0.0 with none, None when any is unpriced."""
+    """The summed spend of ``ws``'s reviewers; 0.0 with none, None when any is
+    unpriced or the workspace's rows are already gone (unknown, not free)."""
     try:
+        if db.get_workspace(ws.id) is None:
+            return None
         total = 0.0
         for a in db.list_agents(ws.id):
             if a.mode != "review":
@@ -221,6 +227,31 @@ def _failure(db: DB, worker: Agent, ws: Workspace) -> tuple[str | None, float]:
     except Exception:  # noqa: BLE001 - no worktree or base to compare: say nothing
         pass
     return None, 0.0
+
+
+def _ending(db: DB, worker: Agent, ws: Workspace, merged: bool = False) -> dict:
+    failure, idle = (None, 0.0) if merged else _failure(db, worker, ws)
+    return {"failure": failure, "idle_seconds": idle, "review_cost_usd": _review_dollars(db, ws),
+            "queue_seconds": _queue_seconds(db, worker, ws.repo_root),
+            "cost_usd": _dollars(db, worker, ws.repo_root)}
+
+
+def capture(db: DB, ws: Workspace, worker: Agent | None) -> None:
+    """Before removing ``ws`` unmerged: note how ``worker``'s task ended
+    (failure, idle time, its own and its reviewers' spend) while its worktree
+    and rows still exist, for the ``note(merged=False)`` that follows the
+    removal. Never raises."""
+    try:
+        if worker is not None:
+            _captured[worker.id] = _ending(db, worker, ws)
+    except Exception:  # noqa: BLE001
+        log.info("brindle: couldn't capture a worker's ending for the learner", exc_info=True)
+
+
+def forget_capture(worker: Agent | None) -> None:
+    """Drop ``worker``'s captured ending (its removal was refused)."""
+    if worker is not None:
+        _captured.pop(worker.id, None)
 
 
 def _task_info(db: DB, worker: Agent, ws: Workspace) -> TaskInfo:
@@ -267,8 +298,10 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
     """Tell the learner about one event in ``worker``'s task. Does nothing
     without a learner, and never raises."""
     try:
+        captured = None
         if merged is not None and worker is not None:
             _settled.add(worker.id)
+            captured = _captured.pop(worker.id, None)
         p = plugin(cfg, ws.repo_root)
         if p is None or worker is None:
             return
@@ -281,14 +314,11 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
         if escalated:
             p.record(info, Outcome("escalated"))
         if merged is not None:
-            failure, idle = (None, 0.0) if merged else _failure(db, worker, ws)
+            ending = (captured if captured is not None and not merged
+                      else _ending(db, worker, ws, merged=bool(merged)))
             p.record(info, Outcome(
                 "merged" if merged else "removed_unmerged", checks_passed=checks_passed,
-                tokens=_tokens(db, worker), wall_seconds=wall,
-                cost_usd=_dollars(db, worker, ws.repo_root),
-                review_cost_usd=_review_dollars(db, ws),
-                queue_seconds=_queue_seconds(db, worker, ws.repo_root),
-                idle_seconds=idle, failure=failure,
+                tokens=_tokens(db, worker), wall_seconds=wall, **ending,
             ))
     except Exception:
         log.exception("brindle: the learner failed to record an outcome")
@@ -403,5 +433,6 @@ def used_prior(cfg: RepoConfig, repo_root: str) -> bool:
         return False
 
 
-__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "choose", "choose_why", "kept_note", "note",
-           "note_reviewer", "plugin", "reset", "settled", "used_prior"]
+__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "capture", "choose", "choose_why",
+           "forget_capture", "kept_note", "note", "note_reviewer", "plugin", "reset", "settled",
+           "used_prior"]
