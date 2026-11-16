@@ -436,9 +436,9 @@ def test_a_demo_held_by_its_preflight_keeps_its_repo_until_settled_or_cancelled(
      {"routing": {"heavy": ["developer"], "light": ["developer-codex"], "advanced": ["developer-codex"]}},
      marks=pytest.mark.variant("stale tier aliases override user edits")),
     # A kind's fallbacks alone keep the person's own pick, not the one this repo's local file overrides it with.
-    pytest.param("user", {"kinds": {"medium": {"fallbacks": ["developer-codex"]}}}, None, 200,
+    pytest.param("user", {"kinds": {"medium": {"fallbacks": ["developer-sonnet"]}}}, None, 200,
      {"routing": {"heavy": ["developer"], "advanced": ["developer-heavy"], "reasoning": ["developer-fable"],
-                  "medium": ["developer-sonnet", "developer-codex"]},
+                  "medium": ["developer-codex", "developer-sonnet"]},
       "routing_locked": {"medium": True}, "routing_light": "claude-haiku"},
      marks=pytest.mark.variant("fallback edit preserves user scope")),
     ("repo", {"tiers": {"light": ["developer"]}, "exclude_providers": ["claude"]}, None, 200,
