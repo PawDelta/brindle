@@ -102,7 +102,7 @@ def test_a_goal_put_at_a_level_is_what_get_reports_with_the_triangle(db, repo, b
     assert (got["weights"], got["scope"], got["locked"]) == ({"cost": 0.5, "speed": 0.2, "first_try": 0.3},
                                                             "repo", False)
     assert {r["name"]: r["measured"] for r in got["preview"]["references"]} == {
-        "Fable 5.2 alone": True, "Gemini 4 Argon alone": False, "GPT-6 Astra alone": False, "brindle B": True}
+        "Fable 5.2 alone": True, "Gemini 4 Argon alone": True, "GPT-6 Astra alone": True, "brindle B": True}
     code, got = _send("PUT", "/v1/routing/goal", {"repo": str(repo), "scope": "session", "session": "boss",
                                                   "weights": {"speed": 1}})
     assert (code, got["scope"], got["weights"]) == (200, "session", {"cost": 0.0, "speed": 1.0, "first_try": 0.0})

@@ -14,21 +14,21 @@
     },
     {
       "name": "Gemini 4 Argon alone",
-      "usd": 8.50,
-      "minutes": 42,
-      "first_try": 0.714,
-      "measured": false,
-      "runs": 0,
-      "note": "Estimated from list price: Fable's measured tokens at Argon's $4/$20 per M from Dec 1 (~$4.25 at the $2/$10 promo until Nov 30). Time and first try are placed with Fable's until it is benchmarked."
+      "usd": 4.30,
+      "minutes": 43.54,
+      "first_try": 1.0,
+      "measured": true,
+      "runs": 1,
+      "note": "Frontier large-task solo run: 169 of 170 checks passed, zero fix rounds after review. Cost uses the $2/$10 per M promo through Nov 30, 2026; the same tokens cost $8.60 at $4/$20 from Dec 1. First try means fix_rounds == 0, not all checks passed."
     },
     {
       "name": "GPT-6 Astra alone",
-      "usd": 21.20,
-      "minutes": 42,
-      "first_try": 0.714,
-      "measured": false,
-      "runs": 0,
-      "note": "Estimated from list price: Fable's measured tokens at Astra's $10/$50 per M (1.25× Fable). Time and first try are placed with Fable's until it is benchmarked."
+      "usd": 9.78,
+      "minutes": 25.43,
+      "first_try": 1.0,
+      "measured": true,
+      "runs": 1,
+      "note": "Frontier large-task solo run: 170 of 170 checks passed, zero fix rounds after review. First try means fix_rounds == 0. Cost and time include implementation and the review follow-up."
     },
     {
       "name": "brindle B",
