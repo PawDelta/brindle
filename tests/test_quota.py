@@ -11,6 +11,51 @@ import pytest
 from brindle import providers, quota, spawn, subscription_usage
 
 
+def test_antigravity_usage_reaches_settings(monkeypatch):
+    from brindle import antigravity, watch_costs
+    from brindle.daemon import routes_read
+
+    # Print-mode /usage envelope; no agent turn or real CLI is involved.
+    answer = json.dumps({"status": "SUCCESS", "num_turns": 0, "command": {
+        "name": "usage", "data": {"groups": [
+            {"name": "Gemini Models", "buckets": [
+                {"window": "5h", "remaining_fraction": 0.75,
+                 "reset_time": "2026-11-16T22:00:00Z"},
+                {"window": "weekly", "remaining_fraction": 0.5,
+                 "reset_time": "2026-11-22T22:00:00Z"}]},
+            {"name": "Claude and GPT models", "buckets": [
+                {"window": "weekly", "remaining_fraction": 0.125,
+                 "reset_time": "2026-11-22T23:00:00Z"}]}]}}})
+    monkeypatch.setattr(quota.time, "time", lambda: 1794859200.0)
+    monkeypatch.setattr(quota, "refresh_claude_usage", lambda: False)
+    monkeypatch.setattr(quota, "_antigravity_usage_at", 0.0, raising=False)
+    monkeypatch.setattr(quota, "_refresh_codex_lazily", lambda: None)
+    monkeypatch.setattr(watch_costs, "_org", lambda *args: None)
+    monkeypatch.setattr(antigravity, "binary", lambda: "agy")
+    runs = []
+    monkeypatch.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or
+                        subprocess.CompletedProcess(argv, 0, answer, ""))
+    watch_costs.collect(None)
+    result = routes_read.get_usage.__wrapped__(None, None)
+    agy = next(p for p in result["providers"] if p["provider"] == "antigravity")
+    assert agy["known"]
+    assert [(w["used"], w["minutes"], w["resets_at"]) for w in agy["windows"]] == [
+        (25, 300, 1794866400.0), (50, 10080, 1795384800.0),
+        (87.5, 10080, 1795388400.0)]
+    assert len({w["name"] for w in agy["windows"]}) == 3
+    watch_costs.collect(None)
+    assert len(runs) == 1
+    # A second process also uses the shared stamp, not just its local clock.
+    monkeypatch.setattr(quota, "_antigravity_usage_at", 0.0)
+    watch_costs.collect(None)
+    assert len(runs) == 1
+    # A failed or unrecognizable answer must not erase the last good reading.
+    for bad_answer in ('not json', '{}', '{"status":"ERROR"}'):
+        answer = bad_answer
+        assert not quota.refresh_antigravity_usage(force=True)
+        assert len(quota.get("antigravity").windows) == 3
+
+
 @pytest.mark.variant("the spawn source measured live: several sidebars each started their own usage run")
 def test_sidebars_share_one_claude_usage_run_per_refresh(monkeypatch):
     """Each sidebar is a process of its own with its own refresh clock; the
