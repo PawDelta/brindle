@@ -8,7 +8,10 @@
    nothing; the engine also answers a repeated Switch with the supervisor the
    first one started. Once either answer is accepted the card leaves. */
 
+import { isTauri } from "@tauri-apps/api/core";
+import { useRef, useState } from "react";
 import type { DaemonClient } from "../../api/client";
+import { tauriFetch } from "../../api/tauri";
 import type { InboxItemDTO } from "../../api/schema";
 import { providerLabel } from "../../api/providers";
 import { LoadingButton } from "../LoadingButton";
@@ -53,17 +56,32 @@ export function switchLine(offer: ProviderSwitchOffer): string {
 }
 
 export function ProviderSwitchCard({ offer, onAnswer, showLine = true }: ProviderSwitchCardProps & { showLine?: boolean }) {
+  /* One answer per offer: the first press wins, and both buttons wait for it. */
+  const inflight = useRef(false);
+  const [pending, setPending] = useState(false);
+  const answer = (accept: boolean) => {
+    if (inflight.current) return undefined;
+    inflight.current = true;
+    setPending(true);
+    return Promise.resolve(onAnswer(accept)).finally(() => {
+      inflight.current = false;
+      setPending(false);
+    });
+  };
   return (
     <div className="flex flex-wrap items-center gap-1" data-testid="provider-switch" data-kind={offer.kind}>
       {showLine && <span className="mr-auto text-sm">{switchLine(offer)}</span>}
-      <LoadingButton type="button" className={`${button} px-s1 py-0.5 text-xs`} onClick={() => onAnswer(true)}>Switch</LoadingButton>
-      <LoadingButton type="button" className={`${quiet} px-s1 py-0.5 text-xs`} onClick={() => onAnswer(false)}>Not now</LoadingButton>
+      <LoadingButton type="button" className={`${button} px-s1 py-0.5 text-xs`} busy={pending} onClick={() => answer(true)}>Switch</LoadingButton>
+      <LoadingButton type="button" className={`${quiet} px-s1 py-0.5 text-xs`} busy={pending} onClick={() => answer(false)}>Not now</LoadingButton>
     </div>
   );
 }
 
+/* The transport the app's own client uses: the desktop shell (which adds the real URL and token), else plain fetch. */
+export const daemonFetch = (): typeof fetch => (isTauri() ? tauriFetch : (i, o) => fetch(i, o));
+
 /* Sends the answer along the item's own route (client.ts has no method for it, by arrangement). */
-export async function answerProviderSwitch(client: Pick<DaemonClient, "baseUrl" | "token">, item: InboxItemDTO, accept: boolean, fetchImpl: typeof fetch = (i, o) => fetch(i, o)) {
+export async function answerProviderSwitch(client: Pick<DaemonClient, "baseUrl" | "token">, item: InboxItemDTO, accept: boolean, fetchImpl: typeof fetch = daemonFetch()) {
   const route = item.action ?? { method: "POST", path: `/v1/sessions/${encodeURIComponent(item.root_id ?? "")}/provider-switch` };
   const response = await fetchImpl(`${client.baseUrl}${route.path}`, {
     method: route.method,

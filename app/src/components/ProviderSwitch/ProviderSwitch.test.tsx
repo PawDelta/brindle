@@ -4,7 +4,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InboxItemDTO } from "../../api/schema";
 import { ProviderSwitchCard, answerProviderSwitch, offerOf } from "./ProviderSwitch";
 
-afterEach(cleanup);
+const { tauri, shellFetch } = vi.hoisted(() => ({ tauri: vi.fn(() => false), shellFetch: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ isTauri: tauri }));
+vi.mock("../../api/tauri", () => ({ tauriFetch: (...a: unknown[]) => shellFetch(...a) }));
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  tauri.mockReturnValue(false);
+});
 
 const item = (kind: string, detail: string): InboxItemDTO => ({
   kind,
@@ -32,6 +40,18 @@ function setup(it_: InboxItemDTO) {
   return { fetchImpl, finish: () => act(async () => answer()) };
 }
 
+describe("answerProviderSwitch", () => {
+  it("in the desktop app goes through the shell's transport, not global fetch", async () => {
+    const shell = vi.fn(async () => new Response("{}", { status: 200 }));
+    tauri.mockReturnValue(true);
+    shellFetch.mockImplementation(shell);
+    const global = vi.spyOn(globalThis, "fetch");
+    await answerProviderSwitch({ baseUrl: "http://brindle-daemon.invalid", token: "" }, item("provider_switch", "claude → codex"), true);
+    expect(shell).toHaveBeenCalledTimes(1);
+    expect(global).not.toHaveBeenCalled();
+  });
+});
+
 describe("ProviderSwitchCard", () => {
   it("a double-pressed Switch sends one request and the card leaves once handled", async () => {
     const { fetchImpl, finish } = setup(item("provider_switch", "claude → codex"));
@@ -39,6 +59,7 @@ describe("ProviderSwitchCard", () => {
     const button = screen.getByRole("button", { name: "Switch" });
     fireEvent.click(button);
     fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("http://d/v1/sessions/root-1/provider-switch");
