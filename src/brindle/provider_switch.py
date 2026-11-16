@@ -156,7 +156,8 @@ def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: 
                 continue
             profile = managed_models.apply_profile(gate.managed, profile)
         profile = connections.apply(profile, repo_root)
-        if quota_switch() == "auto" and _key_billed(profile):
+        if quota_switch() == "auto" and (managed_models.has_org_key(gate.managed, provider)
+                                          or _key_billed(profile)):
             continue
         model = autopilot.effective_profile_model(profile, repo_root) or None
         if not gate.access.allows_profile(profile.name, provider, model):
@@ -300,6 +301,13 @@ def dismiss(db: DB, offer_id: str, now: float) -> Offer:
     return offer
 
 
+def dismiss_notice(db: DB, offer_id: str) -> None:
+    """Hide the completed-switch notice while preserving its recovery history."""
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO inbox_dismissed (key) VALUES (?)",
+                  (f"provider-switch-notice:{offer_id}",))
+
+
 def sweep(db: DB, now: float) -> list[Offer]:
     """New offers for active roots, or carry them out with automatic consent."""
     from brindle import agents
@@ -308,6 +316,10 @@ def sweep(db: DB, now: float) -> list[Offer]:
     automatic = quota_switch() == "auto"
     for root in db.list_agents():
         existing = open_offer(db, root.id)
+        if (automatic and existing is not None and existing.state == "open" and existing.kind == "switch"
+                and out_of_quota(db, root.id, now) != existing.limited_until):
+            dismiss(db, existing.id, now)
+            existing = None
         if existing is not None:
             if automatic and existing.state == "open" and existing not in offers:
                 offers.append(existing)
@@ -319,7 +331,7 @@ def sweep(db: DB, now: float) -> list[Offer]:
             if offer.kind == "back" and limited_until(offer.to_provider, now) is not None:
                 continue
             try:
-                switch(db, offer.id, now)
+                switch(db, offer.id, now, automatic=True)
             except agents.AgentError:
                 # The failed row consumes this limit and exposes the failure.
                 continue
@@ -436,7 +448,7 @@ def _transcript_tail(db: DB, root: Agent) -> list[str]:
     return list(tail) or omitted
 
 
-def switch(db: DB, offer_id: str, now: float) -> Agent:
+def switch(db: DB, offer_id: str, now: float, *, automatic: bool = False) -> Agent:
     """Carry out a switch or back offer: claim it (open -> switching in one
     UPDATE), then ``sessions.handover_to`` with ``dest`` the old root's own
     workspace, ``provider=offer.to_provider`` and ``handoff_note`` as the
@@ -468,6 +480,23 @@ def switch(db: DB, offer_id: str, now: float) -> Agent:
                 c.execute("UPDATE provider_switches SET state='failed', updated_at=? WHERE id=?",
                           (now, offer_id))
             raise agents.AgentError("the provider switch was interrupted; check the session before continuing")
+        if automatic and offer.state == "open" and offer.kind == "switch":
+            # Recheck after taking the dispatch lock: an old ask card is not
+            # consent to move a recovered session or to use an outdated target.
+            until = out_of_quota(db, offer.root_id, now)
+            if until is None or until != offer.limited_until:
+                dismiss(db, offer.id, now)
+                raise agents.AgentError("the quota limit for this offer is no longer current")
+            root = db.get_agent(offer.root_id)
+            ws = db.get_workspace(root.workspace_id)
+            target = pick_target(root.provider, ws.repo_root, now) if ws else None
+            if target is None:
+                dismiss(db, offer.id, now)
+                raise agents.AgentError("no automatic switch target is currently available")
+            with db.tx() as c:
+                c.execute("UPDATE provider_switches SET to_provider=?, updated_at=? WHERE id=? AND state='open'",
+                          (target, now, offer.id))
+            offer = replace(offer, to_provider=target)
         with db.tx() as c:
             claimed = c.execute("UPDATE provider_switches SET state='switching', updated_at=? "
                                 "WHERE id=? AND state='open'", (now, offer_id)).rowcount
@@ -521,6 +550,7 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
     items = []
     for row in db.conn.execute(
             "SELECT * FROM provider_switches WHERE kind='switch' AND state='done' "
+            "AND NOT EXISTS (SELECT 1 FROM inbox_dismissed WHERE key='provider-switch-notice:' || provider_switches.id) "
             "AND NOT EXISTS (SELECT 1 FROM provider_switches AS back WHERE back.back_of=provider_switches.id) "
             "ORDER BY created_at, id"):
         offer = Offer(**dict(row))

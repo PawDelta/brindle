@@ -96,7 +96,7 @@ def test_auto_user_settings_patch_accepts_and_validates_quota_switch(db):
     assert config.user_settings()["quota_switch"] == "auto"
 
 
-@pytest.mark.parametrize("return_mode", ["automatic", "notice_action"])
+@pytest.mark.parametrize("return_mode", ["automatic", "notice_action", "dismiss_notice"])
 def test_auto_sweep_switches_posts_notice_and_returns_when_quota_recovers(db, repo, world, spawned, return_mode):
     _session(db, repo)
     config.set_user("quota_switch", "auto")
@@ -113,7 +113,14 @@ def test_auto_sweep_switches_posts_notice_and_returns_when_quota_recovers(db, re
     assert provider_switch.inbox_items(db, "another-repo", now=NOW) == []
     provider_switch.sweep(db, NOW + 1)
     assert len(spawned) == 1
-    if return_mode == "automatic":
+    if return_mode == "dismiss_notice":
+        from brindle.daemon import routes_actions
+
+        routes_actions.provider_switch(db, {"root": new.id}, {"offer": notice.request_id, "accept": False})
+        assert provider_switch.inbox_items(db, str(repo), now=NOW + 1) == []
+        assert provider_switch.inbox_items(db, str(repo), now=NOW + 2) == []
+        provider_switch.sweep(db, NOW + HOUR + 1)
+    elif return_mode == "automatic":
         provider_switch.sweep(db, NOW + HOUR + 1)
     else:
         from brindle.daemon import routes_actions
@@ -130,7 +137,10 @@ def test_auto_sweep_switches_posts_notice_and_returns_when_quota_recovers(db, re
     assert len(spawned) == 2
 
 
-@pytest.mark.parametrize("billing", ["quota", "profile", "environment"])
+@pytest.mark.parametrize("billing", ["quota", "profile", "environment",
+    pytest.param("org_key_env", marks=pytest.mark.variant("org key metadata overrides a subscription-auth profile")),
+    pytest.param("org_key_helper", marks=pytest.mark.variant("org helper metadata must block switching without running the helper")),
+])
 def test_auto_never_switches_to_key_billed_provider(db, repo, world, spawned, monkeypatch, billing):
     _session(db, repo, provider="codex")
     config.set_user("quota_switch", "auto")
@@ -145,10 +155,67 @@ def test_auto_never_switches_to_key_billed_provider(db, repo, world, spawned, mo
 
         load = profiles.load_profile
         monkeypatch.setattr(profiles, "load_profile", lambda *a, **kw: replace(load(*a, **kw), auth="api_key"))
-    else:
+    elif billing == "environment":
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    else:
+        from dataclasses import replace
+
+        from brindle import profiles
+        from brindle.pro import managed_models, team_policy
+        from brindle.service.routing import RoutingPolicy
+
+        route = team_policy.ProviderConfig("anthropic", **{
+            "key_env" if billing == "org_key_env" else "key_helper":
+                "REVIEW_ORG_KEY" if billing == "org_key_env" else ("unused-key-helper",)})
+        managed = managed_models.Managed("org", route, False)
+        monkeypatch.setattr(RoutingPolicy, "load", lambda *a, **kw:
+                            RoutingPolicy(team_policy.Access(org_id="org"), managed, str(repo)))
+        load = profiles.load_profile
+        monkeypatch.setattr(profiles, "load_profile", lambda *a, **kw: replace(load(*a, **kw), auth="subscription"))
+
+        def unexpected_credentials(*args, **kwargs):
+            pytest.fail("billing classification must not retrieve credentials")
+
+        monkeypatch.setattr(managed_models, "org_key_env", unexpected_credentials)
     provider_switch.sweep(db, NOW)
     assert spawned == [] and provider_switch.open_offer(db, "root") is None
+
+
+@pytest.mark.parametrize("change", ["recovered",
+    pytest.param("new_limit", marks=pytest.mark.variant("a replacement quota window must get its own current-limit record")),
+    pytest.param("headroom", marks=pytest.mark.variant("an old ask offer must follow the current target ranking")),
+    "recovered_at_dispatch",
+])
+def test_auto_existing_offer_revalidates_limit_and_target(db, repo, world, spawned, monkeypatch, change):
+    _session(db, repo)
+    world["quotas"]["claude"] = _limited("claude", NOW + HOUR)
+    offer = provider_switch.maybe_offer(db, "root", NOW)
+    assert offer.to_provider == "codex"
+    if change == "recovered":
+        world["quotas"].clear()
+    elif change == "new_limit":
+        world["quotas"]["claude"] = _limited("claude", NOW + 2 * HOUR)
+    elif change == "recovered_at_dispatch":
+        dispatch = provider_switch.switch
+
+        def recover_then_dispatch(*args, **kwargs):
+            world["quotas"].clear()
+            return dispatch(*args, **kwargs)
+
+        monkeypatch.setattr(provider_switch, "switch", recover_then_dispatch)
+    else:
+        world["quotas"]["codex"] = quota.Quota("codex", [quota.Window(90, NOW + HOUR)])
+    config.set_user("quota_switch", "auto")
+    provider_switch.sweep(db, NOW + 1)
+    if change in ("recovered", "recovered_at_dispatch"):
+        assert spawned == [] and provider_switch.open_offer(db, "root") is None
+    elif change == "new_limit":
+        assert len(spawned) == 1
+        row = db.conn.execute("SELECT limited_until FROM provider_switches WHERE state='done'").fetchone()
+        assert row["limited_until"] == NOW + 2 * HOUR
+        assert provider_switch.get(db, offer.id).state == "dismissed"
+    else:
+        assert [call["provider_name"] for call in spawned] == ["antigravity"]
 
 
 def test_offer_when_supervisor_out_of_quota_names_an_in_quota_provider(db, repo, world, monkeypatch):

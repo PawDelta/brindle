@@ -471,7 +471,10 @@ def provider_switch(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("not_found", "no such provider switch offer for this session", 404)
     now = time.time()
     if not _get(body, "accept", bool, required=True):
-        ps.dismiss(db, offer.id, now)
+        if notice:
+            ps.dismiss_notice(db, offer.id)
+        else:
+            ps.dismiss(db, offer.id, now)
         return {"accepted": False}
     if _get(body, "always", bool, default=False):
         config.set_user("quota_switch", "auto")
