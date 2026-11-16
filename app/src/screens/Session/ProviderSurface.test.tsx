@@ -14,14 +14,15 @@ vi.mock("@xterm/xterm", async (original) => {
 it("typed_words_reach_the_engine", async () => {
   vi.stubGlobal("matchMedia", () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }));
   const agent = { id: "sup1", provider: "claude", status: "idle", window: "s:@1", tmux_server: "brindle" } as AgentDTO;
-  const vouched: string[] = [], written: string[] = [];
+  const vouched: [string | null, boolean][] = [], written: string[] = [];
   const client = { meta: async () => ({ visuals: true }), agent: async () => agent,
     transcript: async () => ({ cursor: "history:3", reset: true, messages: [
       { role: "user", text: "Keep my earlier request", history: true },
       { role: "restart", text: "", history: true },
       { role: "assistant", text: "Only in the live terminal" },
     ] }),
-    visualTypedWords: async (_root: string, text: string) => { vouched.push(text); return { observed: true }; } } as unknown as DaemonClient;
+    visualTypedWords: async (_root: string, text: string | null, _expiry: number, _submitted: number, _signal: AbortSignal, typed = true) => {
+      vouched.push([text, typed]); return { observed: true }; } } as unknown as DaemonClient;
   let handlers: PtyViewHandlers | undefined;
   const views = { status: { kind: "ready", tmux: "tmux 3.8" }, recheck() {}, copy: async () => {}, paste: async () => "",
     open: (_at, _size, given) => { handlers = given; return { write: (d: string) => written.push(d), resize() {}, focus() {}, close() {} }; } } as PtyViews;
@@ -40,7 +41,7 @@ it("typed_words_reach_the_engine", async () => {
   expect(written).toEqual(["\x1b[?1;2c", "\x1b[>0;276;0c", "\x1b[?2026;2$y", "\x1b]10;rgb:ffff/ffff/ffff\x1b\\", "\x1b]11;rgb:0000/0000/0000\x1b\\"]);
   for (const key of "test it now\r") act(() => term.input(key, true));
   await waitFor(() => expect(written.at(-1)).toBe("\r"));
-  // The gate is no wider: what's pasted is still not the person's typing.
+  // The gate is no wider: what's pasted is still not the person's typing (reported as not typed, no words).
   act(() => { term.paste("render it now"); term.input("\r", true); });
-  expect(vouched).toEqual(["test it now"]);
+  await waitFor(() => expect(vouched).toEqual([["test it now", true], [null, false]]));
 });

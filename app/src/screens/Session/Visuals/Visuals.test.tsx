@@ -178,9 +178,9 @@ describe("visuals", () => {
     await send(..."ok", "\r");
     expect(typed).toEqual([true, false, false, false, true]);
 
-    const bytes: string[] = [], words: string[] = [];
+    const bytes: string[] = [], words: (string | null)[] = [], typedFlags: (boolean | undefined)[] = [];
     let answer: { ok(): void; fail(): void } | undefined;
-    const hooked = withTypedWords({ visualTypedWords: (_id, text) => { words.push(text); return new Promise((ok, no) => {
+    const hooked = withTypedWords({ visualTypedWords: (_id, text, _expiry, _submitted, _signal, typed) => { words.push(text); typedFlags.push(typed); return new Promise((ok, no) => {
       answer = { ok: () => ok({ observed: true }), fail: () => no(new Error("refused")) };
     }); } }, "claude", () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }))({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
     [..."hi", "\r"].forEach(data => hooked.write(data));
@@ -192,12 +192,27 @@ describe("visuals", () => {
     await act(async () => answer?.fail());      // a refused report still lets the prompt go, unvouched
     expect(bytes.at(-1)).toBe("\r");
     words.length = 0;
+    typedFlags.length = 0;
     hooked.write("\x1b[200~pasted words\x1b[201~");
     hooked.write("\r");
-    await act(async () => undefined);
-    expect(words).toEqual([]);                  // a paste is never vouched for
+    await act(async () => answer?.ok());
+    expect(words).toEqual([null]);              // a paste is never vouched for: reported as not typed
+    expect(typedFlags).toEqual([false]);
     expect(bytes.at(-1)).toBe("\r");
     hooked.close();
+  });
+
+  it("vouches for an Enter whose words it can't see, typed: an accepted suggestion, never a recalled draft", async () => {
+    const reports: [string | null, boolean | undefined][] = [];
+    const view = withTypedWords({ visualTypedWords: async (_id, text, _expiry, _submitted, _signal, typed) => { reports.push([text, typed]); return { observed: true }; } }, "claude",
+      () => ({ write() {}, resize() {}, focus() {}, close() {} }))({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    const keys = async (...data: string[]) => { data.forEach(d => view.write(d)); await act(async () => undefined); };
+    await keys("\r");                              // Enter on an empty box sends the CLI's suggestion
+    await keys("\t", ..."please", "\r");           // Tab took the suggestion, then more typing
+    await keys("\x1b[A", "\r");                    // history: maybe a pasted draft
+    await keys("\x1bOA", "\r");
+    await keys(..."render it", "\r");
+    expect(reports).toEqual([[null, true], [null, true], [null, false], [null, false], ["render it", true]]);
   });
 
   it("test_typed_message_backs_a_visual: typing is reported while /meta fails, is pending or says off, and never as a tail", async () => {
@@ -206,7 +221,7 @@ describe("visuals", () => {
     let fail = true;
     const meta = () => fail ? Promise.reject(new Error("busy")) : new Promise<{ visuals: boolean }>(ok => { replies.push(ok); });
     const gate = visualsGate({ meta }, () => clock);
-    const words: string[] = [];
+    const words: (string | null)[] = [];
     const view = withTypedWords({ visualTypedWords: async (_id, text) => { words.push(text); return { observed: true }; } }, "claude",
       () => ({ write() {}, resize() {}, focus() {}, close() {} }), gate.enabled)({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
     const type = async (text: string, enter = true) => { [...text, ...(enter ? ["\r"] : [])].forEach(c => view.write(c)); await act(async () => undefined); };

@@ -356,6 +356,83 @@ def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, te
     assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
 
 
+def app_saw_enter(boss, typed=True):
+    """The app saw an Enter but not the words it sent: typed=False is a paste."""
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        return client.post(f"/v1/sessions/{boss.id}/visual-input", json={
+            "typed_words": None, "typed": typed, "expires_at": offers.time.time() + 60,
+            "submitted_at": offers.time.time()})
+
+
+def test_accepted_suggestion_backs_a_visual(db, session):
+    """Real incident: Claude Code sends its own suggestion when the person accepts it (Tab, or Enter
+    on an empty box), so the app saw their keys but not the words. The prompt's hook says what they were."""
+    boss, _ = session
+    ask = "make a separate visual for stage 3"
+    assert app_saw_enter(boss).status_code == 200
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": ask})
+    assert visuals.publish(db, boss, "Stage 3", "<p>yes</p>", asked=ask)["rev"] == 1
+    # An Enter that sent nothing (a menu's) can't vouch for a paste sent after it.
+    assert app_saw_enter(boss).status_code == 200
+    assert app_saw_enter(boss, typed=False).status_code == 200
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": ask})
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Pasted", "<p>no</p>", asked=ask)
+    # Nor for brindle's own words in a stopped delivery the person typed onto.
+    db.set_mark(boss.id, "pane-delivery", offers.json.dumps(
+        {"message_id": 1, "stage": "body", "stopped": True, "body": "worker says: " + ask}))
+    assert app_saw_enter(boss).status_code == 200
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "worker says: " + ask + " ok"})
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Delivered", "<p>no</p>", asked=ask)
+
+
+PASTE, SUGGESTION = "put the pasted plan in a separate visual", "make a separate visual for stage 3"
+
+
+@pytest.mark.parametrize("texts,reported,sent,suggestion_backed", [
+    # Each Enter reported, then sent, the suggestion's both in the same millisecond (a transcript says .001 for both).
+    pytest.param((PASTE, SUGGESTION), (0.0002, 0.0012), (0.0004, 0.0015), True, id="send-in-the-report's-millisecond"),
+    # The next Enter is reported exactly as the suggestion's send millisecond (.000) ends: it came after.
+    pytest.param((SUGGESTION, PASTE), (0.0002, 0.0010), (0.0004, 0.0015), True, id="next-report-at-the-tick's-end"),
+    # Both reports and both sends in one millisecond: which Enter sent which can't be told, so neither counts.
+    pytest.param((PASTE, SUGGESTION), (0.0002, 0.0006), (0.0004, 0.0008), False, id="ambiguous",
+                 marks=pytest.mark.variant("two Enters in the tick a prompt went in: claim neither")),
+])
+def test_messages_taken_in_together_each_keep_their_own_enter(db, session, tmp_path, monkeypatch,
+                                                              texts, reported, sent, suggestion_backed):
+    """A paste and an accepted suggestion, both sent while a turn runs and taken in by one hook:
+    the paste can't claim the suggestion's Enter, and the suggestion keeps it, though Claude Code's
+    send times are whole milliseconds."""
+    boss, _ = session
+    clock = type("Clock", (), {"now": 1_000_000.0, "time": lambda self: self.now})()
+    monkeypatch.setattr(offers, "time", clock)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {}}
+    agents.handle_hook(db, boss.id, "pre-tool", hook)
+    absorbed = []
+    for text, report_at, send_at in zip(texts, reported, sent):
+        clock.now = 1_000_000.0 + report_at
+        assert app_saw_enter(boss, typed=text == SUGGESTION).status_code == 200
+        stamp = datetime.fromtimestamp(1_000_000.0 + send_at, timezone.utc).isoformat(timespec="milliseconds")
+        absorbed.append({"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": text, "commandMode": "prompt", "origin": {"kind": "human"},
+            "timestamp": stamp}})
+    clock.now = 1_000_001.0
+    with transcript.open("a") as f:
+        f.writelines(offers.json.dumps(line) + "\n" for line in absorbed)
+    agents.handle_hook(db, boss.id, "tool-done", hook)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Pasted", "<p>no</p>", asked=PASTE)
+    if suggestion_backed:
+        assert visuals.publish(db, boss, "Stage 3", "<p>yes</p>", asked=SUGGESTION)["rev"] == 1
+    else:
+        with pytest.raises(ServiceError):
+            visuals.publish(db, boss, "Stage 3", "<p>no</p>", asked=SUGGESTION)
+
+
 @pytest.mark.variant("real incident: a vouch arriving after its own prompt's hook, logged without the person's words")
 def test_typed_words_reach_the_engine(db, session, monkeypatch):
     """A vouch landing after its own prompt's hook is refused, and the debug log says why, not what."""
@@ -705,6 +782,25 @@ def test_visual_request_stress(db, session, monkeypatch, said, asked, published)
     else:
         with pytest.raises(ToolError):
             mcp_server.publish_visual("Not asked", "<p>no</p>", asked=asked)
+
+
+def test_message_taken_mid_turn_leaves_the_offer_open(db, session, tmp_path):
+    """Real incident: a reply to something else, sent while the turn that made the offer still ran,
+    closed the offer a second after it was made. Only a prompt after the turn answers it."""
+    boss, _ = session
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {}}
+    agents.handle_hook(db, boss.id, "pre-tool", hook)
+    offers.offer(db, boss, "Which layout?", "layout")
+    with transcript.open("a") as f:
+        f.write(offers.json.dumps({"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": "yes delete that artifact", "commandMode": "prompt",
+            "origin": {"kind": "human"}}}) + "\n")
+    agents.handle_hook(db, boss.id, "tool-done", hook)
+    assert offers.current(db, boss.id) is not None
+    agents.handle_hook(db, boss.id, "prompt-submit", {**hook, "prompt": "the second one"})
+    assert offers.current(db, boss.id) is None
 
 
 @pytest.mark.variant("answering a choice must close its old offer without treating refusals or mentions as consent")

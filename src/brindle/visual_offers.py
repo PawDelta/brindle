@@ -24,6 +24,8 @@ FOLD = 30 * 60
 MIN_QUOTE_WORDS = 2     # a lone "yes" or "the" shows nothing about what was asked for
 MAX_KEPT_MESSAGES = 8   # per session
 MAX_KEPT_CHARS = 32000  # the most the app's input route accepts: a long message can end with an ask
+MARK_WINDOW = 15        # how long before its prompt was sent an Enter's report can stand for it
+SAID_AT_TICK = 0.001    # a transcript's send times are whole milliseconds, rounded down
 
 
 def _expire(c, root: str, now: float) -> None:
@@ -267,7 +269,7 @@ def refresh_input(db: DB, agent: Agent, observer: int, submitted_at: float, expi
 def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
                  fold_only: bool = False, typed: bool = False, cli_prompt: bool = False,
-                 said_at: float | None = None) -> None:
+                 said_at: float | None = None, mid_turn: bool = False, carries_delivery: bool = False) -> None:
     """Called only for authenticated person input, never for agent messages.
 
     ``typed``: the app watched the person key in all of ``text`` themselves.
@@ -275,7 +277,11 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     this is a CLI hook's report of ``text``, which makes words the app staged
     for this same prompt quotable. ``said_at``: when the person sent ``text``,
     if that was earlier than now (a message read back after the fact): a cancel
-    then ends only the words they typed before it."""
+    then ends only the words they typed before it. ``mid_turn``: the CLI took
+    ``text`` into a turn still running, so it was sent before the agent had
+    finished asking anything: it answers no offer. ``carries_delivery``: the
+    prompt holds a brindle delivery the person typed onto, words that aren't
+    theirs, so the app's mark for that Enter (see keep_typed) can't stand for it."""
     if not visuals.enabled():
         return
     root, ws = visuals._session(db, agent)
@@ -299,8 +305,9 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                       "VALUES (?,1,0,0,?) ON CONFLICT(root_id) DO UPDATE SET "
                       "generation=generation+1, invalidated_at=MAX(invalidated_at,excluded.invalidated_at)",
                       (root.id, time.time()))
-        c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
-                  (time.time(), root.id))
+        if not mid_turn:
+            c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
+                      (time.time(), root.id))
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
@@ -313,8 +320,10 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         elif typed and not fold_only:
             _keep_words(c, root.id, text)
         elif cli_prompt:
-            c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
-                      "WHERE root_id=? AND words=? AND staged=1)", (root.id, _words(text)))
+            confirmed = c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
+                                  "WHERE root_id=? AND words=? AND staged=1)", (root.id, _words(text))).rowcount
+            if not confirmed and not carries_delivery:
+                _fill_mark(c, root.id, text, said_at)
         # Tie the words to what this message raises, so one spends the other.
         # A cancel in the same message wins over the request it calls off.
         if not fold_only and scope and not cancelled:
@@ -323,12 +332,20 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
 
 
-def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at: float) -> None:
+def keep_typed(db: DB, agent: Agent, text: str | None, expires_at: float, submitted_at: float,
+               typed: bool = True) -> None:
     """The app watched the person key in ``text``, for a CLI whose prompt hook
     can't say what was typed. Sent before the app lets Enter through: a report
     that fails, comes late or predates newer person input leaves nothing. What
     it leaves is staged: only that prompt's own hook makes the words quotable,
-    in the transaction that raises any grant, so a message can't be spent twice."""
+    in the transaction that raises any grant, so a message can't be spent twice.
+
+    ``text`` None: the person sent it with their own keys, nothing pasted, but
+    the app can't say what it says: a suggestion of the CLI's they accepted
+    (Tab, or Enter on an empty box), or an edit the app can't follow. It stages
+    a mark the prompt's own hook fills in with what it says. ``typed`` False:
+    an Enter that sent something not typed (a paste), staged too, so the order
+    of Enters is known and a paste's prompt can't take another Enter's mark."""
     # Each refusal goes to the debug log (why and how late, never the words), so a real one can be seen.
     if not visuals.enabled():
         return _typed_refused(agent, "visuals are off")
@@ -344,7 +361,13 @@ def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at:
             state = c.execute("SELECT invalidated_at FROM visual_input_state WHERE root_id=?", (root.id,)).fetchone()
             if state and submitted_at <= state["invalidated_at"]:
                 raise ServiceError("stale", "this submission predates a direct person message", 409)
-            if _cancels(text):
+            if not typed or text is None:
+                # An entry in the order of Enters: the prompt each stands for claims it (see _fill_mark).
+                kind = "pasted" if not typed else "unseen" if root.status == "idle" else "unseen-busy"
+                c.execute("INSERT INTO visual_person_words (root_id, words, source, staged, created_at) "
+                          "VALUES (?,'',?,1,?)", (root.id, kind, now))
+                kept = None
+            elif _cancels(text):
                 kept = "it cancels a request"
             else:
                 kept = _keep_words(c, root.id, text, staged=True)
@@ -353,6 +376,32 @@ def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at:
         raise
     if kept is not None:
         _typed_refused(agent, kept)
+
+
+def _fill_mark(c, root: str, text: str, said_at: float | None) -> None:
+    """The Enter reported last before this prompt was sent (see keep_typed) is the one that sent it. If
+    its words were unseen but typed, keep what the prompt says, if that can be kept. That entry and any
+    before it are used up; a later Enter's entry is left for its own prompt, so messages a running turn
+    takes in together each find their own. ``said_at``: when the prompt was sent, if the CLI says;
+    else now, and then only an Enter made while the agent was idle counts: a message queued during a
+    turn and sent after it can't be told apart from the others queued with it. Only a recent Enter
+    counts: one that sent no prompt (a menu's) can't stand for a later prompt whose report was lost."""
+    at = time.time() if said_at is None else said_at
+    # A CLI's send time is cut to its clock's tick: the prompt went in somewhere in [said_at, said_at + tick),
+    # so an Enter reported at said_at + tick or later came after it.
+    before = "created_at<=?" if said_at is None else "created_at<?"
+    entries = c.execute("SELECT id, source, created_at FROM visual_person_words WHERE root_id=? AND staged=1 "
+                        f"AND words='' AND {before} AND created_at>? ORDER BY id DESC LIMIT 2",
+                        (root, at if said_at is None else at + SAID_AT_TICK, at - MARK_WINDOW)).fetchall()
+    if not entries:
+        return
+    entry = entries[0]
+    if entry["created_at"] > at and len(entries) > 1:
+        return   # it fell in the tick the prompt went in: this Enter or the one before may have sent it
+    c.execute("DELETE FROM visual_person_words WHERE root_id=? AND staged=1 AND words='' AND id<=?",
+              (root, entry["id"]))
+    if entry["source"] == "unseen" or (entry["source"] == "unseen-busy" and said_at is not None):
+        _keep_words(c, root, text)
 
 
 def _typed_refused(agent: Agent, why: str, **detail) -> None:
