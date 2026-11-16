@@ -105,9 +105,10 @@ def test_record_payload_keys_and_contents(parts, remote):
     reported, review, escalated, merged, verdict, no_verdict = remote.records
     assert set(review) == {"org_id", "key_id", "repo_key", "agent_ref", "profile", "weight", "features", "event",
                            "approved", "checks_passed", "review_rounds", "escalations",
-                           "tokens", "wall_seconds"}
+                           "tokens", "wall_seconds", "parts", "files_declared"}
     assert set(verdict) == set(review)
-    assert set(reported) == set(escalated) == set(merged) == set(no_verdict) == set(review) - {"approved"}
+    assert set(reported) == set(escalated) == set(no_verdict) == set(review) - {"approved"}
+    assert set(merged) == set(reported) | {"queue_seconds", "idle_seconds", "stalled"}
     assert reported["event"] == "reported" and reported["wall_seconds"] == 12.5
     assert review["approved"] is False and review["event"] == "review"
     assert (review["org_id"], review["key_id"]) == ("org_1", "k1")

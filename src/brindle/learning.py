@@ -50,13 +50,30 @@ class Outcome:
     first report_result), "review" (with ``approved``), "escalated" (the
     supervisor was asked to step in), "merged" or "removed_unmerged" (the
     worker task is over), or "verdict" (with ``approved``) or "no_verdict"
-    (a reviewer run ended)."""
+    (a reviewer run ended).
+
+    On terminal events also: ``cost_usd`` (this agent's dollars at list price
+    from its token usage; None when its price is unknown, never 0 for
+    "unknown"), and for a worker ``review_cost_usd`` (its reviewers' summed
+    dollars, None unless all are priced), ``queue_seconds`` (its task waited
+    before starting), ``idle_seconds`` (it sat idle with no result at the end)
+    and ``failure`` ("no_report", "idle" or "no_commits": it produced
+    nothing usable; None otherwise)."""
     event: str
     approved: bool | None = None
     checks_passed: bool = False
     tokens: int = 0
     wall_seconds: float = 0.0
     at: float = field(default_factory=time.time)
+    cost_usd: float | None = None
+    review_cost_usd: float | None = None
+    queue_seconds: float = 0.0
+    idle_seconds: float = 0.0
+    failure: str | None = None
+
+    @property
+    def stalled(self) -> bool:
+        return self.failure is not None
 
 
 class LearningPlugin(ABC):
@@ -142,6 +159,70 @@ def _tokens(db: DB, worker: Agent) -> int:
         return 0
 
 
+def _dollars(db: DB, agent: Agent, repo_root: str) -> float | None:
+    """``agent``'s spend in US dollars at list price, or None when its usage
+    or its model's price is unknown."""
+    try:
+        from brindle import pricing
+        from brindle.usage import agent_usage, usage_cost
+
+        u = agent_usage(db, agent)
+        if u is None:
+            return None
+        extra = pricing.repo_overrides(repo_root)
+        price = pricing.price_for(u.model, extra) or pricing.profile_price(agent.profile, repo_root, extra)
+        return usage_cost(u, extra, fallback=price)
+    except Exception:  # noqa: BLE001 - unknown rather than a failed record
+        return None
+
+
+def _review_dollars(db: DB, ws: Workspace) -> float | None:
+    """The summed spend of ``ws``'s reviewers; 0.0 with none, None when any is unpriced."""
+    try:
+        total = 0.0
+        for a in db.list_agents(ws.id):
+            if a.mode != "review":
+                continue
+            d = _dollars(db, a, ws.repo_root)
+            if d is None:
+                return None
+            total += d
+        return total
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _queue_seconds(db: DB, worker: Agent, repo_root: str) -> float:
+    """How long ``worker``'s task waited (for room or its dependencies) before starting."""
+    try:
+        for t in db.list_tasks(repo_root):
+            if t.agent_id == worker.id and t.started_at and t.created_at:
+                return max(0.0, t.started_at - t.created_at)
+    except Exception:  # noqa: BLE001
+        pass
+    return 0.0
+
+
+def _failure(db: DB, worker: Agent, ws: Workspace) -> tuple[str | None, float]:
+    """(failure, idle seconds) for a worker whose task ended unmerged: "idle"
+    (idle with no report), "no_report" (never reported), "no_commits" (reported
+    but its branch has nothing ahead of base), else None."""
+    current = db.get_agent(worker.id) or worker
+    if current.result is None:
+        if current.status == "idle":
+            since = current.status_since or current.created_at
+            return "idle", max(0.0, time.time() - since)
+        return "no_report", 0.0
+    try:
+        from brindle import git, workspaces
+
+        if not git.ahead_behind(ws.path, workspaces.require_base(ws))[1]:
+            return "no_commits", 0.0
+    except Exception:  # noqa: BLE001 - no worktree or base to compare: say nothing
+        pass
+    return None, 0.0
+
+
 def _task_info(db: DB, worker: Agent, ws: Workspace) -> TaskInfo:
     from brindle.profiles import load_profile
 
@@ -200,9 +281,14 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
         if escalated:
             p.record(info, Outcome("escalated"))
         if merged is not None:
+            failure, idle = (None, 0.0) if merged else _failure(db, worker, ws)
             p.record(info, Outcome(
                 "merged" if merged else "removed_unmerged", checks_passed=checks_passed,
                 tokens=_tokens(db, worker), wall_seconds=wall,
+                cost_usd=_dollars(db, worker, ws.repo_root),
+                review_cost_usd=_review_dollars(db, ws),
+                queue_seconds=_queue_seconds(db, worker, ws.repo_root),
+                idle_seconds=idle, failure=failure,
             ))
     except Exception:
         log.exception("brindle: the learner failed to record an outcome")
@@ -234,7 +320,8 @@ def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace
         info = _reviewer_info(db, reviewer, ws, worker)
         wall = max(0.0, time.time() - reviewer.created_at)
         p.record(info, Outcome(event, approved=approved if isinstance(approved, bool) else None,
-                               tokens=_tokens(db, reviewer), wall_seconds=wall))
+                               tokens=_tokens(db, reviewer), wall_seconds=wall,
+                               cost_usd=_dollars(db, reviewer, ws.repo_root)))
     except Exception:
         log.exception("brindle: the learner failed to record a reviewer outcome")
 

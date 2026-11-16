@@ -68,9 +68,19 @@ def featurize(task: str | None, files=None) -> Features:
     return Features(best, size, tuple(langs))
 
 
+MAX_PARTS = 10
+_PART_RE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+\S", re.MULTILINE)
+
+
+def count_parts(task: str | None) -> int:
+    """How many bulleted or numbered items the task lists (0 to ``MAX_PARTS``):
+    a count only, so multi-part work can be told apart from a single change."""
+    return min(len(_PART_RE.findall(task or "")), MAX_PARTS)
+
+
 def _extensions(glob: str) -> list[str]:
     m = re.search(r"(\.[A-Za-z0-9]+)(?:[}\]*]|$)", glob.rsplit("/", 1)[-1])
     return [m.group(1).lower()] if m and m.group(1).lower() in LANGS else []
 
 
-__all__ = ["KINDS", "KIND_WORDS", "LANGS", "SIZES", "Features", "featurize"]
+__all__ = ["KINDS", "KIND_WORDS", "LANGS", "MAX_PARTS", "SIZES", "Features", "count_parts", "featurize"]
