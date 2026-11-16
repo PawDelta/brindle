@@ -20,7 +20,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from brindle import agents, autopilot, coordinator, cost_estimate, git, history, kb, knowledge, mcp_stdio, open_items, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
+from brindle import agents, autopilot, coordinator, cost_estimate, git, history, kb, knowledge, mcp_stdio, open_items, pipeline, policy, quota, repos, routing_goal, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config, normalize_weight
 from brindle.db import DB, Agent, Task, Workspace, migrated_by_newer, migration_incompatibility
@@ -924,6 +924,7 @@ async def handoff(
     files: list[str] | None = None, depends_on: list[str] | None = None,
     plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
     dry_run: bool = False, milestone: int | str | None = None, plan_worker: str | None = None,
+    goal: str | dict | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
 
@@ -982,6 +983,11 @@ async def handoff(
     plan_first: the worker must first send a plan with submit_plan and wait
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
+
+    goal: what routing aims for on this task alone, over the session's and
+    the repo's: "cheap", "fast", "first_try" or "balanced", or weights
+    {"cost", "speed", "first_try"} (each 0-1), e.g. "first_try" for a risky
+    migration. An org policy can floor or lock it.
     """
     def run(req: _Request):
         db = DB()
@@ -1000,9 +1006,12 @@ async def handoff(
         decision: dict = {}
         try:
             profile, _ = autopilot.choose_profile(
-                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision)
+                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision,
+                **({"goal": goal} if goal is not None else {}))
         except autopilot.AutopilotError as e:
             return str(e)
+        except routing_goal.GoalError as e:
+            return f"Not started: {e}"
         refused = _policy_refusal(db, caller, ws, profile, task, "handoff", files, weight, branch)
         if refused:
             return refused
@@ -1077,7 +1086,7 @@ async def assign(
     depends_on: list[str] | None = None, plan_first: bool | None = None,
     weight: str | None = None, repo: str | None = None, dry_run: bool = False,
     milestone: int | str | None = None, plan_worker: str | None = None,
-    design_heavy: bool = False, fast_path: bool = False,
+    design_heavy: bool = False, fast_path: bool = False, goal: str | dict | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
 
@@ -1137,6 +1146,11 @@ async def assign(
     plan_first: the worker must first send a plan with submit_plan and wait
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
+
+    goal: what routing aims for on this task alone, over the session's and
+    the repo's: "cheap", "fast", "first_try" or "balanced", or weights
+    {"cost", "speed", "first_try"} (each 0-1), e.g. "first_try" for a risky
+    migration. An org policy can floor or lock it.
     """
     def run(req: _Request):
         db = DB()
@@ -1172,9 +1186,12 @@ async def assign(
             profile, learned = autopilot.choose_profile(
                 db, caller.id, ws.repo_root, agent_profile, task, files, route_weight, why, decision,
                 **({"design_heavy": True} if design_heavy else {}),
-                **({"max_tier": FAST_PATH_WEIGHTS[-1]} if fast else {}))
+                **({"max_tier": FAST_PATH_WEIGHTS[-1]} if fast else {}),
+                **({"goal": goal} if goal is not None else {}))
         except autopilot.AutopilotError as e:
             return str(e)
+        except routing_goal.GoalError as e:
+            return f"Not started: {e}"
         refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, route_weight, branch)
         if refused:
             return refused

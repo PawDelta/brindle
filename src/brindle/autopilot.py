@@ -889,7 +889,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
 def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
                      files: list[str] | None,
                      decision: dict | None = None, gate=None,
-                     ceiling: str | None = None, design_heavy: bool = False) -> tuple[str | None, bool, str]:
+                     ceiling: str | None = None, design_heavy: bool = False,
+                     goal: dict | None = None) -> tuple[str | None, bool, str]:
     """(profile, learned, why) for a task of ``weight``; profile is None when
     every candidate for the tier is out. ``decision`` gets the ``baseline``
     (the pick without learning), and ``over_budget`` (why each candidate was
@@ -933,7 +934,9 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if cfg.routing_locked.get(weight):
         pick, reason = None, None   # the owner pinned this tier: learning never overrides it
     else:
-        options = {"design_heavy": True} if design_heavy else {}
+        options: dict = {"design_heavy": True} if design_heavy else {}
+        if goal is not None:
+            options["goal"] = goal
         pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
                                            weight=weight, default=remaining[0], **options)
     name = pick or remaining[0]
@@ -1072,11 +1075,26 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
     return "medium"
 
 
+def _goal_weights(db: DB, caller_id: str, repo_root: str, goal) -> dict | None:
+    """The routing goal's weights for a delegation by ``caller_id`` when its
+    task or session sets one (they need the session to resolve), else None:
+    the learner then resolves the person's and the repo's itself, and only
+    when it is asked. Raises GoalError for a malformed task ``goal``."""
+    from brindle import routing_goal
+
+    if goal is not None:
+        routing_goal.normalize(goal)
+    root = root_of(db, caller_id) if caller_id else None
+    if goal is None and not (root and db.session_routing_goal(root)):
+        return None
+    return routing_goal.for_learner(repo_root, db=db, root_id=root, task=goal)
+
+
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
                    task: str | None = None, files: list[str] | None = None,
                    weight: str | None = None, why: list[str] | None = None,
                    decision: dict | None = None, *, design_heavy: bool = False,
-                   max_tier: str | None = None) -> tuple[str, bool]:
+                   max_tier: str | None = None, goal=None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
     ``requested`` if given, else (when no ``weight`` is given) the first
     unverified milestone's profile in the caller's session, else the repo's
@@ -1090,9 +1108,15 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     ``design_heavy`` allows Fable when ``fable_for_design_only`` is enabled;
     it does not change the task's weight. ``max_tier``: a ceiling for this
     delegation alone (a fast-path task's "medium"), applied like the repo's
-    ``max_weight`` to routing, its fallbacks and the final pick; the tighter wins."""
+    ``max_weight`` to routing, its fallbacks and the final pick; the tighter wins.
+    ``goal``: this task's own routing goal (a preset name or weights), over
+    the session's, the repo's and the person's (brindle.routing_goal); the
+    learner is asked with the one in force."""
     cfg = load_repo_config(repo_root)
-    options = {"design_heavy": True} if design_heavy else {}
+    options: dict = {"design_heavy": True} if design_heavy else {}
+    weights = _goal_weights(db, caller_id, repo_root, goal)
+    if weights is not None:
+        options["goal"] = weights
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
     if max_tier in weight_order and (ceiling is None or weight_order[max_tier] < weight_order[ceiling]):

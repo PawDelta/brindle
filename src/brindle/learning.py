@@ -42,6 +42,8 @@ class TaskInfo:
     provider: str | None = None
     model: str | None = None
     started_at: float | None = None
+    # What routing aims for (brindle.routing_goal): (cost, speed, first_try), None: no goal
+    weights: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -373,12 +375,15 @@ def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace
 def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
                files: list[str] | None = None, candidates: list[str] | None = None,
                weight: str | None = None,
-               default: str | None = None, *, design_heavy: bool = False) -> tuple[str | None, str | None]:
+               default: str | None = None, *, design_heavy: bool = False,
+               goal: dict | None = None) -> tuple[str | None, str | None]:
     """(override, reason): the learner's pick among ``candidates`` (default:
     the repo's ``learning_candidates``, else the medium tier's routing list)
     when it overrides ``default`` (what brindle would use: the first
     candidate unless given), else (None, None). The learner is not asked with
-    fewer than two candidates."""
+    fewer than two candidates. ``goal``: the routing goal's weights in force
+    (brindle.routing_goal.resolve, with the session and task levels); without
+    it, the personal and repo levels'."""
     _forget_note(cfg, repo_root)
     if candidates is None:
         candidates = cfg.learning_candidates or cfg.routing.get("medium") or []
@@ -397,8 +402,12 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
             return None, None
         p.last_reason = None
         p.last_prior = False
-        pick = p.suggest(TaskInfo(repo_root=repo_root, task=task or "",
-                                  files=tuple(files or ()), weight=weight), names, default)
+        from brindle import routing_goal
+
+        if goal is None:
+            goal = routing_goal.for_learner(repo_root)
+        pick = p.suggest(TaskInfo(repo_root=repo_root, task=task or "", files=tuple(files or ()),
+                                  weight=weight, weights=routing_goal.as_tuple(goal)), names, default)
         if pick not in names or pick == default:
             return None, None
         return pick, p.last_reason
@@ -410,10 +419,12 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
 def choose(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
            files: list[str] | None = None, candidates: list[str] | None = None,
            weight: str | None = None, default: str | None = None, *,
-           design_heavy: bool = False) -> str | None:
+           design_heavy: bool = False, goal: dict | None = None) -> str | None:
     """The learner's override of ``default`` among ``candidates``, or None
     (no learner, nothing to choose between, or it kept the default)."""
-    options = {"design_heavy": True} if design_heavy else {}
+    options: dict = {"design_heavy": True} if design_heavy else {}
+    if goal is not None:
+        options["goal"] = goal
     return choose_why(db, cfg, repo_root, task, files, candidates, weight, default, **options)[0]
 
 
