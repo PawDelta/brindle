@@ -469,6 +469,51 @@ const MODE_ROWS: { key: ModeKey; name: string; testId: string; modes: ModeChoice
   },
 ];
 
+/* Local extension until the shared client includes the new daemon setting. */
+type QuotaSettings = UserSettings & { quota_switch?: "ask" | "auto" };
+
+function QuotaSwitchSetting({ client }: { client: DaemonClient }) {
+  const id = useId();
+  const [mode, setMode] = useState<"ask" | "auto" | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const seq = useRef(0);
+  useEffect(() => {
+    const mine = ++seq.current;
+    setMode(null);
+    setSaving(false);
+    setError(null);
+    client.userSettings().then(
+      (s: QuotaSettings) => { if (mine === seq.current) setMode(s.quota_switch ?? "ask"); },
+      (e: unknown) => { if (mine === seq.current) setError(message(e)); },
+    );
+    return () => { ++seq.current; };
+  }, [client]);
+  const pick = async (next: "ask" | "auto") => {
+    if (mode === null || saving || mode === next) return;
+    const mine = ++seq.current;
+    setSaving(true);
+    setError(null);
+    try {
+      const body: Partial<QuotaSettings> = { quota_switch: next };
+      const settings: QuotaSettings = await client.patchUserSettings(body);
+      if (mine === seq.current) setMode(settings.quota_switch ?? "ask");
+    } catch (e) {
+      if (mine === seq.current) setError(message(e));
+    } finally {
+      if (mine === seq.current) setSaving(false);
+    }
+  };
+  return <Row label="When quota runs out" htmlFor={id} help="Choose whether brindle asks before switching providers.">
+    <select id={id} className={`${field} max-w-72`} value={mode ?? "ask"} disabled={mode === null || saving}
+      onChange={(e) => void pick(e.target.value as "ask" | "auto")}>
+      <option value="ask">Ask me</option>
+      <option value="auto">Switch automatically</option>
+    </select>
+    {error && <span role="alert">{error}</span>}
+  </Row>;
+}
+
 function PermissionMode({ client }: { client: DaemonClient }) {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [unavailable, setUnavailable] = useState<string | null>(null);
@@ -1408,6 +1453,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       {config && (
         <Section id="your-settings" title="Your settings" blurb="Saved to ~/.brindle/config.json and applied to every project, unless a repo sets one itself." testId="your-settings">
           {common.map(yourRow)}
+          <QuotaSwitchSetting client={client} />
           {more && others.map(yourRow)}
           <div className="flex flex-col gap-1 px-s2 py-1">
             <div className="flex flex-wrap items-center gap-s2">

@@ -453,7 +453,7 @@ function ProviderSwitchActions({ item, actions, onDone }: { item: InboxItemDTO; 
     <ProviderSwitchCard
       showLine={false}
       offer={offerOf(item)}
-      onAnswer={(accept) => answerProviderSwitch(client, item, accept).then(
+      onAnswer={(accept, always) => answerProviderSwitch(client, item, accept, undefined, always).then(
         () => { actions.settle(item); onDone(); },
         (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e)),
       )}
