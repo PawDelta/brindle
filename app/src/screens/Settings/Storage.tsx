@@ -10,10 +10,14 @@
    brindle's) says why and has no Clean; one that changed since the report
    and was kept by the engine says why too. The figure the Inbox nudges on
    (store/storage) is kept current from here. An engine without the route
-   leaves the section out. */
+   leaves the section out. The engine answers at once with the report it
+   last measured and measures on a thread of its own (`refreshing`): the
+   section reads again every AGAIN_MS until that measurement is in, keeping
+   the report it has on screen meanwhile. Measure again (and a clean) ask
+   for a fresh one. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { DaemonError, type DaemonClient, type StorageCleaned, type StorageReport, type StorageWorktree } from "../../api/client";
+import { DaemonError, storagePending, type DaemonClient, type StorageCleaned, type StorageReport, type StorageWorktree } from "../../api/client";
 import { plain } from "../../api/wording";
 import { ago } from "../../components/ProviderConnect";
 import { alert, button, card, danger, h2, mono, notice, quiet } from "../../components/ui";
@@ -24,6 +28,8 @@ export type StorageClient = Pick<DaemonClient, "storage" | "cleanStorage">;
 const message = (e: unknown) =>
   e instanceof DaemonError && e.code === "busy" ? "brindle is busy, try again in a moment." : plain(e instanceof Error ? e.message : String(e));
 const ARCHIVE = "refs/brindle-archive/";
+/* How soon to read again while the engine is still measuring. */
+const AGAIN_MS = 2000;
 
 /* What is being confirmed: one worktree's path, or the removable abandoned
    ones shown when Clean all was pressed (exactly these are sent). */
@@ -40,29 +46,40 @@ export function Storage({ client, repo }: { client: StorageClient; repo?: string
   const [done, setDone] = useState<string | null>(null);
   // The newest read's stamp: an older read's answer is dropped.
   const newest = useRef(0);
+  // Bumped when the engine is still measuring: read again shortly.
+  const [follow, setFollow] = useState(0);
 
-  const measure = useCallback(async () => {
+  const measure = useCallback(async (fresh = false) => {
     const started = readStarted();
     newest.current = started;
     setMeasuring(true);
+    let pending = false;
     try {
-      const r = await client.storage(repo);
-      noteReclaimable(r.reclaimable, started);
+      const r = await client.storage(repo, fresh ? { fresh } : undefined);
+      if (r.measured_at !== null) noteReclaimable(r.reclaimable, started);
       if (newest.current !== started) return;
-      setReport(r);
+      // Nothing measured yet: the report on screen stays until one is.
+      if (r.measured_at !== null) setReport(r);
       setError(null);
+      pending = storagePending(r);
+      if (pending) setFollow((n) => n + 1);
     } catch (e) {
       if (newest.current !== started) return;
       if (e instanceof DaemonError && e.status === 404) setAbsent(true);
       else setError(`Couldn't measure brindle's disk use: ${message(e)}`);
     } finally {
-      if (newest.current === started) setMeasuring(false);
+      if (newest.current === started && !pending) setMeasuring(false);
     }
   }, [client, repo]);
 
   useEffect(() => {
     void measure();
   }, [measure]);
+  useEffect(() => {
+    if (follow === 0) return;
+    const next = window.setTimeout(() => void measure(), AGAIN_MS);
+    return () => window.clearTimeout(next);
+  }, [follow, measure]);
 
   if (absent) return null;
 
@@ -83,7 +100,7 @@ export function Storage({ client, repo }: { client: StorageClient; repo?: string
       setKept(Object.fromEntries(out.kept.map((k) => [k.path, plain(k.reason)])));
       const freed = out.removed.reduce((n, r) => n + r.size, 0);
       if (out.removed.length) setDone(`Removed ${out.removed.length} worktree${out.removed.length === 1 ? "" : "s"}, ${bytes(freed)} given back. Each branch's last commit is kept under ${ARCHIVE}.`);
-      await measure();
+      await measure(true);
     } catch (e) {
       setError(message(e));
     } finally {
@@ -102,7 +119,7 @@ export function Storage({ client, repo }: { client: StorageClient; repo?: string
           {report ? `brindle uses ${bytes(report.categories.reduce((n, c) => n + (c.name === "build dirs" ? 0 : c.size), 0))}; ${bytes(report.reclaimable)} could be given back.` : "What brindle keeps on this computer."}
         </span>
         <span className="flex-1" />
-        <button type="button" className={quiet} disabled={measuring || busy} onClick={() => void measure()}>
+        <button type="button" className={quiet} disabled={measuring || busy} onClick={() => void measure(true)}>
           {measuring ? "Measuring…" : "Measure again"}
         </button>
       </header>

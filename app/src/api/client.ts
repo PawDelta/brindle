@@ -1472,6 +1472,16 @@ export interface StorageReport {
   free_bytes: number | null;
   low_disk: string | null;
   dead_branches: { repo_root: string; name: string; sha: string; last_commit: number; merged: boolean }[];
+  /* Epoch seconds the report shown was measured; null: none yet (the fields
+     above are then empty). Older engines leave both fields out. */
+  measured_at?: number | null;
+  /* A measurement is under way (on its own thread): read again for its result. */
+  refreshing?: boolean;
+}
+
+/* A report with nothing measured yet, or one about to be replaced: read again shortly. */
+export function storagePending(r: StorageReport): boolean {
+  return r.refreshing === true || r.measured_at === null;
 }
 
 /* POST /storage/clean (disk.clean): what went, and what was kept and why
@@ -2422,9 +2432,10 @@ export class DaemonClient {
     return this.put<DocFormatView>("/doc-format", { level, format, version });
   }
 
-  /* brindle's disk use (slow: the daemon measures every worktree). */
-  storage(repo?: string) {
-    return this.get<StorageReport>("/storage", { repo });
+  /* brindle's disk use as last measured, at once; `fresh` measures again
+     (the daemon measures every worktree on a thread of its own). */
+  storage(repo?: string, opts: { fresh?: boolean } = {}) {
+    return this.get<StorageReport>("/storage", { repo, fresh: opts.fresh ? 1 : undefined });
   }
 
   /* Removes one worktree (merged or abandoned; the engine checks it again),
