@@ -97,6 +97,47 @@ def test_offer_limits(db, session, monkeypatch, case, kind, counts, reason):
         assert offers.current(db, boss.id)["id"] == result["id"]
 
 
+def test_supervisor_decision_needs_no_visual_consent(db, session):
+    boss, worker = session
+    choices = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    for caller, kind in [(worker, "visual"), (boss, "plan")]:
+        with pytest.raises(ServiceError) as error:
+            visuals.publish(db, caller, "Decision", "<p>Choose</p>", "Which?", choices, kind=kind)
+        assert error.value.code == "visual_request_required"
+    v = visuals.publish(db, boss, "Decision", "<p>Choose</p>", "Which?", choices)
+    assert v["rev"] == 1
+    assert v["options"] and v["answer"] is None
+    assert v["consented_by"] is None
+
+
+def test_second_open_decision_is_refused(db, session):
+    boss, _ = session
+    choices = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    v = visuals.publish(db, boss, "Decision", "<p>Choose</p>", "Which?", choices)
+    visuals.mark_read(db, v["id"])
+    offers.person_spoke(db, boss, "Show me a visual")
+    with pytest.raises(ServiceError) as error:
+        visuals.publish(db, boss, "Another", "<p>Choose</p>", "Which next?", choices)
+    assert error.value.code == "open_decision_prompt"
+    revised = visuals.publish(db, boss, "Revised", "<p>Choose again</p>", "Which now?", choices,
+                              visual_id=v["id"])
+    assert revised["rev"] == 2
+    with db.tx() as c:
+        c.execute("UPDATE visuals SET dismissed_rev=rev WHERE id=?", (v["id"],))
+    assert visuals.publish(db, boss, "Next", "<p>Choose</p>", "Which next?", choices)["rev"] == 1
+
+
+@pytest.mark.variant("a decision exception must not grant consent for plain visuals or question-only publications")
+def test_plain_visual_still_needs_consent_after_decision(db, session):
+    boss, _ = session
+    choices = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    v = visuals.publish(db, boss, "Decision", "<p>Choose</p>", "Which?", choices)
+    for question, visual_id in [(None, None), ("Which?", None), (None, v["id"])]:
+        with pytest.raises(ServiceError) as error:
+            visuals.publish(db, boss, "Plain", "<p>Unrequested</p>", question, visual_id=visual_id)
+        assert error.value.code == "visual_request_required"
+
+
 def test_accept_and_explicit_ask_allow_one_publish(db, session):
     boss, worker = session
     feed = Feed(db, repo_root=db.get_workspace(boss.workspace_id).repo_root)
