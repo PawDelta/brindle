@@ -540,6 +540,9 @@ def switch_back(db: DB, offer_id: str, now: float) -> Agent:
 # -- inbox -----------------------------------------------------------------------
 
 
+NOTICE_PREFIX = "notice: "  # marks a completed-switch notice's detail: "notice: from → to · HH:MM"
+
+
 def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> list[InboxItemDTO]:
     """Open offers as Inbox cards: KIND_OFFER or KIND_BACK, ``request_id``
     the offer id, ``detail`` "<from> -> <to>", ``action`` POST
@@ -567,7 +570,9 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
         reset = time.strftime("%H:%M", time.localtime(offer.limited_until)) if offer.limited_until else "unknown"
         items.append(InboxItemDTO(kind=KIND_BACK,
                                   reason=f"Switched to {offer.to_provider} · {offer.from_provider} was out of quota, back at {reset}",
-                                  detail="Switch back now", agent_id=root.id, workspace_id=ws.id,
+                                  detail=f"{NOTICE_PREFIX}{offer.from_provider} → {offer.to_provider}"
+                                         + (f" · {reset}" if offer.limited_until else ""),
+                                  agent_id=root.id, workspace_id=ws.id,
                                   root_id=root.id, request_id=offer.id,
                                   action=InboxActionDTO(method="POST",
                                       path=f"/v1/sessions/{root.id}/provider-switch")))
@@ -586,9 +591,6 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
         if offer.state != "failed" and offer.to_provider not in targets:
             continue
         detail = f"{offer.from_provider} → {offer.to_provider}"
-        alternatives = [p for p in targets if p != offer.to_provider]
-        if alternatives:
-            detail += f"; alternatives: {', '.join(alternatives)}"
         items.append(InboxItemDTO(kind=KIND_BACK if offer.kind == "back" else KIND_OFFER,
                                   reason=("Provider switch failed. Check the session before continuing."
                                           if offer.state == "failed" else "Switch provider or choose Not now"),

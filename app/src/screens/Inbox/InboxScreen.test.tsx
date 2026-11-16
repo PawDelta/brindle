@@ -79,6 +79,29 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it("renders a provider-switch notice with Switch back now and Dismiss, and the offer without them", async () => {
+    const route = { method: "POST", path: "/v1/sessions/sup1/provider-switch" };
+    const switchNotice: InboxItemDTO = { kind: "provider_switch_back", reason: "Switched to codex · claude was out of quota, back at 09:30", detail: "notice: claude → codex · 09:30", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", request_id: "sw1", action: route };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [switchNotice] });
+    const answers: unknown[] = [];
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/provider-switch")) { answers.push(JSON.parse(String(init?.body))); return new Response("{}", { status: 200 }); }
+      return realFetch(input, init);
+    });
+    const { sync } = mount(daemon);
+    const row = await waitFor(() => { expect(card("provider_switch_back")).toBeTruthy(); return card("provider_switch_back"); });
+    expect(within(row).getByTestId("provider-switch").dataset.variant).toBe("notice");
+    expect(row.textContent).toContain("codex");
+    expect(row.textContent).toContain("09:30");
+    expect(within(row).queryByRole("button", { name: "Switch" })).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Switch back now" }));
+    await waitFor(() => expect(answers).toEqual([{ offer: "sw1", accept: true }]));
+    expect(within(within(row).getByTestId("provider-switch")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    sync.stop();
+    vi.restoreAllMocks();
+  });
+
   it("dismisses a notification through the daemon and keeps it gone after another snapshot", async () => {
     const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [question] });
     const { sync } = mount(daemon);

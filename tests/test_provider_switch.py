@@ -110,6 +110,7 @@ def test_auto_sweep_switches_posts_notice_and_returns_when_quota_recovers(db, re
     [notice] = provider_switch.inbox_items(db, str(repo), now=NOW)
     assert notice.kind == provider_switch.KIND_BACK and notice.root_id == new.id
     assert notice.action.path == f"/v1/sessions/{new.id}/provider-switch"
+    assert notice.detail.startswith(provider_switch.NOTICE_PREFIX + "claude → antigravity")
     assert provider_switch.inbox_items(db, "another-repo", now=NOW) == []
     provider_switch.sweep(db, NOW + 1)
     assert len(spawned) == 1
@@ -216,6 +217,16 @@ def test_auto_existing_offer_revalidates_limit_and_target(db, repo, world, spawn
         assert provider_switch.get(db, offer.id).state == "dismissed"
     else:
         assert [call["provider_name"] for call in spawned] == ["antigravity"]
+
+
+def test_offer_detail_names_one_target_even_with_alternatives(db, repo, world):
+    _session(db, repo)
+    world["quotas"] = {"claude": _limited("claude", NOW + HOUR),
+                       "codex": quota.Quota("codex", [quota.Window(80, NOW + HOUR)]),
+                       "antigravity": quota.Quota("antigravity", [quota.Window(20, NOW + HOUR)])}
+    [offer] = provider_switch.sweep(db, NOW)
+    [card] = provider_switch.inbox_items(db, str(repo), now=NOW)
+    assert card.detail == f"claude → {offer.to_provider}"
 
 
 def test_offer_when_supervisor_out_of_quota_names_an_in_quota_provider(db, repo, world, monkeypatch):

@@ -25,6 +25,8 @@ export interface ProviderSwitchOffer {
   toProvider: string;
   /* When fromProvider's limit lifts (switch), epoch seconds; null for a back offer. */
   limitedUntil: number | null;
+  /* A notice's "HH:MM" reset time, as the daemon formatted it. */
+  resetAt?: string;
 }
 
 export interface ProviderSwitchCardProps {
@@ -34,12 +36,20 @@ export interface ProviderSwitchCardProps {
   onAnswer(accept: boolean, always?: boolean): Promise<unknown>;
 }
 
-export const PROVIDER_SWITCH_KINDS = ["provider_switch", "provider_switch_back"];
+export const NOTICE_PREFIX = "notice: ";
+export const isNotice = (item: InboxItemDTO) => (item.detail ?? "").startsWith(NOTICE_PREFIX);
+
+export const PROVIDER_SWITCH_KINDS =["provider_switch", "provider_switch_back"];
 
 /* The offer an Inbox item carries, from its existing fields. */
 export function offerOf(item: InboxItemDTO): ProviderSwitchOffer {
-  const [from, to] = (item.detail ?? "").split(/\s*→\s*/);
+  const detail = item.detail ?? "";
+  const notice = detail.startsWith(NOTICE_PREFIX);
+  /* A notice reads "notice: from → to · HH:MM"; an offer is just "from → to". */
+  const [pair, resetAt] = (notice ? detail.slice(NOTICE_PREFIX.length) : detail).split(/\s*·\s*/);
+  const [from, to] = pair.split(/\s*→\s*/);
   return {
+    resetAt: notice ? resetAt : undefined,
     offerId: item.request_id ?? "",
     rootId: item.root_id ?? "",
     kind: item.kind === "provider_switch_back" ? "back" : "switch",
@@ -52,7 +62,7 @@ export function offerOf(item: InboxItemDTO): ProviderSwitchOffer {
 /* The line the card leads with. A back offer names the provider with quota again (the one it returns to). */
 export function switchLine(offer: ProviderSwitchOffer, variant: "offer" | "notice" = "offer"): string {
   if (variant === "notice") {
-    const backAt = offer.limitedUntil === null ? "" : `, back at ${new Date(offer.limitedUntil * 1000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).replace(/\s/g, "").toLowerCase()}`;
+    const backAt = offer.resetAt ? `, back at ${offer.resetAt}` : offer.limitedUntil === null ? "" : `, back at ${new Date(offer.limitedUntil * 1000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).replace(/\s/g, "").toLowerCase()}`;
     return `Switched to ${providerLabel(offer.toProvider)} · ${providerLabel(offer.fromProvider)} was out of quota${backAt}`;
   }
   return offer.kind === "back"
