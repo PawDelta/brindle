@@ -17,6 +17,7 @@ Fakes only, no clocks: what is asserted is which calls the read makes.
 
 import threading
 
+import pytest
 from starlette.testclient import TestClient
 
 from brindle import disk, preflight, provider_switch, quota, tmux, workspaces
@@ -28,6 +29,7 @@ TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
+@pytest.mark.variant("regression: the Inbox read ran preflight per provider for every open offer")
 def test_inbox_read_shows_switch_card_without_checking_providers(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("root", ws.id, "supervisor", "claude", None, "interactive", "running", "@1", None, NOW))
