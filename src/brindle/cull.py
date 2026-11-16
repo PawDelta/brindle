@@ -195,16 +195,18 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             agents._note_reviewer_end(db, a)
             planned[aid] = _judged(db.get_agent(aid))
     if planned:
-        # Judged again just before the signal, from the rows and panes as they
-        # are now: one resumed (or otherwise moved on) since is spared.
+        # Their processes found as they are now; then each agent judged again,
+        # from its row and the panes as they are after that scan, just before
+        # the signal: one resumed (or otherwise moved on) meanwhile is spared,
+        # and nothing is scanned between that judgement and the signal.
+        found = procs.agent_pids(list(planned), procs=procs.table())
         now_panes = tmux.list_panes()
         now_owners = agents.pane_owners(db, now_panes)
-        leftovers = [aid for aid, then in planned.items()
-                     if _judged(a := db.get_agent(aid)) == then
-                     and leftover(a, lambda a: (agents.is_alive(a, now_panes)
-                                                and agents.owns_pane(db, a, now_owners)),
-                                  lambda a: agents.same_server(a, now_panes))]
-        found = procs.agent_pids(leftovers, procs=procs.table()) if leftovers else {}
+        found = {aid: pids for aid, pids in found.items()
+                 if _judged(a := db.get_agent(aid)) == planned[aid]
+                 and leftover(a, lambda a: (agents.is_alive(a, now_panes)
+                                            and agents.owns_pane(db, a, now_owners)),
+                              lambda a: agents.same_server(a, now_panes))}
         stopped = procs.terminate({p for pids in found.values() for p in pids}) if found else 0
         if stopped:
             done.append(f"stopped {stopped} leftover process(es) of {len(found)} agent(s)")

@@ -61,13 +61,16 @@ def test_a_worker_resumed_after_the_sweep_judged_it_leftover_keeps_its_processes
     from brindle import cull, procs
 
     a_session(db, tmp_path, monkeypatch, "paused")
+    scans = []
 
-    def leftover_ids(table):
-        yield "w1"
-        resumed(db)          # after the sweep judged w1 paused, before it signals
+    def table():
+        scans.append(1)
+        if len(scans) == 2:  # the scan for w1's processes, after the sweep judged it paused
+            resumed(db)
+        return {}
 
-    monkeypatch.setattr(procs, "table", lambda: {})
-    monkeypatch.setattr(procs, "all_agent_ids", leftover_ids)
+    monkeypatch.setattr(procs, "table", table)
+    monkeypatch.setattr(procs, "all_agent_ids", lambda table: ["w1"])
     monkeypatch.setattr(procs, "agent_pids", lambda ids, **kw: {aid: {4242} for aid in ids})
     signalled = []
     monkeypatch.setattr(procs, "terminate", lambda pids, **kw: signalled.extend(pids) or len(pids))
