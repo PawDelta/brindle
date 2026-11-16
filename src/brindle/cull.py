@@ -64,6 +64,43 @@ LOCK_MAX_AGE = 24 * 3600   # a lock file untouched this long is cleaned up
 FLUSH_RETRY_AFTER = 30.0
 
 
+# What runs the sweep on a clock (each sidebar, the daemon's watch) runs one a
+# minute between all of them, on the clock SWEEP_STAMP keeps (``claim``).
+SWEEP_SECONDS = 60.0
+SWEEP_STAMP = "cull.stamp"
+
+
+def claim(now: float) -> bool:
+    """Claim this minute's sweep. Every caller of this brindle home is due
+    once a minute; under a lock they all take, the shared stamp is read and,
+    when a sweep is due, set to ``now`` before the lock is let go, so with N
+    callers one sweeps a minute, not N. A stamp that can't be used (an
+    unwritable home) claims nothing: this caller sweeps."""
+    stamp = brindle_home() / SWEEP_STAMP
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        with open(stamp.with_name(stamp.name + ".lock"), "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                swept = stamp.stat().st_mtime
+            except FileNotFoundError:
+                swept = 0.0
+            if 0 <= now - swept < SWEEP_SECONDS:   # a stamp from the future: a clock set back
+                return False
+            stamp.touch()
+            os.utime(stamp, (now, now))
+    except OSError:
+        pass
+    return True
+
+
+def _judged(a: Agent | None) -> tuple | None:
+    """What a destructive step judged ``a`` by: read again just before the
+    step, a different value means it moved on since (a resume, a new turn,
+    a close) and the step is skipped for it."""
+    return None if a is None else (a.status, a.status_since, a.dismissed_at)
+
+
 def _root(db: DB, a: Agent) -> str:
     from brindle import autopilot
 
@@ -141,22 +178,36 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     done.extend(note_dead_panes(db, now, panes))
 
     # 1. Processes of agents that shouldn't be running.
-    leftovers = []
+    def leftover(a: Agent | None, alive, here) -> bool:
+        return (a is None or a.status in ("paused", "done") or a.dismissed_at is not None
+                or (a.status == "failed" and here(a) and not alive(a)))
+
+    planned: dict[str, tuple | None] = {}    # agent id -> its row as judged (_judged)
     for aid in procs.all_agent_ids(table):
         a = db.get_agent(aid)
-        if (a is None or a.status in ("paused", "done") or a.dismissed_at is not None
-                or (a.status == "failed" and here(a) and not alive(a))):
-            leftovers.append(aid)
+        if leftover(a, alive, here):
+            planned[aid] = _judged(a)
         elif (agents.runs_process(a) and here(a) and not alive(a)
               and now - max(a.created_at, a.status_since or 0) > LAUNCH_GRACE):
             db.end_native_subagents(a.id)
             db.set_status(a.id, "done" if a.mode != "interactive" and a.result is not None
                           else "paused")
             agents._note_reviewer_end(db, a)
-            leftovers.append(aid)
-    if leftovers:
-        found = procs.agent_pids(leftovers, procs=table)
-        stopped = procs.terminate({p for pids in found.values() for p in pids})
+            planned[aid] = _judged(db.get_agent(aid))
+    if planned:
+        # Their processes found as they are now; then each agent judged again,
+        # from its row and the panes as they are after that scan, just before
+        # the signal: one resumed (or otherwise moved on) meanwhile is spared,
+        # and nothing is scanned between that judgement and the signal.
+        found = procs.agent_pids(list(planned), procs=procs.table())
+        now_panes = tmux.list_panes()
+        now_owners = agents.pane_owners(db, now_panes)
+        found = {aid: pids for aid, pids in found.items()
+                 if _judged(a := db.get_agent(aid)) == planned[aid]
+                 and leftover(a, lambda a: (agents.is_alive(a, now_panes)
+                                            and agents.owns_pane(db, a, now_owners)),
+                              lambda a: agents.same_server(a, now_panes))}
+        stopped = procs.terminate({p for pids in found.values() for p in pids}) if found else 0
         if stopped:
             done.append(f"stopped {stopped} leftover process(es) of {len(found)} agent(s)")
     # What closed panes left with launchd as its parent, its CLI gone (procs.hand_off):
@@ -268,7 +319,16 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
                     "brindle left it open. Check it's not stuck: send_message it what it needs.")))
             continue
         if finished or gone:
-            agents.close(db, a.id, panes)
+            # Judged again just before closing: a worker that took a message,
+            # started a turn, reported or came back since is left open.
+            now_panes = tmux.list_panes()
+            fresh = db.get_agent(a.id)
+            if (fresh is None or _judged(fresh) != _judged(a) or fresh.result != a.result
+                    or (agents.is_alive(fresh, now_panes)
+                        and agents.owns_pane(db, fresh, agents.pane_owners(db, now_panes))) != running
+                    or (finished and db.pending_count(a.id))):
+                continue
+            agents.close(db, a.id, now_panes)
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
                         f"after {int(idle_for // 60)} min")
 
@@ -295,6 +355,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     # nobody is answering, or gone silent.
     decline_environment_setups(db, panes)
     done.extend(settle_startups(db, now, panes))
+    done.extend(read_busy_screens(db, panes))
     done.extend(note_stuck(db, now, panes))
     # Before the idle reminder: a stop on an API error is told with its kind.
     done.extend(note_api_errors(db, now, panes))
@@ -535,6 +596,26 @@ def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     return done
 
 
+def read_busy_screens(db: DB, panes: dict[str, bool]) -> list[str]:
+    """Read the screen of each running worker marked busy, as the sidebar's
+    render does (agents.reconcile, one sample), so a wait no hook reports (a
+    Codex approval prompt with no permission hook) is marked 'waiting' for
+    note_stuck even where no sidebar runs. Each worker's row is read again
+    just before its screen: one a hook or a sweep moved on is left alone."""
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for listed in db.list_agents():
+        a = db.get_agent(listed.id)
+        if (a is None or a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.status != "processing" or a.headless
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        if agents.reconcile(db, a, samples=1).status == "waiting":
+            done.append(f"{a.id}'s screen shows it waiting on a prompt")
+    return done
+
+
 def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     """Forward the live menus of waiting workers immediately. Hook-only
     reviewer requests are immediate too; other waiting states retain their
@@ -574,7 +655,9 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 done.append(f"told {a.parent_id} that worker {a.id} is waiting on input")
             continue
         since = a.status_since or a.created_at
-        if a.stuck_noted == since or (a.mode != "review" and now - since < STUCK_AFTER):
+        # A request held for the person waits on them, not on a prompt that may yet clear: told at once.
+        if a.stuck_noted == since or (a.mode != "review" and now - since < STUCK_AFTER
+                                      and permission_routing.waits_on_person(db, a) is None):
             continue
         ws = db.get_workspace(a.workspace_id)
         tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])

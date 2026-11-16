@@ -568,6 +568,7 @@ def test_required_reviewers_are_synced_in_the_background(monkeypatch):
     monkeypatch.setattr(ReadinessWatch, "sweep_safely", lambda self: None)
     monkeypatch.setattr(lifecycle, "_purge_typed_words", lambda: None)
     monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: None)
+    monkeypatch.setattr(lifecycle, "_cull_sweep", lambda: None)
     asyncio.run(lifecycle._watch(Server(), lifecycle.Activity(build_app(TOKEN, port=8123)), False, wait=elapse,
                                  clock=lambda: now[0]))
     assert synced

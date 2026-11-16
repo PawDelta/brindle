@@ -1270,6 +1270,7 @@ def test_the_daemons_watch_puts_back_a_trust_lost_while_it_runs(ws, hook_daemon,
     from brindle.upgrade import InstallWatch
 
     monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", lambda self: None)
+    monkeypatch.setattr(hook_daemon, "_cull_sweep", lambda: None)
     monkeypatch.setattr(InstallWatch, "changed", lambda self: False)
     _a_rewrite_lost_the_entries(monkeypatch)
     old = time.time() - hook_daemon.CODEX_HOOK_SETTLE - 1

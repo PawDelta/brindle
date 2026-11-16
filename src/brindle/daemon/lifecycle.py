@@ -51,6 +51,7 @@ IDLE_SECONDS = 600.0
 WATCH_INTERVAL = 5.0     # seconds between the idle / upgrade checks
 CODEX_HOOK_EVERY = 60.0  # seconds between looks at the Codex hook's trust (codex_hook.keep_trusted)
 SHARED_DOCS_EVERY = 30.0  # seconds between bringing back what teammates wrote on shared plans
+CULL_EVERY = 60.0       # seconds between cull sweeps when no sidebar has run one (cull.claim)
 CODEX_HOOK_SETTLE = 120.0    # and how long another install's fresh trust is left alone
 STOP_GRACE = 5.0         # seconds `daemon stop` waits before SIGKILL
 SHUTDOWN_GRACE = 1.0     # seconds for requests on shutdown, within the app's replacement budget
@@ -900,6 +901,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     monitor = health.Monitor(clock)
     hook_due = clock() + CODEX_HOOK_EVERY
     shared_due = clock() + SHARED_DOCS_EVERY
+    cull_due = clock() + CULL_EVERY
     sharing: asyncio.Task | None = None     # on its own task: a slow Library never holds up these checks
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
@@ -917,6 +919,9 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
         if clock() >= hook_due:
             hook_due = clock() + CODEX_HOOK_EVERY
             await asyncio.to_thread(_keep_codex_hook, CODEX_HOOK_SETTLE)
+        if clock() >= cull_due:
+            cull_due = clock() + CULL_EVERY
+            await asyncio.to_thread(_cull_sweep)
         if clock() >= shared_due and (sharing is None or sharing.done()):
             shared_due = clock() + SHARED_DOCS_EVERY
             sharing = asyncio.create_task(asyncio.to_thread(_sync_shared_docs))
@@ -926,6 +931,27 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
               and time.monotonic() - activity.last >= IDLE_SECONDS
               and not await asyncio.to_thread(_agents_running)):
             server.should_exit = True
+
+
+def _cull_sweep() -> None:
+    """The sweep the sidebars run (cull.sweep_quietly), for sessions no
+    sidebar watches (the app alone, --no-watch): without it a worker held on
+    its CLI's own prompt was never marked waiting nor its supervisor told.
+    Claimed on the stamp the sidebars share (cull.claim), so one sweep runs a
+    minute between them all; a failure is only logged."""
+    from brindle import cull
+    from brindle.db import DB
+
+    try:
+        if not cull.claim(time.time()):
+            return
+        db = DB()
+        try:
+            cull.sweep_quietly(db)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a sweep must never stop the watch
+        log.debug("brindle: couldn't run the cull sweep", exc_info=True)
 
 
 def _purge_typed_words() -> None:
