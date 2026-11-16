@@ -322,11 +322,14 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     observer = _get(body, "refresh", int)
     if observer is not None:
         return {"generation": visual_offers.refresh_input(db, agent, observer, submitted_at, expires_at)}
-    typed_words = _get(body, "typed_words")
-    if typed_words is not None:
-        if expires_at is None or len(typed_words) > 32000:
+    # typed_words: what the person keyed in, or null when the app saw the keys but can't say the text
+    # (a suggestion they accepted, an edit it can't follow). typed=false: a submission that wasn't typed.
+    if "typed_words" in body:
+        typed_words = _get(body, "typed_words")
+        if expires_at is None or (typed_words is not None and len(typed_words) > 32000):
             raise ServiceError("invalid", "typed_words needs expires_at and a sensible length", 400)
-        visual_offers.keep_typed(db, agent, typed_words, expires_at, submitted_at)
+        visual_offers.keep_typed(db, agent, typed_words, expires_at, submitted_at,
+                                 typed=_get(body, "typed", bool) is not False)
         return {"observed": True}
     text = _get(body, "text", required=True)
     if len(text) > 32000:

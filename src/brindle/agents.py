@@ -6235,7 +6235,7 @@ def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
         # here ends only what the person typed before it, not a newer staged ask.
         for prompt, said_at in prompts:
             if "[brindle" not in prompt and not db.recently_delivered(agent.id, prompt):
-                visual_offers.person_spoke(db, agent, prompt, cli_prompt=True, said_at=said_at)
+                visual_offers.person_spoke(db, agent, prompt, cli_prompt=True, said_at=said_at, mid_turn=True)
     except Exception:  # noqa: BLE001 - a hook must never fail over this
         log.exception("brindle: couldn't read the messages absorbed into %s's turn", agent.id)
 
@@ -6335,7 +6335,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # an acknowledgement below marks anything delivered; sending a stopped
         # delivery with their reply typed onto it is the user speaking, though.
         person = "[brindle" not in prompt and not db.recently_delivered(agent_id, prompt)
-        person = _acknowledge_submitted(db, agent_id, prompt) or person
+        carries_delivery = _acknowledge_submitted(db, agent_id, prompt)
+        person = carries_delivery or person
         db.set_status(agent_id, "processing")
         from brindle import launch_health
         launch_health.accepted(db, agent)
@@ -6345,7 +6346,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             pilot.user_spoke(db, agent)
             from brindle import visual_offers
 
-            visual_offers.person_spoke(db, agent, prompt, cli_prompt=True)
+            visual_offers.person_spoke(db, agent, prompt, cli_prompt=True, carries_delivery=carries_delivery)
     elif event == "notification":
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:

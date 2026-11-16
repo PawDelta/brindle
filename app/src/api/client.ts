@@ -1981,10 +1981,11 @@ export class DaemonClient {
     });
   }
 
-  visualTypedWords(root: string, text: string, expiresAt: number, submittedAt: number, signal?: AbortSignal) {
+  /* `text` null: an Enter whose words the app didn't see; `typed` false: one that sent a paste. */
+  visualTypedWords(root: string, text: string | null, expiresAt: number, submittedAt: number, signal?: AbortSignal, typed = true) {
     return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ typed_words: text, expires_at: expiresAt, submitted_at: submittedAt }), signal,
+      body: JSON.stringify({ typed_words: text, typed, expires_at: expiresAt, submitted_at: submittedAt }), signal,
     });
   }
 
