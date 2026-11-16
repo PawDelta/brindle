@@ -6090,7 +6090,11 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
     if waiter and db.pending_count(agent.id) and not db.pane_delivery_holds(agent.id):
         db.set_status(agent.id, "processing")   # the waiter wakes it at once
         return None
-    msg = None if waiter else db.pop_pending(agent.id)
+    # A stop another Stop hook already sent back (a /goal it can't meet) is
+    # never blocked again by brindle: queued mail stays queued for the sweep's
+    # flush (cull.FLUSH_RETRY_AFTER), so hooks can't keep a turn going together.
+    capped = bool(payload.get("stop_hook_active")) and not (via_inbox or waiter)
+    msg = None if waiter or capped else db.pop_pending(agent.id)
     if msg:
         db.set_status(agent.id, "processing")
         return {"decision": "block", "reason": msg.body}
@@ -6136,7 +6140,10 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
         from brindle import autopilot as pilot
 
         decision = pilot.on_stop(db, agent, payload)
-        if decision:
+        if decision and capped:
+            # Its nudge is kept, as the waiter's path keeps it, rather than blocking again.
+            db.enqueue(agent.id, decision["reason"], None)
+        elif decision:
             db.set_status(agent.id, "processing")
             # Claude Code shows the reason in the chat: one line, like any brindle message.
             kept = db.enqueue_held(agent.id, decision["reason"], None)
@@ -6433,6 +6440,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if agent.mode == "interactive" and inbox.usable(agent):
             decision = _stop_decision(db, agent, payload, via_inbox=True)
             if decision and inbox.send(agent, decision["reason"]):
+                return None
+            if decision and payload.get("stop_hook_active"):
+                db.enqueue(agent_id, decision["reason"], None)   # kept, not blocked again
+                db.set_status(agent_id, "idle")
                 return None
             return decision  # nothing to say, or the inbox failed: block after all
         # A worker with the waiter: its queued mail goes to the waiter this

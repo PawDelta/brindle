@@ -32,6 +32,13 @@ def test_a_worker_looping_on_its_goal_gets_its_supervisor_told_once(db, tmp_path
     assert db.get_agent("w1").status == "waiting"
 
 
+def test_a_stop_another_hook_sent_back_is_not_blocked_again_for_queued_mail(db, tmp_path, monkeypatch):
+    a_session(db, tmp_path, monkeypatch, "processing", "claude")
+    db.enqueue("w1", "continue working", "boss")
+    assert agents.handle_hook(db, "w1", "stop", {"stop_hook_active": True}) is None
+    assert db.pending_count("w1") == 1    # kept for the sweep's flush, not lost
+
+
 def test_the_goal_tells_the_worker_to_ask_its_supervisor_not_its_pane(tmp_path):
     ws = Workspace("ws1", str(tmp_path), "feature", "worktree", "feature", "main", str(tmp_path), None,
                    "brindle-ws1", time.time())
