@@ -239,7 +239,6 @@ def test_offer_is_created_at_the_limit_recording_hook(db, repo, world, monkeypat
     assert [row[0] for row in db.conn.execute("SELECT id FROM provider_switches ORDER BY id")] == offers
 
 
-@NOT_BUILT
 def test_handoff_note_carries_goal_workers_tasks_messages_and_transcript_tail(db, repo, world, tmp_path):
     ws = _session(db, repo)
     transcript = tmp_path / "root.jsonl"
@@ -250,35 +249,220 @@ def test_handoff_note_carries_goal_workers_tasks_messages_and_transcript_tail(db
     db.update_agent("root", transcript_path=str(transcript))
     autopilot.set_goal(db, "root", "ship the provider switch",
                        [("detect the limit", "true", None), ("offer the switch", "false", None)], None)
-    db.record_check(db.milestones("root")[0].id, True, "ok", "abc")
+    db.record_check(db.milestones("root")[0].id, True, "quota check succeeded", "abc")
     db.add_agent(Agent("w1", ws.id, "developer", "claude", "root", "assign", "running", "@2", None, NOW))
     db.add_task(Task("t1", str(repo), None, "root", ws.id, "developer", "write the inbox card", "assign",
                      1, None, None, None, None, "pending", NOW))
-    db.enqueue("root", "w1: the quota reader is done", "w1")
+    db.enqueue("root", "old message outside the tail", "w1")
+    for i in range(10):
+        db.enqueue("root" if i % 2 else "w1", f"message-{i:02d}", "w1" if i % 2 else "root")
+    db.enqueue("w1", "unrelated message", None)
 
     note = provider_switch.handoff_note(db, "root", NOW)
 
     for expected in ("ship the provider switch", "detect the limit", "offer the switch", "w1",
-                     "write the inbox card", "the quota reader is done", "turn-099"):
+                     "developer", "running", ws.branch, "quota check succeeded",
+                     "write the inbox card", "message-00", "message-09", "turn-060", "turn-099"):
         assert expected in note
     # Only the tail of the transcript, not the whole conversation.
     assert "turn-010" not in note
+    assert "turn-059" not in note
+    assert "old message outside the tail" not in note
+    assert "unrelated message" not in note
 
 
-@NOT_BUILT
-def test_handoff_switch_pressed_twice_starts_one_supervisor_on_the_target(db, repo, world, spawned):
+def test_handoff_switch_pressed_twice_starts_one_supervisor_on_the_target(db, repo, world, spawned, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from brindle.daemon import routes_actions
+    from brindle.db import DB
+
     ws = _session(db, repo)
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **kw: tmux.PaneSnapshot())
+    db.add_agent(Agent("other", ws.id, "supervisor", "claude", None, "interactive", "running",
+                       "@2", None, NOW))
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "other")
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "root", "assign", "running", "@3", None, NOW))
+    autopilot.set_goal(db, "root", "finish the work", [("check", "true", None)])
+    db.record_check(db.milestones("root")[0].id, True, "check passed", "abc")
+    db.add_task(Task("t1", str(repo), None, "root", ws.id, "developer", "queued work", "assign",
+                     1, None, None, None, None, "pending", NOW))
     world["quotas"] = {"claude": _limited("claude", NOW + HOUR)}
     _offer_row(db, "o1", "root", "switch", "claude", "codex", "open", limited_until=NOW + HOUR)
 
-    first = provider_switch.switch(db, "o1", NOW)
-    second = provider_switch.switch(db, "o1", NOW + 1)
+    starting, second_entered, release = Event(), Event(), Event()
+    spawn, get = agents.spawn, provider_switch.get
+    paused = []
+
+    def blocking_spawn(*args, **kw):
+        starting.set()
+        assert release.wait(5)
+        return spawn(*args, **kw)
+
+    def observe(db_, offer_id):
+        offer = get(db_, offer_id)
+        if offer and offer.state == "switching":
+            second_entered.set()
+        return offer
+
+    def pause(db_, root_id, **kw):
+        paused.append(root_id)
+        db_.update_agent(root_id, status="paused")
+
+    def press(now):
+        connection = DB(db.path)
+        try:
+            return provider_switch.switch(connection, "o1", now)
+        finally:
+            connection.conn.close()
+
+    monkeypatch.setattr(agents, "spawn", blocking_spawn)
+    monkeypatch.setattr(agents, "pause", pause)
+    monkeypatch.setattr(provider_switch, "get", observe)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_call = pool.submit(press, NOW)
+        first_call.add_done_callback(lambda _: starting.set())
+        try:
+            assert starting.wait(5)
+            if first_call.done():
+                first_call.result()
+            second_call = pool.submit(press, NOW + 1)
+            second_call.add_done_callback(lambda _: second_entered.set())
+            assert second_entered.wait(5)
+            assert not first_call.done() and not second_call.done()
+            assert get(db, "o1").state == "switching" and paused == []
+        finally:
+            release.set()
+        first, second = first_call.result(), second_call.result()
 
     assert len(spawned) == 1 and second.id == first.id
     # Same workspace and branch, the other provider.
     assert (spawned[0]["ws"].id, spawned[0]["provider_name"], first.provider) == (ws.id, "codex", "codex")
     row = provider_switch.get(db, "o1")
     assert (row.state, row.new_root_id) == ("done", first.id)
+    assert paused == ["root"] and db.get_agent("root").status == "paused"
+    assert db.get_agent("other").status == "running"
+    assert db.get_agent("w1").parent_id == first.id
+    assert db.get_task("t1").caller_id == first.id
+    assert db.get_autopilot(first.id).goal == "finish the work"
+    assert db.milestones(first.id)[0].status == "passed"
+    assert provider_switch.switch(db, "o1", NOW + 2).id == first.id
+    response = routes_actions.provider_switch(db, {"root": "root"}, {"offer": "o1", "accept": True})
+    assert response["id"] == first.id and len(spawned) == 1
+
+
+def test_handoff_failed_start_is_consumed_and_route_scopes_the_offer(db, repo, world, monkeypatch):
+    from brindle.daemon import routes_actions
+    from brindle.service.errors import ServiceError
+
+    _session(db, repo)
+    _session(db, repo, root_id="other")
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **kw: tmux.PaneSnapshot())
+    world["quotas"] = {"claude": _limited("claude", NOW + HOUR)}
+    _offer_row(db, "o1", "root", "switch", "claude", "codex", "open", limited_until=NOW + HOUR)
+    attempts = []
+
+    def fail(*args, **kw):
+        attempts.append(True)
+        raise agents.AgentError("launch failed")
+
+    monkeypatch.setattr(agents, "spawn", fail)
+    with pytest.raises(ServiceError) as wrong_root:
+        routes_actions.provider_switch(db, {"root": "other"}, {"offer": "o1", "accept": True})
+    assert wrong_root.value.http_status == 404 and attempts == []
+    with pytest.raises(agents.AgentError):
+        provider_switch.switch(db, "o1", NOW)
+    assert provider_switch.get(db, "o1").state == "failed"
+    with pytest.raises(agents.AgentError):
+        provider_switch.switch(db, "o1", NOW + 1)
+    assert len(attempts) == 1 and db.get_agent("root").status == "running"
+    assert provider_switch.maybe_offer(db, "root", NOW + 2) is None
+    assert [i.request_id for i in provider_switch.inbox_items(db, str(repo), now=NOW)] == ["o1"]
+    routes_actions.provider_switch(db, {"root": "root"}, {"offer": "o1", "accept": False})
+    assert provider_switch.inbox_items(db, str(repo), now=NOW) == []
+    _offer_row(db, "o2", "other", "switch", "claude", "codex", "open", limited_until=NOW + HOUR)
+    routes_actions.provider_switch(db, {"root": "other"}, {"offer": "o2", "accept": False})
+    assert provider_switch.get(db, "o2").state == "dismissed"
+    with pytest.raises(agents.AgentError):
+        provider_switch.switch(db, "o2", NOW)
+    assert len(attempts) == 1
+
+
+def test_handoff_transcripts_use_recorded_paths_and_omit_unreadable_text(db, repo, world, tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from brindle import usage
+
+    _session(db, repo, provider="codex")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    source_home = tmp_path / "source-codex"
+    db.update_agent("root", session_ref="known-session", config_home=str(source_home))
+    monkeypatch.setattr(quota, "codex_home", lambda: source_home)
+    monkeypatch.setattr(usage.time, "time", lambda: NOW)
+    day = usage.time.strftime("%Y/%m/%d", usage.time.localtime(NOW))
+    meta = {"id": "known-session", "cwd": str(repo),
+            "timestamp": datetime.fromtimestamp(NOW, timezone.utc).isoformat()}
+    rollout = source_home / "sessions" / day / "rollout-test-known-session.jsonl"
+    rollout.parent.mkdir(parents=True)
+    recorded = "\n".join(json.dumps(entry) for entry in [
+        {"type": "session_meta", "payload": meta},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "user handoff context"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "assistant handoff context"}]}},
+        {"type": "response_item", "payload": {"type": "function_call", "arguments": "private tool traffic"}},
+    ]) + "\n{broken\n[]\n{\"unfinished\""
+    rollout.write_text(recorded)
+    note = provider_switch.handoff_note(db, "root", NOW)
+    assert "user handoff context" in note and "assistant handoff context" in note
+    assert "private tool traffic" not in note and "unfinished" not in note
+
+    # Same checkout and start time cannot establish transcript ownership.
+    sibling = rollout.with_name("rollout-test-sibling-session.jsonl")
+    foreign = "\n".join(json.dumps(entry) for entry in [
+        {"type": "session_meta", "payload": {**meta, "id": "sibling-session"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "private sibling conversation"}]}},
+    ]) + "\n"
+    sibling.write_text(foreign)
+    rollout.unlink()
+    missing_source = provider_switch.handoff_note(db, "root", NOW)
+    assert "private sibling conversation" not in missing_source
+    assert "user handoff context" not in missing_source
+    # Even a matching filename needs matching session metadata.
+    rollout.write_text(foreign)
+    assert provider_switch.handoff_note(db, "root", NOW) == missing_source
+    rollout.write_text(recorded)
+
+    # The current default home may have changed since the source was launched.
+    other_home = tmp_path / "other-codex"
+    other_rollout = other_home / "sessions" / day / rollout.name
+    other_rollout.parent.mkdir(parents=True)
+    other_rollout.write_text(recorded.replace("user handoff context", "private other-home conversation"))
+    monkeypatch.setattr(quota, "codex_home", lambda: other_home)
+    note = provider_switch.handoff_note(db, "root", NOW)
+    assert "user handoff context" in note and "private other-home conversation" not in note
+    db.update_agent("root", session_ref=None)
+    assert provider_switch.handoff_note(db, "root", NOW) == missing_source
+    db.update_agent("root", session_ref="known-session", config_home=None)
+    assert provider_switch.handoff_note(db, "root", NOW) == missing_source
+
+    # Antigravity's recorded log can contain usage without conversation text.
+    db.update_agent("root", provider="antigravity")
+    log = (Path.home() / ".gemini" / "antigravity-cli" / "brain" / "known-session"
+           / ".system_generated" / "logs" / "transcript.jsonl")
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": 20}) + "\n")
+    assert usage.agent_transcripts(db, db.get_agent("root")) == [log]
+    without_text = provider_switch.handoff_note(db, "root", NOW)
+    assert "user handoff context" not in without_text
+    log.write_text(json.dumps({"type": "PLANNER_RESPONSE", "text": "recorded response"}) + "\n")
+    assert "recorded response" in provider_switch.handoff_note(db, "root", NOW)
+    log.unlink()
+    assert provider_switch.handoff_note(db, "root", NOW) == without_text
 
 
 @NOT_BUILT

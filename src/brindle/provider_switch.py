@@ -26,9 +26,13 @@ docs/provider-switch-design.md.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from brindle import identity_lock, quota
 from brindle.db import DB, Agent
@@ -219,7 +223,7 @@ def dismiss(db: DB, offer_id: str, now: float) -> Offer:
     """Not now: the offer closes and isn't made again for this limit."""
     with db.tx() as c:
         c.execute("UPDATE provider_switches SET state='dismissed', updated_at=? "
-                  "WHERE id=? AND state='open'", (now, offer_id))
+                  "WHERE id=? AND state IN ('open', 'failed')", (now, offer_id))
     offer = get(db, offer_id)
     if offer is None:
         raise ValueError(f"no provider switch offer {offer_id}")
@@ -249,7 +253,102 @@ def handoff_note(db: DB, root_id: str, now: float) -> str:
     TRANSCRIPT_TAIL_ENTRIES turns of its transcript when brindle knows the
     file (Claude's JSONL: user/assistant text blocks). Passed to
     ``sessions.handover_to`` as its ``note``."""
-    raise NotImplementedError
+    from brindle import agents
+
+    root = db.get_agent(root_id)
+    if root is None:
+        raise agents.AgentError(f"no session {root_id}")
+    ap = db.get_autopilot(root_id)
+    lines = [f"Session {root_id}, recorded at {now:g}", "", "Goal:",
+             ap.goal if ap and ap.goal else root.task or "No goal recorded."]
+    if ap and ap.detail:
+        lines.append(ap.detail)
+    lines.append("\nMilestones and last results:")
+    for m in db.milestones(root_id):
+        lines.append(f"- {m.title} [{m.status}]\n{m.output or 'No result recorded.'}")
+    lines.append("\nWorkers:")
+    for worker in agents.tree(db, root_id)[1:]:
+        ws = db.get_workspace(worker.workspace_id)
+        lines.append(f"- {worker.id}: {worker.profile}, {worker.status}, branch {ws.branch if ws else '?'}")
+    lines.append("\nQueued tasks:")
+    for task in db.list_tasks(state="pending"):
+        if task.caller_id == root_id:
+            lines.append(f"- {task.id} ({task.profile}): {task.task_text}")
+    lines.append("\nRecent inbox messages:")
+    messages = db.conn.execute("SELECT sender_id, agent_id, body FROM inbox "
+                               "WHERE agent_id=? OR sender_id=? ORDER BY created_at DESC, id DESC LIMIT ?",
+                               (root_id, root_id, RECENT_MESSAGES)).fetchall()
+    for msg in reversed(messages):
+        lines.append(f"- {msg['sender_id'] or 'brindle'} → {msg['agent_id']}: {msg['body']}")
+    lines.append("\nRecent conversation:")
+    lines.extend(_transcript_tail(db, root))
+    return "\n".join(lines)
+
+
+def _transcript_tail(db: DB, root: Agent) -> list[str]:
+    """Only conversation text from the files already used for usage tracking."""
+    from brindle import provider_homes, usage
+    from brindle.web.chat import _claude_message
+
+    tail: deque[str] = deque(maxlen=TRANSCRIPT_TAIL_ENTRIES)
+    omitted = ["Transcript tail omitted: no readable conversation transcript verified for this session."]
+    try:
+        if root.provider == "codex":
+            # Usage tracking may infer a rollout from cwd/time. A handoff must
+            # never export another session's text on that weaker association,
+            # or look in whichever provider home happens to be current now.
+            paths = []
+            if root.session_ref and root.config_home is not None:
+                home = Path(root.config_home) if root.config_home else provider_homes.source("codex")
+                path = usage.find_codex_rollout(root.session_ref, None, root.created_at, home)
+                if path:
+                    paths = [path]
+        else:
+            paths = usage.agent_transcripts(db, root)
+        # Claude's additional paths belong to subagents, not this conversation.
+        if paths:
+            with paths[0].open(encoding="utf-8", errors="replace") as transcript:
+                if root.provider == "codex":
+                    # Verify the header on the same open file used for the
+                    # tail: a matching filename alone is not ownership proof.
+                    try:
+                        header = json.loads(transcript.readline())
+                    except ValueError:
+                        return omitted
+                    meta = header.get("payload") if isinstance(header, dict) else None
+                    if (not isinstance(meta, dict) or header.get("type") != "session_meta"
+                            or meta.get("id") != root.session_ref):
+                        return omitted
+                for line in transcript:
+                    if not line.endswith("\n"):
+                        continue  # the CLI may still be writing this entry
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    message = _claude_message(entry)
+                    if isinstance(entry, dict) and root.provider == "codex":
+                        payload = entry.get("payload")
+                        message = None
+                        if (entry.get("type") == "response_item" and isinstance(payload, dict)
+                                and payload.get("type") == "message"
+                                and payload.get("role") in ("user", "assistant")):
+                            content = payload.get("content")
+                            text = "\n".join(b["text"] for b in content
+                                             if isinstance(b, dict) and b.get("type") in ("input_text", "output_text")
+                                             and isinstance(b.get("text"), str)) if isinstance(content, list) else ""
+                            if text.strip():
+                                message = {"role": payload["role"], "text": text.strip()}
+                    elif isinstance(entry, dict) and root.provider == "antigravity":
+                        # Usage-only events have no conversation text to carry.
+                        role = {"USER_MESSAGE": "user", "PLANNER_RESPONSE": "assistant"}.get(entry.get("type"))
+                        if role and isinstance(entry.get("text"), str) and entry["text"].strip():
+                            message = {"role": role, "text": entry["text"].strip()}
+                    if message:
+                        tail.append(f"{message['role']}: {message['text']}")
+    except OSError:
+        return ["Transcript tail omitted: the recorded transcript could not be read."]
+    return list(tail) or omitted
 
 
 def switch(db: DB, offer_id: str, now: float) -> Agent:
@@ -260,7 +359,56 @@ def switch(db: DB, offer_id: str, now: float) -> Agent:
     row already switching or done returns that supervisor (waiting for an
     in-flight one) and starts nothing. A failed start marks it failed and
     reopens nothing: the person sees the failure on the card."""
-    raise NotImplementedError
+    from brindle import agents, bus, pipeline, sessions
+
+    offer = get(db, offer_id)
+    if offer is None:
+        raise agents.AgentError(f"no provider switch offer {offer_id}")
+    key = hashlib.sha256(f"{db.path}\0{offer.id}".encode()).hexdigest()
+    # Keep the lock until the result is durable. Other presses wait here,
+    # without holding a database transaction or interrupting the first start.
+    with pipeline._file_lock("provider-switch-" + key):
+        offer = get(db, offer_id)
+        if offer is None:
+            raise agents.AgentError(f"no provider switch offer {offer_id}")
+        if offer.state == "done":
+            new = db.get_agent(offer.new_root_id) if offer.new_root_id else None
+            if new is None:
+                raise agents.AgentError("the switched supervisor no longer exists")
+            return new
+        if offer.state == "switching":
+            # Acquiring the lock means the previous holder exited without
+            # recording its result. Never launch a replacement for that start.
+            with db.tx() as c:
+                c.execute("UPDATE provider_switches SET state='failed', updated_at=? WHERE id=?",
+                          (now, offer_id))
+            raise agents.AgentError("the provider switch was interrupted; check the session before continuing")
+        with db.tx() as c:
+            claimed = c.execute("UPDATE provider_switches SET state='switching', updated_at=? "
+                                "WHERE id=? AND state='open'", (now, offer_id)).rowcount
+        if not claimed:
+            raise agents.AgentError(f"provider switch offer is {offer.state}")
+        try:
+            root = db.get_agent(offer.root_id)
+            if (root is None or root.parent_id is not None or root.mode != "interactive"
+                    or root.status in ("paused", "done") or root.dismissed_at is not None
+                    or root.provider != offer.from_provider or identity_lock.locked_by(root.id)):
+                raise agents.AgentError("the session can no longer switch providers")
+            ws = db.get_workspace(root.workspace_id)
+            if ws is None or offer.to_provider not in _targets(root.provider, ws.repo_root, now):
+                raise agents.AgentError("the target provider is no longer available for this session")
+            new = sessions.handover_to(db, root.id, ws, handoff_note(db, root.id, now),
+                                       provider=offer.to_provider, pause_old=True).agent
+            with db.tx() as c:
+                c.execute("UPDATE provider_switches SET state='done', new_root_id=?, updated_at=? WHERE id=?",
+                          (new.id, now, offer_id))
+        except BaseException:
+            with db.tx() as c:
+                c.execute("UPDATE provider_switches SET state='failed', updated_at=? WHERE id=?",
+                          (now, offer_id))
+            bus.publish_agent(db, "provider_switch.failed", offer.root_id, offer_id=offer_id)
+            raise
+        return new
 
 
 def switch_back(db: DB, offer_id: str, now: float) -> Agent:
@@ -278,25 +426,26 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
     /v1/sessions/{root}/provider-switch."""
     now = time.time() if now is None else now
     items = []
-    for row in db.conn.execute("SELECT * FROM provider_switches WHERE state='open' ORDER BY created_at, id"):
+    for row in db.conn.execute("SELECT * FROM provider_switches WHERE state IN ('open', 'failed') ORDER BY created_at, id"):
         offer = Offer(**dict(row))
         root = db.get_agent(offer.root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
         if (root is None or ws is None or (repo_root is not None and ws.repo_root != repo_root)
                 or identity_lock.locked_by(root.id)):
             continue
-        if offer.kind == "switch" and (root.provider != offer.from_provider
+        if offer.state != "failed" and offer.kind == "switch" and (root.provider != offer.from_provider
                                        or out_of_quota(db, root.id, now) is None):
             continue
-        targets = _targets(offer.from_provider, ws.repo_root, now)
-        if offer.to_provider not in targets:
+        targets = _targets(offer.from_provider, ws.repo_root, now) if offer.state != "failed" else []
+        if offer.state != "failed" and offer.to_provider not in targets:
             continue
         detail = f"{offer.from_provider} → {offer.to_provider}"
         alternatives = [p for p in targets if p != offer.to_provider]
         if alternatives:
             detail += f"; alternatives: {', '.join(alternatives)}"
         items.append(InboxItemDTO(kind=KIND_BACK if offer.kind == "back" else KIND_OFFER,
-                                  reason="Switch provider or choose Not now",
+                                  reason=("Provider switch failed. Check the session before continuing."
+                                          if offer.state == "failed" else "Switch provider or choose Not now"),
                                   detail=detail,
                                   agent_id=root.id, workspace_id=ws.id, root_id=root.id,
                                   request_id=offer.id,
