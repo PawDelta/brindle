@@ -73,25 +73,41 @@ def _offer_row(db, offer_id, root_id, kind, from_provider, to_provider, state, *
                    new_root_id, back_of, NOW, NOW))
 
 
-@NOT_BUILT
-def test_offer_when_supervisor_out_of_quota_names_an_in_quota_provider(db, repo, world):
+def test_offer_when_supervisor_out_of_quota_names_an_in_quota_provider(db, repo, world, monkeypatch):
     _session(db, repo)
+    monkeypatch.setattr(provider_switch.time, "time", lambda: NOW)
     world["quotas"] = {"claude": _limited("claude", NOW + HOUR),
                        "antigravity": _limited("antigravity", NOW + 2 * HOUR)}
 
-    offer = provider_switch.maybe_offer(db, "root", NOW)
+    [offer] = provider_switch.sweep(db, NOW)
 
     assert (offer.kind, offer.state, offer.from_provider, offer.to_provider, offer.limited_until) == (
         "switch", "open", "claude", "codex", NOW + HOUR)
     # Asked again while it is open: the same offer, no second row.
     assert provider_switch.maybe_offer(db, "root", NOW + 60).id == offer.id
     assert db.conn.execute("SELECT COUNT(*) FROM provider_switches").fetchone()[0] == 1
-    cards = [i for i in provider_switch.inbox_items(db, str(repo)) if i.kind == provider_switch.KIND_OFFER]
+    cards = [i for i in provider_switch.inbox_items(db, str(repo), now=NOW)
+             if i.kind == provider_switch.KIND_OFFER]
     assert [(c.root_id, c.request_id, c.action.path) for c in cards] == [
         ("root", offer.id, "/v1/sessions/root/provider-switch")]
+    assert provider_switch.sweep(db, NOW + 60) == []
+    from brindle.service import inbox
+
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **kw: tmux.PaneSnapshot())
+    assert any(i.request_id == offer.id for i in inbox.items(db, str(repo), panes={}))
+    with db.tx() as c:
+        c.execute("UPDATE provider_switches SET state='switching' WHERE id=?", (offer.id,))
+    assert provider_switch.maybe_offer(db, "root", NOW + 61).state == "switching"
+    assert provider_switch.dismiss(db, offer.id, NOW + 62).state == "switching"
+    with db.tx() as c:
+        c.execute("UPDATE provider_switches SET state='open' WHERE id=?", (offer.id,))
+    assert provider_switch.dismiss(db, offer.id, NOW + 63).state == "dismissed"
+    assert provider_switch.maybe_offer(db, "root", NOW + 64) is None
+    assert provider_switch.inbox_items(db, str(repo), now=NOW) == []
+    world["quotas"]["claude"] = _limited("claude", NOW + 2 * HOUR)
+    assert provider_switch.maybe_offer(db, "root", NOW + 65).id != offer.id
 
 
-@NOT_BUILT
 @pytest.mark.parametrize("installed, other_quota", [
     ({"claude", "codex"}, _limited("codex", NOW + HOUR)),   # the only other CLI is limited too
     ({"claude"}, None),                                      # nothing else is installed or signed in
@@ -104,6 +120,123 @@ def test_no_offer_when_no_other_provider_in_quota(db, repo, world, installed, ot
 
     assert provider_switch.maybe_offer(db, "root", NOW) is None
     assert db.conn.execute("SELECT COUNT(*) FROM provider_switches").fetchone()[0] == 0
+
+
+@pytest.mark.variant("each policy or routing refusal must fail closed even with a usable CLI")
+@pytest.mark.parametrize("restriction", ["provider", "unavailable", "route", "plugin", "excluded",
+                                        "model", "profile"])
+def test_offer_never_targets_a_policy_denied_provider(db, repo, world, monkeypatch, restriction):
+    from brindle import policy
+    from brindle.config import RepoConfig
+    from brindle.pro import team_policy
+
+    _session(db, repo)
+    world["installed"] = {"claude", "codex"}
+    world["quotas"] = {"claude": _limited("claude", NOW + HOUR)}
+    access = team_policy.Access(org_id="org")
+    if restriction == "provider":
+        access = team_policy.Access(org_id="org", allowed_providers=("claude",))
+    elif restriction == "unavailable":
+        access = team_policy.Access(error="policy unavailable")
+    elif restriction == "route":
+        access = team_policy.Access(org_id="org", unrouted={"codex": "no managed route"})
+    elif restriction == "model":
+        access = team_policy.Access(org_id="org", allowed_models=())
+    elif restriction == "profile":
+        access = team_policy.Access(org_id="org", allowed_profiles=())
+    elif restriction == "plugin":
+        class Denied:
+            def check_assign(self, info):
+                return policy.deny("blocked")
+
+        monkeypatch.setattr(policy, "plugin", lambda *a: Denied())
+    else:
+        monkeypatch.setattr("brindle.config.load_repo_config",
+                            lambda *a: RepoConfig(exclude_providers=["codex"]))
+    monkeypatch.setattr(team_policy, "access", lambda *a: access)
+
+    assert provider_switch.maybe_offer(db, "root", NOW) is None
+    assert db.conn.execute("SELECT COUNT(*) FROM provider_switches").fetchone()[0] == 0
+    # A policy change must also hide an offer created under the old policy.
+    _offer_row(db, "old", "root", "switch", "claude", "codex", "open", limited_until=NOW + HOUR)
+    assert provider_switch.inbox_items(db, str(repo), now=NOW) == []
+
+
+def test_offer_plan_windows_and_headroom_use_the_supplied_clock(world, monkeypatch):
+    world["quotas"] = {
+        "claude": quota.Quota("claude", [quota.Window(100, NOW + HOUR)]),
+        "codex": quota.Quota("codex", [quota.Window(80, NOW + HOUR)]),
+        "antigravity": quota.Quota("antigravity", [quota.Window(20, NOW + HOUR),
+                                                    quota.Window(100, NOW + HOUR, name="model")]),
+    }
+    assert provider_switch.limited_until("claude", NOW) == NOW + HOUR
+    assert provider_switch.pick_target("claude", None, NOW) == "antigravity"
+    assert provider_switch.limited_until("claude", NOW + HOUR) is None
+    # Expired windows cannot reduce a target's headroom.
+    assert provider_switch.pick_target("claude", None, NOW + HOUR) == "codex"
+    monkeypatch.setattr(quota, "_key_billed", lambda p: p == "claude")
+    assert provider_switch.limited_until("claude", NOW) is None
+    assert provider_switch.limited_until("native", NOW) is None
+    assert provider_switch.pick_target("native", None, NOW) is None
+
+
+@pytest.mark.variant("forward cards must disappear after each source eligibility transition")
+@pytest.mark.parametrize("transition", ["paused", "done", "recovered", "cleared", "provider"])
+def test_offer_ignores_workers_and_inactive_sessions_and_scopes_cards(db, repo, world, transition):
+    ws = _session(db, repo)
+    world["quotas"] = {"claude": _limited("claude", NOW + HOUR)}
+    db.add_agent(Agent("worker", ws.id, "developer", "claude", "root", "assign", "running",
+                       "@2", None, NOW))
+    assert provider_switch.out_of_quota(db, "worker", NOW) is None
+    assert provider_switch.out_of_quota(db, "missing", NOW) is None
+    db.update_agent("root", status="paused")
+    assert provider_switch.sweep(db, NOW) == []
+    db.update_agent("root", status="done")
+    assert provider_switch.maybe_offer(db, "root", NOW) is None
+    db.update_agent("root", status="running")
+    offer = provider_switch.maybe_offer(db, "root", NOW)
+    assert provider_switch.inbox_items(db, str(repo / "elsewhere"), now=NOW) == []
+    assert [i.request_id for i in provider_switch.inbox_items(db, None, now=NOW)] == [offer.id]
+    if transition in ("paused", "done"):
+        db.update_agent("root", status=transition)
+    elif transition == "cleared":
+        world["quotas"].clear()
+    elif transition == "provider":
+        db.update_agent("root", provider="antigravity")
+        world["quotas"]["antigravity"] = _limited("antigravity", NOW + HOUR)
+    now = NOW + HOUR if transition == "recovered" else NOW
+    assert provider_switch.inbox_items(db, None, now=now) == []
+    if transition in ("recovered", "cleared"):
+        provider_switch.dismiss(db, offer.id, now)
+        _offer_row(db, "back", "root", "back", "claude", "codex", "open")
+        assert [i.request_id for i in provider_switch.inbox_items(db, None, now=now)] == ["back"]
+
+
+@pytest.mark.variant("a shared provider limit affects all roots whether a supervisor or worker reports it")
+@pytest.mark.parametrize("reporter", ["root", "worker"])
+def test_offer_is_created_at_the_limit_recording_hook(db, repo, world, monkeypatch, reporter):
+    from brindle import antigravity
+
+    ws = _session(db, repo, provider="antigravity")
+    _session(db, repo, provider="antigravity", root_id="other")
+    db.add_agent(Agent("worker", ws.id, "developer", "antigravity", "root", "assign", "running",
+                       "@2", None, NOW))
+    monkeypatch.setattr(antigravity.time, "time", lambda: NOW)
+
+    def record(provider, cfg):
+        world["quotas"][provider] = _limited(provider, NOW + HOUR)
+        return NOW + HOUR
+
+    monkeypatch.setattr(quota, "record_limit", record)
+    monkeypatch.setattr(agents, "handle_hook", lambda *a, **kw: None)
+    monkeypatch.setattr(antigravity, "_tell_parent_stopped_on_error", lambda *a: None)
+    antigravity.end_turn(db, db.get_agent(reporter), {}, "429 RESOURCE_EXHAUSTED: quota")
+    assert provider_switch.open_offer(db, "root").to_provider == "claude"
+    assert provider_switch.open_offer(db, "other").to_provider == "claude"
+    assert provider_switch.open_offer(db, "worker") is None
+    offers = [row[0] for row in db.conn.execute("SELECT id FROM provider_switches ORDER BY id")]
+    antigravity.end_turn(db, db.get_agent(reporter), {}, "429 RESOURCE_EXHAUSTED: quota")
+    assert [row[0] for row in db.conn.execute("SELECT id FROM provider_switches ORDER BY id")] == offers
 
 
 @NOT_BUILT
