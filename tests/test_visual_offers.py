@@ -374,6 +374,10 @@ def typed_into_cli(db, boss, text, vouched=True):
 
 
 @pytest.mark.parametrize("typed,asked,terminal", [
+    pytest.param("status", "status", False,
+                 marks=pytest.mark.variant("a whole one-word message authorizes one visual")),
+    pytest.param("the status is ready", "status", False,
+                 marks=pytest.mark.variant("one word excerpted from a longer message does not authorize a visual")),
     pytest.param("then render first", "render first", False,
                  marks=pytest.mark.variant("the person's own quoted words authorize one visual without an intent grammar match")),
     pytest.param("please send me updated renders", "please send me updated renders", False,

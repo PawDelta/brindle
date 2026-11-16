@@ -430,7 +430,7 @@ def _keep_words(c, root: str, text: str, staged: bool = False) -> str | None:
     """Keep a typed message for ``asked`` to be checked against, briefly. Why it wasn't kept, if it wasn't."""
     now = time.time()
     words = _words(text)
-    unkept = ("too few words" if _word_count(words) < MIN_QUOTE_WORDS else "too long" if len(words) > MAX_KEPT_CHARS
+    unkept = ("too few words" if not words else "too long" if len(words) > MAX_KEPT_CHARS
               else "it looks like a secret" if visuals.secret_finding(text, "the message") else None)
     if unkept is None:
         c.execute("INSERT INTO visual_person_words (root_id, words, staged, created_at) VALUES (?,?,?,?)",
@@ -462,13 +462,23 @@ def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
     """Whether ``asked`` is the person's recent words; the message backing it is used up."""
     quote = _words(asked)
-    if _word_count(quote) < MIN_QUOTE_WORDS or _NEGATES.search(quote):
+    if not quote or _NEGATES.search(quote):
         return False
     # Whole words, and not a piece cut from "don't render it".
     pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)")
     for row in c.execute("SELECT id, words, source FROM visual_person_words WHERE root_id=? AND staged=0 "
                          "AND created_at>? ORDER BY id DESC", (root, now - FOLD)).fetchall():
         words = row["words"]
+        if words == quote and _word_count(quote) == 1:
+            mentioned = [q.span() for q in _QUOTED.finditer(words)]
+            if mentioned or _NEGATED.search(words) or not _says_it_themselves(words, (0, len(words)), mentioned):
+                continue
+            c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
+            if row["source"] == "grant":
+                c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
+            return True
+        if _word_count(quote) < MIN_QUOTE_WORDS:
+            continue
         mentioned = [q.span() for q in _QUOTED.finditer(words)]
         if any(not _NEGATED.search(words[max(0, m.start() - _NEGATION_REACH):m.start()])
                and _says_it_themselves(words, m.span(), mentioned)
@@ -529,7 +539,7 @@ def consume(c, root: str, kind: str = "visual") -> None:
                                "or to accept an offer", 403)
         raise ServiceError("visual_request_required",
                            "nothing shows the person asked for this. If they asked to see it, the supervisor "
-                           "publishes again with asked=\"...\": at least two of their words, copied exactly from "
+                           "publishes again with asked=\"...\": their whole message, or at least two of their words, copied exactly from "
                            "one message they typed themselves in the app in the last 30 minutes (not pasted, not "
                            "words they were quoting or saying not to do, and not a message that already allowed a "
                            "publication). Otherwise use offer_visual so they "
