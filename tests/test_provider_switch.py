@@ -180,7 +180,9 @@ def test_offer_plan_windows_and_headroom_use_the_supplied_clock(world, monkeypat
     assert provider_switch.pick_target("native", None, NOW) is None
 
 
-def test_offer_ignores_workers_and_inactive_sessions_and_scopes_cards(db, repo, world):
+@pytest.mark.variant("forward cards must disappear after each source eligibility transition")
+@pytest.mark.parametrize("transition", ["paused", "done", "recovered", "cleared", "provider"])
+def test_offer_ignores_workers_and_inactive_sessions_and_scopes_cards(db, repo, world, transition):
     ws = _session(db, repo)
     world["quotas"] = {"claude": _limited("claude", NOW + HOUR)}
     db.add_agent(Agent("worker", ws.id, "developer", "claude", "root", "assign", "running",
@@ -195,12 +197,30 @@ def test_offer_ignores_workers_and_inactive_sessions_and_scopes_cards(db, repo, 
     offer = provider_switch.maybe_offer(db, "root", NOW)
     assert provider_switch.inbox_items(db, str(repo / "elsewhere"), now=NOW) == []
     assert [i.request_id for i in provider_switch.inbox_items(db, None, now=NOW)] == [offer.id]
+    if transition in ("paused", "done"):
+        db.update_agent("root", status=transition)
+    elif transition == "cleared":
+        world["quotas"].clear()
+    elif transition == "provider":
+        db.update_agent("root", provider="antigravity")
+        world["quotas"]["antigravity"] = _limited("antigravity", NOW + HOUR)
+    now = NOW + HOUR if transition == "recovered" else NOW
+    assert provider_switch.inbox_items(db, None, now=now) == []
+    if transition in ("recovered", "cleared"):
+        provider_switch.dismiss(db, offer.id, now)
+        _offer_row(db, "back", "root", "back", "claude", "codex", "open")
+        assert [i.request_id for i in provider_switch.inbox_items(db, None, now=now)] == ["back"]
 
 
-def test_offer_is_created_at_the_limit_recording_hook(db, repo, world, monkeypatch):
+@pytest.mark.variant("a shared provider limit affects all roots whether a supervisor or worker reports it")
+@pytest.mark.parametrize("reporter", ["root", "worker"])
+def test_offer_is_created_at_the_limit_recording_hook(db, repo, world, monkeypatch, reporter):
     from brindle import antigravity
 
-    _session(db, repo, provider="antigravity")
+    ws = _session(db, repo, provider="antigravity")
+    _session(db, repo, provider="antigravity", root_id="other")
+    db.add_agent(Agent("worker", ws.id, "developer", "antigravity", "root", "assign", "running",
+                       "@2", None, NOW))
     monkeypatch.setattr(antigravity.time, "time", lambda: NOW)
 
     def record(provider, cfg):
@@ -209,8 +229,14 @@ def test_offer_is_created_at_the_limit_recording_hook(db, repo, world, monkeypat
 
     monkeypatch.setattr(quota, "record_limit", record)
     monkeypatch.setattr(agents, "handle_hook", lambda *a, **kw: None)
-    antigravity.end_turn(db, db.get_agent("root"), {}, "429 RESOURCE_EXHAUSTED: quota")
+    monkeypatch.setattr(antigravity, "_tell_parent_stopped_on_error", lambda *a: None)
+    antigravity.end_turn(db, db.get_agent(reporter), {}, "429 RESOURCE_EXHAUSTED: quota")
     assert provider_switch.open_offer(db, "root").to_provider == "claude"
+    assert provider_switch.open_offer(db, "other").to_provider == "claude"
+    assert provider_switch.open_offer(db, "worker") is None
+    offers = [row[0] for row in db.conn.execute("SELECT id FROM provider_switches ORDER BY id")]
+    antigravity.end_turn(db, db.get_agent(reporter), {}, "429 RESOURCE_EXHAUSTED: quota")
+    assert [row[0] for row in db.conn.execute("SELECT id FROM provider_switches ORDER BY id")] == offers
 
 
 @NOT_BUILT

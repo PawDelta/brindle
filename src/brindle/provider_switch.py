@@ -285,6 +285,9 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
         if (root is None or ws is None or (repo_root is not None and ws.repo_root != repo_root)
                 or identity_lock.locked_by(root.id)):
             continue
+        if offer.kind == "switch" and (root.provider != offer.from_provider
+                                       or out_of_quota(db, root.id, now) is None):
+            continue
         targets = _targets(offer.from_provider, ws.repo_root, now)
         if offer.to_provider not in targets:
             continue
