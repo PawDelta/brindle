@@ -27,26 +27,12 @@ from brindle.daemon.routes_read import _json, _need_repo
 from brindle.db import DB
 from brindle.service.errors import ServiceError
 
-ROLE_KINDS = ("light", "medium", "heavy", "advanced", "reviewer", "supervisor")
-
-
-def _roles(repo: str) -> list[dict]:
-    """What runs each role today. ``profile`` is what the goal would run:
-    today's pick until hosted preview estimates exist (routing goals §4: no
-    lever moves on evidence brindle doesn't have)."""
-    cfg = config.load_repo_config(repo)
-    today = {t: (cfg.routing.get(t) or [None])[0] for t in config.WEIGHTS}
-    today["reviewer"] = cfg.review_profile or cfg.reviewer
-    today["supervisor"] = cfg.supervisor_profile or "supervisor"
-    return [{"kind": k, "profile": today.get(k), "previous": today.get(k)} for k in ROLE_KINDS]
-
-
 def goal_view(db: DB, repo: str, session: str | None) -> dict:
     org, error = routing_goal.org_goal(repo)
     got = routing_goal.resolve(repo, db=db, root_id=session, org=org, org_known=True)
-    weights = got.weights or dict(routing_goal.PRESETS["balanced"])
-    return {"weights": weights, "scope": got.scope, "locked": got.locked or error is not None,
-            "preview": routing_goal.preview(weights, _roles(repo))}
+    return {"weights": got.weights or dict(routing_goal.PRESETS["balanced"]), "scope": got.scope,
+            "locked": got.locked or error is not None,
+            "preview": routing_goal.preview(got.weights, repo, db)}
 
 
 @_json

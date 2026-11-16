@@ -886,6 +886,20 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     return None
 
 
+def tier_order(cfg: RepoConfig, weight: str, *, allowed_only: bool = True) -> list[str]:
+    """``weight``'s candidates in the order routing tries them: the built-in
+    tier ranking for the default lists, the configured order otherwise;
+    ``allowed_only``: without those routing reserves for design-heavy tasks."""
+    from brindle.worker_models import TIER_PREFERENCES
+
+    order = list(cfg.routing.get(weight, []))
+    if cfg.routing_sources.get(weight) == "DEFAULT_ROUTING" and not cfg.routing_locked.get(weight):
+        preferred = TIER_PREFERENCES.get(weight, ())
+        # Follow the built-in tier ranking; explicit routing keeps its configured order.
+        order = sorted(order, key=lambda name: preferred.index(name) if name in preferred else len(preferred))
+    return [n for n in order if cfg.routing_allows(n, False)] if allowed_only else order
+
+
 def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
                      files: list[str] | None,
                      decision: dict | None = None, gate=None,
@@ -896,19 +910,14 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     (the pick without learning), and ``over_budget`` (why each candidate was
     skipped) when a budget was what ruled every one out, or ``demoted_from``
     when it moved the task to a cheaper candidate."""
-    from brindle import learning
-    from brindle.worker_models import TIER_PREFERENCES
+    from brindle import learning, routing_goal
 
     skipped: list[str] = []
     remaining: list[str] = []
     over: dict[str, str] = {}
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
-    order = cfg.routing.get(weight, [])
-    if cfg.routing_sources.get(weight) == "DEFAULT_ROUTING" and not cfg.routing_locked.get(weight):
-        preferred = TIER_PREFERENCES.get(weight, ())
-        # Follow the built-in tier ranking; explicit routing keeps its configured order.
-        order = sorted(order, key=lambda name: preferred.index(name) if name in preferred else len(preferred))
+    order = tier_order(cfg, weight, allowed_only=False)
     if effective_ceiling:
         order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:
@@ -934,6 +943,14 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if cfg.routing_locked.get(weight):
         pick, reason = None, None   # the owner pinned this tier: learning never overrides it
     else:
+        if goal is None:
+            goal = routing_goal.for_learner(repo_root)
+        # The goal orders what's left by the shipped priors (§4): the pick
+        # without hosted learning, and the default the learner must beat.
+        ranked = routing_goal.rank(remaining, weight, goal, repo_root)
+        if ranked[0] != remaining[0]:
+            skipped.insert(0, f"the routing goal put it ahead of {remaining[0]}")
+        remaining = ranked
         options: dict = {"design_heavy": True} if design_heavy else {}
         if goal is not None:
             options["goal"] = goal

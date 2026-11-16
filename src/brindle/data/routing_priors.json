@@ -1,0 +1,16 @@
+{
+  "note": "Cold-start priors for routing goals (design §4.1): what brindle assumes about a profile on a tier before any hosted estimate exists. Per-profile entries are from the bench and routing history (design §0): codex/medium $0.57 a task and 38% clean merges vs sonnet/medium $1.58 and 30%; sonnet on heavy 20 min; Fable as a worker about 2.2x slower (290 s vs 113-158 s). Everything else is a rough tier default: mtok (million tokens a task, at token_mix) is calibrated on sonnet/medium ($1.58 at its list price) and scaled by guess for the other tiers. A profile's $ without its own entry is mtok x its list price (brindle.pricing).",
+  "token_mix": {"input": 0.8, "output": 0.2},
+  "default_mix": {"light": 0.2, "medium": 0.5, "heavy": 0.25, "advanced": 0.05},
+  "tiers": {
+    "light": {"mtok": 0.15, "minutes": 15, "first_try": 0.45, "p": 0.85},
+    "medium": {"mtok": 0.44, "minutes": 30, "first_try": 0.34, "p": 0.8},
+    "heavy": {"mtok": 1.0, "minutes": 40, "first_try": 0.3, "p": 0.75},
+    "advanced": {"mtok": 2.0, "minutes": 60, "first_try": 0.3, "p": 0.7}
+  },
+  "profiles": {
+    "developer-codex": {"medium": {"usd": 0.57, "first_try": 0.38}},
+    "developer-sonnet": {"medium": {"usd": 1.58, "first_try": 0.30}, "heavy": {"minutes": 20}},
+    "developer-fable": {"*": {"minutes_factor": 2.2}}
+  }
+}

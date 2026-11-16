@@ -18,15 +18,24 @@ exactly what it was, and the learner is sent no weights. The org's policy
 ``max``, ``locked``) can floor, cap or lock it; the server applies it again on
 every suggest and never trusts this clamp.
 
+Before any hosted estimate exists (Free, offline, a new install: §4.1), the
+goal orders each tier's eligible candidates by §1's score on the shipped
+priors (``brindle/data/routing_priors.json``): that order is routing's pick
+without hosted learning and the default the learner must beat. A tier the
+owner locked keeps its order.
+
 The triangle (§6a) places a *setup* (an outcome: $ a task, minutes, first try)
-against a yardstick, Fable 5.2 alone, at the centre. The reference setups
-ship in ``brindle/data/reference_setups.json``.
+against a yardstick, Fable alone, at the centre. The preview's own point is
+this repo's routing under the goal, on its recent mix of tiers, against Fable
+on the same mix; the reference setups ship in
+``brindle/data/reference_setups.json``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from importlib import resources
 
@@ -126,28 +135,44 @@ def _bounds(low: dict | None, high: dict | None) -> tuple[dict, dict]:
     return ({k: (low or {}).get(k, 0.0) for k in KEYS}, {k: (high or {}).get(k, 1.0) for k in KEYS})
 
 
+def _solve(f, a: float, b: float) -> float:
+    """The x in [a, b] where the non-decreasing ``f`` reaches 1 (f(a) <= 1 <= f(b))."""
+    for _ in range(80):
+        mid = (a + b) / 2
+        a, b = (mid, b) if f(mid) < 1 else (a, mid)
+    return (a + b) / 2
+
+
 def clamp(weights: dict, org: OrgGoal | None) -> dict:
-    """``weights`` projected into the org's allowed region: a weight under its
-    floor is raised to it (over its ceiling, lowered to it) and the others
-    rescaled to keep the sum at 1."""
+    """``weights`` projected into the org's allowed region (each weight within
+    its floor and ceiling, summing to 1). Proportional where it can be: every
+    weight scaled by one factor, each held at the bound it would cross, so a
+    weight under its floor is raised to it and the others keep their ratios.
+    When scaling can't reach a sum of 1 (the weights that can grow are all at
+    their ceilings), every weight is shifted by one amount instead. Either way
+    a bound fixed early is released when the sum needs it, so the result is
+    always inside the region whenever the region isn't empty."""
     if org is None or (org.low is None and org.high is None):
         return dict(weights)
     lo, hi = _bounds(org.low, org.high)
-    w = dict(weights)
-    fixed: dict[str, float] = {}
-    for _ in range(len(KEYS)):
-        for k in KEYS:
-            if k not in fixed and (w[k] < lo[k] - 1e-9 or w[k] > hi[k] + 1e-9):
-                fixed[k] = min(max(w[k], lo[k]), hi[k])
-        free = [k for k in KEYS if k not in fixed]
-        rest = 1.0 - sum(fixed.values())
-        share = sum(w[k] for k in free)
-        for k in free:
-            w[k] = rest * w[k] / share if share > 0 else rest / len(free)
-        w.update(fixed)
-        if all(lo[k] - 1e-9 <= w[k] <= hi[k] + 1e-9 for k in KEYS):
-            break
-    return {k: round(max(0.0, w[k]), 4) for k in KEYS}
+
+    def held(x: float, k: str) -> float:
+        return min(max(x, lo[k]), hi[k])
+
+    def scaled(t: float) -> float:
+        return sum(held(t * weights[k], k) for k in KEYS)
+
+    def shifted(d: float) -> float:
+        return sum(held(weights[k] + d, k) for k in KEYS)
+
+    top = max((hi[k] / weights[k] for k in KEYS if weights[k] > 0), default=0.0)
+    if scaled(top) >= 1:
+        t = _solve(scaled, 0.0, top)
+        w = {k: held(t * weights[k], k) for k in KEYS}
+    else:
+        d = _solve(shifted, -1.0, 1.0)
+        w = {k: held(weights[k] + d, k) for k in KEYS}
+    return {k: round(w[k], 4) for k in KEYS}
 
 
 def org_goal(repo_root: str) -> tuple[OrgGoal | None, str | None]:
@@ -207,14 +232,16 @@ def resolve(repo_root: str, *, db=None, root_id: str | None = None, task=None,
     task_w = normalize(task) if task is not None else None
     if not org_known:
         org, _ = org_goal(repo_root)
+    balanced = dict(PRESETS["balanced"])
     if org is not None and org.locked:
-        return Resolved(org.default or dict(PRESETS["balanced"]), "org", locked=True)
+        return Resolved(clamp(org.default or balanced, org), "org", locked=True)
     have = levels(repo_root, db, root_id)
     have["task"] = task_w
     scope, weights = next(((s, have[s]) for s in ("task", "session", "repo", "personal") if have[s]), ("", None))
     if weights is None:
-        if org is not None and org.default is not None:
-            return Resolved(clamp(org.default, org), "org")
+        if org is not None and (org.default is not None or org.low is not None or org.high is not None):
+            # The org asks for a mix (its default, or Balanced within its bounds): that is a goal.
+            return Resolved(clamp(org.default or balanced, org), "org")
         return Resolved(None, "default")
     return Resolved(clamp(weights, org), scope)
 
@@ -262,20 +289,143 @@ def place(setup: dict, yardstick: dict, stretch: float = 2.0) -> dict[str, float
 SETUP_FIELDS = ("name", "usd", "minutes", "first_try", "measured", "runs", "note")
 
 
-def preview(weights: dict | None, roles: list[dict]) -> dict:
-    """The triangle's numbers: ``aim`` (the weights asked for, Balanced
-    without a goal), ``landed`` (where what routing delivered lands),
-    ``you`` (what it delivered), the ``references`` and ``roles``. Until
-    hosted preview estimates exist, ``you`` is the benchmark of brindle's
-    default mix (``measured`` false, ``runs`` 0: not your own tasks)."""
+# -- cold-start ranking (§1, §4.1) -------------------------------------------------------------------
+
+P_FLOOR = 0.5           # a candidate likelier to fail than merge is never put first by the goal
+MIN_USD = 0.01          # a free (local) model still costs something to run and review
+GAP_CAP = 5.0           # doublings: no goal swamps the others by more than 32x
+YARDSTICK_PROFILE = "developer-fable"     # "one model doing everything", as the references' yardstick
+HISTORY = 30            # the person's last tasks whose tier mix the preview uses
+
+
+def priors() -> dict:
+    """The shipped cold-start priors (``brindle/data/routing_priors.json``)."""
+    raw = resources.files("brindle").joinpath("data", "routing_priors.json").read_text(encoding="utf-8")
+    return json.loads(raw)
+
+
+def _price(profile: str, repo_root: str):
+    from brindle import pricing
+
+    try:
+        return pricing.profile_price(profile, repo_root, pricing.repo_overrides(repo_root))
+    except Exception:  # noqa: BLE001 - an unknown price is no evidence, not an error
+        return None
+
+
+def estimates(candidates: list[str], tier: str, repo_root: str, pri: dict | None = None) -> dict[str, dict]:
+    """Each candidate's prior on ``tier``: ``usd`` and ``minutes`` a task,
+    ``first_try`` and ``p`` (it merges at all). A profile's own entry first,
+    else its list price times the tier's tokens and the tier's defaults; a $
+    brindle can't price is the median of those it can (no evidence either way)."""
+    pri = pri or priors()
+    t = pri["tiers"][tier]
+    mix = pri["token_mix"]
+    out = {}
+    for c in candidates:
+        mine = pri["profiles"].get(c, {})
+        own = {**mine.get("*", {}), **mine.get(tier, {})}
+        usd = own.get("usd")
+        if usd is None and (price := _price(c, repo_root)) is not None:
+            usd = t["mtok"] * (mix["input"] * price.input + mix["output"] * price.output)
+        out[c] = {"usd": usd, "minutes": own.get("minutes", t["minutes"] * own.get("minutes_factor", 1)),
+                  "first_try": own.get("first_try", t["first_try"]), "p": own.get("p", t["p"])}
+    known = sorted(e["usd"] for e in out.values() if e["usd"] is not None)
+    middle = known[len(known) // 2] if known else 1.0
+    for e in out.values():
+        e["usd"] = max(middle if e["usd"] is None else e["usd"], MIN_USD)
+    return out
+
+
+def _gap(ratio: float) -> float:
+    return min(max(math.log2(ratio), 0.0), GAP_CAP)
+
+
+def scores(est: dict[str, dict], weights: dict) -> dict[str, float]:
+    """§1's score of each candidate (lower is better): the weighted doublings
+    of its $ and minutes per success over the best candidate's, and of the
+    best first-try odds over its own."""
+    usd = {c: e["usd"] / e["p"] for c, e in est.items()}
+    mins = {c: e["minutes"] / e["p"] for c, e in est.items()}
+    odds = {c: _odds(e["first_try"]) for c, e in est.items()}
+    cheapest, soonest, surest = min(usd.values()), min(mins.values()), max(odds.values())
+    return {c: (weights["cost"] * _gap(usd[c] / cheapest) + weights["speed"] * _gap(mins[c] / soonest)
+                + weights["first_try"] * _gap(surest / odds[c])) for c in est}
+
+
+def rank(candidates: list[str], tier: str, weights: dict | None, repo_root: str) -> list[str]:
+    """``candidates`` (already eligible, in routing's order) reordered for the
+    goal by the shipped priors: lowest §1 score first, ties keeping routing's
+    order, any candidate under the success floor last. No goal, or nothing to
+    choose between: the order as given."""
+    from brindle.config import normalize_weight
+
+    tier = normalize_weight(tier)
+    pri = priors()
+    if not weights or len(candidates) < 2 or tier not in pri["tiers"]:
+        return list(candidates)
+    est = estimates(candidates, tier, repo_root, pri)
+    s = scores(est, weights)
+    sure = [c for c in candidates if est[c]["p"] >= P_FLOOR]
+    return sorted(sure, key=lambda c: s[c]) + [c for c in candidates if c not in sure]
+
+
+def tier_mix(db, repo_root: str) -> tuple[dict[str, float], int]:
+    """({tier: share}, tasks): the tiers of this repo's last tasks, else the priors' default mix."""
+    from brindle.config import WEIGHTS, normalize_weight
+
+    recent = [normalize_weight(d.weight) for d in db.list_routing_decisions(repo_root)[-HISTORY:]
+              if d.weight] if db is not None else []
+    recent = [t for t in recent if t in WEIGHTS]
+    if not recent:
+        return dict(priors()["default_mix"]), 0
+    return {t: recent.count(t) / len(recent) for t in WEIGHTS if t in recent}, len(recent)
+
+
+def preview(weights: dict | None, repo_root: str, db=None) -> dict:
+    """The triangle's numbers for ``repo_root``. ``aim``: the weights asked
+    for (Balanced without a goal). ``roles``: each worker tier's first pick
+    under the goal (``profile``) and without it (``previous``); the reviewer
+    and supervisor stay as they are until they have evidence of their own
+    (§4). ``you``: what those picks cost, take and merge first time on this
+    repo's recent mix of tiers, from the shipped priors (``measured`` false:
+    not yet measured on your tasks; ``runs``: the tasks the mix is from).
+    ``landed``: where ``you`` sits against Fable alone on the same mix."""
+    from brindle import autopilot, config
+
+    cfg = config.load_repo_config(repo_root)
+    pri = priors()
+    mix, runs = tier_mix(db, repo_root)
+    roles, you, yard, covered = [], dict.fromkeys(("usd", "minutes", "first_try"), 0.0), \
+        dict.fromkeys(("usd", "minutes", "first_try"), 0.0), 0.0
+    for t in config.WEIGHTS:
+        order = autopilot.tier_order(cfg, t)
+        previous = order[0] if order else None
+        locked = bool(cfg.routing_locked.get(t))
+        pick = previous if (weights is None or locked) else (rank(order, t, weights, repo_root) or [None])[0]
+        roles.append({"kind": t, "profile": pick, "previous": previous})
+        if pick is None or t not in mix:
+            continue
+        mine = estimates(order, t, repo_root, pri)[pick]
+        fable = estimates(list(dict.fromkeys([YARDSTICK_PROFILE, *order])), t, repo_root, pri)[YARDSTICK_PROFILE]
+        for k in you:
+            you[k] += mix[t] * mine[k]
+            yard[k] += mix[t] * fable[k]
+        covered += mix[t]
+    reviewer = cfg.review_profile or cfg.reviewer
+    supervisor = cfg.supervisor_profile or "supervisor"
+    roles += [{"kind": "reviewer", "profile": reviewer, "previous": reviewer},
+              {"kind": "supervisor", "profile": supervisor, "previous": supervisor}]
     data = references()
-    setups = data["setups"]
-    yard = next(s for s in setups if s["name"] == data["yardstick"])
-    mix = next(s for s in setups if s.get("weights"))
-    you = {"usd": mix["usd"], "minutes": mix["minutes"], "first_try": mix["first_try"],
-           "measured": False, "runs": 0}
+    if covered:
+        you = {k: v / covered for k, v in you.items()}
+        yard = {k: v / covered for k, v in yard.items()}
+        landed = place(you, yard, data.get("stretch", 2))
+    else:
+        landed = {k: round(1 / 3, 4) for k in KEYS}
     return {"aim": dict(weights or PRESETS["balanced"]),
-            "landed": place(you, yard, data.get("stretch", 2)),
-            "you": you,
-            "references": [{k: s[k] for k in SETUP_FIELDS} for s in setups],
+            "landed": landed,
+            "you": {"usd": round(you["usd"], 2), "minutes": round(you["minutes"], 1),
+                    "first_try": round(you["first_try"], 3), "measured": False, "runs": runs},
+            "references": [{k: s[k] for k in SETUP_FIELDS} for s in data["setups"]],
             "roles": roles}
