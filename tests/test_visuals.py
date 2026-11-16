@@ -186,9 +186,9 @@ def test_note_only_answers_reach_the_supervisor(db, session, client):
 
 def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_again(db, session, client, monkeypatch):
     _, boss, worker = session
-    v = visuals.publish(db, worker, "Release flow", "<p>flow</p>", "Which flow?", OPTIONS)
     answered = visuals.publish(db, worker, "Answered", "<p>x</p>", "Which?", OPTIONS)
     visuals.answer(db, answered["id"], 1, "A")
+    v = visuals.publish(db, worker, "Release flow", "<p>flow</p>", "Which flow?", OPTIONS)
     assert [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     def notices(agent):
         return db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (agent,)).fetchone()[0]
