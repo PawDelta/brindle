@@ -97,17 +97,19 @@ def test_invalid_weight_is_refused(db, repo, boss):
 
 @pytest.mark.parametrize("weight,candidates,expected", [
     ("light", ["developer-local", "developer"], "developer"),
-    pytest.param("medium", ["developer-sonnet", "developer-heavy"], "developer-sonnet",
+    pytest.param("medium", ["developer-codex", "developer-heavy"], "developer-codex",
                  marks=pytest.mark.variant("changing the tier preference ranking changes the routed worker")),
+    pytest.param("light", None, "developer-codex",
+                 marks=pytest.mark.variant("light tasks prefer Sol over the available Claude workers")),
 ])
 def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch, weight, candidates, expected):
     monkeypatch.setattr(quota, "headroom",
                         lambda provider, cfg=None, repo_root=None: 0.0 if provider == "native" else 100.0)
-    if weight == "light":
+    if weight == "light" and candidates:
         config(repo, routing={weight: candidates})
     why = []
     assert choose(db, repo, weight=weight, why=why)[0] == expected
-    if "developer-local" in candidates:
+    if candidates and "developer-local" in candidates:
         assert "local model server not answering" in why[0]
     if weight == "medium":
         from brindle import worker_models
@@ -119,11 +121,26 @@ def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch
         assert choose(db, repo, weight=weight)[0] == "developer-heavy"
 
 
+@pytest.mark.parametrize("weight,blocked,expected", [
+    ("light", ["developer-codex"], "developer-light"),
+    pytest.param("light", ["developer-codex", "developer-light"], "developer-sonnet",
+                 marks=pytest.mark.variant("Sonnet takes light work when both Sol and Haiku cannot run")),
+    pytest.param("medium", ["developer-codex"], "developer-sonnet",
+                 marks=pytest.mark.variant("medium work falls back to Sonnet when Sol cannot run")),
+])
+@pytest.mark.variant("availability changes must advance to the next benchmark-ranked worker")
+def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, expected):
+    unavailable = autopilot._unavailable
+    monkeypatch.setattr(autopilot, "_unavailable",
+                        lambda name, *args: "unavailable" if name in blocked else unavailable(name, *args))
+    assert choose(db, repo, weight=weight)[0] == expected
+
+
 @pytest.mark.variant("nondefault learner choice: weighted routing must select the eligible profile chosen by the learner")
 def test_learning_plugin_reorders_the_remaining_candidates(db, repo, boss, monkeypatch):
-    install(monkeypatch, Picker(prefer="developer-codex"))
+    install(monkeypatch, Picker(prefer="developer-sonnet"))
     config(repo, learning="cloud")
-    assert choose(db, repo, weight="medium") == ("developer-codex", True)
+    assert choose(db, repo, weight="medium") == ("developer-sonnet", True)
 
 
 def test_all_out_falls_back_to_the_default_agent_and_says_why(db, repo, boss, monkeypatch):

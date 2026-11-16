@@ -26,8 +26,8 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1"
 # Ranked worker profiles for each tier. Availability checks fall through this
 # order; the learner may choose another eligible candidate when enabled.
 TIER_PREFERENCES: dict[str, tuple[str, ...]] = {
-    "light": ("developer-sonnet", "developer-light", "developer", "developer-codex", "developer-local"),
-    "medium": ("developer-sonnet", "developer", "developer-codex", "developer-heavy"),
+    "light": ("developer-codex", "developer-light", "developer-sonnet", "developer", "developer-local"),
+    "medium": ("developer-codex", "developer-sonnet", "developer", "developer-heavy"),
     "heavy": ("developer-heavy", "developer-gemini", "developer", "developer-codex"),
     "advanced": ("developer-fable", "developer-heavy", "developer-gemini"),
 }
