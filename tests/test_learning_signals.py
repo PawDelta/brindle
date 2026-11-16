@@ -54,7 +54,7 @@ def test_an_idle_worker_without_a_report_is_recorded_as_a_stalled_failure(db, ws
     task, outcome = recorder.events[-1]
     assert outcome.event == "removed_unmerged"
     assert outcome.failure == "idle" and outcome.idle_seconds >= 20
-    body = pro_learning.record_payload(KEY, "repo", task, outcome)
+    body = pro_learning.record_payload(KEY, "repo", task, outcome, signals=True)
     assert body["stalled"] is True and body["failure"] == "idle"
     assert body["parts"] == 3
 
@@ -75,7 +75,7 @@ def test_real_cost_and_time_are_in_the_record(db, ws, recorder, monkeypatch):
     assert outcome.cost_usd == pytest.approx(worker_cost)
     assert outcome.review_cost_usd == pytest.approx(review_cost)
     assert outcome.failure is None
-    body = pro_learning.record_payload(KEY, "repo", task, outcome)
+    body = pro_learning.record_payload(KEY, "repo", task, outcome, signals=True)
     assert body["cost_usd"] == pytest.approx(worker_cost, abs=1e-4)
     assert body["review_cost_usd"] == pytest.approx(review_cost, abs=1e-4)
     assert body["wall_seconds"] >= 30 and body["stalled"] is False
@@ -84,5 +84,5 @@ def test_real_cost_and_time_are_in_the_record(db, ws, recorder, monkeypatch):
     spend["w1"] = usage.Usage(1000, 2000, 0, 0, "no-such-model")
     monkeypatch.setattr(pricing, "profile_price", lambda *a, **k: None)
     learning.note(db, RepoConfig(learning="cloud"), w, ws, merged=True)
-    body = pro_learning.record_payload(KEY, "repo", *recorder.events[-1])
+    body = pro_learning.record_payload(KEY, "repo", *recorder.events[-1], signals=True)
     assert "cost_usd" not in body   # unknown price: left out, never sent as $0

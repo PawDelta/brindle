@@ -28,7 +28,9 @@ baseline). Ticket size as two counts on every record and suggest
 price (``cost_usd``, left out when its price is unknown), and on a worker
 terminal event its reviewers' (``review_cost_usd``, likewise),
 ``queue_seconds``, ``idle_seconds``, ``stalled`` and, when it produced nothing
-usable, ``failure`` ("no_report", "idle" or "no_commits"). Never task text,
+usable, ``failure`` ("no_report", "idle" or "no_commits"). These newer fields
+(``SIGNAL_KEYS``) go only to a server whose replies said ``"signals": 1`` or
+more; an older one gets exactly the earlier payload. Never task text,
 file paths, repo paths, branch names, provider or model.
 
 ``repo_key`` and ``agent_ref`` are HMACs under the active org's learning key
@@ -79,6 +81,11 @@ RECORD_KEYS = frozenset({"org_id", "key_id", "repo_key", "agent_ref", "profile",
                          "baseline_cost_rank", "parts", "files_declared", "cost_usd",
                          "review_cost_usd", "queue_seconds", "idle_seconds", "failure",
                          "stalled"})
+# Sent only to a server that said (``"signals": 1`` or more in a 200 reply) it
+# takes them: an older one rejects unknown keys.
+SIGNAL_KEYS = frozenset({"parts", "files_declared", "cost_usd", "review_cost_usd", "queue_seconds",
+                         "idle_seconds", "failure", "stalled"})
+SIGNALS_VERSION = 1
 FAILURES = ("no_report", "idle", "no_commits")
 MAX_DOLLARS = 10_000.0
 MAX_SECONDS = 7 * 86400
@@ -176,12 +183,22 @@ def ticket_size(task: TaskInfo) -> dict[str, int]:
 
 def record_payload(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
                    review_rounds: int = 0, escalations: int = 0, decision=None,
-                   cost=None) -> dict | None:
+                   cost=None, signals: bool = False) -> dict | None:
     """The exact body of ``POST /learning/record``, or None if it can't be
     sent without leaking (e.g. a profile name that isn't a plain identifier).
     On a terminal event, ``decision`` (this worker's local routing decision:
     ``baseline_profile`` and ``learned``) and ``cost`` (profile name -> rank)
-    add the four coarse savings fields; without either they are omitted."""
+    add the four coarse savings fields; without either they are omitted.
+    ``SIGNAL_KEYS`` are included only with ``signals`` (the server takes them)."""
+    body = _record_body(key, identity, task, outcome, review_rounds, escalations, decision, cost)
+    if body is not None and not signals:
+        for k in SIGNAL_KEYS:
+            body.pop(k, None)
+    return body
+
+
+def _record_body(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
+                 review_rounds: int, escalations: int, decision, cost) -> dict | None:
     if not task.profile or not PROFILE_RE.match(task.profile) or outcome.event not in EVENTS:
         return None
     body = {
@@ -237,10 +254,10 @@ def record_payload(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
 
 
 def suggest_payload(key: OrgKey, identity: str, task: TaskInfo, candidates: list[str],
-                    cost=None, default: str | None = None) -> dict | None:
+                    cost=None, default: str | None = None, signals: bool = False) -> dict | None:
     """The exact body of ``POST /learning/suggest``, or None to send nothing.
     ``default`` is the profile brindle would use without learning (the first
-    candidate when not given)."""
+    candidate when not given). The ticket-size counts go only with ``signals``."""
     if not candidates or len(candidates) > MAX_CANDIDATES or len(set(candidates)) != len(candidates):
         return None
     if not all(isinstance(c, str) and PROFILE_RE.match(c) for c in candidates):
@@ -250,8 +267,9 @@ def suggest_payload(key: OrgKey, identity: str, task: TaskInfo, candidates: list
         return None
     body = {"org_id": key.org_id, "key_id": key.key_id,
             "repo_key": key.repo_key(identity), "weight": _weight(task),
-            "features": one_hot(task), **ticket_size(task),
-            "candidates": list(candidates), "default": default}
+            "features": one_hot(task), "candidates": list(candidates), "default": default}
+    if signals:
+        body.update(ticket_size(task))
     if cost is not None:
         costs = {}
         for c in candidates:
@@ -293,6 +311,8 @@ class CloudLearner(LearningPlugin):
         self._org_override = org
         self._identity: str | None = None
         self._backoff_until = 0.0
+        # whether this server said it takes SIGNAL_KEYS; until it does, send today's payload
+        self.signals = False
         self._lock = threading.Lock()
         self._counts: dict[str, list[int]] = {}      # agent id -> [review rounds, escalations]
         self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_SIZE)
@@ -358,6 +378,9 @@ class CloudLearner(LearningPlugin):
         if isinstance(resp, dict) and "key_id" in resp:
             self.keys.note_key_id(org, resp.get("key_id"))
         if status == 200:
+            level = resp.get("signals") if isinstance(resp, dict) else None
+            self.signals = (isinstance(level, int) and not isinstance(level, bool)
+                            and level >= SIGNALS_VERSION)
             return resp
         if status == 409 and resp.get("error") in ("stale_key", "key_rotated"):
             self.keys.note_key_id(org, resp.get("key_id") or "")
@@ -447,7 +470,7 @@ class CloudLearner(LearningPlugin):
                 except Exception:  # noqa: BLE001 - no decision on record: omit the savings fields
                     decision = None
             body = record_payload(self.key(org), identity, task, outcome, rounds, escalations,
-                                  decision=decision, cost=self.cost)
+                                  decision=decision, cost=self.cost, signals=self.signals)
             if body is not None:
                 self._post(org, "/learning/record", body)
         except Exception as e:  # noqa: BLE001
@@ -467,7 +490,7 @@ class CloudLearner(LearningPlugin):
         for ref, task, outcome, decision in items:
             body = record_payload(self.key(org), identity, task, outcome,
                                   decision.review_rounds, decision.escalations,
-                                  decision=decision, cost=self.cost)
+                                  decision=decision, cost=self.cost, signals=self.signals)
             if body is not None:
                 try:
                     self._post(org, "/learning/record", body)
@@ -514,7 +537,8 @@ class CloudLearner(LearningPlugin):
         identity = self.identity() if org else None
         if org is None or identity is None:
             return None
-        body = suggest_payload(self.key(org), identity, task, candidates, self.cost, default)
+        body = suggest_payload(self.key(org), identity, task, candidates, self.cost, default,
+                               signals=self.signals)
         if body is None:
             return None
         resp = self._post(org, "/learning/suggest", body)

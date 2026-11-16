@@ -105,10 +105,9 @@ def test_record_payload_keys_and_contents(parts, remote):
     reported, review, escalated, merged, verdict, no_verdict = remote.records
     assert set(review) == {"org_id", "key_id", "repo_key", "agent_ref", "profile", "weight", "features", "event",
                            "approved", "checks_passed", "review_rounds", "escalations",
-                           "tokens", "wall_seconds", "parts", "files_declared"}
+                           "tokens", "wall_seconds"}
     assert set(verdict) == set(review)
-    assert set(reported) == set(escalated) == set(no_verdict) == set(review) - {"approved"}
-    assert set(merged) == set(reported) | {"queue_seconds", "idle_seconds", "stalled"}
+    assert set(reported) == set(escalated) == set(merged) == set(no_verdict) == set(review) - {"approved"}
     assert reported["event"] == "reported" and reported["wall_seconds"] == 12.5
     assert review["approved"] is False and review["event"] == "review"
     assert (review["org_id"], review["key_id"]) == ("org_1", "k1")
@@ -130,6 +129,25 @@ def test_record_payload_keys_and_contents(parts, remote):
     for body in remote.records:
         no_forbidden(body)
         assert set(body) <= cloud.RECORD_KEYS
+
+
+def test_new_signals_go_only_to_a_server_that_said_it_takes_them(parts, remote):
+    plain = remote.routes["POST /learning/record"]
+
+    def advertising(form, headers):
+        status, reply = plain(form, headers)
+        return status, {**reply, "signals": 1}
+
+    remote.routes["POST /learning/record"] = advertising
+    lr = make(parts, remote)
+    done = Outcome("removed_unmerged", wall_seconds=5.0, cost_usd=0.42, failure="idle")
+    lr.record(task(), done)
+    lr.record(task(), done)
+    lr.flush()
+    before, after = remote.records
+    assert not set(before) & cloud.SIGNAL_KEYS       # an older server 422s on these
+    assert after["cost_usd"] == 0.42 and after["stalled"] is True and after["failure"] == "idle"
+    no_forbidden(after)
 
 
 def test_unsafe_and_rogue_profile_names_are_never_sent_or_followed(parts, remote):
