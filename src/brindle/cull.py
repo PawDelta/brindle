@@ -703,6 +703,11 @@ def _goal_loop_question(screen: str) -> str | None:
             or sum(bool(GOAL_NOT_MET.search(ln)) for ln in lines) >= GOAL_LOOP_REPEATS):
         return None
     i = max(n for n, m in enumerate(marker) if m)
+    # Anything but an input prompt after the last marker means the worker has
+    # since resumed (guidance, a reply, a spinner): the loop is history.
+    if any(ln.strip() and not ln.lstrip().startswith((">", "❯", "│", "─", "╭", "╰"))
+           for ln in lines[i + 1:]):
+        return None
     while i >= 0 and (marker[i] or not lines[i].strip()):
         i -= 1
     block = []

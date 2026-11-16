@@ -28,6 +28,15 @@ def test_a_worker_looping_on_its_goal_gets_its_supervisor_told_once(db, tmp_path
     assert db.get_agent("w1").status == "waiting"
 
 
+def test_a_loop_the_worker_has_resumed_from_is_not_told(db, tmp_path, monkeypatch):
+    sent = a_session(db, tmp_path, monkeypatch, "idle", "claude")
+    resumed = LOOPED.rstrip("> \n") + "\n> use option 1\n● Creating tests/test_x.py now\n✻ Working… (3s)\n"
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: resumed if target == "%w1" else "")
+    cull.sweep(db)
+    assert not [1 for to, body in sent if to == "boss" and "w1" in body]
+    assert db.get_agent("w1").status == "idle"
+
+
 def test_a_stop_another_hook_sent_back_is_not_blocked_again_for_queued_mail(db, tmp_path, monkeypatch):
     a_session(db, tmp_path, monkeypatch, "processing", "claude")
     db.enqueue("w1", "continue working", "boss")
