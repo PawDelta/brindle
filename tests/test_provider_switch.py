@@ -15,8 +15,6 @@ from brindle.db import Agent, Task
 
 NOW = 1_800_000_000.0
 HOUR = 3600.0
-# The design's tests, ahead of the code: milestone checks run them with --runxfail.
-NOT_BUILT = pytest.mark.xfail(strict=True, reason="provider switch: not built yet")
 
 
 @pytest.fixture
@@ -28,7 +26,7 @@ def world(monkeypatch):
     monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
     monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw:
                         [] if provider in state["installed"] else [f"{provider} not installed"])
-    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: {})
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: tmux.PaneSnapshot())
     return state
 
 
@@ -465,7 +463,6 @@ def test_handoff_transcripts_use_recorded_paths_and_omit_unreadable_text(db, rep
     assert provider_switch.handoff_note(db, "root", NOW) == without_text
 
 
-@NOT_BUILT
 def test_switch_back_once_original_limit_resets(db, repo, world, spawned):
     ws = _session(db, repo)
     db.update_agent("root", status="paused")
@@ -476,7 +473,10 @@ def test_switch_back_once_original_limit_resets(db, repo, world, spawned):
     world["quotas"] = {"claude": _limited("claude", NOW + HOUR)}
 
     assert provider_switch.maybe_offer_back(db, NOW + 60) == []
-    [back] = provider_switch.maybe_offer_back(db, NOW + HOUR + 1)
+    autopilot.set_goal(db, "now", "finish after switching", [("check", "true", None)])
+    # A reset still offers a back card when the replacement has hit its limit.
+    world["quotas"]["codex"] = _limited("codex", NOW + 2 * HOUR)
+    [back] = provider_switch.sweep(db, NOW + HOUR + 1)
     assert (back.kind, back.root_id, back.from_provider, back.to_provider, back.back_of) == (
         "back", "now", "codex", "claude", "o1")
     assert provider_switch.maybe_offer_back(db, NOW + HOUR + 2) == []   # offered once
@@ -485,3 +485,54 @@ def test_switch_back_once_original_limit_resets(db, repo, world, spawned):
 
     assert [(c["ws"].id, c["provider_name"]) for c in spawned] == [(ws.id, "claude")]
     assert returned.provider == "claude"
+    assert db.get_autopilot(returned.id).goal == "finish after switching"
+    assert "finish after switching" in spawned[0]["prompt"]
+    assert provider_switch.switch_back(db, back.id, NOW + HOUR + 4).id == returned.id
+    assert len(spawned) == 1
+    assert provider_switch.maybe_offer_back(db, NOW + HOUR + 5) == []
+
+
+@pytest.mark.variant("each loss of session ownership or target eligibility must suppress a back offer")
+@pytest.mark.parametrize("change", ["paused", "done", "worker", "handed_away", "dismissed",
+                                    "provider", "unavailable", "open_offer"])
+def test_switch_back_requires_current_root_and_usable_original_provider(db, repo, world, change):
+    from brindle import sessions
+
+    ws = _session(db, repo)
+    db.update_agent("root", status="paused")
+    db.add_agent(Agent("now", ws.id, "supervisor", "codex", None, "interactive", "running",
+                       "@3", None, NOW))
+    db.add_autopilot("now")
+    _offer_row(db, "o1", "root", "switch", "claude", "codex", "done",
+               limited_until=NOW, new_root_id="now")
+    if change in ("paused", "done"):
+        db.update_agent("now", status=change)
+    elif change == "worker":
+        db.update_agent("now", parent_id="root")
+    elif change == "handed_away":
+        db.update_autopilot("now", state="blocked", note=sessions.HANDED_AWAY + "successor")
+    elif change == "dismissed":
+        db.update_agent("now", dismissed_at=NOW)
+    elif change == "provider":
+        db.update_agent("now", provider="antigravity")
+    elif change == "unavailable":
+        world["installed"].remove("claude")
+    elif change == "open_offer":
+        _offer_row(db, "other", "now", "switch", "codex", "antigravity", "open")
+
+    assert provider_switch.maybe_offer_back(db, NOW + 1) == []
+    assert db.conn.execute("SELECT COUNT(*) FROM provider_switches WHERE kind='back'").fetchone()[0] == 0
+
+
+def test_switch_back_dismissal_is_not_offered_again(db, repo, world):
+    ws = _session(db, repo)
+    db.update_agent("root", status="paused")
+    db.add_agent(Agent("now", ws.id, "supervisor", "codex", None, "interactive", "running",
+                       "@3", None, NOW))
+    _offer_row(db, "o1", "root", "switch", "claude", "codex", "done",
+               limited_until=NOW, new_root_id="now")
+    [back] = provider_switch.maybe_offer_back(db, NOW + 1)
+    provider_switch.dismiss(db, back.id, NOW + 2)
+    assert provider_switch.sweep(db, NOW + 3) == []
+    assert provider_switch.open_offer(db, "now") is None
+    assert db.conn.execute("SELECT COUNT(*) FROM provider_switches WHERE back_of='o1'").fetchone()[0] == 1

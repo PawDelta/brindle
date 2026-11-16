@@ -216,7 +216,39 @@ def maybe_offer_back(db: DB, now: float) -> list[Offer]:
     """For each done switch whose ``from_provider`` is in quota again and
     whose new supervisor is still the session's, a back offer (once: an
     open or dismissed back offer for that switch is not repeated)."""
-    raise NotImplementedError
+    from brindle import sessions
+
+    offers = []
+    rows = db.conn.execute("SELECT * FROM provider_switches WHERE kind='switch' AND state='done' "
+                           "AND NOT EXISTS (SELECT 1 FROM provider_switches AS back "
+                           "WHERE back.back_of=provider_switches.id) ORDER BY created_at, id").fetchall()
+    for row in rows:
+        original = Offer(**dict(row))
+        root = db.get_agent(original.new_root_id) if original.new_root_id else None
+        if (root is None or root.parent_id is not None or root.mode != "interactive"
+                or root.status in ("paused", "done") or root.dismissed_at is not None
+                or root.provider != original.to_provider or identity_lock.locked_by(root.id)):
+            continue
+        ap = db.get_autopilot(root.id)
+        if (ap and sessions.handed_away(ap)) or open_offer(db, root.id) is not None:
+            continue
+        ws = db.get_workspace(root.workspace_id)
+        if ws is None or original.from_provider not in _targets(root.provider, ws.repo_root, now):
+            continue
+        offer_id = uuid.uuid4().hex
+        with db.tx() as c:
+            # Check history inside the write transaction too: concurrent sweeps
+            # share one offer, and every terminal state consumes the back offer.
+            inserted = c.execute(
+                "INSERT OR IGNORE INTO provider_switches "
+                "(id, root_id, kind, from_provider, to_provider, state, limited_until, back_of, "
+                "created_at, updated_at) SELECT ?, ?, 'back', ?, ?, 'open', ?, ?, ?, ? "
+                "WHERE NOT EXISTS (SELECT 1 FROM provider_switches WHERE back_of=?)",
+                (offer_id, root.id, root.provider, original.from_provider, original.limited_until,
+                 original.id, now, now, original.id)).rowcount
+        if inserted:
+            offers.append(get(db, offer_id))
+    return offers
 
 
 def dismiss(db: DB, offer_id: str, now: float) -> Offer:
@@ -231,9 +263,8 @@ def dismiss(db: DB, offer_id: str, now: float) -> Offer:
 
 
 def sweep(db: DB, now: float) -> list[Offer]:
-    """New forward offers for active session roots. Switch-back detection
-    is a separate pass (``maybe_offer_back``)."""
-    offers = []
+    """New forward and back offers for active session roots."""
+    offers = maybe_offer_back(db, now)
     for root in db.list_agents():
         if open_offer(db, root.id) is not None:
             continue
@@ -414,7 +445,12 @@ def switch(db: DB, offer_id: str, now: float) -> Agent:
 def switch_back(db: DB, offer_id: str, now: float) -> Agent:
     """``switch`` for a back offer (kind back): the session returns to the
     provider it started on, in the same workspace."""
-    raise NotImplementedError
+    from brindle import agents
+
+    offer = get(db, offer_id)
+    if offer is None or offer.kind != "back":
+        raise agents.AgentError(f"no provider switch-back offer {offer_id}")
+    return switch(db, offer_id, now)
 
 
 # -- inbox -----------------------------------------------------------------------
