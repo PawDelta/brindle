@@ -64,7 +64,8 @@ def test_an_idle_worker_without_a_report_is_recorded_as_a_stalled_failure(db, ws
 
 
 @pytest.mark.parametrize("stop, resumed", [
-    ("limit", False),
+    pytest.param("limit", False, marks=pytest.mark.variant(
+        "a usage-limit stop marked by at_limit, never resumed, is the provider's stop at every signal level")),
     pytest.param("overload", False, marks=pytest.mark.variant(
         "a first overload, the provider not yet erroring, is still the provider's stop")),
     pytest.param("limit", True, marks=pytest.mark.variant(
@@ -88,6 +89,8 @@ def test_a_worker_stopped_for_its_limit_and_removed_unmerged_sends_no_failure(db
     assert not [b for b in sent if "failure" in b or "stalled" in b or b["event"] == "removed_unmerged"]
 
 
+@pytest.mark.variant("a rate-limited park: level 2 sends the interrupted event with its cause and the "
+                     "unparked wall time, level 1 sends nothing")
 def test_with_signals_2_the_interrupted_event_carries_the_cause(db, ws, recorder):
     w = add(db, ws, "w1", "assign", status="idle", status_since=time.time() - 25)
     limit_report.park(db, w, provider_health.RATE_LIMITED, now=time.time() - 20)

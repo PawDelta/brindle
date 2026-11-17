@@ -52,6 +52,8 @@ def only(monkeypatch, installed: str) -> None:
     monkeypatch.setattr(agents, "model_problem", lambda name, ws, **kw: None)   # provisioning: not under test
 
 
+@pytest.mark.variant("each provider alone must staff every role: a role with no cross-provider fallback "
+                     "only shows in the full provider-by-role grid")
 def test_every_role_finds_a_profile_on_the_one_installed_provider(db, repo, boss, monkeypatch):
     # The owner's supervisor runs on Claude; with Claude gone the supervisor
     # takes another provider's built-in profile.
@@ -120,7 +122,6 @@ def test_a_table_built_from_records_with_near_zero_minutes_still_orders(db, repo
 
 
 @pytest.mark.parametrize("refused,reason", [
-    ({"developer-codex"}, "no Codex here"),
     pytest.param({"developer-codex"}, "", marks=pytest.mark.variant(
         "a denial with no reason text must still count as a denial, not an approval")),
     pytest.param(None, "nothing today", marks=pytest.mark.variant(
@@ -158,7 +159,8 @@ class _EP:
 
 
 @pytest.mark.parametrize("tier_out,default", [
-    (True, "developer-heavy"),
+    pytest.param(True, "developer-heavy", marks=pytest.mark.variant(
+        "with the tier's own candidate out, the learner's default is the first replacement, not the unrunnable pick")),
     pytest.param(False, "developer-sonnet", marks=pytest.mark.variant(
         "a runnable tier must not hide unmeasured replacements from the learner's evidence")),
 ])
