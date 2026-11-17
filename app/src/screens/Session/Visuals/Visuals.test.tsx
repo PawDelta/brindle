@@ -860,6 +860,18 @@ describe("visuals", () => {
     expect(screen.queryByTestId("inbox-card")).toBeNull();
   });
 
+  it("stops asking when the prompt was answered in chat", () => {
+    const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test" });
+    const view = render(<VisualReader client={client} visual={{ ...visual, unread: false }} onBack={() => {}} onAnswered={() => {}} Frame={() => <div />} />);
+    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+    view.rerender(<VisualReader client={client} visual={{ ...visual, unread: false, answered_in_chat: true }} onBack={() => {}} onAnswered={() => {}} Frame={() => <div />} />);
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+    expect(screen.queryByTestId("visual-send")).toBeNull();
+    expect(screen.getByRole("status").getAttribute("data-state")).toBe("answered-in-chat");
+    fireEvent.keyDown(window, { key: "b" });
+    expect(screen.queryByRole("radio")).toBeNull();
+  });
+
   it("sends a note-only answer from the free-text choice", async () => {
     let sent: unknown;
     const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {

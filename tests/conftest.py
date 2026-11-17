@@ -665,6 +665,17 @@ def push_messages(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def typed_supervisors(monkeypatch):
+    """Most tests drive brindle's typed pane delivery (still how a Codex, agy
+    or OpenCode chat gets its mail) through a Claude Code chat's pane;
+    tests/test_silent_wake.py and tests/test_wake.py turn the real rule, that
+    a person's Claude Code chat is never typed into (wake.silent), back on."""
+    from brindle import wake
+
+    monkeypatch.setattr(wake, "silent", lambda agent: False)
+
+
+@pytest.fixture(autouse=True)
 def finish_review_inline(monkeypatch):
     """A verdict's pipeline work runs in a detached brindle process, which
     tests can't wait on: run it before submit_review returns instead."""

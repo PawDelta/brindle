@@ -1672,6 +1672,13 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                                                   mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
     except providers.CodexSandboxRefused as e:
         raise AgentError(str(e)) from e
+    from brindle import wake
+
+    if wake.applies_poke(provider.name, agent.mode, bool(agent.headless)):
+        try:
+            wake.arm_poke(agent.id)   # this session runs the FileChanged waiter (wake.poke)
+        except OSError:
+            pass   # unpokeable: its mail waits for its next Stop or SessionStart
     if provider.name == "codex":
         from brindle import codex_hook
 
@@ -2972,9 +2979,10 @@ def _hand_over(db: DB, agent: Agent, message_id: int, text: str, sender_id: str 
         return "queued"  # a supervisor restart: it goes to the fresh session
     from brindle import wake
 
-    if wake.enabled(agent):
+    if wake.enabled(agent) or wake.pokeable(agent):
         # A chat with brindle's waiter never gets the inbox, where Claude Code
-        # would wrap the message as another session's (see brindle.wake).
+        # would wrap the message as another session's (see brindle.wake);
+        # nor does one launched with it whose first waiter hasn't registered yet.
         if wake.live(agent):
             return "delivered"  # the waiter wakes it with this
     elif _deliver_to_inbox(db, agent, message_id, text, sender_id):
@@ -3367,12 +3375,25 @@ def _flush_messages(db: DB, agent_id: str) -> bool:
     agent = db.get_agent(agent_id)
     if _delivery_held(db, agent, waiter=False):
         return False
+    silent = wake.silent(agent)
     partial = db.mark(agent_id, "pane-delivery")
     if partial is not None:
         # Even with a live waiter: its take() can't pass this mark, so only
-        # finishing the delivery here lets the queue move again.
+        # finishing the delivery here lets the queue move again. A person's
+        # chat is never typed into, even to finish one an older brindle began.
+        if silent:
+            return _settle_untyped(db, agent, partial)
         return _resume_pane_delivery(db, agent, partial)
     if wake.enabled(agent) and wake.live(agent):
+        return False
+    if silent and (wake.enabled(agent) or wake.pokeable(agent)):
+        # A person's chat is never typed into: an idle one with no live
+        # waiter is poked, and Claude Code starts one that wakes it with the
+        # mail (wake.poke); a busy one gets it at its Stop. One launched by an
+        # older brindle can't be poked: its mail waits for its next Stop or
+        # SessionStart (a turn the person starts ends in a Stop).
+        if agent.status == "idle" and wake.pokeable(agent) and db.pending_count(agent_id):
+            wake.poke(agent)
         return False
     if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
@@ -3391,10 +3412,30 @@ def _flush_messages(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
+    if silent:
+        # No waiter hook at all (a much older launch) and no inbox: held for
+        # its next Stop, never typed.
+        return False
     # One paste into the pane at a time, whichever path: the idle claim alone
     # leaves the agent busy for a second sender's mid-turn paste while the
     # first is still typing, reordering or merging the two.
     return _flush_pane(db, agent_id)
+
+
+def _settle_untyped(db: DB, agent: Agent, saved: str) -> bool:
+    """``_flush_messages`` for a person's chat that an older brindle had
+    begun typing a message into: retired without a key typed. Sent ("submitted")
+    counts as delivered, a turn started on it stays unresolved, and anything
+    else goes back in the queue for a waiter, but only once nothing of it is
+    left in the composer: text still there is the person's to send (its
+    prompt acknowledges it) or clear, and the mark keeps the row till then."""
+    if json.loads(saved).get("stage") in ("lead", "body") and not _composer_settled(agent):
+        return False
+    if not db.settle_pane_delivery(agent.id, saved):
+        return False   # a hook changed it meanwhile: the next flush looks again
+    if db.pane_delivery_holds(agent.id):
+        return False
+    return _flush_messages(db, agent.id)
 
 
 def delivery_lock(agent_id: str):
@@ -6386,6 +6427,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
             processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
                           str(get_provider(agent.provider).ready_delay)])
+        from brindle import wake
+
+        if agent.provider == "claude" and wake.pokeable(agent):
+            # Watched for the session's FileChanged waiter hook (wake.poke).
+            return {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                           "watchPaths": [str(wake.poke_path(agent_id))]}}
     elif event == "prompt-submit":
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.

@@ -80,6 +80,7 @@ function Row({ v, onPick }: { v: VisualDTO; onPick(id: string): void }) {
         <span className="truncate text-xs text-ink-3">
           {v.by} · {formatAge(Math.max(0, Date.now() / 1000 - v.created_at))}
           {picked && ` · ${picked.label}`}
+          {v.answered_in_chat && " · answered in chat"}
           {v.kept && " · kept"}
         </span>
       </span>

@@ -5,6 +5,7 @@ from their official pricing pages:
 
 - Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 - OpenAI: https://developers.openai.com/api/docs/pricing (Standard tier)
+- Gemini: https://ai.google.dev/gemini-api/docs/pricing (Standard tier)
 
 Each price has four rates: uncached input, output, cache write and cache
 read. Anthropic's cache write is the 5-minute rate (1.25x input; brindle's
@@ -67,6 +68,9 @@ def _openai(inp: float, cached: float, out: float, write: float | None = None) -
 
 
 PRICES: dict[str, Price] = {
+    # Verified 2026-11-16: Argon's launch rates end on November 30.
+    "gemini-4-argon": (Price(2, 10, 2, 0.1) if _dt.date.today() < _dt.date(2026, 12, 1)
+                       else Price(4, 20, 4, 0.2)),
     # Anthropic
     "claude-fable-5-1": _anthropic(10, 50, read=0.25),
     "claude-mythos-5-1": _anthropic(10, 50, read=0.25),
@@ -81,7 +85,10 @@ PRICES: dict[str, Price] = {
     "claude-opus-4-1": _anthropic(15, 75),
     "claude-opus-4": _anthropic(15, 75),
     "claude-opus-4-0": _anthropic(15, 75),
-    "claude-sonnet-5-5": _anthropic(2, 10),
+    # Cache reads are 0.05x input for the 5.5 Sonnet/Opus models, i.e. $0.10 per M here
+    # (https://platform.claude.com/docs/en/about-claude/pricing, checked 2026-11-17;
+    # Opus 5.5 above is $0.20 and Haiku 5.5 below $0.01, both matching the table).
+    "claude-sonnet-5-5": _anthropic(2, 10, read=0.10),
     "claude-sonnet-5": _anthropic(2, 10),
     "claude-sonnet-4-6": _anthropic(3, 15),
     "claude-sonnet-4-5": _anthropic(3, 15),

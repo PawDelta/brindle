@@ -184,6 +184,37 @@ def test_note_only_answers_reach_the_supervisor(db, session, client):
     assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
 
 
+@pytest.mark.parametrize("revise", [False, pytest.param(True, marks=pytest.mark.variant(
+    "a new revision of an older visual must use its publication time, not the visual's creation time"))])
+def test_person_message_closes_only_earlier_prompts_in_its_session(db, session, monkeypatch, revise):
+    ws, boss, worker = session
+    clock = [100.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    other = Agent("other", ws.id, "supervisor", "claude", None, "interactive", "idle", "%3", None, 100,
+                  headless=1)
+    db.add_agent(other)
+    prompt = visuals.publish(db, worker, "Release", "<p>x</p>", "Which?", OPTIONS)
+    untouched = visuals.publish(db, other, "Other", "<p>x</p>", "Which?", OPTIONS)
+    clock[0] = 200.0
+    agents.send_message(db, boss.id, "Use the first approach", person=True)
+    closed = visuals.get(db, prompt["id"])
+    assert closed["dismissed_rev"] == closed["rev"]
+    assert closed["answer"] is None
+    assert visuals.to_dto(db, closed)["answered_in_chat"] is True
+    assert [v["id"] for v in visuals.inbox_pending(db, None)] == [untouched["id"]]
+    assert db.conn.execute("SELECT body FROM inbox WHERE agent_id=? ORDER BY id DESC", (boss.id,)).fetchone()[0] \
+        == "Use the first approach"
+
+    clock[0] = 300.0
+    later = visuals.publish(db, worker, "Release", "<p>new</p>", "Which now?", OPTIONS,
+                            visual_id=prompt["id"] if revise else None)
+    clock[0] = 400.0
+    # A delayed CLI report of the same message must preserve the newer publication.
+    visual_offers.person_spoke(db, boss, "Use the first approach", cli_prompt=True, said_at=200.0)
+    assert {v["id"] for v in visuals.inbox_pending(db, None)} == {untouched["id"], later["id"]}
+    assert visuals.to_dto(db, visuals.get(db, later["id"]))["answered_in_chat"] is False
+
+
 def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_again(db, session, client, monkeypatch):
     _, boss, worker = session
     answered = visuals.publish(db, worker, "Answered", "<p>x</p>", "Which?", OPTIONS)
