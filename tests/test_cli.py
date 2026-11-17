@@ -131,9 +131,10 @@ def test_app_command_opens_the_app_or_prints_the_download_url(monkeypatch):
     import subprocess
     import sys
 
-    from brindle import cli
+    from brindle import cli, providers
 
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(providers, "is_wsl", lambda: False)
     runs = []
     no_opener = []
 
@@ -151,3 +152,47 @@ def test_app_command_opens_the_app_or_prints_the_download_url(monkeypatch):
     no_opener.append(True)
     missing = CliRunner().invoke(cli.app, ["app"])
     assert cli.APP_DOWNLOAD_URL in missing.output
+
+
+def test_app_command_on_wsl_without_windows_app_prints_download(monkeypatch):
+    import subprocess
+    import sys
+
+    from brindle import cli, providers
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(providers, "is_wsl", lambda: True)
+    monkeypatch.setattr(cli.os.path, "isfile", lambda path: False)
+
+    def run(cmd, **kw):
+        output = {
+            "cmd.exe": "C:\\Users\\tester\\AppData\\Local\r\n",
+            "wslpath": "/mnt/c/Users/tester/AppData/Local\n",
+        }.get(cmd[0], "")
+        return subprocess.CompletedProcess(cmd, 0, stdout=output)
+
+    def launch(*args, **kwargs):
+        pytest.fail("an absent Windows app must not be launched")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    result = CliRunner().invoke(cli.app, ["app"])
+    assert result.exit_code == 0
+    assert cli.APP_DOWNLOAD_URL in result.output
+    assert "opened" not in result.output
+
+
+def test_app_command_on_macos_opens_the_engines_own_bundle_by_path(monkeypatch):
+    import subprocess
+    import sys
+
+    from brindle import cli
+
+    bundle = "/Volumes/Build/brindle.app"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "executable", f"{bundle}/Contents/Resources/engine/bin/python")
+    runs = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: runs.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    res = CliRunner().invoke(cli.app, ["app"])
+    assert runs == [["open", bundle]]
+    assert "opened the brindle app" in res.output

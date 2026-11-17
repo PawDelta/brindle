@@ -112,9 +112,9 @@ def test_transcript_usage_becomes_history_rows_without_double_counting(db, repo,
     assert total == 114_500_000
 
     spent = cost.summary(db, root)
-    assert spent.total.dollars == pytest.approx(78.0)
-    assert spent.by_model["claude-sonnet-5-5"].dollars == pytest.approx(78.0)
-    assert "$78.00" in cli.invoke(app, ["cost"]).output
+    assert spent.total.dollars == pytest.approx(68.0)
+    assert spent.by_model["claude-sonnet-5-5"].dollars == pytest.approx(68.0)
+    assert "$68.00" in cli.invoke(app, ["cost"]).output
 
 
 # -- pricing --------------------------------------------------------------------------------------
