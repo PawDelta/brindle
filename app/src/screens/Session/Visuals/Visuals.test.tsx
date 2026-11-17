@@ -739,6 +739,44 @@ describe("visuals", () => {
     expect(screen.getByTestId("visual-answered").textContent).toContain("Stage it first");
   });
 
+  it.each(["2", "b"])("selects the second visual option with %s by position", (key) => {
+    // Labels and ids start with the opposite letter: shortcuts follow the displayed position.
+    const reversed = { ...visual, options: [...visual.options!].reverse() };
+    render(<VisualReader client={new FakeDaemon().client()} visual={reversed} onBack={() => {}} onAnswered={() => {}} Frame={() => <div />} />);
+    const options = screen.getAllByRole("radio");
+    fireEvent.keyDown(document.body, { key });
+    expect(options[1].getAttribute("aria-checked")).toBe("true");
+    expect(options[0].getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("submits the selected visual option on Enter outside the note with no note", async () => {
+    const sent: unknown[] = [];
+    const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
+      if (String(url).endsWith("/answer")) sent.push(JSON.parse(init!.body as string));
+      return new Response(JSON.stringify({ ...visual, answer: { option: "B", note: "", at: now } }));
+    } });
+    const onAnswered = vi.fn();
+    render(<VisualReader client={client} visual={visual} onBack={() => {}} onAnswered={onAnswered} Frame={() => <div />} />);
+    fireEvent.click(screen.getAllByRole("radio")[1]);
+    await act(async () => { fireEvent.keyDown(document.body, { key: "Enter" }); });
+    expect(sent).toEqual([{ rev: visual.rev, option: "B", note: "" }]);
+    expect(onAnswered).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the keyboard selection while typing b in the visual note", () => {
+    render(<VisualReader client={new FakeDaemon().client()} visual={visual} onBack={() => {}} onAnswered={() => {}} Frame={() => <div />} />);
+    const options = screen.getAllByRole("radio");
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(options[0].getAttribute("aria-checked")).toBe("true");
+    const note = screen.getByRole("textbox");
+    note.focus();
+    fireEvent.keyDown(note, { key: "b" });
+    fireEvent.change(note, { target: { value: "b" } });
+    expect(note).toHaveProperty("value", "b");
+    expect(options[0].getAttribute("aria-checked")).toBe("true");
+    expect(options[1].getAttribute("aria-checked")).toBe("false");
+  });
+
   it("submits the answer on Enter from the single-line note, the free-text box or a chosen option", async () => {
     const sent: unknown[] = [];
     const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
