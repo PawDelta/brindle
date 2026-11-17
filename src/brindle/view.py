@@ -430,7 +430,13 @@ def retired(db: DB, ws: Workspace, alive: set[str], now: float | None = None,
     if repos.is_session_branch(db, ws.repo_root, ws.branch):
         return False   # a session's merge target in a repo it has attached, whoever ran there
 
-    return (git_counts(ws, now) if counts is None else counts(ws)).ahead == 0
+    if counts is not None:
+        return counts(ws).ahead == 0
+    try:
+        st = status_cache.cached_status(ws.path, ws.base_branch, now=now)
+    except git.GitError:
+        return False
+    return st.ahead == 0
 
 
 def attached_roots(db: DB, repo_root: str) -> list[str]:
