@@ -812,6 +812,7 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     _stress("can't you", ["can't you just render it?"], "render it", True),
     _stress("negation in an earlier clause", ["I don't get it, render it"], "render it", True),
     _stress("ideographs have no spaces", ["把这个流程画出来"], "把这个流程画出来", True),
+    _stress("one ideograph alone is not a request", ["画"], "画", False),
     _stress("never mind something else", ["never mind the typo, render it"], "render it", True),
     _stress("never mind, then the ask", ["never mind, render it"], "render it", True),
     _stress("never mind, then a polite ask", ["Never mind — can you show me the flow"], "show me the flow", True),

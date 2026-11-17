@@ -457,7 +457,7 @@ def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple
     holds_a_mention = bool(own)
     own.append(words[at:end])
     own_words = _word_count(" ".join(own))
-    whole_one_word_message = begin == 0 and end == len(words) and own_words == 1
+    whole_one_word_message = begin == 0 and end == len(words) and len(words.split()) == 1 and own_words == 1
     return (own_words >= MIN_QUOTE_WORDS or whole_one_word_message) and (
         not holds_a_mention or _ASKS_FOR.match(own[0]) is not None)
 
