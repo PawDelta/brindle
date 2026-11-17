@@ -6269,7 +6269,7 @@ def _note_staged_prompt(db: DB, agent: Agent, payload: dict) -> None:
 
     if agent.mode != "interactive" or agent.parent_id is not None:
         return
-    if not db.conn.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND words!=''",
+    if not db.conn.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1",
                            (agent.id,)).fetchone():
         return
     path = payload.get("transcript_path")
