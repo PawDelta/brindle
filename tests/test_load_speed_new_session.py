@@ -159,6 +159,7 @@ def test_new_session_page_reads_run_no_git_or_cli_and_share_one_tmux_look(db, re
     assert ran == []
 
 
+@pytest.mark.variant("every test reopens the DB, but none notices the setup re-run on each open (a burst's queueing)")
 def test_each_request_opens_the_db_without_setting_it_up_again(db, monkeypatch):
     """The daemon opens a DB per request: one this process set up, its schema
     unchanged, opens without the setup (whose reads queued a burst of
