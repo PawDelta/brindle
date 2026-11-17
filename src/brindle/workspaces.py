@@ -897,13 +897,14 @@ def sync_with_base(ws: Workspace) -> SyncResult:
     return SyncResult("synced", new_sha=new_sha, old_sha=before)
 
 
-PR_FOOTER = "🌲 Built in parallel and verified with [brindle](https://pawdelta.com/brindle/)"
+PR_FOOTER = "Built with [brindle](https://pawdelta.com/brindle)"
 
 
 def with_footer(body: str, repo_root: str) -> str:
-    """``body`` plus brindle's one-line footer, unless the repo turned it off
+    """``body`` ending with brindle's one-line footer, added once (a body that
+    already has it is left alone), unless the repo turned it off
     (``"pr_footer": false``)."""
-    if not load_repo_config(repo_root).pr_footer:
+    if not load_repo_config(repo_root).pr_footer or PR_FOOTER in body:
         return body
     return f"{body.rstrip()}\n\n{PR_FOOTER}" if body.strip() else PR_FOOTER
 
