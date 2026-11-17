@@ -249,6 +249,31 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
       if (active.current) setSending(false);
     }
   };
+  useEffect(() => {
+    if (visual.answer) return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      const target = event.target;
+      // The note keeps normal typing and its existing Enter handler. Other editable controls do too.
+      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+      if (event.key === "Enter") {
+        // Focused controls retain their own activation; the answer bar handles its chosen option.
+        if (target instanceof HTMLElement && target.closest("button, a")) return;
+        if (!canSend || sending) return;
+        event.preventDefault();
+        void send();
+        return;
+      }
+      const index = /^[1-9]$/.test(event.key) ? Number(event.key) - 1
+        : /^[a-z]$/i.test(event.key) ? event.key.toLowerCase().charCodeAt(0) - 97 : -1;
+      const option = options[index];
+      if (!option || sending) return;
+      event.preventDefault();
+      if (picked !== option.id) onPick(option.id);
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  });
   return (
     <footer ref={bar} className="flex flex-col gap-s1 border-t border-line px-s2 py-s1" data-testid="visual-answer">
       {visual.question && <p className="text-sm text-ink-2">{visual.question}</p>}
@@ -270,8 +295,9 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           void send();
         }}>
           <div role="radiogroup" aria-label="Options" className="flex flex-wrap gap-1">
-            {options.map((o) => (
+            {options.map((o, index) => (
               <button key={o.id} type="button" role="radio" aria-checked={picked === o.id} title={o.detail} className={`${button} ${picked === o.id ? "border-branch bg-branch-soft" : ""}`} onClick={() => onPick(o.id)}>
+                {index < 26 && <kbd aria-hidden="true" className="mr-1 rounded-[3px] border border-line bg-surface-2 px-1 font-mono text-[10px] font-medium leading-4 text-ink-3">{index < 9 ? `${index + 1} / ` : ""}{String.fromCharCode(97 + index)}</kbd>}
                 {o.label}
               </button>
             ))}
