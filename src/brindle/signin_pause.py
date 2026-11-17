@@ -405,7 +405,7 @@ def _handle(db, state, base, provider, running, res: Check, enforce: bool) -> li
     if res.kind == "signed_out":
         return _pause(db, state, base, provider, running, f"{name} signed out",
                       f"{name} is signed out. Run `brindle login` or `brindle doctor --fix` "
-                      "(or the CLI's own login) and they resume on their own.")
+                      "(or the CLI's own login) and they resume on their own.", signed_out=True)
     if res.ident and not res.problem:
         signed_in = None
         for a in running:   # launched before identities were recorded; never under a mismatch
@@ -442,12 +442,17 @@ def _expected() -> str | None:
     return company_identity.expected_ident(claude)
 
 
-def _pause(db, state, base, provider, running, reason: str, advice: str) -> list[str]:
+def _pause(db, state, base, provider, running, reason: str, advice: str, *,
+           signed_out: bool = False) -> list[str]:
     if not running:
         return []
+    from brindle import limit_report, provider_health
+
     expect = _expected() if provider == "claude" else None
     done, paused = [], []
     for a in running:
+        if signed_out:   # a provider stop, not the model's: the learner leaves it out
+            limit_report.park(db, a, provider_health.SIGNED_OUT)
         try:
             agents.pause_worker(db, a)
         except Exception:  # noqa: BLE001 - one agent failing to pause doesn't stop the rest

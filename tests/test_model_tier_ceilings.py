@@ -102,7 +102,9 @@ def test_max_weight_medium_filters_heavy_candidate_from_medium_routing(db, repo,
 
 
 def test_no_permissible_candidates_under_ceiling_raises(db, repo, monkeypatch):
-    cfg = RepoConfig(max_weight="light", default_agent="developer-heavy", routing={"light": ["developer-heavy"], "medium": ["developer-heavy"], "heavy": ["developer-heavy"]})
+    # light is pinned, so the cascade has no built-in light profile to fall back to
+    cfg = RepoConfig(max_weight="light", default_agent="developer-heavy", routing_locked={"light": True},
+                     routing={"light": ["developer-heavy"], "medium": ["developer-heavy"], "heavy": ["developer-heavy"]})
     monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
 
     with pytest.raises(autopilot.AutopilotError) as exc_info:

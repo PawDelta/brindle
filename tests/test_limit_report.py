@@ -29,6 +29,11 @@ def session(db, repo, monkeypatch):
     db.add_autopilot("boss")
     autopilot.set_goal(db, "boss", "Goal", [("M1", "true", None)])
     stopped = []
+    # No other provider can take the task over (brindle.handover, tested in
+    # test_handover.py): a full window pauses, whatever CLIs this machine has.
+    from brindle import handover
+
+    monkeypatch.setattr(handover, "replacement", lambda *a, **k: None)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id != "boss" and a.status != "paused")
     monkeypatch.setattr(agents, "_stop", lambda db_, a: stopped.append(a.id))
     return ws, stopped

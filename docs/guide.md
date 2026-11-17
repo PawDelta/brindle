@@ -379,12 +379,20 @@ an uncommitted change, so it never blocks a merge or a milestone's check.
 Pause the session to stop it. The deprecated `--autopilot`/`--no-autopilot`
 flags and the `autopilot` config key are ignored: goal driving is always on.
 
-When your Claude usage reaches `usage_limit`, brindle pauses for usage: its
-running Claude workers stop (worktrees, branches, queued messages and sessions
-are kept) and the sidebar says "paused for usage until <time>". Once the usage
-window resets, brindle restarts those workers on its own, resumes goal driving
-again and tells the supervisor what it resumed. Speaking to the supervisor
-doesn't end the pause.
+When a provider's usage reaches `usage_limit`, brindle stops giving it new
+work; workers already on it carry on. When it is about to run out (97% or
+more, its approaching-limit notice, a projection of 100% within minutes, or a
+429 at 90% or more, with the window's reset more than 20 minutes away), each
+Claude, Codex and agy worker on it is asked, mid-turn, to commit its work in
+progress and leave a short handover note (`handover_note`), then carry on;
+at most twice, ten minutes apart.
+
+When a Claude worker's turn fails on the limit itself, brindle pauses for
+usage: its running Claude workers stop (worktrees, branches, queued messages
+and sessions are kept) and the sidebar says "paused for usage until <time>".
+Once the usage window resets, brindle restarts those workers on its own,
+resumes goal driving again and tells the supervisor what it resumed. Speaking
+to the supervisor doesn't end the pause.
 
 To track your Claude usage, brindle gives the agents it launches a status line.
 It records the usage percentage Claude Code reports, then prints whatever
@@ -763,7 +771,7 @@ Goal driving, merge gates and cleanup:
 | `wait_for_room` | `true` | a new worker or check run waits while the machine is busy; `false` starts it at once. While it waits, the supervisor can start a worker anyway with `start_now` |
 | `check_concurrency` | half the logical cores, at least 2, at most 6 and 2 GB of RAM per run | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
 | `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` before handing it to you; `true` turns it on for a cloud account, `false` off |
-| `usage_limit` | `90` | brindle stops pushing on at this % of your Claude usage limit |
+| `usage_limit` | `90` | brindle stops giving a provider new work at this % of its usage limit |
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
 | `graphify_auto_refresh` | `true` | automatically rebuild untracked code maps; `false` disables rebuilds while keeping queries available |
@@ -1773,7 +1781,7 @@ Your org's `deny_personal_keys` (Enterprise) still applies on top of `auth`.
 When running long, unattended sessions with API keys:
 
 - **Quota, token and cost measurements per provider**:
-  - brindle's automatic usage pause (`usage_limit: 90`) relies on the percentage numbers emitted by Claude Code's status line under subscription plans. Under API-key billing (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), the CLIs report no subscription percentage, so subscription usage pause thresholds do not trigger; manage spend via provider account budget limits or brindle budget policies.
+  - brindle's usage threshold (`usage_limit: 90`) and last-moment checkpoint rely on the percentage numbers emitted by Claude Code's status line under subscription plans. Under API-key billing (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), the CLIs report no subscription percentage, so subscription usage pause thresholds do not trigger; manage spend via provider account budget limits or brindle budget policies.
   - Token and cost tracking: Token counts and cost estimates are captured from Claude and Codex transcripts. Antigravity (`agy`) currently has **no token/cost measurements**, so budget policies and cost tracking cannot monitor Antigravity spend; enforce usage caps directly in Google AI Studio or your Google Cloud project billing settings.
 - **Runtime auth failure handling and provider differences**:
   - **Claude and Antigravity**: Runtime authentication failures (such as 401/403, revoked API keys, or credit/billing errors) are intercepted via StopFailure and exit hooks. Brindle marks the worker as failed, alerts the supervisor, invalidates cached sign-in checks, and pauses goal driving with a `Credentials need attention` notice rather than cycling idle nudges.

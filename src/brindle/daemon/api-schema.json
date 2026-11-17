@@ -2739,6 +2739,25 @@
       "title": "InboxActionDTO",
       "type": "object"
     },
+    "InboxChoiceDTO": {
+      "description": "One answer a card offers: posted to its ``action`` as ``{\"choice\": id}``.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "title": "InboxChoiceDTO",
+      "type": "object"
+    },
     "InboxItemDTO": {
       "$defs": {
         "InboxActionDTO": {
@@ -2758,6 +2777,25 @@
             "path"
           ],
           "title": "InboxActionDTO",
+          "type": "object"
+        },
+        "InboxChoiceDTO": {
+          "description": "One answer a card offers: posted to its ``action`` as ``{\"choice\": id}``.",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "InboxChoiceDTO",
           "type": "object"
         },
         "PermissionChoiceDTO": {
@@ -3031,6 +3069,21 @@
           ],
           "default": null,
           "title": "Agent Id"
+        },
+        "choices": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/InboxChoiceDTO"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Choices"
         },
         "detail": {
           "anyOf": [
@@ -13479,6 +13532,10 @@
     {
       "method": "POST",
       "path": "/v1/goal/plan-offer"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/handovers/{id}"
     },
     {
       "method": "POST",

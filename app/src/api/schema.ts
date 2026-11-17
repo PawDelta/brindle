@@ -31,6 +31,7 @@ export interface ApiSchema {
   GitHubConnectionDTO: GitHubConnectionDTO;
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
+  InboxChoiceDTO: InboxChoiceDTO;
   InboxItemDTO: InboxItemDTO;
   KeptVisualDTO: KeptVisualDTO;
   LibraryFolderDTO: LibraryFolderDTO;
@@ -585,12 +586,23 @@ export interface InboxActionDTO {
   path: string;
 }
 /**
+ * One answer a card offers: posted to its ``action`` as ``{"choice": id}``.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "InboxChoiceDTO".
+ */
+export interface InboxChoiceDTO {
+  id: string;
+  label: string;
+}
+/**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "InboxItemDTO".
  */
 export interface InboxItemDTO {
   action?: InboxActionDTO | null;
   agent_id?: string | null;
+  choices?: InboxChoiceDTO[] | null;
   detail?: string | null;
   doc?: number | string | null;
   fix?: string | null;

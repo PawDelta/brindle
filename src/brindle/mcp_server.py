@@ -1009,6 +1009,7 @@ async def handoff(
         try:
             profile, _ = autopilot.choose_profile(
                 db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision,
+                policy={"mode": "handoff", "branch": branch},
                 **({"goal": goal} if goal is not None else {}))
         except autopilot.AutopilotError as e:
             return str(e)
@@ -1187,6 +1188,7 @@ async def assign(
             # A fast-path task's routing, fallbacks and final pick all stay at or under medium.
             profile, learned = autopilot.choose_profile(
                 db, caller.id, ws.repo_root, agent_profile, task, files, route_weight, why, decision,
+                policy={"mode": "assign", "branch": branch},
                 **({"design_heavy": True} if design_heavy else {}),
                 **({"max_tier": FAST_PATH_WEIGHTS[-1]} if fast else {}),
                 **({"goal": goal} if goal is not None else {}))
@@ -1371,6 +1373,21 @@ def report_result(result: str) -> str:
     if coordinator.is_coordinator(caller):
         return coordinator.finish(db, caller, result)
     return agents.report_result(db, caller.id, result)
+
+
+@mcp.tool()
+def handover_note(note: str) -> str:
+    """Workers, when brindle asks (your provider is about to hit its usage
+    limit): after committing your work in progress, leave at most ten lines
+    for whoever picks the task up: what's done, what's left, and any traps.
+    Then carry on with your task."""
+    db = DB()
+    caller, _ = _caller(db)
+    if not caller:
+        return "Not running as a brindle agent; nowhere to keep the note."
+    from brindle import checkpoint
+
+    return checkpoint.record_note(db, caller, note)
 
 
 @mcp.tool()

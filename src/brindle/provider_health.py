@@ -13,7 +13,9 @@ states only this module records:
   CLOSING_MIN_RESET_SECONDS away, and the CLI showed its approaching-limit
   notice, or a live window reads CLOSING_PERCENT or more, or the readings
   of the last PROJECTION_SPAN_SECONDS project 100% within
-  PROJECTION_AHEAD_SECONDS.
+  PROJECTION_AHEAD_SECONDS, or a 429 came within NOTICE_SECONDS while the
+  window reads RATE_LIMIT_CLOSING_PERCENT or more. ``closing`` reads this
+  alone, unmasked by a rate limit, for brindle.checkpoint.
 
 Those live in ``provider_health.json`` beside ``quota.json``, keyed by
 subscription identity (``subscription_usage.cache_key``) and written
@@ -53,7 +55,8 @@ CLOSING_PERCENT = 97.0
 CLOSING_MIN_RESET_SECONDS = 20 * 60
 PROJECTION_SPAN_SECONDS = 10 * 60
 PROJECTION_AHEAD_SECONDS = 3 * 60
-NOTICE_SECONDS = 10 * 60      # how long a CLI's approaching-limit notice stands
+NOTICE_SECONDS = 10 * 60      # how long a CLI's approaching-limit notice (or a 429) stands
+RATE_LIMIT_CLOSING_PERCENT = 90.0
 FULL_PERCENT = 100.0
 
 
@@ -143,7 +146,16 @@ def record_rate_limited(provider: str, *, now: float | None = None,
     with _locked() as data:
         e = _entry(data, _key(provider))
         e["rate_limited_until"] = max(until, _num(e.get("rate_limited_until")) or 0)
+        e["rate_limited_at"] = now
     return until
+
+
+def record_throttle(provider: str, *, now: float | None = None) -> None:
+    """A 429 showed mid-turn (the CLI waits it out and goes on): no time out
+    of routing, but near the limit it means ``closing``."""
+    now = _clock() if now is None else now
+    with _locked() as data:
+        _entry(data, _key(provider))["rate_limited_at"] = now
 
 
 def record_error(provider: str, *, now: float | None = None) -> bool:
@@ -205,6 +217,18 @@ def is_notice(text: str | None) -> bool:
     return bool(text and _NOTICE.search(text))
 
 
+# A CLI's line for a 429 it is waiting out: Claude Code's "API Error (429 ...)",
+# Codex's "429 Too Many Requests". Not a bare "rate limit",
+# which code on screen says all the time.
+_THROTTLED = re.compile(r"\b429\b[^\n]{0,80}(?:too many requests|rate.?limit)"
+                        r"|(?:api error|status)\W{0,4}429\b", re.I)
+
+
+def is_throttled(text: str | None) -> bool:
+    """Whether ``text`` is a CLI's line for a 429."""
+    return bool(text and _THROTTLED.search(text))
+
+
 def _cap_applies(name: str, model: str | None) -> bool:
     """Whether the one-model cap ``name`` ("Fable", "Gemini Pro 5h") is ``model``'s."""
     if not model:
@@ -228,9 +252,14 @@ def _projected_full(readings: list, now: float) -> bool:
 
 
 def _quota_state(provider: str, model: str | None, now: float, entry: dict) -> Health | None:
-    """``limited`` or ``closing`` from the subscription windows, or None."""
-    if quota._key_billed(provider):
-        return None
+    """``limited`` or ``closing`` from the subscription windows, or None.
+    Whether Claude is billed per key (which may read the key store) is asked
+    only once there is a state to give: a hook reads this on every tool call."""
+    state = _windows_state(provider, model, now, entry)
+    return None if state is not None and quota._key_billed(provider) else state
+
+
+def _windows_state(provider: str, model: str | None, now: float, entry: dict) -> Health | None:
     q = quota.get(provider, now=now)
     if q is None:
         return None
@@ -245,6 +274,7 @@ def _quota_state(provider: str, model: str | None, now: float, entry: dict) -> H
         return Health(LIMITED, w.resets_at, f"{label} {w.name} limit reached" if w.name
                       else f"{label} limit reached")
     notice = (_num(entry.get("notice_at")) or 0) > now - NOTICE_SECONDS
+    throttled = (_num(entry.get("rate_limited_at")) or 0) > now - NOTICE_SECONDS
     readings = [r for r in entry.get("readings", []) if isinstance(r, list) and len(r) == 3]
     projected = _projected_full(readings, now)
     # Each window on its own: one that lifts within CLOSING_MIN_RESET_SECONDS
@@ -253,9 +283,20 @@ def _quota_state(provider: str, model: str | None, now: float, entry: dict) -> H
         if w.resets_at is None or w.resets_at - now <= CLOSING_MIN_RESET_SECONDS:
             continue
         tracked = w.name is None and projected and readings[-1][2] == w.resets_at
-        if notice or w.used >= CLOSING_PERCENT or tracked:
+        if (notice or w.used >= CLOSING_PERCENT or tracked
+                or (throttled and w.used >= RATE_LIMIT_CLOSING_PERCENT)):
             return Health(CLOSING, w.resets_at, f"{label} close to its limit ({w.used:.0f}%)")
     return None
+
+
+def closing(provider: str, model: str | None = None, *, now: float | None = None) -> Health | None:
+    """``provider``'s (or ``model``'s) ``closing`` state, or None. Unlike
+    ``limit``, a rate limit or error run doesn't mask it: a worker should
+    save its work whatever else is going on."""
+    now = _clock() if now is None else now
+    entry = _load().get(_key(provider))
+    q = _quota_state(provider, model, now, entry if isinstance(entry, dict) else {})
+    return q if q is not None and q.state == CLOSING else None
 
 
 def limit(provider: str, model: str | None = None, *, now: float | None = None) -> Health:

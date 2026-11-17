@@ -30,7 +30,12 @@ terminal event its reviewers' (``review_cost_usd``, likewise),
 ``queue_seconds``, ``idle_seconds``, ``stalled`` and, when it produced nothing
 usable, ``failure`` ("no_report", "idle" or "no_commits"). These newer fields
 (``SIGNAL_KEYS``) go only to a server whose replies said ``"signals": 1`` or
-more; an older one gets exactly the earlier payload. To such a server a
+more; an older one gets exactly the earlier payload. A worker removed
+unmerged (or a reviewer ended without a verdict) while stopped for a provider
+cause is never a "removed_unmerged", "no_verdict" or failure: to a server at
+``"signals": 2`` it is an "interrupted" event with its ``cause``, and to an
+older one nothing at all; at that level a merge also carries ``handovers``
+and ``handed_from`` (the profile it took over from). To such a server a
 suggest also carries the routing goal's ``weights`` ({cost, speed,
 first_try}, after the org clamp; see :mod:`brindle.routing_goal`) when one is
 set, else ``BALANCED_WEIGHTS``. Never task text,
@@ -71,11 +76,12 @@ FORBIDDEN_BACKOFF = 600.0      # after a 403, don't ask again for this long
 ERROR_BACKOFF = 60.0           # after a transport error or a 429
 DAILY_LIMIT_BACKOFF = 3600.0   # after the repo's daily event cap
 WEIGHTS = ("light", "medium", "heavy", "advanced")
-EVENTS = ("reported", "review", "escalated", "merged", "removed_unmerged", "verdict", "no_verdict")
+EVENTS = ("reported", "review", "escalated", "merged", "removed_unmerged", "verdict", "no_verdict",
+          "interrupted")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 MAX_CANDIDATES = 16
 
-TERMINAL = ("merged", "removed_unmerged", "verdict", "no_verdict")
+TERMINAL = ("merged", "removed_unmerged", "verdict", "no_verdict", "interrupted")
 WORKER_TERMINAL = ("merged", "removed_unmerged")
 
 RECORD_KEYS = frozenset({"org_id", "key_id", "repo_key", "agent_ref", "profile", "weight", "features", "event",
@@ -83,12 +89,17 @@ RECORD_KEYS = frozenset({"org_id", "key_id", "repo_key", "agent_ref", "profile",
                          "wall_seconds", "baseline_profile", "learned", "cost_rank",
                          "baseline_cost_rank", "parts", "files_declared", "cost_usd",
                          "review_cost_usd", "queue_seconds", "idle_seconds", "failure",
-                         "stalled"})
+                         "stalled", "cause", "handovers", "handed_from"})
 # Sent only to a server that said (``"signals": 1`` or more in a 200 reply) it
 # takes them: an older one rejects unknown keys.
 SIGNAL_KEYS = frozenset({"parts", "files_declared", "cost_usd", "review_cost_usd", "queue_seconds",
                          "idle_seconds", "failure", "stalled"})
 SIGNALS_VERSION = 1
+# The "interrupted" event and these keys go only to a server at ``"signals": 2``
+# or more; an older one hears nothing of a provider stop.
+STOP_KEYS = frozenset({"cause", "handovers", "handed_from"})
+STOP_SIGNALS = 2
+CAUSES = ("limit", "rate_limited", "signed_out", "provider_error", "not_installed")
 GOAL_KEYS = ("cost", "speed", "first_try")     # suggest's ``weights``, in TaskInfo.weights' order
 BALANCED_WEIGHTS = (0.45, 0.25, 0.30)          # what learning aims for when no routing goal is set
 FAILURES = ("no_report", "idle", "no_commits")
@@ -188,16 +199,24 @@ def ticket_size(task: TaskInfo) -> dict[str, int]:
 
 def record_payload(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
                    review_rounds: int = 0, escalations: int = 0, decision=None,
-                   cost=None, signals: bool = False) -> dict | None:
+                   cost=None, signals: int = 0) -> dict | None:
     """The exact body of ``POST /learning/record``, or None if it can't be
     sent without leaking (e.g. a profile name that isn't a plain identifier).
     On a terminal event, ``decision`` (this worker's local routing decision:
     ``baseline_profile`` and ``learned``) and ``cost`` (profile name -> rank)
     add the four coarse savings fields; without either they are omitted.
-    ``SIGNAL_KEYS`` are included only with ``signals`` (the server takes them)."""
+    ``signals`` is the level the server said it takes: ``SIGNAL_KEYS`` go
+    from ``SIGNALS_VERSION``, an "interrupted" event and ``STOP_KEYS`` from
+    ``STOP_SIGNALS`` (below it an "interrupted" event is sent as nothing)."""
+    level = int(signals)
+    if outcome.event == "interrupted" and level < STOP_SIGNALS:
+        return None
     body = _record_body(key, identity, task, outcome, review_rounds, escalations, decision, cost)
-    if body is not None and not signals:
+    if body is not None and level < SIGNALS_VERSION:
         for k in SIGNAL_KEYS:
+            body.pop(k, None)
+    if body is not None and level < STOP_SIGNALS:
+        for k in STOP_KEYS:
             body.pop(k, None)
     return body
 
@@ -225,6 +244,16 @@ def _record_body(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
         body["agent_ref"] = key.agent_ref(task.agent_id)
     if outcome.event in ("review", "verdict") and isinstance(outcome.approved, bool):
         body["approved"] = outcome.approved
+    if outcome.event == "interrupted":
+        cause = getattr(outcome, "cause", None)
+        if cause not in CAUSES:
+            return None
+        body["cause"] = cause
+    handovers = _count(getattr(outcome, "handovers", 0), 50)
+    handed_from = getattr(outcome, "handed_from", None)
+    if (outcome.event == "merged" and handovers and isinstance(handed_from, str)
+            and PROFILE_RE.match(handed_from)):
+        body.update(handovers=handovers, handed_from=handed_from)
     if outcome.event in TERMINAL:
         dollars = _dollars(getattr(outcome, "cost_usd", None))
         if dollars is not None:
@@ -319,8 +348,8 @@ class CloudLearner(LearningPlugin):
         self._org_override = org
         self._identity: str | None = None
         self._backoff_until = 0.0
-        # whether this server said it takes SIGNAL_KEYS; until it does, send today's payload
-        self.signals = False
+        # the signals level this server said it takes (0: none yet); until it says, send today's payload
+        self.signals = 0
         self._lock = threading.Lock()
         self._counts: dict[str, list[int]] = {}      # agent id -> [review rounds, escalations]
         self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_SIZE)
@@ -387,8 +416,8 @@ class CloudLearner(LearningPlugin):
             self.keys.note_key_id(org, resp.get("key_id"))
         if status == 200:
             level = resp.get("signals") if isinstance(resp, dict) else None
-            self.signals = (isinstance(level, int) and not isinstance(level, bool)
-                            and level >= SIGNALS_VERSION)
+            self.signals = (max(0, level) if isinstance(level, int) and not isinstance(level, bool)
+                            else 0)
             return resp
         if status == 409 and resp.get("error") in ("stale_key", "key_rotated"):
             self.keys.note_key_id(org, resp.get("key_id") or "")

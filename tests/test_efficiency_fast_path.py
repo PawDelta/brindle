@@ -104,12 +104,14 @@ def test_small_request_merges_after_one_light_review_and_the_checks(db, repo, se
 
 def test_fast_path_routing_never_falls_through_to_a_heavy_worker(db, repo, session, monkeypatch):
     """The medium tier's list ends in developer-heavy: with the cheaper
-    candidates out, real routing must still not hand a fast-path task to it."""
+    candidates out, real routing must still not hand a fast-path task to it:
+    with nothing at or under medium able to run, it refuses."""
     session(fast_path=True)
     monkeypatch.setattr(autopilot, "_unavailable",
                         lambda name, *a, **k: None if name == "developer-heavy" else "not installed")
-    _reply, worker_id = assign(db, repo, weight="medium", done_when="app.py prints hello", fast_path=True)
-    assert autopilot.profile_weight(db.get_agent(worker_id).profile, None, str(repo)) in ("light", "medium")
+    reply = asyncio.run(mcp_server.assign(task="Fix the typo", weight="medium", done_when="app.py prints hello",
+                                          fast_path=True))
+    assert "under max_weight 'medium'" in reply and db.list_tasks(str(repo)) == []
 
 
 @pytest.mark.parametrize("kw", [

@@ -71,18 +71,18 @@ def install(monkeypatch, plugin):
     monkeypatch.setattr(pro_learning, "CloudLearner", lambda repo_root: plugin)
 
 
-@pytest.mark.parametrize("names", [
-    ["missing-worker", "developer"],
-    pytest.param(["missing-worker"], marks=pytest.mark.variant("failure path: an entirely missing routing tier falls back to the default agent and remains a doctor warning")),
+@pytest.mark.parametrize("names,expected", [
+    (["missing-worker", "developer"], "developer"),
+    pytest.param(["missing-worker"], "developer-codex", marks=pytest.mark.variant("failure path: an entirely missing routing tier cascades to the next heavier tier and remains a doctor warning")),
 ])
-def test_unknown_routing_profiles_are_skipped_and_reported(db, repo, boss, names):
+def test_unknown_routing_profiles_are_skipped_and_reported(db, repo, boss, names, expected):
     path = user_config_path()
     path.write_text(json.dumps({"routing": {"light": names}}))
     why = []
-    assert choose(db, repo, weight="light", why=why) == ("developer", False)
+    assert choose(db, repo, weight="light", why=why) == (expected, False)
     assert f"no profile missing-worker in {path}, skipped missing-worker" in why[0]
     if len(names) == 1:
-        assert "every light candidate was out" in why[0] and "using developer" in why[0]
+        assert "every light candidate was out" in why[0]
     [check] = [c for c in doctor.routing_checks(load_repo_config(repo), str(repo))
                if c.name == "routing light"]
     assert check.level == doctor.WARN
@@ -169,12 +169,25 @@ def test_learning_plugin_reorders_the_remaining_candidates(db, repo, boss, monke
     assert choose(db, repo, weight="medium") == ("developer-sonnet", True)
 
 
-def test_all_out_falls_back_to_the_default_agent_and_says_why(db, repo, boss, monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda cli: None)
-    config(repo, default_agent="reviewer")
-    why = []
-    assert choose(db, repo, weight="heavy", why=why) == ("reviewer", False)
-    assert "every heavy candidate was out" in why[0] and "using reviewer" in why[0]
+@pytest.mark.parametrize("pinned", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant(
+        "a pinned tier that can't run must refuse, not escape the pin through default_agent")),
+])
+def test_an_exhausted_cascade_refuses_and_says_why(db, repo, boss, monkeypatch, pinned):
+    if pinned:   # medium pinned to Sonnet, which can't run; everything else could
+        unavailable = autopilot._unavailable
+        monkeypatch.setattr(autopilot, "_unavailable", lambda name, *args: "unavailable"
+                            if name == "developer-sonnet" else unavailable(name, *args))
+        config(repo, default_agent="developer-codex", routing={"medium": ["developer-sonnet"]},
+               routing_locked={"medium": True})
+    else:
+        monkeypatch.setattr("shutil.which", lambda cli: None)
+        monkeypatch.setattr(quota, "headroom",
+                            lambda provider, cfg=None, repo_root=None: 0.0 if provider == "native" else 100.0)
+        config(repo, default_agent="reviewer")
+    with pytest.raises(autopilot.AutopilotError, match="every (medium|heavy) candidate was out"):
+        choose(db, repo, weight="medium" if pinned else "heavy")
 
 
 def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monkeypatch):

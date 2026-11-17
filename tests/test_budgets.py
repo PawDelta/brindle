@@ -77,7 +77,8 @@ def test_the_goals_spend_counts_toward_goal_usd(db, repo, boss):
 
 
 def test_nothing_fits_refuses_and_asks_the_user(db, repo, boss):
-    config(repo, budget={"task_usd": 0.1})
+    # A pinned tier is the whole pool: the cascade has nothing else to try.
+    config(repo, budget={"task_usd": 0.1}, routing_locked={"medium": True})
     with pytest.raises(autopilot.AutopilotError) as e:
         choose(db, repo)
     assert "over budget" in str(e.value) and "Raise `budget`" in str(e.value)

@@ -48,6 +48,7 @@ export const KIND_LABEL: Record<string, string> = {
   plan_offer: "Plan first?",
   provider_switch: "Provider switch",
   provider_switch_back: "Provider switch",
+  handover: "Provider ran out",
 };
 
 /* What the app can repair itself for a `setup` item, by its `fix` (engine
@@ -91,6 +92,7 @@ export const KIND_SHORT: Record<string, string> = {
   plan_offer: "plan first?",
   provider_switch: "provider",
   provider_switch_back: "provider",
+  handover: "handover",
 };
 
 /* An item whose card opens a visual in its reader. */

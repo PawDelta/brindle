@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -448,7 +449,7 @@ def test_a_demo_held_by_its_preflight_keeps_its_repo_until_settled_or_cancelled(
     pytest.param("repo", {"reviewer": "reviewer"}, 310, 403, {},
                  marks=pytest.mark.variant("an agent holding the token still can't change routing")),
 ], ids=["user", "user-kind", "repo", "bad-profile", "agent"])
-def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body, peer_pid, status, written):
+def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, tmp_path, scope, body, peer_pid, status, written):
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent w1")
     config.set_user("routing", {"heavy": ["developer"], "advanced": ["developer-heavy"],
                                 "reasoning": ["developer-fable"]})
@@ -460,9 +461,16 @@ def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body,
     after = config._read_json(config.scope_paths(str(repo))[scope])
     assert after == ({k: v for k, v in before.items() if k != "routing_light"} | written if written else before)
     if "exclude_providers" in written:
-        # The light candidate and the default agent both run on claude: routing refuses, not falls back.
-        with pytest.raises(autopilot.AutopilotError, match="excluded from routing"):
-            autopilot.choose_profile(db, "sup", str(repo), weight="light")
+        # The light candidate runs on claude: the cascade replaces it with one on another provider.
+        # Only claude and a codex stub are installed, whatever the machine has (CI has neither).
+        codex = tmp_path / "clis" / "codex"
+        codex.parent.mkdir()
+        codex.write_text("#!/bin/sh\nexit 1\n")
+        codex.chmod(0o755)
+        monkeypatch.setenv("PATH", os.pathsep.join([str(codex.parent), os.path.dirname(shutil.which("claude")),
+                                                    "/usr/bin", "/bin"]))
+        name, _ = autopilot.choose_profile(db, "sup", str(repo), weight="light")
+        assert agents.load_profile(name, str(repo)).provider != "claude"
 
 
 def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_reports_it(db, repo, world, monkeypatch):

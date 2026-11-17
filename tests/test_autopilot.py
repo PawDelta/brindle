@@ -666,7 +666,6 @@ def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
     ap = db.get_autopilot("boss")
     assert ap.state == "running" and ap.audit_ok == 0
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
-    monkeypatch.setattr(autopilot, "over_limit", lambda *a: False)
     block = autopilot.on_stop(db, agent, {})
     assert block["decision"] == "block" and "completion audit" in block["reason"]
     assert "the UI never calls the API" in block["reason"]
@@ -723,7 +722,6 @@ def test_approval_of_an_older_commit_keeps_the_goal_open(db, root, repo, monkeyp
     assert "isn't reached" in out and "Tell the user" not in out
     assert db.get_autopilot("boss").state == "running"
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
-    monkeypatch.setattr(autopilot, "over_limit", lambda *a: False)
     assert autopilot.on_stop(db, agent, {})["decision"] == "block"
     autopilot.check_milestones(db, "boss", ws)
     assert db.get_autopilot("boss").state == "auditing"   # the new commit gets its own audit
@@ -750,7 +748,6 @@ def test_auditor_grace_keeps_an_auditor_whose_window_is_not_up_yet(db, root, rep
     monkeypatch.setattr(agents, "spawn", spawn)
     autopilot.start_audit(db, "boss", ws)
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
-    monkeypatch.setattr(autopilot, "over_limit", lambda *a: False)
     autopilot.on_stop(db, agent, {})
     if launch == "failed":
         assert db.get_autopilot("boss").auditor_id is None
@@ -760,20 +757,6 @@ def test_auditor_grace_keeps_an_auditor_whose_window_is_not_up_yet(db, root, rep
     monkeypatch.setattr(agents, "close_later", lambda *a, **k: None)
     agents.submit_review(db, "audit1", True, "all there")
     assert db.get_autopilot("boss").state == "done"
-
-
-def test_usage_limit_pauses_autopilot(db, root, monkeypatch):
-    from brindle import subscription_usage
-
-    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
-    agent, _ = root
-    with_goal(db)
-    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    autopilot.record_usage({"rate_limits": {"five_hour": {"used_percentage": 93, "resets_at": None}}})
-    assert autopilot.usage()["used"] == 93
-    assert autopilot.on_stop(db, agent, {}) is None
-    ap = db.get_autopilot("boss")
-    assert ap.state == "blocked" and "93%" in ap.note
 
 
 def test_rate_limit_failure_runs_the_supervisor_turn_again(db, root):
@@ -901,7 +884,6 @@ def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
     # 1. State is auditing, but auditor agent does not exist or died
     db.update_autopilot("boss", state="auditing", auditor_id="dead_auditor", audit_sha=head_sha)
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
-    monkeypatch.setattr(autopilot, "over_limit", lambda *a: False)
 
     # on_stop should detect dead auditor, reset state to running, and block stop to nudge supervisor
     block = autopilot.on_stop(db, agent, {})

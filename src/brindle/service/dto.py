@@ -249,6 +249,12 @@ class InboxActionDTO(_DTO):
     path: str
 
 
+class InboxChoiceDTO(_DTO):
+    """One answer a card offers: posted to its ``action`` as ``{"choice": id}``."""
+    id: str
+    label: str
+
+
 class PlanOfferMilestoneDTO(_DTO):
     title: str
     verified: bool
@@ -280,6 +286,7 @@ class InboxItemDTO(_DTO):
     fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
+    choices: list[InboxChoiceDTO] | None = None   # a handover card's answers, each posted to ``action``
     visual_id: str | None = None   # a visual's open question: GET /v1/sessions/{root_id}/visuals
     plan_offer: PlanOfferDTO | None = None
     url: str | None = None         # a pr_opened item's: the open PR on GitHub

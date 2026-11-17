@@ -419,6 +419,31 @@ describe("inbox", () => {
     }
   });
 
+  it("a handover card answers with one of its own choices, once", async () => {
+    const item: InboxItemDTO = { kind: "handover", reason: "Its provider ran out a third time, after 2 handovers", agent_id: "w1", workspace_id: worker.id, root_id: "sup1", request_id: "h1",
+      action: { method: "POST", path: "/v1/handovers/h1" },
+      choices: [{ id: "continue", label: "Continue on developer-opencode" }, { id: "wait", label: "Wait for its provider" }, { id: "stop", label: "Stop" }] };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [item] });
+    const client = daemon.client();
+    const answered: unknown[] = [];
+    const actionClient = new DaemonClient({ baseUrl: client.baseUrl, token: client.token, fetch: async (input, init) => {
+      if (String(input).endsWith("/v1/handovers/h1")) {
+        answered.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ done: "started" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return daemon.fetch(input, init);
+    } });
+    mount(daemon, actionClient);
+    const row = await waitFor(() => { expect(card("handover")).toBeTruthy(); return card("handover"); });
+    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(expect.arrayContaining(["Continue on developer-opencode", "Wait for its provider", "Stop"]));
+    act(() => {
+      const wait = within(row).getByRole("button", { name: "Wait for its provider" });
+      fireEvent.click(wait);
+      fireEvent.click(wait);
+    });
+    await waitFor(() => expect(answered).toEqual([{ choice: "wait" }]));
+  });
+
   it("starts a sign-in from its card", async () => {
     // As the engine's permission-items branch emits a lapsed sign-in: no detail, the sign-in route named on the
     // item; the worker is on Codex (its record), so the sign-in must be Codex's, never Claude's.

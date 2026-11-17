@@ -159,7 +159,25 @@ def check_assign(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode:
                  running_workers: int | None = None) -> Decision:
     """The plugin's decision on starting ``task`` with ``profile`` (allow
     without a plugin). In air-gap mode (``brindle.airgap``) only a local
-    profile gets as far as the plugin."""
+    profile gets as far as the plugin. A denial is audited."""
+    d = assign_decision(cfg, repo_root, profile, task, mode, files=files, weight=weight, branch=branch,
+                        actor=actor, running_workers=running_workers)
+    if not d.allowed:              # an air-gap refusal is audited like any other denial
+        from brindle import events
+
+        provider, model = _profile_fields(profile, repo_root)
+        events.emit_denial(cfg, repo_root, "assign", d.reason, branch=branch, profile=profile,
+                           provider=provider, model=model, actor=actor.id if actor else "user")
+    return d
+
+
+def assign_decision(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode: str, *,
+                    files: list[str] | None = None, weight: str | None = None,
+                    branch: str | None = None, actor: Agent | None = None,
+                    running_workers: int | None = None) -> Decision:
+    """``check_assign``'s decision without auditing it: routing asks it of
+    each candidate it weighs (brindle.cascade), and only the delegation that
+    actually starts (or is refused) is audited."""
     from brindle import airgap
 
     provider, model = _profile_fields(profile, repo_root)
@@ -168,19 +186,11 @@ def check_assign(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode:
         profile=profile, provider=provider, model=model, mode=mode, branch=branch,
         actor=actor.id if actor else "user", running_workers=running_workers,
     )
-    d = allow()
     if airgap.enabled(cfg):
         ok, why = airgap.check_profile(profile, repo_root)
         if not ok:
-            d = deny(why)
-    if d.allowed:
-        d = _decide("delegation", cfg, repo_root, lambda p: p.check_assign(info))
-    if not d.allowed:              # an air-gap refusal is audited like any other denial
-        from brindle import events
-
-        events.emit_denial(cfg, repo_root, "assign", d.reason, branch=branch, profile=profile,
-                           provider=provider, model=model, actor=info.actor)
-    return d
+            return deny(why)
+    return _decide("delegation", cfg, repo_root, lambda p: p.check_assign(info))
 
 
 def worker_agents(db: DB, repo_root: str) -> list[Agent]:
