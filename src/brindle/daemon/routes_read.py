@@ -177,9 +177,11 @@ def _still_a_repo(root: str, now: float) -> bool:
 def repos(db: DB, request: Request) -> Any:
     """The person's projects, most recently used first: each repo brindle has
     worked in that is still a git repo on disk. A repo in a system temp folder
-    and a scratch session are listed only while a session runs there (by the
-    DB's say: no git or tmux on this path). brindle's own repos (practice runs)
-    are listed as before, flagged ``demo``."""
+    and a scratch session are listed only while a session runs there: its
+    chat's pane is up and still its own, as sessions.live judges it, from the
+    tmux look GET /sessions shares (no git on this path, and tmux only when
+    such a repo has a chat that may be running). brindle's own repos
+    (practice runs) are listed as before, flagged ``demo``."""
     from brindle import scratch
     from brindle.config import brindle_home
     from brindle.demo import is_demo_repo
@@ -187,15 +189,26 @@ def repos(db: DB, request: Request) -> Any:
     now = time.monotonic()
     home = str(brindle_home()).rstrip("/") + "/"
     scratch_root = str(scratch.scratch_dir()).rstrip("/") + "/"
+    look: list = []
+
+    def running(chats: list[str]) -> bool:
+        if not chats:
+            return False
+        if not look:
+            look.extend(_shared_panes(db))
+        panes, owners = look
+        return any(a is not None and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)
+                   for a in map(db.get_agent, chats))
+
     listed = []
-    for root, (used, live) in db.repo_activity().items():
+    for root, (used, chats) in db.repo_activity().items():
         mine = root.startswith(home)      # brindle's own (practice runs, scratch), wherever its home is
         if root.startswith(scratch_root):
-            keep = live
+            keep = running(chats)
         elif not _still_a_repo(root, now):
             keep = False
         else:
-            keep = live or mine or not root.startswith(TEMP_ROOTS)
+            keep = mine or not root.startswith(TEMP_ROOTS) or running(chats)
         if keep:
             listed.append((used, root))
     listed.sort(key=lambda u: (-u[0], u[1]))
@@ -783,18 +796,18 @@ def providers_installed(db: DB, request: Request) -> Any:
 
 # GET /providers/usable answers from the last full answer for the repo: telling
 # whether each CLI is signed in runs the CLI (a second or more for them all),
-# which the New session page must not wait on. An answer older than
-# USABLE_FRESH, or the first one (told without running any CLI), is worked out
-# again on a thread of its own; one that changes is published as a
-# "providers.usable" event, and the page asks again.
-USABLE_FRESH = 30.0
+# which the New session page must not wait on. Each ask has the answer worked
+# out again on a thread of its own (the first answer is told without running
+# any CLI); one that changes is published as a "providers.usable" event, and
+# the page asks again.
 
 
 @dataclasses.dataclass
 class _UsableCache:
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
-    answers: dict[str, tuple[dict, float]] = dataclasses.field(default_factory=dict)   # repo → (answer, when)
+    answers: dict[str, dict] = dataclasses.field(default_factory=dict)   # repo → its last answer
     refreshing: set[str] = dataclasses.field(default_factory=set)
+    again: set[str] = dataclasses.field(default_factory=set)       # asked for while one ran
 
 
 _usable_cache = _UsableCache()
@@ -810,9 +823,12 @@ def _usable_answer(db: DB, repo: str) -> dict:
 
 
 def _refresh_usable(repo: str) -> None:
-    """Work ``repo``'s answer out again in the background, unless that already runs."""
+    """Work ``repo``'s answer out again in the background. While one already
+    runs (it may have begun before a sign-in this ask is about), one more
+    follows it: never more than one running and one waiting."""
     with _usable_cache.lock:
         if repo in _usable_cache.refreshing:
+            _usable_cache.again.add(repo)
             return
         _usable_cache.refreshing.add(repo)
     _start_usable_refresh(repo)
@@ -833,8 +849,8 @@ def _run_usable_refresh(repo: str) -> None:
             answer = _usable_answer(db, repo)
             with _usable_cache.lock:
                 before = _usable_cache.answers.get(repo)
-                _usable_cache.answers[repo] = (answer, time.monotonic())
-            if before is None or before[0] != answer:
+                _usable_cache.answers[repo] = answer
+            if before != answer:
                 bus.publish(db, "providers.usable", repo_root=repo, **answer)
         finally:
             db.conn.close()
@@ -842,7 +858,12 @@ def _run_usable_refresh(repo: str) -> None:
         log.debug("brindle: refreshing the usable CLIs for %s failed", repo, exc_info=True)
     finally:
         with _usable_cache.lock:
-            _usable_cache.refreshing.discard(repo)
+            follow = repo in _usable_cache.again
+            _usable_cache.again.discard(repo)
+            if not follow:
+                _usable_cache.refreshing.discard(repo)
+        if follow:      # still marked running: the waiting one goes now
+            _start_usable_refresh(repo)
 
 
 @_json
@@ -852,7 +873,7 @@ def providers_usable(db: DB, request: Request) -> Any:
     each CLI that is installed, signed in, turned on and allowed by the org's
     policy, in preference order, and ``default``, the one a start with no
     provider runs on (null when none is usable: such a start is refused).
-    Answered at once from the last answer (see USABLE_FRESH): no CLI runs here."""
+    Answered at once from the last answer, re-checked behind the reply: no CLI runs here."""
     from brindle import providers
 
     repo = _need_repo(request)
@@ -864,13 +885,15 @@ def providers_usable(db: DB, request: Request) -> Any:
         with providers.no_sign_in_probes():
             answer = _usable_answer(db, repo)
         with _usable_cache.lock:
-            _usable_cache.answers.setdefault(repo, (answer, -math.inf))
+            _usable_cache.answers.setdefault(repo, answer)
         _refresh_usable(repo)
         return answer
-    answer, at = got
-    if time.monotonic() - at > USABLE_FRESH:
-        _refresh_usable(repo)
-    return answer
+    # Every ask has it worked out again behind the reply (one at a time per repo): a sign-in,
+    # an install or a CLI turned on since tells nothing brindle watches, and the page asks only
+    # when it opens or hears the answer changed. A CLI signed in stays told (providers.SIGNED_IN_TTL),
+    # so the check behind a page that opens again and again is mostly free.
+    _refresh_usable(repo)
+    return got
 
 
 @_json

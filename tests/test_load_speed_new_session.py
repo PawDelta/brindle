@@ -44,39 +44,56 @@ def _get(path: str, **query: str) -> tuple[int, object]:
     return asyncio.run(ask())
 
 
-def _chat(db, ws: Workspace, agent_id: str, status: str = "running", created: float = 0.0) -> Agent:
-    agent = Agent(agent_id, ws.id, "supervisor", "claude", None, "interactive", status, "%1", None,
+def _chat(db, ws: Workspace, agent_id: str, status: str = "running", created: float = 0.0,
+          pane: str = "%1") -> Agent:
+    agent = Agent(agent_id, ws.id, "supervisor", "claude", None, "interactive", status, pane, None,
                   created or time.time(), tmux_server=tmux.current_server())
     db.add_agent(agent)
     return agent
 
 
+def _panes(up: set[str]):
+    snap = tmux.PaneSnapshot(tmux.current_server())
+    snap.update({p: True for p in up})
+    return snap
+
+
 def test_project_list_leaves_out_gone_and_temp_repos_unless_a_session_runs_there(db, tmp_path, monkeypatch):
     temp = tmp_path / "T"
     monkeypatch.setattr(routes_read, "TEMP_ROOTS", (f"{temp}/",), raising=False)
+    up = {"%2", "%3", "%5"}
+    monkeypatch.setattr(tmux, "list_panes", lambda server=None: _panes(up))
 
-    def project(path, used, *, on_disk=True, live=False) -> str:
+    def project(path, used, *, on_disk=True, chat=None) -> str:
         if on_disk:
             (path / ".git").mkdir(parents=True)
         ws = Workspace(f"{path.name}/root", str(path), "root", "root", "main", "main", str(path), None,
                        f"brindle-{path.name}", used)
         db.add_workspace(ws)
-        if live:
-            _chat(db, ws, f"chat-{path.name}", created=used)
+        if chat:
+            _chat(db, ws, f"chat-{path.name}", status=chat[0], created=used, pane=chat[1])
         return str(path)
 
     old = project(tmp_path / "projects" / "old", 1.0)
     new = project(tmp_path / "projects" / "new", 3.0)
     project(tmp_path / "projects" / "gone", 5.0, on_disk=False)       # deleted since
     project(temp / "bench-idle", 6.0)                                 # a benchmark's, nothing running
-    bench = project(temp / "bench-live", 2.0, live=True)              # a temp repo with a session running
+    bench = project(temp / "bench-live", 2.0, chat=("running", "%2"))   # a temp repo with a session running
+    # Its chat marked failed (a brief not confirmed) while its pane still runs: running.
+    failing = project(temp / "bench-failing", 2.5, chat=("failed", "%3"))
+    project(temp / "bench-ended", 2.7, chat=("running", "%4"))        # its pane is gone, its row not yet updated
     project(scratch.scratch_dir() / "idle", 7.0, on_disk=False)       # a scratch session, paused
-    live_scratch = project(scratch.scratch_dir() / "live", 0.5, on_disk=False, live=True)
+    live_scratch = project(scratch.scratch_dir() / "live", 0.5, on_disk=False, chat=("running", "%5"))
 
-    code, listed = _get("/v1/repos")
-    assert code == 200
+    def listed() -> list[str]:
+        code, rows = _get("/v1/repos")
+        assert code == 200
+        return [r["repo_root"] for r in rows]
+
     # Most recently used first.
-    assert [r["repo_root"] for r in listed] == [new, bench, old, live_scratch]
+    assert listed() == [new, failing, bench, old, live_scratch]
+    up.discard("%3")        # that session's chat exits
+    assert listed() == [new, bench, old, live_scratch]
 
 
 def test_new_session_page_reads_run_no_git_or_cli_and_share_one_tmux_look(db, repo, monkeypatch):
@@ -100,8 +117,7 @@ def test_new_session_page_reads_run_no_git_or_cli_and_share_one_tmux_look(db, re
 
     monkeypatch.setattr(tmux, "list_panes", list_panes)
     monkeypatch.setattr(routes_read, "PANE_VIEW_MAX_AGE", math.inf, raising=False)
-    monkeypatch.setattr(routes_read, "USABLE_FRESH", math.inf, raising=False)
-    answers, asked, refreshes = [["claude"]], [], []
+    answers, asked, refreshes = [[]], [], []
 
     def usable(root):
         asked.append((root, providers.probing()))
@@ -120,14 +136,26 @@ def test_new_session_page_reads_run_no_git_or_cli_and_share_one_tmux_look(db, re
     assert [r["id"] for r in _get("/v1/sessions", repo=root)[1]] == ["chat1"] and len(looks) == 2
 
     # The CLIs: answered without running one, then worked out behind the reply.
-    assert _get("/v1/providers/usable", repo=root) == (200, {"usable": ["claude"], "default": "claude"})
-    assert asked == [(root, False)] and refreshes == [root]
-    answers.append(["codex", "claude"])          # signed in to Codex meanwhile
-    routes_read._run_usable_refresh(root)        # what the background thread runs
-    assert asked[-1] == (root, True)
-    assert [e["payload"]["usable"] for e in bus.tail(db, kinds=("providers.usable",))] == [["codex", "claude"]]
-    assert _get("/v1/providers/usable", repo=root) == (200, {"usable": ["codex", "claude"], "default": "codex"})
-    assert len(asked) == 2 and refreshes == [root]      # a fresh answer is served as is
+    def usable_now():
+        return _get("/v1/providers/usable", repo=root)[1]["usable"]
+
+    def published():
+        return [e["payload"]["usable"] for e in bus.tail(db, kinds=("providers.usable",))]
+
+    assert usable_now() == [] and asked == [(root, False)] and refreshes == [root]
+    routes_read._run_usable_refresh(root)        # what the background thread runs: nothing changed
+    assert asked[-1] == (root, True) and published() == []
+    # Signed in to Codex in Settings, back on New session a moment later: told at once from
+    # the last answer, and checked again behind it.
+    answers.append(["codex"])
+    assert usable_now() == [] and refreshes == [root, root]
+    assert usable_now() == [] and refreshes == [root, root]     # asked again meanwhile: one more waits
+    routes_read._run_usable_refresh(root)
+    assert published() == [["codex"]]            # the page hears it and asks again
+    assert refreshes == [root, root, root]       # and the waiting check follows the one that ran
+    routes_read._run_usable_refresh(root)
+    assert published() == [["codex"]]            # the same answer again says nothing
+    assert _get("/v1/providers/usable", repo=root) == (200, {"usable": ["codex"], "default": "codex"})
     assert ran == []
 
 
