@@ -1147,10 +1147,28 @@ def doctor(
 APP_DOWNLOAD_URL = "https://github.com/PawDelta/brindle-app/releases"
 
 
+def _app_bundle() -> str | None:
+    """The brindle.app to open on macOS: the one holding this engine, else the installed copy."""
+    m = re.match(r"(.*\.app)/Contents/Resources/engine(/|$)", sys.executable)
+    if m:
+        return m.group(1)
+    for path in ("/Applications/brindle.app", os.path.expanduser("~/Applications/brindle.app")):
+        if os.path.isdir(path):
+            return path
+    return None
+
+
 @app.command("app")
 def app_cmd() -> None:
     """Open the brindle desktop app, or print where to download it."""
-    cmd = ["open", "-a", "brindle"] if sys.platform == "darwin" else ["xdg-open", "brindle://"]
+    if sys.platform == "darwin":
+        bundle = _app_bundle()
+        if bundle is None:
+            typer.echo(f"the brindle app isn't installed. Download it from {APP_DOWNLOAD_URL}")
+            return
+        cmd = ["open", bundle]
+    else:
+        cmd = ["xdg-open", "brindle://"]
     try:
         opened = subprocess.run(cmd, capture_output=True).returncode == 0
     except OSError:
