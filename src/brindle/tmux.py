@@ -925,25 +925,14 @@ def pane_input(pane: str, server: object = _THIS_SERVER) -> float | None:
     input: the person's keys reach tmux before the program in the pane has
     drawn them. Epoch seconds, the latest across those clients; None when no
     client shows it. Raises TmuxError when the server can't be asked.
-    ``server`` as for capture.
-
-    tmux starts a client's activity at its creation, so a client that has
-    had no input since it attached (a viewer the app just opened on a new
-    session's pane) is not counted: it would read as keys pressed and hold
-    the session's start-up prompts back."""
-    proc = _tmux("list-clients", "-F", "#{pane_id}\t#{client_activity}\t#{client_created}",
-                 check=False, server=server)
+    ``server`` as for capture."""
+    proc = _tmux("list-clients", "-F", "#{pane_id}\t#{client_activity}", check=False, server=server)
     if proc.returncode != 0:
         if _NO_SERVER.search(proc.stderr):
             return None
         raise TmuxError(f"tmux list-clients: {proc.stderr.strip()}")
-    times = []
-    for row in (line.split("\t") for line in proc.stdout.splitlines()):
-        if len(row) < 2 or row[0] != pane or not row[1].isdigit():
-            continue
-        if len(row) > 2 and row[2].isdigit() and int(row[1]) <= int(row[2]):
-            continue   # no input since it attached
-        times.append(float(row[1]))
+    rows = (line.split("\t") for line in proc.stdout.splitlines())
+    times = [float(row[1]) for row in rows if len(row) == 2 and row[0] == pane and row[1].isdigit()]
     return max(times) if times else None
 
 

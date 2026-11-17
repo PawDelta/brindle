@@ -3424,6 +3424,8 @@ def _delivery_held(db: DB, agent: Agent | None, waiter: bool = True) -> bool:
 # A chat the person pressed a key in this recently is theirs: a queued message
 # waits for the next flush (a turn's end, the hook's hand-over, or cull's sweep).
 TYPED_WITHIN = 5.0
+# When a start-up delivery the input held back is tried again (see handle_hook's session-start).
+STARTUP_FLUSH_AFTER = TYPED_WITHIN + 1.0
 
 
 class _PasteBlocked(Exception):
@@ -6361,9 +6363,18 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             # the CLI's input box, so it takes input now (agy's warm-up, then
             # its task, would otherwise wait out ready_delay first).
             try:
-                flush(db, agent_id)
+                delivered = flush(db, agent_id)
             except tmux.TmuxError:
-                pass  # stays queued for the next flush
+                delivered = False  # stays queued for the next flush
+            if not delivered and db.pending_count(agent_id):
+                # Held back: keys in its pane lately, or a viewer that just
+                # attached (tmux can't tell the two apart within a second).
+                # A CLI with no turn-end hook would sit without its task until
+                # cull's sweep, so one more flush once that input has gone quiet.
+                from brindle.providers import brindle_invocation
+
+                processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
+                                  str(STARTUP_FLUSH_AFTER)])
         elif db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.
