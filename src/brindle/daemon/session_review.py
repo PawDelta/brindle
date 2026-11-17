@@ -20,14 +20,20 @@ The diff is polled, so its git work is kept: a commit's diff and a merge's
 commits never change, and a session's last result is reused while its
 fingerprint (HEAD, the base refs, the index's mtime, read from git's files
 without starting git) holds. When new commits land only their diffs run, and
-only the files they touched are blamed again. One computation runs per
+only the files they touched are blamed again. Each file's blame is also kept
+on disk as soon as it is found, so a restart, or a computation stopped part
+way, blames only the files it hasn't yet. One computation runs per
 session at a time; who asks meanwhile shares it. Who wrote what is read from
 the db on every ask, so a worker's id is never stale."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import re
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -39,7 +45,7 @@ from typing import Any
 from uuid import uuid4
 
 from brindle import agents, autopilot, bus, gates, git, knowledge, pipeline, session_sync, spawn, status_cache, tasks, workspaces
-from brindle.config import load_repo_config
+from brindle.config import brindle_home, load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
 
@@ -1098,23 +1104,143 @@ def _deleters(ws: Workspace, chain: list[tuple[str, str]], wanted: dict[str, lis
     return found
 
 
+def _untouched_since(shas: list[str], touches: dict[str, frozenset[str]], since: str) -> set[str] | None:
+    """The paths the first-parent commits after ``since`` (in ``shas``,
+    oldest first) touch; None when ``since`` isn't among them or a commit's
+    touches aren't known, so nothing found at ``since`` can be trusted."""
+    if since not in shas:
+        return None
+    after = shas[shas.index(since) + 1:]
+    if not all(sha in touches for sha in after):
+        return None
+    return set().union(*(touches[sha] for sha in after))
+
+
 def _blames(ws: Workspace, mb: str, head: str, chain: list[tuple[str, str]], touches: dict[str, frozenset[str]],
             added: dict[str, tuple[int, ...]], prev: _Facts | None) -> dict[str, tuple[tuple[int, ...], dict[int, str]]]:
     """``_Facts.blamed`` for the files with ``added`` lines. A file that no
     first-parent commit since ``prev``'s HEAD ``touches`` keeps ``prev``'s blame:
     blame hands a file its first parent has unchanged wholly to that parent,
-    so it walks down to ``prev``'s HEAD and finds what it found then."""
+    so it walks down to ``prev``'s HEAD and finds what it found then. What
+    ``prev`` doesn't hold comes from the blames kept on disk (the same rule,
+    from the HEAD each was found at), and each file blamed anew is kept there
+    as soon as it is done: a restart, or a run stopped part way, blames only
+    what it hasn't yet."""
     shas = [sha for sha, _ in chain]
     kept: dict[str, tuple[tuple[int, ...], dict[int, str]]] = {}
-    if (prev is not None and prev.path == ws.path and prev.base_sha == mb and prev.head in shas
-            and all(sha in touches for sha in shas)):
-        touched = set().union(*(touches[sha] for sha in shas[shas.index(prev.head) + 1:]))
-        kept = {path: found for path, found in prev.blamed.items() if path not in touched}
+    if prev is not None and prev.path == ws.path and prev.base_sha == mb:
+        touched = _untouched_since(shas, touches, prev.head)
+        if touched is not None:
+            kept = {path: found for path, found in prev.blamed.items() if path not in touched}
     out = {}
+    need = [path for path, lines in added.items() if (hit := kept.get(path)) is None or hit[0] != lines]
+    blobs = _blobs(ws, mb, head) if need else {}
     for path, lines in added.items():
-        hit = kept.get(path)
-        out[path] = hit if hit is not None and hit[0] == lines else (lines, _blame(ws, mb, head, path, list(lines)))
+        if path not in need:
+            out[path] = kept[path]
+            continue
+        blob = blobs.get(path)
+        hit = _stored_blame(ws, path, blob, mb, lines, shas, touches) if blob else None
+        if hit is None:
+            hit = (lines, _blame(ws, mb, head, path, list(lines)))
+            if blob:
+                _store_blame(ws, path, blob, mb, head, hit)
+        out[path] = hit
     return out
+
+
+# -- blames kept on disk ---------------------------------------------------------
+#
+# A blame is kept per file, keyed by its repo, path, blob at HEAD and the
+# session's merge base, with the HEAD it was found at. It holds at a later
+# HEAD whose first-parent history since then never touched the file: the
+# same rule as reusing the session's last facts, so a revert to an earlier
+# blob, or history rewritten under the same blob, is blamed again.
+
+BLAME_KEEP_SECONDS = 30 * 86400     # a kept blame not written for this long is dropped
+_pruned = False
+
+
+def _blame_dir() -> Path:
+    return brindle_home() / "session-blame"
+
+
+def _blame_file(ws: Workspace, path: str, blob: str, mb: str) -> Path:
+    key = hashlib.sha256("\0".join((ws.repo_root, path, blob, mb)).encode()).hexdigest()
+    return _blame_dir() / key[:2] / f"{key}.json"
+
+
+def _blobs(ws: Workspace, mb: str, head: str) -> dict[str, str]:
+    """Each path ``mb``..``head`` adds or changes -> its blob at ``head``."""
+    tokens = git.run(["-c", "core.quotePath=false", "diff", "--raw", "--no-abbrev", "--no-renames", "-z", mb, head],
+                     ws.path).stdout.split("\0")
+    out = {}
+    for meta, path in zip(tokens[::2], tokens[1::2]):
+        fields = meta.split()
+        if meta.startswith(":") and len(fields) >= 5 and fields[4] != "D":
+            out[path] = fields[3]
+    return out
+
+
+def _stored_blame(ws: Workspace, path: str, blob: str, mb: str, lines: tuple[int, ...], shas: list[str],
+                  touches: dict[str, frozenset[str]]) -> tuple[tuple[int, ...], dict[int, str]] | None:
+    """``path``'s kept blame for ``lines``, when it holds at the HEAD ``shas`` end at."""
+    try:
+        record = json.loads(_blame_file(ws, path, blob, mb).read_text(encoding="utf-8"))
+        if tuple(record["lines"]) != lines:
+            return None
+        touched = _untouched_since(shas, touches, record["head"])
+        if touched is None or path in touched:
+            return None
+        commits = record["commits"]
+        return lines, {n: commits[i] for n, i in zip(lines, record["by"], strict=True) if i >= 0}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
+        log.debug("brindle: ignoring the kept blame of %s: %s", path, e)
+        return None
+
+
+def _store_blame(ws: Workspace, path: str, blob: str, mb: str, head: str,
+                 found: tuple[tuple[int, ...], dict[int, str]]) -> None:
+    """Keep ``found`` (``path``'s blame at ``head``) on disk, replaced into
+    place whole. A blame that can't be kept is only blamed again."""
+    lines, commits = found
+    order = list(dict.fromkeys(commits.values()))
+    index = {sha: i for i, sha in enumerate(order)}
+    record = {"head": head, "lines": list(lines), "commits": order,
+              "by": [index[commits[n]] if n in commits else -1 for n in lines]}
+    target = _blame_file(ws, path, blob, mb)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(record, f, separators=(",", ":"))
+            os.replace(tmp, target)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    except OSError as e:
+        log.debug("brindle: couldn't keep the blame of %s: %s", path, e)
+        return
+    _prune_blames()
+
+
+def _prune_blames() -> None:
+    """Once per process: drop the kept blames not written for
+    ``BLAME_KEEP_SECONDS`` (files since changed, sessions long gone)."""
+    global _pruned
+    if _pruned:
+        return
+    _pruned = True
+    oldest = time.time() - BLAME_KEEP_SECONDS
+    for kept in _blame_dir().glob("*/*.json"):
+        try:
+            if kept.stat().st_mtime < oldest:
+                kept.unlink()
+        except OSError:
+            pass
 
 
 def _compute(ws: Workspace, base: str, fp: _Fingerprint | None, prev: _Facts | None) -> _Facts:

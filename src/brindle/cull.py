@@ -356,6 +356,8 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     decline_environment_setups(db, panes)
     done.extend(settle_startups(db, now, panes))
     done.extend(read_busy_screens(db, panes))
+    # Before note_stuck: a goal loop marks the worker waiting, told once, here.
+    done.extend(note_goal_loops(db, now, panes))
     done.extend(note_stuck(db, now, panes))
     # Before the idle reminder: a stop on an API error is told with its kind.
     done.extend(note_api_errors(db, now, panes))
@@ -678,6 +680,96 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         if not _send_note(db, a, since, body):
             continue  # noted by another sweep, or its supervisor isn't running (tried again later)
         done.append(f"told {a.parent_id} that worker {a.id} is stuck on a prompt")
+    return done
+
+
+# A Claude worker whose /goal (its finish line) can't be met keeps being sent
+# back by the goal's own Stop hook: it asks in its pane, nobody reads it, and
+# Claude Code's cap finally ends the turn. Either sign on its screen counts.
+GOAL_CAP = re.compile(r"hook blocked the turn from ending \d+ consecutive times", re.I)
+GOAL_NOT_MET = re.compile(r"goal not yet met", re.I)
+GOAL_LOOP_REPEATS = 3          # this many "Goal not yet met" on one screen is a loop
+GOAL_LOOP_MARK = "goal_loop"   # agent_marks: a digest of the question last told
+
+
+def _goal_loop_question(screen: str) -> str | None:
+    """The worker's last words before the goal sent it back, when ``screen``
+    shows it looping on its /goal (the stop-hook cap, or GOAL_LOOP_REPEATS
+    "Goal not yet met"); None when it doesn't. Up to 12 lines: the block
+    between the last goal or cap line and the one before it."""
+    lines = [ln.rstrip() for ln in screen.splitlines()]
+    marker = [bool(GOAL_CAP.search(ln) or GOAL_NOT_MET.search(ln)) for ln in lines]
+    if not (any(GOAL_CAP.search(ln) for ln in lines)
+            or sum(bool(GOAL_NOT_MET.search(ln)) for ln in lines) >= GOAL_LOOP_REPEATS):
+        return None
+    i = max(n for n, m in enumerate(marker) if m)
+    while i >= 0 and (marker[i] or not lines[i].strip()):
+        i -= 1
+    block = []
+    while i >= 0 and not marker[i] and len(block) < 12:
+        if lines[i].strip():
+            block.append(lines[i])
+        i -= 1
+    return "\n".join(reversed(block))
+
+
+def note_goal_loops(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell a Claude worker's supervisor, once per question, that the worker
+    is looping on a finish line (its /goal) it can't meet, with the question
+    it keeps asking in its own pane, and mark it 'waiting'. Its pane shows
+    Claude Code's stop-hook cap or repeated "Goal not yet met", and it hasn't
+    reported. The note is claimed on the waiting spell too (claim_note), so
+    note_stuck and prompt_answer.tell don't tell the same wait again."""
+    import hashlib
+
+    from brindle import prompt_answer
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.provider != "claude" or a.headless
+                or a.status not in ("processing", "idle")
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        key = _screen_key(a, panes)
+        if _screen_unchanged(db, a, "goal", key):
+            continue
+        try:
+            screen = tmux.capture(a.tmux_window, lines=120, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        question = _goal_loop_question(screen)
+        if question is None:
+            _screen_read(db, a, "goal", key)
+            continue
+        question = prompt_answer.redact(question)
+        digest = hashlib.sha256(question.encode()).hexdigest()[:16]
+        won, previous = db.claim_mark(a.id, GOAL_LOOP_MARK, digest)
+        if not won:
+            _screen_read(db, a, "goal", key)
+            continue   # this question was told already
+        db.set_status(a.id, "waiting", only_if=a.status)
+        fresh = db.get_agent(a.id)
+        if fresh is None or fresh.status != "waiting" or fresh.result is not None:
+            db.set_mark(a.id, GOAL_LOOP_MARK, previous)
+            continue   # a hook or a report moved it on first
+        ws = db.get_workspace(a.workspace_id)
+        where = f" on branch `{ws.branch}`" if ws else ""
+        attach = f" (or answer it in its pane: `brindle attach {ws.name}`)" if ws else ""
+        finish = f"\n\nIts finish line: {a.done_when.strip()}" if a.done_when else ""
+        body = (f"Worker {a.id} ({a.profile}){where} is looping on a finish line it can't meet"
+                f"{': ' + ' | '.join(question.splitlines()) if question else ''}\n\n"
+                "Its goal keeps sending it back and it keeps asking in its own pane, which nobody "
+                f"reads. Answer it with send_message{attach}, change its task, or remove the "
+                f"workspace if the work is no longer needed.{finish}\n\n"
+                f"Its last question:\n{question or '(none on its screen)'}")
+        if not _send_note(db, fresh, fresh.status_since or fresh.created_at, body):
+            db.set_mark(a.id, GOAL_LOOP_MARK, previous)
+            continue
+        _screen_read(db, a, "goal", key)
+        done.append(f"told {a.parent_id} that worker {a.id} is looping on its finish line")
     return done
 
 

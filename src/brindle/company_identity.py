@@ -13,8 +13,9 @@ only checked to be signed in: no account is matched, and that cloud's env-var
 family stays in the pane (``own_signin``).
 
 Commands are argv lists with a timeout, through ``company_login.run_cmd`` and
-``company_login.which`` (which tests replace); each answer is kept briefly so
-one doctor run asks a CLI once.
+``company_login.which`` (which tests replace). Daemon doctor probes refresh in
+the background, keyed by executable path, mtime and environment; policy checks
+still run on each request. Terminal diagnostics ask for a fresh answer.
 
 A launch (``launch_problem``) also remembers a determined, matching cloud
 identity (bedrock, vertex, foundry) for ``LAUNCH_CACHE_SECONDS`` per key (route
@@ -246,8 +247,20 @@ def _probe(argv: list[str], cache: bool = True, home: dict[str, str] | None = No
     installed or the command couldn't run or timed out. ``home``: the config
     home the CLI's agents run with (provider_homes.launch_env), so the
     probe asks the same login; a cached answer is that home's only."""
-    if not company_login.which(argv[0]):
+    path = company_login.which(argv[0])
+    if not path:
         return None
+    from brindle import doctor
+
+    if cache and doctor._background_probes.get():
+        env = {**os.environ, **(home or {})}
+
+        def probe():
+            code, out = company_login.run_cmd([path, *argv[1:]], PROBE_TIMEOUT, env=env)
+            return None if code in (124, 127) else (code, out)
+
+        return doctor._cached_probe(path, tuple(argv[1:]), tuple(sorted(env.items())),
+                                    probe, CACHE_SECONDS)
     key = (*argv, *sorted((home or {}).items()))
     env = {**os.environ, **home} if home else None
     now = time.monotonic()
