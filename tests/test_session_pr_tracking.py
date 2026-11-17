@@ -145,6 +145,45 @@ def test_goal_tracks_pr_on_fresh_branch_with_copied_changes(db, tracking, monkey
     assert workspaces.open_pull_request_for_commit(session_head, ws.path) is None
 
 
+def test_pull_request_no_match_reuses_immutable_patches(tmp_path, monkeypatch):
+    monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/bin/gh")
+    monkeypatch.setattr(workspaces, "_pr_patches", {}, raising=False)
+    monkeypatch.setattr(workspaces, "_pr_no_matches", {}, raising=False)
+    candidates = [{"number": 1, "baseRefOid": "base", "headRefOid": "other"}]
+    diffs = []
+    patches = []
+    real_patch = workspaces._pr_patch
+
+    def patch(base, head, cwd):
+        patches.append((base, head))
+        return real_patch(base, head, cwd)
+
+    def read(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps([] if "--search" in args else candidates))
+
+    def run(args, cwd):
+        diffs.append(args[-1])
+        return SimpleNamespace(stdout=f"diff --git a/file b/file\n+{args[-1]}\n")
+
+    monkeypatch.setattr(spawn, "read", read)
+    monkeypatch.setattr(workspaces, "_pr_patch", patch)
+    monkeypatch.setattr(git, "run", run)
+    monkeypatch.setattr(git, "out", lambda args, cwd: "base")
+    assert workspaces.open_pull_request_for_commit("session", str(tmp_path)) == {}
+    assert len(diffs) == 2
+    diffs.clear()
+    patches.clear()
+    assert workspaces.open_pull_request_for_commit("session", str(tmp_path)) == {}
+    assert diffs == []
+    assert patches == []
+
+    # A changed candidate set must be checked, reusing the session's patch.
+    candidates.append({"number": 2, "baseRefOid": "base", "headRefOid": "session"})
+    assert workspaces.open_pull_request_for_commit("session", str(tmp_path))["number"] == 2
+    assert patches
+    assert diffs == []
+
+
 def test_closed_pr_is_not_readopted_from_cached_head(db, tracking, monkeypatch):
     ws, goal = tracking
     url = "https://github.com/o/r/pull/457"
