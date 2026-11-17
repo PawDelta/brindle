@@ -107,7 +107,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   const key = visual ? `${visual.id}:${visual.rev}` : "";
   const options = visual?.options ?? [];
   const choose = (option: string) => {
-    if (visual && !visual.answer && (option === "" || options.some((o) => o.id === option))) {
+    if (visual && !visual.answer && !visual.answered_in_chat && (option === "" || options.some((o) => o.id === option))) {
       setPicked((current) => current?.key === key && current.option === option ? null : { key, option });
     }
   };
@@ -178,7 +178,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   const options = visual.options ?? [];
   // Files go to the agent that receives the answer, and only where its provider takes them.
   const target = visual.answer_agent_id;
-  const canAttach = !!client.attach && !!target && visual.accepts_files === true && !visual.answer;
+  const canAttach = !!client.attach && !!target && visual.accepts_files === true && !visual.answer && !visual.answered_in_chat;
   // `read` yields the files: browser Files are sent as bytes, native drops and clipboard files as paths.
   const upload = async (read: () => Promise<Attachment[]>) => {
     if (!canAttach) return;
@@ -250,7 +250,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
     }
   };
   useEffect(() => {
-    if (visual.answer) return;
+    if (visual.answer || visual.answered_in_chat) return;
     const keydown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.repeat || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
       const target = event.target;
@@ -277,7 +277,9 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   return (
     <footer ref={bar} className="flex flex-col gap-s1 border-t border-line px-s2 py-s1" data-testid="visual-answer">
       {visual.question && <p className="text-sm text-ink-2">{visual.question}</p>}
-      {visual.answer ? (
+      {visual.answered_in_chat ? (
+        <p className="text-sm" role="status" data-state="answered-in-chat">Answered in chat</p>
+      ) : visual.answer ? (
         <p className="text-sm" role="status" data-testid="visual-answered">
           {visual.answer.option == null ? "You answered" : <>You picked <span className="font-semibold">{answered?.label ?? visual.answer.option}</span></>}
           {visual.answer.note && <span className="text-ink-2"> · {visual.answer.note}</span>}
@@ -384,7 +386,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           <button type="button" className={button} disabled={sending} data-testid="visual-dismiss" onClick={() => void dismiss()}>Dismiss</button>
         </div>
       )}
-      {!visual.answer && (attached.length > 0 || uploading > 0) && (
+      {!visual.answer && !visual.answered_in_chat && (attached.length > 0 || uploading > 0) && (
         <ul className="flex flex-wrap gap-1" aria-label="Attached files">
           {attached.map((path, i) => (
             <li key={`${path}:${i}`} className="flex items-center gap-1 rounded border border-line px-1.5 text-xs">

@@ -88,6 +88,7 @@ const SCENES: Record<string, Route> = {
   "knowledge-record": { screen: "knowledge" },
   "knowledge-search": { screen: "knowledge" },
   settings: { screen: "settings" },
+  "settings-usage": { screen: "settings", tab: "usage" },
   "settings-edit": { screen: "settings" },
   account: { screen: "account" },
   "account-free": { screen: "account" },
@@ -118,6 +119,19 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+if (scene === "settings-usage") {
+  daemon.data.usage = usageScenario("normal");
+  const agy = daemon.data.usage.providers.find((q) => q.provider === "antigravity")!;
+  const now = Date.now() / 1000;
+  Object.assign(agy, {
+    known: true,
+    updated_at: now - 35,
+    windows: [
+      { name: "Gemini Pro 5h", short: "Gemini Pro 5h", minutes: 300, used: 42, resets_at: now + 7200 },
+      { name: "Gemini Flash wk", short: "Gemini Flash wk", minutes: 10080, used: 67, resets_at: now + 172800 },
+    ],
+  });
+}
 // Keep the common sidebar shots representative of full requests and descriptive session names.
 if (scene === "session" || scene === "new") {
   const longGoal = "Update the desktop sidebar so a detailed goal stays readable beside the active session, even when the request describes several milestones, review requirements, project constraints, and the final checks needed before shipping the finished work.";

@@ -86,9 +86,9 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, out
     assert said == ([] if outcome == "open" else ["s"])   # said once the look answered "none", never for an open PR
     reads.clear()
     monkeypatch.setattr(spawn, "room", lambda: 0)
-    monkeypatch.setattr(review, "_merge_polled", 0)
+    monkeypatch.setattr(review, "_merge_polled", {})
     watch.sweep(db)
-    assert reads == [] and watch.ready == {"s": True} and review._merge_polled == 0
+    assert reads == [] and watch.ready == {"s": True} and review._merge_polled == {}
 
 
 @pytest.mark.parametrize("recorded, expected", [
@@ -110,62 +110,53 @@ def test_missing_gh_is_not_confirmed_absence(db, monkeypatch, recorded, expected
 
 
 def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch, caplog):
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import Future
+    from contextvars import Context
+    from types import SimpleNamespace
     from brindle import spawn, workspaces
     from brindle.daemon import session_review as review
-    from brindle.db import DB
     _open_readiness_prs(db, 2)
-    release, both, finished = threading.Event(), threading.Event(), threading.Event()
-    started, lock = [], threading.Lock()
+    started, scheduled, results = [], [], []
+    def submit(check, *args):
+        future = Future()
+        future.set_running_or_notify_cancel()
+        scheduled.append((future, check, args))
+        return future
+    def end_round(pending, **kwargs):
+        # All reads must be submitted before waiting. Keep their futures running
+        # across sweeps, without depending on shared threads or wall-clock time.
+        assert len(pending) == 2 and all(f.running() for f in pending)
+        if not started:
+            for _, check, args in scheduled:
+                # Executor threads start without the caller's deadline context.
+                results.append(Context().run(check, *args))
     # Only the merged-PR polling is under test: the checks refresh has its own pool.
     monkeypatch.setattr(review, "refresh_pr_states", lambda db: None)
+    monkeypatch.setattr(review, "_merge_pool", SimpleNamespace(submit=submit))
+    monkeypatch.setattr(review, "_merge_checks", {})
+    monkeypatch.setattr(review, "_merge_order", {})
+    monkeypatch.setattr(review, "wait", end_round)
     # Other sweep steps touch the fake /repo outside the merge-check deadline.
     # In particular, fetch notices resolve its git directory through spawn.read.
     monkeypatch.setattr(review.session_sync, "refresh_drift_flags", lambda *a, **kw: None)
     monkeypatch.setattr(review.session_sync, "refresh_idle_sessions", lambda *a, **kw: None)
     monkeypatch.setattr(review.session_sync, "tell_refused_fetches", lambda db: None)
-    # Module-level state of earlier rows must not decide whether a read is submitted.
-    monkeypatch.setattr(review, "_merge_checks", {})
-    monkeypatch.setattr(review, "_merge_order", {})
-    # Wait for both reads to start (events, with a generous bound only to fail instead of hang).
-    monkeypatch.setattr(review, "wait", lambda pending, **_: both.wait(30))
     def slow(*args, **kwargs):
         assert spawn.current() is not None
-        with lock:
-            started.append(args)
-            if len(started) == 2:
-                both.set()
-        release.wait()
+        started.append(args)
         raise spawn.Busy("read stopped")
     monkeypatch.setattr(spawn, "read", slow)
     monkeypatch.setattr(workspaces.shutil, "which", lambda *a: "gh")
     monkeypatch.setattr(spawn, "room", lambda: 2)
-    monkeypatch.setattr(review, "_merge_polled", 0)
-    monkeypatch.setattr(review, "MERGE_CHECK_SECONDS", 0.05, raising=False)
-    # Own the pool so every gh read finishes before patches and log capture end.
-    pool = ThreadPoolExecutor(max_workers=2)
-    monkeypatch.setattr(review, "_merge_pool", pool)
-    def sweep():
-        connection = DB(db.path)
-        try:
-            review.ReadinessWatch().sweep(connection)
-        finally:
-            connection.conn.close()
-            finished.set()
-    worker = threading.Thread(target=sweep)
-    worker.start()
-    try:
-        assert both.wait(30)
-        assert finished.wait(30)
-        monkeypatch.setattr(review, "_merge_polled", 0)
-        review.ReadinessWatch().sweep(db)
-        assert len(started) == 2
-    finally:
-        release.set()
-        worker.join(30)
-        pool.shutdown(wait=True, cancel_futures=True)
-    assert not worker.is_alive()
+    monkeypatch.setattr(review, "_merge_polled", {})
+    review.ReadinessWatch().sweep(db)
+    assert len(started) == 2
+    monkeypatch.setattr(review, "_merge_polled", {})
+    review.ReadinessWatch().sweep(db)
+    assert len(scheduled) == len(started) == 2
+    # Finish every controlled read before patches and log capture end.
+    for (future, _, _), result in zip(scheduled, results, strict=True):
+        future.set_result(result)
     for future in review._merge_checks.values():
         assert future.result() is False
     assert not any(record.exc_info for record in caplog.records)
@@ -221,9 +212,28 @@ def _readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
     monkeypatch.setattr(review, "_merge_checks", {})
     monkeypatch.setattr(review, "_merge_order", {})
     for _ in range(2):
-        monkeypatch.setattr(review, "_merge_polled", 0)
+        monkeypatch.setattr(review, "_merge_polled", {})
         review.poll_merged(db)
     assert {url.rsplit("/", 1)[1] for url in seen} == {str(n) for n in range(5)}
+
+
+def _merge_poll_soon_after_boot(db, monkeypatch):
+    """A daemon that has never polled this database's PRs polls on its first
+    round, even when the clock (time since boot, on Linux) is younger than
+    MERGE_POLL_SECONDS: a fresh CI VM skipped it (run 44135119625)."""
+    import time
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+    from brindle.daemon import session_review as review
+    _open_readiness_prs(db, 1)
+    asked = []
+    monkeypatch.setattr(review, "time", SimpleNamespace(monotonic=lambda: 30.0, time=time.time))
+    monkeypatch.setattr(review._merge_pool, "submit", lambda check, url, cwd: asked.append(url) or Future())
+    monkeypatch.setattr(review, "wait", lambda *a, **kw: None)
+    monkeypatch.setattr(review, "_merge_checks", {})
+    monkeypatch.setattr(review, "_merge_order", {})
+    review.poll_merged(db)
+    assert asked == ["https://github.com/o/r/pull/0"]
 
 
 def _session_changed_tracks_head_and_index_without_status_changes(db, tmp_path, memory):
@@ -303,6 +313,8 @@ def _status_fingerprint(tmp_path, monkeypatch):
     pytest.param(_readiness_slow_gh_is_parallel_and_bounded, {}, id="readiness-slow-gh"),
     pytest.param(_readiness_deferred_prs_get_a_turn, {"queued": "expired"}, id="readiness-deferred-expired",
                  marks=pytest.mark.variant("a queued check starts after deadline expiry before the sweep can cancel it")),
+    pytest.param(_merge_poll_soon_after_boot, {}, id="merge-poll-after-boot",
+                 marks=pytest.mark.variant("a first poll within a minute of boot was skipped (CI run 44135119625)")),
     pytest.param(_session_changed_tracks_head_and_index_without_status_changes, {"memory": False},
                  id="session_changed-file-db",
                  marks=pytest.mark.variant("two daemons on one database file each announce a change exactly once")),

@@ -309,14 +309,19 @@ def dismiss_item(db: DB, value: dict) -> dict:
     return {"dismissed": True}
 
 
-def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[InboxItemDTO]:
+def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+          known_git: view.KnownGit | None = None, *, snapshot_rows: list[dict] | None = None) -> list[InboxItemDTO]:
     """Everything waiting on a person in ``repo_root``'s sessions (every
     session when None), then the org's unread notices. Each agent's item
-    names its session (``root_id``), so the app can link into it."""
+    names its session (``root_id``), so the app can link into it.
+    ``known_git``: as for ``view.snapshot``. ``snapshot_rows`` reuses a rendering
+    already made for the adjacent snapshot request."""
     out: list[InboxItemDTO] = []
     shown: set[str] = set()
     occurrences = {r["source"]: r["generation"] for r in db.conn.execute("SELECT source, generation FROM inbox_occurrences")}
-    for ws in view.snapshot(db, repo_root, panes=panes):
+    if snapshot_rows is None:
+        snapshot_rows = view.snapshot(db, repo_root, panes=panes, known_git=known_git)
+    for ws in snapshot_rows:
         shown.update(a["id"] for a in ws["agents"])
         for a in ws["agents"]:
             if a.get("locked"):
@@ -344,10 +349,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                                         detail=row.failed_why.removeprefix("review: ")
                                         if (row.failed_why or "").startswith("review: ") else None,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
-            # Only a plan agents.approve_plan would take: a plan-first worker with a supervisor.
-            if row.plan_state == "proposed" and row.plan_first and row.parent_id is not None:
-                out.append(InboxItemDTO(kind="plan", reason="plan awaiting approval", **link,
-                                        detail=row.plan_text))
+            # A worker's plan proposal is its supervisor's to approve (approve_plan); it is
+            # never an Inbox card. The supervisor decides whether the person should weigh in.
             if row.parent_id is not None:
                 continue
             ap = db.get_autopilot(row.id)

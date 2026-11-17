@@ -631,6 +631,7 @@ def test_watch_pane_shares_the_window_and_messages_reach_the_agent(db, ws):
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
+@pytest.mark.slow("starts a real tmux session; runs long when the machine is loaded")
 def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
     tmux._tmux("new-window", "-d", "-t", f"={ws.tmux_session}:", "-n", "extra")  # something the user opened

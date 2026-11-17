@@ -757,6 +757,74 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
     return st
 
 
+def known(path: str | Path, base: str | None, now: float | None = None) -> tuple[git.Status | None, bool]:
+    """(the last status this process counted for ``path``, whether it still
+    stands), without counting: no git and no walk of the tree, so that a read
+    that must answer at once (the app's first after the daemon starts) never
+    waits on one. It stands while ``cached_status`` would return it as it is
+    (the same fingerprint and refs, within TTL). (None, True): the base names
+    no commit, as ``cached_status`` last found and still would; (None,
+    False): never counted. A count that doesn't stand is for the caller to
+    have redone elsewhere (``view.warm_later``)."""
+    if not base:
+        return None, False
+    path = Path(path)
+    key = str(path)
+    hit, failed = _status_cache.get(key), _failed.get(key)
+    if hit is None and failed is None:
+        return None, False
+    now = time.time() if now is None else now
+    try:
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+        base_ref = _base_ref_cache.get((key, base))
+        if base_ref is None or base_ref[0] != _refs_fingerprint(common, base):
+            fp = refs = None      # which ref is the base may have changed: git would decide
+        else:
+            fp = _fingerprint(path, wt_gitdir, common, base_ref[1])
+            refs = _refs_key(wt_gitdir, common, base_ref[1], hit.upstream if hit is not None else None)
+    except OSError:
+        fp = refs = None
+    if failed is not None and fp is not None and failed[:2] == (fp, refs):
+        return None, True       # it failed since its last count, and would again (cached_status checks it first too)
+    if hit is not None:
+        return hit.status, fp is not None and hit.fp == fp and hit.refs == refs and now - hit.checked_at < TTL
+    return None, False
+
+
+def commits(path: str | Path, base: str) -> tuple[str, str | None, str | None] | None:
+    """The commits HEAD, ``base`` and ``origin/<base>`` name, read from the
+    git files without git (None for a ref that isn't there); None when HEAD
+    can't be read that way. ahead/behind against ``base`` is a function of
+    these three alone (``git.base_ref`` picks between the last two)."""
+    try:
+        private = _worktree_gitdir(Path(path))
+        common = _common_gitdir(private)
+        head = _resolve(private, common, (private / "HEAD").read_text().strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    if head is None:
+        return None
+    return (head, _resolve(private, common, f"ref: refs/heads/{base}"),
+            _resolve(private, common, f"ref: refs/remotes/origin/{base}"))
+
+
+def counted(path: str | Path, base: str) -> tuple[tuple[str, str | None, str | None], git.Status] | None:
+    """This process's last status of ``path`` against ``base`` and the
+    ``commits`` it was counted for, while they still name what they did when
+    it was counted; None when there is none, or HEAD or the base ref has
+    moved since (the next look counts again)."""
+    key = str(Path(path))
+    hit = _status_cache.get(key)
+    ref = _base_ref_cache.get((key, base))
+    now = commits(path, base)
+    if hit is None or ref is None or now is None or hit.refs[0] != now[0]:
+        return None
+    if hit.refs[1] != (now[1] if ref[1] == base else now[2]):
+        return None
+    return now, hit.status
+
+
 def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
     """Bring the cached status of each (path, base) up to date at once, in
     parallel: a cold first look (the app opening) runs one `git status` per
