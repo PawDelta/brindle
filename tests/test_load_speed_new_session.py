@@ -159,6 +159,24 @@ def test_new_session_page_reads_run_no_git_or_cli_and_share_one_tmux_look(db, re
     assert ran == []
 
 
+def test_each_request_opens_the_db_without_setting_it_up_again(db, monkeypatch):
+    """The daemon opens a DB per request: one this process set up, its schema
+    unchanged, opens without the setup (whose reads queued a burst of
+    requests), with its foreign keys still on; a changed schema is set up again."""
+    from brindle import db as dbm
+
+    runs, real = [], dbm.DB._migrate
+    monkeypatch.setattr(dbm.DB, "_migrate", lambda self: runs.append(1) or real(self))
+    for _ in range(2):
+        again = dbm.DB()
+        assert again.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        again.conn.close()
+    assert runs == []
+    db.conn.execute("CREATE TABLE added_by_another_brindle (x)")     # another process's migration
+    dbm.DB().conn.close()
+    assert runs == [1]
+
+
 class _Stop(Exception):
     """Where the test stops a start: once its worktree would be made."""
 

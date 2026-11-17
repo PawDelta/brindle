@@ -1754,6 +1754,14 @@ def migration_incompatibility() -> str | None:
         conn.close()
 
 
+# Each database file this process has set up (schema and migrations), with
+# SQLite's schema_version as it left it. A DB() of that file whose schema is
+# still exactly that skips the setup: the daemon opens one per request, and the
+# setup's ~60 schema reads made a burst of reads (the app's per-repo
+# GET /sessions) queue for a fifth of a second each.
+_set_up: dict[str, int] = {}
+
+
 class DB:
     def __init__(self, path: str | None = None) -> None:
         p = str(path) if path is not None else str(db_path())
@@ -1770,6 +1778,11 @@ class DB:
                 raise RuntimeError(
                     "This database was written by a newer brindle. Update brindle."
                 )
+            if (version == SCHEMA_VERSION and p in _set_up
+                    and self.conn.execute("PRAGMA schema_version").fetchone()[0] == _set_up[p]):
+                self.conn.execute("PRAGMA foreign_keys=ON")     # a connection's own setting
+                self._enforce_permissions()     # SQLite makes its -wal and -shm files afresh
+                return
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA foreign_keys=ON")
             self.conn.executescript(SCHEMA)
@@ -1778,6 +1791,8 @@ class DB:
             # Mark the upgrade only after all required migrations succeed.
             if version < SCHEMA_VERSION:
                 self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            if p != ":memory:":
+                _set_up[p] = self.conn.execute("PRAGMA schema_version").fetchone()[0]
         except BaseException:
             self.conn.close()
             raise
@@ -1805,8 +1820,9 @@ class DB:
             # What made a thread, when that must be found again (an offline edit filed by
             # brindle.pro.live_docs): one thread per origin, written in the thread's own insert.
             self.conn.execute("ALTER TABLE plan_threads ADD COLUMN origin TEXT")
-        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS plan_threads_origin ON plan_threads(origin)"
-                          " WHERE origin IS NOT NULL")
+        if not self._has_schema_object("plan_threads_origin"):
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS plan_threads_origin ON plan_threads(origin)"
+                              " WHERE origin IS NOT NULL")
         merge_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(session_pr_merges)")}
         if "owner" not in merge_cols:
             self.conn.execute("ALTER TABLE session_pr_merges ADD COLUMN owner TEXT")
@@ -1941,8 +1957,11 @@ class DB:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
         if "ever_passed" not in cols:
             self.conn.execute("ALTER TABLE milestones ADD COLUMN ever_passed INTEGER")
-        self.conn.execute("UPDATE milestones SET ever_passed=1 WHERE ever_passed IS NULL "
-                          "AND (status='passed' OR passed_sha IS NOT NULL)")
+        # Asked first: an UPDATE takes the write lock even when it matches nothing, so every
+        # open queued behind every other (a burst of daemon reads, each opening its own DB).
+        legacy = "ever_passed IS NULL AND (status='passed' OR passed_sha IS NOT NULL)"
+        if self.conn.execute(f"SELECT 1 FROM milestones WHERE {legacy} LIMIT 1").fetchone():
+            self.conn.execute(f"UPDATE milestones SET ever_passed=1 WHERE {legacy}")
         # Rows checked before states were stored: work them out from what was recorded.
         for r in self.conn.execute("SELECT id, status, output, passed_sha FROM milestones "
                                    "WHERE state IS NULL AND status IN ('passed', 'failed')").fetchall():
@@ -2006,10 +2025,17 @@ class DB:
         if "delivery_lead" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN delivery_lead TEXT")
         try:   # only brindle.kb needs FTS5: a SQLite built without it still opens
-            self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5("
-                              "text, heading_path, chunk_id UNINDEXED)")
+            if not self._has_schema_object("kb_fts"):
+                self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5("
+                                  "text, heading_path, chunk_id UNINDEXED)")
         except sqlite3.OperationalError:
             pass
+
+    def _has_schema_object(self, name: str) -> bool:
+        """Whether table or index ``name`` exists, asked by a read: a CREATE ... IF NOT
+        EXISTS takes the write lock even when there is nothing to create, so every
+        open would queue behind every other."""
+        return self.conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (name,)).fetchone() is not None
 
     def _move_session_repo_branches(self) -> None:
         """A development build kept the branch on session_repos itself: copy
