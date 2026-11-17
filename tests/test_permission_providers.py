@@ -1910,3 +1910,18 @@ def test_agy_mirror_never_widens_an_allow():
     assert not any("make check" in e or "a && b" in e for e in out["allow"])
     assert "command(regex:^git status$)" in out["allow"]
     assert not any("tracked" in e for e in out["allow"])
+
+
+def test_resumed_codex_turns_report_deltas_of_cumulative_totals():
+    """`codex exec resume` reports thread totals; each turn's usage is the growth since the last."""
+    from brindle.providers import Codex
+    codex = Codex()
+
+    def turn(totals, session=None):
+        events = [{"type": "thread.started", "thread_id": "t1"},
+                  {"type": "turn.completed", "usage": totals}]
+        return codex.print_events(events, "gpt-x", session)[-1]["modelUsage"]["gpt-x"]
+    first = turn({"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 10})
+    second = turn({"input_tokens": 150, "cached_input_tokens": 60, "output_tokens": 25}, session="t1")
+    assert (first["inputTokens"], first["cacheReadInputTokens"], first["outputTokens"]) == (60, 40, 10)
+    assert (second["inputTokens"], second["cacheReadInputTokens"], second["outputTokens"]) == (30, 20, 15)
