@@ -390,6 +390,15 @@ class Created:
     finish: Callable[[], SetupResult | None] | None = None
 
 
+def _is_base_tip(repo_root: str, base: str, sha: str) -> bool:
+    """Whether ``sha`` is ``base``'s tip, locally or on origin as last fetched."""
+    for ref in (f"refs/heads/{base}", f"refs/remotes/origin/{base}"):
+        proc = git.run(["rev-parse", "--verify", "--quiet", ref], repo_root, check=False)
+        if proc.returncode == 0 and proc.stdout.strip() == sha:
+            return True
+    return False
+
+
 def branch_name(repo_root: str, branch: str, apply_prefix: bool = True) -> str:
     """The branch ``create`` makes for ``branch``: with the repo's
     ``branch_prefix`` (unless ``apply_prefix`` is off), sanitized."""
@@ -446,20 +455,16 @@ def create(
     # tip, the same thing a pool fill builds from: either the caller didn't
     # ask for a specific `start` at all (the common case -- a worker's base
     # is the caller's own branch), or an explicit `start` happens to resolve
-    # to the local base branch's own tip. Not, e.g., create_from_pr, where
-    # `start` is a fetched PR head unrelated to `base`.
+    # to the base branch's own tip, locally or on origin as last fetched (a
+    # new session's worktree starts there: rebind moves the entry forward, and
+    # setup runs again only if the lockfiles differ). Not, e.g., create_from_pr,
+    # where `start` is a fetched PR head unrelated to `base`.
     claimed = None
     if (
         run_setup
         and not git.branch_exists(repo_root, branch)
         and not git.remote_branch_exists(repo_root, branch)
-        and (
-            start is None
-            or (
-                git.branch_exists(repo_root, base)
-                and start_sha == git.out(["rev-parse", base], repo_root)
-            )
-        )
+        and (start is None or _is_base_tip(repo_root, base, start_sha))
     ):
         from brindle import pool
 

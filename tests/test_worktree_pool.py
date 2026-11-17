@@ -79,6 +79,28 @@ def test_lockfile_change_triggers_setup_again(db, repo, tmp_path):
     )
 
 
+@pytest.mark.variant("a session cut from origin's tip must reuse the warm pool entry instead of a fresh worktree")
+def test_session_worktree_from_origins_tip_claims_the_pool_entry(db, repo, tmp_path):
+    """A new session's worktree starts at origin's tip as just fetched, ahead of
+    the local main the entry was built from: it still takes the ready entry
+    (moved forward), so its setup isn't run again behind the session's start."""
+    counter = tmp_path / "counter"
+    write_config(repo, setup=[f'echo x >> "{counter}"'])
+    sh("git add -A && git commit -qm setup && git push -q origin main", repo)
+    pool.fill(db, str(repo))
+    assert counter.read_text().count("x") == 1
+    (repo / "new.txt").write_text("from origin\n")
+    sh("git add -A && git commit -qm ahead && git push -q origin main && git reset -q --hard HEAD~1", repo)
+    tip = git.out(["rev-parse", "origin/main"], str(repo))
+    assert tip != git.out(["rev-parse", "main"], str(repo))
+
+    created = workspaces.create(db, str(repo), "brindle/session-2", base="main", start=tip, apply_prefix=False)
+    assert created.how == "pool"
+    assert git.out(["rev-parse", "HEAD"], created.workspace.path) == tip
+    assert git.out(["branch", "--show-current"], created.workspace.path) == "brindle/session-2"
+    assert counter.read_text().count("x") == 1
+
+
 def test_failed_claim_falls_back(db, repo, tmp_path, monkeypatch):
     write_config(repo, setup=["false"])
     attempted = []

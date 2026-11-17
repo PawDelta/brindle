@@ -274,10 +274,16 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
     nothing, so only that isn't checked."""
     repo, choice, session_id = _get(body, "repo", required=True), _get(body, "choice"), _get(body, "session_id")
     name = _session_name(_get(body, "name"))     # checked with the rest, before anything launches
+    branch, worktree = _get(body, "branch"), _get(body, "worktree")
+    fetched = None
     with svc.create_timing():
         with svc.create_step("checks_s"):
             repo_root = workspaces.adopt_root(db, repo).repo_root
-            opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
+            if choice == "n" and not branch and not worktree:
+                # A new worktree starts from origin's tip as just fetched: fetched while
+                # these checks run, not after them (svc.prefetch).
+                fetched = svc.prefetch(repo_root)
+            opening = (choice == "o" and not branch and not worktree
                        and any(s.root.id == session_id for s in sessions_mod.live(db, repo_root)))
             provider = _get(body, "provider")
             if not opening:
@@ -290,9 +296,9 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
                     return SessionBlocked(blocked.items, [p for p in usable if p != provider])
         got = svc.start(db, repo, provider=provider,
                         prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
-                        autopilot=_get(body, "autopilot", bool), branch=_get(body, "branch"),
-                        worktree=_get(body, "worktree"), choice=_get(body, "choice"),
-                        session_id=_get(body, "session_id"))
+                        autopilot=_get(body, "autopilot", bool), branch=branch,
+                        worktree=worktree, choice=_get(body, "choice"),
+                        session_id=_get(body, "session_id"), fetched=fetched)
     if isinstance(got, svc.Opened):
         return {"opened": SessionDTO.from_agent(got.root).to_json()}
     if isinstance(got, svc.Started):
@@ -690,11 +696,15 @@ def clean_storage(db: DB, params: dict, body: Body) -> Any:
     one (``abandoned``: true), each with its branch, tip archived first
     (``disk.clean``). The app asks the person before it calls this."""
     from brindle import disk
+    from brindle.daemon.storage_reports import REPORTS
 
     path, abandoned = _get(body, "path"), _get(body, "abandoned", bool, False)
     if not path and not abandoned:
         raise ServiceError("invalid", "path or abandoned is required")
-    return disk.clean(db, path=path, abandoned=not path)
+    try:
+        return disk.clean(db, path=path, abandoned=not path)
+    finally:
+        REPORTS.forget()     # the kept report still lists what went
 
 
 # An agent mid-turn (or stopped at a prompt mid-turn) may be writing the same file.

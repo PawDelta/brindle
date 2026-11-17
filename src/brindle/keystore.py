@@ -677,15 +677,18 @@ def list_keys(repo_root: str | None = None) -> dict[str, str]:
 def pane_keys(names, present=()) -> dict[str, str]:
     """The stored keys among ``names`` (an agent's own credential names) that
     aren't in ``present``: stored keys reach new panes. Never raises: a broken
-    store just means no stored keys."""
+    store just means no stored keys. Most of ``names`` were never saved: one
+    shared listing answers those (listed_reads), not a `security` call each,
+    which held every launch up by a second or more."""
     out: dict[str, str] = {}
-    for name in sorted(names):
-        if name in REFUSED or name in present or os.environ.get(name):
-            continue
-        try:
-            value = get_key(name)
-        except CredentialError:
-            continue
-        if value:
-            out[name] = value
+    with listed_reads():
+        for name in sorted(names):
+            if name in REFUSED or name in present or os.environ.get(name):
+                continue
+            try:
+                value = get_key(name)
+            except CredentialError:
+                continue
+            if value:
+                out[name] = value
     return out

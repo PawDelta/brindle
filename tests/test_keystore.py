@@ -181,6 +181,10 @@ def test_resume_skips_keys_never_saved(monkeypatch):
         keystore.set_key("OPENAI_API_KEY", "sk-openai")
     both = {"ANTHROPIC_API_KEY": FAKE, "OPENAI_API_KEY": "sk-openai"}
     assert resume() == both and calls == ["<listing>", *both]     # the next listing shows it
+    # A launch's pane keys likewise: one listing, not a read per credential name.
+    now[0] += keystore.KEYCHAIN_READ_TTL
+    calls.clear()
+    assert keystore.pane_keys(names) == both and calls == ["<listing>", *both]
     for listing_fails[0] in ("exit", "partial"):     # no listing to go by: every name is read
         assert resume() == both and calls == ["<listing>", *names], listing_fails[0]
 

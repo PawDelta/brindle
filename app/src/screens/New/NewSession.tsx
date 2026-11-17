@@ -32,6 +32,7 @@ import { Dot } from "../../components/Sidebar";
 import { alert, button, card, field, h2, label, lede, main, quiet, title } from "../../components/ui";
 import { isPaused, providerName } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
+import { useAppState } from "../../store/useStore";
 import { PracticeRow } from "../Onboarding/Demo";
 import { FirstRun } from "./FirstRun";
 import { SendButton, sessionLabel, type SendHow } from "./SendButton";
@@ -190,10 +191,17 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     setGitEmail("");
   }, [repo]);
 
+  // The engine answers from its last look and checks the CLIs again behind it: a changed
+  // answer comes as a "providers.usable" event, and this repo's list is asked for again.
+  const usableChanged = useAppState((s) => s.recent.reduce((last, e) => (e.kind === "providers.usable" && e.repo_root === repo ? e.id : last), 0));
+  const asked = useRef<{ repo: string; lookups: number } | null>(null);
   useEffect(() => {
     let live = true;
-    // A lookup begins: whatever an earlier one answered (this repo's too) no longer holds.
-    setGot(null);
+    // A lookup begins: whatever an earlier one answered for another repo, or before Try again, no
+    // longer holds. A changed answer for this repo keeps the list on screen until the new one.
+    const again = asked.current?.repo === repo && asked.current.lookups === lookups;
+    asked.current = { repo, lookups };
+    if (!again) setGot(null);
     client
       .usableProviders(repo)
       .then((r) => live && setGot({ repo, usable: r.usable }))
@@ -201,7 +209,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     return () => {
       live = false;
     };
-  }, [client, repo, lookups]);
+  }, [client, repo, lookups, usableChanged]);
 
   // Several usable: the person's pick (none yet on a first session); one: that one, named; none: setup.
   const many = usable !== null && usable.length > 1;

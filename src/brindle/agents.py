@@ -3138,12 +3138,12 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
             # no client's input). A first write needs a composer holding
             # nothing; the body, one holding exactly the lead (a resumed one
             # is matched below). Enter is guarded by the input alone: a
-            # collapsed paste can't be matched as text.
-            elif (_typed_lately(fresh, since=baseline[0])
+            # collapsed paste can't be matched as text. The lead is judged
+            # once drawn, before the input: keys pressed while it was drawing count.
+            elif ((state["stage"] == "lead" and resume is None and not _lead_drawn(fresh, state))
+                  or _typed_lately(fresh, since=baseline[0])
                   or (state["stage"] is None and _composer_taken(fresh))
-                  or (state["stage"] in ("lead", "body") and not owned())
-                  or (state["stage"] == "lead" and resume is None
-                      and not _partial_composer(fresh, state, "lead"))):
+                  or (state["stage"] in ("lead", "body") and not owned())):
                 # Stopped for good: after the body, its Enter withheld (whatever
                 # goes in now, the person sent); after the lead, its body never
                 # written (a turn from here can't carry it: note_turn_started).
@@ -3214,6 +3214,28 @@ def _partial_composer(agent: Agent, state: dict, stage: str) -> bool:
     if stage == "body":
         expected += state["body"]
     return draft == expected.rstrip()
+
+
+# How long a CLI may take to draw the lead brindle has just typed: agy shows
+# a burst of keys a moment after tmux sends them.
+LEAD_DRAWN_WITHIN = 2.0
+
+
+def _lead_drawn(agent: Agent, state: dict) -> bool:
+    """``_partial_composer`` for the lead just typed, once the CLI has drawn
+    it. A composer still empty, or holding only the start of the lead, is
+    drawing it and is read again (each read a capture) for up to
+    LEAD_DRAWN_WITHIN; anything else in it is someone else's text."""
+    provider = get_provider(agent.provider)
+    lead = state["lead"].replace("\n", " ").rstrip() if state["lead"] else ""
+    end = time.monotonic() + LEAD_DRAWN_WITHIN
+    while not _partial_composer(agent, state, "lead"):
+        screen = tmux.capture(agent.tmux_window, lines=200, escapes=True, server=server_of(agent))
+        draft = provider.composer_text(screen)
+        drawing = provider.paste_blocked(screen, True) is None or (draft is not None and lead.startswith(draft))
+        if not drawing or time.monotonic() >= end:
+            return False
+    return True
 
 
 def _retire_orphaned_delivery(db: DB, agent: Agent) -> None:
@@ -3402,6 +3424,8 @@ def _delivery_held(db: DB, agent: Agent | None, waiter: bool = True) -> bool:
 # A chat the person pressed a key in this recently is theirs: a queued message
 # waits for the next flush (a turn's end, the hook's hand-over, or cull's sweep).
 TYPED_WITHIN = 5.0
+# When a start-up delivery the input held back is tried again (see handle_hook's session-start).
+STARTUP_FLUSH_AFTER = TYPED_WITHIN + 1.0
 
 
 class _PasteBlocked(Exception):
@@ -6339,9 +6363,18 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             # the CLI's input box, so it takes input now (agy's warm-up, then
             # its task, would otherwise wait out ready_delay first).
             try:
-                flush(db, agent_id)
+                delivered = flush(db, agent_id)
             except tmux.TmuxError:
-                pass  # stays queued for the next flush
+                delivered = False  # stays queued for the next flush
+            if not delivered and db.pending_count(agent_id):
+                # Held back: keys in its pane lately, or a viewer that just
+                # attached (tmux can't tell the two apart within a second).
+                # A CLI with no turn-end hook would sit without its task until
+                # cull's sweep, so one more flush once that input has gone quiet.
+                from brindle.providers import brindle_invocation
+
+                processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
+                                  str(STARTUP_FLUSH_AFTER)])
         elif db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.

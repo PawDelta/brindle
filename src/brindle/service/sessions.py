@@ -16,6 +16,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
@@ -161,6 +162,23 @@ def cull_detached(repo_root: str | None = None) -> None:
 # -- start -------------------------------------------------------------------
 
 
+def prefetch(repo_root: str) -> Future[str]:
+    """Where a new session worktree starts (session_sync.fresh_start: origin's
+    tip, as just fetched), fetched on a thread of its own under the request's
+    deadline, so a start's checks run while it fetches (start's ``fetched``)."""
+    done: Future[str] = Future()
+    work = spawn.carry(session_sync.fresh_start)
+
+    def run() -> None:
+        try:
+            done.set_result(work(repo_root))
+        except BaseException as e:  # noqa: BLE001 - handed to whoever waits on it
+            done.set_exception(e)
+
+    threading.Thread(target=run, name="brindle-session-fetch", daemon=True).start()
+    return done
+
+
 def session_worktree(db: DB, ws: Workspace) -> Workspace:
     """A worktree for a second session in this repo: branch brindle/session-N,
     cut from origin's default branch as just fetched (session_sync.fresh_start:
@@ -169,13 +187,20 @@ def session_worktree(db: DB, ws: Workspace) -> Workspace:
     return _new_session_worktree(db, ws).workspace
 
 
-def _new_session_worktree(db: DB, ws: Workspace, *, defer_setup: bool = False) -> workspaces.Created:
-    """session_worktree's; ``defer_setup``: its setup is left in ``finish``."""
+def _new_session_worktree(db: DB, ws: Workspace, *, defer_setup: bool = False,
+                          fetched: Future[str] | None = None) -> workspaces.Created:
+    """session_worktree's; ``defer_setup``: its setup is left in ``finish``.
+    ``fetched``: origin's tip, already being fetched (prefetch), to wait for
+    instead of fetching here."""
+    # Every session branch in one read, not a git call per number taken (a repo
+    # many sessions old waited a second or two on those).
+    taken = set(git.out(["for-each-ref", "--format=%(refname)", "refs/heads/brindle/session-*"],
+                        ws.repo_root).split())
     n = 2
-    while git.ok(["rev-parse", "--verify", "--quiet", f"refs/heads/brindle/session-{n}"], ws.repo_root):
+    while f"refs/heads/brindle/session-{n}" in taken:
         n += 1
     with create_step("fetch_s"):
-        start = session_sync.fresh_start(ws.repo_root)
+        start = fetched.result() if fetched is not None else session_sync.fresh_start(ws.repo_root)
     with create_step("worktree_s"):
         created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}",
                                     base=session_sync.default_branch(ws.repo_root), start=start,
@@ -186,16 +211,17 @@ def _new_session_worktree(db: DB, ws: Workspace, *, defer_setup: bool = False) -
 
 
 def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | None = None, *,
-          live: list | None = None) -> Placed | Opened | Conflict:
+          live: list | None = None, fetched: Future[str] | None = None) -> Placed | Opened | Conflict:
     """Where a new session in ``ws``'s checkout runs, given the repo's live
     sessions (in any worktree). With some running and no ``choice``, a
     Conflict: open one ("o"), start another here alongside them ("a"), start
     in a new worktree ("n"), or pause one and start fresh here ("p").
     "n" needs no session picked, nor any running: the app's Send asks for it
     whenever a session is there, running or paused.
-    ``live`` is the Conflict's list, to skip asking tmux again."""
+    ``live`` is the Conflict's list, to skip asking tmux again. ``fetched``:
+    for "n", origin's tip already being fetched (prefetch)."""
     if choice == "n":
-        made = _new_session_worktree(db, ws, defer_setup=True)
+        made = _new_session_worktree(db, ws, defer_setup=True, fetched=fetched)
         created = made.workspace
         return Placed(created, [Note(f"✓ new session in its own worktree: {created.path} ({created.branch})")],
                       fresh=True, finish=made.finish)
@@ -455,7 +481,7 @@ def _finish_start(root_id: str, refreshes: list[tuple[str, str | None]],
 def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | None = None,
           watch: bool = True, autopilot: bool | None = None, branch: str | None = None,
           worktree: str | None = None, choice: str | None = None,
-          session_id: str | None = None) -> Started | Opened | Conflict:
+          session_id: str | None = None, fetched: Future[str] | None = None) -> Started | Opened | Conflict:
     """A fresh supervisor session in ``repo_root``'s checkout, or (with
     ``branch``/``worktree``) in that worktree. With a session already running
     in the repo, a Conflict until ``choice`` and ``session_id`` say what to do
@@ -463,7 +489,8 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
 
     Only what the supervisor needs runs before it starts: a new worktree's
     setup commands and its code map's rebuild (graphify, which takes every
-    core) run after, on their own thread (after_launch)."""
+    core) run after, on their own thread (after_launch). ``fetched``: a new
+    worktree's start point already being fetched (prefetch)."""
     with create_timing() as steps, codemap.refreshes_held() as refreshes:
         notes: list[Note] = []
         finish, fresh = None, False
@@ -474,7 +501,7 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
             finish = deferred[0] if deferred else None
         else:
             with create_step("place_s"):
-                got = place(db, workspaces.adopt_root(db, repo_root), choice, session_id)
+                got = place(db, workspaces.adopt_root(db, repo_root), choice, session_id, fetched=fetched)
             if not isinstance(got, Placed):
                 return got
             ws, notes, finish, fresh = got.workspace, got.notes, got.finish, got.fresh
