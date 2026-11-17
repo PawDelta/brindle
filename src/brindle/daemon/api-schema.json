@@ -12549,6 +12549,11 @@
           "title": "Answer Agent Id",
           "type": "string"
         },
+        "answered_in_chat": {
+          "default": false,
+          "title": "Answered In Chat",
+          "type": "boolean"
+        },
         "by": {
           "title": "By",
           "type": "string"

@@ -114,9 +114,9 @@ def test_supervisor_decision_needs_no_visual_consent(db, session):
 def test_second_open_decision_is_refused(db, session):
     boss, _ = session
     choices = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    offers.person_spoke(db, boss, "Show me a visual")
     v = visuals.publish(db, boss, "Decision", "<p>Choose</p>", "Which?", choices)
     visuals.mark_read(db, v["id"])
-    offers.person_spoke(db, boss, "Show me a visual")
     with pytest.raises(ServiceError) as error:
         visuals.publish(db, boss, "Another", "<p>Choose</p>", "Which next?", choices)
     assert error.value.code == "open_decision_prompt"
