@@ -730,7 +730,10 @@ def refresh_pr_states(db: DB) -> None:
 
 MERGE_POLL_SECONDS = 60.0
 MERGE_CHECK_SECONDS = 3.0
-_merge_polled = 0.0
+# When each database's open PRs were last polled (time.monotonic). One never
+# polled is due at once: monotonic counts from boot on Linux, so a 0.0 "never"
+# skipped the first poll for a minute after the machine started.
+_merge_polled: dict[str, float] = {}
 _merge_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pr-merged")
 _merge_lock = threading.Lock()
 _merge_checks: dict[tuple[str, str, str, str], Future] = {}
@@ -745,18 +748,18 @@ def poll_merged(db: DB) -> None:
     deadline. The first PR advances each round, independent of whether a
     queued check was cancelled or ran after its execution window expired.
     """
-    global _merge_polled
     if not _merge_lock.acquire(blocking=False):
         return
     try:
-        due = time.monotonic() - _merge_polled >= MERGE_POLL_SECONDS
-        if due:
-            _merge_polled = time.monotonic()
+        path = str(db.path)
+        now = time.monotonic()
+        last = _merge_polled.get(path)
+        if last is None or now - last >= MERGE_POLL_SECONDS:
+            _merge_polled[path] = now
             for root_id in session_sync.unlanded(db):    # a merge whose landing an earlier round missed
                 _sync_after_merge(db, root_id)
             with spawn.deadline(MERGE_CHECK_SECONDS) as limit:
                 check = spawn.carry(workspaces.pull_request_merged)
-                path = str(db.path)
                 priority = {key: n for n, key in enumerate(_merge_order.get(path, []))}
                 rows = db.conn.execute("SELECT root_id, branch, url FROM session_prs"
                                        " WHERE url IS NOT NULL AND merged_at IS NULL").fetchall()
