@@ -275,15 +275,49 @@ def list_sessions(db: DB, request: Request) -> Any:
     return current + [row for row in paused if row["id"] not in live_ids]
 
 
-@_json
-def snapshot(db: DB, request: Request) -> Any:
+class SnapshotView:
+    """Share a rendering between the app's adjacent snapshot and inbox reads.
+
+    Events invalidate it immediately; the short age bound also catches changes
+    outside the event stream (pane liveness, transcript usage, and git files).
+    One app owns one entry, and concurrent readers join the same rendering.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.key: tuple[str | None, int] | None = None
+        self.at = 0.0
+        self.rows: list[dict] | None = None
+
+    def read(self, db: DB, repo: str | None) -> list[dict]:
+        with self.lock:
+            newest = db.conn.execute("SELECT MAX(id) FROM events").fetchone()[0] or 0
+            key = (repo, newest)
+            if self.rows is None or self.key != key or time.monotonic() - self.at >= 0.25:
+                self.rows = _snapshot_rows(db, repo)
+                self.key, self.at = key, time.monotonic()
+            return self.rows
+
+
+def _snapshot_rows(db: DB, repo: str | None) -> list[dict]:
     # Git counts only as far as they are known: the app's first read after the
     # daemon starts must not wait on a git status per workspace (with recovery
     # competing, that took half a minute). The rest is counted afterwards and
     # published (view.warm_later); the events feed's git sweep keeps them current.
     known = view.KnownGit(db)
-    rows = view.snapshot(db, _repo(request), known_git=known)
+    rows = view.snapshot(db, repo, known_git=known)
     view.warm_later(known.pending)
+    return rows
+
+
+def _shared_snapshot(db: DB, request: Request) -> list[dict]:
+    shared = getattr(request.app.state, "snapshot_view", None)
+    return shared.read(db, _repo(request)) if shared is not None else _snapshot_rows(db, _repo(request))
+
+
+@_json
+def snapshot(db: DB, request: Request) -> Any:
+    rows = _shared_snapshot(db, request)
     return [WorkspaceDTO.model_validate(ws).to_json() for ws in rows]
 
 
@@ -308,10 +342,7 @@ def goal(db: DB, request: Request) -> Any:
 
 @_json
 def inbox_(db: DB, request: Request) -> Any:
-    known = view.KnownGit(db)     # as for the snapshot, which the app reads alongside
-    out = [i.to_json() for i in inbox.items(db, _repo(request), known_git=known)]
-    view.warm_later(known.pending)
-    return out
+    return [i.to_json() for i in inbox.items(db, _repo(request), snapshot_rows=_shared_snapshot(db, request))]
 
 
 @_json
