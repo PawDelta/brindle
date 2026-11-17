@@ -42,6 +42,8 @@ def inbox(db, agent_id):
     return [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (agent_id,))]
 
 
+@pytest.mark.variant("the brief's required case: the hook itself, at a full window, reports in the same call "
+                     "with branch, commits and reset time; the sweep-path test reaches at_limit another way")
 def test_full_window_pauses_the_worker_and_reports_it_at_once(db, session):
     ws, stopped = session
     use(100)
