@@ -1,7 +1,7 @@
 /* The Account page's Usage section (design/usage/U2-account-usage.html):
    one card per provider brindle runs, each window it reports as a bar with
-   its percent used and the clock time it resets, a one-model cap in small
-   print, and what brindle does about it past 80% and 90%. A provider that
+   its percent used and the clock time it resets, including one-model caps,
+   and what brindle does about it past 80% and 90%. A provider that
    refused work says when it is available again; one that reports nothing
    says why. A card's left edge turns warm past 80%, red past 90% or on a
    limit, green when a window resets within the hour; nothing moves. The
@@ -11,7 +11,7 @@ import { forwardRef } from "react";
 import type { ProviderUsage, UsageWindow } from "../../api/client";
 import { alert, card, h2, mono } from "../../components/ui";
 import { useUsage } from "../../store/usage";
-import { ago, caps, hint, level, noneText, nowSeconds, planWindows, providerCli, providerName, resetLine, resets, soon, clock, stateOf, windowLabel, type UsageState } from "./usage";
+import { ago, hint, level, noneText, nowSeconds, providerCli, providerName, resetLine, resets, soon, clock, stateOf, windowLabel, type UsageState } from "./usage";
 
 /* The card's left edge, per state. */
 const EDGE: Record<UsageState, string> = { none: "", ok: "", warn: "before:bg-sap", stop: "before:bg-fail", limit: "before:bg-fail", soon: "before:bg-pass" };
@@ -41,8 +41,6 @@ function Meter({ w, now }: { w: UsageWindow; now: number }) {
 
 function ProviderCard({ q, now }: { q: ProviderUsage; now: number }) {
   const state = stateOf(q, now);
-  const plan = planWindows(q);
-  const capped = caps(q);
   const note = q.known && !q.limited ? hint(q) : null;
   return (
     <article
@@ -71,19 +69,10 @@ function ProviderCard({ q, now }: { q: ProviderUsage; now: number }) {
       ) : (
         <>
           <div className="flex flex-col gap-s1">
-            {plan.map((w) => (
+            {q.windows.map((w) => (
               <Meter key={`${w.short}-${w.minutes}`} w={w} now={now} />
             ))}
           </div>
-          {capped.length > 0 && (
-            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-ink-3" data-testid="usage-caps">
-              {capped.map((w) => (
-                <span key={w.name}>
-                  {w.name} cap · {Math.round(w.used)}% used{w.resets_at != null && ` · resets ${resets(w.resets_at, now)}`}
-                </span>
-              ))}
-            </div>
-          )}
           {note && <p className="m-0 text-[11.5px] leading-[1.45] text-ink-2">{note}</p>}
         </>
       )}
