@@ -139,13 +139,18 @@ def save_patch(path: str, label: str, now: float | None = None) -> tuple[Path | 
     return dest, f"{head} {tree}"
 
 
-def _discard(patch: Path | None) -> None:
-    """A patch saved for a worktree that stayed after all: it still holds its changes."""
-    if patch is not None:
-        try:
+def _discard(patch: Path | None, path: str, saved: str | None) -> None:
+    """A patch saved for a worktree that stayed after all goes only when the
+    worktree provably still holds exactly what it saved (its ``snapshot``):
+    a teardown or a removal that failed part way may have deleted some of
+    it, and the patch is then the only copy left."""
+    if patch is None or saved is None:
+        return
+    try:
+        if os.path.isdir(path) and snapshot(path) == saved:
             patch.unlink()
-        except OSError:
-            pass
+    except (git.GitError, OSError):
+        pass   # can't be shown to be safe: the patch stays
 
 
 # -- 1. brindle's own workspaces ----------------------------------------------------
@@ -226,16 +231,16 @@ def sweep_workspaces(db, now: float) -> list[str]:
         if _workspace_changed(db, judged, now):
             continue
         ws = db.get_workspace(judged.ws_id)
-        patch = None
+        patch, saved = None, None
         try:
             patch, saved = save_patch(ws.path, ws.branch, now)
-            # Forced past the changes just saved: so at the last moment
-            # (after teardown, right before the worktree goes) everything
-            # that made it removable is read again, the saved state included.
+            # Forced past the changes just saved: so before anything is torn
+            # down, and again right before the worktree goes, everything that
+            # made it removable is read again, the saved state included.
             workspaces.remove(db, ws, force=True, delete_branch=False, stop=(),
                               guard=lambda: _workspace_changed(db, judged, now, saved))
         except (workspaces.WorkspaceError, git.GitError, OSError) as e:
-            _discard(patch)
+            _discard(patch, judged.path, saved)
             log.info("brindle: kept worktree %s: %s", judged.path, e)
             continue
         done.append(f"removed finished worktree {ws.path} (branch {ws.branch} kept"
@@ -397,7 +402,7 @@ def sweep_loose(db, root: str, now: float) -> list[str]:
             continue
         if _loose_changed(db, judged, base, now):
             continue
-        patch = None
+        patch, saved = None, None
         try:
             patch, saved = save_patch(judged.path, judged.branch or os.path.basename(judged.path), now)
             # Forced past the changes just saved: everything read again first.
@@ -406,7 +411,7 @@ def sweep_loose(db, root: str, now: float) -> list[str]:
                 raise git.GitError(why)
             git.remove_worktree(root, judged.path, force=True)
         except (git.GitError, OSError) as e:
-            _discard(patch)
+            _discard(patch, judged.path, saved)
             log.info("brindle: kept worktree %s: %s", judged.path, e)
             continue
         kept = f"branch {judged.branch} kept" if judged.branch else "detached"

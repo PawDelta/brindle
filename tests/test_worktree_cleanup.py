@@ -2,13 +2,14 @@
 ones go once nothing is in them, their changes saved as a patch and their
 branch kept; the person's own checkouts are never touched."""
 
+import dataclasses
 import os
 import time
 from pathlib import Path
 
 import pytest
 
-from brindle import agents, config, disk, git, history, workspaces, worktree_cleanup
+from brindle import agents, config, disk, git, history, services, workspaces, worktree_cleanup
 from brindle.db import Agent
 
 LATER = 2 * disk.FRESH   # past the quiet time a finished worktree is left alone for
@@ -24,14 +25,25 @@ def _agent(db, ws_id: str, **fields) -> None:
                        time.time(), **fields))
 
 
-@pytest.mark.parametrize("holder", [None, "process", "process-during-save", "edit-during-save"])
-def test_kept_merged_workspace_goes_once_nothing_is_in_it(db, repo, process_scan, monkeypatch, holder):
+@pytest.mark.parametrize("holder", [None, "process", "process-during-save", "edit-during-save",
+                                    "teardown-deletes"])
+def test_kept_merged_workspace_goes_once_nothing_is_in_it(db, repo, tmp_path, process_scan, monkeypatch,
+                                                          holder):
     """A worker's workspace kept at merge (its branch merged, uncommitted
     changes left) is removed by a later sweep with its changes saved as a
     patch and its branch kept; a process whose folder is in it keeps it,
     and so does one that starts there, or an edit made, while its changes
-    are being saved (after the earlier checks passed)."""
+    are being saved (after the earlier checks passed): then neither its
+    teardown nor its services are run. A teardown that deletes saved
+    changes keeps the worktree, and the patch, the only copy left."""
     ws = workspaces.create(db, str(repo), "kept-at-merge").workspace
+    marker = tmp_path / "torn-down"
+    teardown = "rm notes.txt" if holder == "teardown-deletes" else f"touch {marker}"
+    configured = workspaces.config_for
+    monkeypatch.setattr(workspaces, "config_for",
+                        lambda *a: dataclasses.replace(configured(*a), teardown=[teardown]))
+    downed = []
+    monkeypatch.setattr(services, "down", lambda w, cfg: downed.append(w.id))
     path = Path(ws.path)
     (path / "feature.py").write_text("done = True\n")
     git.run(["add", "feature.py"], path)
@@ -43,7 +55,7 @@ def test_kept_merged_workspace_goes_once_nothing_is_in_it(db, repo, process_scan
     monkeypatch.setattr(agents, "is_alive", lambda *a, **kw: False)
     if holder == "process":   # a dev server started by hand, still running there
         process_scan[4242] = os.path.realpath(path / "web")
-    elif holder:
+    elif holder in ("process-during-save", "edit-during-save"):
         save = worktree_cleanup.save_patch
 
         def busy_meanwhile(*args, **kwargs):
@@ -57,12 +69,19 @@ def test_kept_merged_workspace_goes_once_nothing_is_in_it(db, repo, process_scan
 
     worktree_cleanup.sweep(db, time.time() + LATER)
 
+    if holder == "teardown-deletes":
+        assert path.is_dir() and not (path / "notes.txt").exists()
+        [patch] = _patches()
+        assert "left behind" in patch.read_text()
+        return
     if holder:
-        assert path.is_dir() and (path / "notes.txt").is_file()
-        assert db.get_workspace(ws.id) is not None and not _patches()
+        assert path.is_dir() and (path / "notes.txt").is_file() and db.get_workspace(ws.id) is not None
+        assert not marker.exists() and not downed
+        if holder != "edit-during-save":   # (that one's patch has what the edit replaced)
+            assert not _patches()
         return
     assert not path.exists() and db.get_workspace(ws.id) is None
-    assert git.branch_exists(str(repo), ws.branch)
+    assert git.branch_exists(str(repo), ws.branch) and marker.exists() and downed == [ws.id]
     [patch] = _patches()
     git.run(["apply", "--check", "--binary", str(patch)], repo)   # applies to the merged commit
     assert "left behind" in patch.read_text() and "edited after the merge" in patch.read_text()
