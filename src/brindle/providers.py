@@ -2066,6 +2066,47 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
 
 
 class Codex(Provider):
+    @staticmethod
+    def print_command(binary: str, model: str, prompt: str, session: str | None) -> list[str]:
+        """JSON events from one exec turn, preserving the CLI's approval policy."""
+        return [binary, "exec", *(["resume"] if session else []), "--json", "--model", model,
+                "-c", 'sandbox_mode="workspace-write"', *([session] if session else []), prompt]
+
+    def print_events(self, entries: list[dict], model: str, session: str | None) -> list[dict]:
+        """Adapt exec's cumulative thread totals to per-turn print results."""
+        from brindle.usage import Usage, _codex_totals
+
+        totals_by_session = getattr(self, "_print_usage", {})
+        resumed = session is not None
+        reply = None
+        output = []
+        for event in entries:
+            if event.get("type") == "thread.started":
+                session = event.get("thread_id") or session
+            item = event.get("item", {})
+            if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+                reply = item.get("text")
+            if event.get("type") == "turn.completed":
+                totals = event.get("usage", {})
+                previous = totals_by_session.get(session, {}) if resumed else {}
+                delta = {key: max(0, value - previous.get(key, 0))
+                         for key, value in totals.items() if isinstance(value, (int, float))}
+                totals_by_session[session] = totals
+                self._print_usage = totals_by_session
+                resumed = True
+                # Share the rollout reader's inclusive input/cache semantics.
+                data = json.dumps({"payload": {"type": "token_count", "info": {
+                    "total_token_usage": delta}}}).encode() + b"\n"
+                usage, _ = _codex_totals(data, 0, Usage(0, 0))
+                output.append({"type": "result", "session_id": session, "result": reply,
+                               "modelUsage": {model: {"inputTokens": usage.input_tokens,
+                                   "outputTokens": usage.output_tokens,
+                                   "cacheReadInputTokens": usage.cache_read_tokens,
+                                   "cacheCreationInputTokens": usage.cache_creation_tokens}}})
+            if event.get("type") == "turn.failed":
+                output.append({"type": "result", "session_id": session, "is_error": True})
+        return output
+
     name = "codex"
     accepts_files = True
     startup_prompts = True
@@ -2273,6 +2314,41 @@ class Codex(Provider):
 
 class Antigravity(Provider):
     """Google Antigravity's terminal agent, agy (see brindle.antigravity)."""
+
+    @staticmethod
+    def print_command(binary: str, model: str, prompt: str, session: str | None) -> list[str]:
+        return [binary, "-p", prompt, "--model", model, "--mode", "auto", "--output-format", "stream-json",
+                *(["--conversation", session] if session else [])]
+
+    def print_events(self, entries: list[dict], model: str, session: str | None) -> list[dict]:
+        """Normalize print mode's cumulative conversation usage to turn deltas.
+
+        Envelope schema: https://antigravity.google/docs/cli/headless/
+        As in usage.antigravity_agent_usage, input and cache reads are separate;
+        output already includes thinking tokens.
+        """
+        output = []
+        for event in entries:
+            if event.get("event") == "init":
+                init = event.get("init", {})
+                model = init.get("model") or model
+                output.append({"type": "system", "subtype": "init",
+                               "permissionMode": init.get("permission_mode")})
+            if event.get("event") != "result":
+                continue
+            result = event.get("result", {})
+            usage = result.get("usage", {})
+            previous = getattr(self, "_print_usage", {}) if session else {}
+            delta = {key: max(0, value - previous.get(key, 0))
+                     for key, value in usage.items() if isinstance(value, (int, float))}
+            self._print_usage = usage
+            output.append({"type": "result", "session_id": result.get("conversation_id") or session,
+                           "result": result.get("response"),
+                           "is_error": result.get("status") != "SUCCESS" or bool(result.get("finished_reason")),
+                           "modelUsage": {model: {"inputTokens": delta.get("input_tokens", 0),
+                               "outputTokens": delta.get("output_tokens", 0),
+                               "cacheReadInputTokens": delta.get("cache_read_tokens", 0)}}})
+        return output
 
     name = "antigravity"
     accepts_files = True

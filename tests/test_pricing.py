@@ -34,6 +34,29 @@ def tokens(model=None, input=0, output=0, cache_read=0, cache_creation=0):
 # -- the price table ---------------------------------------------------------------------------------
 
 
+def test_gemini_argon_promo_then_later_rates(monkeypatch):
+    import runpy
+
+    class Day(dt.date):
+        today_is = dt.date(2026, 11, 30)
+
+        @classmethod
+        def today(cls):
+            return cls.today_is
+    monkeypatch.setattr(dt, "date", Day)   # the table is built at import: rebuild it on chosen days
+
+    def argon():
+        p = runpy.run_path(pricing.__file__)["PRICES"]["gemini-4-argon"]
+        return (p.input, p.output, p.cache_write, p.cache_read)
+    assert argon() == (2, 10, 2, 0.1)
+    Day.today_is = dt.date(2026, 12, 1)
+    assert argon() == (4, 20, 4, 0.2)
+
+
+def test_sonnet_5_5_cache_reads_are_a_twentieth_of_input():
+    assert pricing.price_for("claude-sonnet-5-5").cache_read == pytest.approx(0.10)
+
+
 def test_stale_warning_after_90_days():
     assert pricing.stale_warning(pricing.AS_OF + dt.timedelta(days=90)) is None
     warning = pricing.stale_warning(pricing.AS_OF + dt.timedelta(days=91))
