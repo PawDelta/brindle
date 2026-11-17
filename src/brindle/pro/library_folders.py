@@ -43,14 +43,22 @@ def list_all(scopes: list[dict], *, api: Api = _default_api,
     (the server's scope rows). A scope the server refuses (``refusals``: a
     team without the team feature, say) is left out, unless every one
     refuses: then the first refusal is raised."""
-    out, refused = [], None
-    for s in scopes:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brindle import spawn
+
+    def ask(s: dict) -> tuple[list[dict] | None, Exception | None]:
         try:
-            folders = list_folders(s["kind"], s["id"], api=api)
+            return list_folders(s["kind"], s["id"], api=api), None
         except refusals as e:
-            refused = refused or e
-            continue
-        out.append({"scope": {"kind": s["kind"], "id": s["id"], "name": s.get("name")}, "folders": folders})
+            return None, e
+
+    # One server round trip per scope: all at once, not one after another (answers kept in scope order).
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(scopes)))) as pool:
+        answers = list(pool.map(spawn.carry(ask), scopes))
+    out = [{"scope": {"kind": s["kind"], "id": s["id"], "name": s.get("name")}, "folders": folders}
+           for s, (folders, e) in zip(scopes, answers) if e is None]
+    refused = next((e for _, e in answers if e is not None), None)
     if refused and not out:
         raise refused
     return out

@@ -116,10 +116,40 @@ def normalize_remote(url: str) -> str | None:
     return f"{host.lower()}/{path}"
 
 
+class _NoAnswer(Exception):
+    """git didn't answer: nothing to remember."""
+
+
+def _root_commits(repo_root: str) -> str | None:
+    """``git rev-list --max-parents=0 HEAD``'s output. It walks the whole history, and Settings ›
+    Integrations asks it of every repo brindle knows on every open, so it is asked once per commit:
+    HEAD read from the repo's files (no git), and the answer kept by that commit's sha
+    (``git.once``: asked again when the clone is deepened or grafted, never kept with replace
+    refs). A new HEAD (a commit, an amended root, other history checked out or merged in) is a new
+    question. When the files can't say what HEAD is (no commit yet, a reftable repo), git is asked."""
+    from brindle import git
+
+    found = git.resolve(repo_root, "HEAD")
+    if not found or not SHA_RE.match(found[0]):
+        return _git(repo_root, "rev-list", "--max-parents=0", "HEAD")
+    head = found[0]
+
+    def ask() -> str:
+        got = _git(repo_root, "rev-list", "--max-parents=0", head)
+        if got is None:
+            raise _NoAnswer(repo_root)
+        return got
+
+    try:
+        return git.once(repo_root, ["rev-list", "--max-parents=0", head], ask)
+    except _NoAnswer:
+        return None
+
+
 def repo_identity(repo_root: str) -> str | None:
     """The root commit SHA (smallest of several), else the normalized origin
     URL, else None."""
-    out = _git(repo_root, "rev-list", "--max-parents=0", "HEAD")
+    out = _root_commits(repo_root)
     shas = sorted(s for s in (out or "").split() if SHA_RE.match(s))
     if shas:
         return shas[0]
