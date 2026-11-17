@@ -63,10 +63,12 @@ beforeEach(() => {
   localStorage.setItem(ONBOARDED_KEY, "1");
   native.invoke.mockReset();
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
-  closeParkedVisuals();
   vi.useRealTimers();
+  // A reader that just went parks its page a few awaits later: let it, then close every one.
+  await new Promise((settled) => setTimeout(settled));
+  closeParkedVisuals();
   native.enabled = false;
   native.events.clear();
   document.documentElement.style.removeProperty("--canvas");
@@ -542,6 +544,50 @@ describe("visuals", () => {
     expect(lastBounds()).toEqual({ label, bounds });
     expect(native.invoke.mock.calls.filter(([command]) => command === "visual_open")).toHaveLength(1);
     expect(native.invoke).not.toHaveBeenCalledWith("visual_close", expect.anything());
+  });
+
+  async function sessionWithVisuals(visuals: VisualDTO[]) {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const bounds = { x: 0, y: 40, width: 900, height: 600 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ ...bounds, top: bounds.y, left: bounds.x, right: bounds.width, bottom: bounds.y + bounds.height, toJSON() {} }));
+    native.invoke.mockReset().mockImplementation(async (command, args) =>
+      command === "visual_open" ? `visual:${(args as { id: string }).id}:r2` : undefined);
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    vi.spyOn(client, "visuals").mockResolvedValue(visuals);
+    vi.spyOn(client, "markVisualRead").mockImplementation(async (id) => ({ ...visuals.find((v) => v.id === id)!, unread: false }));
+    vi.useFakeTimers();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect, backoff: () => 1000 });
+    const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    const view = renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await advance(1000);
+    const opens = () => native.invoke.mock.calls.filter(([command]) => command === "visual_open").map(([, args]) => args);
+    return { bounds, advance, opens, view };
+  }
+
+  it("builds the newest visual not yet opened ahead, and opening it shows that page with no new open", async () => {
+    const older = { ...visual, id: "v_older", title: "Older", created_at: now - 3600 };
+    const { bounds, advance, opens } = await sessionWithVisuals([older, visual, answered]);
+    // The one spare: the newest unread, at no size, before anything is clicked.
+    expect(opens()).toEqual([{ id: visual.id, rev: 2, bounds: { x: 0, y: 0, width: 0, height: 0 } }]);
+    fireEvent.click(screen.getByTestId("visuals-button"));
+    fireEvent.click(within(screen.getByTestId("visuals-panel")).getByText("Release flow"));
+    await advance(100);
+    expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: "visual:v_8f2c:r2", bounds });
+    expect(opens()).toHaveLength(1);
+    expect(native.invoke).not.toHaveBeenCalledWith("visual_close", expect.anything());
+  });
+
+  it("closes the spare it built when the session view goes without opening it", async () => {
+    const { advance, opens, view } = await sessionWithVisuals([visual]);
+    expect(opens()).toHaveLength(1);
+    view.unmount();
+    await advance(0);
+    expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_8f2c:r2" });
   });
 
   it("visuals unread dot clears on view while Inbox removes notices and keeps unanswered prompts", async () => {

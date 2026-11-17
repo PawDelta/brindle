@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useContext, useEffect, useRef, useState } from "react";
+import type { VisualDTO } from "../../../api/client";
 import { AppCovered } from "../../../components/ReconnectOverlay";
 import { computedSnapshot, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
 
@@ -42,10 +43,95 @@ function unpark(label: string): boolean {
 }
 /* Close every parked page (a test's clean slate). */
 export function closeParkedVisuals() {
+  if (spare) releaseSpare(spare);
   for (const label of [...parked]) {
     parked.delete(label);
     extendLifecycle(label, lifecycleOf(label).then(() => invoke("visual_close", { label })));
   }
+}
+
+// The one spare: the page of the visual the person is likeliest to open next (the newest they
+// haven't), built ahead at no size and parked, so opening it shows it at once. Bound to its own
+// revision like any other. Building: being opened; claimed: a reader took it (it's that reader's
+// now); released: no longer wanted (closed once built, if no reader took it).
+type Spare = { label: string; state: "building" | "built" | "claimed" | "released"; unlisten?: () => void };
+let spare: Spare | null = null;
+// The revisions a reader shows now: never built a second time as the spare.
+const shown = new Set<string>();
+
+function claimSpare(label: string) {
+  if (spare?.label !== label) return;
+  spare.state = "claimed";
+  spare.unlisten?.();
+  spare = null;
+}
+
+function releaseSpare(it: Spare) {
+  if (it.state === "claimed" || it.state === "released") return;
+  const built = it.state === "built";
+  it.state = "released";
+  it.unlisten?.();
+  if (spare === it) spare = null;
+  if (built && parked.delete(it.label)) {
+    extendLifecycle(it.label, lifecycleOf(it.label).then(() => invoke("visual_close", { label: it.label })));
+  }
+}
+
+/* Build the page of `id` at `rev` ahead of its first open; the one spare, replacing any other.
+   Answers the release: the spare's page is closed unless a reader has taken it. */
+export function prebuildVisual(id: string, rev: number): () => void {
+  const label = `visual:${id}:r${rev}`;
+  if (parked.has(label) || shown.has(label)) return () => {};      // already built: a reader's
+  if (spare?.label === label) {
+    const same = spare;
+    return () => releaseSpare(same);
+  }
+  if (spare) releaseSpare(spare);
+  const it: Spare = { label, state: "building" };
+  spare = it;
+  // Read afresh after each await: a reader may claim it, or the session view release it, meanwhile.
+  const now = (): Spare["state"] => it.state;
+  extendLifecycle(label, lifecycleOf(label).then(async () => {
+    if (now() !== "building") return;
+    // The blocker can fail with no reader to hear it: then the spare goes.
+    const unlisten = await listen<Delivery>("visual:failed", ({ payload }) => {
+      if (payload.label === label && it.state !== "claimed") {
+        it.state = "built";
+        releaseSpare(it);
+      }
+    });
+    it.unlisten = unlisten;
+    if (now() === "released") return unlisten();
+    if (now() === "claimed") unlisten();        // the reader hears its own failures
+    try {
+      await invoke<string>("visual_open", { id, rev, bounds: { x: 0, y: 0, width: 0, height: 0 } });
+    } catch {
+      unlisten();
+      if (spare === it) spare = null;
+      it.state = "released";
+      return;
+    }
+    if (now() === "released") {
+      return invoke("visual_close", { label });
+    }
+    park(label);
+    if (now() === "building") it.state = "built";
+  }));
+  return () => releaseSpare(it);
+}
+
+/* While a session's visuals are on screen: the newest one the person hasn't opened is built ahead
+   (the one spare), and released when it changes or the session view goes. */
+export function useSpareVisual(visuals: readonly VisualDTO[] | null) {
+  const next = (visuals ?? [])
+    .filter((v) => v.kind === "visual" && v.unread)
+    .reduce<VisualDTO | null>((newest, v) => (!newest || v.created_at > newest.created_at ? v : newest), null);
+  const id = next?.id;
+  const rev = next?.rev;
+  useEffect(() => {
+    if (!id || !rev || !isTauri()) return;
+    return prebuildVisual(id, rev);
+  }, [id, rev]);
 }
 
 function themeMessage() {
@@ -77,6 +163,9 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     const element = host.current!;
     const from: VisualSource = rev === null ? { kind: "kept", id } : { kind: "session", id, rev };
     const expected = rev === null ? `visual:kept:${id}` : `visual:${id}:r${rev}`;
+    // The spare built for this revision is this reader's now: nothing releases it from under it.
+    claimSpare(expected);
+    shown.add(expected);
     let disposed = false;
     let failed = false;
     let closing: Promise<unknown> | undefined;
@@ -164,6 +253,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     system.addEventListener("change", theme);
     return () => {
       disposed = true;
+      shown.delete(expected);
       snapshot.current = null;
       relayout.current = null;
       resize.disconnect();

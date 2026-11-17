@@ -37,6 +37,7 @@ import { VisualsButton } from "./Visuals/VisualsButton";
 import { OfferChip } from "./Visuals/OfferChip";
 import { PracticeActions, PracticeSteps, usePractice } from "./PracticeRun";
 import { useVisuals } from "./Visuals/useVisuals";
+import { useSpareVisual } from "./Visuals/NativeFrame";
 
 export interface SessionScreenProps {
   client: DaemonClient;
@@ -167,6 +168,8 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   });
   // The session's visuals; one open replaces the chat (the terminal stays mounted under it, hidden).
   const visuals = useVisuals(client, root);
+  // The newest one not opened yet is built ahead, so opening it is at once.
+  useSpareVisual(visuals.visuals);
   const showVisual = shownSheet?.kind === "visual";
   const visualId = shownSheet?.kind === "visual" ? shownSheet.id : null;
   // Stable, for the chat's link handler: it opens on the agent and route as they are when clicked.
