@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useContext, useEffect, useRef, useState } from "react";
+import type { VisualDTO } from "../../../api/client";
 import { AppCovered } from "../../../components/ReconnectOverlay";
 import { computedSnapshot, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
 
@@ -12,8 +13,128 @@ type Delivery = {
 };
 
 // Labels belong to a revision. Finish closing its previous reader before opening it again,
-// including React's effect replay and Back while a native open is still pending.
-let lifecycle: Promise<unknown> = Promise.resolve();
+// including React's effect replay and Back while a native open is still pending. Only the same
+// label waits: another visual opens at once, while the one before it is still closing.
+const lifecycles = new Map<string, Promise<unknown>>();
+const lifecycleOf = (label: string): Promise<unknown> => lifecycles.get(label) ?? Promise.resolve();
+function extendLifecycle(label: string, step: Promise<unknown>) {
+  const settled = step.catch(() => {});
+  lifecycles.set(label, settled);
+  void settled.then(() => { if (lifecycles.get(label) === settled) lifecycles.delete(label); });
+}
+
+// A reader that goes (Back, another visual) parks its page instead of closing it: the webview
+// stays, bound to its own revision as before, at no size, and opening that revision again shows
+// it at once instead of building a new webview and loading the page again. A revision never
+// changes, so the parked page is still its page. The oldest past PARKED is closed.
+export const PARKED = 3;
+const parked = new Set<string>();
+// The revisions a reader shows now (from its mount, before it has taken its parked page back):
+// never evicted, and never built a second time as the spare.
+const shown = new Set<string>();
+function park(label: string) {
+  parked.delete(label);
+  parked.add(label);
+  for (const oldest of parked) {
+    if (parked.size <= PARKED) break;
+    if (shown.has(oldest)) continue;
+    parked.delete(oldest);
+    extendLifecycle(oldest, lifecycleOf(oldest).then(() => invoke("visual_close", { label: oldest })));
+  }
+}
+function unpark(label: string): boolean {
+  return parked.delete(label);
+}
+/* Close every parked page (a test's clean slate). */
+export function closeParkedVisuals() {
+  if (spare) releaseSpare(spare);
+  for (const label of [...parked]) {
+    parked.delete(label);
+    extendLifecycle(label, lifecycleOf(label).then(() => invoke("visual_close", { label })));
+  }
+}
+
+// The one spare: the page of the visual the person is likeliest to open next (the newest they
+// haven't), built ahead at no size and parked, so opening it shows it at once. Bound to its own
+// revision like any other. Building: being opened; claimed: a reader took it (it's that reader's
+// now); released: no longer wanted (closed once built, if no reader took it).
+type Spare = { label: string; state: "building" | "built" | "claimed" | "released"; unlisten?: () => void };
+let spare: Spare | null = null;
+
+function claimSpare(label: string) {
+  if (spare?.label !== label) return;
+  spare.state = "claimed";
+  spare.unlisten?.();
+  spare = null;
+}
+
+function releaseSpare(it: Spare) {
+  if (it.state === "claimed" || it.state === "released") return;
+  const built = it.state === "built";
+  it.state = "released";
+  it.unlisten?.();
+  if (spare === it) spare = null;
+  if (built && parked.delete(it.label)) {
+    extendLifecycle(it.label, lifecycleOf(it.label).then(() => invoke("visual_close", { label: it.label })));
+  }
+}
+
+/* Build the page of `id` at `rev` ahead of its first open; the one spare, replacing any other.
+   Answers the release: the spare's page is closed unless a reader has taken it. */
+export function prebuildVisual(id: string, rev: number): () => void {
+  const label = `visual:${id}:r${rev}`;
+  if (parked.has(label) || shown.has(label)) return () => {};      // already built: a reader's
+  if (spare?.label === label) {
+    const same = spare;
+    return () => releaseSpare(same);
+  }
+  if (spare) releaseSpare(spare);
+  const it: Spare = { label, state: "building" };
+  spare = it;
+  // Read afresh after each await: a reader may claim it, or the session view release it, meanwhile.
+  const now = (): Spare["state"] => it.state;
+  extendLifecycle(label, lifecycleOf(label).then(async () => {
+    if (now() !== "building") return;
+    // The blocker can fail with no reader to hear it: then the spare goes.
+    const unlisten = await listen<Delivery>("visual:failed", ({ payload }) => {
+      if (payload.label === label && it.state !== "claimed") {
+        it.state = "built";
+        releaseSpare(it);
+      }
+    });
+    it.unlisten = unlisten;
+    if (now() === "released") return unlisten();
+    if (now() === "claimed") unlisten();        // the reader hears its own failures
+    try {
+      await invoke<string>("visual_open", { id, rev, bounds: { x: 0, y: 0, width: 0, height: 0 } });
+    } catch {
+      unlisten();
+      if (spare === it) spare = null;
+      it.state = "released";
+      return;
+    }
+    if (now() === "released") {
+      return invoke("visual_close", { label });
+    }
+    park(label);
+    if (now() === "building") it.state = "built";
+  }));
+  return () => releaseSpare(it);
+}
+
+/* While a session's visuals are on screen: the newest one the person hasn't opened is built ahead
+   (the one spare), and released when it changes or the session view goes. */
+export function useSpareVisual(visuals: readonly VisualDTO[] | null) {
+  const next = (visuals ?? [])
+    .filter((v) => v.kind === "visual" && v.unread)
+    .reduce<VisualDTO | null>((newest, v) => (!newest || v.created_at > newest.created_at ? v : newest), null);
+  const id = next?.id;
+  const rev = next?.rev;
+  useEffect(() => {
+    if (!id || !rev || !isTauri()) return;
+    return prebuildVisual(id, rev);
+  }, [id, rev]);
+}
 
 function themeMessage() {
   const style = getComputedStyle(document.documentElement);
@@ -44,6 +165,9 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     const element = host.current!;
     const from: VisualSource = rev === null ? { kind: "kept", id } : { kind: "session", id, rev };
     const expected = rev === null ? `visual:kept:${id}` : `visual:${id}:r${rev}`;
+    // The spare built for this revision is this reader's now: nothing releases it from under it.
+    claimSpare(expected);
+    shown.add(expected);
     let disposed = false;
     let failed = false;
     let closing: Promise<unknown> | undefined;
@@ -53,11 +177,16 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     // with unmount cleanup and serialize the next reader behind it.
     function close() {
       if (!closing) {
-        closing = lifecycle.then(async () => {
+        closing = lifecycleOf(expected).then(async () => {
           const label = await opened.catch(() => null);
-          if (label) await invoke("visual_close", { label });
+          if (!label) return;
+          if (failed) return invoke("visual_close", { label });
+          // Out of sight, kept for the next open of this revision.
+          const { x, y } = element.getBoundingClientRect();
+          await invoke("visual_set_bounds", { label, bounds: { x, y, width: 0, height: 0 } });
+          park(label);
         });
-        lifecycle = closing.catch(() => {});
+        extendLifecycle(expected, closing);
       }
       return closing;
     }
@@ -90,12 +219,20 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
       listen<Delivery>("visual:failed", ({ payload }) => { if (matches(payload)) fail(payload.why); }),
     ];
     const registered = Promise.all(listeners);
-    const opened = lifecycle.then(async () => {
+    const opened = lifecycleOf(expected).then(async () => {
       await registered;
       if (disposed) return null;
+      if (unpark(expected)) {
+        try {
+          await invoke("visual_set_bounds", { label: expected, bounds: bounds() });
+          return expected;
+        } catch {
+          // No longer open (the shell closed it): opened afresh below.
+        }
+      }
       return invoke<string>("visual_open", { id, rev, bounds: bounds() });
     });
-    lifecycle = opened.catch(() => {});
+    extendLifecycle(expected, opened);
     let sends: Promise<unknown> = opened;
     const send = (command: string, args: Record<string, unknown> = {}) => {
       sends = sends.then(() => opened).then((label) => {
@@ -118,6 +255,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     system.addEventListener("change", theme);
     return () => {
       disposed = true;
+      shown.delete(expected);
       snapshot.current = null;
       relayout.current = null;
       resize.disconnect();

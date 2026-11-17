@@ -354,12 +354,16 @@ class Locked(RuntimeError):
 ENFORCED = ("enforced_on", "enforced_off")
 
 
-def _own_group(policy: dict, client, store) -> str | None:
-    """The person's group in the org whose ``policy`` this is: the one group
-    scope they read that the policy names. None when there isn't exactly one
-    (never a guess)."""
+def _group_scopes(client, store) -> set[str]:
+    """The ids of the group scopes the person reads."""
     listed = api("GET", "/analysis-docs/scopes", client=client, store=store).get("scopes") or []
-    mine = {s["id"] for s in listed if isinstance(s, dict) and s.get("kind") == "group" and isinstance(s.get("id"), str)}
+    return {s["id"] for s in listed if isinstance(s, dict) and s.get("kind") == "group" and isinstance(s.get("id"), str)}
+
+
+def _own_group(policy: dict, mine: set[str]) -> str | None:
+    """The person's group in the org whose ``policy`` this is: the one group
+    scope they read (``mine``) that the policy names. None when there isn't
+    exactly one (never a guess)."""
     found = sorted(mine & set(policy.get("groups") or {}))
     return found[0] if len(found) == 1 else None
 
@@ -370,16 +374,26 @@ def switch_states(client=None, store=None) -> list[dict]:
     (None while unset), ``on`` what applies, and ``locked`` whether their org
     enforces it (an Enterprise org's own switches, or their group's in a Team
     or Enterprise org), with the enforced value in ``org``."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brindle import spawn
+
     client, store = _session(client, store)
     ent = require_entitlement(store)
-    choices = fetch_switches(client, store)
     policy, group = {"switches": {}, "groups": {}}, None
-    if "analysis_docs_team" in ent.features:
-        got = analysis_policy.fetch(ent.org_id, client, store)
+    if "analysis_docs_team" not in ent.features:
+        choices = fetch_switches(client, store)
+    else:
+        # Three Library round trips that don't wait on each other: all at once.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            asked_choices = pool.submit(spawn.carry(fetch_switches), client, store)
+            asked_policy = pool.submit(spawn.carry(analysis_policy.fetch), ent.org_id, client, store)
+            asked_scopes = pool.submit(spawn.carry(_group_scopes), client, store)
+        choices, got = asked_choices.result(), asked_policy.result()
         # the server weighs the org's own switches only on Enterprise; groups from Team up
         policy = {"switches": got["switches"] if "analysis_docs_enterprise" in ent.features else {},
                   "groups": got["groups"]}
-        group = _own_group(policy, client, store)
+        group = _own_group(policy, asked_scopes.result())
     states = []
     for name in analysis_policy.SWITCHES:
         enforced = next((v for v in (policy["switches"].get(name),

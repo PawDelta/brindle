@@ -2,6 +2,7 @@ import { connectDaemon, renderApp, inTestStore, trackedSync as startSync } from 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import App from "../../../App";
 import { DaemonClient, type Plan, type PlanVerdict, type VisualDTO } from "../../../api/client";
 import { ONBOARDED_KEY } from "../../../api/providers";
@@ -11,6 +12,7 @@ import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
+import { PARKED, closeParkedVisuals } from "./NativeFrame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
@@ -62,9 +64,12 @@ beforeEach(() => {
   localStorage.setItem(ONBOARDED_KEY, "1");
   native.invoke.mockReset();
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
   vi.useRealTimers();
+  // A reader that just went parks its page a few awaits later: let it, then close every one.
+  await new Promise((settled) => setTimeout(settled));
+  closeParkedVisuals();
   native.enabled = false;
   native.events.clear();
   document.documentElement.style.removeProperty("--canvas");
@@ -408,7 +413,8 @@ describe("visuals", () => {
     await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_set_bounds", { label: delivery.label, bounds }));
     fireEvent.click(screen.getByTestId("visual-send"));
     await waitFor(() => expect(answer).toHaveBeenCalledWith(visual.id, 2, "B", ""));
-    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: delivery.label }));
+    // The reader goes: its page is parked out of sight, for the next open of this revision.
+    await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_set_bounds", { label: delivery.label, bounds: { ...bounds, width: 0, height: 0 } }));
     expect(native.events.size).toBe(0);
     // A revision change and a screen switch while the native open is still pending.
     let opened!: (label: string) => void;
@@ -417,7 +423,7 @@ describe("visuals", () => {
     await waitFor(() => expect(opened).toBeTypeOf("function"));
     view.rerender(<Reader shown={false} />);
     await act(async () => opened("visual:v_8f2c:r3"));
-    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_8f2c:r3" }));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: "visual:v_8f2c:r3", bounds: { ...bounds, width: 0, height: 0 } }));
     native.invoke.mockImplementation(async (command) => command === "visual_open" ? "visual:kept:k_1" : undefined);
     const kept = { kind: "kept", id: "k_1" } as const;
     view.rerender(<VisualFrame source={kept} title="Kept" onMessage={() => {}} />);
@@ -445,6 +451,99 @@ describe("visuals", () => {
     await act(async () => opened("visual:v_8f2c:r4"));
     await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
     expect(native.invoke.mock.calls.map(([command]) => command)).toEqual(["visual_close"]);
+    view.unmount();
+  });
+
+  it("opens the next visual at once, while the one before it is still closing", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    // Nothing but an open ever finishes, so the first visual is never put away: only its own
+    // reopening may wait for that.
+    native.invoke.mockReset().mockImplementation((command, args) => command === "visual_open"
+      ? Promise.resolve(`visual:${(args as { id: string }).id}:r2`)
+      : new Promise<void>(() => {}));
+    const frame = (id: string) => <VisualFrame source={{ kind: "session", id, rev: 2 }} title={id} onMessage={() => {}} />;
+    const view = render(frame("v_first"));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.objectContaining({ id: "v_first" })));
+    view.rerender(frame("v_second"));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.objectContaining({ id: "v_second" })));
+    view.rerender(frame("v_first"));
+    await act(async () => {});
+    expect(native.invoke.mock.calls.filter(([command, args]) => command === "visual_open" && (args as { id: string }).id === "v_first")).toHaveLength(1);
+    view.unmount();
+  });
+
+  it("opens a visual seen a moment ago on its parked page, and closes the oldest past the few kept", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    native.invoke.mockReset().mockImplementation(async (command, args) =>
+      command === "visual_open" ? `visual:${(args as { id: string }).id}:r2` : undefined);
+    const frame = (id: string) => <VisualFrame source={{ kind: "session", id, rev: 2 }} title={id} onMessage={() => {}} />;
+    const opens = (id: string) => native.invoke.mock.calls.filter(([command, args]) => command === "visual_open" && (args as { id: string }).id === id).length;
+    const view = render(frame("v_a"));
+    await waitFor(() => expect(opens("v_a")).toBe(1));
+    view.rerender(<div>Chat</div>);
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: "visual:v_a:r2", bounds: expect.objectContaining({ width: 0, height: 0 }) }));
+    view.rerender(frame("v_a"));
+    // Shown again where the reader is: no new webview, no page load.
+    await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_post", expect.objectContaining({ label: "visual:v_a:r2" })));
+    expect(opens("v_a")).toBe(1);
+    const others = Array.from({ length: PARKED }, (_, i) => `v_${i}`);
+    for (const id of others) {
+      view.rerender(frame(id));
+      await waitFor(() => expect(opens(id)).toBe(1));
+    }
+    view.rerender(<div>Chat</div>);
+    // v_a, then each of the others, went out of sight: the oldest is closed, the rest kept.
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_a:r2" }));
+    expect(native.invoke.mock.calls.filter(([command]) => command === "visual_close")).toHaveLength(1);
+    view.rerender(frame("v_a"));
+    await waitFor(() => expect(opens("v_a")).toBe(2));
+    view.unmount();
+  });
+
+  it("never evicts the parked page of a visual whose reader is coming back to it", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ x: 0, y: 40, width: 900, height: 600, top: 40, left: 0, right: 900, bottom: 640, toJSON() {} }));
+    let hidden!: () => void;
+    native.invoke.mockReset().mockImplementation((command, args) => {
+      const { id, label, bounds } = args as { id?: string; label?: string; bounds?: { width: number } };
+      if (command === "visual_open") return Promise.resolve(`visual:${id}:r2`);
+      // D's going out of sight waits until the test lets it.
+      if (command === "visual_set_bounds" && label === "visual:v_d:r2" && bounds?.width === 0) return new Promise<void>((resolve) => { hidden = resolve; });
+      return Promise.resolve();
+    });
+    const frame = (id: string) => <VisualFrame source={{ kind: "session", id, rev: 2 }} title={id} onMessage={() => {}} />;
+    const opens = (id: string) => native.invoke.mock.calls.filter(([command, args]) => command === "visual_open" && (args as { id: string }).id === id).length;
+    const view = render(frame("v_a"));
+    await waitFor(() => expect(opens("v_a")).toBe(1));
+    for (const id of ["v_b", "v_c", "v_d"]) {
+      view.rerender(frame(id));
+      await waitFor(() => expect(opens(id)).toBe(1));
+    }
+    // A, B and C parked; D open. Back to A while A's listeners are still registering.
+    const listening = vi.mocked(listen);
+    const registering = listening.getMockImplementation()!;
+    let registered!: () => void;
+    const gate = new Promise<void>((resolve) => { registered = resolve; });
+    listening.mockImplementation(async (name, handler) => { await gate; return registering(name, handler); });
+    try {
+      view.rerender(frame("v_a"));
+      await waitFor(() => expect(hidden).toBeTypeOf("function"));
+      // D finishes going out of sight first: four parked, one too many, and A is the oldest.
+      await act(async () => hidden());
+      await act(async () => registered());
+    } finally {
+      listening.mockImplementation(registering);
+    }
+    await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_post", expect.objectContaining({ label: "visual:v_a:r2" })));
+    expect(opens("v_a")).toBe(1);
+    expect(native.invoke).not.toHaveBeenCalledWith("visual_close", { label: "visual:v_a:r2" });
+    expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_b:r2" });
     view.unmount();
   });
 
@@ -489,6 +588,50 @@ describe("visuals", () => {
     expect(lastBounds()).toEqual({ label, bounds });
     expect(native.invoke.mock.calls.filter(([command]) => command === "visual_open")).toHaveLength(1);
     expect(native.invoke).not.toHaveBeenCalledWith("visual_close", expect.anything());
+  });
+
+  async function sessionWithVisuals(visuals: VisualDTO[]) {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const bounds = { x: 0, y: 40, width: 900, height: 600 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ ...bounds, top: bounds.y, left: bounds.x, right: bounds.width, bottom: bounds.y + bounds.height, toJSON() {} }));
+    native.invoke.mockReset().mockImplementation(async (command, args) =>
+      command === "visual_open" ? `visual:${(args as { id: string }).id}:r2` : undefined);
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    vi.spyOn(client, "visuals").mockResolvedValue(visuals);
+    vi.spyOn(client, "markVisualRead").mockImplementation(async (id) => ({ ...visuals.find((v) => v.id === id)!, unread: false }));
+    vi.useFakeTimers();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect, backoff: () => 1000 });
+    const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    const view = renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await advance(1000);
+    const opens = () => native.invoke.mock.calls.filter(([command]) => command === "visual_open").map(([, args]) => args);
+    return { bounds, advance, opens, view };
+  }
+
+  it("builds the newest visual not yet opened ahead, and opening it shows that page with no new open", async () => {
+    const older = { ...visual, id: "v_older", title: "Older", created_at: now - 3600 };
+    const { bounds, advance, opens } = await sessionWithVisuals([older, visual, answered]);
+    // The one spare: the newest unread, at no size, before anything is clicked.
+    expect(opens()).toEqual([{ id: visual.id, rev: 2, bounds: { x: 0, y: 0, width: 0, height: 0 } }]);
+    fireEvent.click(screen.getByTestId("visuals-button"));
+    fireEvent.click(within(screen.getByTestId("visuals-panel")).getByText("Release flow"));
+    await advance(100);
+    expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: "visual:v_8f2c:r2", bounds });
+    expect(opens()).toHaveLength(1);
+    expect(native.invoke).not.toHaveBeenCalledWith("visual_close", expect.anything());
+  });
+
+  it("closes the spare it built when the session view goes without opening it", async () => {
+    const { advance, opens, view } = await sessionWithVisuals([visual]);
+    expect(opens()).toHaveLength(1);
+    view.unmount();
+    await advance(0);
+    expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_8f2c:r2" });
   });
 
   it("visuals unread dot clears on view while Inbox removes notices and keeps unanswered prompts", async () => {

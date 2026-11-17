@@ -77,18 +77,32 @@ def policy_view(got: dict) -> dict:
 
 
 def snapshot() -> dict:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brindle import spawn
+
     account = Account()
-    got = account.policy()
-    roles = None
-    members = []
+
+    def outcome(read):
+        try:
+            return read(), None
+        except Exception as e:  # noqa: BLE001 - judged below, in the serial read's order
+            return None, e
+
+    # Three account round trips: all at once, then judged in the order a serial read would
+    # (the policy's refusal first, then the role inventory's, then the members').
+    reads = (account.policy, account.roles, lambda: account.call("GET", "/members")["members"])
+    with ThreadPoolExecutor(max_workers=len(reads)) as pool:
+        (got, refused), (roles, roles_refused), (members, members_refused) = pool.map(
+            spawn.carry(outcome), reads)
+    if refused is not None:
+        raise refused
     inventory_error = None
-    try:
-        roles = account.roles()
-        members = account.call("GET", "/members")["members"]
-    except ServiceError as e:
-        if e.http_status not in (403, 404) and e.http_status < 500:
-            raise
-        roles = None
+    e = roles_refused or members_refused
+    if e is not None:
+        if not isinstance(e, ServiceError) or (e.http_status not in (403, 404) and e.http_status < 500):
+            raise e
+        roles, members = None, []
         inventory_error = str(e)
     reason = account.policy_reason(roles)
     return OrgPermissionsDTO(
