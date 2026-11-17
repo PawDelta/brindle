@@ -1085,7 +1085,7 @@ class ClaudeCode(Provider):
 
     @staticmethod
     def _hook(event: str, agent_id: str, waiter: bool = False, timeout: int | None = None,
-              fail_closed: bool = False) -> list[dict]:
+              fail_closed: bool = False, waiter_only: bool = False) -> list[dict]:
         # The agent's id (and where brindle keeps its state) go in the command
         # itself, not just the pane's environment: Claude Code may run the
         # session in a process its background daemon started earlier, whose
@@ -1097,6 +1097,10 @@ class ClaudeCode(Provider):
             return assigns + " ".join(shlex.quote(a) for a in
                                       [*brindle_invocation(), "_hook", name, "--agent", agent_id])
 
+        if waiter_only:
+            from brindle import wake
+
+            return [{"hooks": [wake.hook_entry(command(wake.EVENT))]}]
         hooks = [{"type": "command", "command": command(event), **({"timeout": timeout} if timeout else {})}]
         if fail_closed:
             # A hook that can't start, crashes or times out blocks the call
@@ -1165,6 +1169,11 @@ class ClaudeCode(Provider):
                 # repo's permission_hold_seconds: Claude Code must let it.
                 "PermissionRequest": self._hook("permission-request", ctx.agent_id,
                                                 timeout=_permission_hook_timeout(ctx.cwd)),
+                # A person's chat: brindle writes its poke file (watched
+                # through the SessionStart hook's watchPaths) to start a
+                # waiter when none is live, instead of typing (wake.poke).
+                **({"FileChanged": self._hook(wake.EVENT, ctx.agent_id, waiter_only=True)}
+                   if wake.applies_poke(self.name, ctx.mode, bool(ctx.profile.headless)) else {}),
             },
             # Claude Code only tells status lines how much of the plan's usage
             # is spent. brindle's records that, then runs the person's own

@@ -1672,6 +1672,13 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                                                   mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
     except providers.CodexSandboxRefused as e:
         raise AgentError(str(e)) from e
+    from brindle import wake
+
+    if wake.applies_poke(provider.name, agent.mode, bool(agent.headless)):
+        try:
+            wake.arm_poke(agent.id)   # this session runs the FileChanged waiter (wake.poke)
+        except OSError:
+            pass   # unpokeable: its mail waits for its next Stop or SessionStart
     if provider.name == "codex":
         from brindle import codex_hook
 
@@ -3373,6 +3380,15 @@ def _flush_messages(db: DB, agent_id: str) -> bool:
         # finishing the delivery here lets the queue move again.
         return _resume_pane_delivery(db, agent, partial)
     if wake.enabled(agent) and wake.live(agent):
+        return False
+    if wake.silent(agent):
+        # A person's chat is never typed into: an idle one with no live
+        # waiter is poked, and Claude Code starts one that wakes it with the
+        # mail (wake.poke); a busy one gets it at its Stop. One launched by an
+        # older brindle can't be poked: its mail waits for its next Stop or
+        # SessionStart (a turn the person starts ends in a Stop).
+        if agent.status == "idle" and wake.pokeable(agent) and db.pending_count(agent_id):
+            wake.poke(agent)
         return False
     if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
@@ -6386,6 +6402,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
             processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
                           str(get_provider(agent.provider).ready_delay)])
+        from brindle import wake
+
+        if agent.provider == "claude" and wake.pokeable(agent):
+            # Watched for the session's FileChanged waiter hook (wake.poke).
+            return {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                           "watchPaths": [str(wake.poke_path(agent_id))]}}
     elif event == "prompt-submit":
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.

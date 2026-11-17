@@ -24,7 +24,10 @@ One waiter per agent: each records itself in ``<brindle home>/wake/<agent>``
 that finds a newer one there leaves quietly. With no live waiter (one
 already handed over mail and its turn hasn't ended, or a session started by
 an older brindle), messages stay queued for the next Stop's waiter while
-the agent is busy, or are typed into its pane if it's idle (agents.flush).
+the agent is busy. An idle worker gets them typed into its pane
+(agents.flush). A person's chat (a supervisor) is never typed into: brindle
+pokes it (see poke) and its FileChanged hook starts a waiter, or, for a
+session launched before pokes, the mail waits for its next Stop or SessionStart.
 """
 
 from __future__ import annotations
@@ -68,6 +71,12 @@ def applies(provider: str, mode: str | None, headless: bool = False) -> bool:
     return provider == "claude" and mode in MODES and not headless
 
 
+def applies_poke(provider: str, mode: str | None, headless: bool = False) -> bool:
+    """Whether an agent is launched with the FileChanged waiter too (see
+    poke): a person's chat, which brindle never types into."""
+    return applies(provider, mode, headless) and mode == "interactive"
+
+
 def hook_entry(command: str) -> dict:
     """The hook settings Claude Code runs the waiter with."""
     return {"type": "command", "command": command, "asyncRewake": True, "timeout": TIMEOUT}
@@ -80,6 +89,48 @@ def _path(agent_id: str) -> Path:
 def enabled(agent: Agent) -> bool:
     """Whether ``agent``'s session runs the waiter (one has registered)."""
     return applies(agent.provider, agent.mode, bool(agent.headless)) and _path(agent.id).exists()
+
+
+def silent(agent: Agent) -> bool:
+    """Whether brindle must never type into ``agent``'s pane: a person's
+    chat (a supervisor) that runs the waiter. Its mail reaches it only
+    through a waiter, one a poke starts (``poke``) or the next hook event's."""
+    return agent.mode == "interactive" and enabled(agent)
+
+
+# A poke: brindle writes a file that the session watches (its SessionStart
+# hook returns it as watchPaths), and Claude Code runs the chat's FileChanged
+# hook, the same asyncRewake waiter as at Stop. That waiter finds the queued
+# mail at once and wakes the model with it: an idle chat with no live waiter
+# (a turn ended by Esc or an API error, a waiter past its limit) gets its mail
+# without a key typed into its pane.
+def poke_path(agent_id: str) -> Path:
+    return brindle_home() / "wake-poke" / agent_id
+
+
+def arm_poke(agent_id: str) -> None:
+    """At launch, for a session started with the FileChanged waiter hook:
+    its poke file exists from now on, so its SessionStart hook has it watched."""
+    p = poke_path(agent_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.touch()
+
+
+def pokeable(agent: Agent) -> bool:
+    """Whether ``agent``'s session was launched with the FileChanged waiter
+    hook (one launched by an older brindle wasn't: its mail waits for its
+    next Stop or SessionStart instead)."""
+    return silent(agent) and poke_path(agent.id).exists()
+
+
+def poke(agent: Agent) -> bool:
+    """Have Claude Code start a waiter for ``agent`` now. Returns whether the
+    poke was written (not whether a waiter came: the next sweep pokes again)."""
+    try:
+        poke_path(agent.id).write_text(f"{time.time()!r}\n")
+        return True
+    except OSError:
+        return False
 
 
 def _read(agent_id: str) -> tuple[int, str, float] | None:
@@ -292,11 +343,13 @@ def _mtime(p: Path) -> float:
 
 
 def prune(known: set[str]) -> None:
-    """Forget the waiter records of agents brindle no longer has."""
-    try:
-        entries = list((brindle_home() / "wake").iterdir())
-    except OSError:
-        return
+    """Forget the waiter records (and poke files) of agents brindle no longer has."""
+    entries = []
+    for folder in ("wake", "wake-poke"):
+        try:
+            entries += list((brindle_home() / folder).iterdir())
+        except OSError:
+            pass
     for p in entries:
         # An old dotfile is a record a waiter died writing (see _register).
         stray = p.name.startswith(".") and time.time() - _mtime(p) > 60
