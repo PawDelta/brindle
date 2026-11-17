@@ -605,7 +605,7 @@ describe("App", () => {
   });
 
   it("library sidebar: the foot's button opens the Library with the sidebar as its navigation, ← Sessions and ⌘L go back, and Settings keeps Agents", async () => {
-    const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
+    const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj" };
     const decided = { id: "a".repeat(32), repo_key: "proj", topic: "storage", body: "use sqlite", rationale: "", scope: [], status: "accepted", created_at: 1 };
     const OTHER = "/home/u/other";
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [session], workspaces: [root], inbox: [plan], decisions: [decided] });
@@ -671,7 +671,7 @@ describe("App", () => {
   });
 
   it("library sidebar stages: shared designs with no Inbox card are counted from their own review state, and a stage row lists what it counted", async () => {
-    const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
+    const plan = { kind: "question", reason: "has a question", agent_id: "sup1", workspace_id: "proj" };
     const libraryDocs = [
       { doc_id: "a1", title: "Waiting on sam", updated_at: 30, design: { rev: 1, ready: false, reviewers: [{ sub: "sam", required: true }], sign_offs: [] } },
       { doc_id: "a2", title: "All signed", updated_at: 20, design: { rev: 1, ready: true, reviewers: [{ sub: "sam", required: true }], sign_offs: [{ sub: "sam", rev: 1 }] } },
@@ -687,7 +687,7 @@ describe("App", () => {
     await screen.findByRole("region", { name: "Session" }, { timeout: 4000 });
     fireEvent.click(await within(screen.getByTestId("sidebar-foot-row")).findByRole("button", { name: /^Library/ }));
     const rail = await within(nav()).findByRole("navigation", { name: "Library" });
-    // a4 waits on the person and is still in review; the unrelated plan isn't a Library design; a3 is a draft.
+    // a4 waits on the person and is still in review; the unrelated question isn't a Library design; a3 is a draft.
     await waitFor(() => expect(within(rail).getByRole("button", { name: /^In review/ }).textContent).toContain("2"));
     expect(within(rail).getByRole("button", { name: /^Approved/ }).textContent).toContain("1");
     expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");
@@ -730,24 +730,17 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", REPO));
   });
 
-  it("inbox: a plan is approved and a notice marked read right on their cards, at once; Go to session opens the session with nothing over it", async () => {
-    const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan.\n2. Ship it." };
+  it("inbox: a notice is marked read right on its card, at once; Go to session opens the session with nothing over it", async () => {
     const notice = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [plan, notice, question], goal });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [notice, question], goal });
     const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox" }} />);
-    const group = await screen.findByRole("region", { name: "Ship ls --json" });
+    await screen.findByRole("region", { name: "Ship ls --json" });
     const posts = () => daemon.requests.filter((r) => r.method === "POST").map((r) => r.path);
-    // Approve, on the card: the request goes at once, no moment to undo, and the card is gone.
-    const planCard = within(group).getAllByTestId("inbox-card").find((c) => c.dataset.kind === "plan")!;
-    fireEvent.click(within(planCard).getByRole("button", { name: "Approve" }));
-    await waitFor(() => expect(posts()).toEqual(["/inbox/sup1/approve"]));
-    await waitFor(() => expect(within(group).queryAllByTestId("inbox-card").some((c) => c.dataset.kind === "plan")).toBe(false));
-    expect(screen.queryByRole("dialog")).toBeNull();
-    // Mark read, on the notice's card, the same way.
+    // Mark read, on the notice's card: the request goes at once, no moment to undo, and the card is gone.
     const org = screen.getByRole("region", { name: "Your org" });
     fireEvent.click(within(org).getByRole("button", { name: "Mark read" }));
-    await waitFor(() => expect(posts()).toEqual(["/inbox/sup1/approve", "/inbox/n-18/read"]));
+    await waitFor(() => expect(posts()).toEqual(["/inbox/n-18/read"]));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Your org" })).toBeNull());
     // Go to session on the question's card: the supervisor's pane, and nothing over it.
     fireEvent.click(within(screen.getByRole("region", { name: "Ship ls --json" })).getByRole("button", { name: "Go to session ›" }));

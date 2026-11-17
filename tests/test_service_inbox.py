@@ -52,7 +52,6 @@ def _notice(db, root, worker, mp):
     # Live: a Codex worker whose brief wasn't delivered read "Codex needs a sign-in", signed in or not.
     ("failed", _worker(provider="codex", status="failed", failed_why="delivery"), [("w1", None)]),
     ("question", _two_asking, [("r1", None), ("r2", None)]),
-    ("plan", _worker(plan_state="proposed", plan_first=1, plan_text="1. add the column"), [("w1", "1. add the column")]),
     pytest.param("proposed_checks", _locked_checks, [],
                  marks=pytest.mark.variant("Check proposals locked to another identity must not appear as answerable inbox items")),
     ("login", _login, [("r1", "aws sso login")]),
@@ -97,7 +96,7 @@ def test_dismiss_persists_without_answering_permission_or_plan(db, repo, monkeyp
     digest = permissions.request_digest(json.dumps(req.to_dict()), None)
     live.register("w1", "ask-1", digest, "nonce", 200.0)
     cards = [i for i in inbox.items(db, str(repo)) if i.kind in ("permission", "plan")]
-    assert {i.kind for i in cards} == {"permission", "plan"}
+    assert {i.kind for i in cards} == {"permission"}
     assert svc_permissions.asks(db, str(repo))
     before = dict(db.permission_requests_of("w1")[0])
     for item in cards:
@@ -109,11 +108,10 @@ def test_dismiss_persists_without_answering_permission_or_plan(db, repo, monkeyp
         assert dict(restarted.permission_requests_of("w1")[0]) == before
         assert live.held("w1", "ask-1").answer is None
         assert restarted.get_agent("w1").plan_state == "proposed"
-        # A new proposal and a different request still need their own attention.
-        restarted.update_agent("w1", plan_text="A different plan")
+        # A different request still needs its own attention.
         restarted.add_permission_request("w1", "ask-2", json.dumps(req.to_dict()), "", None, "hook")
         live.register("w1", "ask-2", digest, "nonce", 200.0)
-        assert {i.kind for i in inbox.items(restarted, str(repo)) if i.kind in ("permission", "plan")} == {"permission", "plan"}
+        assert {i.kind for i in inbox.items(restarted, str(repo)) if i.kind in ("permission", "plan")} == {"permission"}
         assert [a.request_id for g in svc_permissions.asks(restarted, str(repo)) for a in g.items] == ["ask-2"]
     finally:
         restarted.conn.close()

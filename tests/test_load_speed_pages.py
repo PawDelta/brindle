@@ -90,9 +90,12 @@ def _doc_switches(monkeypatch, api):
 @pytest.mark.parametrize("read, expected", [
     (_docs, ["user", "team:t1", "org:o1"]),
     (_folders, ["u1", "t1", "o1"]),
-    (_policies, ["review-policies/directory", "review-policies/in-review"]),
-    (_org_approvals, ["policy", "roles", "members"]),
-    (_doc_switches, ["/me/analysis-docs/settings", "policy", "/analysis-docs/scopes"]),
+    pytest.param(_policies, ["review-policies/directory", "review-policies/in-review"], id="review policies",
+                 marks=pytest.mark.variant("Settings › Review policies must read both lists at once")),
+    pytest.param(_org_approvals, ["policy", "roles", "members"], id="org approvals",
+                 marks=pytest.mark.variant("Settings › org approvals must read policy, roles and members at once")),
+    pytest.param(_doc_switches, ["/me/analysis-docs/settings", "policy", "/analysis-docs/scopes"], id="doc switches",
+                 marks=pytest.mark.variant("Settings › doc switches must read all three at once")),
 ], ids=["library docs", "library folders", "review policies", "org approvals", "doc switches"])
 def test_library_pages_ask_the_server_at_once(read, expected, monkeypatch):
     """The Library's docs and folders are one server round trip per scope the
