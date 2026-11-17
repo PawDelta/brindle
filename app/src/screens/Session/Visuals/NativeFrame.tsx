@@ -29,11 +29,15 @@ function extendLifecycle(label: string, step: Promise<unknown>) {
 // changes, so the parked page is still its page. The oldest past PARKED is closed.
 export const PARKED = 3;
 const parked = new Set<string>();
+// The revisions a reader shows now (from its mount, before it has taken its parked page back):
+// never evicted, and never built a second time as the spare.
+const shown = new Set<string>();
 function park(label: string) {
   parked.delete(label);
   parked.add(label);
   for (const oldest of parked) {
     if (parked.size <= PARKED) break;
+    if (shown.has(oldest)) continue;
     parked.delete(oldest);
     extendLifecycle(oldest, lifecycleOf(oldest).then(() => invoke("visual_close", { label: oldest })));
   }
@@ -56,8 +60,6 @@ export function closeParkedVisuals() {
 // now); released: no longer wanted (closed once built, if no reader took it).
 type Spare = { label: string; state: "building" | "built" | "claimed" | "released"; unlisten?: () => void };
 let spare: Spare | null = null;
-// The revisions a reader shows now: never built a second time as the spare.
-const shown = new Set<string>();
 
 function claimSpare(label: string) {
   if (spare?.label !== label) return;

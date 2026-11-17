@@ -2,6 +2,7 @@ import { connectDaemon, renderApp, inTestStore, trackedSync as startSync } from 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import App from "../../../App";
 import { DaemonClient, type Plan, type PlanVerdict, type VisualDTO } from "../../../api/client";
 import { ONBOARDED_KEY } from "../../../api/providers";
@@ -500,6 +501,49 @@ describe("visuals", () => {
     expect(native.invoke.mock.calls.filter(([command]) => command === "visual_close")).toHaveLength(1);
     view.rerender(frame("v_a"));
     await waitFor(() => expect(opens("v_a")).toBe(2));
+    view.unmount();
+  });
+
+  it("never evicts the parked page of a visual whose reader is coming back to it", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ x: 0, y: 40, width: 900, height: 600, top: 40, left: 0, right: 900, bottom: 640, toJSON() {} }));
+    let hidden!: () => void;
+    native.invoke.mockReset().mockImplementation((command, args) => {
+      const { id, label, bounds } = args as { id?: string; label?: string; bounds?: { width: number } };
+      if (command === "visual_open") return Promise.resolve(`visual:${id}:r2`);
+      // D's going out of sight waits until the test lets it.
+      if (command === "visual_set_bounds" && label === "visual:v_d:r2" && bounds?.width === 0) return new Promise<void>((resolve) => { hidden = resolve; });
+      return Promise.resolve();
+    });
+    const frame = (id: string) => <VisualFrame source={{ kind: "session", id, rev: 2 }} title={id} onMessage={() => {}} />;
+    const opens = (id: string) => native.invoke.mock.calls.filter(([command, args]) => command === "visual_open" && (args as { id: string }).id === id).length;
+    const view = render(frame("v_a"));
+    await waitFor(() => expect(opens("v_a")).toBe(1));
+    for (const id of ["v_b", "v_c", "v_d"]) {
+      view.rerender(frame(id));
+      await waitFor(() => expect(opens(id)).toBe(1));
+    }
+    // A, B and C parked; D open. Back to A while A's listeners are still registering.
+    const listening = vi.mocked(listen);
+    const registering = listening.getMockImplementation()!;
+    let registered!: () => void;
+    const gate = new Promise<void>((resolve) => { registered = resolve; });
+    listening.mockImplementation(async (name, handler) => { await gate; return registering(name, handler); });
+    try {
+      view.rerender(frame("v_a"));
+      await waitFor(() => expect(hidden).toBeTypeOf("function"));
+      // D finishes going out of sight first: four parked, one too many, and A is the oldest.
+      await act(async () => hidden());
+      await act(async () => registered());
+    } finally {
+      listening.mockImplementation(registering);
+    }
+    await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_post", expect.objectContaining({ label: "visual:v_a:r2" })));
+    expect(opens("v_a")).toBe(1);
+    expect(native.invoke).not.toHaveBeenCalledWith("visual_close", { label: "visual:v_a:r2" });
+    expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_b:r2" });
     view.unmount();
   });
 
