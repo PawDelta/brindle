@@ -177,6 +177,40 @@ def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: 
     return [provider for provider, _ in targets]
 
 
+# What the Inbox cards show is checked here, off the request path: per
+# database (DB.path), (from provider, repo root, allow_limited) -> the
+# targets ``_targets`` found then. maybe_offer records its own look and each
+# sweep (the daemon's, every PROVIDER_SWITCH_EVERY) replaces the lot for the
+# offers still open, so ``inbox_items`` never runs preflight, profiles or
+# policy itself: a card is at most one sweep out of date, and pressing Switch
+# checks again (``switch``). An offer no look has covered yet shows no card.
+_card_targets: dict[str, dict[tuple[str, str | None, bool], list[str]]] = {}
+
+
+def _checked_targets(db: DB, current: str, repo_root: str | None, now: float, *,
+                     allow_limited: bool = False) -> list[str]:
+    """``_targets``, remembered for this database's Inbox cards."""
+    found = _targets(current, repo_root, now, allow_limited=allow_limited)
+    _card_targets.setdefault(db.path, {})[(current, repo_root, allow_limited)] = found
+    return found
+
+
+def _card_key(db: DB, offer: Offer) -> tuple[str, str | None, bool] | None:
+    root = db.get_agent(offer.root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    return None if ws is None else (offer.from_provider, ws.repo_root, offer.kind == "back")
+
+
+def check_cards(db: DB, now: float) -> None:
+    """Look again at the targets of every open offer, for ``inbox_items``."""
+    checked: dict[tuple[str, str | None, bool], list[str]] = {}
+    for row in db.conn.execute("SELECT * FROM provider_switches WHERE state='open'"):
+        key = _card_key(db, Offer(**dict(row)))
+        if key is not None and key not in checked:
+            checked[key] = _targets(key[0], key[1], now, allow_limited=key[2])
+    _card_targets[db.path] = checked
+
+
 def pick_target(current: str, repo_root: str | None, now: float) -> str | None:
     """The provider to move a supervisor on ``current`` to: usable, in quota,
     most headroom first (ties in SUPERVISOR_PROVIDERS order). None when no
@@ -226,7 +260,9 @@ def maybe_offer(db: DB, root_id: str, now: float) -> Offer | None:
     ws = db.get_workspace(root.workspace_id)
     if ws is None:
         return None
-    target = pick_target(root.provider, ws.repo_root, now)
+    if root.provider not in SUPERVISOR_PROVIDERS:
+        return None
+    target = next(iter(_checked_targets(db, root.provider, ws.repo_root, now)), None)
     if target is None:
         return None
     offer_id = uuid.uuid4().hex
@@ -335,7 +371,9 @@ def sweep(db: DB, now: float) -> list[Offer]:
             except agents.AgentError:
                 # The failed row consumes this limit and exposes the failure.
                 continue
+        check_cards(db, now)
         return []
+    check_cards(db, now)
     return offers
 
 
@@ -546,10 +584,13 @@ NOTICE_PREFIX = "notice: "  # marks a completed-switch notice's detail: "notice:
 def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> list[InboxItemDTO]:
     """Open offers as Inbox cards: KIND_OFFER or KIND_BACK, ``request_id``
     the offer id, ``detail`` "<from> -> <to>", ``action`` POST
-    /v1/sessions/{root}/provider-switch."""
+    /v1/sessions/{root}/provider-switch. Built on every Inbox read, so it
+    reads only the database, quota.json and the targets the last sweep
+    found (``check_cards``): never preflight, profiles or policy."""
     from brindle import sessions
 
     now = time.time() if now is None else now
+    checked = _card_targets.get(db.path, {})
     items = []
     for row in db.conn.execute(
             "SELECT * FROM provider_switches WHERE kind='switch' AND state='done' "
@@ -586,9 +627,8 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
         if offer.state != "failed" and offer.kind == "switch" and (root.provider != offer.from_provider
                                        or out_of_quota(db, root.id, now) is None):
             continue
-        targets = _targets(offer.from_provider, ws.repo_root, now,
-                           allow_limited=offer.kind == "back") if offer.state != "failed" else []
-        if offer.state != "failed" and offer.to_provider not in targets:
+        if offer.state != "failed" and offer.to_provider not in checked.get(
+                (offer.from_provider, ws.repo_root, offer.kind == "back"), ()):
             continue
         detail = f"{offer.from_provider} → {offer.to_provider}"
         items.append(InboxItemDTO(kind=KIND_BACK if offer.kind == "back" else KIND_OFFER,
