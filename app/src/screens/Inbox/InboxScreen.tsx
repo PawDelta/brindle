@@ -12,8 +12,7 @@
    (PermissionAsks.tsx), whoever holds them: Deny, Allow once, Allow ▾ for a
    request brindle's hook holds, a note and a way to the agent's window for
    a prompt only that window can take. Acted on here too: a lapsed sign-in (Sign in: the provider CLI's own login on the engine, or
-   brindle's cloud sign-in for a "login" item), a plan (Approve; changes
-   are asked for in its session), proposed checks (Accept / Decline), an
+   brindle's cloud sign-in for a "login" item), proposed checks (Accept / Decline), an
    org notice (Mark read) and a setup problem the engine can repair itself
    (Fix: a job on the engine, POST /v1/setup/codex-hook for a Codex that no
    longer trusts brindle's permission hook; the card goes when the job is
@@ -86,12 +85,11 @@ interface Group {
   items: InboxItemDTO[];
 }
 
-/* The card's colour by kind: sap for a request, fail for a lapsed sign-in, branch for a question or a plan. */
+/* The card's colour by kind: sap for a request, fail for a lapsed sign-in, branch for a question. */
 const TONE: Record<string, { bar: string; ink: string }> = {
   credentials: { bar: "before:bg-fail", ink: "text-fail" },
   login: { bar: "before:bg-fail", ink: "text-fail" },
   question: { bar: "before:bg-branch", ink: "text-branch" },
-  plan: { bar: "before:bg-branch", ink: "text-branch" },
   proposed_checks: { bar: "before:bg-branch", ink: "text-branch" },
   review: { bar: "before:bg-branch", ink: "text-branch" },
   pr_ready: { bar: "before:bg-branch", ink: "text-branch" },
@@ -320,7 +318,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       <p><strong>Why brindle is offering: </strong>{offer.reasons.join(" ") || "The work qualified when this offer was made; the plan has since changed."}</p>
       <p>Yes: the supervisor writes a planning doc for you to approve before more workers start. Not now: the work goes ahead as is.</p>
     </div>;
-  } else if (item.kind === "proposed_checks" || item.kind === "plan") {
+  } else if (item.kind === "proposed_checks") {
     // Approved or accepted from this card: shown whole, never cut short.
     body = <pre className="whitespace-pre-wrap font-mono text-xs" data-testid="card-detail">{item.detail}</pre>;
   } else if (item.kind === "org_notice") {
@@ -344,14 +342,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     </button>
   );
   let acts: ReactNode;
-  if (item.kind === "plan") {
-    acts = (
-      <>
-        {act("Approve", "approve", { feedback: "" })}
-        <span className="text-[11px] text-ink-3">to ask for changes, tell it in its session</span>
-      </>
-    );
-  } else if (item.kind === "proposed_checks") {
+  if (item.kind === "proposed_checks") {
     acts = (
       <>
         {act("Accept", "accept", { allow_commands: false })}

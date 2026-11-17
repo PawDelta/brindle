@@ -57,4 +57,4 @@ export function useVisuals(client: VisualsClient, root: string): Visuals {
 }
 
 /* Open: still asks the person (or asks nothing and isn't answered). Decided: answered. */
-export const decided = (v: VisualDTO): boolean => !!v.answer;
+export const decided = (v: VisualDTO): boolean => !!v.answer || !!v.answered_in_chat;

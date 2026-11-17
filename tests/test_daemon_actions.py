@@ -1779,7 +1779,7 @@ def test_auto_merge_session_pr_once_across_daemons_and_opt_out(db, session_pr_fo
         assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
         # Only the existing merge observer records the merge and starts session sync.
         landed = []
-        monkeypatch.setattr(session_review, "_merge_polled", 0.0)
+        monkeypatch.setattr(session_review, "_merge_polled", {})
         monkeypatch.setattr(session_review, "_merge_checks", {})
         monkeypatch.setattr(session_review, "_sync_after_merge", lambda *args: landed.append(args[1:]))
         session_review.poll_merged(db)

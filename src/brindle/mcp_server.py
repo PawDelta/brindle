@@ -434,6 +434,8 @@ def list_visuals() -> str:
         if v["answer"]:
             a = v["answer"]
             state = f"answered: option {a['option']}" + (f" (note: {a['note']})" if a["note"] else "")
+        elif v["answered_in_chat_rev"] == v["rev"]:
+            state = "answered in chat"
         elif v["options"]:
             state = "open: " + ", ".join(o["id"] for o in v["options"])
         lines.append(f"{v['id']} r{v['rev']} · {v['title']} · {state}" + (" · kept" if v["kept_at"] else ""))

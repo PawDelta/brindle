@@ -287,6 +287,7 @@ class VisualDTO(_DTO):
     question: str | None = None
     options: list[VisualOptionDTO] | None = None
     answer: VisualAnswerDTO | None = None
+    answered_in_chat: bool = False
     kept: bool
     unread: bool
     created_at: float
