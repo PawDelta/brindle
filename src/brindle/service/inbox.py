@@ -309,14 +309,16 @@ def dismiss_item(db: DB, value: dict) -> dict:
     return {"dismissed": True}
 
 
-def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[InboxItemDTO]:
+def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+          known_git: view.KnownGit | None = None) -> list[InboxItemDTO]:
     """Everything waiting on a person in ``repo_root``'s sessions (every
     session when None), then the org's unread notices. Each agent's item
-    names its session (``root_id``), so the app can link into it."""
+    names its session (``root_id``), so the app can link into it.
+    ``known_git``: as for ``view.snapshot``."""
     out: list[InboxItemDTO] = []
     shown: set[str] = set()
     occurrences = {r["source"]: r["generation"] for r in db.conn.execute("SELECT source, generation FROM inbox_occurrences")}
-    for ws in view.snapshot(db, repo_root, panes=panes):
+    for ws in view.snapshot(db, repo_root, panes=panes, known_git=known_git):
         shown.update(a["id"] for a in ws["agents"])
         for a in ws["agents"]:
             if a.get("locked"):

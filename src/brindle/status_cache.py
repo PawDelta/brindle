@@ -757,6 +757,53 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
     return st
 
 
+def known(path: str | Path, base: str | None, now: float | None = None) -> git.Status | None:
+    """``cached_status``, once this process has looked at ``path`` (it is
+    kept up to date as ``cached_status`` keeps it, and a base that names no
+    commit fails as it does); None before that first look, which runs git
+    status and stats the tree, so that a read that must answer at once (the
+    app's first after the daemon starts) never waits on it."""
+    if not base:
+        return None
+    key = str(Path(path))
+    if key not in _status_cache and key not in _failed:
+        return None
+    return cached_status(path, base, now=now)
+
+
+def commits(path: str | Path, base: str) -> tuple[str, str | None, str | None] | None:
+    """The commits HEAD, ``base`` and ``origin/<base>`` name, read from the
+    git files without git (None for a ref that isn't there); None when HEAD
+    can't be read that way. ahead/behind against ``base`` is a function of
+    these three alone (``git.base_ref`` picks between the last two)."""
+    try:
+        private = _worktree_gitdir(Path(path))
+        common = _common_gitdir(private)
+        head = _resolve(private, common, (private / "HEAD").read_text().strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    if head is None:
+        return None
+    return (head, _resolve(private, common, f"ref: refs/heads/{base}"),
+            _resolve(private, common, f"ref: refs/remotes/origin/{base}"))
+
+
+def counted(path: str | Path, base: str) -> tuple[tuple[str, str | None, str | None], git.Status] | None:
+    """This process's last status of ``path`` against ``base`` and the
+    ``commits`` it was counted for, while they still name what they did when
+    it was counted; None when there is none, or HEAD or the base ref has
+    moved since (the next look counts again)."""
+    key = str(Path(path))
+    hit = _status_cache.get(key)
+    ref = _base_ref_cache.get((key, base))
+    now = commits(path, base)
+    if hit is None or ref is None or now is None or hit.refs[0] != now[0]:
+        return None
+    if hit.refs[1] != (now[1] if ref[1] == base else now[2]):
+        return None
+    return now, hit.status
+
+
 def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
     """Bring the cached status of each (path, base) up to date at once, in
     parallel: a cold first look (the app opening) runs one `git status` per
