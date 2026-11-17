@@ -346,6 +346,9 @@ class OrgPolicy:
     permission_grants: GrantPolicy | None = None
     # Dangerous enterprise admin opt-in: restarting can make the supervisor lose track of work.
     supervisor_restart_tokens: int = 0
+    # The org's ``routing_goal`` block (brindle.routing_goal.OrgGoal; None: absent,
+    # or malformed and ignored): a default, floors and ceilings, or a lock.
+    routing_goal: object | None = None
     # Keep the server answer separate from the interpreted policy: newer
     # servers may send fields this client cannot model yet. Do not serialize
     # the interpreted policy back over those fields when caching it.
@@ -391,6 +394,7 @@ class OrgPolicy:
                "policy": {**self.rules(), **self.budgets(), **self.rollout(), **self.managed(),
                           **self.grants(), **self.dangerous(),
                           "agent_setup": asdict(self.agent_setup) if self.agent_setup else None,
+                          "routing_goal": self.routing_goal.to_json() if self.routing_goal else None,
                           "roles": {r: {k: _list(v) if k in LISTS else v
                                         for k, v in o.items()}
                                     for r, o in self.roles.items()}},
@@ -936,6 +940,18 @@ def _agent_setup(p: dict) -> AgentSetup | None:
         return None
 
 
+def _routing_goal(p: dict):
+    """The policy's ``routing_goal`` block. A malformed one is ignored with one
+    warning (the server clamps every suggest again), and never raises."""
+    from brindle import routing_goal
+
+    try:
+        return routing_goal.parse_org_goal(p.get("routing_goal"))
+    except routing_goal.GoalError as e:
+        log.warning("ignoring the org policy's routing_goal block (%s)", e)
+        return None
+
+
 def _spend(v) -> dict:
     if not isinstance(v, dict):
         return {}
@@ -1003,6 +1019,7 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
     setup = _agent_setup(p)       # org-wide, like the rollout: the effective policy carries it too
     grants = _grants(p)
     dangerous = _dangerous(p)     # org-wide: member overrides cannot enable restarts
+    goal = _routing_goal(p)
     return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p), **_budgets(p),
                      **roll, **managed, **grants, **dangerous, roles=_roles(p.get("roles")),
                      effective=None if eff is None else OrgPolicy(
@@ -1010,7 +1027,9 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
                          **_budgets(eff), **roll, **dangerous, **(_managed(eff) if (
                              "provider_config" in eff or "deny_personal_keys" in eff) else managed),
                          agent_setup=setup,
+                         routing_goal=_routing_goal(eff) if "routing_goal" in eff else goal,
                          **(_grants(eff) if "permission_grants" in eff else grants), **spend),
+                     routing_goal=goal,
                      role=_role_name(body.get("role")),
                      policy_role=_role_name(body.get("policy_role")),
                      cached_for=tuple(key) if ok_key else None,
@@ -1355,6 +1374,7 @@ class Access:
     unrouted: dict = field(default_factory=dict)        # CLI -> why the managed routing refuses it
     error: str | None = None
     agent_setup: AgentSetup | None = None               # its Claude route may pin an alias to an allowed id
+    routing_goal: object | None = None                  # brindle.routing_goal.OrgGoal, or None
 
     def pinned(self, provider: str | None, model: str | None) -> str | None:
         """The route id the org's Claude route pins ``model`` (an alias) to, or None."""
@@ -1424,7 +1444,8 @@ def access(repo_root: str | None) -> Access:
     deny_keys = m.deny_personal_keys if m is not None else p.deny_personal_keys
     return Access(org_id=p.org_id, allowed_providers=p.allowed_providers,
                   allowed_models=p.allowed_models, allowed_profiles=p.allowed_profiles,
-                  deny_personal_keys=deny_keys, unrouted=unrouted, agent_setup=p.agent_setup)
+                  deny_personal_keys=deny_keys, unrouted=unrouted, agent_setup=p.agent_setup,
+                  routing_goal=p.routing_goal)
 
 
 def make(repo_root: str) -> ProPolicy:

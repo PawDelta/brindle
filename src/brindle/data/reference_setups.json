@@ -1,0 +1,44 @@
+{
+  "feature": "large",
+  "stretch": 2,
+  "yardstick": "Fable 5.2 alone",
+  "setups": [
+    {
+      "name": "Fable 5.2 alone",
+      "usd": 16.96,
+      "minutes": 42,
+      "first_try": 0.714,
+      "measured": true,
+      "runs": 3,
+      "note": "Stage 3 solo runs on the large feature: $14.54–19.65 and 36–51 min a run. First try counts runs with no fix round after review: 1 of 3 here, 5 of 7 pooled with the backlog runs (used for placement)."
+    },
+    {
+      "name": "Gemini 4 Argon alone",
+      "usd": 4.30,
+      "minutes": 43.54,
+      "first_try": 1.0,
+      "measured": true,
+      "runs": 1,
+      "note": "Frontier large-task solo run: 169 of 170 checks passed, zero fix rounds after review. Cost uses the $2/$10 per M promo through Nov 30, 2026; the same tokens cost $8.60 at $4/$20 from Dec 1. First try means fix_rounds == 0, not all checks passed."
+    },
+    {
+      "name": "GPT-6 Astra alone",
+      "usd": 9.78,
+      "minutes": 25.43,
+      "first_try": 1.0,
+      "measured": true,
+      "runs": 1,
+      "note": "Frontier large-task solo run: 170 of 170 checks passed, zero fix rounds after review. First try means fix_rounds == 0. Cost and time include implementation and the review follow-up."
+    },
+    {
+      "name": "brindle B",
+      "usd": 11.11,
+      "minutes": 62,
+      "first_try": 0.778,
+      "measured": true,
+      "runs": 1,
+      "weights": {"cost": 0.5, "speed": 0.2, "first_try": 0.3},
+      "note": "Stage 3 finalist B (Opus supervises, Codex Sol works, Sonnet high reviews): one valid run of three. First try counts branches merged on their first review (7 of 9)."
+    }
+  ]
+}

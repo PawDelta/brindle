@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from brindle import spawn
+from brindle.worker_models import TIER_PREFERENCES
 
 CONFIG_DIR = ".brindle"
 CONFIG_FILE = "config.json"
@@ -86,12 +87,7 @@ def normalize_weight(weight: str | None) -> str | None:
 # brindle Pro's learner may pick instead when its evidence says they do better.
 # Nothing here prefers another provider for its own sake: all-Claude, all-Codex
 # or all-Gemini may well be best, and that's the learner's call.
-DEFAULT_ROUTING = {
-    "light": ["developer-sonnet", "developer-light", "developer", "developer-codex", "developer-local"],
-    "medium": ["developer-sonnet", "developer", "developer-codex", "developer-heavy"],
-    "heavy": ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
-    "advanced": ["developer-fable", "developer-heavy", "developer-gemini"],
-}
+DEFAULT_ROUTING = {tier: list(names) for tier, names in TIER_PREFERENCES.items()}
 
 
 @dataclass
@@ -111,8 +107,8 @@ class RepoConfig:
     scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
     scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (0: no cap)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
-    reviewer: str = "reviewer"         # agent profile that reviews branches
-    review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
+    reviewer: str = "reviewer-sonnet-high"  # agent profile that reviews branches
+    review_profile: str | None = None  # force request_review's profile (skips automatic selection)
     review_sizing: bool = True        # scoped context and cheaper profiles for small or docs/test-only reviews
     review_small_max_files: int = 5
     review_small_max_lines: int = 200  # additions + deletions; binary changes keep the usual reviewer

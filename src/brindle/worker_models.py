@@ -23,6 +23,15 @@ HOW = {CLI: "a signed-in CLI", LOCAL: "local (Ollama)", KEY: "hosted, with an AP
 OPENROUTER_KEY = "OPENROUTER_API_KEY"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
+# Ranked worker profiles for each tier. Availability checks fall through this
+# order; the learner may choose another eligible candidate when enabled.
+TIER_PREFERENCES: dict[str, tuple[str, ...]] = {
+    "light": ("developer-codex", "developer-light", "developer-sonnet", "developer", "developer-local"),
+    "medium": ("developer-codex", "developer-sonnet", "developer", "developer-heavy"),
+    "heavy": ("developer-heavy", "developer-gemini", "developer", "developer-codex"),
+    "advanced": ("developer-fable", "developer-heavy", "developer-gemini"),
+}
+
 
 @dataclass(frozen=True)
 class Model:
