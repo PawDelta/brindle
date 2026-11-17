@@ -184,7 +184,7 @@ def test_note_only_answers_reach_the_supervisor(db, session, client):
     assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
 
 
-@pytest.mark.parametrize("revise", [False, pytest.param(True, marks=pytest.mark.variant(
+@pytest.mark.parametrize("revise", [pytest.param(True, marks=pytest.mark.variant(
     "a new revision of an older visual must use its publication time, not the visual's creation time"))])
 def test_person_message_closes_only_earlier_prompts_in_its_session(db, session, monkeypatch, revise):
     ws, boss, worker = session

@@ -41,7 +41,12 @@ def _waiter_gone():
     wake._path("boss").write_text("0 gone\n")
 
 
-@pytest.mark.parametrize("registered,armed", [(True, True), (True, False), (False, False)],
+@pytest.mark.parametrize("registered,armed", [
+    pytest.param(True, True, marks=pytest.mark.variant(
+        "an armed supervisor whose waiter ended must be poked without typing into the person's chat")),
+    pytest.param(True, False, marks=pytest.mark.variant(
+        "an older launch with a departed waiter and no poke hook must leave mail queued without typing")),
+    (False, False)],
                          ids=["pokeable", "older-launch", "no-waiter-hook"])
 def test_idle_supervisor_without_a_waiter_is_never_typed_into(db, boss, registered, armed):
     if registered:
@@ -75,7 +80,10 @@ def test_a_supervisors_session_watches_its_poke_file(db, boss):
     assert out["hookSpecificOutput"]["watchPaths"] == [str(wake.poke_path("boss"))]
 
 
-@pytest.mark.parametrize("settled", [True, False], ids=["composer-empty", "composer-holds-it"])
+@pytest.mark.parametrize("settled", [
+    pytest.param(True, marks=pytest.mark.variant(
+        "an old delivery cleared from the composer must be requeued whole without resuming pane input")),
+    False], ids=["composer-empty", "composer-holds-it"])
 def test_a_delivery_an_older_brindle_began_typing_is_not_finished_by_typing(db, boss, monkeypatch, settled):
     monkeypatch.setattr(agents, "_composer_settled", lambda a: settled)
     _waiter_gone()

@@ -115,6 +115,7 @@ def test_snapshot_query_count_is_independent_of_workspace_count(db, tmp_path, fa
     assert counts[1] <= counts[0] <= 25, counts
 
 
+@pytest.mark.variant("concurrent inbox and snapshot reads must share a render and invalidate it after events")
 def test_inbox_reuses_snapshot_and_refreshes_after_an_event(db, tmp_path, monkeypatch, fake_git):
     ws = _worktree(tmp_path, db, "one", OLD)
     calls = []
@@ -158,8 +159,10 @@ def test_inbox_reuses_snapshot_and_refreshes_after_an_event(db, tmp_path, monkey
 
 
 @pytest.mark.parametrize("stored_head, shown", [
-    (None, UNKNOWN),    # nothing stored: unknown until counted, never counted on the request path
-    (OLD, None),        # stored for these commits, ahead 0: merged, so hidden at once
+    pytest.param(None, UNKNOWN, marks=pytest.mark.variant(
+        "a daemon with no stored counts must defer git and show unknown counts")),
+    pytest.param(OLD, None, marks=pytest.mark.variant(
+        "stored zero-ahead counts for unchanged commits must hide a merged workspace immediately")),
     (NEW, UNKNOWN),     # HEAD moved since: the stored counts no longer apply
 ])
 def test_cold_snapshot_runs_no_git_and_uses_stored_counts(db, tmp_path, monkeypatch, fake_git, stored_head, shown):
@@ -174,6 +177,7 @@ def test_cold_snapshot_runs_no_git_and_uses_stored_counts(db, tmp_path, monkeypa
     assert [w.id for w, _ in later[0]] == [ws.id]    # counted afterwards
 
 
+@pytest.mark.variant("an edit after the events feed counts must preserve the last count and schedule a refresh")
 def test_a_count_gone_stale_before_the_first_snapshot_is_shown_and_recounted_later(
         db, tmp_path, monkeypatch, fake_git):
     ws = _worktree(tmp_path, db, "one", OLD)
@@ -206,7 +210,8 @@ def test_a_deleted_base_shows_unknown_once_counted_and_stops_recounting(db, tmp_
 
 
 @pytest.mark.parametrize("ahead, told", [
-    (2, True),      # not what was shown: the app reads again
+    pytest.param(2, True, marks=pytest.mark.variant(
+        "changed background counts must notify the app and survive a daemon restart")),
     (0, False),     # as shown: nothing to read again
 ])
 def test_background_count_stores_counts_the_next_daemon_shows(db, tmp_path, monkeypatch, fake_git, ahead, told):

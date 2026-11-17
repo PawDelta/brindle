@@ -25,7 +25,9 @@ def _agent(db, ws_id: str, **fields) -> None:
                        time.time(), **fields))
 
 
-@pytest.mark.parametrize("holder", [None, "process", "process-during-save", "edit-during-save",
+@pytest.mark.parametrize("holder", [None, "process", "process-during-save",
+                                    pytest.param("edit-during-save", marks=pytest.mark.variant(
+                                        "an edit after saving the patch must prevent teardown and worktree deletion")),
                                     "teardown-deletes"])
 def test_kept_merged_workspace_goes_once_nothing_is_in_it(db, repo, tmp_path, process_scan, monkeypatch,
                                                           holder):
@@ -87,6 +89,7 @@ def test_kept_merged_workspace_goes_once_nothing_is_in_it(db, repo, tmp_path, pr
     assert "left behind" in patch.read_text() and "edited after the merge" in patch.read_text()
 
 
+@pytest.mark.variant("cleanup must never remove an adopted personal checkout even when merged and idle")
 def test_the_persons_own_checkout_is_never_touched(db, repo, tmp_path, monkeypatch):
     """A worktree the person made outside brindle's folders stays, however
     finished and idle it looks: merged, uncommitted changes, nothing in it,

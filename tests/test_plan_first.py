@@ -80,6 +80,7 @@ def test_submit_plan_needs_a_plan_first_worker(db, repo, boss, sent):
     assert not sent
 
 
+@pytest.mark.variant("worker plans must reach their supervisor without creating a person-facing inbox prompt")
 def test_submitted_plan_reaches_the_supervisor_not_the_inbox(db, repo, boss, sent):
     from brindle.service import inbox
 
