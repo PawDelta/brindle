@@ -369,6 +369,7 @@ def end_turn(db, agent, base: dict, error: str, provider: str = "antigravity") -
                 _flush_soon(agent_id)
             _tell_parent_stopped_on_error(db, failed, error_type)
         return
+    agents.turn_succeeded(agent)   # before the queued-mail path, which skips the Stop hook
     if db.pending_count(agent_id):
         # A new turn, not a continuation: only then does agy give the
         # agent its MCP tools.

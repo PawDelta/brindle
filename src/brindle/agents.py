@@ -6415,6 +6415,15 @@ def _note_health(record, provider: str | None) -> None:
         log.exception("brindle: couldn't record provider health")
 
 
+def turn_succeeded(agent: Agent) -> None:
+    """``agent``'s turn ended without a provider error: a run of provider
+    errors (provider_health's erroring) is broken. Every provider's turn-end
+    path calls this, including ones that skip the Stop hook."""
+    from brindle import provider_health
+
+    _note_health(provider_health.record_success, agent.provider)
+
+
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``brindle _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
@@ -6567,10 +6576,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         except Exception:  # noqa: BLE001
             log.exception("brindle: couldn't check the brindle MCP server's start")
     elif event == "stop":
-        from brindle import inbox, provider_health, tasks
+        from brindle import inbox, tasks
 
-        # A turn that ended well breaks a run of provider errors.
-        _note_health(provider_health.record_success, agent.provider)
+        turn_succeeded(agent)
         # A request left to the person with no PostToolUse by the end of the
         # turn wasn't approved (or we can't tell): drop it, learn nothing.
         # Terminal approval commands must remain usable after this reply.
@@ -6638,6 +6646,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         except OSError:
             pass
         if payload.get("type") == "agent-turn-complete":
+            turn_succeeded(agent)
             inputs = payload.get("input-messages")
             if isinstance(inputs, list):
                 _acknowledge_submitted(db, agent_id, "\n".join(str(m) for m in inputs))

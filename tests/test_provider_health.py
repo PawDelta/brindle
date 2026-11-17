@@ -67,22 +67,43 @@ def health(brindle_home, clock):
     return provider_health
 
 
-@pytest.mark.parametrize("events,expected", [
-    pytest.param([("stop-failure", {"error": "rate_limit_error: 429"})], "rate_limited", id="429"),
-    pytest.param([("stop-failure", {"error": "api_error 500"})] * 3, "erroring",
-                 id="three failed turns"),
-    pytest.param([("stop-failure", {"error": "api_error 500"})] * 2 + [("stop", {})]
-                 + [("stop-failure", {"error": "api_error 500"})], "ok", id="a finished turn breaks the run"),
-    pytest.param([("notification", {"message": "Approaching usage limit"})], "closing",
+def _hook(event, payload):
+    return lambda db: agents.handle_hook(db, "w", event, payload)
+
+
+def _agy_done_with_mail(db):
+    # agy's own turn end with a message queued: it types the message in as a
+    # new turn and never runs the Stop hook.
+    from brindle import antigravity
+
+    db.enqueue("w", "next", "brindle")
+    antigravity.end_turn(db, db.get_agent("w"), {}, "")
+
+
+FAIL = _hook("stop-failure", {"error": "api_error 500"})
+
+
+@pytest.mark.parametrize("steps,expected", [
+    pytest.param([_hook("stop-failure", {"error": "rate_limit_error: 429"})], "rate_limited", id="429"),
+    pytest.param([FAIL] * 3, "erroring", id="three failed turns"),
+    pytest.param([FAIL, FAIL, _hook("stop", {}), FAIL], "ok", id="a finished turn breaks the run"),
+    pytest.param([FAIL, FAIL, _agy_done_with_mail, FAIL], "ok",
+                 id="a finished agy turn with queued mail breaks the run"),
+    pytest.param([FAIL, FAIL, _hook("codex-notify", {"type": "agent-turn-complete"}), FAIL], "ok",
+                 id="a finished Codex turn breaks the run"),
+    pytest.param([_hook("notification", {"message": "Approaching usage limit"})], "closing",
                  id="the CLI's approaching-limit notice"),
 ])
-def test_hooks_record_provider_health(db, repo, health, events, expected):
+def test_hooks_record_provider_health(db, repo, health, monkeypatch, steps, expected):
+    from brindle import antigravity
+
+    monkeypatch.setattr(antigravity, "_flush_soon", lambda agent_id: None)
     quota.record("antigravity", [quota.Window(50, NOW + DAY, 10080)])
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("w", ws.id, "developer-gemini", "antigravity", None,
                        "interactive", "processing", "@1", None, NOW))
-    for event, payload in events:
-        agents.handle_hook(db, "w", event, payload)
+    for step in steps:
+        step(db)
     assert health.limit("antigravity").state == expected
 
 
