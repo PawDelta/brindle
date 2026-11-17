@@ -93,6 +93,19 @@ def test_a_turn_run_since_the_429_drops_its_rerun(db, session, monkeypatch):
     assert limit_report.rerun_due(db, now=later) == [] and sent == []
 
 
+@pytest.mark.variant("race: a new turn starts while the sweep reads provider health, after its stop check")
+def test_a_turn_started_during_the_health_read_gets_no_rerun(db, session, monkeypatch):
+    limit_report, sent, later = rate_limited_then(db, monkeypatch, 40)
+    health_of = limit_report.health_of
+
+    def new_turn_meanwhile(db_, agent, now=None):
+        db.set_status("w1", "processing")
+        return health_of(db_, agent, now)
+
+    monkeypatch.setattr(limit_report, "health_of", new_turn_meanwhile)
+    assert limit_report.rerun_due(db, now=later) == [] and sent == []
+
+
 def test_a_window_filled_since_the_429_is_reported_not_run_again(db, session, monkeypatch):
     _, stopped = session
     limit_report, sent, later = rate_limited_then(db, monkeypatch, 100)

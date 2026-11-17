@@ -266,8 +266,11 @@ def rerun_due(db: DB, now: float | None = None) -> list[str]:
         if health is None or health.state == provider_health.RATE_LIMITED:
             continue    # another 429 since: wait for that one too
         claimed = f"{RERUNNING} {stop}"
-        if not db.replace_mark(agent_id, RERUN_MARK, value, claimed):
-            continue
+        # Atomic with the agent's current stop: a turn started while health
+        # was read (its supervisor or the person sent it something) wins.
+        if not db.claim_mark_at_stop(agent_id, RERUN_MARK, value, claimed,
+                                     agent.status_since or agent.created_at, agent.reopened_at):
+            continue    # the next sweep drops a rerun whose stop has passed
         if health.state in (provider_health.LIMITED, provider_health.ERRORING):
             db.set_mark(agent_id, RERUN_MARK, None)
             if db.mark(agent_id, agents.API_ERROR_MARK) == stop:

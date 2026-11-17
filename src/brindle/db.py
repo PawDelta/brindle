@@ -2759,6 +2759,22 @@ class DB:
                       (agent_id, kind, value))
         return True, row["value"] if row else None
 
+    def claim_mark_at_stop(self, agent_id: str, kind: str, old: str, new: str,
+                           status_since: float, reopened_at: float | None) -> bool:
+        """``replace_mark`` from ``old`` to ``new``, only while the agent is
+        still idle at the stop its caller read (``status_since``,
+        ``reopened_at``), with no result and not dismissed: checked in the same
+        transaction, so a turn started meanwhile makes the claim fail."""
+        with self.tx() as c:
+            current = c.execute(
+                "SELECT 1 FROM agents WHERE id=? AND status='idle' AND result IS NULL"
+                " AND dismissed_at IS NULL AND COALESCE(status_since, created_at) IS ?"
+                " AND reopened_at IS ?", (agent_id, status_since, reopened_at)).fetchone()
+            if current is None:
+                return False
+            return bool(c.execute("UPDATE agent_marks SET value=? WHERE agent_id=? AND kind=? AND value=?",
+                                  (new, agent_id, kind, old)).rowcount)
+
     def release_stop_mark(self, agent_id: str, kind: str, status_since: float,
                           previous: str | None) -> None:
         """Undo a ``claim_stop_mark`` whose notice couldn't be sent, only
