@@ -34,6 +34,7 @@ def two_session_template(tmp_path_factory):
     return base, made
 
 
+@pytest.mark.variant("end to end through real git: the started branch shares no commits with the other session's branch")
 def test_dependent_task_branch_is_cut_from_own_session(db, tmp_path, two_session_template, monkeypatch):
     template, made = two_session_template
     repo = copy_tree(template, tmp_path)
