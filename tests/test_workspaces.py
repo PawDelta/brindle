@@ -205,3 +205,14 @@ def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, f
     assert db.get_workspace(ws.id) is None
     assert db.get_agent("rev0") is None
 
+
+
+@pytest.mark.parametrize("body", ["Fixes a bug.", "Fixes a bug.\n\nBuilt with [brindle](https://pawdelta.com/brindle)", ""])
+def test_pr_body_ends_with_the_footer_exactly_once(feature, monkeypatch, body):
+    seen = []
+    monkeypatch.setattr(workspaces.git, "push", lambda *a, **k: None)
+    monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(workspaces.spawn, "action", lambda args, cwd: (seen.append(args), SimpleNamespace(returncode=0, stdout="https://gh.test/pr/1\n"))[1])
+    workspaces.open_pull_request(feature, title="t", body=body)
+    sent = seen[0][seen[0].index("--body") + 1]
+    assert sent.endswith(workspaces.PR_FOOTER) and sent.count(workspaces.PR_FOOTER) == 1
