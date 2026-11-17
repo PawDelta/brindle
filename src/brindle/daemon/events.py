@@ -138,6 +138,7 @@ class Feed:
 
         status = self._git_status or status_cache.cached_any_status    # no git for an unchanged checkout
         out = []
+        changed = []
         roots = {}
         for agent in self.db.list_agents():
             if agent.parent_id is None:
@@ -152,6 +153,7 @@ class Feed:
             if self._git.get(ws.id) != st:
                 self._git[ws.id] = st
                 out.append({"type": "git", "workspace_id": ws.id, "status": st})
+                changed.append(ws)
             if ws.id not in roots:
                 continue
             try:
@@ -171,6 +173,13 @@ class Feed:
                 if before is not None and before != signature:
                     bus.publish_ws(self.db, "session.changed", ws, root_id=root)
                 self._changes.signatures[root] = signature
+        if changed:
+            from brindle import view
+
+            try:
+                view.store_counts(self.db, changed)    # what the next daemon shows before it has counted
+            except Exception:  # noqa: BLE001 - a display extra: never stops the feed
+                log.exception("brindle: couldn't store git counts")
         return out
 
     def _status(self) -> list[dict]:

@@ -361,6 +361,22 @@ CREATE TABLE IF NOT EXISTS check_cache (
     created_at REAL NOT NULL,
     PRIMARY KEY (workspace_id, sha, command)
 );
+-- A workspace's last counted git status (view.snapshot's ahead/behind/dirty),
+-- with the commits it was counted for: HEAD and the local and origin base
+-- refs, as the git files named them. A fresh process (the daemon after a
+-- restart) shows these while HEAD and both refs still name those commits,
+-- instead of running git status for every workspace before its first answer.
+CREATE TABLE IF NOT EXISTS git_counts (
+    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    base_branch TEXT NOT NULL,
+    head TEXT NOT NULL,
+    local_base TEXT,
+    origin_base TEXT,
+    ahead INTEGER NOT NULL,
+    behind INTEGER NOT NULL,
+    dirty INTEGER NOT NULL,
+    counted_at REAL NOT NULL
+);
 -- The files two running branches were last reported to have both changed
 -- (see tasks.conflict_forecast): the supervisor hears about a pair once, and
 -- again only when more files join the overlap. Rows go with their workspaces.
@@ -3690,6 +3706,24 @@ class DB:
             "SELECT ok, output FROM check_tree_cache WHERE repo_root=? AND tree=? AND command=?",
             (repo_root, tree, command),
         ).fetchone()
+
+    def git_counts(self) -> dict[str, sqlite3.Row]:
+        """Every workspace's last counted git status (see the git_counts table), by workspace id."""
+        return {r["workspace_id"]: r for r in self.conn.execute("SELECT * FROM git_counts")}
+
+    def set_git_counts(self, workspace_id: str, base_branch: str,
+                       commits: tuple[str, str | None, str | None],
+                       ahead: int, behind: int, dirty: int) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO git_counts (workspace_id, base_branch, head, local_base, origin_base,"
+                " ahead, behind, dirty, counted_at) VALUES (?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(workspace_id) DO UPDATE SET base_branch=excluded.base_branch,"
+                " head=excluded.head, local_base=excluded.local_base, origin_base=excluded.origin_base,"
+                " ahead=excluded.ahead, behind=excluded.behind, dirty=excluded.dirty,"
+                " counted_at=excluded.counted_at",
+                (workspace_id, base_branch, *commits, ahead, behind, dirty, time.time()),
+            )
 
     def set_tree_check(self, repo_root: str, tree: str, command: str, ok: bool, output: str) -> None:
         with self.tx() as c:

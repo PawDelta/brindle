@@ -277,7 +277,14 @@ def list_sessions(db: DB, request: Request) -> Any:
 
 @_json
 def snapshot(db: DB, request: Request) -> Any:
-    return [WorkspaceDTO.model_validate(ws).to_json() for ws in view.snapshot(db, _repo(request))]
+    # Git counts only as far as they are known: the app's first read after the
+    # daemon starts must not wait on a git status per workspace (with recovery
+    # competing, that took half a minute). The rest is counted afterwards and
+    # published (view.warm_later); the events feed's git sweep keeps them current.
+    known = view.KnownGit(db)
+    rows = view.snapshot(db, _repo(request), known_git=known)
+    view.warm_later(known.pending)
+    return [WorkspaceDTO.model_validate(ws).to_json() for ws in rows]
 
 
 @_json
@@ -301,7 +308,10 @@ def goal(db: DB, request: Request) -> Any:
 
 @_json
 def inbox_(db: DB, request: Request) -> Any:
-    return [i.to_json() for i in inbox.items(db, _repo(request))]
+    known = view.KnownGit(db)     # as for the snapshot, which the app reads alongside
+    out = [i.to_json() for i in inbox.items(db, _repo(request), known_git=known)]
+    view.warm_later(known.pending)
+    return out
 
 
 @_json
