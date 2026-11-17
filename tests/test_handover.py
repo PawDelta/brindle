@@ -18,6 +18,8 @@ from brindle import (agents, autopilot, limit_report, plugins, provider_switch, 
 from brindle.db import Agent
 from brindle.profiles import load_profile
 
+REAL_SPAWN = agents.spawn     # before the fixture stands a fake in for it
+
 # quota drops windows already past their reset: keep it ahead of the real clock.
 RESET = time.time() + 30 * 86400
 TIERS = ("light", "medium", "heavy", "advanced")
@@ -158,13 +160,15 @@ def test_a_second_trigger_of_the_same_stop_starts_nothing(db, setup):
 
 
 def test_a_third_stop_parks_the_task_with_one_inbox_card(db, setup):
-    from brindle import handover
+    from brindle import handover, learning
 
     ws, spawned, _, _ = setup
     out_of("claude")
     cut_off(db, "w1")                    # hop 1: Gemini
     out_of("antigravity")
     cut_off(db, "new1")                  # hop 2: Codex, the only measured provider left
+    # The learner hears the merge as a takeover: from the profile before it, after two hops.
+    assert learning.handover(db, db.get_agent("new2"), ws.repo_root) == ("developer-gemini", 2)
     # A third stop: even with Codex back within the park window, the person decides.
     out_of("codex", time.time() + 10 * 60)
     cut_off(db, "new2")
@@ -200,6 +204,56 @@ def test_a_replacement_billed_through_the_org_waits_for_the_persons_yes(db, setu
     assert [c.id for c in card.choices] == ["continue", "wait", "stop"]
     handover.answer(db, card.request_id, "continue")
     assert [s["profile"] for s in spawned] == ["developer-gemini"] and db.get_agent("w1").status == "rewound"
+
+
+@pytest.mark.parametrize("when", [pytest.param("routing", marks=pytest.mark.variant(
+    "regression: the handover's cascade ran with no budget gate and started a profile over the budget")),
+                                  pytest.param("offered", marks=pytest.mark.variant(
+    "a pick offered on an Inbox card before the budget tightened is checked again at launch"))])
+def test_a_replacement_over_the_budget_is_never_started(db, setup, repo, monkeypatch, when):
+    from brindle import budget, handover
+
+    ws, spawned, _, _ = setup
+
+    def over() -> None:
+        """A $1 task budget, which Gemini (about $5 a task) doesn't fit."""
+        cfg = json.loads((repo / ".brindle" / "config.json").read_text())
+        (repo / ".brindle" / "config.json").write_text(json.dumps({**cfg, "budget": {"task_usd": 1}}))
+
+    monkeypatch.setattr(budget, "entitled", lambda: True)
+    monkeypatch.setattr(budget, "estimate", lambda db_, root, profile, weight, extra=None:
+                        5.0 if profile == "developer-gemini" else 0.5)
+    out_of("claude")
+    if when == "routing":
+        over()
+        cut_off(db, "w1")
+        assert [s["profile"] for s in spawned] == ["developer-codex"]     # the table's pick didn't fit
+        return
+    # The person is asked about Gemini first (billed per token); the budget tightens before they answer.
+    monkeypatch.setattr(handover, "per_token", lambda profile, repo_root: profile == "developer-gemini")
+    cut_off(db, "w1")
+    [card] = handover.inbox_items(db, ws.repo_root)
+    over()
+    handover.answer(db, card.request_id, "continue")
+    assert spawned == [] and db.get_agent("w1").status == "paused"
+
+
+@pytest.mark.variant("regression: a handoff_detached worker's replacement was spawned in that raw mode, "
+                     "so it lost its weight and the worker's report_result footer")
+def test_a_detached_handoffs_replacement_is_briefed_and_weighted_as_a_handoff(db, setup, monkeypatch):
+    _, _, task, _ = setup
+    launched = []
+    monkeypatch.setattr(agents, "spawn", REAL_SPAWN)
+    monkeypatch.setattr(agents, "_launch", lambda db_, agent, ws_, prompt=None, **kw: launched.append(prompt))
+    # A queued handoff nobody waits on, its weight stored as spawn stores it.
+    db.update_agent("w1", mode="handoff_detached", weight="medium")
+    out_of("claude")
+    cut_off(db, "w1")
+
+    fresh = db.get_agent(db.get_task(task.id).agent_id)
+    assert fresh.id != "w1" and fresh.mode == "handoff_detached" and fresh.weight == "medium"
+    [prompt] = launched
+    assert "report_result" in prompt                    # the worker's finish protocol
 
 
 def test_recovery_adopts_only_the_launch_its_handover_recorded(db, setup, monkeypatch):
