@@ -310,15 +310,18 @@ def dismiss_item(db: DB, value: dict) -> dict:
 
 
 def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
-          known_git: view.KnownGit | None = None) -> list[InboxItemDTO]:
+          known_git: view.KnownGit | None = None, *, snapshot_rows: list[dict] | None = None) -> list[InboxItemDTO]:
     """Everything waiting on a person in ``repo_root``'s sessions (every
     session when None), then the org's unread notices. Each agent's item
     names its session (``root_id``), so the app can link into it.
-    ``known_git``: as for ``view.snapshot``."""
+    ``known_git``: as for ``view.snapshot``. ``snapshot_rows`` reuses a rendering
+    already made for the adjacent snapshot request."""
     out: list[InboxItemDTO] = []
     shown: set[str] = set()
     occurrences = {r["source"]: r["generation"] for r in db.conn.execute("SELECT source, generation FROM inbox_occurrences")}
-    for ws in view.snapshot(db, repo_root, panes=panes, known_git=known_git):
+    if snapshot_rows is None:
+        snapshot_rows = view.snapshot(db, repo_root, panes=panes, known_git=known_git)
+    for ws in snapshot_rows:
         shown.update(a["id"] for a in ws["agents"])
         for a in ws["agents"]:
             if a.get("locked"):
