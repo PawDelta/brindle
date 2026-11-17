@@ -2343,12 +2343,20 @@ def docs_everywhere(path: str, repo: str | None, query: dict[str, str]) -> list[
     """GET ``path`` (a list the server answers per scope) in each scope of
     :func:`docs_scopes`: the answers that came back. A scope that refuses
     is skipped unless every one does."""
-    got, refused = [], None
-    for spec in dict.fromkeys(scope_spec(s) for s in docs_scopes(repo)):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def ask(spec: str) -> tuple[Any, ServiceError | None]:
         try:
-            got.append(docs_api("GET", path, repo=repo, query=query, scope=spec))
+            return docs_api("GET", path, repo=repo, query=query, scope=spec), None
         except ServiceError as e:
-            refused = refused or e
+            return None, e
+
+    specs = list(dict.fromkeys(scope_spec(s) for s in docs_scopes(repo)))
+    # One server round trip per scope: all at once, not one after another (answers kept in scope order).
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(specs)))) as pool:
+        answers = list(pool.map(spawn.carry(ask), specs))
+    got = [a for a, e in answers if e is None]
+    refused = next((e for _, e in answers if e is not None), None)
     if refused and not got:
         raise refused
     return got
