@@ -79,6 +79,7 @@ def test_lockfile_change_triggers_setup_again(db, repo, tmp_path):
     )
 
 
+@pytest.mark.variant("a session cut from origin's tip must reuse the warm pool entry instead of a fresh worktree")
 def test_session_worktree_from_origins_tip_claims_the_pool_entry(db, repo, tmp_path):
     """A new session's worktree starts at origin's tip as just fetched, ahead of
     the local main the entry was built from: it still takes the ready entry
