@@ -289,21 +289,39 @@ def replacement(db: DB, agent: Agent, ws: Workspace, after: list[str]) -> str | 
     """The cascade's best runnable profile for ``agent``'s task, on none of
     the providers ``after`` (the profiles it ran on) used, as a fresh assign
     of it would be checked (the repo's policy included)."""
-    from brindle import autopilot, cascade, policy as pol
+    from brindle import budget, cascade, policy as pol
     from brindle.config import load_repo_config
 
     cfg = load_repo_config(ws.repo_root)
-    tier = agent.weight if agent.weight in cascade.TIERS else cascade._weight(
-        autopilot.profile_weight(agent.profile, cfg, ws.repo_root))
-    if tier not in cascade.TIERS:
-        tier = "medium"
+    tier = _tier(agent, cfg, ws)
 
     def refusal(name: str) -> str | None:
         d = pol.assign_decision(cfg, ws.repo_root, name, agent.task or "", "assign", weight=tier,
                                 branch=ws.branch)
         return None if d.allowed else (d.reason or "the repo's policy refused it")
 
-    return cascade.workers(cfg, ws.repo_root, tier, after=after, policy=refusal).first
+    # The budgets a fresh assign by its supervisor would be held to (task, goal, month, the org's).
+    gate = budget.Gate(db, cfg, ws.repo_root, agent.parent_id)
+    return cascade.workers(cfg, ws.repo_root, tier, gate=gate, after=after, policy=refusal).first
+
+
+def _tier(agent: Agent, cfg, ws: Workspace) -> str:
+    """The routing tier of ``agent``'s task."""
+    from brindle import autopilot, cascade
+
+    tier = agent.weight if agent.weight in cascade.TIERS else cascade._weight(
+        autopilot.profile_weight(agent.profile, cfg, ws.repo_root))
+    return tier if tier in cascade.TIERS else "medium"
+
+
+def over_budget(db: DB, agent: Agent, ws: Workspace, pick: str) -> str | None:
+    """Why ``pick`` taking ``agent``'s task over doesn't fit the budget now, or None."""
+    from brindle import budget
+    from brindle.config import load_repo_config
+
+    cfg = load_repo_config(ws.repo_root)
+    gate = budget.Gate(db, cfg, ws.repo_root, agent.parent_id)
+    return gate.why_not(pick, _tier(agent, cfg, ws)) if gate.active else None
 
 
 CLOUD_SWITCHES = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
@@ -382,10 +400,25 @@ def _start(db: DB, h: Handover, ws: Workspace, pick: str, now: float) -> str | N
         return None
     if agents.session_paused(db, old):
         return _park(db, h, now)
+    # Checked again at launch: a pick offered on an Inbox card earlier may no longer fit.
+    over = over_budget(db, old, ws, pick)
+    if over:
+        if agents.is_alive(old):
+            agents.pause_worker(db, old)
+        elif old.status != "paused":
+            db.set_status(old.id, "paused")
+        detail = (f"{pick} doesn't fit the budget now ({over}), so brindle didn't start it; the worker is "
+                  "paused with its work: assign the task to another profile, or continue the worker once "
+                  "its limit lifts")
+        _set(db, h, now, state=FAILED, to_profile=pick, claimed_at=None, detail=detail)
+        return detail
     if agents.is_alive(old):
         agents._stop(db, old)
+    # A handoff nobody waits on is still briefed and weighted as a handoff (see agents.spawn).
+    detached = old.mode == "handoff_detached"
     try:
-        fresh = agents.spawn(db, ws, pick, prompt=text, parent_id=old.parent_id, mode=old.mode,
+        fresh = agents.spawn(db, ws, pick, prompt=text, parent_id=old.parent_id,
+                             mode="handoff" if detached else old.mode, detached=detached,
                              done_when=old.done_when, weight=old.weight, background_setup=True)
     except Exception as e:  # noqa: BLE001 - its supervisor must hear of it
         log.exception("brindle: couldn't start %s for %s", pick, old.id)
@@ -450,6 +483,11 @@ def carry_over(db: DB, old: Agent, fresh: Agent, ws: Workspace, now: float, quot
                     plan_first=old.plan_first, plan_state=old.plan_state, plan_text=old.plan_text)
     ids = list(quoted)
     with db.tx() as c:
+        # Learning hears the takeover with the merge (learning.handover): the profile it took over
+        # from and the hops so far. Only rows still on ``old`` count, so a repeat adds no hop.
+        c.execute("INSERT OR REPLACE INTO task_handovers (task_id, handed_from, handovers) "
+                  "SELECT t.id, ?, COALESCE((SELECT h.handovers FROM task_handovers h WHERE h.task_id=t.id), 0) + 1 "
+                  "FROM tasks t WHERE t.agent_id=?", (old.profile, old.id))
         c.execute("UPDATE tasks SET agent_id=? WHERE agent_id=?", (fresh.id, old.id))
         c.execute("UPDATE routing_decisions SET agent_id=? WHERE agent_id=?", (fresh.id, old.id))
         if ids:
