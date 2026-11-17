@@ -206,7 +206,9 @@ def test_a_replacement_billed_through_the_org_waits_for_the_persons_yes(db, setu
     assert [s["profile"] for s in spawned] == ["developer-gemini"] and db.get_agent("w1").status == "rewound"
 
 
-@pytest.mark.parametrize("when", ["routing", pytest.param("offered", marks=pytest.mark.variant(
+@pytest.mark.parametrize("when", [pytest.param("routing", marks=pytest.mark.variant(
+    "regression: the handover's cascade ran with no budget gate and started a profile over the budget")),
+                                  pytest.param("offered", marks=pytest.mark.variant(
     "a pick offered on an Inbox card before the budget tightened is checked again at launch"))])
 def test_a_replacement_over_the_budget_is_never_started(db, setup, repo, monkeypatch, when):
     from brindle import budget, handover
@@ -236,6 +238,8 @@ def test_a_replacement_over_the_budget_is_never_started(db, setup, repo, monkeyp
     assert spawned == [] and db.get_agent("w1").status == "paused"
 
 
+@pytest.mark.variant("regression: a handoff_detached worker's replacement was spawned in that raw mode, "
+                     "so it lost its weight and the worker's report_result footer")
 def test_a_detached_handoffs_replacement_is_briefed_and_weighted_as_a_handoff(db, setup, monkeypatch):
     _, _, task, _ = setup
     launched = []
