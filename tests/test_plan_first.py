@@ -80,6 +80,15 @@ def test_submit_plan_needs_a_plan_first_worker(db, repo, boss, sent):
     assert not sent
 
 
+def test_submitted_plan_reaches_the_supervisor_not_the_inbox(db, repo, boss, sent):
+    from brindle.service import inbox
+
+    planner(db, boss)
+    agents.submit_plan(db, "w1", "1. add the column")
+    assert [(to, "approve_plan agent_id=w1" in body) for to, body, _ in sent] == [("boss", True)]
+    assert not [i for i in inbox.items(db, str(repo)) if i.kind == "plan"]
+
+
 def test_approve_plan_can_ask_for_a_revision(db, repo, boss, sent):
     planner(db, boss, plan_state="proposed")
     agents.approve_plan(db, "boss", "w1", "split it up", approved=False)
