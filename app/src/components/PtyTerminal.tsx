@@ -57,13 +57,19 @@
    Every column past those shown is masked: the box's last fraction of a
    cell, and, where a narrower terminal having the window narrows the
    agent's pane, a right sidebar inside the view. ⌘C of a selection copies
-   only the columns shown (selectionIn), not xterm.js's whole rows. */
+   only the columns shown (selectionIn), not xterm.js's whole rows.
+
+   Rows are cropped the same way (`cropRows`, Session/Chat/ChatPane.tsx: a
+   provider's own prompt box while brindle's message box stands in for it):
+   the client is that many rows taller than the view, xterm.js too, and the
+   box clips its foot, masked from the last whole row shown. Nothing the
+   pane prints is changed; the crop going back to none shows those rows. */
 
 import { ClipboardAddon, type IClipboardProvider } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { Terminal as XTerm } from "@xterm/xterm";
+import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useContext, useEffect, useRef, useState } from "react";
 import { logDebug } from "../api/debug";
@@ -133,12 +139,25 @@ export interface PtyTerminalProps {
   onView?(view: TerminalView): void;
   /* The view's size in cells, once it opens and on each change (what its client asks tmux for, the crop's columns not counted). */
   onSize?(cols: number, rows: number): void;
+  /* xterm.js's colours, applied as they change (the app's theme switched): the shell block's (shellTheme) unless given. */
+  theme?: ITheme;
+  /* Rows under the view's foot the client draws and the view clips (the module's comment): none unless given. */
+  cropRows?: number;
+  /* While given, what the person types or pastes in the view goes here, not to the pane (its input cropped away,
+     another field standing in for it): text keys and pastes as their text, keys that would edit or submit the
+     pane's hidden input taken, IME composition handed over as "". Escape, Ctrl and ⌘ keys, the mouse and the
+     terminal's own replies still reach the pane. */
+  typeElsewhere?(text: string): void;
 }
 
-/* The width of xterm.js's cells in CSS pixels, as its fit addon reads it. */
-function cellWidth(term: XTerm): number {
-  return (term as unknown as { _core: { _renderService: { dimensions: { css: { cell: { width: number } } } } } })._core._renderService.dimensions.css.cell.width;
+/* Keys that would move in, edit or submit a program's input line: taken, not sent, while typing goes elsewhere. */
+const EDITING_KEYS = new Set(["Enter", "Backspace", "Delete", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"]);
+
+/* xterm.js's cells in CSS pixels, as its fit addon reads them. */
+function cell(term: XTerm): { width: number; height: number } {
+  return (term as unknown as { _core: { _renderService: { dimensions: { css: { cell: { width: number; height: number } } } } } })._core._renderService.dimensions.css.cell;
 }
+const cellWidth = (term: XTerm): number => cell(term).width;
 
 /* xterm.js's selection, as its own copy would give it, but only columns `from` to `to` (end
    exclusive) of each row: the selection's ends where they are, the rows between from `from`
@@ -216,10 +235,19 @@ export function linkOpener(openUrl: () => OpenUrl, mac: boolean, openVisual?: ()
   };
 }
 
-export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize }: PtyTerminalProps) {
+export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, cropRows = 0, typeElsewhere }: PtyTerminalProps) {
+  const elsewhere = useRef(typeElsewhere);
+  elsewhere.current = typeElsewhere;
   const host = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const mask = useRef<HTMLDivElement>(null);
+  const foot = useRef<HTMLDivElement>(null);
+  const themed = useRef(theme);
+  themed.current = theme;
+  const footRows = useRef(cropRows);
+  footRows.current = cropRows;
+  // The open view's xterm.js and its layout, for a theme or row crop changing while it's open.
+  const live = useRef<{ term: XTerm; layout(): void } | null>(null);
   const [renderer, setRenderer] = useState<Renderer | null>(null);
   const [view, setView] = useState<TerminalView>({ kind: "connecting" });
   const [copiedShown, setCopiedShown] = useState(false);
@@ -257,7 +285,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       fontSize: 13,
       scrollback: 0,
       macOptionClickForcesSelection: true,
-      theme: shellTheme(),
+      theme: themed.current ?? shellTheme(),
       linkHandler: { activate: follow },
     });
     const fit = new FitAddon();
@@ -304,21 +332,32 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     const shownCols = () => Math.min(term.cols - crop.cols, crop.width ?? Infinity);
     // Fitted to the box, and the crop's columns wider; shifted left by the client's columns before the agent's; masked
     // past those shown, where xterm.js goes on: the box's last fraction of a cell would show the next column's.
+    // Rows likewise: the cropped ones under the view's foot, the client that much taller; masked from the last whole
+    // row shown, where the box's last fraction of a row would show the first cropped one's top.
+    let cropped = 0;
     const layout = () => {
       const fits = fit.proposeDimensions();
       if (fits && Number.isFinite(fits.cols) && Number.isFinite(fits.rows)) {
+        cropped = Math.max(0, footRows.current);
         const cols = fits.cols + crop.cols;
-        if (cols !== term.cols || fits.rows !== term.rows) term.resize(cols, fits.rows);
+        const rows = fits.rows + cropped;
+        if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
       }
       if (term.element) term.element.style.marginLeft = crop.left ? `${-crop.left * cellWidth(term)}px` : "";
       if (mask.current) {
         mask.current.hidden = !crop.cols;
         mask.current.style.left = crop.cols ? `${shownCols() * cellWidth(term)}px` : "";
       }
+      if (foot.current) {
+        foot.current.hidden = !cropped;
+        foot.current.style.top = cropped ? `${(term.rows - cropped) * cell(term).height}px` : "";
+      }
       el.dataset.crop = `${crop.cols},${crop.left}`;
+      el.dataset.cropRows = String(cropped);
       el.dataset.shown = String(shownCols());
     };
     layout();
+    live.current = { term, layout };
     // Whether tmux has taken the client's terminal (a paste waits for it, toPane): it switches to the alternate screen
     // first thing, its pty raw by then, however the bytes were split. Also woken by the view ending, whose paste waits
     // no more.
@@ -357,7 +396,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       },
     });
     setView({ kind: "live" });
-    sized.current?.(term.cols, term.rows);
+    sized.current?.(term.cols, term.rows - cropped);
     // What goes to the pane, in the order the person made it: a ⌘V holds its place while the clipboard is read,
     // and what's typed after waits behind it.
     let waiting = 0;
@@ -380,14 +419,35 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       if (e.data && e.inputType === "insertText" && !e.isComposing) deadKey = false;
     };
     term.textarea?.addEventListener("input", completedInput);
+    // A composition (IME) starting while typing goes elsewhere: xterm.js would send its text at the end, past the key
+    // handler, so the keyboard is handed over before it can.
+    const composing = () => {
+      const away = elsewhere.current;
+      if (!away) return;
+      term.blur();
+      away("");
+    };
+    term.textarea?.addEventListener("compositionstart", composing);
+    // Text the textarea takes with no key behind it (an emoji or character picker, dictation): xterm.js sends it from
+    // its input listener, past the key handler. Captured on the view before it gets there, and sent elsewhere.
+    const inserted = (event: Event) => {
+      const e = event as InputEvent;
+      const away = elsewhere.current;
+      if (!away || e.target !== term.textarea || e.isComposing || !e.data || !e.inputType.startsWith("insert")) return;
+      e.stopPropagation();
+      if (term.textarea) term.textarea.value = "";
+      away(e.data);
+    };
+    el.addEventListener("input", inserted, true);
     const binary = term.onBinary(send);
     // The wheel's reports as a native terminal sends them (terminalScroll.ts), not xterm.js's one an event.
     const wheel = scrollByWheel(term, send);
     const resized = term.onResize(({ cols, rows }) => {
-      // The view's own size: the crop's columns are the client's to add.
+      // The view's own size: the crop's columns are the client's to add. Its cropped rows are the view's own: the
+      // client asks tmux for them, and they aren't the view's size.
       const shown = cols - crop.cols;
       pty.resize(shown, rows);
-      sized.current?.(shown, rows);
+      sized.current?.(shown, rows - cropped);
     });
     // Focused (the app's window too, coming to the front) or clicked: the window takes
     // the view's size, though nothing is typed (a terminal sharing the pane had it). A
@@ -430,10 +490,20 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     // parsed so far: tmux reads the markers, and passes them on only to a pane that asked (a_paste_reaches_...), so its
     // Enters are never keys at the client. Once tmux has taken the client's terminal (ATTACH_WAIT), or a cooked pty
     // would change them. What's typed waits behind it, in the line.
-    const toPane = async (pasting: string) => {
+    // `wentAway`: whether typing went elsewhere (typeElsewhere) as the paste was made. It goes where it was made for,
+    // or nowhere: where that changed while the text was read (a permission question came, or went), it is dropped,
+    // never sent to the other side.
+    const toPane = async (pasting: string, wentAway: boolean) => {
       const bytes = pasting.length;
       const text = wellFormed(unbracketed(pasting)).replace(/\r?\n/g, "\r");
       if (!text) return dropPaste("the clipboard holds no text", bytes);
+      const away = elsewhere.current;
+      if (!!away !== wentAway) return dropPaste("where typing goes changed while it was read", bytes);
+      if (away) {
+        // Typing goes elsewhere: so does a paste, as the person's text, line ends theirs.
+        if (!gone) away(wellFormed(unbracketed(pasting)));
+        return;
+      }
       if (!attached && !gone && !ended) {
         await new Promise<void>((ok) => {
           const patience = setTimeout(ok, ATTACH_WAIT);
@@ -495,12 +565,14 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
         return fallback();
       }
     };
-    // Its place in the line kept from now, however long the text takes to come.
-    const pasteInLine = (reading: Promise<string | null>) =>
+    // Its place in the line kept from now, however long the text takes to come, and its destination too.
+    const pasteInLine = (reading: Promise<string | null>) => {
+      const wentAway = !!elsewhere.current;
       queued(async () => {
         const text = await reading;
-        if (text !== null) await toPane(text);
+        if (text !== null) await toPane(text, wentAway);
       });
+    };
     let unlisten: (() => void) | undefined;
     if (attaching.current) {
       void listenForDrops(event => {
@@ -514,10 +586,11 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
         } else if (inside && event.type === "drop") {
           // Reserve the whole drop's position before any upload starts.
           const destination = attaching.current;
+          const wentAway = !!elsewhere.current;
           queued(async () => {
             if (gone || attaching.current !== destination) return;
             const text = await attachFiles((event.paths ?? []).map(path => ({ path })));
-            if (text) await toPane(text);
+            if (text) await toPane(text, wentAway);
           });
         }
       }).then(stop => { if (gone) stop(); else unlisten = stop; }, () => {
@@ -569,7 +642,22 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     // Send these on keydown so a webview needn't supply that legacy event.
     // Keep IME composition and actual modifier shortcuts on xterm's usual path.
     let capsLetter = false;
+    // Typing going elsewhere (typeElsewhere): text keys go there as their text, editing keys go nowhere, composition
+    // and dead keys hand the keyboard over (""). Their keypress is taken too, xterm.js's other way to send a key.
+    // Escape and Ctrl/⌘ keys (interrupt, copy, paste) carry on below.
+    const typedAway = (e: KeyboardEvent): boolean => {
+      const away = elsewhere.current;
+      if (!away || e.ctrlKey || e.metaKey || e.key === "Escape") return false;
+      if (e.type === "keypress") return true;
+      if (e.type !== "keydown") return false;
+      if (e.isComposing || e.keyCode === 229 || e.key === "Dead") away("");
+      else if (e.key.length === 1) away(e.key);
+      else if (!EDITING_KEYS.has(e.key)) return false;
+      e.preventDefault();
+      return true;
+    };
     term.attachCustomKeyEventHandler((e) => {
+      if (typedAway(e)) return false;
       if (e.type === "keypress" && capsLetter) {
         e.preventDefault();
         return false;
@@ -682,6 +770,8 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       term.textarea?.removeEventListener("focus", noteFocus);
       term.textarea?.removeEventListener("focus", focused);
       term.textarea?.removeEventListener("input", completedInput);
+      term.textarea?.removeEventListener("compositionstart", composing);
+      el.removeEventListener("input", inserted, true);
       el.removeEventListener("mousedown", focused, true);
       el.removeEventListener("mousedown", keyboard, true);
       window.removeEventListener("focus", atApp);
@@ -696,18 +786,32 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       binary.dispose();
       wheel.dispose();
       resized.dispose();
+      live.current = null;
       pty.close();
       term.dispose();
     };
   }, [server, target, open]);
 
+  // The theme switched, or the rows to crop changed, with the view open: xterm.js redraws in the new colours; the
+  // client is resized to the new crop, and the pane redraws itself to fit as on any resize.
+  useEffect(() => {
+    if (live.current && theme) live.current.term.options.theme = theme;
+  }, [theme]);
+  useEffect(() => {
+    live.current?.layout();
+  }, [cropRows]);
+
+  // The view's ground: the theme's background where one is given, the shell block's otherwise.
+  const ground = theme?.background ? { background: theme.background } : undefined;
   return (
-    <div ref={host} className="terminal-host relative min-h-0 min-w-0 flex-1 overflow-hidden bg-shell-bg" data-testid="terminal" data-renderer={renderer ?? undefined} data-view={view.kind} data-pty="1" data-target={target}>
-      {/* The view's box: xterm.js fits it, and is clipped to it where it is wider (a crop). */}
+    <div ref={host} className="terminal-host relative min-h-0 min-w-0 flex-1 overflow-hidden bg-shell-bg" style={ground} data-testid="terminal" data-renderer={renderer ?? undefined} data-view={view.kind} data-pty="1" data-target={target}>
+      {/* The view's box: xterm.js fits it, and is clipped to it where it is wider or taller (a crop). */}
       <div ref={box} className="absolute inset-1 overflow-hidden">
         {/* Over the columns past those shown, with columns cropped: the box's last fraction of a cell, and a right
             sidebar a narrower terminal's window puts in the view. */}
-        <div ref={mask} hidden className="absolute inset-y-0 right-0 z-10 bg-shell-bg" data-testid="terminal-mask" />
+        <div ref={mask} hidden className="absolute inset-y-0 right-0 z-10 bg-shell-bg" style={ground} data-testid="terminal-mask" />
+        {/* Under the last whole row shown, with rows cropped: the box's last fraction of a row. */}
+        <div ref={foot} hidden className="absolute inset-x-0 bottom-0 z-10 bg-shell-bg" style={ground} data-testid="terminal-foot-mask" />
       </div>
       {/* A copy reached the app's clipboard: said for a moment, out of the way of the pane's text and clicks. */}
       {copiedShown && (

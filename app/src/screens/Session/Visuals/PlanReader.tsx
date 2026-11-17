@@ -639,11 +639,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // text changed under it (a newer revision) isn't sent: its range no longer says what was meant.
   const sendDraft = async (text: string) => {
     if (!draft || draftStale) return;
-    if (draft.kind === "suggest") {
-      if (!draftChange || !suggestionReady) return;
+    if (draft.kind === "suggest" && draftChange && (draftChange.before || draftChange.after)) {
+      if (!suggestionReady) return;
       if ((await write(() => source.suggest(plan.rev, { section: draft.section, ...draftChange }, text))) && alive.current) setDraft(null);
       return;
     }
+    if (!text.trim()) return;
     const on = anchorOf(draft);
     const start = on.kind === "text" ? toPoints(bodyOf(on.section), on.start) : 0;
     if ((await write(() => source.comment(plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask"))) && alive.current) setDraft(null);

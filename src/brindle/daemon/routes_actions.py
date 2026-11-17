@@ -566,6 +566,37 @@ def message_agent(db: DB, params: dict, body: Body) -> Any:
     return {"status": svc.send(db, _agent(db, params["id"]).id, _get(body, "text", required=True))}
 
 
+# -- chat-send owner: live CLI input; contract in brindle.chat ------------------
+def chat_send(db: DB, params: dict, body: Body) -> Any:
+    """Full text and byte attachments; idle sends, busy queues."""
+    from brindle import chat
+    from brindle.service.dto import ChatMessageDTO
+
+    return chat.send(db, params["id"], ChatMessageDTO.model_validate(body)).to_json()
+
+
+# -- chat-queue owner: explicit add/remove/send-now; list in AgentDTO snapshot --
+def chat_enqueue(db: DB, params: dict, body: Body) -> Any:
+    """Stub route: hold one user message without typing it into the CLI."""
+    from brindle import chat
+    from brindle.service.dto import ChatMessageDTO
+
+    return chat.enqueue(db, params["id"], ChatMessageDTO.model_validate(body)).to_json()
+
+
+def chat_remove(db: DB, params: dict, body: Body) -> Any:
+    from brindle import chat
+
+    chat.remove(db, params["id"], params["message_id"])
+    return {"removed": params["message_id"]}
+
+
+def chat_send_now(db: DB, params: dict, body: Body) -> Any:
+    from brindle import chat
+
+    return chat.send_now(db, params["id"], params["message_id"]).to_json()
+
+
 def attach_agent(db: DB, params: dict, body: Body) -> Any:
     from brindle import attachments, providers
 
@@ -3185,6 +3216,10 @@ ROUTES = [
     _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
     _post("/agents/{id}/message", message_agent),
+    _post("/agents/{id}/chat/send", chat_send),
+    _post("/agents/{id}/chat/queue", chat_enqueue),
+    Route("/v1/agents/{id}/chat/queue/{message_id}", _endpoint(chat_remove), methods=["DELETE"]),
+    _post("/agents/{id}/chat/queue/{message_id}/send-now", chat_send_now),
     _post("/agents/{id}/attachments", attach_agent),
     _post("/agents/{id}/close", close_agent),
     _post("/agents/{id}/kill", kill_agent),

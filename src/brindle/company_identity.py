@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brindle import cloud_credential, company_login, config
+from brindle.providers import SingleFlight
 
 CACHE_SECONDS = 30.0
 LAUNCH_CACHE_SECONDS = 300.0
@@ -263,16 +264,30 @@ def _probe(argv: list[str], cache: bool = True, home: dict[str, str] | None = No
                                     probe, CACHE_SECONDS)
     key = (*argv, *sorted((home or {}).items()))
     env = {**os.environ, **home} if home else None
-    now = time.monotonic()
-    hit = _cache.get(key) if cache else None
-    if hit and now - hit[0] < CACHE_SECONDS:
-        return hit[1]
+    if not cache:
+        return _run_probe(argv, env, key)
+
+    def ask() -> tuple[int, str] | None:
+        hit = _cache.get(key)
+        if hit and time.monotonic() - hit[0] < CACHE_SECONDS:
+            return hit[1]
+        return _run_probe(argv, env, key)
+
+    # Launches side by side (a daemon start's recovery) ask once: the others take that
+    # answer, whatever it is (a timeout or an unreadable one too), rather than ask again.
+    return _probes.call(key, ask)
+
+
+_probes = SingleFlight()    # _probe's, per command and config home
+
+
+def _run_probe(argv: list[str], env: dict[str, str] | None, key: tuple[str, ...]) -> tuple[int, str] | None:
     code, out = company_login.run_cmd(argv, PROBE_TIMEOUT, env=env)
     if code == 124:     # a healthy CLI can miss the timeout on a loaded machine: once more, longer
         code, out = company_login.run_cmd(argv, PROBE_TIMEOUT * RETRY_FACTOR, env=env)
     if code in (124, 127):
         return None
-    _cache[key] = (now, (code, out))
+    _cache[key] = (time.monotonic(), (code, out))     # as of its answer: a slow probe's lasts its full time
     return code, out
 
 

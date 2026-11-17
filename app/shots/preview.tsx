@@ -22,6 +22,7 @@ import { ORGS, REPO, data } from "./fixtures";
 import { installLibrary, libraryInbox } from "./library";
 import { wideCheckout, wideDiff } from "./wideDiff";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
+import { ChatPaneScene } from "./chatPane";
 import "../src/styles.css";
 
 // A page that breaks still renders: the error is shown and the page marks itself ready.
@@ -313,7 +314,9 @@ const sync = startSync({ client, store, connect: daemon.connect });
 const pickFolder = () => Promise.resolve("/home/sam/Notes/runbooks");
 createRoot(document.getElementById("root")!).render(
   <PtyViewsProvider value={views}>
-    <App store={store} client={client} refresh={sync.refresh} initialRoute={SCENES[scene] ?? SCENES.new} pickFolder={pickFolder} appUpdates={appUpdates} />
+    {scene.startsWith("chat-pane")
+      ? <ChatPaneScene scene={scene} theme={theme} />
+      : <App store={store} client={client} refresh={sync.refresh} initialRoute={SCENES[scene] ?? SCENES.new} pickFolder={pickFolder} appUpdates={appUpdates} />}
   </PtyViewsProvider>,
 );
 

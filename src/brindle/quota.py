@@ -284,7 +284,7 @@ def record_claude(status: dict) -> bool:
 
 # -- Claude: ``claude -p /usage`` -------------------------------------------------------
 
-CLAUDE_USAGE_REFRESH_SECONDS = 5 * 60
+CLAUDE_USAGE_REFRESH_SECONDS = 30 * 60
 CLAUDE_USAGE_TIMEOUT = 30
 _USAGE_LINE = re.compile(r"^\s*Current (session|week)(?: \(([^)]+)\))?:\s*(\d+(?:\.\d+)?)% used"
                          r"(?:\s*·\s*resets (.+?))?\s*(?:\(([^)]+)\))?\s*$")
@@ -378,6 +378,10 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
     key = subscription_usage.cache_key("claude")
     if key is None:
         return False
+    if not force:
+        current = get("claude", identity_key=key)
+        if current and current.source == "status line" and time.time() - current.updated_at <= CLAUDE_FRESH_SECONDS:
+            return False
     if not force and key == _claude_usage_identity and time.time() - _claude_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
         return False
     asked = _claim_usage_refresh(force, key)

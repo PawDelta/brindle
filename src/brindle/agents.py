@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import SimpleNamespace
@@ -2329,6 +2329,7 @@ def _gate_commit(hold: ExitStack | None) -> None:
 class _ResumeTiming:
     enabled: bool
     seconds: dict[str, float] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)     # workers launch side by side
 
     @contextmanager
     def part(self, name: str, *, exclude_windows: bool = False):
@@ -2343,7 +2344,8 @@ class _ResumeTiming:
             elapsed = time.monotonic() - began
             if exclude_windows:
                 elapsed -= sum(_window_seconds.get() or ()) - windows
-            self.seconds[name] = self.seconds.get(name, 0.0) + elapsed
+            with self.lock:
+                self.seconds[name] = self.seconds.get(name, 0.0) + elapsed
 
     def call(self, name, fn, *args, **kwargs):
         with self.part(name):
@@ -2453,7 +2455,10 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         timing.call("goals_s", pilot.reload_goals_file, db, root_id)   # edits the person made to this session's goal file
     resumed = []
     launch_steps: dict[str, dict] = {}   # per agent: its provider and each launch step's seconds
-    for a in candidates:    # the chat comes first, and may add to this as it starts
+    guard = threading.Lock()     # resumed, launch_steps, candidates, unstarted: workers launch side by side
+
+    def bring_back(db: DB, a: Agent) -> None:
+        """Launch candidate ``a`` on ``db`` (its thread's own), if it is still to be."""
         if a.status == "done":
             # Read when a verdict may have been reopening it (_send_back, under this lock, from
             # pipeline=fixing to its launch): then the launch is the verdict's. Ours from here.
@@ -2462,7 +2467,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             with pipeline.merge_lock(a.workspace_id):
                 current = db.get_agent(a.id)
                 if current is None or not restartable(current):
-                    continue
+                    return
                 db.set_status(a.id, "paused")
         if a.status != "paused":
             from brindle import procs
@@ -2477,16 +2482,16 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
                 except Exception:
                     pass
             if not stopped:
-                continue
+                return
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path):
-            continue
+            return
         if a.pipeline in BACK_AT_WORK and a.result is not None:
             from brindle import pipeline
 
             if pipeline._settled(db, ws):   # merged by hand meanwhile: the round is over
                 db.set_status(a.id, "done")
-                continue
+                return
         with timing.part("provider_prep_s"):
             provider = get_provider(a.provider)
             ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
@@ -2511,23 +2516,26 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         except Cancelled:
             raise
         except LaunchTaken:
-            continue        # someone else's now: its status with it
+            return        # someone else's now: its status with it
         except Exception as e:  # noqa: BLE001 - told to its chat, or raised
             _close_failed_launch(db, a)
             db.set_status(a.id, before)
-            if not _chat_is_up(db, root_id, resumed, candidates):
+            if not _chat_is_up(db, root_id, list(resumed), candidates):
                 raise       # nothing of the session runs: it stays as it was, for the caller to hear
             if unstarted is None:
                 _worker_not_restarted(db, root_id, a, e)
             else:
-                unstarted.add(a.id)
+                with guard:
+                    unstarted.add(a.id)
                 log.warning("brindle: worker %s of session %s didn't restart", a.id, root_id, exc_info=e)
-            continue
+            return
         finally:
             _launch_steps.reset(step_token)
             if steps:
-                launch_steps[a.id] = {"provider": a.provider, **{k: round(v, 3) for k, v in steps.items()}}
-        resumed.append(a)
+                with guard:
+                    launch_steps[a.id] = {"provider": a.provider, **{k: round(v, 3) for k, v in steps.items()}}
+        with guard:
+            resumed.append(a)
         if a.id == root_id:
             # A verdict held for this resume (pipeline._send_back) while the chat was still
             # paused, past the look above. Once this look is over the chat is running, so
@@ -2540,6 +2548,12 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
                 candidates.extend(w for w in tree(db, root_id)
                                   if w.id not in known and w.status == "paused" and w.pipeline in BACK_AT_WORK
                                   and restartable(w) and not identity_lock.locked_by(w.id))
+
+    # The chat comes first, alone: it may add to the candidates as it starts (above), and
+    # whoever waits for the session waits for it. Its workers then come back side by side.
+    if candidates and candidates[0].id == root_id:
+        bring_back(db, candidates[0])
+    _side_by_side(db, [a for a in candidates if a.id != root_id], bring_back)
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
         from brindle import pipeline, tasks
@@ -2576,6 +2590,61 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             detail["launch_steps"] = launch_steps
         debuglog.recovery_timing(log, "brindle: session %s resume detail: %s", root_id, detail)
     return resumed
+
+
+RESUME_SIDE_BY_SIDE = 6     # a session's workers one resume launches at once (_side_by_side)
+
+
+def _side_by_side(db: DB, agents_: list[Agent], launch) -> None:
+    """``launch(db, agent)`` for each of ``agents_``, up to RESUME_SIDE_BY_SIDE
+    at once, each thread on a DB of its own: a session's workers come back
+    together, not one after another (a session of four took the sum of its
+    launches, 26 s of a 28 s restart). Those sharing a tmux session go one
+    after another, in order, as the first launch may create it
+    (tmux.ensure_session). A failure stops what hasn't begun and is raised
+    once the launches under way have ended, Cancelled before any other."""
+    groups: dict[str, list[Agent]] = {}
+    for a in agents_:
+        ws = db.get_workspace(a.workspace_id)
+        groups.setdefault(ws.tmux_session if ws else a.id, []).append(a)
+    lanes = list(groups.values())
+    if len(lanes) <= 1 or db.path == ":memory:":
+        for a in agents_:
+            launch(db, a)
+        return
+    lock = threading.Lock()
+    failures: list[BaseException] = []
+    windows = _window_seconds.get()
+
+    def work() -> None:
+        own, mine = DB(db.path), []
+        if windows is not None:
+            _window_seconds.set(mine)   # its own: a launch's timing leaves the other threads' windows out
+        try:
+            while True:
+                with lock:
+                    if failures or not lanes:
+                        return
+                    lane = lanes.pop(0)
+                for a in lane:
+                    launch(own, a)
+        except BaseException as e:  # noqa: BLE001 - raised in the caller's thread, below
+            with lock:
+                failures.append(e)
+        finally:
+            own.conn.close()
+            if windows is not None:
+                with lock:
+                    windows.extend(mine)
+
+    threads = [threading.Thread(target=copy_context().run, args=(work,), name=f"brindle-relaunch-{n}", daemon=True)
+               for n in range(min(RESUME_SIDE_BY_SIDE, len(lanes)))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if failures:
+        raise next((e for e in failures if isinstance(e, Cancelled)), failures[0])
 
 
 def _close_failed_launch(db: DB, a: Agent) -> None:

@@ -74,7 +74,10 @@ engine) and `account-signed-out` (sign-in, the plans compared). The app's
 own update, over a fake shell (not in the default list, so pass `--scene`):
 `update-inbox` (offered: the strip over the Inbox), `update-downloading`
 (Update now pressed, downloading), `update-later` (set aside: the sidebar's
-pill) and `update-session` (the strip over a session). Themes
+pill) and `update-session` (the strip over a session). The chat pane on its
+own (`shots/chatPane.tsx`, also only by `--scene`): `chat-pane` (Claude Code
+idle, its prompt box rows cropped under brindle's message box) and
+`chat-pane-permission` (a permission question: every row shown). Themes
 (`--theme`): `dark`, `light`.
 
 ## The design doc

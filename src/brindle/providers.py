@@ -1997,6 +1997,57 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
         return None
     if not probing():
         return None
+    # Launches side by side (a daemon start's recovery) ask once: the others take
+    # that answer, whatever it is, rather than start a CLI each (twenty for nine agents).
+    def ask() -> str | None:
+        seen = _SIGNED_IN.get(key)     # answered by one that ended since the look above
+        if seen and seen > _last_invalidated(provider) and time.time() - seen < SIGNED_IN_TTL:
+            return None
+        return _signed_out_probe(provider, full_env, key)
+
+    return _SIGN_IN_PROBES.call(key, ask)
+
+
+class SingleFlight:
+    """One call per key at a time: callers asking while one is under way wait
+    for it and share its outcome, a result or the exception it raised alike.
+    Nothing is kept once it has ended: a caller after that calls again (what a
+    caller caches, and for how long, is its own)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._under_way: dict = {}
+
+    def call(self, key, fn):
+        from concurrent.futures import Future
+
+        with self._lock:
+            shared = self._under_way.get(key)
+            if shared is None:
+                shared = self._under_way[key] = Future()
+                mine = True
+            else:
+                mine = False
+        if not mine:
+            return shared.result()
+        try:
+            result = fn()
+        except BaseException as e:
+            shared.set_exception(e)
+            raise
+        else:
+            shared.set_result(result)
+            return result
+        finally:
+            with self._lock:
+                self._under_way.pop(key, None)
+
+
+_SIGN_IN_PROBES = SingleFlight()    # signed_out's, per sign-in asked about
+
+
+def _signed_out_probe(provider: str, full_env: dict[str, str], key) -> str | None:
+    """signed_out's probe of ``provider``'s CLI (one per key at a time: SingleFlight)."""
     reason = None
     confirmed = False
     if provider == "claude":

@@ -73,6 +73,37 @@ def test_sidebars_share_one_claude_usage_run_per_refresh(monkeypatch):
     assert len(runs) == 1
 
 
+def test_claude_usage_refresh_uses_status_line_and_shared_thirty_minute_cadence(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path))
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
+    monkeypatch.setattr(quota, "_claude_usage_identity", None)
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    monkeypatch.setattr(providers, "claude_binary", lambda *a, **k: "claude")
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(quota.time, "time", lambda: now[0])
+    runs = []
+    answer = "Current session: 36% used\n"
+    monkeypatch.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or
+                        subprocess.CompletedProcess(argv, 0, answer, ""))
+
+    assert quota.record_claude({"rate_limits": {"five_hour": {"used_percentage": 22}}})
+    assert not quota.refresh_claude_usage()
+    assert runs == []
+
+    # Expire the status-line reading so the shared CLI cadence applies.
+    quota.record("claude", [quota.Window(22, now[0] - quota.CLAUDE_FRESH_SECONDS - 1, 300)],
+                 source="claude /usage")
+    monkeypatch.setattr(quota, "get", lambda *args, **kwargs: None)
+    assert quota.refresh_claude_usage()
+    assert len(runs) == 1
+    now[0] += 10 * 60
+    assert not quota.refresh_claude_usage()
+    assert len(runs) == 1
+    now[0] += 20 * 60
+    assert quota.refresh_claude_usage()
+    assert len(runs) == 2
+
+
 @pytest.mark.variant("a race: two sidebars find the refresh due at the same moment")
 def test_two_sidebars_looking_at_once_start_one_claude_usage_run(monkeypatch):
     """The second sidebar looks while the first is reading the shared stamp,

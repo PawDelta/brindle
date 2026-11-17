@@ -208,6 +208,33 @@
           ],
           "title": "NativeSubagentDTO",
           "type": "object"
+        },
+        "QueuedChatMessageDTO": {
+          "description": "Snapshot display data; attachment contents remain in the daemon queue.",
+          "properties": {
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "text"
+          ],
+          "title": "QueuedChatMessageDTO",
+          "type": "object"
         }
       },
       "properties": {
@@ -215,6 +242,14 @@
           "default": false,
           "title": "Accepts Files",
           "type": "boolean"
+        },
+        "chat_queue": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QueuedChatMessageDTO"
+          },
+          "title": "Chat Queue",
+          "type": "array"
         },
         "dismissed_at": {
           "anyOf": [
@@ -1766,6 +1801,95 @@
         "tenant_id"
       ],
       "title": "AzureOptionsDTO",
+      "type": "object"
+    },
+    "ChatAttachmentDTO": {
+      "properties": {
+        "data_base64": {
+          "title": "Data Base64",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "data_base64"
+      ],
+      "title": "ChatAttachmentDTO",
+      "type": "object"
+    },
+    "ChatMessageDTO": {
+      "$defs": {
+        "ChatAttachmentDTO": {
+          "properties": {
+            "data_base64": {
+              "title": "Data Base64",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "data_base64"
+          ],
+          "title": "ChatAttachmentDTO",
+          "type": "object"
+        }
+      },
+      "description": "Full user text (typed text then expanded paste chips) and attachment bytes.",
+      "properties": {
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ChatAttachmentDTO"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "ChatMessageDTO",
+      "type": "object"
+    },
+    "ChatResultDTO": {
+      "properties": {
+        "message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "status": {
+          "enum": [
+            "delivered",
+            "queued"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ChatResultDTO",
       "type": "object"
     },
     "CloudLoginDTO": {
@@ -9838,6 +9962,33 @@
       "title": "ProviderConnectionDTO",
       "type": "object"
     },
+    "QueuedChatMessageDTO": {
+      "description": "Snapshot display data; attachment contents remain in the daemon queue.",
+      "properties": {
+        "attachments": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text"
+      ],
+      "title": "QueuedChatMessageDTO",
+      "type": "object"
+    },
     "RepoDTO": {
       "description": "A repo brindle has worked in. ``demo``: brindle's practice repo (under the\ndemo folder), which the app does not offer as a project to start in.",
       "properties": {
@@ -12677,6 +12828,14 @@
               "title": "Accepts Files",
               "type": "boolean"
             },
+            "chat_queue": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/QueuedChatMessageDTO"
+              },
+              "title": "Chat Queue",
+              "type": "array"
+            },
             "dismissed_at": {
               "anyOf": [
                 {
@@ -12918,6 +13077,33 @@
           ],
           "title": "NativeSubagentDTO",
           "type": "object"
+        },
+        "QueuedChatMessageDTO": {
+          "description": "Snapshot display data; attachment contents remain in the daemon queue.",
+          "properties": {
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "text"
+          ],
+          "title": "QueuedChatMessageDTO",
+          "type": "object"
         }
       },
       "properties": {
@@ -13069,6 +13255,22 @@
     {
       "method": "POST",
       "path": "/v1/agents/{id}/attachments"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/chat/queue"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/agents/{id}/chat/queue/{message_id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/chat/queue/{message_id}/send-now"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/chat/send"
     },
     {
       "method": "POST",

@@ -171,7 +171,9 @@ function DraftCard({ draft, number, stale, busy, onSend, onCancel, change }: {
 }) {
   const [text, setText] = useState("");
   const words = draftWords[draft.kind];
-  const ready = !stale && (draft.kind === "suggest" ? !!change && (!!change.before || !!change.after) : !!text.trim());
+  const hasChange = !!change && (!!change.before || !!change.after);
+  const asComment = draft.kind === "suggest" && !hasChange && !!text.trim();
+  const ready = !stale && (draft.kind === "suggest" ? hasChange || asComment : !!text.trim());
   const send = () => {
     if (ready && !busy) onSend(text.trim());
   };
@@ -185,13 +187,13 @@ function DraftCard({ draft, number, stale, busy, onSend, onCancel, change }: {
         <span className="flex-1" />
         <span>not sent</span>
       </span>
-      {draft.kind === "suggest" && (change && (change.before || change.after)
+      {draft.kind === "suggest" && (change && hasChange
         ? <Change before={change.before} after={change.after} />
-        : <span className="text-xs text-ink-3">Type your change in the doc: what you delete is struck through, what you type is green.</span>)}
+        : <p className="font-medium text-ink">Type your change in the doc: what you delete is struck through, what you type is green.</p>)}
       <textarea className={`${field} ${draft.kind === "suggest" ? "min-h-8" : "min-h-16"} w-full text-[12.5px]`} aria-label={words.name} placeholder={words.placeholder} autoFocus={draft.kind !== "suggest"} value={text} onChange={(e) => setText(e.target.value)} />
       {stale && <p role="alert" className="text-xs text-sap">This part of the doc changed in a newer revision. Cancel, and start again on the new text.</p>}
       <div className="flex items-center gap-1.5">
-        <button type="submit" className={`${draft.kind === "suggest" ? main : button} text-xs`} disabled={!ready || busy}>{words.send}</button>
+        <button type="submit" className={`${draft.kind === "suggest" ? main : button} text-xs`} disabled={!ready || busy}>{asComment ? "Send as comment" : words.send}</button>
         <button type="button" className={`${quiet} text-xs`} onClick={onCancel}>{draft.kind === "suggest" ? "Discard" : "Cancel"}</button>
         <span className="flex-1" />
         <kbd className="rounded-sm border border-line-strong px-1 font-mono text-[10.5px] text-ink-3">⌘↵</kbd>

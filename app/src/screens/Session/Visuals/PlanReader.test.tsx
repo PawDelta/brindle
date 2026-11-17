@@ -578,6 +578,40 @@ it("the policies shown before a first share are those of the revision on screen,
   expect(screen.queryByTestId("plan-policy-preview-stale-rule")).toBeNull();
 });
 
+it("sends a suggestion's reason as a comment on its anchor when the doc has no change", async () => {
+  let plan = doc(1, "🦊 Workers run on your machine.");
+  const client: PlansClient & PlanDocClient & VisualsClient = {
+    ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
+    commentPlan: async (_id, rev, anchor, text, question) => (plan = { ...plan, threads: [
+      { id: 1, kind: "comment", rev, anchor: { ...anchor, state: "current" }, author: "person", text, question, status: "open", at: 1 },
+    ] }),
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const words = (await screen.findByText("🦊 Workers run on your machine.")).firstChild!;
+  const range = document.createRange();
+  range.setStart(words, 3);
+  range.setEnd(words, 10);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+  fireEvent.click(within(screen.getByRole("toolbar", { name: "For the highlighted text" })).getByRole("button", { name: "Suggest edit" }));
+  const box = await screen.findByLabelText("Suggestion to Summary");
+  const editor = EditorView.findFromDOM(box.closest<HTMLElement>(".cm-editor")!)!;
+  expect(document.activeElement).toBe(editor.contentDOM);
+  expect(editor.state.selection.main.from).toBe(3);
+  expect(editor.state.selection.main.to).toBe(10);
+  const card = screen.getByTestId("thread-draft");
+  fireEvent.change(within(card).getByRole("textbox", { name: "Why (optional)" }), { target: { value: "  Does this include a rented VM?  " } });
+  const send = within(card).getByRole<HTMLButtonElement>("button", { name: "Send as comment" });
+  expect(send.disabled).toBe(false);
+  await act(async () => fireEvent.click(send));
+  const thread = screen.getByTestId("thread-1");
+  expect(thread.dataset.kind).toBe("comment");
+  expect(plan.threads?.[0]).toMatchObject({ text: "Does this include a rented VM?", anchor: { kind: "text", section: "summary", start: 2, quote: "Workers" }, question: false });
+  expect(screen.queryByTestId("thread-draft")).toBeNull();
+  expect(screen.queryByTestId("plan-suggest-box")).toBeNull();
+});
+
 it("types a suggestion on the page as a tracked change, formats it there, and sends it with the card's reason", async () => {
   const plan = doc(1, "Workers run on your machine.");
   const sent: unknown[] = [];

@@ -124,6 +124,32 @@ class NativeSubagentDTO(_DTO):
     ended_at: float | None = None
 
 
+# Chat contracts: send owns request/result, attach owns bytes, queue owns entries.
+class ChatAttachmentDTO(_DTO):
+    name: str
+    data_base64: str
+
+
+class ChatMessageDTO(_DTO):
+    """Full user text (typed text then expanded paste chips) and attachment bytes."""
+
+    text: str
+    attachments: list[ChatAttachmentDTO] = []
+
+
+class ChatResultDTO(_DTO):
+    status: Literal["delivered", "queued"]
+    message_id: str | None = None
+
+
+class QueuedChatMessageDTO(_DTO):
+    """Snapshot display data; attachment contents remain in the daemon queue."""
+
+    id: str
+    text: str
+    attachments: list[str] = []
+
+
 class AgentDTO(_DTO):
     id: str
     profile: str
@@ -149,6 +175,7 @@ class AgentDTO(_DTO):
     tmux_server: str | None = None
     headless: bool | None = None
     subagents: list[NativeSubagentDTO] = []
+    chat_queue: list[QueuedChatMessageDTO] = []
 
 
 class WorkspaceDTO(_DTO):

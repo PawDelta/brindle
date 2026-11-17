@@ -19,6 +19,9 @@ export interface ApiSchema {
   AskScopeDTO: AskScopeDTO;
   AwsProfileDTO: AwsProfileDTO;
   AzureOptionsDTO: AzureOptionsDTO;
+  ChatAttachmentDTO: ChatAttachmentDTO;
+  ChatMessageDTO: ChatMessageDTO;
+  ChatResultDTO: ChatResultDTO;
   CloudLoginDTO: CloudLoginDTO;
   CloudOptionsDTO: CloudOptionsDTO;
   ConnectionReadyDTO: ConnectionReadyDTO;
@@ -79,6 +82,7 @@ export interface ApiSchema {
   ProfileDTO: ProfileDTO;
   ProviderChoiceDTO: ProviderChoiceDTO;
   ProviderConnectionDTO: ProviderConnectionDTO;
+  QueuedChatMessageDTO: QueuedChatMessageDTO;
   RepoDTO: RepoDTO;
   RoutingDTO: RoutingDTO;
   RoutingKindDTO: RoutingKindDTO;
@@ -143,6 +147,7 @@ export interface ActionTerminalDTO {
  */
 export interface AgentDTO {
   accepts_files?: boolean;
+  chat_queue?: QueuedChatMessageDTO[];
   dismissed_at?: number | null;
   headless?: boolean | null;
   hooks_off?: string | null;
@@ -163,6 +168,17 @@ export interface AgentDTO {
   tokens?: string | null;
   unread?: number | null;
   window?: string | null;
+}
+/**
+ * Snapshot display data; attachment contents remain in the daemon queue.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "QueuedChatMessageDTO".
+ */
+export interface QueuedChatMessageDTO {
+  attachments?: string[];
+  id: string;
+  text: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -368,6 +384,32 @@ export interface AzureOptionsDTO {
   subscription_id?: string | null;
   subscription_name?: string | null;
   tenant_id: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ChatAttachmentDTO".
+ */
+export interface ChatAttachmentDTO {
+  data_base64: string;
+  name: string;
+}
+/**
+ * Full user text (typed text then expanded paste chips) and attachment bytes.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ChatMessageDTO".
+ */
+export interface ChatMessageDTO {
+  attachments?: ChatAttachmentDTO[];
+  text: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ChatResultDTO".
+ */
+export interface ChatResultDTO {
+  message_id?: string | null;
+  status: "delivered" | "queued";
 }
 /**
  * A cloud login's state (brindle.cloud_login.status): ``valid`` now,

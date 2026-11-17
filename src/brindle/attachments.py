@@ -12,6 +12,7 @@ import secrets
 import stat
 import unicodedata
 from pathlib import Path
+from typing import Callable
 
 from brindle import git, permissions, providers
 from brindle.service.errors import ServiceError
@@ -45,6 +46,21 @@ def _too_large(name: str, size: int) -> ServiceError:
     return ServiceError(
         "too_large", f"{name} is {size:,} bytes; the attachment limit is {MAX_BYTES:,} bytes.", 413,
     )
+
+
+def decode_clipboard(name: str, encoded: str) -> bytes:
+    """Validate a byte attachment before creating any destination files."""
+    name = _safe_name(name)
+    if len(encoded) > 4 * ((MAX_BYTES + 2) // 3):
+        size = len(encoded) // 4 * 3 - min(2, len(encoded) - len(encoded.rstrip("=")))
+        raise _too_large(name, size)
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise ServiceError("invalid", f"{name} could not be attached because its data is not valid base64.") from None
+    if len(data) > MAX_BYTES:
+        raise _too_large(name, len(data))
+    return data
 
 
 def _system_path(path: Path) -> Path:
@@ -175,7 +191,8 @@ def _read_file(path: Path, name: str) -> bytes:
         ) from None
 
 
-def attach(worktree: str, provider: providers.Provider, body: dict) -> dict:
+def attach(worktree: str, provider: providers.Provider, body: dict,
+           authorize: Callable[[], None] | None = None) -> dict:
     """Copy one local file or clipboard payload and return the CLI's paste text."""
     if not provider.accepts_files:
         raise ServiceError("unsupported", "this agent's provider does not accept file attachments")
@@ -195,29 +212,28 @@ def attach(worktree: str, provider: providers.Provider, body: dict) -> dict:
                     raise ServiceError("forbidden", f"{name} is a credential file and cannot be attached.", 403)
                 data = _read_file(rewritten, name)
             else:
-                encoded = body["data_base64"]
-                if len(encoded) > 4 * ((MAX_BYTES + 2) // 3):
-                    size = len(encoded) // 4 * 3 - min(2, len(encoded) - len(encoded.rstrip("=")))
-                    raise _too_large(name, size)
-                try:
-                    data = base64.b64decode(encoded, validate=True)
-                except (ValueError, binascii.Error):
-                    raise ServiceError("invalid", f"{name} could not be attached because its data is not valid base64.") from None
+                data = decode_clipboard(name, body["data_base64"])
             if len(data) > MAX_BYTES:
                 raise _too_large(name, len(data))
             destination = root / ".brindle" / "attachments"
             directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
             stack.callback(os.close, directory)
             for component in (".brindle", "attachments"):
+                if authorize is not None:
+                    authorize()
                 try:
                     os.mkdir(component, mode=0o700, dir_fd=directory)
                 except FileExistsError:
                     pass
                 directory = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
                 stack.callback(os.close, directory)
+            if authorize is not None:
+                authorize()
             git.exclude(root, destination)
             final = f"{secrets.token_hex(16)}-{name}"
             temporary = f".upload-{secrets.token_hex(16)}"
+            if authorize is not None:
+                authorize()
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
             try:
                 with os.fdopen(fd, "wb") as output:
@@ -225,6 +241,8 @@ def attach(worktree: str, provider: providers.Provider, body: dict) -> dict:
                     output.flush()
                     os.fsync(output.fileno())
                 # link is atomic and fails if the destination exists; replace would overwrite.
+                if authorize is not None:
+                    authorize()
                 os.link(temporary, final, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
             finally:
                 os.unlink(temporary, dir_fd=directory)

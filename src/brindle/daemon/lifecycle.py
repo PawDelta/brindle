@@ -466,7 +466,11 @@ RESUME_WAIT = 5.0     # seconds the way out waits for a start's resume still und
 LAUNCH_WAIT = 8.0      # and in all, launches under way included (within daemon.rs PAUSE_GRACE, with PAUSE_BUDGET)
 RESUME_STALL = 120.0   # seconds with no session finished after which a start stops waiting (a resume that hangs)
 RESUME_TRIES = 2       # starts that may fail to bring one session back before it is left paused
-RESUME_PARALLEL = 4    # sessions a start brings back at once (resume_after_start)
+# Sessions a start brings back at once (resume_after_start). Each holds its thread until
+# Claude has drawn its input box (_await_resume_prompt), seconds for a long conversation:
+# four left the fifth and sixth of a restart waiting on those, not on the machine
+# (spawn.wait_for_room still holds a launch the machine has no room for).
+RESUME_PARALLEL = 12
 RESUME_BUSY_WAIT = 3.0  # seconds a session other than the person's own waits on a machine short of CPU only
 RESUME_PROMPT_WAIT = 90.0   # seconds to wait for Claude's input box after its pane is launched
 

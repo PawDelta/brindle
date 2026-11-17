@@ -12,6 +12,8 @@ import type {
   AllowAllPlanDTO,
   AskDecisionDTO,
   AskGroupDTO,
+  ChatMessageDTO,
+  ChatResultDTO,
   CloudOptionsDTO,
   DecisionDTO,
   DesignTaskDTO,
@@ -1905,6 +1907,24 @@ export class DaemonClient {
   /* The person's message, queued until the agent is idle. */
   message(id: string, text: string) {
     return this.post<MessageResult>(`/agents/${encodeURIComponent(id)}/message`, { text });
+  }
+
+  /* Chat stubs (501 until implemented). The queue is AgentDTO.chat_queue in
+     snapshots. Byte attachments are part of the message, with no source path. */
+  chatSend(id: string, message: ChatMessageDTO) {
+    return this.post<ChatResultDTO>(`/agents/${encodeURIComponent(id)}/chat/send`, message);
+  }
+
+  chatEnqueue(id: string, message: ChatMessageDTO) {
+    return this.post<ChatResultDTO>(`/agents/${encodeURIComponent(id)}/chat/queue`, message);
+  }
+
+  chatRemove(id: string, messageId: string) {
+    return this.delete<{ removed: string }>(`/agents/${encodeURIComponent(id)}/chat/queue/${encodeURIComponent(messageId)}`, {});
+  }
+
+  chatSendNow(id: string, messageId: string) {
+    return this.post<ChatResultDTO>(`/agents/${encodeURIComponent(id)}/chat/queue/${encodeURIComponent(messageId)}/send-now`, {});
   }
 
   async attach(id: string, file: Attachment) {

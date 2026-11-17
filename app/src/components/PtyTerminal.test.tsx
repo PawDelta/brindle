@@ -1,4 +1,5 @@
 import { act, cleanup, render } from "@testing-library/react";
+import { FitAddon } from "@xterm/addon-fit";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
@@ -835,4 +836,27 @@ it("copies a selection across rows only from the columns shown: never a cropped 
   expect(selectionIn(term(), 11, 80)).toBe("row 1\nagent row 2\nagent");
   // Columns from 14 on hidden (a right sidebar's): no row has them, the ends kept where they are.
   expect(selectionIn(term(), 0, 14)).toBe("\nside 2    │age\nside 3    │age");
+});
+
+it("crops rows under the view's foot with a taller client, restores them, and switches its colours live", () => {
+  // The view's box fits 80×20 (jsdom measures no cells).
+  const fits = vi.spyOn(FitAddon.prototype, "proposeDimensions").mockReturnValue({ cols: 80, rows: 20 });
+  const asked: number[][] = [];
+  const sizes: number[][] = [];
+  const open: PtyViewOpener = (_at, size) => {
+    asked.push([size.cols, size.rows]);
+    return { write() {}, resize: (cols, rows) => void asked.push([cols, rows]), focus() {}, close() {} };
+  };
+  const at = { server: "brindle", target: "s:@1" };
+  const view = render(<PtyTerminal at={at} open={open} cropRows={4} theme={{ background: "#070b09" }} onSize={(c, r) => sizes.push([c, r])} />);
+  // The client asks for the view's rows and the cropped ones; the view's size is its own.
+  expect(asked[0]).toEqual([80, 24]);
+  expect(sizes.at(-1)).toEqual([80, 20]);
+  expect(xterms.at(-1)!.rows).toBe(24);
+  view.rerender(<PtyTerminal at={at} open={open} cropRows={0} theme={{ background: "#ffffff" }} onSize={(c, r) => sizes.push([c, r])} />);
+  expect(asked.at(-1)).toEqual([80, 20]);
+  expect(xterms.at(-1)!.options.theme?.background).toBe("#ffffff");
+  // The same view throughout: the crop and theme change it, never reopen it.
+  expect(xterms).toHaveLength(1);
+  fits.mockRestore();
 });
