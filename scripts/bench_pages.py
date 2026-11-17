@@ -10,6 +10,9 @@ launched; routes are called in-process through the ASGI app.
 Cold is each route's first call in a fresh process (after one /meta call, so
 the DB is open, as in a running daemon); warm is the best of `rounds` calls
 after it. Prints one line per page and route, slowest flagged.
+`--profile=<route path>` instead prints a cProfile of that route's cold call.
+Load-sensitive: timings on a machine whose load is far above its cores are
+indicative only.
 """
 
 from __future__ import annotations
