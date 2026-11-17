@@ -377,6 +377,7 @@ def test_offer_ignores_workers_and_inactive_sessions_and_scopes_cards(db, repo, 
     if transition in ("recovered", "cleared"):
         provider_switch.dismiss(db, offer.id, now)
         _offer_row(db, "back", "root", "back", "claude", "codex", "open")
+        provider_switch.check_cards(db, now)    # the sweep's look, which the cards show
         assert [i.request_id for i in provider_switch.inbox_items(db, None, now=now)] == ["back"]
 
 

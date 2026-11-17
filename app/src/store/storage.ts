@@ -2,14 +2,18 @@
    by Settings › Storage and the Inbox's nudge. The report is slow (the daemon
    measures every worktree), so the Inbox reads it at most once an hour and
    Settings, which reads it anyway, keeps the figure current: a Clean there
-   lowers the nudge at once. An engine without the route leaves it null. */
+   lowers the nudge at once. An engine without the route leaves it null. The
+   engine answers with its last report while it measures on its own thread:
+   a report with nothing measured yet notes nothing, and while it is still
+   measuring the figure is read again every AGAIN_MS (while anyone listens). */
 
 import { useEffect, useState } from "react";
-import type { DaemonClient } from "../api/client";
+import { storagePending, type DaemonClient } from "../api/client";
 
 /* Above this the Inbox suggests a clean. */
 export const NUDGE_BYTES = 5 * 1024 ** 3;
 const STALE_MS = 60 * 60 * 1000;
+const AGAIN_MS = 2000;
 
 const GB = 1024 ** 3;
 const MB = 1024 ** 2;
@@ -55,6 +59,29 @@ export function forgetReclaimable(): void {
   reading = null;
 }
 
+/* One read of the report; again shortly while the engine is still measuring. */
+function read(client: Pick<DaemonClient, "storage">): void {
+  const started = readStarted();
+  let pending = false;
+  reading = client.storage().then(
+    (r) => {
+      if (r.measured_at !== null) noteReclaimable(r.reclaimable, started);
+      if (r.error) failedAt = Date.now();
+      pending = storagePending(r);
+    },
+    () => {
+      failedAt = Date.now();
+    },
+  ).finally(() => {
+    reading = null;
+    if (pending) {
+      window.setTimeout(() => {
+        if (!reading && listeners.size > 0) read(client);
+      }, AGAIN_MS);
+    }
+  });
+}
+
 /* The figure, reading the report when there is none or it is over an hour
    old, and not within an hour of a failed read. */
 export function useReclaimable(client: Pick<DaemonClient, "storage">): number | null {
@@ -63,17 +90,7 @@ export function useReclaimable(client: Pick<DaemonClient, "storage">): number | 
     const update = () => setValue(currentReclaimable());
     listeners.add(update);
     const now = Date.now();
-    if (!reading && now - failedAt > STALE_MS && (!last || now - last.started > STALE_MS)) {
-      const started = readStarted();
-      reading = client.storage().then(
-        (r) => noteReclaimable(r.reclaimable, started),
-        () => {
-          failedAt = Date.now();
-        },
-      ).finally(() => {
-        reading = null;
-      });
-    }
+    if (!reading && now - failedAt > STALE_MS && (!last || now - last.started > STALE_MS)) read(client);
     update();
     return () => {
       listeners.delete(update);

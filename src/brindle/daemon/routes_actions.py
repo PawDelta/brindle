@@ -690,11 +690,15 @@ def clean_storage(db: DB, params: dict, body: Body) -> Any:
     one (``abandoned``: true), each with its branch, tip archived first
     (``disk.clean``). The app asks the person before it calls this."""
     from brindle import disk
+    from brindle.daemon.storage_reports import REPORTS
 
     path, abandoned = _get(body, "path"), _get(body, "abandoned", bool, False)
     if not path and not abandoned:
         raise ServiceError("invalid", "path or abandoned is required")
-    return disk.clean(db, path=path, abandoned=not path)
+    try:
+        return disk.clean(db, path=path, abandoned=not path)
+    finally:
+        REPORTS.forget()     # the kept report still lists what went
 
 
 # An agent mid-turn (or stopped at a prompt mid-turn) may be writing the same file.
