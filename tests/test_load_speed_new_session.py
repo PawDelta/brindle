@@ -90,10 +90,13 @@ def test_project_list_leaves_out_gone_and_temp_repos_unless_a_session_runs_there
         assert code == 200
         return [r["repo_root"] for r in rows]
 
-    # Most recently used first.
-    assert listed() == [new, failing, bench, old, live_scratch]
+    # First opened first (created 0.5, 1.0, 2.0, 2.5, 3.0).
+    assert listed() == [live_scratch, old, bench, failing, new]
     up.discard("%3")        # that session's chat exits
-    assert listed() == [new, bench, old, live_scratch]
+    assert listed() == [live_scratch, old, bench, new]
+    # New work in an older repo doesn't move it: the order is when each was first opened.
+    db.add_workspace(Workspace("old/later", old, "later", "worktree", "later", "main", old, None, "brindle-old-later", 9.0))
+    assert listed() == [live_scratch, old, bench, new]
 
 
 def test_new_session_page_reads_run_no_git_or_cli_and_share_one_tmux_look(db, repo, monkeypatch):

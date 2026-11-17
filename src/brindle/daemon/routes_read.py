@@ -175,7 +175,7 @@ def _still_a_repo(root: str, now: float) -> bool:
 
 @_json
 def repos(db: DB, request: Request) -> Any:
-    """The person's projects, most recently used first: each repo brindle has
+    """The person's projects, oldest first by when brindle first worked there: each repo brindle has
     worked in that is still a git repo on disk. A repo in a system temp folder
     and a scratch session are listed only while a session runs there: its
     chat's pane is up and still its own, as sessions.live judges it, from the
@@ -187,6 +187,8 @@ def repos(db: DB, request: Request) -> Any:
     from brindle.demo import is_demo_repo
 
     now = time.monotonic()
+    opened = {root: float(created_at) for root, created_at in db.conn.execute(
+        "SELECT repo_root, MIN(created_at) FROM workspaces GROUP BY repo_root")}
     home = str(brindle_home()).rstrip("/") + "/"
     scratch_root = str(scratch.scratch_dir()).rstrip("/") + "/"
     look: list = []
@@ -211,7 +213,7 @@ def repos(db: DB, request: Request) -> Any:
             keep = mine or not root.startswith(TEMP_ROOTS) or running(chats)
         if keep:
             listed.append((used, root))
-    listed.sort(key=lambda u: (-u[0], u[1]))
+    listed.sort(key=lambda u: (is_demo_repo(u[1]), opened.get(u[1], float("inf")), u[1]))
     return [RepoDTO(repo_root=r, name=r.rstrip("/").rsplit("/", 1)[-1], demo=is_demo_repo(r)).to_json()
             for _, r in listed]
 
