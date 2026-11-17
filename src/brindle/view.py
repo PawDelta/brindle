@@ -119,11 +119,11 @@ def git_counts(ws: Workspace, now: float | None = None) -> GitCounts:
 
 class KnownGit:
     """Git counts for a read that answers at once (the daemon's snapshot and
-    inbox): what this process has counted already (``status_cache.known``),
-    else the counts stored for the very commits HEAD and the base refs name
-    now (``db.git_counts``), else unknown. Starts no git and stats no tree on
-    a workspace this process hasn't looked at; those are in ``pending``, with
-    what was shown for them, for ``warm_later``."""
+    inbox): what this process counted last (``status_cache.known``), else the
+    counts stored for the very commits HEAD and the base refs name now
+    (``db.git_counts``), else unknown. Starts no git and walks no tree; the
+    workspaces whose count is missing or no longer stands are in ``pending``,
+    with what was shown for them, for ``warm_later``."""
 
     def __init__(self, db: DB, now: float | None = None) -> None:
         self.stored = db.git_counts()
@@ -139,12 +139,12 @@ class KnownGit:
     def _look(self, ws: Workspace) -> GitCounts:
         if not ws.base_branch or not os.path.isdir(ws.path):
             return GitCounts()
-        try:
-            st = status_cache.known(ws.path, ws.base_branch, now=self.now)
-        except git.GitError:
-            return GitCounts()
-        if st is not None:
-            return _counts(st)
+        st, stands = status_cache.known(ws.path, ws.base_branch, now=self.now)
+        if st is not None or stands:
+            shown = GitCounts() if st is None else _counts(st)   # None standing: its base names no commit
+            if not stands:
+                self.pending.append((ws, shown))   # the last count, until it is counted again
+            return shown
         row = self.stored.get(ws.id)
         shown = GitCounts()
         if row is not None and row["base_branch"] == ws.base_branch and \

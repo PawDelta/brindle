@@ -757,18 +757,37 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
     return st
 
 
-def known(path: str | Path, base: str | None, now: float | None = None) -> git.Status | None:
-    """``cached_status``, once this process has looked at ``path`` (it is
-    kept up to date as ``cached_status`` keeps it, and a base that names no
-    commit fails as it does); None before that first look, which runs git
-    status and stats the tree, so that a read that must answer at once (the
-    app's first after the daemon starts) never waits on it."""
+def known(path: str | Path, base: str | None, now: float | None = None) -> tuple[git.Status | None, bool]:
+    """(the last status this process counted for ``path``, whether it still
+    stands), without counting: no git and no walk of the tree, so that a read
+    that must answer at once (the app's first after the daemon starts) never
+    waits on one. It stands while ``cached_status`` would return it as it is
+    (the same fingerprint and refs, within TTL). (None, True): the base names
+    no commit, as ``cached_status`` last found and still would; (None,
+    False): never counted. A count that doesn't stand is for the caller to
+    have redone elsewhere (``view.warm_later``)."""
     if not base:
-        return None
-    key = str(Path(path))
-    if key not in _status_cache and key not in _failed:
-        return None
-    return cached_status(path, base, now=now)
+        return None, False
+    path = Path(path)
+    key = str(path)
+    hit, failed = _status_cache.get(key), _failed.get(key)
+    if hit is None and failed is None:
+        return None, False
+    now = time.time() if now is None else now
+    try:
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+        base_ref = _base_ref_cache.get((key, base))
+        if base_ref is None or base_ref[0] != _refs_fingerprint(common, base):
+            fp = refs = None      # which ref is the base may have changed: git would decide
+        else:
+            fp = _fingerprint(path, wt_gitdir, common, base_ref[1])
+            refs = _refs_key(wt_gitdir, common, base_ref[1], hit.upstream if hit is not None else None)
+    except OSError:
+        fp = refs = None
+    if hit is not None:
+        return hit.status, fp is not None and hit.fp == fp and hit.refs == refs and now - hit.checked_at < TTL
+    return None, fp is not None and failed[:2] == (fp, refs)
 
 
 def commits(path: str | Path, base: str) -> tuple[str, str | None, str | None] | None:
