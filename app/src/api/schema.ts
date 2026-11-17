@@ -1514,6 +1514,7 @@ export interface VisualDTO {
   accepts_files: boolean;
   answer?: VisualAnswerDTO | null;
   answer_agent_id: string;
+  answered_in_chat?: boolean;
   by: string;
   created_at: number;
   id: string;

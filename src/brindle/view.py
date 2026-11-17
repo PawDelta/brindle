@@ -6,11 +6,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
+from collections.abc import Callable
+from typing import NamedTuple
 
-from brindle import agents, git, identity_lock, pipeline, providers, status_cache, tmux
+from brindle import agents, bus, git, identity_lock, pipeline, providers, status_cache, tmux
 from brindle import usage as usage_mod
 from brindle.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
+from brindle.view_reads import ViewReads
 
 log = logging.getLogger(__name__)
 
@@ -91,24 +95,140 @@ def last_activity(a: Agent) -> str:
     return f" last: {tool + ' ' if tool else ''}{_ago(age)}"
 
 
+class GitCounts(NamedTuple):
+    """A workspace's commits ahead of and behind its base, and its changed
+    files; None where they aren't known."""
+    ahead: int | None = None
+    behind: int | None = None
+    dirty: int | None = None
+
+
+def _counts(st: git.Status) -> GitCounts:
+    return GitCounts(st.ahead, st.behind, len(st.dirty_files))
+
+
+def git_counts(ws: Workspace, now: float | None = None) -> GitCounts:
+    """``ws``'s counts as ``status_cache.cached_status`` has them (git runs
+    when nothing is cached); unknown when it has no base or git can't say."""
+    if not ws.base_branch or not os.path.isdir(ws.path):
+        return GitCounts()
+    try:
+        return _counts(status_cache.cached_status(ws.path, ws.base_branch, now=now))
+    except git.GitError:
+        return GitCounts()
+
+
+class KnownGit:
+    """Git counts for a read that answers at once (the daemon's snapshot and
+    inbox): what this process counted last (``status_cache.known``), else the
+    counts stored for the very commits HEAD and the base refs name now
+    (``db.git_counts``), else unknown. Starts no git and walks no tree; the
+    workspaces whose count is missing or no longer stands are in ``pending``,
+    with what was shown for them, for ``warm_later``."""
+
+    def __init__(self, db: DB, now: float | None = None) -> None:
+        self.stored = db.git_counts()
+        self.now = now
+        self.pending: list[tuple[Workspace, GitCounts]] = []
+        self._seen: dict[str, GitCounts] = {}
+
+    def __call__(self, ws: Workspace) -> GitCounts:
+        if ws.id not in self._seen:
+            self._seen[ws.id] = self._look(ws)
+        return self._seen[ws.id]
+
+    def _look(self, ws: Workspace) -> GitCounts:
+        if not ws.base_branch or not os.path.isdir(ws.path):
+            return GitCounts()
+        st, stands = status_cache.known(ws.path, ws.base_branch, now=self.now)
+        if st is not None or stands:
+            shown = GitCounts() if st is None else _counts(st)   # None standing: its base names no commit
+            if not stands:
+                self.pending.append((ws, shown))   # the last count, until it is counted again
+            return shown
+        row = self.stored.get(ws.id)
+        shown = GitCounts()
+        if row is not None and row["base_branch"] == ws.base_branch and \
+                (row["head"], row["local_base"], row["origin_base"]) == status_cache.commits(ws.path, ws.base_branch):
+            shown = GitCounts(row["ahead"], row["behind"], row["dirty"])
+        self.pending.append((ws, shown))
+        return shown
+
+
+GIT_KNOWN_EVENT = "workspace.git"
+_warming_lock = threading.Lock()
+_warming: set[str] = set()      # ids of the workspaces a warm_later is counting
+
+
+def warm_later(pending: list[tuple[Workspace, GitCounts]]) -> threading.Thread | None:
+    """Count the workspaces a ``KnownGit`` read had no live count for, on a
+    thread of their own (the reader has already answered), store the counts,
+    and publish ``workspace.git`` in each repo where one came out other than
+    shown (the app then reads its snapshot again: a merged worktree leaves the
+    sidebar, say). One already being counted is left to that count. Returns
+    the thread, None when there was nothing to count."""
+    with _warming_lock:
+        todo = [(ws, shown) for ws, shown in pending if ws.id not in _warming]
+        _warming.update(ws.id for ws, _ in todo)
+    if not todo:
+        return None
+    thread = threading.Thread(target=_warm_and_tell, args=(todo,), name="brindle-git-counts", daemon=True)
+    thread.start()
+    return thread
+
+
+def store_counts(db: DB, workspaces: list[Workspace]) -> None:
+    """Store the counts this process has for each of ``workspaces``
+    (``status_cache.counted``) where they differ from those stored, for the
+    next process's ``KnownGit``."""
+    stored = None
+    for ws in workspaces:
+        got = status_cache.counted(ws.path, ws.base_branch) if ws.base_branch else None
+        if got is None:
+            continue
+        stored = db.git_counts() if stored is None else stored
+        row = stored.get(ws.id)
+        counts = _counts(got[1])
+        if row is None or (row["base_branch"], (row["head"], row["local_base"], row["origin_base"]),
+                           GitCounts(row["ahead"], row["behind"], row["dirty"])) != (ws.base_branch, got[0], counts):
+            db.set_git_counts(ws.id, ws.base_branch, got[0], *counts)
+
+
+def _warm_and_tell(todo: list[tuple[Workspace, GitCounts]]) -> None:
+    try:
+        status_cache.warm([(ws.path, ws.base_branch) for ws, _ in todo])
+        db = DB()
+        try:
+            told: dict[str, Workspace] = {}
+            for ws, shown in todo:
+                if git_counts(ws) != shown:    # cached by warm (warm leaves a single one to this)
+                    told.setdefault(ws.repo_root, ws)
+            store_counts(db, [ws for ws, _ in todo])
+            for ws in told.values():
+                bus.publish_ws(db, GIT_KNOWN_EVENT, ws)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - the counts are a display extra; the next read tries again
+        log.exception("brindle: couldn't count workspaces' git status")
+    finally:
+        with _warming_lock:
+            _warming.difference_update(ws.id for ws, _ in todo)
+
+
 def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
                     native_subagents: dict[str, list[NativeSubagent]] | None = None,
                     now: float | None = None,
                     panes: dict[str, bool] | None = None,
                     agent_list: list[Agent] | None = None,
                     alive: set[str] | None = None,
-                    read_screens: bool = True) -> dict:
+                    read_screens: bool = True,
+                    counts: GitCounts | None = None) -> dict:
     """``agent_list`` limits the agents shown (default: all of ``ws``'s);
     ``alive`` is the ids of the ones known to be running, when the caller
     has already worked that out (see ``snapshot``). ``read_screens``: as
-    for ``agent_entry``."""
-    ahead = behind = dirty = None
-    if ws.base_branch and os.path.isdir(ws.path):
-        try:
-            st = status_cache.cached_status(ws.path, ws.base_branch, now=now)
-            ahead, behind, dirty = st.ahead, st.behind, len(st.dirty_files)
-        except git.GitError:
-            pass
+    for ``agent_entry``. ``counts``: its git counts, when the caller has them
+    (default: ``git_counts``)."""
+    ahead, behind, dirty = git_counts(ws, now) if counts is None else counts
     return {
         "id": ws.id,
         "name": ws.name,
@@ -290,12 +410,14 @@ def _finished(a: Agent) -> bool:
 
 
 def retired(db: DB, ws: Workspace, alive: set[str], now: float | None = None,
-            everyone: list[Agent] | None = None) -> bool:
+            everyone: list[Agent] | None = None,
+            counts: Callable[[Workspace], GitCounts] | None = None) -> bool:
     """A worker's worktree whose branch is merged into its base (it has no
     commit the base lacks) and whose agents are all finished: closed, done or
     reported, none still running. Uncommitted changes don't count against
     it: the sidebar hides it all the same, but ``cull.prune_retired`` only
-    removes a clean one."""
+    removes a clean one. ``counts``: where its commits ahead come from
+    (default: ``git_counts``); not known, it isn't retired."""
     now = time.time() if now is None else now
     if ws.kind != "worktree" or not ws.base_branch or not os.path.isdir(ws.path):
         return False
@@ -309,6 +431,8 @@ def retired(db: DB, ws: Workspace, alive: set[str], now: float | None = None,
     if repos.is_session_branch(db, ws.repo_root, ws.branch):
         return False   # a session's merge target in a repo it has attached, whoever ran there
 
+    if counts is not None:
+        return counts(ws).ahead == 0
     try:
         st = status_cache.cached_status(ws.path, ws.base_branch, now=now)
     except git.GitError:
@@ -339,12 +463,15 @@ def session_workspaces(db: DB, repo_root: str | None) -> list[Workspace]:
 
 
 def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
-             read_screens: bool = True) -> list[dict]:
+             read_screens: bool = True, known_git: KnownGit | None = None) -> list[dict]:
     """What the sidebar shows: agents closed with `brindle close`, and stopped
     sessions with nothing left running, are left out, as is a worktree
     whose agents are all left out that way, and a finished worktree whose
     branch is already merged (see ``retired``). ``read_screens`` False
-    reads no agent's screen (see ``agent_entry``)."""
+    reads no agent's screen (see ``agent_entry``). ``known_git``: take git
+    counts only from it (no git for a workspace this process hasn't counted
+    yet; see ``KnownGit``) instead of counting every workspace first."""
+    db = ViewReads(db)
     now = time.time()
     by_parent = db.all_native_subagents()
     if panes is None:
@@ -380,14 +507,17 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
         shown = [a for a in current if not past_worker(a) and not hidden(a)]
         if everyone and not shown and ws.kind != "main":
             continue
-        if retired(db, ws, alive, now, everyone):
+        if retired(db, ws, alive, now, everyone, counts=known_git):
             continue
         listed.append((ws, shown))
-    status_cache.warm([(ws.path, ws.base_branch) for ws, _ in listed if os.path.isdir(ws.path)], now=now)
+    if known_git is None:
+        status_cache.warm([(ws.path, ws.base_branch) for ws, _ in listed if os.path.isdir(ws.path)], now=now)
+    db.prepare_autopilots({agents.root_of(db, a.id) for _, shown in listed for a in shown})
     out = []
     for ws, shown in listed:
         entry = workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
-                                panes=panes, agent_list=shown, alive=alive, read_screens=read_screens)
+                                panes=panes, agent_list=shown, alive=alive, read_screens=read_screens,
+                                counts=None if known_git is None else known_git(ws))
         review = db.last_review(ws.id)
         # The latest reviewer verdict, so the sidebar can flag rows that need you.
         entry["review"] = None if review is None else ("approved" if review.approved else "changes")

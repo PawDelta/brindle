@@ -52,7 +52,7 @@ const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid
 
 describe("inbox", () => {
   it.each([
-    "doc", "review_requested", "changes_requested", "signed_off", "waiting", "question", "plan",
+    "doc", "review_requested", "changes_requested", "signed_off", "waiting", "question",
     "review", "merge_failed", "pr_ready", "pr_failed", "pr_opened", "proposed_checks", "credentials",
     "login", "org_notice", "org_blocked", "setup", "idle_stopped", "plan_offer", "visual", "failed",
     "sync_conflict", "permission", "permission-window", "permission-group", "update-pending", "update-updated", "storage",
@@ -445,29 +445,15 @@ describe("inbox", () => {
     await waitFor(() => expect(within(cloud).getByTestId("cloud-login").textContent).toContain("Signed in again"));
   });
 
-  it("approves a plan, accepts or declines proposed checks, on the card, at once; a refusal comes back as one line on the card", async () => {
-    const plan: InboxItemDTO = { kind: "plan", reason: "plan awaiting approval", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: "1. Keep the plan.\n2. Ship it." };
+  it("accepts or declines proposed checks, on the card, at once; a refusal comes back as one line on the card", async () => {
     const checks: InboxItemDTO = { kind: "proposed_checks", reason: "checks proposed", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "npm test\nnpm run build" };
     const review: InboxItemDTO = { kind: "review", reason: "to review", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, name: "Login fix" }], workspaces: [root, worker], inbox: [plan, checks, review] });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, name: "Login fix" }], workspaces: [root, worker], inbox: [checks, review] });
     const { onOpen } = mount(daemon);
     // A named session is headed by its name, not its goal.
-    const group = await screen.findByRole("region", { name: "Login fix" });
-    // A plan: Approve alone (changes are asked for in its session), no reply field, no undo; the plan whole on the
-    // card, never cut short.
-    expect(within(card("plan")).queryByRole("textbox")).toBeNull();
-    expect(within(card("plan")).queryByRole("button", { name: /Request changes/ })).toBeNull();
-    expect(within(card("plan")).getByTestId("card-detail").textContent).toBe("1. Keep the plan.\n2. Ship it.");
-    expect(within(card("plan")).getByTestId("card-detail").className).not.toContain("line-clamp");
-    // The plan the engine lists changes: the card shows the new one whole before anything is approved
-    // (useInboxActions.test covers an approval of a plan the card no longer shows).
-    daemon.data.inbox = daemon.data.inbox.map((i) => (i.kind === "plan" ? { ...i, detail: "1. Keep the plan.\n2. Ship it.\n3. Also delete the database." } : i));
-    daemon.publish("message.queued", { agent_id: "w1" });
-    await waitFor(() => expect(within(card("plan")).getByTestId("card-detail").textContent).toContain("3. Also delete the database."));
-    fireEvent.click(within(card("plan")).getByRole("button", { name: "Approve" }));
-    await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/w1/approve", query: {}, body: { feedback: "" } }]));
-    await waitFor(() => expect(within(group).queryAllByTestId("inbox-card").some((c) => c.dataset.kind === "plan")).toBe(false));
-    expect(screen.queryByRole("status")).toBeNull();
+    await screen.findByRole("region", { name: "Login fix" });
+    // The checks are shown whole on the card, never cut short.
+    expect(within(card("proposed_checks")).getByTestId("card-detail").className).not.toContain("line-clamp");
     // Proposed checks: Accept or Decline. The engine's refusal (nothing waiting any more) comes back on the card.
     daemon.data.inbox = daemon.data.inbox.filter((i) => i.kind !== "proposed_checks");
     fireEvent.click(within(card("proposed_checks")).getByRole("button", { name: "Decline" }));

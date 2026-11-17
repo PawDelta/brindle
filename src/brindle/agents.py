@@ -1672,6 +1672,13 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                                                   mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
     except providers.CodexSandboxRefused as e:
         raise AgentError(str(e)) from e
+    from brindle import wake
+
+    if wake.applies_poke(provider.name, agent.mode, bool(agent.headless)):
+        try:
+            wake.arm_poke(agent.id)   # this session runs the FileChanged waiter (wake.poke)
+        except OSError:
+            pass   # unpokeable: its mail waits for its next Stop or SessionStart
     if provider.name == "codex":
         from brindle import codex_hook
 
@@ -2972,9 +2979,10 @@ def _hand_over(db: DB, agent: Agent, message_id: int, text: str, sender_id: str 
         return "queued"  # a supervisor restart: it goes to the fresh session
     from brindle import wake
 
-    if wake.enabled(agent):
+    if wake.enabled(agent) or wake.pokeable(agent):
         # A chat with brindle's waiter never gets the inbox, where Claude Code
-        # would wrap the message as another session's (see brindle.wake).
+        # would wrap the message as another session's (see brindle.wake);
+        # nor does one launched with it whose first waiter hasn't registered yet.
         if wake.live(agent):
             return "delivered"  # the waiter wakes it with this
     elif _deliver_to_inbox(db, agent, message_id, text, sender_id):
@@ -3367,12 +3375,25 @@ def _flush_messages(db: DB, agent_id: str) -> bool:
     agent = db.get_agent(agent_id)
     if _delivery_held(db, agent, waiter=False):
         return False
+    silent = wake.silent(agent)
     partial = db.mark(agent_id, "pane-delivery")
     if partial is not None:
         # Even with a live waiter: its take() can't pass this mark, so only
-        # finishing the delivery here lets the queue move again.
+        # finishing the delivery here lets the queue move again. A person's
+        # chat is never typed into, even to finish one an older brindle began.
+        if silent:
+            return _settle_untyped(db, agent, partial)
         return _resume_pane_delivery(db, agent, partial)
     if wake.enabled(agent) and wake.live(agent):
+        return False
+    if silent and (wake.enabled(agent) or wake.pokeable(agent)):
+        # A person's chat is never typed into: an idle one with no live
+        # waiter is poked, and Claude Code starts one that wakes it with the
+        # mail (wake.poke); a busy one gets it at its Stop. One launched by an
+        # older brindle can't be poked: its mail waits for its next Stop or
+        # SessionStart (a turn the person starts ends in a Stop).
+        if agent.status == "idle" and wake.pokeable(agent) and db.pending_count(agent_id):
+            wake.poke(agent)
         return False
     if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
@@ -3391,10 +3412,30 @@ def _flush_messages(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
+    if silent:
+        # No waiter hook at all (a much older launch) and no inbox: held for
+        # its next Stop, never typed.
+        return False
     # One paste into the pane at a time, whichever path: the idle claim alone
     # leaves the agent busy for a second sender's mid-turn paste while the
     # first is still typing, reordering or merging the two.
     return _flush_pane(db, agent_id)
+
+
+def _settle_untyped(db: DB, agent: Agent, saved: str) -> bool:
+    """``_flush_messages`` for a person's chat that an older brindle had
+    begun typing a message into: retired without a key typed. Sent ("submitted")
+    counts as delivered, a turn started on it stays unresolved, and anything
+    else goes back in the queue for a waiter, but only once nothing of it is
+    left in the composer: text still there is the person's to send (its
+    prompt acknowledges it) or clear, and the mark keeps the row till then."""
+    if json.loads(saved).get("stage") in ("lead", "body") and not _composer_settled(agent):
+        return False
+    if not db.settle_pane_delivery(agent.id, saved):
+        return False   # a hook changed it meanwhile: the next flush looks again
+    if db.pane_delivery_holds(agent.id):
+        return False
+    return _flush_messages(db, agent.id)
 
 
 def delivery_lock(agent_id: str):
@@ -6209,6 +6250,7 @@ def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
 
         prompt_answer.settled(db, agent)   # see handle_hook
         launch_health.accepted(db, agent)
+        _note_staged_prompt(db, agent, payload)
     except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
         log.exception("brindle: Codex PreToolUse bookkeeping failed")
     return answer
@@ -6216,6 +6258,67 @@ def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
 
 ABSORBED_MARK = "absorbed-prompts"   # {"path": transcript, "offset": bytes of it already read}
 _ABSORBED_READ_MAX = 32 << 20        # more unread transcript than this at once is skipped, not read
+
+
+def _note_staged_prompt(db: DB, agent: Agent, payload: dict) -> None:
+    """Confirm app-vouched input from the CLI's transcript before tools run.
+    Codex has no prompt-submit hook, and Claude's can be missed; queued input
+    has no such hook either. Input absent from the transcript stays staged.
+    Only staged words are confirmed: later tools cannot renew a spent ask."""
+    from brindle import visual_offers
+
+    if agent.mode != "interactive" or agent.parent_id is not None:
+        return
+    if not db.conn.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1",
+                           (agent.id,)).fetchone():
+        return
+    path = payload.get("transcript_path")
+    if not isinstance(path, str) or not path:
+        return
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.fstat(f.fileno()).st_size - _ABSORBED_READ_MAX))
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        text, mid_turn = None, False
+        stamp = entry.get("timestamp")
+        if agent.provider == "codex" and entry.get("type") == "event_msg":
+            message = entry.get("payload")
+            if isinstance(message, dict) and message.get("type") == "user_message":
+                text = message.get("message")
+        elif agent.provider == "claude" and not entry.get("isSidechain"):
+            message = entry.get("message")
+            attachment = entry.get("attachment")
+            if entry.get("type") == "user" and not entry.get("isMeta") and isinstance(message, dict):
+                if message.get("role") == "user":
+                    content = message.get("content")
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list) and all(
+                            isinstance(block, dict) and block.get("type") == "text" for block in content):
+                        text = "\n".join(block.get("text", "") for block in content)
+            elif (entry.get("type") == "attachment" and isinstance(attachment, dict)
+                  and attachment.get("type") == "queued_command" and attachment.get("commandMode") == "prompt"
+                  and isinstance(attachment.get("origin"), dict) and attachment["origin"].get("kind") == "human"):
+                text, mid_turn = attachment.get("prompt"), True
+                stamp = attachment.get("timestamp") or stamp
+        if not isinstance(text, str):
+            continue
+        said_at = _transcript_time(stamp)
+        if said_at is None:
+            return
+        if "[brindle" not in text and not db.recently_delivered(agent.id, text):
+            visual_offers.person_spoke(db, agent, text, cli_prompt=True, said_at=said_at,
+                                       staged_only=True, mid_turn=mid_turn)
+        return
 
 
 def _absorbed_prompts(db: DB, agent: Agent, path: str) -> list[tuple[str, float | None]]:
@@ -6316,6 +6419,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # returning a policy decision (especially a deny).
         answer = permission_request_decision(db, agent, payload, provider="codex")
         try:
+            _note_staged_prompt(db, agent, payload)
             sid = payload.get("session_id")
             if isinstance(sid, str) and sid and sid != agent.session_ref:
                 db.update_agent(agent_id, session_ref=sid)
@@ -6333,6 +6437,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         db.update_agent(agent_id, transcript_path=str(transcript))
     if agent.provider == "claude" and agent.mode == "interactive" and (transcript or agent.transcript_path):
         _note_absorbed_prompts(db, agent, str(transcript or agent.transcript_path))
+        if event != "prompt-submit":
+            _note_staged_prompt(db, agent, {"transcript_path": transcript or agent.transcript_path})
 
     if event in ("prompt-submit", "pre-tool", "tool-done") and agent.unreported_noted:
         # It's working again, so a later stop without a result is a new one
@@ -6386,6 +6492,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
             processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
                           str(get_provider(agent.provider).ready_delay)])
+        from brindle import wake
+
+        if agent.provider == "claude" and wake.pokeable(agent):
+            # Watched for the session's FileChanged waiter hook (wake.poke).
+            return {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                           "watchPaths": [str(wake.poke_path(agent_id))]}}
     elif event == "prompt-submit":
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.

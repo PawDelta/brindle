@@ -138,4 +138,5 @@ def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
     app = Starlette(routes=ROUTES)
     app.state.poller = poller
     app.state.heavy_read_lane = routes_read.HeavyReadLane()
+    app.state.snapshot_view = routes_read.SnapshotView()
     return Guard(Deadlines(app), token, port)

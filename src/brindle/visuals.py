@@ -220,6 +220,7 @@ def to_dto(db: DB, v: dict) -> dict:
         rev=v["rev"],
         answer_agent_id=v["root_id"], accepts_files=provider.accepts_files,
         question=v["question"], options=v["options"],
+        answered_in_chat=v["answered_in_chat_rev"] == v["rev"],
         answer={k: answer[k] for k in ("option", "note", "at", "attachments") if k in answer} if answer else None,
         kept=v["kept_at"] is not None, unread=v["read_rev"] < v["rev"], created_at=v["created_at"],
     ).to_json()
@@ -511,6 +512,19 @@ def has_approved_design(db: DB, root_id: str, goal: str) -> bool:
                                           and o.get("goal") == goal for o in json.loads(row["options"])):
             return True
     return False
+
+
+def answered_in_chat(c, root_id: str, said_at: float) -> list:
+    """Fold only decision revisions already published when this person message was sent.
+
+    The chat message itself reaches the supervisor; no option is inferred and
+    no extra agent message is needed. Run in the input observation transaction.
+    """
+    return c.execute(
+        "UPDATE visuals SET dismissed_rev=rev, answered_in_chat_rev=rev, read_rev=MAX(read_rev, rev) "
+        "WHERE root_id=? AND kind='visual' AND question IS NOT NULL AND options IS NOT NULL "
+        "AND answer IS NULL AND dismissed_rev < rev AND updated_at < ? RETURNING id, rev",
+        (root_id, said_at)).fetchall()
 
 
 def dismiss(db: DB, visual_id: str, rev: Any) -> dict:

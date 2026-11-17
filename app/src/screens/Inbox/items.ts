@@ -33,7 +33,6 @@ export const KIND_LABEL: Record<string, string> = {
   waiting: "Waiting for you",
   permission: "Permission",
   question: "Question",
-  plan: "Plan to approve",
   review: "Branch to review",
   merge_failed: "Merge failed",
   pr_ready: "Pull request",
@@ -77,7 +76,6 @@ export const KIND_SHORT: Record<string, string> = {
   waiting: "waiting",
   permission: "permission",
   question: "question",
-  plan: "plan",
   review: "review",
   merge_failed: "merge",
   pr_ready: "PR",
@@ -111,8 +109,6 @@ export function describeItem(item: InboxItemDTO): string {
     }
     case "question":
       return "Has a question for you";
-    case "plan":
-      return "Plan ready for your approval";
     case "review":
       return item.reason === "to review" ? "Branch ready to review" : `Branch ${item.reason}`;
     case "merge_failed":
@@ -155,8 +151,6 @@ export function primaryAction(item: InboxItemDTO): InboxAction | null {
     case "question":
     case "waiting":
       return "answer";
-    case "plan":
-      return "approve";
     case "review":
       return "review";
     case "merge_failed":
@@ -206,7 +200,7 @@ export const completable = (item: InboxItemDTO): boolean => item.kind === "crede
 
 /* An item that needs a decision, not just a reply: the review sheet opens
    on it when its session is opened from the inbox. */
-export const needsDecision = (item: InboxItemDTO): boolean => ["plan", "review", "merge_failed", "proposed_checks"].includes(item.kind);
+export const needsDecision = (item: InboxItemDTO): boolean => ["review", "merge_failed", "proposed_checks"].includes(item.kind);
 
 /* The id POST /inbox/{id}/{action} takes: an org notice's notice_id, else the agent's. */
 export const actionId = (item: InboxItemDTO) =>
@@ -231,7 +225,7 @@ export const itemKey = (item: InboxItemDTO) => {
 export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
   { key: "questions", label: "Questions", kinds: ["question", "waiting"] },
   { key: "permissions", label: "Permissions", kinds: ["permission"] },
-  { key: "plans", label: "Plans", kinds: ["plan", "plan_offer"] },
+  { key: "plans", label: "Plans", kinds: ["plan_offer"] },
   { key: "reviews", label: "Reviews", kinds: ["review", "merge_failed"] },
   { key: "checks", label: "Checks", kinds: ["proposed_checks"] },
   { key: "docs", label: "Docs", kinds: ["doc", ...REVIEW_KINDS] },

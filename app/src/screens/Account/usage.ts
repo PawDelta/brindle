@@ -58,8 +58,16 @@ export function stateOf(q: ProviderUsage, now: number): UsageState {
   return planWindows(q).some((x) => soon(x.resets_at, now)) ? "soon" : "ok";
 }
 
-/* The window's label on the Account page: "5-hour window", "Fable cap, this week". */
-export const windowLabel = (w: UsageWindow) => (isCap(w) ? `${w.name} cap${w.minutes === 10080 ? ", this week" : ""}` : `${w.name} window`);
+/* quota.window_name/window_short, for model caps whose name includes the short window. */
+const WINDOW_NAMES: Record<number, [string, string]> = { 300: ["5-hour", "5h"], 10080: ["weekly", "wk"], 43200: ["monthly", "mo"] };
+/* The window's label on the Account page: "5-hour window", "Gemini Pro, 5-hour". */
+export function windowLabel(w: UsageWindow): string {
+  if (!isCap(w)) return `${w.name} window`;
+  const [name, short] = WINDOW_NAMES[w.minutes ?? 0] ?? (w.minutes ? [`${w.minutes}-minute`, `${w.minutes}m`] : ["usage", "use"]);
+  const suffix = ` ${short}`;
+  const model = w.name.endsWith(suffix) ? w.name.slice(0, -suffix.length) : w.name;
+  return `${model}, ${name}`;
+}
 /* "Resets 4:40pm", "Resets in 12 min (3:10pm)", or that it isn't known. */
 export const resetLine = (w: UsageWindow, now: number) =>
   w.resets_at == null ? "Reset time unknown" : `Resets ${resets(w.resets_at, now)}${soon(w.resets_at, now) ? ` (${clock(w.resets_at)})` : ""}`;
