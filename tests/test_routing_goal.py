@@ -143,22 +143,19 @@ def offline(db, repo, monkeypatch):
     plugins.reset()
 
 
-@pytest.mark.parametrize("goal,picked", [
-    (None, "developer-sonnet"),
-    ("cheap", "developer-codex"),
-    pytest.param("fast", "developer-sonnet",
-                 marks=pytest.mark.variant("the opposite trade-off keeps the quick candidate first")),
-])
-def test_without_hosted_learning_the_goal_orders_the_tier_by_the_priors(db, repo, offline, goal, picked):
-    kw = {"goal": goal} if goal else {}
-    assert autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium", **kw)[0] == picked
-
-
 def _medium(preview: dict) -> dict:
     return {r["kind"]: r for r in preview["roles"]}["medium"]
 
 
+def _dispatch(db, repo, **kw) -> str:
+    return autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium", **kw)[0]
+
+
 def test_the_preview_reflects_this_repos_routing_and_goal(db, repo, offline):
+    # Without hosted learning the goal orders the tier by the priors; the
+    # opposite trade-off keeps the quick candidate first.
+    assert (_dispatch(db, repo), _dispatch(db, repo, goal="cheap"), _dispatch(db, repo, goal="fast")) == (
+        "developer-sonnet", "developer-codex", "developer-sonnet")
     cheap = routing_goal.preview(CHEAP, str(repo), db)
     fast = routing_goal.preview(routing_goal.PRESETS["fast"], str(repo), db)
     assert (_medium(cheap)["profile"], _medium(cheap)["previous"]) == ("developer-codex", "developer-sonnet")
@@ -169,8 +166,7 @@ def test_the_preview_reflects_this_repos_routing_and_goal(db, repo, offline):
     # A candidate routing can't run is never proposed: the preview's pick is dispatch's.
     config.set_repo(str(repo), "exclude_providers", ["codex"])
     proposed = _medium(routing_goal.preview(CHEAP, str(repo), db))["profile"]
-    assert proposed == "developer-sonnet" == autopilot.choose_profile(
-        db, "boss", str(repo), None, "task", None, "medium", goal="cheap")[0]
+    assert proposed == "developer-sonnet" == _dispatch(db, repo, goal="cheap")
 
 
 @pytest.mark.parametrize("weights,signals,sent", [

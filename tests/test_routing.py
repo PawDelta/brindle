@@ -137,7 +137,8 @@ def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, ex
 
 
 @pytest.mark.parametrize("unavailable,expected", [
-    (None, "reviewer-sonnet-high"),
+    pytest.param(None, "reviewer-sonnet-high", marks=pytest.mark.variant(
+        "with nothing blocking it, the default reviewer is the Sonnet high profile, not the baseline")),
     pytest.param("policy", "reviewer", marks=pytest.mark.variant(
         "an org refusal of the default reviewer must use the available baseline fallback")),
     pytest.param("codex", "reviewer", marks=pytest.mark.variant(

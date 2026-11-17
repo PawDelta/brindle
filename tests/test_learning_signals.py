@@ -51,6 +51,7 @@ def add(db, ws, agent_id, mode, status="processing", status_since=None):
     return a
 
 
+@pytest.mark.variant("an idle worker with no report is a stalled failure, not a plain removal")
 def test_an_idle_worker_without_a_report_is_recorded_as_a_stalled_failure(db, ws, recorder):
     w = add(db, ws, "w1", "assign", status="idle", status_since=time.time() - 20)
     pipeline.note_removed_unmerged(db, ws, worker=w)
@@ -64,8 +65,10 @@ def test_an_idle_worker_without_a_report_is_recorded_as_a_stalled_failure(db, ws
 
 @pytest.mark.parametrize("branch, failure", [
     ("untouched", "no_commits"),
-    ("committed", None),
-    ("merged_by_git", "no record"),   # level with its base, but its commits are in it
+    pytest.param("committed", None, marks=pytest.mark.variant(
+        "a branch that moved from its recorded start is never claimed as no_commits")),
+    pytest.param("merged_by_git", "no record", marks=pytest.mark.variant(
+        "level with its base because plain git merged it: no failure is recorded")),
 ])
 def test_removal_records_what_the_worktree_and_reviewers_showed_before_teardown(
         db, repo, recorder, monkeypatch, branch, failure):
