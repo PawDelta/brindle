@@ -13,8 +13,9 @@ takes back what is finished or has aged out, and nothing else:
   hourly from the sweep, once on the first daemon start after the upgrade
   (``upgrade_sweep``) and on ``brindle clean``. An abandoned one is only
   listed, with its size, until someone cleans it (``clean``: one, or every
-  abandoned one). A worktree with uncommitted changes is never removed by
-  any path, only flagged;
+  abandoned one). A worktree with uncommitted changes is only flagged here;
+  ``brindle.worktree_cleanup`` (also hourly) removes a finished one once
+  nothing is in it, its changes saved as a patch first, its branch kept;
 - ``retain`` keeps the newest ``db_backups`` ``brindle.db.before-*`` copies,
   ages and caps the archive (whole records: a ``<repo>.jsonl`` line with the
   transcripts it names), and rotates brindle's own top-level ``*.log`` files
@@ -933,7 +934,8 @@ def retain(dry_run: bool = False) -> list[Item]:
 
 def now_and_then(db, now: float | None = None) -> None:
     """From the automatic sweep, at most every ``RETAIN_EVERY`` seconds:
-    ``retain`` and ``sweep_merged``. Never raises."""
+    ``retain``, ``sweep_merged`` and the leftover-worktree sweep
+    (``worktree_cleanup``). Never raises."""
     now = time.time() if now is None else now
     marker = config.brindle_home() / _RETAINED
     try:
@@ -945,6 +947,9 @@ def now_and_then(db, now: float | None = None) -> None:
         sweep_merged(db, now)
     except Exception:  # noqa: BLE001
         log.exception("brindle: the hourly disk cleanup failed")
+    from brindle import worktree_cleanup
+
+    worktree_cleanup.sweep(db, now)   # never raises; after a failure above too
 
 
 # -- Spotlight --------------------------------------------------------------------------
