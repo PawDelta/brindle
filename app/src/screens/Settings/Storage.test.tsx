@@ -63,6 +63,47 @@ describe("Storage", () => {
     expect(client.cleanStorage.mock.calls.map(([t]) => t)).toEqual([{ path: "/wt/old-idea" }, { path: "/wt/stale-2" }]);
   });
 
+  it("reads again while the engine is still measuring, then shows its report", async () => {
+    vi.useFakeTimers();
+    try {
+      const nothingYet: StorageReport = { worktrees: [], categories: [], reclaimable: 0, free_bytes: null, low_disk: null, dead_branches: [], measured_at: null, refreshing: true };
+      const client = {
+        storage: vi.fn().mockResolvedValueOnce(nothingYet).mockResolvedValue({ ...REPORT, measured_at: 1_800_000_000, refreshing: false }),
+        cleanStorage: vi.fn(),
+      };
+      render(<Storage client={client} />);
+      await act(async () => {});
+      expect(screen.getByText("Measuring every worktree…")).toBeTruthy();
+      expect(currentReclaimable()).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(screen.getByRole("list", { name: "Disk use by category" })).toBeTruthy();
+      expect(currentReclaimable()).toBe(2 * GB);
+      expect(client.storage).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops reading when the engine's measurement failed, and lets the person ask again", async () => {
+    vi.useFakeTimers();
+    try {
+      const failed: StorageReport = { worktrees: [], categories: [], reclaimable: 0, free_bytes: null, low_disk: null, dead_branches: [], measured_at: null, refreshing: false, error: "OSError: disk gone" };
+      const client = { storage: vi.fn().mockResolvedValue(failed), cleanStorage: vi.fn() };
+      render(<Storage client={client} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(client.storage).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("alert")).toBeTruthy();
+      expect((screen.getByRole("button", { name: "Measure again" }) as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows only the newest read when two land out of order, and keeps the shared figure from it", async () => {
     const reads: Record<string, (r: StorageReport) => void> = {};
     const client = { storage: vi.fn((repo?: string) => new Promise<StorageReport>((resolve) => (reads[repo!] = resolve))), cleanStorage: vi.fn() };

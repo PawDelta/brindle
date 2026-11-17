@@ -653,14 +653,16 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True
     return kinds
 
 
-@_heavy_json
+@_json
 def get_storage(db: DB, request: Request) -> Any:
     """brindle's disk use: every worktree classified merged / abandoned / active
-    with its size and why it must stay (``disk.storage_report``). On the heavy
-    lane: measuring walks every worktree."""
-    from brindle import disk
+    with its size and why it must stay (``disk.storage_report``), as last
+    measured, at once: measuring walks every worktree, so it runs on a thread
+    of its own (``storage_reports``), plus ``measured_at`` and ``refreshing``.
+    ``fresh=1`` measures again now (unless a measurement is under way)."""
+    from brindle.daemon.storage_reports import REPORTS
 
-    return disk.storage_report(db, _repo(request))
+    return REPORTS.get(_repo(request), fresh=request.query_params.get("fresh") in ("1", "true"))
 
 
 @_json
