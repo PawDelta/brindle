@@ -978,7 +978,24 @@ def merge_pull_request(url: str, cwd: str, head: str) -> None:
         raise WorkspaceError("GitHub refused the automatic PR merge. Check the PR's merge requirements.")
 
 
+_pr_patches: dict[tuple[str, str], str | None] = {}
+_pr_no_matches: dict[tuple[str, str], tuple] = {}
+
+
 def _pr_patch(base: str, head: str, cwd: str) -> str | None:
+    # Only successful reads are reusable: missing local objects may arrive later.
+    try:
+        return _pr_patches[base, head]
+    except KeyError:
+        pass
+    patch = _read_pr_patch(base, head, cwd)
+    _pr_patches[base, head] = patch
+    while len(_pr_patches) > 256:
+        _pr_patches.pop(next(iter(_pr_patches), None), None)
+    return patch
+
+
+def _read_pr_patch(base: str, head: str, cwd: str) -> str | None:
     diff = git.run(["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color",
                     "--full-index", "--binary", f"{base}...{head}"], cwd).stdout
     if not diff:
@@ -1050,6 +1067,14 @@ def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
             # gh paginates internally up to --limit. A full result could be
             # truncated, so ask for more before deciding a match is unique.
             limit *= 2
+        # Preserve duplicate candidates as well as order independence: duplicates
+        # can prevent a match from being unique. Scope negative answers to cwd.
+        candidate_key = tuple(sorted(
+            ((pr.get("number"), pr.get("headRefOid"), pr.get("baseRefOid"))
+             for pr in candidates if isinstance(pr, dict)), key=repr))
+        lookup_key = (cwd, sha)
+        if _pr_no_matches.get(lookup_key) == candidate_key:
+            return {}
         matches = []
         identities: dict[tuple[str, str], str | None] = {}
         for pr in candidates:
@@ -1065,7 +1090,12 @@ def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
                     matches.append(pr)
             except git.GitError:
                 return None  # An unreadable candidate prevents proving uniqueness.
-        return matches[0] if len(matches) == 1 else {}
+        if len(matches) == 1:
+            return matches[0]
+        _pr_no_matches[lookup_key] = candidate_key
+        while len(_pr_no_matches) > 256:
+            _pr_no_matches.pop(next(iter(_pr_no_matches), None), None)
+        return {}
     except (OSError, subprocess.SubprocessError, spawn.Busy, ValueError):
         return None
 
