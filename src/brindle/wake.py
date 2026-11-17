@@ -93,9 +93,11 @@ def enabled(agent: Agent) -> bool:
 
 def silent(agent: Agent) -> bool:
     """Whether brindle must never type into ``agent``'s pane: a person's
-    chat (a supervisor) that runs the waiter. Its mail reaches it only
-    through a waiter, one a poke starts (``poke``) or the next hook event's."""
-    return agent.mode == "interactive" and enabled(agent)
+    Claude Code chat (a supervisor), whatever its session runs or has
+    registered so far. Its mail reaches it through a waiter, one a poke starts
+    (``poke``) or the next hook event's; a session with no waiter hook at all
+    (launched by a much older brindle) through Claude Code's inbox."""
+    return applies_poke(agent.provider, agent.mode, bool(agent.headless))
 
 
 # A poke: brindle writes a file that the session watches (its SessionStart
@@ -119,7 +121,8 @@ def arm_poke(agent_id: str) -> None:
 def pokeable(agent: Agent) -> bool:
     """Whether ``agent``'s session was launched with the FileChanged waiter
     hook (one launched by an older brindle wasn't: its mail waits for its
-    next Stop or SessionStart instead)."""
+    next Stop or SessionStart instead). Its launch made the poke file, so
+    this holds before its first waiter has registered too."""
     return silent(agent) and poke_path(agent.id).exists()
 
 

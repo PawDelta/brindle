@@ -17,6 +17,7 @@ from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, LaunchContext
 
 REAL_PULLS = agents.pulls_messages  # conftest patches it off for the other tests
+REAL_SILENT = wake.silent            # likewise
 
 
 @pytest.fixture
@@ -28,6 +29,7 @@ def boss(db, repo, monkeypatch):
                        "@1", None, time.time()))
     monkeypatch.setattr(agents, "is_alive", lambda a, *_: True)
     monkeypatch.setattr(agents, "pulls_messages", REAL_PULLS)
+    monkeypatch.setattr(wake, "silent", REAL_SILENT)
     return ws
 
 
@@ -317,5 +319,7 @@ def test_a_stopped_pane_delivery_doesnt_wedge_a_live_waiter(db, boss, monkeypatc
 
     assert agents._stop_decision(db, db.get_agent("boss"), {}, via_inbox=True, waiter=True) is None
     assert db.get_agent("boss").status == "idle"   # the sweep's flush needs it idle
-    assert agents.flush(db, "boss") is True and pasted == ["typed"]
-    assert "the answer" in wake.take(db, db.get_agent("boss"))[0]
+    # Retired without a key typed into the person's chat: both go to the waiter.
+    assert agents.flush(db, "boss") is False and pasted == []
+    text = wake.take(db, db.get_agent("boss"))[0]
+    assert "typed" in text and "the answer" in text

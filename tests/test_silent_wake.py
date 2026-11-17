@@ -13,6 +13,7 @@ from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, LaunchContext
 
 REAL_PULLS = agents.pulls_messages  # conftest patches it off for the other tests
+REAL_SILENT = wake.silent            # likewise
 
 
 @pytest.fixture
@@ -24,20 +25,27 @@ def boss(db, repo, monkeypatch):
                        "@1", None, time.time()))
     monkeypatch.setattr(agents, "is_alive", lambda a, *_: True)
     monkeypatch.setattr(agents, "pulls_messages", REAL_PULLS)
+    monkeypatch.setattr(wake, "silent", REAL_SILENT)
     monkeypatch.setattr(agents, "reconcile", lambda db, a, *k: a)   # no screen to read
     monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
     monkeypatch.setattr(agents, "_pane_input", lambda a: None)
+    monkeypatch.setattr(agents, "_partial_composer", lambda a, state, stage: True)
     pasted = []
     monkeypatch.setattr(agents.tmux, "paste", lambda target, body, **k: pasted.append(body))
-    # Its waiter registered once (the session runs it) and has since gone:
-    # a turn ended by Esc, or one past its limit.
-    wake._register("boss")
-    wake._path("boss").write_text("0 gone\n")
     return pasted
 
 
-@pytest.mark.parametrize("armed", [True, False], ids=["pokeable", "older-launch"])
-def test_idle_supervisor_without_a_waiter_is_never_typed_into(db, boss, armed):
+def _waiter_gone():
+    """Its waiter registered once and has since gone: a turn ended by Esc, or one past its limit."""
+    wake._register("boss")
+    wake._path("boss").write_text("0 gone\n")
+
+
+@pytest.mark.parametrize("registered,armed", [(True, True), (True, False), (False, False)],
+                         ids=["pokeable", "older-launch", "no-waiter-hook"])
+def test_idle_supervisor_without_a_waiter_is_never_typed_into(db, boss, registered, armed):
+    if registered:
+        _waiter_gone()
     if armed:
         wake.arm_poke("boss")
         before = wake.poke_path("boss").read_text()
@@ -61,6 +69,32 @@ def test_a_supervisors_session_watches_its_poke_file(db, boss):
     argv = ClaudeCode().command(LaunchContext("a1", load_profile("developer"), None, mode="assign"))
     assert "FileChanged" not in json.loads(argv[argv.index("--settings") + 1])["hooks"]
 
+    # A fresh session: its SessionStart hook can run before its first waiter registers.
     wake.arm_poke("boss")
     out = agents.handle_hook(db, "boss", "session-start", {})
     assert out["hookSpecificOutput"]["watchPaths"] == [str(wake.poke_path("boss"))]
+
+
+@pytest.mark.parametrize("settled", [True, False], ids=["composer-empty", "composer-holds-it"])
+def test_a_delivery_an_older_brindle_began_typing_is_not_finished_by_typing(db, boss, monkeypatch, settled):
+    monkeypatch.setattr(agents, "_composer_settled", lambda a: settled)
+    _waiter_gone()
+    wake.arm_poke("boss")
+    before = wake.poke_path("boss").read_text()
+    mid = db.enqueue("boss", "typed", None)
+    db.record_pane_delivery(mid, "boss", json.dumps(
+        {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")), "provider": "claude",
+         "body": "typed", "lead": "brindle delivered this message:", "stage": "lead", "stopped": True}))
+    db.enqueue("boss", "the answer", None)
+
+    assert agents.flush(db, "boss") is False and boss == []
+    if settled:
+        # Nothing of it is left in the composer: back in the queue, and the chat poked.
+        assert db.mark("boss", "pane-delivery") is None
+        assert wake.poke_path("boss").read_text() != before
+        text, _ = wake.take(db, db.get_agent("boss"))
+        assert "typed" in text and "the answer" in text
+    else:
+        # The person's to send (its prompt acknowledges it) or clear: kept, not lost.
+        assert db.mark("boss", "pane-delivery") is not None
+        assert not db.message_delivered(mid) and db.pending_count("boss") == 2
