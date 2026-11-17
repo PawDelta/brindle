@@ -33,7 +33,7 @@ usable, ``failure`` ("no_report", "idle" or "no_commits"). These newer fields
 more; an older one gets exactly the earlier payload. To such a server a
 suggest also carries the routing goal's ``weights`` ({cost, speed,
 first_try}, after the org clamp; see :mod:`brindle.routing_goal`) when one is
-set, and nothing when none is. Never task text,
+set, else ``BALANCED_WEIGHTS``. Never task text,
 file paths, repo paths, branch names, provider or model.
 
 ``repo_key`` and ``agent_ref`` are HMACs under the active org's learning key
@@ -90,6 +90,7 @@ SIGNAL_KEYS = frozenset({"parts", "files_declared", "cost_usd", "review_cost_usd
                          "idle_seconds", "failure", "stalled"})
 SIGNALS_VERSION = 1
 GOAL_KEYS = ("cost", "speed", "first_try")     # suggest's ``weights``, in TaskInfo.weights' order
+BALANCED_WEIGHTS = (0.45, 0.25, 0.30)          # what learning aims for when no routing goal is set
 FAILURES = ("no_report", "idle", "no_commits")
 MAX_DOLLARS = 10_000.0
 MAX_SECONDS = 7 * 86400
@@ -262,7 +263,7 @@ def suggest_payload(key: OrgKey, identity: str, task: TaskInfo, candidates: list
     """The exact body of ``POST /learning/suggest``, or None to send nothing.
     ``default`` is the profile brindle would use without learning (the first
     candidate when not given). The ticket-size counts and the routing goal's
-    ``weights`` (only when one is set) go only with ``signals``."""
+    ``weights`` (``BALANCED_WEIGHTS`` when none is set) go only with ``signals``."""
     if not candidates or len(candidates) > MAX_CANDIDATES or len(set(candidates)) != len(candidates):
         return None
     if not all(isinstance(c, str) and PROFILE_RE.match(c) for c in candidates):
@@ -275,8 +276,8 @@ def suggest_payload(key: OrgKey, identity: str, task: TaskInfo, candidates: list
             "features": one_hot(task), "candidates": list(candidates), "default": default}
     if signals:
         body.update(ticket_size(task))
-        if task.weights is not None:
-            body["weights"] = dict(zip(GOAL_KEYS, (round(float(w), 4) for w in task.weights)))
+        weights = BALANCED_WEIGHTS if task.weights is None else task.weights
+        body["weights"] = dict(zip(GOAL_KEYS, (round(float(w), 4) for w in weights)))
     if cost is not None:
         costs = {}
         for c in candidates:
