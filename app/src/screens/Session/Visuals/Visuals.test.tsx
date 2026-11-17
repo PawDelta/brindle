@@ -448,6 +448,26 @@ describe("visuals", () => {
     view.unmount();
   });
 
+  it("opens the next visual at once, while the one before it is still closing", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    // The first visual's close never finishes: only its own reopening may wait for it.
+    native.invoke.mockReset().mockImplementation((command, args) => command === "visual_close"
+      ? new Promise<void>(() => {})
+      : Promise.resolve(command === "visual_open" ? `visual:${(args as { id: string }).id}:r2` : undefined));
+    const frame = (id: string) => <VisualFrame source={{ kind: "session", id, rev: 2 }} title={id} onMessage={() => {}} />;
+    const view = render(frame("v_first"));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.objectContaining({ id: "v_first" })));
+    view.rerender(frame("v_second"));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_first:r2" }));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.objectContaining({ id: "v_second" })));
+    view.rerender(frame("v_first"));
+    await act(async () => {});
+    expect(native.invoke.mock.calls.filter(([command, args]) => command === "visual_open" && (args as { id: string }).id === "v_first")).toHaveLength(1);
+    view.unmount();
+  });
+
   it("an open native visual steps aside under the reconnect overlay and comes back, the same page, once the engine answers", async () => {
     native.enabled = true;
     vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));

@@ -12,8 +12,15 @@ type Delivery = {
 };
 
 // Labels belong to a revision. Finish closing its previous reader before opening it again,
-// including React's effect replay and Back while a native open is still pending.
-let lifecycle: Promise<unknown> = Promise.resolve();
+// including React's effect replay and Back while a native open is still pending. Only the same
+// label waits: another visual opens at once, while the one before it is still closing.
+const lifecycles = new Map<string, Promise<unknown>>();
+const lifecycleOf = (label: string): Promise<unknown> => lifecycles.get(label) ?? Promise.resolve();
+function extendLifecycle(label: string, step: Promise<unknown>) {
+  const settled = step.catch(() => {});
+  lifecycles.set(label, settled);
+  void settled.then(() => { if (lifecycles.get(label) === settled) lifecycles.delete(label); });
+}
 
 function themeMessage() {
   const style = getComputedStyle(document.documentElement);
@@ -53,11 +60,11 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     // with unmount cleanup and serialize the next reader behind it.
     function close() {
       if (!closing) {
-        closing = lifecycle.then(async () => {
+        closing = lifecycleOf(expected).then(async () => {
           const label = await opened.catch(() => null);
           if (label) await invoke("visual_close", { label });
         });
-        lifecycle = closing.catch(() => {});
+        extendLifecycle(expected, closing);
       }
       return closing;
     }
@@ -90,12 +97,12 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
       listen<Delivery>("visual:failed", ({ payload }) => { if (matches(payload)) fail(payload.why); }),
     ];
     const registered = Promise.all(listeners);
-    const opened = lifecycle.then(async () => {
+    const opened = lifecycleOf(expected).then(async () => {
       await registered;
       if (disposed) return null;
       return invoke<string>("visual_open", { id, rev, bounds: bounds() });
     });
-    lifecycle = opened.catch(() => {});
+    extendLifecycle(expected, opened);
     let sends: Promise<unknown> = opened;
     const send = (command: string, args: Record<string, unknown> = {}) => {
       sends = sends.then(() => opened).then((label) => {
