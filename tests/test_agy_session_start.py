@@ -59,3 +59,51 @@ def test_new_agy_session_gets_its_warmup_when_a_viewer_just_attached(db, repo, m
         assert pasted == [] and db.pending_count("g1") == 2
     else:
         assert pasted == [warmup] and db.pending_count("g1") == 1   # the task follows the warm-up's turn
+
+
+def test_new_agy_session_gets_its_warmup_when_agy_draws_the_lead_late(db, repo, monkeypatch):
+    """agy draws a burst of typed keys a moment after tmux sends them: the
+    screen read right after brindle types its lead still shows the empty
+    composer. That once stopped the delivery with the lead stranded in the
+    composer, where every later flush took it for the person's draft."""
+    ws = workspaces.adopt_root(db, str(repo))
+    db.add_agent(Agent("g1", ws.id, "supervisor", "antigravity", None, "interactive", "starting", "%9",
+                       None, time.time()))
+    warmup = antigravity.warmup("You are a supervisor.")
+    db.enqueue("g1", warmup, None)
+    db.enqueue("g1", "THE TASK", None)
+    pane = {"composer": "", "undrawn": "", "buffer": ""}
+    submitted = []
+
+    def screen():
+        shown = pane["composer"] or "Accept-edits mode: file edits auto-approved (shift+tab to cycle)"
+        footer = "" if pane["composer"] else "? for shortcuts"
+        return f"{'─' * 60}\n> {shown}\n{'─' * 60}\n{footer}   accept-edits · Gemini 4 Carbon · medium\n"
+
+    def tmux_call(*args, input=None, authorize=None, **k):   # one fake agy pane, %9
+        if authorize is not None:
+            authorize()
+        out = ""
+        if args[0] == "capture-pane":
+            out = screen()
+            pane["composer"] += pane["undrawn"]   # typed keys show from the next read on
+            pane["undrawn"] = ""
+        elif args[0] == "load-buffer":
+            pane["buffer"] = input
+        elif args[0] == "send-keys" and "-l" in args:
+            pane["undrawn"] += args[-1]
+        elif args[0] == "paste-buffer":
+            pane["composer"] += pane["undrawn"] + pane["buffer"]
+            pane["undrawn"] = ""
+        elif args[0] == "send-keys" and args[-1] == "Enter":
+            submitted.append(pane["composer"])
+            pane["composer"] = ""
+        return SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(tmux, "pane_input", _REAL_PANE_INPUT)
+    monkeypatch.setattr(tmux, "_tmux", tmux_call)
+    lead = agents.message_lead(db, db.get_agent("g1"), None)
+
+    agents.ready(db, "g1")   # after_launch saw agy's input box
+
+    assert submitted == [f"{lead} {warmup}"] and db.pending_count("g1") == 1
