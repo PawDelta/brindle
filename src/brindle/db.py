@@ -2110,6 +2110,18 @@ class DB:
             rows = self.conn.execute("SELECT * FROM workspaces ORDER BY created_at")
         return [_load(Workspace, r) for r in rows]
 
+    def repo_activity(self) -> dict[str, tuple[float, bool]]:
+        """Every repo with a workspace: when it was last used (its newest
+        workspace or agent) and whether a session chat there is running by
+        the DB's say (an interactive agent not paused, done, failed or
+        dismissed). One query, for a list that must answer at once."""
+        rows = self.conn.execute(
+            "SELECT w.repo_root, MAX(MAX(w.created_at), COALESCE(MAX(a.created_at), 0)),"
+            " MAX(CASE WHEN a.mode='interactive' AND a.status NOT IN ('paused','done','failed')"
+            "          AND a.dismissed_at IS NULL THEN 1 ELSE 0 END)"
+            " FROM workspaces w LEFT JOIN agents a ON a.workspace_id = w.id GROUP BY w.repo_root")
+        return {root: (float(used or 0), bool(live)) for root, used, live in rows}
+
     def workspace_by_path(self, path: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE path=?", (path,)).fetchone()
         return _load(Workspace, row) if row else None

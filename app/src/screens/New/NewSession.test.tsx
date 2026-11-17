@@ -452,6 +452,19 @@ describe("NewSession", () => {
     expect(localStorage.getItem("brindle.supervisorCli")).toBe("codex");
   });
 
+  it("asks for the usable CLIs again when the engine says its answer changed, keeping the list meanwhile", async () => {
+    localStorage.clear();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root], providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1", signed_in: false } }) });
+    setup(daemon);
+    await screen.findByRole("button", { name: "Supervisor CLI: Claude Code" });
+    // Signed in to Codex meanwhile: the engine's re-check finds it and says so.
+    daemon.data.providers.find((p) => p.provider === "codex")!.signed_in = true;
+    act(() => void daemon.publish("providers.usable", { repo_root: REPO }));
+    const cli = await screen.findByRole("button", { name: /^Supervisor CLI:/ });
+    fireEvent.click(cli);
+    await waitFor(() => expect(within(screen.getByRole("menu", { name: "Supervisor CLI" })).getAllByRole("menuitemradio")).toHaveLength(2));
+  });
+
   it("won't start on an earlier answer: a repo's usable CLIs are asked again each time it is selected", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [], workspaces: [root] });
     const fetch = daemon.fetch;

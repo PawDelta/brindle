@@ -236,7 +236,7 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
         db.add_agent(Agent(f"wk{n}", f"w-{n}", "developer", "claude", "sup", "assign", "idle", f"%{n + 1}",
                            None, time.time()))
     stopped = []
-    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: {})
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: tmux.PaneSnapshot(None))
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id not in stopped)
     monkeypatch.setattr(agents, "owns_pane", lambda *a, **k: True)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: stopped.append(a.id))
@@ -397,6 +397,7 @@ def test_the_demo_runs_in_a_practice_repo_on_the_cli_signed_in(db, world, brindl
     assert demo_launches == [(reply["repo"], "codex")]
     # The flag /repos sends (the app hides it from New session's projects); a lookalike elsewhere is no demo.
     look = str(brindle_home / "textkit-1")
+    (brindle_home / "textkit-1" / ".git").mkdir(parents=True)     # /repos lists only repos still on disk
     db.add_workspace(Workspace("look/root", look, "root", "main", "main", "main", look, None, "brindle-look", time.time()))
     flagged = {r["repo_root"]: r["demo"] for r in _send("GET", "/v1/repos")[1]}
     assert flagged[reply["repo"]] is True and flagged[look] is False
