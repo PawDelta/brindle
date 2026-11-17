@@ -62,7 +62,10 @@ def agy(db, repo, monkeypatch):
     return pane
 
 
-@pytest.mark.parametrize("typed", [False, True])
+@pytest.mark.parametrize("typed", [
+    pytest.param(False, marks=pytest.mark.variant("regression: a just-attached viewer counted as the person typing")),
+    pytest.param(True, marks=pytest.mark.variant("real typing must still hold the warmup back")),
+])
 def test_new_agy_session_gets_its_warmup_once_a_just_attached_viewer_is_quiet(db, agy, typed):
     """The app opens a viewer on the new pane as agy becomes ready: tmux
     starts its activity at its creation, the same second a key pressed at once
@@ -89,6 +92,7 @@ def test_new_agy_session_gets_its_warmup_once_a_just_attached_viewer_is_quiet(db
         assert agy["submitted"] == [f"{lead} {agy['warmup']}"] and db.pending_count("g1") == 1
 
 
+@pytest.mark.variant("regression: agy drew the lead after brindle checked, leaving it stuck in the composer")
 def test_new_agy_session_gets_its_warmup_when_agy_draws_the_lead_late(db, agy):
     """agy draws a burst of typed keys a moment after tmux sends them: the
     screen read right after brindle types its lead still shows the empty

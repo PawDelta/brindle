@@ -8,7 +8,7 @@ import time
 import pytest
 
 from brindle import agents, autopilot, doctor, learning, mcp_server, plugins, quota, workspaces
-from brindle.config import load_repo_config, user_config_path
+from brindle.config import RepoConfig, load_repo_config, user_config_path
 from brindle.db import Agent
 from test_merge_order import fake_spawn
 
@@ -95,20 +95,78 @@ def test_invalid_weight_is_refused(db, repo, boss):
         choose(db, repo, weight="enormous")
 
 
-def test_native_down_is_skipped(db, repo, boss, monkeypatch):
+@pytest.mark.parametrize("weight,candidates,expected", [
+    ("light", ["developer-local", "developer"], "developer"),
+    pytest.param("medium", ["developer-codex", "developer-heavy"], "developer-codex",
+                 marks=pytest.mark.variant("changing the tier preference ranking changes the routed worker")),
+    pytest.param("light", None, "developer-codex",
+                 marks=pytest.mark.variant("light tasks prefer Sol over the available Claude workers")),
+])
+def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch, weight, candidates, expected):
     monkeypatch.setattr(quota, "headroom",
                         lambda provider, cfg=None, repo_root=None: 0.0 if provider == "native" else 100.0)
-    config(repo, routing={"light": ["developer-local", "developer"]})
+    if weight == "light" and candidates:
+        config(repo, routing={weight: candidates})
     why = []
-    assert choose(db, repo, weight="light", why=why)[0] == "developer"
-    assert "local model server not answering" in why[0]
+    assert choose(db, repo, weight=weight, why=why)[0] == expected
+    if candidates and "developer-local" in candidates:
+        assert "local model server not answering" in why[0]
+    if weight == "medium":
+        from brindle import worker_models
+
+        ranked = list(worker_models.TIER_PREFERENCES[weight])
+        first, second = (ranked.index(name) for name in candidates)
+        ranked[first], ranked[second] = ranked[second], ranked[first]
+        monkeypatch.setitem(worker_models.TIER_PREFERENCES, weight, tuple(ranked))
+        assert choose(db, repo, weight=weight)[0] == "developer-heavy"
+
+
+@pytest.mark.parametrize("weight,blocked,expected", [
+    ("light", ["developer-codex"], "developer-light"),
+    pytest.param("light", ["developer-codex", "developer-light"], "developer-sonnet",
+                 marks=pytest.mark.variant("Sonnet takes light work when both Sol and Haiku cannot run")),
+    pytest.param("medium", ["developer-codex"], "developer-sonnet",
+                 marks=pytest.mark.variant("medium work falls back to Sonnet when Sol cannot run")),
+])
+@pytest.mark.variant("availability changes must advance to the next benchmark-ranked worker")
+def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, expected):
+    unavailable = autopilot._unavailable
+    monkeypatch.setattr(autopilot, "_unavailable",
+                        lambda name, *args: "unavailable" if name in blocked else unavailable(name, *args))
+    assert choose(db, repo, weight=weight)[0] == expected
+
+
+@pytest.mark.parametrize("unavailable,expected", [
+    pytest.param(None, "reviewer-sonnet-high", marks=pytest.mark.variant(
+        "with nothing blocking it, the default reviewer is the Sonnet high profile, not the baseline")),
+    pytest.param("policy", "reviewer", marks=pytest.mark.variant(
+        "an org refusal of the default reviewer must use the available baseline fallback")),
+    pytest.param("codex", "reviewer", marks=pytest.mark.variant(
+        "a default profile overridden to signed-out Codex must use the available baseline fallback")),
+])
+def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expected):
+    from brindle import policy, providers
+
+    db.add_agent(Agent("writer", boss.id, "developer-sonnet", "claude", None,
+                       "assign", "done", "@0", "done", time.time()))
+    monkeypatch.setattr(policy, "check_assign", lambda cfg, root, name, *args:
+                        policy.Decision(allowed=not (unavailable == "policy" and name == "reviewer-sonnet-high")))
+    if unavailable == "codex":
+        path = repo / ".brindle" / "agents" / "reviewer-sonnet-high.md"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("---\nextends: reviewer\nprovider: codex\n---\n")
+        monkeypatch.setattr(providers, "signed_out", lambda provider, env=None:
+                            "not signed in" if provider == "codex" else None)
+    chosen, note = agents._review_choice(db, boss, None, RepoConfig(review_sizing=False))
+    assert chosen == expected
+    assert (note is not None) == (unavailable is not None)
 
 
 @pytest.mark.variant("nondefault learner choice: weighted routing must select the eligible profile chosen by the learner")
 def test_learning_plugin_reorders_the_remaining_candidates(db, repo, boss, monkeypatch):
-    install(monkeypatch, Picker(prefer="developer-codex"))
+    install(monkeypatch, Picker(prefer="developer-sonnet"))
     config(repo, learning="cloud")
-    assert choose(db, repo, weight="medium") == ("developer-codex", True)
+    assert choose(db, repo, weight="medium") == ("developer-sonnet", True)
 
 
 def test_all_out_falls_back_to_the_default_agent_and_says_why(db, repo, boss, monkeypatch):

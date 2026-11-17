@@ -20,7 +20,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from brindle import agents, autopilot, coordinator, cost_estimate, git, history, kb, knowledge, mcp_stdio, open_items, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
+from brindle import agents, autopilot, coordinator, cost_estimate, git, history, kb, knowledge, mcp_stdio, open_items, pipeline, policy, quota, repos, routing_goal, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config, normalize_weight
 from brindle.db import DB, Agent, Task, Workspace, migrated_by_newer, migration_incompatibility
@@ -924,6 +924,7 @@ async def handoff(
     files: list[str] | None = None, depends_on: list[str] | None = None,
     plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
     dry_run: bool = False, milestone: int | str | None = None, plan_worker: str | None = None,
+    goal: str | dict | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
 
@@ -982,6 +983,11 @@ async def handoff(
     plan_first: the worker must first send a plan with submit_plan and wait
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
+
+    goal: what routing aims for on this task alone, over the session's and
+    the repo's: "cheap", "fast", "first_try" or "balanced", or weights
+    {"cost", "speed", "first_try"} (each 0-1), e.g. "first_try" for a risky
+    migration. An org policy can floor or lock it.
     """
     def run(req: _Request):
         db = DB()
@@ -1000,9 +1006,12 @@ async def handoff(
         decision: dict = {}
         try:
             profile, _ = autopilot.choose_profile(
-                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision)
+                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision,
+                **({"goal": goal} if goal is not None else {}))
         except autopilot.AutopilotError as e:
             return str(e)
+        except routing_goal.GoalError as e:
+            return f"Not started: {e}"
         refused = _policy_refusal(db, caller, ws, profile, task, "handoff", files, weight, branch)
         if refused:
             return refused
@@ -1077,7 +1086,7 @@ async def assign(
     depends_on: list[str] | None = None, plan_first: bool | None = None,
     weight: str | None = None, repo: str | None = None, dry_run: bool = False,
     milestone: int | str | None = None, plan_worker: str | None = None,
-    design_heavy: bool = False, fast_path: bool = False,
+    design_heavy: bool = False, fast_path: bool = False, goal: str | dict | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
 
@@ -1137,6 +1146,11 @@ async def assign(
     plan_first: the worker must first send a plan with submit_plan and wait
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
+
+    goal: what routing aims for on this task alone, over the session's and
+    the repo's: "cheap", "fast", "first_try" or "balanced", or weights
+    {"cost", "speed", "first_try"} (each 0-1), e.g. "first_try" for a risky
+    migration. An org policy can floor or lock it.
     """
     def run(req: _Request):
         db = DB()
@@ -1172,9 +1186,12 @@ async def assign(
             profile, learned = autopilot.choose_profile(
                 db, caller.id, ws.repo_root, agent_profile, task, files, route_weight, why, decision,
                 **({"design_heavy": True} if design_heavy else {}),
-                **({"max_tier": FAST_PATH_WEIGHTS[-1]} if fast else {}))
+                **({"max_tier": FAST_PATH_WEIGHTS[-1]} if fast else {}),
+                **({"goal": goal} if goal is not None else {}))
         except autopilot.AutopilotError as e:
             return str(e)
+        except routing_goal.GoalError as e:
+            return f"Not started: {e}"
         refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, route_weight, branch)
         if refused:
             return refused
@@ -1827,7 +1844,10 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
                 return (f"Not removed: {ws.id} shares its worktree {ws.path} with {other.id}, "
                         "which has a live worker; removing it would delete that worker's "
                         "checkout. Pass force=true to remove it anyway.")
+    from brindle import learning
+
     unmerged = False
+    ahead = None
     if ws.kind == "worktree" and ws.base_branch and os.path.isdir(ws.path):
         try:
             _behind, ahead = git.ahead_behind(ws.path, ws.base_branch)
@@ -1836,15 +1856,25 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
             pass
     worker = agents.workspace_worker(db, ws)
     abandoned = bool(worker and worker.result is None and not db.merged_sha(ws.id))
+    # reported, yet its branch never moved from where it started (not merely
+    # level with its base, which a plain-git merge also leaves) and no merge
+    # recorded: it produced nothing, which the learner counts as a failure
+    empty = bool(worker and worker.result is not None and ahead == 0
+                 and not db.merged_sha(ws.id) and not learning.settled(worker.id)
+                 and learning.produced_nothing(worker, ws))
     its_agents = [a.id for a in db.list_agents(ws.id)]
+    if unmerged or abandoned or empty:
+        # the worktree and the reviewers' rows go with the removal
+        learning.capture(db, ws, worker)
     try:
         removed = workspaces.remove(db, ws, force=force, delete_branch=delete_branch)
     except workspaces.WorkspaceError as e:
+        learning.forget_capture(worker)
         return f"Not removed: {e}"
     # Removal can refuse dirty, busy or unwritable checkouts. Only settle
     # dependencies and publish its outcome after it succeeds. The worker's
     # row may already be gone, so use the identity captured above.
-    if unmerged or abandoned:
+    if unmerged or abandoned or empty:
         if unmerged:
             tasks.on_removed_unmerged(db, ws, worker=worker)
         pipeline.note_removed_unmerged(db, ws, actor=caller, worker=worker)

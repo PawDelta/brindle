@@ -4534,11 +4534,11 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     ``cfg.review_profile`` if set, else ``cfg.reviewer``, unless brindle Pro's
     learner picks one of the other built-in reviewers that can run here
     (Codex installed; the local model served) because its evidence says it
-    reviews this kind of work better. brindle never reaches for a different
-    model on its own: a Claude worker reviewed by a Claude reviewer is fine."""
+    reviews this kind of work better. The default is Sonnet at high effort;
+    a Claude worker reviewed by a Claude reviewer is fine."""
     if cfg.review_profile:
         return cfg.review_profile
-    if cfg.reviewer and cfg.reviewer != "reviewer":
+    if cfg.reviewer and cfg.reviewer != "reviewer-sonnet-high":
         return cfg.reviewer
     if db is None or not repo_root or cfg.routing_locked.get("reviewer"):
         return cfg.reviewer
@@ -4656,8 +4656,9 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
     spawning a reviewer doomed to fail in a dead pane, and why any earlier
     candidate was passed over (None when the first could run). ``profile`` asked for by
     name is the only candidate; otherwise the owner's pick, then each of
-    ``cfg.reviewer_fallbacks`` in order: the first that exists, can run on its
-    provider here and that policy allows. Raises ``AgentError`` for the first
+    ``cfg.reviewer_fallbacks`` in order, with ``reviewer`` as a final fallback
+    for the automatic Sonnet-high default: the first that exists, can run on
+    its provider here and that policy allows. Raises ``AgentError`` for the first
     candidate's problem when none can. Sends nothing: a check before dispatch
     uses it so the supervisor hears the reason once."""
     if profile is not None:
@@ -4666,6 +4667,9 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
         worker = workspace_worker(db, ws)
         pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
         candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
+        if pick == "reviewer-sonnet-high" and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
+            if "reviewer" not in candidates:
+                candidates.append("reviewer")
         if cfg.review_sizing and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
             from brindle import review_scope
 

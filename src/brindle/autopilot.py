@@ -886,23 +886,32 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     return None
 
 
-def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
-                     files: list[str] | None,
-                     decision: dict | None = None, gate=None,
-                     ceiling: str | None = None, design_heavy: bool = False) -> tuple[str | None, bool, str]:
-    """(profile, learned, why) for a task of ``weight``; profile is None when
-    every candidate for the tier is out. ``decision`` gets the ``baseline``
-    (the pick without learning), and ``over_budget`` (why each candidate was
-    skipped) when a budget was what ruled every one out, or ``demoted_from``
-    when it moved the task to a cheaper candidate."""
-    from brindle import learning
+def tier_order(cfg: RepoConfig, weight: str) -> list[str]:
+    """``weight``'s candidates in the order routing tries them: the built-in
+    tier ranking for the default lists, the configured order otherwise."""
+    from brindle.worker_models import TIER_PREFERENCES
 
+    order = list(cfg.routing.get(weight, []))
+    if cfg.routing_sources.get(weight) == "DEFAULT_ROUTING" and not cfg.routing_locked.get(weight):
+        preferred = TIER_PREFERENCES.get(weight, ())
+        # Follow the built-in tier ranking; explicit routing keeps its configured order.
+        order = sorted(order, key=lambda name: preferred.index(name) if name in preferred else len(preferred))
+    return order
+
+
+def eligible(cfg: RepoConfig, repo_root: str, weight: str, gate=None, *, ceiling: str | None = None,
+             design_heavy: bool = False) -> tuple[list[str], list[str], list[str], dict[str, str]]:
+    """(order, remaining, skipped, over) for a ``weight`` task: the tier's
+    candidates in routing's order under the ceiling (``ceiling``, else the
+    repo's ``max_weight``), those it can run now, why each other was
+    skipped, and which a budget (``gate``) ruled out. Read-only: routing and
+    the goal preview both judge candidates by it."""
     skipped: list[str] = []
     remaining: list[str] = []
     over: dict[str, str] = {}
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
-    order = cfg.routing.get(weight, [])
+    order = tier_order(cfg, weight)
     if effective_ceiling:
         order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:
@@ -916,6 +925,23 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
                 over[name] = why
         else:
             remaining.append(name)
+    return order, remaining, skipped, over
+
+
+def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
+                     files: list[str] | None,
+                     decision: dict | None = None, gate=None,
+                     ceiling: str | None = None, design_heavy: bool = False,
+                     goal: dict | None = None) -> tuple[str | None, bool, str]:
+    """(profile, learned, why) for a task of ``weight``; profile is None when
+    every candidate for the tier is out. ``decision`` gets the ``baseline``
+    (the pick without learning), and ``over_budget`` (why each candidate was
+    skipped) when a budget was what ruled every one out, or ``demoted_from``
+    when it moved the task to a cheaper candidate."""
+    from brindle import learning, routing_goal
+
+    order, remaining, skipped, over = eligible(cfg, repo_root, weight, gate, ceiling=ceiling,
+                                               design_heavy=design_heavy)
     if over and decision is not None:
         if not remaining:
             decision["over_budget"] = list(over.values())
@@ -928,7 +954,17 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if cfg.routing_locked.get(weight):
         pick, reason = None, None   # the owner pinned this tier: learning never overrides it
     else:
-        options = {"design_heavy": True} if design_heavy else {}
+        if goal is None:
+            goal = routing_goal.for_learner(repo_root)
+        # The goal orders what's left by the shipped priors (§4): the pick
+        # without hosted learning, and the default the learner must beat.
+        ranked = routing_goal.rank(remaining, weight, goal, repo_root)
+        if ranked[0] != remaining[0]:
+            skipped.insert(0, f"the routing goal put it ahead of {remaining[0]}")
+        remaining = ranked
+        options: dict = {"design_heavy": True} if design_heavy else {}
+        if goal is not None:
+            options["goal"] = goal
         pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
                                            weight=weight, default=remaining[0], **options)
     name = pick or remaining[0]
@@ -1067,11 +1103,26 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
     return "medium"
 
 
+def _goal_weights(db: DB, caller_id: str, repo_root: str, goal) -> dict | None:
+    """The routing goal's weights for a delegation by ``caller_id`` when its
+    task or session sets one (they need the session to resolve), else None:
+    the learner then resolves the person's and the repo's itself, and only
+    when it is asked. Raises GoalError for a malformed task ``goal``."""
+    from brindle import routing_goal
+
+    if goal is not None:
+        routing_goal.normalize(goal)
+    root = root_of(db, caller_id) if caller_id else None
+    if goal is None and not (root and db.session_routing_goal(root)):
+        return None
+    return routing_goal.for_learner(repo_root, db=db, root_id=root, task=goal)
+
+
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
                    task: str | None = None, files: list[str] | None = None,
                    weight: str | None = None, why: list[str] | None = None,
                    decision: dict | None = None, *, design_heavy: bool = False,
-                   max_tier: str | None = None) -> tuple[str, bool]:
+                   max_tier: str | None = None, goal=None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
     ``requested`` if given, else (when no ``weight`` is given) the first
     unverified milestone's profile in the caller's session, else the repo's
@@ -1085,9 +1136,15 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     ``design_heavy`` allows Fable when ``fable_for_design_only`` is enabled;
     it does not change the task's weight. ``max_tier``: a ceiling for this
     delegation alone (a fast-path task's "medium"), applied like the repo's
-    ``max_weight`` to routing, its fallbacks and the final pick; the tighter wins."""
+    ``max_weight`` to routing, its fallbacks and the final pick; the tighter wins.
+    ``goal``: this task's own routing goal (a preset name or weights), over
+    the session's, the repo's and the person's (brindle.routing_goal); the
+    learner is asked with the one in force."""
     cfg = load_repo_config(repo_root)
-    options = {"design_heavy": True} if design_heavy else {}
+    options: dict = {"design_heavy": True} if design_heavy else {}
+    weights = _goal_weights(db, caller_id, repo_root, goal)
+    if weights is not None:
+        options["goal"] = weights
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
     if max_tier in weight_order and (ceiling is None or weight_order[max_tier] < weight_order[ceiling]):

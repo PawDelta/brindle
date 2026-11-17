@@ -236,15 +236,15 @@ def test_review_dispatch_scopes_docs_then_keeps_risky_rereview_strong(
 @pytest.mark.parametrize("enabled,path,stats,options,expected", [
     pytest.param(True, "src/a.py", "2\t1", {}, "reviewer-light",
                  marks=pytest.mark.variant("small production changes qualify independently of docs-only branches")),
-    pytest.param(True, "src/a.py", "2\t1", {"review_small_max_lines": 2}, "reviewer",
+    pytest.param(True, "src/a.py", "2\t1", {"review_small_max_lines": 2}, "reviewer-sonnet-high",
                  marks=pytest.mark.variant("line-count ceiling prevents downsizing code above the configured limit")),
-    pytest.param(True, "src/a.py", "2\t1", {"review_small_max_files": 0}, "reviewer",
+    pytest.param(True, "src/a.py", "2\t1", {"review_small_max_files": 0}, "reviewer-sonnet-high",
                  marks=pytest.mark.variant("file-count threshold must apply independently of changed-line count")),
     pytest.param(True, "tests/test_a.py", "900\t0", {}, "reviewer-light",
                  marks=pytest.mark.variant("test-only branches qualify beyond the small-code threshold too")),
-    pytest.param(True, "src/sensitive.py", "1\t0", {"review_risky_paths": ["src/sensitive.py"]}, "reviewer",
+    pytest.param(True, "src/sensitive.py", "1\t0", {"review_risky_paths": ["src/sensitive.py"]}, "reviewer-sonnet-high",
                  marks=pytest.mark.variant("custom risky globs must override size eligibility just like built-in auth paths")),
-    (True, "image.png", "-\t-", {}, "reviewer"),
+    (True, "image.png", "-\t-", {}, "reviewer-sonnet-high"),
 ])
 def test_review_size_selection(db, tmp_path, monkeypatch, enabled, path, stats, options, expected):
     ws = SimpleNamespace(id="ws", path=str(tmp_path), repo_root=str(tmp_path), base_branch="main")
@@ -262,7 +262,7 @@ def test_disabled_review_preserves_prompt_and_explicit_profile(db, repo, monkeyp
         disabled.setattr(review_scope, "small_branch", lambda *a: pytest.fail("sizing was not requested"))
         disabled.setattr(review_scope, "context_pack", lambda *a: pytest.fail("pack was not requested"))
         reviewer = agents.request_review(db, None, ws, cfg=RepoConfig(review_sizing=False, learning="off"))
-        assert reviewer.profile == "reviewer"
+        assert reviewer.profile == "reviewer-sonnet-high"
         assert "Scoped review context pack:" not in reviewer.task
         # Explicit selection also bypasses automatic sizing when the feature is on.
         assert agents._review_choice(db, ws, "reviewer", RepoConfig(review_sizing=True))[0] == "reviewer"

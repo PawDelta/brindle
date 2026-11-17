@@ -304,6 +304,13 @@ CREATE TABLE IF NOT EXISTS session_credentials (
     updated_at REAL NOT NULL,
     PRIMARY KEY (session_id, key)
 );
+-- What routing aims for in one session (brindle.routing_goal): JSON weights
+-- {cost, speed, first_try}, set by the session's chip in the app.
+CREATE TABLE IF NOT EXISTS session_routing_goals (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    weights TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 -- A reviewer agent's verdict on a branch at one commit. A merge gate only
 -- accepts an approval of the commit it is about to merge.
 CREATE TABLE IF NOT EXISTS reviews (
@@ -2314,6 +2321,28 @@ class DB:
                 (session_id, key, value, ts),
             )
         self._enforce_permissions()
+
+    def session_routing_goal(self, root_id: str) -> dict | None:
+        """The weights session ``root_id`` aims routing for, or None (not set there)."""
+        row = self.conn.execute("SELECT weights FROM session_routing_goals WHERE root_id=?",
+                                (root_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            got = json.loads(row["weights"])
+        except ValueError:
+            return None
+        return got if isinstance(got, dict) else None
+
+    def set_session_routing_goal(self, root_id: str, weights: dict | None) -> None:
+        """Set (None: clear) session ``root_id``'s routing goal."""
+        with self.tx() as c:
+            if weights is None:
+                c.execute("DELETE FROM session_routing_goals WHERE root_id=?", (root_id,))
+            else:
+                c.execute("INSERT INTO session_routing_goals (root_id, weights, updated_at) VALUES (?, ?, ?) "
+                          "ON CONFLICT(root_id) DO UPDATE SET weights=excluded.weights, "
+                          "updated_at=excluded.updated_at", (root_id, json.dumps(weights), time.time()))
 
     def get_session_credentials(self, session_id: str) -> dict[str, str]:
         rows = self.conn.execute(
