@@ -2518,25 +2518,29 @@ def usage_note(u: dict) -> str:
     return f"Claude usage at {u['used']:.0f}% of the {window} limit{resets}"
 
 
-def limit_reached(db: DB, agent: Agent) -> None:
-    """A turn failed on its provider's usage limit: stop pushing until the
-    user is back. Only Claude's window is tracked (see ``usage``), so only a
-    Claude limit, with a reset time known, stops that provider's workers and
-    resumes on its own; any other provider's just blocks and names it."""
+def limit_reached(db: DB, agent: Agent, until: float | None = None) -> str | None:
+    """A turn failed on its provider's usage limit (provider_health's
+    ``limited``, lifting at ``until`` where known): stop pushing until it
+    lifts. Only Claude's window is tracked (see ``usage``), so only a Claude
+    limit with a reset time stops that provider's workers and resumes on its
+    own; any other provider's just blocks and names it. Returns what
+    autopilot does next, or None outside autopilot."""
     ap = db.get_autopilot(root_of(db, agent.id))
     if not ap:
-        return
-    u = usage() if agent.provider == "claude" else None
-    if u and isinstance(u.get("resets_at"), (int, float)):
-        _pause_provider(db, ap.root_id, agent.provider, u["resets_at"],
-                        "Claude's usage limit was reached")
-        return
+        return None
+    if agent.provider == "claude" and isinstance(until, (int, float)):
+        stopped = _pause_provider(db, ap.root_id, agent.provider, until,
+                                  "Claude's usage limit was reached")
+        return (f"autopilot paused {len(stopped)} {agent.provider} worker(s)"
+                + (f" ({', '.join(stopped)})" if stopped else "")
+                + " and resumes them on its own once the limit lifts")
     db.update_autopilot(ap.root_id, state="blocked", nudges=0,
                         note=f"The {agent.provider} provider's usage limit was reached. "
                         "Continue when it resets.")
+    return "autopilot is blocked and waits for the person to continue it once the limit lifts"
 
 
-def _pause_provider(db: DB, root_id: str, provider: str, resets_at: float, why: str) -> None:
+def _pause_provider(db: DB, root_id: str, provider: str, resets_at: float, why: str) -> list[str]:
     from brindle import agents
 
     stopped = [a for a in active_workers(db, root_id)
@@ -2549,6 +2553,7 @@ def _pause_provider(db: DB, root_id: str, provider: str, resets_at: float, why: 
     db.update_autopilot(root_id, state="usage_paused", usage_resets_at=float(resets_at),
                         usage_paused_ids=json.dumps([a.id for a in stopped]),
                         note=note + ".", nudges=0)
+    return [a.id for a in stopped]
 
 
 def over_limit(db: DB, root_id: str, cfg: RepoConfig) -> bool:

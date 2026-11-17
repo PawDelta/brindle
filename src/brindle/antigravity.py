@@ -364,10 +364,13 @@ def end_turn(db, agent, base: dict, error: str, provider: str = "antigravity") -
                            {**base, "error_type": error_type, "error": error})
         failed = db.get_agent(agent_id)
         if failed is not None and failed.status != "failed":   # not a sign-in problem
+            from brindle import limit_report
+
             db.update_agent(agent_id, stop_blocked=0)
             if db.pending_count(agent_id):
                 _flush_soon(agent_id)
-            _tell_parent_stopped_on_error(db, failed, error_type)
+            if not limit_report.told(db, failed):   # at its limit: stop-failure told its parent in full
+                _tell_parent_stopped_on_error(db, failed, error_type)
         return
     agents.turn_succeeded(agent)   # before the queued-mail path, which skips the Stop hook
     if db.pending_count(agent_id):

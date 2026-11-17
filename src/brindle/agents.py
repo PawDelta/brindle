@@ -6734,6 +6734,13 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                     f"(invalid or expired credentials): {err_desc}. "
                     "Check API keys or login status."
                 )
+                if agent.mode in FORWARDING_MODES and agent.result is None:
+                    from brindle import limit_report, provider_health
+
+                    msg = limit_report.body(db, agent, provider_health.Health(
+                        provider_health.SIGNED_OUT, None, f"credentials refused: {err_desc}"),
+                        f"the worker is marked failed and won't go on by itself. Sign {agent.provider} "
+                        "in again (`brindle doctor` shows how), then assign the task again")
             else:
                 err_desc = "its model isn't available on this route"
                 msg = (
@@ -6756,14 +6763,17 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)
-            # Overloaded (529): it pauses nothing, and its worker is reported.
-            if is_rate_limit and not overloaded:
-                from brindle import autopilot as pilot
+            from brindle import limit_report
 
-                pilot.limit_reached(db, agent)
+            # Overloaded (529): it pauses nothing, and its worker is reported.
+            stopped = db.get_agent(agent_id)
+            if stopped is not None and not overloaded:
+                limit_report.on_stop_failure(db, stopped, rate_limited=is_rate_limit)
             current = db.get_agent(agent_id)
-            # Not paused for a usage limit; agy's own stop tells its parent itself.
-            if current is not None and current.status == "idle" and current.provider == "claude":
+            # Not paused for a usage limit, reported at its limit or running its
+            # turn again; agy's own stop tells its parent itself.
+            if (current is not None and current.status == "idle" and current.provider == "claude"
+                    and not limit_report.told(db, current)):
                 tell_parent_api_error(db, current, err_fields)
     elif event == "subagent-start":
         # A crash can skip SubagentStop, so this doesn't touch agent.status:

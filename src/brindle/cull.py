@@ -221,6 +221,10 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     from brindle import autopilot
 
     done.extend(autopilot.usage_sweep(db, now))
+    # Turns that stopped on a 429 short of the usage limit: run them again once it lifts.
+    from brindle import limit_report
+
+    done.extend(limit_report.rerun_due(db, now))
 
     # 1b'. Tasks queued for room on the machine whose helper is gone: start them once there is.
     from brindle import tasks
