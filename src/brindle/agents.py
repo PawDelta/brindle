@@ -4732,7 +4732,8 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
 
 def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
     """Raises ``AgentError`` if reviewer profile ``name`` doesn't exist, its
-    provider can't run an agent here (with the profile's own environment) or
+    provider can't run an agent here (with the profile's own environment),
+    can't take work now (``provider_health``: limited, refused, ...) or
     policy refuses it."""
     try:
         chosen = load_profile(name, ws.repo_root)
@@ -4748,6 +4749,15 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
             f"reviewer profile {name!r} can't run: {why}. "
             "Fix that, or set review_profile (or pass profile) to a different reviewer"
         )
+    from brindle import provider_health
+
+    from brindle.autopilot import effective_profile_model
+
+    health = provider_health.check(chosen.provider, model=effective_profile_model(chosen, ws.repo_root) or None,
+                                   profile=name,
+                                   repo_root=ws.repo_root, env=chosen.env, installed=False)
+    if not health.ok:
+        raise AgentError(f"reviewer profile {name!r} can't run now: {health.reason}")
     try:
         from brindle import policy as pol
         d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review")
@@ -6395,6 +6405,25 @@ def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
         log.exception("brindle: couldn't read the messages absorbed into %s's turn", agent.id)
 
 
+def _note_health(record, provider: str | None) -> None:
+    """Record a provider-health event from a hook; never fails the hook."""
+    if not provider:
+        return
+    try:
+        record(provider)
+    except OSError:
+        log.exception("brindle: couldn't record provider health")
+
+
+def turn_succeeded(agent: Agent) -> None:
+    """``agent``'s turn ended without a provider error: a run of provider
+    errors (provider_health's erroring) is broken. Every provider's turn-end
+    path calls this, including ones that skip the Stop hook."""
+    from brindle import provider_health
+
+    _note_health(provider_health.record_success, agent.provider)
+
+
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``brindle _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
@@ -6524,6 +6553,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:
             db.set_status(agent_id, "waiting")
+        from brindle import provider_health
+
+        if provider_health.is_notice(text):
+            _note_health(provider_health.record_notice, agent.provider)
     elif event == "pre-tool":
         # A tool call means a turn is running. The hooks can miss its start:
         # a turn that a finished background task or a queued message begins
@@ -6545,6 +6578,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     elif event == "stop":
         from brindle import inbox, tasks
 
+        turn_succeeded(agent)
         # A request left to the person with no PostToolUse by the end of the
         # turn wasn't approved (or we can't tell): drop it, learn nothing.
         # Terminal approval commands must remain usable after this reply.
@@ -6612,6 +6646,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         except OSError:
             pass
         if payload.get("type") == "agent-turn-complete":
+            turn_succeeded(agent)
             inputs = payload.get("input-messages")
             if isinstance(inputs, list):
                 _acknowledge_submitted(db, agent_id, "\n".join(str(m) for m in inputs))
@@ -6676,6 +6711,14 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
         is_model = not is_rate_limit and not is_auth and bool(
             re.search(launch_health.SELECTED_MODEL, err_fields))
+        from brindle import provider_health
+
+        # An overloaded API (529) is the provider's capacity, not this account's usage.
+        overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
+        if is_rate_limit and not overloaded:
+            _note_health(provider_health.record_rate_limited, agent.provider)
+        elif not is_auth and not is_model:
+            _note_health(provider_health.record_error, agent.provider)
         if is_auth or is_model:
             db.update_agent(agent_id, failed_why="auth" if is_auth else "model")
             db.set_status(agent_id, "failed")
@@ -6691,6 +6734,13 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                     f"(invalid or expired credentials): {err_desc}. "
                     "Check API keys or login status."
                 )
+                if agent.mode in FORWARDING_MODES and agent.result is None:
+                    from brindle import limit_report, provider_health
+
+                    msg = limit_report.body(db, agent, provider_health.Health(
+                        provider_health.SIGNED_OUT, None, f"credentials refused: {err_desc}"),
+                        f"the worker is marked failed and won't go on by itself. Sign {agent.provider} "
+                        "in again (`brindle doctor` shows how), then assign the task again")
             else:
                 err_desc = "its model isn't available on this route"
                 msg = (
@@ -6713,16 +6763,19 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)
-            # An overloaded API (529) is the provider's capacity, not this
-            # account's usage: it pauses nothing, and its worker is reported.
-            overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
-            if is_rate_limit and not overloaded:
-                from brindle import autopilot as pilot
+            from brindle import limit_report
 
-                pilot.limit_reached(db, agent)
+            # Overloaded (529): it pauses nothing, and its worker is reported
+            # (in full once the provider is erroring).
+            stopped = db.get_agent(agent_id)
+            if stopped is not None:
+                limit_report.on_stop_failure(db, stopped, rate_limited=is_rate_limit and not overloaded,
+                                             overloaded=overloaded)
             current = db.get_agent(agent_id)
-            # Not paused for a usage limit; agy's own stop tells its parent itself.
-            if current is not None and current.status == "idle" and current.provider == "claude":
+            # Not paused for a usage limit, reported at its limit or running its
+            # turn again; agy's own stop tells its parent itself.
+            if (current is not None and current.status == "idle" and current.provider == "claude"
+                    and not limit_report.told(db, current)):
                 tell_parent_api_error(db, current, err_fields)
     elif event == "subagent-start":
         # A crash can skip SubagentStop, so this doesn't touch agent.status:

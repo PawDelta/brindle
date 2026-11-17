@@ -776,12 +776,17 @@ def test_usage_limit_pauses_autopilot(db, root, monkeypatch):
     assert ap.state == "blocked" and "93%" in ap.note
 
 
-def test_rate_limit_failure_blocks_autopilot(db, root):
+def test_rate_limit_failure_runs_the_supervisor_turn_again(db, root):
+    """A 429 with no full usage window is no limit: autopilot isn't blocked,
+    and its supervisor's turn runs again once the rate limit lifts."""
+    from brindle import limit_report
+
     agent, _ = root
     with_goal(db)
     agents.handle_hook(db, "boss", "stop-failure", {"error_type": "rate_limit"})
-    assert db.get_autopilot("boss").state == "blocked"
+    assert db.get_autopilot("boss").state == "running"
     assert db.get_agent("boss").status == "idle"
+    assert db.mark("boss", limit_report.RERUN_MARK) is not None
 
 
 # -- merge gates ---------------------------------------------------------------

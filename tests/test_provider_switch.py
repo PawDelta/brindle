@@ -330,6 +330,19 @@ def test_offer_never_targets_a_policy_denied_provider(db, repo, world, spawned, 
     assert provider_switch.inbox_items(db, str(repo), now=NOW) == []
 
 
+@pytest.mark.variant("a rate-limited target provider is skipped by the switch, via provider_health")
+def test_switch_passes_over_a_rate_limited_target(db, repo, world, monkeypatch):
+    from brindle import provider_health
+
+    _session(db, repo)
+    world["quotas"] = {"claude": _limited("claude", NOW + HOUR)}
+    provider_health.record_rate_limited("codex", now=NOW)
+
+    [offer] = provider_switch.sweep(db, NOW)
+
+    assert (offer.from_provider, offer.to_provider) == ("claude", "antigravity")
+
+
 def test_offer_plan_windows_and_headroom_use_the_supplied_clock(world, monkeypatch):
     world["quotas"] = {
         "claude": quota.Quota("claude", [quota.Window(100, NOW + HOUR)]),

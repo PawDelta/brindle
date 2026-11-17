@@ -53,9 +53,6 @@ KIND_BACK = "provider_switch_back"
 RECENT_MESSAGES = 10         # inbox rows to or from the old supervisor
 TRANSCRIPT_TAIL_ENTRIES = 40  # text turns from the old supervisor's transcript (agents.transcript_file)
 
-# A plan window this full counts as out of quota even before the CLI refuses.
-FULL_PERCENT = 100.0
-
 
 @dataclass
 class Offer:
@@ -99,23 +96,43 @@ def _key_billed(profile) -> bool:
             or connections._key(profile.provider)[0] is not None)
 
 
-def limited_until(provider: str, now: float) -> float | None:
-    """When ``provider``'s limit lifts, or None while it is in quota.
-    ``quota.get(provider).limited_until`` after ``now``; else the fullest
-    plan window (``quota.fullest``) at FULL_PERCENT, until its ``resets_at``.
-    An API-key Claude (``quota._key_billed``) is never limited."""
-    if provider not in SUPERVISOR_PROVIDERS or quota._key_billed(provider):
+def limited_until(provider: str, now: float, model: str | None = None) -> float | None:
+    """When ``provider`` (running ``model``) can take a supervisor again, or
+    None while it can now: ``provider_health.limit``, the definition routing
+    and the reviewer check use too (limited, closing, rate limited or
+    erroring, each until it lifts). An API-key Claude
+    (``quota._key_billed``) is never out of quota, though it can still be
+    rate limited or erroring."""
+    if provider not in SUPERVISOR_PROVIDERS:
         return None
-    q = quota.get(provider)
-    if q is None:
+    from brindle import provider_health
+
+    health = provider_health.limit(provider, model, now=now)
+    return None if health.ok else health.until
+
+
+def _supervisor_profile(provider: str, repo_root: str | None, name: str | None = None):
+    """The profile a supervisor launched on ``provider`` would use: the
+    configured supervisor choice, on that provider."""
+    from brindle import agents
+    from brindle.profiles import load_profile
+
+    profile = load_profile(name or agents.SUPERVISOR, repo_root)
+    if repo_root:
+        profile = agents._with_supervisor_choice(profile, provider, repo_root)
+    return replace(profile, provider=provider)
+
+
+def _supervisor_model(provider: str, repo_root: str | None, name: str | None = None) -> str | None:
+    """The model a supervisor on ``provider`` runs, for one-model caps; None
+    when it can't be told."""
+    from brindle import autopilot
+
+    try:
+        profile = _supervisor_profile(provider, repo_root, name)
+    except (KeyError, OSError, ValueError):
         return None
-    if q.limited_until is not None and q.limited_until > now:
-        return q.limited_until
-    window = quota.fullest(replace(q, windows=[w for w in q.windows
-                                              if w.resets_at is None or w.resets_at > now]))
-    if window and window.used >= FULL_PERCENT and window.resets_at is not None:
-        return window.resets_at
-    return None
+    return autopilot.effective_profile_model(profile, repo_root) or None
 
 
 def usable(provider: str, repo_root: str | None) -> bool:
@@ -128,10 +145,9 @@ def usable(provider: str, repo_root: str | None) -> bool:
 
 def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: bool = False) -> list[str]:
     """Eligible targets, ordered by headroom with a stable provider tie break."""
-    from brindle import agents, airgap, autopilot, connections, policy
+    from brindle import airgap, autopilot, connections, policy
     from brindle.config import load_repo_config
     from brindle.pro import managed_models
-    from brindle.profiles import load_profile
     from brindle.service.routing import RoutingPolicy
 
     cfg = load_repo_config(repo_root) if repo_root else None
@@ -147,10 +163,7 @@ def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: 
             continue
         # Judge the identity a supervisor launched with this provider would use,
         # including a configured supervisor choice and the org's managed route.
-        profile = load_profile(agents.SUPERVISOR, repo_root)
-        if repo_root:
-            profile = agents._with_supervisor_choice(profile, provider, repo_root)
-        profile = replace(profile, provider=provider)
+        profile = _supervisor_profile(provider, repo_root)
         if gate.managed is not None:
             if managed_models.refusal(gate.managed, profile):
                 continue
@@ -162,6 +175,8 @@ def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: 
         model = autopilot.effective_profile_model(profile, repo_root) or None
         if not gate.access.allows_profile(profile.name, provider, model):
             continue
+        if not allow_limited and model and limited_until(provider, now, model) is not None:
+            continue    # a cap on the model this supervisor would run
         if cfg is not None:
             info = policy.AssignInfo(repo_root=repo_root, profile=profile.name,
                                      provider=provider, model=model, mode="handoff")
@@ -229,7 +244,9 @@ def out_of_quota(db: DB, root_id: str, now: float) -> float | None:
             or root.status in ("paused", "done") or root.dismissed_at is not None
             or identity_lock.locked_by(root.id)):
         return None
-    return limited_until(root.provider, now)
+    ws = db.get_workspace(root.workspace_id)
+    return limited_until(root.provider, now,
+                         _supervisor_model(root.provider, ws.repo_root if ws else None, root.profile))
 
 
 # -- offers ----------------------------------------------------------------------
@@ -364,8 +381,12 @@ def sweep(db: DB, now: float) -> list[Offer]:
             offers.append(offer)
     if automatic:
         for offer in offers:
-            if offer.kind == "back" and limited_until(offer.to_provider, now) is not None:
-                continue
+            if offer.kind == "back":
+                back_root = db.get_agent(offer.root_id)
+                back_ws = db.get_workspace(back_root.workspace_id) if back_root else None
+                model = _supervisor_model(offer.to_provider, back_ws.repo_root if back_ws else None)
+                if limited_until(offer.to_provider, now, model) is not None:
+                    continue
             try:
                 switch(db, offer.id, now, automatic=True)
             except agents.AgentError:
