@@ -590,13 +590,19 @@ def plan_policy_preview(db: DB, params: dict, body: dict) -> Any:
 def review_policies_read(db: DB, request: Request) -> Any:
     """An org admin's settings page: the rules, the teams and roles they can
     name, and the designs each covers now. The Library checks the permission."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brindle import spawn
     from brindle.daemon import routes_actions as actions
 
     repo = request.query_params.get("repo") or None
     rules = actions.docs_org_api("GET", "review-policies", repo=repo)
     org = rules.get("org_id")      # the rest is of the org the rules were, even if the active one changes meanwhile
     read = lambda tail: actions.docs_org_api("GET", tail, repo=repo, org_id=org)  # noqa: E731
-    return {**rules, "directory": read("review-policies/directory"), "in_review": read("review-policies/in-review")}
+    # The directory and the designs in review are two Library round trips: both at once.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        directory, in_review = pool.map(spawn.carry(read), ("review-policies/directory", "review-policies/in-review"))
+    return {**rules, "directory": directory, "in_review": in_review}
 
 
 def review_policies_save(db: DB, params: dict, body: dict) -> Any:

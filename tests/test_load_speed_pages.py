@@ -4,8 +4,10 @@
 import threading
 
 import pytest
+from starlette.requests import Request
 
 from brindle.daemon import routes_actions as actions
+from brindle.daemon import routes_visuals
 from brindle.pro import library_folders as folders
 from brindle.pro import orgkey
 from brindle.pro import work_items as wi
@@ -26,14 +28,29 @@ def _folders(monkeypatch, api):
         "folders": [{"id": api(p.split("scope_id=")[1])["docs"][0]}]})]
 
 
-@pytest.mark.parametrize("read, expected", [(_docs, ["user", "team:t1", "org:o1"]), (_folders, ["u1", "t1", "o1"])],
-                         ids=["library docs", "library folders"])
-def test_library_asks_every_scope_at_once(read, expected, monkeypatch):
+def _policies(monkeypatch, api):
+    def org_api(method, tail, body=None, *, repo=None, org_id=None):
+        return {"org_id": "o1"} if tail == "review-policies" else api(tail)["docs"][0]
+
+    monkeypatch.setattr(actions, "docs_org_api", org_api)
+    request = Request({"type": "http", "method": "GET", "path": "/v1/review-policies", "query_string": b"",
+                       "headers": []})
+    got = routes_visuals.review_policies_read.__wrapped__(None, request)
+    return [got["directory"], got["in_review"]]
+
+
+@pytest.mark.parametrize("read, expected", [
+    (_docs, ["user", "team:t1", "org:o1"]),
+    (_folders, ["u1", "t1", "o1"]),
+    (_policies, ["review-policies/directory", "review-policies/in-review"]),
+], ids=["library docs", "library folders", "review policies"])
+def test_library_pages_ask_the_server_at_once(read, expected, monkeypatch):
     """The Library's docs and folders are one server round trip per scope the
-    person reads: every scope is asked at once, and the answers keep the
-    scopes' order. (Asked one after another, the first ask would wait on the
-    others at the barrier and break it.)"""
-    together = threading.Barrier(len(SCOPES))
+    person reads, and Settings › Review policies two after its rules: those
+    are asked at once, and the answers keep their order. (Asked one after
+    another, the first ask would wait on the others at the barrier and break
+    it.)"""
+    together = threading.Barrier(len(expected))
 
     def api(scope):
         together.wait(5)
