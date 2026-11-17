@@ -86,9 +86,9 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, out
     assert said == ([] if outcome == "open" else ["s"])   # said once the look answered "none", never for an open PR
     reads.clear()
     monkeypatch.setattr(spawn, "room", lambda: 0)
-    monkeypatch.setattr(review, "_merge_polled", 0)
+    monkeypatch.setattr(review, "_merge_polled", {})
     watch.sweep(db)
-    assert reads == [] and watch.ready == {"s": True} and review._merge_polled == 0
+    assert reads == [] and watch.ready == {"s": True} and review._merge_polled == {}
 
 
 @pytest.mark.parametrize("recorded, expected", [
@@ -148,10 +148,10 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch, caplog):
     monkeypatch.setattr(spawn, "read", slow)
     monkeypatch.setattr(workspaces.shutil, "which", lambda *a: "gh")
     monkeypatch.setattr(spawn, "room", lambda: 2)
-    monkeypatch.setattr(review, "_merge_polled", 0)
+    monkeypatch.setattr(review, "_merge_polled", {})
     review.ReadinessWatch().sweep(db)
     assert len(started) == 2
-    monkeypatch.setattr(review, "_merge_polled", 0)
+    monkeypatch.setattr(review, "_merge_polled", {})
     review.ReadinessWatch().sweep(db)
     assert len(scheduled) == len(started) == 2
     # Finish every controlled read before patches and log capture end.
@@ -212,9 +212,28 @@ def _readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
     monkeypatch.setattr(review, "_merge_checks", {})
     monkeypatch.setattr(review, "_merge_order", {})
     for _ in range(2):
-        monkeypatch.setattr(review, "_merge_polled", 0)
+        monkeypatch.setattr(review, "_merge_polled", {})
         review.poll_merged(db)
     assert {url.rsplit("/", 1)[1] for url in seen} == {str(n) for n in range(5)}
+
+
+def _merge_poll_soon_after_boot(db, monkeypatch):
+    """A daemon that has never polled this database's PRs polls on its first
+    round, even when the clock (time since boot, on Linux) is younger than
+    MERGE_POLL_SECONDS: a fresh CI VM skipped it (run 44135119625)."""
+    import time
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+    from brindle.daemon import session_review as review
+    _open_readiness_prs(db, 1)
+    asked = []
+    monkeypatch.setattr(review, "time", SimpleNamespace(monotonic=lambda: 30.0, time=time.time))
+    monkeypatch.setattr(review._merge_pool, "submit", lambda check, url, cwd: asked.append(url) or Future())
+    monkeypatch.setattr(review, "wait", lambda *a, **kw: None)
+    monkeypatch.setattr(review, "_merge_checks", {})
+    monkeypatch.setattr(review, "_merge_order", {})
+    review.poll_merged(db)
+    assert asked == ["https://github.com/o/r/pull/0"]
 
 
 def _session_changed_tracks_head_and_index_without_status_changes(db, tmp_path, memory):
@@ -294,6 +313,8 @@ def _status_fingerprint(tmp_path, monkeypatch):
     pytest.param(_readiness_slow_gh_is_parallel_and_bounded, {}, id="readiness-slow-gh"),
     pytest.param(_readiness_deferred_prs_get_a_turn, {"queued": "expired"}, id="readiness-deferred-expired",
                  marks=pytest.mark.variant("a queued check starts after deadline expiry before the sweep can cancel it")),
+    pytest.param(_merge_poll_soon_after_boot, {}, id="merge-poll-after-boot",
+                 marks=pytest.mark.variant("a first poll within a minute of boot was skipped (CI run 44135119625)")),
     pytest.param(_session_changed_tracks_head_and_index_without_status_changes, {"memory": False},
                  id="session_changed-file-db",
                  marks=pytest.mark.variant("two daemons on one database file each announce a change exactly once")),
