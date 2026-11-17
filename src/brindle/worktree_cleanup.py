@@ -72,15 +72,39 @@ def _label(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-") or "worktree"
 
 
-def save_patch(path: str, label: str, now: float | None = None) -> Path | None:
+def _in_scratch_index(path: str, then):
+    """``then(env)`` with ``path``'s files as they are now (tracked and
+    untracked, not ignored) staged in a scratch index seeded from HEAD, so
+    the worktree's own index is left alone."""
+    git_dir = git.out(["rev-parse", "--path-format=absolute", "--git-dir"], path)
+    index = os.path.join(git_dir, "brindle-patch-index")
+    env = {**os.environ, "GIT_INDEX_FILE": index}
+    try:
+        git.run_env(["read-tree", "HEAD"], path, env)
+        git.run_env(["add", "-A", "--", "."], path, env)
+        return then(env)
+    finally:
+        try:
+            os.unlink(index)
+        except FileNotFoundError:
+            pass
+
+
+def snapshot(path: str) -> str:
+    """HEAD and the tree of ``path``'s files as they are now: what a saved
+    patch holds. Any edit, new file or commit since changes it."""
+    head = git.out(["rev-parse", "HEAD"], path)
+    tree = _in_scratch_index(path, lambda env: git.run_env(["write-tree"], path, env).stdout.strip())
+    return f"{head} {tree}"
+
+
+def save_patch(path: str, label: str, now: float | None = None) -> tuple[Path | None, str]:
     """Every uncommitted change of the worktree at ``path`` (tracked and
     untracked files, not ignored ones) as a binary patch against its HEAD,
-    under ``brindle_home()/worktree-patches/<date>/``, built in a scratch
-    index so the worktree's own index is left alone. None when there is
-    nothing to save. Raises (``git.GitError``, ``OSError``) when it couldn't
-    be saved: the worktree must then stay."""
-    if not git.dirty_files(path):
-        return None
+    under ``brindle_home()/worktree-patches/<date>/`` (None when there is
+    nothing to save), and the ``snapshot`` it was made from. Raises
+    (``git.GitError``, ``OSError``) when it couldn't be saved: the worktree
+    must then stay."""
     now = time.time() if now is None else now
     day = config.brindle_home() / PATCHES_DIR / time.strftime("%Y-%m-%d", time.localtime(now))
     day.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -90,28 +114,38 @@ def save_patch(path: str, label: str, now: float | None = None) -> Path | None:
     while dest.exists():
         n += 1
         dest = day / f"{stem}-{n}.patch"
-    git_dir = git.out(["rev-parse", "--path-format=absolute", "--git-dir"], path)
-    index = os.path.join(git_dir, "brindle-patch-index")
     raw = Path(f"{dest}.part")
-    env = {**os.environ, "GIT_INDEX_FILE": index}
-    try:
-        git.run_env(["read-tree", "HEAD"], path, env)
-        git.run_env(["add", "-A", "--", "."], path, env)
+    head = git.out(["rev-parse", "HEAD"], path)
+
+    def write(env) -> str:
         git.run_env(["diff", "--cached", "--binary", f"--output={raw}", "HEAD"], path, env)
-        head = git.out(["rev-parse", "HEAD"], path)
+        return git.run_env(["write-tree"], path, env).stdout.strip()
+
+    try:
+        tree = _in_scratch_index(path, write)
         body = raw.read_bytes()
+        if not body:
+            return None, f"{head} {tree}"
         header = (f"# brindle saved the uncommitted changes of {path} (at {head}) before removing it.\n"
                   f"# Apply them in a checkout of that commit with: git apply --binary {dest}\n\n")
         fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(header.encode() + body)
     finally:
-        for leftover in (index, str(raw)):
-            try:
-                os.unlink(leftover)
-            except FileNotFoundError:
-                pass
-    return dest
+        try:
+            raw.unlink()
+        except FileNotFoundError:
+            pass
+    return dest, f"{head} {tree}"
+
+
+def _discard(patch: Path | None) -> None:
+    """A patch saved for a worktree that stayed after all: it still holds its changes."""
+    if patch is not None:
+        try:
+            patch.unlink()
+        except OSError:
+            pass
 
 
 # -- 1. brindle's own workspaces ----------------------------------------------------
@@ -160,6 +194,24 @@ def _sharing_live(db, ws) -> bool:
                for o in db.workspaces_sharing(ws.repo_root, path=ws.path, exclude_id=ws.id))
 
 
+def _workspace_changed(db, judged: _Judged, now: float, saved: str | None = None) -> str | None:
+    """Why the workspace ``judged`` can't go after all, read afresh: its row,
+    branch tip, workers or quiet changed, something is in it (a process, a
+    pane, a live worker sharing its folder), or its files no longer match
+    the ``saved`` snapshot. None when it still can."""
+    ws = db.get_workspace(judged.ws_id)
+    try:
+        if ws is None or _workspace_done(db, ws, now) != judged:
+            return "it changed since it was judged finished"
+        if _sharing_live(db, ws) or _in_use(db, ws.path, own=ws):
+            return "something is in it"
+        if saved is not None and snapshot(ws.path) != saved:
+            return "it changed since its changes were saved"
+    except git.GitError as e:
+        return str(e)
+    return None
+
+
 def sweep_workspaces(db, now: float) -> list[str]:
     from brindle import workspaces
 
@@ -171,19 +223,20 @@ def sweep_workspaces(db, now: float) -> list[str]:
             continue
         if judged is None:
             continue
-        # Right before it goes: everything that made it removable, read again.
+        if _workspace_changed(db, judged, now):
+            continue
         ws = db.get_workspace(judged.ws_id)
+        patch = None
         try:
-            again = _workspace_done(db, ws, now) if ws is not None else None
-        except git.GitError:
-            continue
-        if again != judged or _sharing_live(db, ws) or _in_use(db, ws.path, own=ws):
-            continue
-        try:
-            patch = save_patch(ws.path, ws.branch, now)
-            workspaces.remove(db, ws, force=True, delete_branch=False, stop=())
+            patch, saved = save_patch(ws.path, ws.branch, now)
+            # Forced past the changes just saved: so at the last moment
+            # (after teardown, right before the worktree goes) everything
+            # that made it removable is read again, the saved state included.
+            workspaces.remove(db, ws, force=True, delete_branch=False, stop=(),
+                              guard=lambda: _workspace_changed(db, judged, now, saved))
         except (workspaces.WorkspaceError, git.GitError, OSError) as e:
-            log.info("brindle: kept worktree %s: %s", ws.path, e)
+            _discard(patch)
+            log.info("brindle: kept worktree %s: %s", judged.path, e)
             continue
         done.append(f"removed finished worktree {ws.path} (branch {ws.branch} kept"
                     + (f"; uncommitted changes saved to {patch})" if patch else ")"))
@@ -191,11 +244,6 @@ def sweep_workspaces(db, now: float) -> list[str]:
 
 
 # -- 3. worktrees agents made by hand --------------------------------------------------
-
-
-def _slug(path: str | Path) -> str:
-    """A folder as Claude Code names its project folder: every other character a dash."""
-    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
 def _tmp_base() -> str | None:
@@ -226,34 +274,46 @@ def scratchpad_of(path: str, base: str | None) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
-def _brindle_project(db, project: str) -> bool:
-    """Whether the folder a Claude Code session started in (its slug) was
-    one of brindle's worktrees."""
-    roots = {ws.repo_root for ws in db.find_workspaces()} | set(disk._repos(db, None))
-    for root in roots:
+def _archived_session(session: str) -> bool:
+    """Whether brindle archived an agent of Claude Code session ``session``
+    (``history.archive``): its workspace was removed, and its agents
+    stopped, with it."""
+    import json
+
+    from brindle import history
+
+    try:
+        files = sorted(history.archive_dir().glob("*.jsonl"))
+    except OSError:
+        return False
+    needle = json.dumps(session)
+    for f in files:
         try:
-            owned = [config.worktree_root(root), config.worktrees_dir()]
-        except ValueError:
-            owned = [config.worktrees_dir()]
-        for r in owned:
-            if any(project.startswith(_slug(p) + "-") for p in {str(r), os.path.realpath(r)}):
-                return True
+            with open(f, encoding="utf-8") as lines:
+                for line in lines:
+                    if needle not in line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if any(isinstance(a, dict) and a.get("session_ref") == session
+                           for a in entry.get("agents") or []):
+                        return True
+        except (OSError, UnicodeDecodeError):
+            continue
     return False
 
 
-def session_ended(db, project: str, session: str) -> bool:
-    """Whether the Claude Code session ``session`` (started in the folder
-    whose slug is ``project``) was brindle's and is over: its agents are
-    known and all finished, none running; or none is known any more (its
-    records went with its workspace) and it started in one of brindle's
-    worktrees that is gone. A session brindle can't place is never over."""
+def session_ended(db, session: str) -> bool:
+    """Whether the Claude Code session ``session`` is known to be brindle's
+    and over: its agents' rows are all finished, none running; or, its rows
+    gone, brindle archived them with their removed workspace. A session
+    brindle has no record of is never over."""
     mine = [a for a in db.list_agents() if a.session_ref == session]
     if mine:
         return _all_finished(mine) and not _alive(db, mine)
-    if not _brindle_project(db, project):
-        return False
-    return not any(_slug(p) == project for ws in db.find_workspaces()
-                   for p in {ws.path, os.path.realpath(ws.path)})
+    return _archived_session(session)
 
 
 def _subagent_tree(db, root: str, path: str) -> bool:
@@ -288,7 +348,7 @@ def _loose_done(db, root: str, wt: dict, base: str | None, now: float) -> _Loose
         return None
     pad = scratchpad_of(path, base)
     if pad is not None:
-        return _Loose(root, path, head, branch, "its session ended") if session_ended(db, *pad) else None
+        return _Loose(root, path, head, branch, "its session ended") if session_ended(db, pad[1]) else None
     if not _subagent_tree(db, root, path) or not head:
         return None
     default = git.default_branch(root)
@@ -307,6 +367,24 @@ def _worktree_at(root: str, path: str) -> dict | None:
                  if os.path.realpath(wt.get("worktree", "")) == real), None)
 
 
+def _loose_changed(db, judged: _Loose, base: str | None, now: float, saved: str | None = None) -> str | None:
+    """Why the loose worktree ``judged`` can't go after all, read afresh: no
+    longer that worktree at that commit, its session or merge no longer
+    ending it, something in it, or files changed since the ``saved``
+    snapshot. None when it still can."""
+    try:
+        wt = _worktree_at(judged.root, judged.path)
+        if wt is None or _loose_done(db, judged.root, wt, base, now) != judged:
+            return "it changed since it was judged done"
+        if _in_use(db, judged.path):
+            return "something is in it"
+        if saved is not None and snapshot(judged.path) != saved:
+            return "it changed since its changes were saved"
+    except git.GitError as e:
+        return str(e)
+    return None
+
+
 def sweep_loose(db, root: str, now: float) -> list[str]:
     base = _tmp_base()
     done = []
@@ -317,18 +395,18 @@ def sweep_loose(db, root: str, now: float) -> list[str]:
             continue
         if judged is None:
             continue
-        # Right before it goes: still that worktree, at that commit, still done.
-        try:
-            now_wt = _worktree_at(root, judged.path)
-            again = _loose_done(db, root, now_wt, base, now) if now_wt is not None else None
-        except git.GitError:
+        if _loose_changed(db, judged, base, now):
             continue
-        if again != judged or _in_use(db, judged.path):
-            continue
+        patch = None
         try:
-            patch = save_patch(judged.path, judged.branch or os.path.basename(judged.path), now)
+            patch, saved = save_patch(judged.path, judged.branch or os.path.basename(judged.path), now)
+            # Forced past the changes just saved: everything read again first.
+            why = _loose_changed(db, judged, base, now, saved)
+            if why:
+                raise git.GitError(why)
             git.remove_worktree(root, judged.path, force=True)
         except (git.GitError, OSError) as e:
+            _discard(patch)
             log.info("brindle: kept worktree %s: %s", judged.path, e)
             continue
         kept = f"branch {judged.branch} kept" if judged.branch else "detached"

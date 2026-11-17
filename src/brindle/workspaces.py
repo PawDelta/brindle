@@ -701,7 +701,7 @@ def _rescue_sidebar(db: DB, ws: Workspace) -> None:
 
 
 def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | None = None,
-           keep_session: bool = False, stop=None) -> Removed:
+           keep_session: bool = False, stop=None, guard=None) -> Removed:
     """``delete_branch``: True deletes the branch (only if merged, unless
     ``force``), False keeps it, and None (the default) follows the repo's
     ``delete_merged_branches``: the branch goes once it is fully merged into
@@ -714,7 +714,10 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
     worktree's, read just before the check (none with ``keep_session``),
     whose own CLI and plumbing in the worktree then don't keep it. A sweep
     that chose the workspace from an earlier look passes ``()``: a worker
-    back at work since then keeps it."""
+    back at work since then keeps it. ``guard``: called after teardown,
+    right before the session and the worktree go; a reason it returns keeps
+    the worktree (``WorkspaceError``): for a sweep that forces past changes
+    it saved, so the checks force skips are made at the last moment."""
     from brindle import agents
 
     def stop_them():
@@ -788,6 +791,10 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             raise WorkspaceError(f"teardown failed; fix it or pass --force:\n{teardown.log}")
 
     services.down(ws, cfg)
+    if guard is not None:
+        why_kept = guard()
+        if why_kept:
+            raise WorkspaceError(f"{ws.name}'s worktree {ws.path} is kept: {why_kept}")
     if not keep_session:
         _rescue_sidebar(db, ws)
         tmux.kill_session(ws.tmux_session)

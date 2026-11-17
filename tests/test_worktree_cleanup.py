@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brindle import agents, config, disk, git, workspaces, worktree_cleanup
+from brindle import agents, config, disk, git, history, workspaces, worktree_cleanup
 from brindle.db import Agent
 
 LATER = 2 * disk.FRESH   # past the quiet time a finished worktree is left alone for
@@ -24,11 +24,13 @@ def _agent(db, ws_id: str, **fields) -> None:
                        time.time(), **fields))
 
 
-@pytest.mark.parametrize("holder", [None, "process"])
+@pytest.mark.parametrize("holder", [None, "process", "process-during-save", "edit-during-save"])
 def test_kept_merged_workspace_goes_once_nothing_is_in_it(db, repo, process_scan, monkeypatch, holder):
     """A worker's workspace kept at merge (its branch merged, uncommitted
     changes left) is removed by a later sweep with its changes saved as a
-    patch and its branch kept; a process whose folder is in it keeps it."""
+    patch and its branch kept; a process whose folder is in it keeps it,
+    and so does one that starts there, or an edit made, while its changes
+    are being saved (after the earlier checks passed)."""
     ws = workspaces.create(db, str(repo), "kept-at-merge").workspace
     path = Path(ws.path)
     (path / "feature.py").write_text("done = True\n")
@@ -41,11 +43,22 @@ def test_kept_merged_workspace_goes_once_nothing_is_in_it(db, repo, process_scan
     monkeypatch.setattr(agents, "is_alive", lambda *a, **kw: False)
     if holder == "process":   # a dev server started by hand, still running there
         process_scan[4242] = os.path.realpath(path / "web")
+    elif holder:
+        save = worktree_cleanup.save_patch
+
+        def busy_meanwhile(*args, **kwargs):
+            saved = save(*args, **kwargs)
+            if holder == "process-during-save":
+                process_scan[4242] = os.path.realpath(path)
+            else:
+                (path / "notes.txt").write_text("written after the patch was saved\n")
+            return saved
+        monkeypatch.setattr(worktree_cleanup, "save_patch", busy_meanwhile)
 
     worktree_cleanup.sweep(db, time.time() + LATER)
 
     if holder:
-        assert path.is_dir() and (path / "notes.txt").read_text() == "left behind\n"
+        assert path.is_dir() and (path / "notes.txt").is_file()
         assert db.get_workspace(ws.id) is not None and not _patches()
         return
     assert not path.exists() and db.get_workspace(ws.id) is None
@@ -97,3 +110,30 @@ def test_scratchpad_worktree_goes_only_after_its_session_ends(db, repo, tmp_path
     assert not probe.exists()
     [patch] = _patches()
     assert "an experiment" in patch.read_text()
+
+
+@pytest.mark.parametrize("record", ["none", "archived"])
+def test_scratchpad_worktree_of_a_session_without_rows(db, repo, tmp_path, monkeypatch, record):
+    """A session whose agent rows are gone counts as ended only when brindle
+    archived them with their removed workspace: a session it has no record
+    of (here one started in a folder of a workspace that still exists)
+    keeps its scratchpad worktree."""
+    base = tmp_path / "cc-tmp"
+    monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(base))
+    ws = workspaces.create(db, str(repo), "still-here").workspace
+    project = "".join(c if c.isalnum() else "-" for c in os.path.join(ws.path, "sub"))
+    pad = base / f"claude-{os.getuid()}" / project / "sess-456" / "scratchpad"
+    pad.mkdir(parents=True)
+    probe = pad / "probe"
+    git.run(["worktree", "add", "-q", "--detach", str(probe), "HEAD"], repo)
+    monkeypatch.setattr(agents, "is_alive", lambda *a, **kw: False)
+    if record == "archived":
+        gone = workspaces.adopt_root(db, str(repo))
+        _agent(db, gone.id, id="w9", session_ref="sess-456")
+        assert history.archive(db, gone, db.list_agents(gone.id), "workspace removed")
+        db.delete_workspace(gone.id)
+        assert not [a for a in db.list_agents() if a.session_ref == "sess-456"]
+
+    worktree_cleanup.sweep(db)
+
+    assert probe.exists() == (record == "none")
