@@ -500,6 +500,34 @@ def test_typed_words_reach_the_engine(db, session, monkeypatch):
     assert "typed words refused: this submission predates" in log and "show me again" not in log
 
 
+@pytest.mark.variant("Codex takes a staged message into its turn before its completion notification")
+def test_staged_message_is_quotable_in_the_turn_it_started(db, session, tmp_path, monkeypatch):
+    boss, _ = session
+    clock = [1_000_000.0]
+    monkeypatch.setattr(offers.time, "time", lambda: clock[0])
+    db.update_agent(boss.id, provider="codex")
+    transcript = tmp_path / "rollout.jsonl"
+    ask = "open board"
+    assert app_vouches(boss, ask, offers.time.time() + 60).status_code == 200
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Before the turn", "<p>no</p>", asked=ask)
+    transcript.write_text(offers.json.dumps({
+        "timestamp": datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat(),
+        "type": "event_msg", "payload": {"type": "user_message", "message": ask}}) + "\n")
+    hook = {"transcript_path": str(transcript), "tool_name": "mcp__brindle__publish_visual", "tool_input": {}}
+    agents.handle_hook(db, boss.id, "codex-pre-tool", hook)
+    assert visuals.publish(db, boss, "Board", "<p>yes</p>", asked=ask)["rev"] == 1
+    agents.handle_hook(db, boss.id, "codex-pre-tool", hook)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Twice", "<p>no</p>", asked=ask)
+    # Identical words queued for a later turn cannot be claimed by this turn's input.
+    clock[0] += 1
+    assert app_vouches(boss, ask, offers.time.time() + 60).status_code == 200
+    agents.handle_hook(db, boss.id, "codex-pre-tool", hook)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Still queued", "<p>no</p>", asked=ask)
+
+
 def test_mid_turn_message_backs_a_visual(db, session, tmp_path):
     """Claude Code takes a message typed while it works into the running turn: no prompt hook runs,
     only its transcript records it. Its words back ``asked`` once; an agent's note with the same words doesn't."""

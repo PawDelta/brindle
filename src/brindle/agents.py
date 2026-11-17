@@ -6250,6 +6250,7 @@ def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
 
         prompt_answer.settled(db, agent)   # see handle_hook
         launch_health.accepted(db, agent)
+        _note_codex_prompt(db, agent, payload)
     except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
         log.exception("brindle: Codex PreToolUse bookkeeping failed")
     return answer
@@ -6257,6 +6258,45 @@ def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
 
 ABSORBED_MARK = "absorbed-prompts"   # {"path": transcript, "offset": bytes of it already read}
 _ABSORBED_READ_MAX = 32 << 20        # more unread transcript than this at once is skipped, not read
+
+
+def _note_codex_prompt(db: DB, agent: Agent, payload: dict) -> None:
+    """Codex has no prompt-submit hook. Its rollout records the turn's input
+    before tools run, so confirm app-vouched words here, before a publication
+    in that turn. A queued message absent from the rollout stays staged.
+    Only staged words are confirmed: later tools cannot renew a spent ask."""
+    from brindle import visual_offers
+
+    if agent.mode != "interactive" or agent.parent_id is not None:
+        return
+    if not db.conn.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND words!=''",
+                           (agent.id,)).fetchone():
+        return
+    path = payload.get("transcript_path")
+    if not isinstance(path, str) or not path:
+        return
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.fstat(f.fileno()).st_size - _ABSORBED_READ_MAX))
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "event_msg":
+            continue
+        message = entry.get("payload")
+        if not isinstance(message, dict) or message.get("type") != "user_message":
+            continue
+        text, said_at = message.get("message"), _transcript_time(entry.get("timestamp"))
+        if not isinstance(text, str) or said_at is None:
+            return
+        if "[brindle" not in text and not db.recently_delivered(agent.id, text):
+            visual_offers.person_spoke(db, agent, text, cli_prompt=True, said_at=said_at, staged_only=True)
+        return
 
 
 def _absorbed_prompts(db: DB, agent: Agent, path: str) -> list[tuple[str, float | None]]:
@@ -6357,6 +6397,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # returning a policy decision (especially a deny).
         answer = permission_request_decision(db, agent, payload, provider="codex")
         try:
+            _note_codex_prompt(db, agent, payload)
             sid = payload.get("session_id")
             if isinstance(sid, str) and sid and sid != agent.session_ref:
                 db.update_agent(agent_id, session_ref=sid)

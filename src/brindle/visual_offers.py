@@ -269,7 +269,8 @@ def refresh_input(db: DB, agent: Agent, observer: int, submitted_at: float, expi
 def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
                  fold_only: bool = False, typed: bool = False, cli_prompt: bool = False,
-                 said_at: float | None = None, mid_turn: bool = False, carries_delivery: bool = False) -> None:
+                 said_at: float | None = None, mid_turn: bool = False, carries_delivery: bool = False,
+                 staged_only: bool = False) -> None:
     """Called only for authenticated person input, never for agent messages.
 
     ``typed``: the app watched the person key in all of ``text`` themselves.
@@ -281,7 +282,9 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     ``text`` into a turn still running, so it was sent before the agent had
     finished asking anything: it answers no offer. ``carries_delivery``: the
     prompt holds a brindle delivery the person typed onto, words that aren't
-    theirs, so the app's mark for that Enter (see keep_typed) can't stand for it."""
+    theirs, so the app's mark for that Enter (see keep_typed) can't stand for it.
+    ``staged_only``: a repeated report from a rollout only confirms an input
+    still staged, atomically, so concurrent hooks cannot renew its grant."""
     if not visuals.enabled():
         return
     root, ws = visuals._session(db, agent)
@@ -292,6 +295,11 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         message_at = time.time()
     scope = request_intent(text)
     with db.tx() as c:
+        if staged_only and not c.execute(
+                "SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND words=? "
+                "AND created_at<? AND created_at>?",
+                (root.id, _words(text), message_at + SAID_AT_TICK, time.time() - FOLD)).fetchone():
+            return
         if expires_at is not None and time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
         if observation is not None:
@@ -325,7 +333,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             _keep_words(c, root.id, text)
         elif cli_prompt:
             confirmed = c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
-                                  "WHERE root_id=? AND words=? AND staged=1)", (root.id, _words(text))).rowcount
+                                  "WHERE root_id=? AND words=? AND staged=1 AND created_at<?)",
+                                  (root.id, _words(text), time.time() if said_at is None else said_at + SAID_AT_TICK)).rowcount
             if not confirmed and not carries_delivery:
                 _fill_mark(c, root.id, text, said_at)
         # Tie the words to what this message raises, so one spends the other.
@@ -344,7 +353,7 @@ def keep_typed(db: DB, agent: Agent, text: str | None, expires_at: float, submit
     """The app watched the person key in ``text``, for a CLI whose prompt hook
     can't say what was typed. Sent before the app lets Enter through: a report
     that fails, comes late or predates newer person input leaves nothing. What
-    it leaves is staged: only that prompt's own hook makes the words quotable,
+    it leaves is staged: only the CLI confirming it took in that prompt makes the words quotable,
     in the transaction that raises any grant, so a message can't be spent twice.
 
     ``text`` None: the person sent it with their own keys, nothing pasted, but
