@@ -2,12 +2,15 @@
 (scripts/bench_pages.py times each page's routes on a copy of the DB)."""
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 from starlette.requests import Request
 
+from brindle import org_permissions
 from brindle.daemon import routes_actions as actions
 from brindle.daemon import routes_visuals
+from brindle.pro import analysis_docs
 from brindle.pro import library_folders as folders
 from brindle.pro import orgkey
 from brindle.pro import work_items as wi
@@ -39,17 +42,64 @@ def _policies(monkeypatch, api):
     return [got["directory"], got["in_review"]]
 
 
+def _org_approvals(monkeypatch, api):
+    seen = {}
+
+    class Account:
+        ent = SimpleNamespace(sub="u1", org_id="o1", role="admin", policy_role=None, plan="team")
+        policy_reason = org_permissions.Account.policy_reason
+
+        def policy(self):
+            seen["policy"] = api("policy")["docs"][0]
+            return {"version": 1, "policy": {}}
+
+        def roles(self):
+            seen["roles"] = api("roles")["docs"][0]
+            return []
+
+        def call(self, method, path, body=None):
+            seen["members"] = api("members")["docs"][0]
+            return {"members": []}
+
+    monkeypatch.setattr(org_permissions, "Account", Account)
+    org_permissions.snapshot()
+    return [seen["policy"], seen["roles"], seen["members"]]
+
+
+def _doc_switches(monkeypatch, api):
+    seen = {}
+
+    def library(method, path, body=None, **kw):
+        seen[path] = api(path)["docs"][0]
+        return {"switches": {}, "scopes": []}
+
+    def policy(org_id, client, store):
+        seen["policy"] = api("policy")["docs"][0]
+        return {"switches": {}, "groups": {}}
+
+    monkeypatch.setattr(analysis_docs, "_session", lambda client, store: (None, None))
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store: SimpleNamespace(
+        features={"analysis_docs_team"}, org_id="o1", plan="team"))
+    monkeypatch.setattr(analysis_docs, "api", library)
+    monkeypatch.setattr(analysis_docs.analysis_policy, "fetch", policy)
+    analysis_docs.switch_states()
+    return [seen["/me/analysis-docs/settings"], seen["policy"], seen["/analysis-docs/scopes"]]
+
+
 @pytest.mark.parametrize("read, expected", [
     (_docs, ["user", "team:t1", "org:o1"]),
     (_folders, ["u1", "t1", "o1"]),
     (_policies, ["review-policies/directory", "review-policies/in-review"]),
-], ids=["library docs", "library folders", "review policies"])
+    (_org_approvals, ["policy", "roles", "members"]),
+    (_doc_switches, ["/me/analysis-docs/settings", "policy", "/analysis-docs/scopes"]),
+], ids=["library docs", "library folders", "review policies", "org approvals", "doc switches"])
 def test_library_pages_ask_the_server_at_once(read, expected, monkeypatch):
     """The Library's docs and folders are one server round trip per scope the
-    person reads, and Settings › Review policies two after its rules: those
-    are asked at once, and the answers keep their order. (Asked one after
-    another, the first ask would wait on the others at the barrier and break
-    it.)"""
+    person reads; Settings › Review policies two after its rules, Org
+    approvals three and the doc switches three, none waiting on another:
+    those are asked at once, and the answers keep their order. (Asked one
+    after another, the first ask would wait on the others at the barrier and
+    break it.)"""
     together = threading.Barrier(len(expected))
 
     def api(scope):
