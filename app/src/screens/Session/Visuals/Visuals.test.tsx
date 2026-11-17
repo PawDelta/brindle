@@ -11,6 +11,7 @@ import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
+import { PARKED, closeParkedVisuals } from "./NativeFrame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
@@ -64,6 +65,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  closeParkedVisuals();
   vi.useRealTimers();
   native.enabled = false;
   native.events.clear();
@@ -408,7 +410,8 @@ describe("visuals", () => {
     await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_set_bounds", { label: delivery.label, bounds }));
     fireEvent.click(screen.getByTestId("visual-send"));
     await waitFor(() => expect(answer).toHaveBeenCalledWith(visual.id, 2, "B", ""));
-    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: delivery.label }));
+    // The reader goes: its page is parked out of sight, for the next open of this revision.
+    await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_set_bounds", { label: delivery.label, bounds: { ...bounds, width: 0, height: 0 } }));
     expect(native.events.size).toBe(0);
     // A revision change and a screen switch while the native open is still pending.
     let opened!: (label: string) => void;
@@ -417,7 +420,7 @@ describe("visuals", () => {
     await waitFor(() => expect(opened).toBeTypeOf("function"));
     view.rerender(<Reader shown={false} />);
     await act(async () => opened("visual:v_8f2c:r3"));
-    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_8f2c:r3" }));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: "visual:v_8f2c:r3", bounds: { ...bounds, width: 0, height: 0 } }));
     native.invoke.mockImplementation(async (command) => command === "visual_open" ? "visual:kept:k_1" : undefined);
     const kept = { kind: "kept", id: "k_1" } as const;
     view.rerender(<VisualFrame source={kept} title="Kept" onMessage={() => {}} />);
@@ -452,19 +455,49 @@ describe("visuals", () => {
     native.enabled = true;
     vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
     vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
-    // The first visual's close never finishes: only its own reopening may wait for it.
-    native.invoke.mockReset().mockImplementation((command, args) => command === "visual_close"
-      ? new Promise<void>(() => {})
-      : Promise.resolve(command === "visual_open" ? `visual:${(args as { id: string }).id}:r2` : undefined));
+    // Nothing but an open ever finishes, so the first visual is never put away: only its own
+    // reopening may wait for that.
+    native.invoke.mockReset().mockImplementation((command, args) => command === "visual_open"
+      ? Promise.resolve(`visual:${(args as { id: string }).id}:r2`)
+      : new Promise<void>(() => {}));
     const frame = (id: string) => <VisualFrame source={{ kind: "session", id, rev: 2 }} title={id} onMessage={() => {}} />;
     const view = render(frame("v_first"));
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.objectContaining({ id: "v_first" })));
     view.rerender(frame("v_second"));
-    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_first:r2" }));
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.objectContaining({ id: "v_second" })));
     view.rerender(frame("v_first"));
     await act(async () => {});
     expect(native.invoke.mock.calls.filter(([command, args]) => command === "visual_open" && (args as { id: string }).id === "v_first")).toHaveLength(1);
+    view.unmount();
+  });
+
+  it("opens a visual seen a moment ago on its parked page, and closes the oldest past the few kept", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    native.invoke.mockReset().mockImplementation(async (command, args) =>
+      command === "visual_open" ? `visual:${(args as { id: string }).id}:r2` : undefined);
+    const frame = (id: string) => <VisualFrame source={{ kind: "session", id, rev: 2 }} title={id} onMessage={() => {}} />;
+    const opens = (id: string) => native.invoke.mock.calls.filter(([command, args]) => command === "visual_open" && (args as { id: string }).id === id).length;
+    const view = render(frame("v_a"));
+    await waitFor(() => expect(opens("v_a")).toBe(1));
+    view.rerender(<div>Chat</div>);
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: "visual:v_a:r2", bounds: expect.objectContaining({ width: 0, height: 0 }) }));
+    view.rerender(frame("v_a"));
+    // Shown again where the reader is: no new webview, no page load.
+    await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_post", expect.objectContaining({ label: "visual:v_a:r2" })));
+    expect(opens("v_a")).toBe(1);
+    const others = Array.from({ length: PARKED }, (_, i) => `v_${i}`);
+    for (const id of others) {
+      view.rerender(frame(id));
+      await waitFor(() => expect(opens(id)).toBe(1));
+    }
+    view.rerender(<div>Chat</div>);
+    // v_a, then each of the others, went out of sight: the oldest is closed, the rest kept.
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_a:r2" }));
+    expect(native.invoke.mock.calls.filter(([command]) => command === "visual_close")).toHaveLength(1);
+    view.rerender(frame("v_a"));
+    await waitFor(() => expect(opens("v_a")).toBe(2));
     view.unmount();
   });
 

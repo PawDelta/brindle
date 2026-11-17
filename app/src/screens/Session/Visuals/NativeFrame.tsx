@@ -22,6 +22,32 @@ function extendLifecycle(label: string, step: Promise<unknown>) {
   void settled.then(() => { if (lifecycles.get(label) === settled) lifecycles.delete(label); });
 }
 
+// A reader that goes (Back, another visual) parks its page instead of closing it: the webview
+// stays, bound to its own revision as before, at no size, and opening that revision again shows
+// it at once instead of building a new webview and loading the page again. A revision never
+// changes, so the parked page is still its page. The oldest past PARKED is closed.
+export const PARKED = 3;
+const parked = new Set<string>();
+function park(label: string) {
+  parked.delete(label);
+  parked.add(label);
+  for (const oldest of parked) {
+    if (parked.size <= PARKED) break;
+    parked.delete(oldest);
+    extendLifecycle(oldest, lifecycleOf(oldest).then(() => invoke("visual_close", { label: oldest })));
+  }
+}
+function unpark(label: string): boolean {
+  return parked.delete(label);
+}
+/* Close every parked page (a test's clean slate). */
+export function closeParkedVisuals() {
+  for (const label of [...parked]) {
+    parked.delete(label);
+    extendLifecycle(label, lifecycleOf(label).then(() => invoke("visual_close", { label })));
+  }
+}
+
 function themeMessage() {
   const style = getComputedStyle(document.documentElement);
   const vars = Object.fromEntries([
@@ -62,7 +88,12 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
       if (!closing) {
         closing = lifecycleOf(expected).then(async () => {
           const label = await opened.catch(() => null);
-          if (label) await invoke("visual_close", { label });
+          if (!label) return;
+          if (failed) return invoke("visual_close", { label });
+          // Out of sight, kept for the next open of this revision.
+          const { x, y } = element.getBoundingClientRect();
+          await invoke("visual_set_bounds", { label, bounds: { x, y, width: 0, height: 0 } });
+          park(label);
         });
         extendLifecycle(expected, closing);
       }
@@ -100,6 +131,14 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     const opened = lifecycleOf(expected).then(async () => {
       await registered;
       if (disposed) return null;
+      if (unpark(expected)) {
+        try {
+          await invoke("visual_set_bounds", { label: expected, bounds: bounds() });
+          return expected;
+        } catch {
+          // No longer open (the shell closed it): opened afresh below.
+        }
+      }
       return invoke<string>("visual_open", { id, rev, bounds: bounds() });
     });
     extendLifecycle(expected, opened);
