@@ -1158,15 +1158,55 @@ def _app_bundle() -> str | None:
     return None
 
 
+def _windows_app() -> str | None:
+    """Find the Windows desktop app from WSL, including per-user NSIS installs."""
+    candidates = []
+    try:
+        local = subprocess.run(
+            ["cmd.exe", "/d", "/c", "echo", "%LOCALAPPDATA%"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if local and local != "%LOCALAPPDATA%":
+            path = subprocess.run(
+                ["wslpath", "-u", local], capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            if path:
+                candidates.append(os.path.join(path, "brindle", "brindle.exe"))
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    candidates.extend((
+        "/mnt/c/Program Files/brindle/brindle.exe",
+        "/mnt/c/Program Files (x86)/brindle/brindle.exe",
+    ))
+    return next((path for path in candidates if os.path.isfile(path)), None)
+
+
 @app.command("app")
 def app_cmd() -> None:
     """Open the brindle desktop app, or print where to download it."""
+    from brindle import providers
+
     if sys.platform == "darwin":
         bundle = _app_bundle()
         if bundle is None:
             typer.echo(f"the brindle app isn't installed. Download it from {APP_DOWNLOAD_URL}")
             return
         cmd = ["open", bundle]
+    elif providers.is_wsl():
+        executable = _windows_app()
+        if executable is None:
+            typer.echo(f"the Windows brindle app isn't installed. Download it from {APP_DOWNLOAD_URL}")
+            return
+        try:
+            subprocess.Popen(
+                [executable], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+        except OSError:
+            typer.echo(f"couldn't open the Windows brindle app. Download it from {APP_DOWNLOAD_URL}")
+            return
+        typer.echo("opened the brindle app")
+        return
     else:
         cmd = ["xdg-open", "brindle://"]
     try:
