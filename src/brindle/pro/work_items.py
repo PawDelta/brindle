@@ -276,16 +276,22 @@ def local_repos(roots: list[str], org_id: str, *, key_of: Callable[[str], str | 
         def key_of(root: str) -> str | None:
             identity = repo_identity(root)
             return keys.get(org_id).repo_key(identity) if identity else None
-    out = []
-    for root in roots:
-        name = root.rstrip("/").rsplit("/", 1)[-1]
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brindle import spawn
+
+    def key(root: str) -> str | None:
         try:
-            key = key_of(root)
+            return key_of(root)
         except Exception:  # noqa: BLE001 - no org key right now: the repo just can't be mapped yet
-            continue
-        if key and _REPO_NAME.match(name):
-            out.append({"repo": name, "repo_key": key, "repo_root": root})
-    return out
+            return None
+
+    named = [(root, root.rstrip("/").rsplit("/", 1)[-1]) for root in roots]
+    named = [(root, name) for root, name in named if _REPO_NAME.match(name)]
+    # Each repo's identity is a git read: all at once, not one after another.
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(named)))) as pool:
+        keys = list(pool.map(spawn.carry(key), [root for root, _ in named]))
+    return [{"repo": name, "repo_key": k, "repo_root": root} for (root, name), k in zip(named, keys) if k]
 
 
 def connect_url(base: str, org_id: str) -> str:
