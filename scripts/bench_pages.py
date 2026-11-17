@@ -96,22 +96,51 @@ def main(repo: str | None, rounds: int) -> None:
 
     app = build_app("t" * 43)
 
+    async def raw(path: str, query: str) -> int:
+        """The route's status, the body read but not decoded (a visual's page is HTML)."""
+        sent: list[dict] = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+                 "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": query.encode(),
+                 "root_path": "", "server": ("127.0.0.1", 8123), "client": ("127.0.0.1", 50000),
+                 "headers": [(b"authorization", f"Bearer {'t' * 43}".encode())]}
+        await app(scope, receive, send)
+        return sent[0]["status"]
+
     async def timed(path: str, query: dict) -> tuple[int, float]:
         t = time.perf_counter()
-        status, _ = await _call(app, path, urlencode(query))
+        status = await raw(path, urlencode(query))
         return status, (time.perf_counter() - t) * 1000
+
+    def flag(name: str) -> str | None:
+        return next((a.split("=", 1)[1] for a in sys.argv if a.startswith(f"--{name}=")), None)
 
     async def run() -> None:
         await _call(app, "/v1/meta")
         _, repos = await _call(app, "/v1/repos")
         chosen = repo or next(x["repo_root"] for x in repos if not x.get("demo"))
         _, sessions = await _call(app, "/v1/sessions", urlencode({"repo": chosen}))
-        root = sessions[0]["id"] if sessions else None
+        root = flag("session") or (sessions[0]["id"] if sessions else None)
         _, snap = await _call(app, "/v1/snapshot", urlencode({"repo": chosen}))
         agent = next((a["id"] for w in snap or [] for a in w.get("agents", [])), None)
         print(f"repo={chosen} root={root} agent={agent} repos={len(repos)} sessions={len(sessions)}", flush=True)
-        only = os.environ.get("BENCH_ONLY") or next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--profile=")), None)
-        for page, path, query in _pages(chosen, root, agent):
+        only = os.environ.get("BENCH_ONLY") or flag("profile")
+        pages = _pages(chosen, root, agent)
+        if root:
+            # The Visuals screen: the list, then opening a visual is its page at its revision
+            # (the app's brindle-visual:// scheme fetches this route).
+            _, shown = await _call(app, f"/v1/sessions/{quote(root, safe='')}/visuals")
+            pages += [("Visuals", f"/v1/visuals/{v['id']}/r/{v['rev']}", {})
+                      for v in (shown if isinstance(shown, list) else [])[:3]]
+        if "--visuals" in sys.argv:
+            pages = [p for p in pages if p[0] == "Visuals" or p[1].endswith("/visuals")]
+        for page, path, query in pages:
             if only:
                 if path != only:
                     continue
@@ -126,8 +155,8 @@ def main(repo: str | None, rounds: int) -> None:
                 return
             status, cold = await timed(path, query)
             warm = min([(await timed(path, query))[1] for _ in range(rounds)])
-            flag = "  SLOW" if warm > 300 or cold > 1000 else ""
-            print(f"{page:10} {path[:60]:60} {status} cold {cold:7.0f}ms  warm {warm:7.0f}ms{flag}", flush=True)
+            slow = "  SLOW" if warm > 300 or cold > 1000 else ""
+            print(f"{page:10} {path[:60]:60} {status} cold {cold:7.0f}ms  warm {warm:7.0f}ms{slow}", flush=True)
 
     asyncio.run(run())
 
