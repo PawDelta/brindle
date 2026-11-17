@@ -68,9 +68,7 @@ def _openai(inp: float, cached: float, out: float, write: float | None = None) -
 
 
 PRICES: dict[str, Price] = {
-    # Verified 2026-11-16: Argon's launch rates end on November 30.
-    "gemini-4-argon": (Price(2, 10, 2, 0.1) if _dt.date.today() < _dt.date(2026, 12, 1)
-                       else Price(4, 20, 4, 0.2)),
+    "gemini-4-argon": Price(4, 20, 4, 0.2),   # after PROMOS' launch rate ends
     # Anthropic
     "claude-fable-5-1": _anthropic(10, 50, read=0.25),
     "claude-mythos-5-1": _anthropic(10, 50, read=0.25),
@@ -120,6 +118,12 @@ PRICES: dict[str, Price] = {
 }
 
 # Claude Code's model aliases, as profiles write them: each names the latest of its family.
+# Launch rates: model -> (first day the PRICES rate applies, launch price).
+# Verified 2026-11-16: Argon's launch rates end on November 30.
+PROMOS: dict[str, tuple[_dt.date, Price]] = {
+    "gemini-4-argon": (_dt.date(2026, 12, 1), Price(2, 10, 2, 0.1)),
+}
+
 ALIASES = {
     "fable": "claude-fable-5-1",
     "opus": "claude-opus-5-5",
@@ -183,13 +187,16 @@ def repo_overrides(repo_root: str | None) -> dict[str, Price]:
 
 
 def price_for(model: str | None, extra: dict[str, Price] | None = None) -> Price | None:
-    """``model``'s price (``extra`` first, then ``PRICES``), or None when
-    brindle doesn't know it."""
+    """``model``'s price (``extra`` first, then a launch rate still running
+    today, then ``PRICES``), or None when brindle doesn't know it."""
     if not model:
         return None
     key = normalize(model)
     if extra and key in extra:
         return extra[key]
+    promo = PROMOS.get(key)
+    if promo and _dt.date.today() < promo[0]:   # checked per lookup: a long-lived daemon crosses the end
+        return promo[1]
     return PRICES.get(key)
 
 
