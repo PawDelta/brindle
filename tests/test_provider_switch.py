@@ -330,6 +330,7 @@ def test_offer_never_targets_a_policy_denied_provider(db, repo, world, spawned, 
     assert provider_switch.inbox_items(db, str(repo), now=NOW) == []
 
 
+@pytest.mark.variant("a rate-limited target provider is skipped by the switch, via provider_health")
 def test_switch_passes_over_a_rate_limited_target(db, repo, world, monkeypatch):
     from brindle import provider_health
 
