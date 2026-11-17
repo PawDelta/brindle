@@ -6250,7 +6250,7 @@ def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
 
         prompt_answer.settled(db, agent)   # see handle_hook
         launch_health.accepted(db, agent)
-        _note_codex_prompt(db, agent, payload)
+        _note_staged_prompt(db, agent, payload)
     except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
         log.exception("brindle: Codex PreToolUse bookkeeping failed")
     return answer
@@ -6260,10 +6260,10 @@ ABSORBED_MARK = "absorbed-prompts"   # {"path": transcript, "offset": bytes of i
 _ABSORBED_READ_MAX = 32 << 20        # more unread transcript than this at once is skipped, not read
 
 
-def _note_codex_prompt(db: DB, agent: Agent, payload: dict) -> None:
-    """Codex has no prompt-submit hook. Its rollout records the turn's input
-    before tools run, so confirm app-vouched words here, before a publication
-    in that turn. A queued message absent from the rollout stays staged.
+def _note_staged_prompt(db: DB, agent: Agent, payload: dict) -> None:
+    """Confirm app-vouched input from the CLI's transcript before tools run.
+    Codex has no prompt-submit hook, and Claude's can be missed; queued input
+    has no such hook either. Input absent from the transcript stays staged.
     Only staged words are confirmed: later tools cannot renew a spent ask."""
     from brindle import visual_offers
 
@@ -6286,16 +6286,38 @@ def _note_codex_prompt(db: DB, agent: Agent, payload: dict) -> None:
             entry = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(entry, dict) or entry.get("type") != "event_msg":
+        if not isinstance(entry, dict):
             continue
-        message = entry.get("payload")
-        if not isinstance(message, dict) or message.get("type") != "user_message":
+        text, mid_turn = None, False
+        stamp = entry.get("timestamp")
+        if agent.provider == "codex" and entry.get("type") == "event_msg":
+            message = entry.get("payload")
+            if isinstance(message, dict) and message.get("type") == "user_message":
+                text = message.get("message")
+        elif agent.provider == "claude" and not entry.get("isSidechain"):
+            message = entry.get("message")
+            attachment = entry.get("attachment")
+            if entry.get("type") == "user" and not entry.get("isMeta") and isinstance(message, dict):
+                if message.get("role") == "user":
+                    content = message.get("content")
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list) and all(
+                            isinstance(block, dict) and block.get("type") == "text" for block in content):
+                        text = "\n".join(block.get("text", "") for block in content)
+            elif (entry.get("type") == "attachment" and isinstance(attachment, dict)
+                  and attachment.get("type") == "queued_command" and attachment.get("commandMode") == "prompt"
+                  and isinstance(attachment.get("origin"), dict) and attachment["origin"].get("kind") == "human"):
+                text, mid_turn = attachment.get("prompt"), True
+                stamp = attachment.get("timestamp") or stamp
+        if not isinstance(text, str):
             continue
-        text, said_at = message.get("message"), _transcript_time(entry.get("timestamp"))
-        if not isinstance(text, str) or said_at is None:
+        said_at = _transcript_time(stamp)
+        if said_at is None:
             return
         if "[brindle" not in text and not db.recently_delivered(agent.id, text):
-            visual_offers.person_spoke(db, agent, text, cli_prompt=True, said_at=said_at, staged_only=True)
+            visual_offers.person_spoke(db, agent, text, cli_prompt=True, said_at=said_at,
+                                       staged_only=True, mid_turn=mid_turn)
         return
 
 
@@ -6397,7 +6419,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # returning a policy decision (especially a deny).
         answer = permission_request_decision(db, agent, payload, provider="codex")
         try:
-            _note_codex_prompt(db, agent, payload)
+            _note_staged_prompt(db, agent, payload)
             sid = payload.get("session_id")
             if isinstance(sid, str) and sid and sid != agent.session_ref:
                 db.update_agent(agent_id, session_ref=sid)
@@ -6415,6 +6437,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         db.update_agent(agent_id, transcript_path=str(transcript))
     if agent.provider == "claude" and agent.mode == "interactive" and (transcript or agent.transcript_path):
         _note_absorbed_prompts(db, agent, str(transcript or agent.transcript_path))
+        if event != "prompt-submit":
+            _note_staged_prompt(db, agent, {"transcript_path": transcript or agent.transcript_path})
 
     if event in ("prompt-submit", "pre-tool", "tool-done") and agent.unreported_noted:
         # It's working again, so a later stop without a result is a new one

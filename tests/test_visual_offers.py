@@ -501,29 +501,41 @@ def test_typed_words_reach_the_engine(db, session, monkeypatch):
 
 
 @pytest.mark.variant("Codex takes a staged message into its turn before its completion notification")
-def test_staged_message_is_quotable_in_the_turn_it_started(db, session, tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider,queued", [
+    ("codex", False),
+    pytest.param("claude", False, marks=pytest.mark.variant("Claude user input with a missed prompt hook must be confirmed before publication")),
+    pytest.param("claude", True, marks=pytest.mark.variant("a queued message already present at the first transcript observation must count")),
+])
+def test_staged_message_is_quotable_in_the_turn_it_started(db, session, tmp_path, monkeypatch, provider, queued):
     boss, _ = session
     clock = [1_000_000.0]
     monkeypatch.setattr(offers.time, "time", lambda: clock[0])
-    db.update_agent(boss.id, provider="codex")
+    db.update_agent(boss.id, provider=provider)
     transcript = tmp_path / "rollout.jsonl"
-    ask = "open board"
+    ask = "status (visually)" if provider == "claude" else "open board"
     assert app_vouches(boss, ask, offers.time.time() + 60).status_code == 200
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Before the turn", "<p>no</p>", asked=ask)
-    transcript.write_text(offers.json.dumps({
-        "timestamp": datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat(),
-        "type": "event_msg", "payload": {"type": "user_message", "message": ask}}) + "\n")
+    entry = {"timestamp": datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat()}
+    if provider == "codex":
+        entry.update(type="event_msg", payload={"type": "user_message", "message": ask})
+    elif queued:
+        entry.update(type="attachment", isSidechain=False, attachment={
+            "type": "queued_command", "prompt": ask, "commandMode": "prompt", "origin": {"kind": "human"}})
+    else:
+        entry.update(type="user", isSidechain=False, message={"role": "user", "content": ask})
+    transcript.write_text(offers.json.dumps(entry) + "\n")
     hook = {"transcript_path": str(transcript), "tool_name": "mcp__brindle__publish_visual", "tool_input": {}}
-    agents.handle_hook(db, boss.id, "codex-pre-tool", hook)
+    event = "codex-pre-tool" if provider == "codex" else "pre-tool"
+    agents.handle_hook(db, boss.id, event, hook)
     assert visuals.publish(db, boss, "Board", "<p>yes</p>", asked=ask)["rev"] == 1
-    agents.handle_hook(db, boss.id, "codex-pre-tool", hook)
+    agents.handle_hook(db, boss.id, event, hook)
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Twice", "<p>no</p>", asked=ask)
     # Identical words queued for a later turn cannot be claimed by this turn's input.
     clock[0] += 1
     assert app_vouches(boss, ask, offers.time.time() + 60).status_code == 200
-    agents.handle_hook(db, boss.id, "codex-pre-tool", hook)
+    agents.handle_hook(db, boss.id, event, hook)
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Still queued", "<p>no</p>", asked=ask)
 
