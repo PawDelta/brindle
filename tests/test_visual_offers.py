@@ -419,7 +419,7 @@ def app_saw_enter(boss, typed=True):
 
 
 @pytest.mark.variant("catches an accepted Claude Code suggestion being refused as the person's words")
-def test_accepted_suggestion_backs_a_visual(db, session):
+def test_accepted_suggestion_backs_a_visual(db, session, tmp_path):
     """Real incident: Claude Code sends its own suggestion when the person accepts it (Tab, or Enter
     on an empty box), so the app saw their keys but not the words. The prompt's hook says what they were."""
     boss, _ = session
@@ -440,6 +440,14 @@ def test_accepted_suggestion_backs_a_visual(db, session):
     agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "worker says: " + ask + " ok"})
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Delivered", "<p>no</p>", asked=ask)
+    transcript = tmp_path / "delivered.jsonl"
+    transcript.write_text(offers.json.dumps({"type": "user", "message": {
+        "role": "user", "content": "worker says: " + ask + " ok"},
+        "timestamp": datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat()}) + "\n")
+    agents.handle_hook(db, boss.id, "pre-tool", {"transcript_path": str(transcript),
+                                                "tool_name": "mcp__brindle__publish_visual", "tool_input": {}})
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Still delivered", "<p>no</p>", asked=ask)
 
 
 PASTE, SUGGESTION = "put the pasted plan in a separate visual", "make a separate visual for stage 3"
@@ -498,6 +506,53 @@ def test_typed_words_reach_the_engine(db, session, monkeypatch):
     assert app_vouches(session[0], "show me again", offers.time.time() + 60, submitted_at).status_code == 409
     log = offers.debuglog.log_path().read_text()
     assert "typed words refused: this submission predates" in log and "show me again" not in log
+
+
+@pytest.mark.variant("a staged message authorizes one publication in the turn that takes it in")
+@pytest.mark.parametrize("provider,queued,known", [
+    ("codex", False, True),
+    pytest.param("claude", False, True, marks=pytest.mark.variant("Claude user input with a missed prompt hook must be confirmed before publication")),
+    pytest.param("claude", True, True, marks=pytest.mark.variant("a queued message already present at the first transcript observation must count")),
+    pytest.param("claude", False, False, id="claude-fresh-unseen",
+                 marks=pytest.mark.variant("a fresh prompt must retain app-vouched unseen input until the transcript supplies its send time")),
+])
+def test_staged_message_is_quotable_in_the_turn_it_started(db, session, tmp_path, monkeypatch, provider, queued, known):
+    boss, _ = session
+    clock = [1_000_000.0]
+    monkeypatch.setattr(offers.time, "time", lambda: clock[0])
+    db.update_agent(boss.id, provider=provider)
+    transcript = tmp_path / "rollout.jsonl"
+    ask = "status (visually)" if provider == "claude" else "open board"
+    if known:
+        assert app_vouches(boss, ask, offers.time.time() + 60).status_code == 200
+    else:
+        db.set_status(boss.id, "processing")
+        assert app_saw_enter(boss).status_code == 200
+        agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": ask})
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Before the turn", "<p>no</p>", asked=ask)
+    entry = {"timestamp": datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat()}
+    if provider == "codex":
+        entry.update(type="event_msg", payload={"type": "user_message", "message": ask})
+    elif queued:
+        entry.update(type="attachment", isSidechain=False, attachment={
+            "type": "queued_command", "prompt": ask, "commandMode": "prompt", "origin": {"kind": "human"}})
+    else:
+        entry.update(type="user", isSidechain=False, message={"role": "user", "content": ask})
+    transcript.write_text(offers.json.dumps(entry) + "\n")
+    hook = {"transcript_path": str(transcript), "tool_name": "mcp__brindle__publish_visual", "tool_input": {}}
+    event = "codex-pre-tool" if provider == "codex" else "pre-tool"
+    agents.handle_hook(db, boss.id, event, hook)
+    assert visuals.publish(db, boss, "Board", "<p>yes</p>", asked=ask)["rev"] == 1
+    agents.handle_hook(db, boss.id, event, hook)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Twice", "<p>no</p>", asked=ask)
+    # Identical words queued for a later turn cannot be claimed by this turn's input.
+    clock[0] += 1
+    assert app_vouches(boss, ask, offers.time.time() + 60).status_code == 200
+    agents.handle_hook(db, boss.id, event, hook)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Still queued", "<p>no</p>", asked=ask)
 
 
 def test_mid_turn_message_backs_a_visual(db, session, tmp_path):
