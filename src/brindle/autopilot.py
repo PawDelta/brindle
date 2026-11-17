@@ -820,17 +820,6 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", "opencode": "opencode"}
 
 
-def _excluded(name: str, cfg: RepoConfig, repo_root: str) -> bool:
-    """Whether profile ``name`` runs on a provider in ``exclude_providers``
-    (a profile that doesn't exist isn't: its own check reports it)."""
-    if not cfg.exclude_providers:
-        return False
-    try:
-        return load_profile(name, repo_root).provider in cfg.exclude_providers
-    except KeyError:
-        return False
-
-
 def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
                  weight: str | None = None) -> str | None:
     """Why routing skips profile ``name`` (its provider is in
@@ -935,16 +924,49 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
                      files: list[str] | None,
                      decision: dict | None = None, gate=None,
                      ceiling: str | None = None, design_heavy: bool = False,
-                     goal: dict | None = None) -> tuple[str | None, bool, str]:
+                     goal: dict | None = None, after: list[str] | None = None,
+                     policy: dict | None = None) -> tuple[str | None, bool, str]:
     """(profile, learned, why) for a task of ``weight``; profile is None when
     every candidate for the tier is out. ``decision`` gets the ``baseline``
     (the pick without learning), and ``over_budget`` (why each candidate was
     skipped) when a budget was what ruled every one out, or ``demoted_from``
-    when it moved the task to a cheaper candidate."""
-    from brindle import learning, routing_goal
+    when it moved the task to a cheaper candidate. Candidates come from the
+    cascade (brindle.cascade): the tier, then the rest of the pool when the
+    tier has nothing runnable, ordered by the measured table. ``after``:
+    profiles this task already ran on (their providers are left out).
+    ``policy``: the assignment's context for the repo's policy (``mode``,
+    ``branch``, ``actor``), asked of each candidate as a fresh assign would;
+    the delegation's own policy guard still decides the final pick."""
+    from brindle import cascade, learning, policy as pol, routing_goal
 
-    order, remaining, skipped, over = eligible(cfg, repo_root, weight, gate, ceiling=ceiling,
-                                               design_heavy=design_heavy)
+    if goal is None and not cfg.routing_locked.get(weight):
+        goal = routing_goal.for_learner(repo_root)
+    ctx = dict(policy or {})
+    try:
+        running = pol.running_workers(db, repo_root)
+    except Exception:  # noqa: BLE001 - the policy decides what an unknown count means
+        running = None
+
+    def refusal(name: str) -> str | None:
+        d = pol.assign_decision(cfg, repo_root, name, task or "", ctx.get("mode", "assign"), files=files,
+                                weight=weight, branch=ctx.get("branch"), actor=ctx.get("actor"),
+                                running_workers=running)
+        # A denial is a denial whatever its text: an empty reason never reads as allowed.
+        return None if d.allowed else (d.reason or "the repo's policy refused it")
+
+    try:
+        # With a learner, every replacement is checked so it can weigh them all.
+        learner = not cfg.routing_locked.get(weight) and learning.plugin(cfg, repo_root) is not None
+    except Exception:  # noqa: BLE001 - no learner: the table's order stands
+        learner = False
+    found = cascade.workers(cfg, repo_root, weight, gate=gate, ceiling=ceiling, design_heavy=design_heavy,
+                            after=after or (), weights=goal, policy=refusal, full=learner)
+    order, remaining = found.pool, found.order
+    own = set(tier_order(cfg, weight))
+    over = {n: why for n, why in found.skipped if why.startswith("over budget")}
+    # The tier's own reasons, as before; the rest of the pool's only once the tier is out.
+    in_tier = not remaining or any(n in own for n in remaining)
+    skipped = [why for n, why in found.skipped if n in own or not in_tier]
     if over and decision is not None:
         if not remaining:
             decision["over_budget"] = list(over.values())
@@ -953,18 +975,23 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
             if order.index(first) < order.index(remaining[0]):
                 decision["demoted_from"] = first
     if not remaining:
+        if found.policy_refused and decision is not None:
+            # Only policy stood in the way: the delegation is refused (and audited) as policy refuses it.
+            name = found.policy_refused[0]
+            d = pol.check_assign(cfg, repo_root, name, task or "", ctx.get("mode", "assign"), files=files,
+                                 weight=weight, branch=ctx.get("branch"), actor=ctx.get("actor"),
+                                 running_workers=running)
+            decision["policy_refusal"] = (d.reason or "the repo's policy refused it") if not d.allowed \
+                else dict(found.skipped)[name]
         return None, False, f"every {weight} candidate was out ({'; '.join(skipped) or 'none configured'})"
+    if not in_tier:
+        skipped.insert(0, f"every {weight} candidate was out, so the cascade went on")
     if cfg.routing_locked.get(weight):
         pick, reason = None, None   # the owner pinned this tier: learning never overrides it
     else:
-        if goal is None:
-            goal = routing_goal.for_learner(repo_root)
-        # The goal orders what's left by the shipped priors (§4): the pick
-        # without hosted learning, and the default the learner must beat.
-        ranked = routing_goal.rank(remaining, weight, goal, repo_root)
-        if ranked[0] != remaining[0]:
-            skipped.insert(0, f"the routing goal put it ahead of {remaining[0]}")
-        remaining = ranked
+        # The cascade's order (the measured table, on the goal's weights) is
+        # the pick without hosted learning, and the default the learner must
+        # beat among every candidate that can run.
         options: dict = {"design_heavy": True} if design_heavy else {}
         if goal is not None:
             options["goal"] = goal
@@ -1121,16 +1148,26 @@ def _goal_weights(db: DB, caller_id: str, repo_root: str, goal) -> dict | None:
     return routing_goal.for_learner(repo_root, db=db, root_id=root, task=goal)
 
 
+def _policy_context(db: DB, caller_id: str, given: dict | None) -> dict:
+    """What routing tells the repo's policy about the delegation it weighs:
+    ``given`` (``mode``, ``branch``) and the caller as the actor."""
+    ctx = dict(given or {})
+    if "actor" not in ctx:
+        ctx["actor"] = db.get_agent(caller_id) if caller_id else None
+    return ctx
+
+
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
                    task: str | None = None, files: list[str] | None = None,
                    weight: str | None = None, why: list[str] | None = None,
                    decision: dict | None = None, *, design_heavy: bool = False,
-                   max_tier: str | None = None, goal=None) -> tuple[str, bool]:
+                   max_tier: str | None = None, goal=None, policy: dict | None = None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
     ``requested`` if given, else (when no ``weight`` is given) the first
     unverified milestone's profile in the caller's session, else the repo's
-    routing for ``weight`` (available
-    candidates only, the hosted learner choosing among them), else the hosted
+    routing for ``weight`` (the cascade's runnable candidates only, the
+    hosted learner choosing among them; AutopilotError when none can run),
+    else (no weight) the hosted
     learner's pick among ``learning_candidates``, else the repo's
     ``default_agent``. Raises AutopilotError if it doesn't exist. An
     explanation of a routed pick is appended to ``why``. ``decision`` is
@@ -1142,7 +1179,9 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     ``max_weight`` to routing, its fallbacks and the final pick; the tighter wins.
     ``goal``: this task's own routing goal (a preset name or weights), over
     the session's, the repo's and the person's (brindle.routing_goal); the
-    learner is asked with the one in force."""
+    learner is asked with the one in force. ``policy``: the delegation's
+    ``mode`` and ``branch``, so routing asks the repo's policy about each
+    candidate as the assignment will (default mode "assign")."""
     cfg = load_repo_config(repo_root)
     options: dict = {"design_heavy": True} if design_heavy else {}
     weights = _goal_weights(db, caller_id, repo_root, goal)
@@ -1211,7 +1250,9 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             from brindle import budget
 
             gate = budget.Gate(db, cfg, repo_root, caller_id)
-            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate, ceiling=ceiling, **options)
+            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate,
+                                                     ceiling=ceiling, policy=_policy_context(db, caller_id, policy),
+                                                     **options)
             if routed.get("over_budget"):
                 message = budget.refusal(routed["over_budget"])
                 try:
@@ -1219,21 +1260,14 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 except Exception:  # noqa: BLE001 - no autopilot session: the refusal is the answer
                     pass
                 raise AutopilotError(message)
-            if picked:
-                name = picked
-            else:
-                candidates = [cfg.default_agent]
-                if ceiling and weight_order[profile_weight(cfg.default_agent, cfg, repo_root)] > weight_order[ceiling]:
-                    candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
-                candidates = [n for n in candidates if cfg.routing_allows(n, design_heavy)]
-                fallback = next((n for n in candidates if not _excluded(n, cfg, repo_root)), None)
-                if not fallback and candidates:
-                    raise AutopilotError(f"no agent profile left for a {weight} task: every candidate runs on a "
-                                         f"provider excluded from routing ({', '.join(cfg.exclude_providers)})")
-                if not fallback:
-                    raise AutopilotError(f"no permissible agent profile under max_weight ceiling {ceiling!r}")
-                name = fallback
-                note += f"; using {name}"
+            if not picked and routed.get("policy_refusal"):
+                raise AutopilotError(f"Not started: the repo's policy refused it: {routed['policy_refusal']}")
+            if not picked:
+                # The cascade checked every profile this task may use: nothing unchecked stands in.
+                where = f"no permissible agent profile under max_weight {ceiling!r}" if ceiling \
+                    else "no agent profile"
+                raise AutopilotError(f"{where} can take a {weight} task now: {note}")
+            name = picked
             if why is not None:
                 why.append(note)
         if not name:
@@ -2556,20 +2590,11 @@ def _pause_provider(db: DB, root_id: str, provider: str, resets_at: float, why: 
     return [a.id for a in stopped]
 
 
-def over_limit(db: DB, root_id: str, cfg: RepoConfig) -> bool:
-    """Usage is at the limit: stop the session's workers until the window
-    resets (autopilot state "usage_paused"). Without a reset time to wait for,
-    autopilot is just blocked, as the user has to say when to go on."""
-    u = usage()
-    if not u or u["used"] < cfg.usage_limit:
-        return False
-    resets_at = u.get("resets_at")
-    if not isinstance(resets_at, (int, float)):
-        db.update_autopilot(root_id, state="blocked", note=usage_note(u)
-                            + ". Autopilot paused so work doesn't stall halfway.")
-        return True
-    _pause_provider(db, root_id, "claude", resets_at, usage_note(u))
-    return True
+# Near the limit (``usage_limit``, 90% by default) nothing is stopped: routing
+# only stops giving that provider new work (``_unavailable``), and workers
+# already on it are asked to save their work if it is about to cut off
+# (brindle.checkpoint). Workers are paused only once the limit is reached
+# (``limit_reached``).
 
 
 def usage_resume(db: DB, root_id: str, now: float | None = None) -> str | None:
@@ -2586,10 +2611,10 @@ def usage_resume(db: DB, root_id: str, now: float | None = None) -> str | None:
     root = db.get_agent(root_id)
     if root is None or root.status in ("paused", "done") or not agents.is_alive(root):
         return None  # the session itself is stopped: `brindle continue` brings it back
-    ws = db.get_workspace(root.workspace_id)
-    cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
+    from brindle import provider_health
+
     u = usage()
-    if u and u["used"] >= cfg.usage_limit:
+    if u and u["used"] >= provider_health.FULL_PERCENT:
         return None  # the fresh reading says the limit still holds
     try:
         ids = set(json.loads(ap.usage_paused_ids or "[]"))
@@ -2606,8 +2631,8 @@ def usage_resume(db: DB, root_id: str, now: float | None = None) -> str | None:
 
 
 def usage_sweep(db: DB, now: float | None = None) -> list[str]:
-    """One pass over every autopilot session: stop workers at the limit,
-    resume them after the reset, and wake completed outside waits.
+    """One pass over every autopilot session: resume workers stopped at the
+    limit once it has reset, and wake completed outside waits.
     Called from the cull sweep."""
     from brindle import agents, identity_lock, login_pause, tmux
 
@@ -2621,12 +2646,8 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
         if ap.goal:
             phase_landing(db, root.id, now)
         if ap.state == "running" and ap.goal:
-            ws = db.get_workspace(root.workspace_id)
-            cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
-            if over_limit(db, root.id, cfg):
-                done.append(f"usage limit reached: {root.id} is {db.get_autopilot(root.id).state}")
-            elif ((ap.external_wait or db.outstanding(root.id, WAIT_ENDED_HEAD))
-                  and not login_pause.paused(db, root.id) and not proposing(ap)):
+            if ((ap.external_wait or db.outstanding(root.id, WAIT_ENDED_HEAD))
+                    and not login_pause.paused(db, root.id) and not proposing(ap)):
                 try:
                     message = wait_ended(db, ap, now)
                     if db.outstanding(root.id, WAIT_ENDED_HEAD):
@@ -2723,8 +2744,6 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
         db.update_autopilot(agent.id, state="done")
         return None
 
-    if over_limit(db, agent.id, cfg):
-        return None  # workers included: they'd keep burning usage
     if ap.external_wait:
         try:
             wait_ended(db, ap)

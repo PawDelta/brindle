@@ -48,17 +48,14 @@ def use(percent, resets_at=RESET):
     autopilot.record_usage({"rate_limits": {"five_hour": {"used_percentage": percent, "resets_at": resets_at}}})
 
 
-@pytest.mark.variant("budget enforcement: stopping the supervisor at its usage limit must also pause live workers")
-def test_on_stop_pauses_even_with_workers_running(db, session):
-    use(95)
-    assert autopilot.on_stop(db, db.get_agent("boss"), {}) is None
-    assert db.get_autopilot("boss").state == "usage_paused"
-    assert db.get_agent("w1").status == "paused"
+def limit(db):
+    """w1's turn failed on Claude's usage limit, which lifts at RESET."""
+    autopilot.limit_reached(db, db.get_agent("w1"), RESET)
 
 
-def test_over_limit_waits_for_the_reset_then_resumes_without_fresh_usage(db, session):
-    use(95)
-    autopilot.usage_sweep(db)
+def test_limit_pause_waits_for_the_reset_then_resumes_without_fresh_usage(db, session):
+    limit(db)
+    use(100)
     assert autopilot.usage_sweep(db, now=RESET + 1) == []  # fresh usage still at the limit
     assert db.get_autopilot("boss").state == "usage_paused"
     quota.path().unlink()
@@ -73,7 +70,7 @@ def test_cull_sweep_drives_it_and_keeps_paused_workers(db, session, monkeypatch)
     monkeypatch.setattr(cull, "clean_locks", lambda db, now: 0)
     monkeypatch.setattr(cull, "note_stuck", lambda db, now, panes: [])
     monkeypatch.setattr(cull.agents, "pane_owners", lambda db, panes=None: {})
-    use(95)
+    limit(db)
     cull.sweep(db, now=time.time())
     assert db.get_autopilot("boss").state == "usage_paused"
     cull.sweep(db, now=time.time() + 10 * 3600)  # far past any idle limit
@@ -94,8 +91,7 @@ def test_claude_limit_error_pauses_only_claude_workers(db, session):
 
 
 def test_paused_session_is_not_restarted_by_the_sweep(db, session):
-    use(95)
-    autopilot.usage_sweep(db)
+    limit(db)
     db.set_status("boss", "paused")  # the person paused the whole session
     use(5)
     assert autopilot.usage_sweep(db, now=RESET + 1) == []

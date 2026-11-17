@@ -52,7 +52,13 @@ class Outcome:
     first report_result), "review" (with ``approved``), "escalated" (the
     supervisor was asked to step in), "merged" or "removed_unmerged" (the
     worker task is over), or "verdict" (with ``approved``) or "no_verdict"
-    (a reviewer run ended).
+    (a reviewer run ended), or "interrupted" (with ``cause``: a worker removed
+    unmerged, or a reviewer ended without a verdict, while stopped for a
+    provider cause; never counted against its model).
+
+    Wall and idle seconds leave out the time the agent was parked after such
+    a stop. A merge carries ``handovers`` and ``handed_from`` when the worker
+    took over from one stopped for a provider cause.
 
     On terminal events also: ``cost_usd`` (this agent's dollars at list price
     from its token usage; None when its price is unknown, never 0 for
@@ -72,6 +78,9 @@ class Outcome:
     queue_seconds: float = 0.0
     idle_seconds: float = 0.0
     failure: str | None = None
+    cause: str | None = None         # "interrupted": limit | rate_limited | signed_out | provider_error | not_installed
+    handovers: int = 0               # "merged": takeovers its task had, this worker's included
+    handed_from: str | None = None   # "merged": the profile this worker took over from
 
     @property
     def stalled(self) -> bool:
@@ -211,15 +220,45 @@ def _queue_seconds(db: DB, worker: Agent, repo_root: str) -> float:
     return 0.0
 
 
-def _failure(db: DB, worker: Agent, ws: Workspace) -> tuple[str | None, float]:
+def _stop(db: DB, agent: Agent, now: float) -> tuple[str | None, float, float | None]:
+    """``agent``'s provider stop: (cause, seconds parked, the open spell's start)."""
+    try:
+        return db.stop_of(agent.id, now)
+    except Exception:  # noqa: BLE001 - no record: an ordinary ending
+        return None, 0.0, None
+
+
+def stop_cause(db: DB, agent: Agent | None) -> str | None:
+    """The provider cause ``agent`` is stopped for (its captured ending's, once
+    its rows went with the removal), or None."""
+    if agent is None:
+        return None
+    if agent.id in _captured:
+        return _captured[agent.id].get("cause")
+    return _stop(db, agent, time.time())[0]
+
+
+def handover(db: DB, worker: Agent, repo_root: str) -> tuple[str | None, int]:
+    """(the profile ``worker``'s task took over from, takeovers its work has
+    had so far): (None, 0) when its task took over from no provider stop."""
+    for t in db.list_tasks(repo_root):
+        if t.agent_id == worker.id:
+            return db.handover_of(t.id)
+    return None, 0
+
+
+def _failure(db: DB, worker: Agent, ws: Workspace,
+             parked_since: float | None = None) -> tuple[str | None, float]:
     """(failure, idle seconds) for a worker whose task ended unmerged: "idle"
     (idle with no report), "no_report" (never reported), "no_commits" (reported
-    but its branch never moved from where it started), else None."""
+    but its branch never moved from where it started), else None. Idle time
+    ends where a park (``parked_since``) began."""
     current = db.get_agent(worker.id) or worker
     if current.result is None:
         if current.status == "idle":
             since = current.status_since or current.created_at
-            return "idle", max(0.0, time.time() - since)
+            end = time.time() if parked_since is None else parked_since
+            return "idle", max(0.0, end - since)
         return "no_report", 0.0
     if produced_nothing(worker, ws):
         return "no_commits", 0.0
@@ -246,10 +285,16 @@ def produced_nothing(worker: Agent | None, ws: Workspace) -> bool:
 
 
 def _ending(db: DB, worker: Agent, ws: Workspace, merged: bool = False) -> dict:
-    failure, idle = (None, 0.0) if merged else _failure(db, worker, ws)
+    cause, parked, since = _stop(db, worker, time.time())
+    failure, idle = (None, 0.0) if merged else _failure(db, worker, ws, since)
+    if cause is not None or merged:
+        failure = None      # a provider stop is not the model's failure
+    handed_from, handovers = handover(db, worker, ws.repo_root) if merged else (None, 0)
     return {"failure": failure, "idle_seconds": idle, "review_cost_usd": _review_dollars(db, ws),
             "queue_seconds": _queue_seconds(db, worker, ws.repo_root),
-            "cost_usd": _dollars(db, worker, ws.repo_root)}
+            "cost_usd": _dollars(db, worker, ws.repo_root),
+            "cause": None if merged else cause, "parked_seconds": parked,
+            "handed_from": handed_from, "handovers": handovers}
 
 
 def capture(db: DB, ws: Workspace, worker: Agent | None) -> None:
@@ -322,18 +367,22 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
         if p is None or worker is None:
             return
         info = _task_info(db, worker, ws)
-        wall = max(0.0, time.time() - worker.created_at)
+        now = time.time()
+        cause, parked, _since = _stop(db, worker, now)
         if reported:
-            p.record(info, Outcome("reported", wall_seconds=wall))
+            p.record(info, Outcome("reported", wall_seconds=max(0.0, now - worker.created_at - parked)))
         if approved is not None:
             p.record(info, Outcome("review", approved=approved))
-        if escalated:
+        if escalated and cause is None:     # the supervisor stepping in for a provider stop isn't the model's
             p.record(info, Outcome("escalated"))
         if merged is not None:
-            ending = (captured if captured is not None and not merged
-                      else _ending(db, worker, ws, merged=bool(merged)))
+            ending = dict(captured if captured is not None and not merged
+                          else _ending(db, worker, ws, merged=bool(merged)))
+            wall = max(0.0, now - worker.created_at - ending.pop("parked_seconds", 0.0))
+            event = ("merged" if merged else
+                     "interrupted" if ending.get("cause") else "removed_unmerged")
             p.record(info, Outcome(
-                "merged" if merged else "removed_unmerged", checks_passed=checks_passed,
+                event, checks_passed=checks_passed,
                 tokens=_tokens(db, worker), wall_seconds=wall, **ending,
             ))
     except Exception:
@@ -343,7 +392,8 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
 def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace | None, *,
                   approved: bool | None = None, worker: Agent | None = None) -> None:
     """Tell the learner how ``reviewer``'s run ended ("verdict" when ``approved``
-    is a bool, else "no_verdict"), at most once per reviewer."""
+    is a bool, else "no_verdict", or "interrupted" while it is stopped for a
+    provider cause), at most once per reviewer."""
     try:
         if reviewer is None or reviewer.mode != "review" or ws is None or reviewer.id in _settled:
             return
@@ -364,10 +414,15 @@ def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace
         if p is None:
             return
         info = _reviewer_info(db, reviewer, ws, worker)
-        wall = max(0.0, time.time() - reviewer.created_at)
+        now = time.time()
+        cause, parked, _since = _stop(db, reviewer, now)
+        if event == "no_verdict" and cause is not None:
+            event = "interrupted"   # stopped for a provider cause: not the model's missing verdict
+        wall = max(0.0, now - reviewer.created_at - parked)
         p.record(info, Outcome(event, approved=approved if isinstance(approved, bool) else None,
                                tokens=_tokens(db, reviewer), wall_seconds=wall,
-                               cost_usd=_dollars(db, reviewer, ws.repo_root)))
+                               cost_usd=_dollars(db, reviewer, ws.repo_root),
+                               cause=cause if event == "interrupted" else None))
     except Exception:
         log.exception("brindle: the learner failed to record a reviewer outcome")
 

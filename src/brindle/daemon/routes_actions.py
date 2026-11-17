@@ -495,6 +495,21 @@ def provider_switch(db: DB, params: dict, body: Body) -> Any:
     return SessionDTO.from_agent(new).to_json()
 
 
+def handover_choice(db: DB, params: dict, body: Body) -> Any:
+    """The person's answer on a handover Inbox card (kind handover):
+    ``{"choice": "wait" | "continue" | "stop"}``. A second answer finds the
+    card taken and changes nothing (brindle.handover.answer)."""
+    from brindle import handover
+
+    try:
+        done = handover.answer(db, params["id"], _get(body, "choice", required=True), time.time())
+    except KeyError:
+        raise ServiceError("not_found", "no such handover", 404) from None
+    except ValueError as e:
+        raise ServiceError("invalid", str(e)) from None
+    return {"done": done}
+
+
 # -- inbox -----------------------------------------------------------------------
 
 
@@ -3209,6 +3224,7 @@ ROUTES = [
     _post("/sessions/{root}/handover", handover_session),
     _post("/sessions/{root}/transfer", transfer_session),
     _post("/sessions/{root}/provider-switch", provider_switch),
+    _post("/handovers/{id}", handover_choice),
     # GET on the file path reads (routes_read); agent callers are refused by the guard.
     Route("/v1/sessions/{root:path}/file", _endpoint(put_session_file), methods=["PUT"]),
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),

@@ -20,7 +20,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from brindle import build_caches, model_access, tmux
+from brindle import build_caches, model_access, provider_health, tmux
 from brindle.pro import route_health
 
 FOLLOWUP_SECONDS = 5.0
@@ -35,6 +35,9 @@ _LAUNCH_ENV = frozenset({"BRINDLE_AGENT_ID", "BRINDLE_ROOT_PATH", "BRINDLE_WORKS
 AUTH = model_access.LAUNCH_AUTH
 MODEL = model_access.LAUNCH_MODEL
 CAPACITY = model_access.LAUNCH_CAPACITY
+# A pane-read failure that is the provider's, not the model's: its provider_health state
+# (limit_report.CAUSES), recorded as the agent's stop
+PROVIDER_STOPS = {AUTH.key: provider_health.SIGNED_OUT, CAPACITY.key: provider_health.ERRORING}
 # Claude Code's own line for a --model its backend doesn't serve (a 404), which
 # carries no "API Error:" marker: "There's an issue with the selected model (...)".
 # Vertex says "The model X is not available on your vertex deployment." instead.
@@ -593,6 +596,12 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     if outcome == "pending":
         return outcome  # diagnostics only; do not spend a supervisor turn on a live process
     ws = db.get_workspace(agent.workspace_id)
+    if cause is not None and cause.key in PROVIDER_STOPS:
+        from brindle import limit_report
+
+        # Before the reviewer's ending is noted: a provider stop, not the model's
+        # (a rejected model stays the profile's own failure).
+        limit_report.park(db, agent, PROVIDER_STOPS[cause.key])
     agents._note_reviewer_end(db, agent, ws)
     if not alive and agent.mode == "review" and ws:
         from brindle import pipeline

@@ -125,11 +125,12 @@ def test_an_org_lock_refuses_a_put_and_get_shows_the_org_goal(db, repo, boss, mo
 
 # developer-sonnet: dear and quick; developer-codex: cheap, slow and likelier to merge first time.
 TRADEOFF = {
+    "version": 2, "measured": "2026-11-15", "source": "test", "min_runs": 5, "handover": {},
     "token_mix": {"input": 0.8, "output": 0.2}, "default_mix": {"medium": 1.0},
     "tiers": {t: {"mtok": 1.0, "minutes": 30, "first_try": 0.3, "p": 0.8}
               for t in ("light", "medium", "heavy", "advanced")},
-    "profiles": {"developer-sonnet": {"medium": {"usd": 4.0, "minutes": 10, "first_try": 0.3}},
-                 "developer-codex": {"medium": {"usd": 1.0, "minutes": 40, "first_try": 0.6}}},
+    "profiles": {"developer-sonnet": {"medium": {"usd": 2.0, "minutes": 10, "first_try": 0.5, "p": 0.8, "runs": 9}},
+                 "developer-codex": {"medium": {"usd": 1.0, "minutes": 80, "first_try": 0.6, "p": 0.8, "runs": 9}}},
 }
 
 
@@ -159,7 +160,7 @@ def test_the_preview_reflects_this_repos_routing_and_goal(db, repo, offline):
     cheap = routing_goal.preview(CHEAP, str(repo), db)
     fast = routing_goal.preview(routing_goal.PRESETS["fast"], str(repo), db)
     assert (_medium(cheap)["profile"], _medium(cheap)["previous"]) == ("developer-codex", "developer-sonnet")
-    assert fast["you"]["usd"] / cheap["you"]["usd"] == pytest.approx(4.0, rel=0.01)
+    assert fast["you"]["usd"] / cheap["you"]["usd"] == pytest.approx(2.0, rel=0.01)
     # The point and the table share one yardstick: the shipped Fable alone reference.
     fable = next(r for r in cheap["references"] if r["name"] == "Fable 5.2 alone")
     assert cheap["landed"] == pytest.approx(routing_goal.place(cheap["you"], fable), abs=0.01)

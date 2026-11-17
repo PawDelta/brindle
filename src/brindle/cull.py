@@ -225,6 +225,16 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     from brindle import limit_report
 
     done.extend(limit_report.rerun_due(db, now))
+    # A provider about to cut off: its Codex and agy workers are told to save their work.
+    # (Claude's hear it from their own PostToolUse hook.)
+    from brindle import checkpoint
+
+    done.extend(checkpoint.sweep(db, now))
+    # Workers parked at a provider limit: resumed in place once it is back, and
+    # handovers a process claimed and never finished, taken up again.
+    from brindle import handover
+
+    done.extend(handover.sweep(db, now))
 
     # 1b'. Tasks queued for room on the machine whose helper is gone: start them once there is.
     from brindle import tasks

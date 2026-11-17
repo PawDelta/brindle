@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import (agents, learning, mcp_server, pipeline, plugins, pricing, procs, rewind, usage,
-                     workspaces)
+from brindle import (agents, learning, limit_report, mcp_server, pipeline, plugins, pricing, procs,
+                     provider_health, rewind, usage, workspaces)
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.pro import learning as pro_learning
@@ -61,6 +61,43 @@ def test_an_idle_worker_without_a_report_is_recorded_as_a_stalled_failure(db, ws
     body = pro_learning.record_payload(KEY, "repo", task, outcome, signals=True)
     assert body["stalled"] is True and body["failure"] == "idle"
     assert body["parts"] == 3
+
+
+@pytest.mark.parametrize("stop, resumed", [
+    ("limit", False),
+    pytest.param("overload", False, marks=pytest.mark.variant(
+        "a first overload, the provider not yet erroring, is still the provider's stop")),
+    pytest.param("limit", True, marks=pytest.mark.variant(
+        "back at work once the limit lifted, then abandoned: its own failure again")),
+])
+def test_a_worker_stopped_for_its_limit_and_removed_unmerged_sends_no_failure(db, ws, recorder, stop, resumed):
+    w = add(db, ws, "w1", "assign", status="idle", status_since=time.time() - 20)
+    if stop == "limit":
+        limit_report.at_limit(db, w, provider_health.Health(provider_health.LIMITED, time.time() + 600))
+    else:
+        limit_report.on_stop_failure(db, w, rate_limited=False, overloaded=True)
+    if resumed:
+        db.set_status("w1", "processing")
+        db.set_status("w1", "idle")
+    pipeline.note_removed_unmerged(db, ws, worker=w)
+    sent = [body for task, outcome in recorder.events for level in (0, 1, 2)
+            if (body := pro_learning.record_payload(KEY, "repo", task, outcome, signals=level))]
+    if resumed:
+        assert any(b.get("failure") == "idle" for b in sent)
+        return
+    assert not [b for b in sent if "failure" in b or "stalled" in b or b["event"] == "removed_unmerged"]
+
+
+def test_with_signals_2_the_interrupted_event_carries_the_cause(db, ws, recorder):
+    w = add(db, ws, "w1", "assign", status="idle", status_since=time.time() - 25)
+    limit_report.park(db, w, provider_health.RATE_LIMITED, now=time.time() - 20)
+    pipeline.note_removed_unmerged(db, ws, worker=w)
+    task, outcome = recorder.events[-1]
+    body = pro_learning.record_payload(KEY, "repo", task, outcome, signals=2)
+    assert body["event"] == "interrupted" and body["cause"] == "rate_limited"
+    assert body["wall_seconds"] < 20            # created 30s ago, parked for the last 20
+    assert set(body) <= pro_learning.RECORD_KEYS
+    assert pro_learning.record_payload(KEY, "repo", task, outcome, signals=1) is None
 
 
 @pytest.mark.parametrize("branch, failure", [

@@ -353,6 +353,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     acts = <PlanOfferActions item={item} actions={actions} onDone={onDone} onGo={onGo} />;
   } else if (PROVIDER_SWITCH_KINDS.includes(item.kind)) {
     acts = <ProviderSwitchActions item={item} actions={actions} onDone={onDone} />;
+  } else if (item.kind === "handover" && item.choices?.length) {
+    acts = <HandoverActions item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "org_notice") {
     acts = act("Mark read", "read", {}, PLAIN);
   } else if (item.kind === "org_blocked") {
@@ -450,6 +452,37 @@ function ProviderSwitchActions({ item, actions, onDone }: { item: InboxItemDTO; 
         (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e)),
       )}
     />
+  );
+}
+
+/* A worker whose provider ran out (engine brindle.handover): the card's own
+   choices (continue on another model / wait / stop), the first as the main
+   button. One answer at a time; the card goes once the engine has it. */
+function HandoverActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+  const client = useDaemon();
+  const [saving, setSaving] = useState(false);
+  const pending = useRef(false);
+  const answer = (choice: string) => {
+    if (pending.current) return;
+    pending.current = true;
+    setSaving(true);
+    void client
+      .answerHandover(item.request_id ?? "", choice)
+      .then(() => actions.settle(item), (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e)))
+      .finally(() => {
+        pending.current = false;
+        setSaving(false);
+        onDone();
+      });
+  };
+  return (
+    <>
+      {(item.choices ?? []).map((c, i) => (
+        <button key={c.id} type="button" className={`${ACT} ${i === 0 ? PLAIN : GHOST}`} disabled={saving} onClick={() => answer(c.id)}>
+          {c.label}
+        </button>
+      ))}
+    </>
   );
 }
 

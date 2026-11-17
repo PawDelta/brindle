@@ -263,7 +263,7 @@ def test_policy_deny_blocks_assign_and_handoff_with_the_reason(db, repo, boss, m
     assert info.mode == "assign" and info.weight == "heavy" and info.files == ("a.py",)
     assert info.profile == "developer-heavy" and info.provider == "claude" and info.actor == "boss"
     assert info.branch == "feat-a" and info.repo_root == str(repo)
-    assert gate.seen[1].mode == "handoff"
+    assert gate.seen[-1].mode == "handoff"   # routing asks about each assign candidate first
 
 
 @pytest.mark.variant("a policy denial must prevent manual MCP merges even when pipeline review is disabled")

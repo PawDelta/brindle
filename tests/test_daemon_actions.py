@@ -460,9 +460,9 @@ def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body,
     after = config._read_json(config.scope_paths(str(repo))[scope])
     assert after == ({k: v for k, v in before.items() if k != "routing_light"} | written if written else before)
     if "exclude_providers" in written:
-        # The light candidate and the default agent both run on claude: routing refuses, not falls back.
-        with pytest.raises(autopilot.AutopilotError, match="excluded from routing"):
-            autopilot.choose_profile(db, "sup", str(repo), weight="light")
+        # The light candidate runs on claude: the cascade replaces it with one on another provider.
+        name, _ = autopilot.choose_profile(db, "sup", str(repo), weight="light")
+        assert agents.load_profile(name, str(repo)).provider != "claude"
 
 
 def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_reports_it(db, repo, world, monkeypatch):

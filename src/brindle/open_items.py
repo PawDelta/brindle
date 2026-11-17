@@ -24,7 +24,7 @@ import json
 import logging
 import time
 
-from brindle import agents, bus, disk, git, identity_lock, pipeline, tasks, tmux, workspaces
+from brindle import agents, bus, disk, git, identity_lock, learning, pipeline, tasks, tmux, workspaces
 from brindle.db import DB, Agent, OpenItem, Task, Workspace
 from brindle.providers import get_provider
 
@@ -341,12 +341,17 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
         "ORDER BY COALESCE(held,0) DESC, id DESC LIMIT 1", (worker.id, supervisor.id)).fetchone()
     if note:
         unmerged_note += f"\n\nPrevious worker's latest note:\n{note['body']}"
+    # Read before its rows go with the retirement: a worker stopped for a
+    # provider cause is handed over (the learner hears it with the merge).
+    handover = None
+    if learning.stop_cause(db, worker) is not None:
+        handover = [worker.profile, learning.handover(db, worker, ws.repo_root)[1] + 1]
     pipeline.note_removed_unmerged(db, ws, actor=actor)
     text = brief + unmerged_note
     prior = _takeover_state(db, worker.id)
     state = {"worker": worker.id, "supervisor": supervisor.id, "ws": ws.id, "repo": ws.repo_root,
              "branch": ws.branch, "text": text, "old_task": task.id if task else None,
-             "detail": item.detail, "opened_at": item.opened_at, "at": now,
+             "detail": item.detail, "opened_at": item.opened_at, "at": now, "handover": handover,
              # What an earlier attempt prepared is still this takeover's to undo.
              "task": prior["task"] if prior else None, "moved": prior["moved"] if prior else []}
     _save_takeover(db, state)
@@ -417,6 +422,8 @@ def _finish_takeover(db: DB, state: dict, now: float, actor: Agent | None = None
         bus.publish(db, "task.cancelled", repo_root=old.repo_root, task_id=old.id,
                     reason=f"its worker {worker_id} was stuck; replaced by task {new_id}")
     tasks.move(db, new_id, tasks.UNANSWERED, "pending")
+    if state.get("handover"):
+        db.note_handover(new_id, *state["handover"])
     try:
         started = tasks.start_requeued(db, db.get_task(new_id), f"worker {worker_id}'s task")
     except Exception as e:  # noqa: BLE001 - it is retired already, so the supervisor must hear of this

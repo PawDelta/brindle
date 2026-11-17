@@ -1883,6 +1883,12 @@ export class DaemonClient {
     return this.postInbox<{ accepted: boolean }>("/goal/plan-offer", { root, offer, accept });
   }
 
+  /* A handover card's answer (engine brindle.handover.answer): one of the
+     card's `choices` ids. A second answer finds the card taken. */
+  answerHandover(id: string, choice: string) {
+    return this.postInbox<{ done: string }>(`/handovers/${encodeURIComponent(id)}`, { choice });
+  }
+
   inbox(repo?: string) {
     return this.get<InboxItemDTO[]>("/inbox", { repo });
   }

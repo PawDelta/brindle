@@ -124,7 +124,7 @@ class RepoConfig:
     wait_for_room: bool = True         # a new worker or check run waits while the machine is busy; false starts it at once
     room_wait_max: int = 300           # seconds a worker waits for room before its supervisor is told once (it never starts early)
     check_concurrency: int = 4         # check runs at once on this machine, across branches; the rest queue (0: no cap)
-    usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
+    usage_limit: int = 90              # routing stops giving a provider new work at this % of its usage limit
     limit_headroom: float = 10         # percentage points reserved for a heavy task; medium uses half, light a quarter
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)

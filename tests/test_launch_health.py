@@ -417,6 +417,8 @@ def test_current_failures_report_safe_actions_and_effective_cooldown(db, health,
     assert denied.key == cause
     assert (db.get_agent(a.id).status == "failed") == (cause == "launch_model")
     assert db.get_agent(a.id).failed_why == ("model" if cause == "launch_model" else None)
+    # a rejected sign-in is the provider's stop (the learner leaves it out); a rejected model is not
+    assert db.stop_of(a.id, 200.0)[0] == ("signed_out" if cause == "launch_auth" else None)
     ws = db.get_workspace(a.workspace_id)
     assert route_health.pending() == ({(ws.repo_root, provider, "bedrock", "claude-opus-5-5", refused): 1}
                                       if refused else {})

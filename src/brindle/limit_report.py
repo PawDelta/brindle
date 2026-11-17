@@ -35,6 +35,24 @@ REPORTED = (provider_health.LIMITED, provider_health.SIGNED_OUT, provider_health
 RERUN_PROMPT = ("[brindle] Your last turn stopped on a provider rate limit (429) before it "
                 "finished, and that limit has lifted. Carry on from where you stopped.")
 
+# provider_health state -> the stop cause the learner hears (brindle.learning)
+CAUSES = {provider_health.LIMITED: "limit", provider_health.RATE_LIMITED: "rate_limited",
+          provider_health.SIGNED_OUT: "signed_out", provider_health.ERRORING: "provider_error",
+          provider_health.NOT_INSTALLED: "not_installed"}
+
+
+def park(db: DB, agent: Agent, state: str, now: float | None = None) -> None:
+    """``agent`` stopped on provider ``state`` (one of ``CAUSES``): record the
+    cause and start its parked time, so the learner counts neither against
+    its model. Never raises."""
+    cause = CAUSES.get(state)
+    if cause is None:
+        return
+    try:
+        db.park(agent.id, cause, time.time() if now is None else now)
+    except Exception:  # noqa: BLE001 - a stop is reported whether or not it is recorded
+        log.exception("brindle: couldn't record %s's stop", agent.id)
+
 
 def when(ts: float | None) -> str:
     """``ts`` as the report names it, in local time."""
@@ -173,8 +191,14 @@ def at_limit(db: DB, agent: Agent, health: provider_health.Health) -> bool:
     Returns whether ``health`` was either."""
     from brindle import autopilot as pilot
 
+    if health.state in (provider_health.LIMITED, provider_health.ERRORING):
+        park(db, agent, health.state)
     if health.state == provider_health.LIMITED:
-        nxt = pilot.limit_reached(db, agent, health.until)
+        from brindle import handover
+
+        # A worker's task is parked or handed over first (brindle.handover);
+        # one it doesn't take pauses or blocks as before.
+        nxt = handover.on_cutoff(db, agent, health) or pilot.limit_reached(db, agent, health.until)
         tell(db, agent, health, nxt or (
             "nothing on its own outside autopilot: the worker stays idle at its prompt. "
             "send_message it once the limit lifts, assign the task to another profile, "
@@ -196,9 +220,13 @@ def on_stop_failure(db: DB, agent: Agent, *, rate_limited: bool, overloaded: boo
     with the provider erroring, ``at_limit``. An overload is never the
     account's limit: it is reported in full only once the provider is
     ``erroring``. A 429 short of the limit pauses nothing: the turn runs
-    again in place once the rate limit lifts."""
+    again in place once the rate limit lifts.
+
+    Whatever the provider's health, the turn stopped on the provider: the
+    agent is parked for it at once (``at_limit`` names the limit instead)."""
     from brindle import autopilot as pilot
 
+    park(db, agent, provider_health.RATE_LIMITED if rate_limited else provider_health.ERRORING, now)
     health = health_of(db, agent, now)
     if health is None:
         return
@@ -226,6 +254,7 @@ def schedule_rerun(db: DB, agent: Agent, at: float) -> None:
     from brindle import agents
 
     stop = agents.api_error_stop(agent)
+    park(db, agent, provider_health.RATE_LIMITED)
     db.set_mark(agent.id, agents.API_ERROR_MARK, stop)
     db.set_mark(agent.id, RERUN_MARK, f"{float(at)!r} {stop}")
 

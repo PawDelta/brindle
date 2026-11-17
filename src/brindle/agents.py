@@ -264,7 +264,7 @@ _BRIEF_IN_PROFILE = ("claude", "codex", "native", "opencode", "antigravity")
 # same at every start.
 REVIEWER_TOOLS = ("submit_review", "report_result", "workspace_diff", "read_messages", "send_message",
                   "decisions", "kb_search", "read_analysis_doc")
-LIGHT_WORKER_TOOLS = ("report_result", "submit_plan", "read_messages", "send_message", "workspace_diff",
+LIGHT_WORKER_TOOLS = ("report_result", "handover_note", "submit_plan", "read_messages", "send_message", "workspace_diff",
                       "decisions", "kb_search", "who_is_working", "read_analysis_doc", "edit_analysis_doc",
                       "record_decision", "publish_visual")
 _WORKER_MODES = ("handoff", "handoff_detached", "assign")
@@ -773,21 +773,43 @@ def supervisor_choice(repo_root: str):
     """The profile a new supervisor chat takes its provider, model and effort
     from: the first of the owner's ``supervisor_profile`` and
     ``supervisor_fallbacks`` that exists, the org's policy allows and can run
-    here; None when none is set or none can (the supervisor profile's own then)."""
+    here (installed, signed in, provider_health). Past those, the cascade
+    (brindle.cascade) goes on to the built-in profiles a supervisor can take
+    its provider from, ordered by the measured table, unless the owner pinned
+    the supervisor (``routing_locked``). None when none is set (the
+    supervisor profile's own then) or nothing can run."""
+    from brindle import cascade, provider_health
+    from brindle.autopilot import effective_profile_model
     from brindle.config import load_repo_config
     from brindle.profiles import ProfileError
     from brindle.service.routing import RoutingPolicy
 
     cfg = load_repo_config(repo_root)
     policy = RoutingPolicy.load(repo_root)
-    for name in [cfg.supervisor_profile, *cfg.supervisor_fallbacks]:
+    loaded: dict = {}
+
+    def why_not(name: str) -> str | None:
         try:
-            p = load_profile(name, repo_root) if name else None
-        except (KeyError, ProfileError):
-            continue
-        if p is not None and policy.refusal(p) is None and unusable(p.provider, p.env) is None:
-            return p
-    return None
+            p = loaded[name] = load_profile(name, repo_root)
+        except (KeyError, ProfileError) as e:
+            return str(e)
+        why = policy.refusal(p) or unusable(p.provider, p.env)
+        if why:
+            return why
+        health = provider_health.check(p.provider, model=effective_profile_model(p, repo_root) or None,
+                                       profile=name, repo_root=repo_root, env=p.env, installed=False)
+        return None if health.ok else health.reason
+
+    configured = [n for n in [cfg.supervisor_profile, *cfg.supervisor_fallbacks] if n]
+    pinned = bool(cfg.routing_locked.get("supervisor"))
+    if not configured:
+        return None   # nothing chosen: the launch picks a usable provider itself (service.sessions)
+    if why_not(configured[0]) is None:
+        return loaded[configured[0]]
+    pool = configured if pinned else [*configured, *cascade.SUPERVISORS]
+    found = cascade.run("supervisor", pool, why_not, repo_root=repo_root, lead=configured[0], pinned=pinned,
+                        beyond=len(configured))
+    return loaded[found.first] if found.first else None
 
 
 def _with_supervisor_choice(profile, provider: str, repo_root: str):
@@ -3591,14 +3613,49 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
     return True
 
 
-def _flush_midturn(db: DB, agent_id: str) -> bool:
+def queue_urgent(db: DB, agent: Agent, body: str) -> int:
+    """Queue ``body`` from brindle for ``agent``, for ``deliver_through``.
+    Returns its message id."""
+    text = body
+    if agent.provider == "antigravity":
+        from brindle.antigravity import format_delivered_message
+        text = format_delivered_message(text)
+    return db.enqueue(agent.id, text, None)
+
+
+def deliver_through(db: DB, agent_id: str, message_id: int) -> bool:
+    """For what can't wait for a turn's end (brindle.checkpoint): if the
+    agent's CLI keeps input typed mid-turn (Codex, agy), type its queue in
+    now, in order, worker or not, up to and including ``message_id``. Every
+    guard of a mid-turn delivery holds; whatever can't go in now stays queued
+    for the next try or the turn's end. Returns whether ``message_id`` is in."""
+    with delivery_lock(agent_id):
+        while not db.message_settled(message_id):
+            agent = db.get_agent(agent_id)
+            if _delivery_held(db, agent):
+                return False
+            try:
+                # A delivery that stopped partway holds the queue: finished
+                # (or put back) first, by the same guarded path flush uses.
+                partial = db.mark(agent_id, "pane-delivery")
+                if partial is not None:
+                    if not _resume_pane_delivery(db, agent, partial):
+                        return False
+                elif not _flush_midturn(db, agent_id, any_mode=True):
+                    return False
+            except tmux.TmuxError:
+                return False
+        return True
+
+
+def _flush_midturn(db: DB, agent_id: str, any_mode: bool = False) -> bool:
     """``_flush_pane`` for a busy interactive chat whose CLI keeps input typed
     mid-turn until its current step finishes (Codex, agy): the oldest queued
     message goes in now instead of at the turn-end notify or Stop. Never into
     an approval prompt ('waiting', or one on screen the hooks haven't
-    reported), where the keys would answer it."""
+    reported), where the keys would answer it. ``any_mode``: a worker too."""
     agent = db.get_agent(agent_id)
-    if (agent is None or agent.status != "processing" or agent.mode != "interactive"
+    if (agent is None or agent.status != "processing" or (agent.mode != "interactive" and not any_mode)
             or not get_provider(agent.provider).types_midturn):
         return False
     try:
@@ -4770,7 +4827,13 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
     for the automatic Sonnet-high default: the first that exists, can run on
     its provider here and that policy allows. Raises ``AgentError`` for the first
     candidate's problem when none can. Sends nothing: a check before dispatch
-    uses it so the supervisor hears the reason once."""
+    uses it so the supervisor hears the reason once. Past those, the cascade
+    (brindle.cascade) goes on to the other built-in reviewers (unless the
+    owner pinned the reviewer), ordered by the measured table; the first
+    candidate keeps its place while it can run."""
+    from brindle import cascade
+
+    pinned = profile is not None or bool(cfg.routing_locked.get("reviewer"))
     if profile is not None:
         candidates = [profile]
     else:
@@ -4787,16 +4850,34 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
                 cheap = _sized_review_profile(pick, worker, ws.repo_root)
                 if cheap:
                     candidates.insert(0, cheap)
-    first: AgentError | None = None
-    for name in candidates:
+    errors: dict[str, AgentError] = {}
+
+    def why_not(name: str) -> str | None:
+        if name in errors:
+            return str(errors[name])
         try:
             _reviewer_can_run(name, ws, cfg)
         except AgentError as e:
-            first = first or e
-            continue
-        return name, (f"Review of {ws.branch}: {first}; reviewing with {name} instead."
-                      if first is not None else None)
-    raise first
+            errors[name] = e
+            return str(e)
+        return None
+
+    if why_not(candidates[0]) is None:
+        return candidates[0], None   # the pick runs: nothing to cascade over
+    if cfg.review_profile and not pinned:
+        try:
+            load_profile(cfg.review_profile, ws.repo_root)
+        except KeyError as e:
+            raise AgentError(str(e)) from e   # a misnamed setting is reported, never replaced silently
+    pool = candidates if pinned else [*candidates, *cascade.REVIEWERS]
+    found = cascade.run("reviewer", pool, why_not, repo_root=ws.repo_root, lead=candidates[0], pinned=pinned,
+                        beyond=len(candidates))
+    first = next((errors[n] for n in found.pool if n in errors), None)
+    if found.first is None:
+        raise first
+    name = found.first
+    return name, (f"Review of {ws.branch}: {first}; reviewing with {name} instead."
+                  if first is not None and found.pool.index(name) > 0 else None)
 
 
 def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
@@ -6644,6 +6725,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             launch_health.check_mcp(db, agent)
         except Exception:  # noqa: BLE001
             log.exception("brindle: couldn't check the brindle MCP server's start")
+        if agent.provider == "claude":
+            from brindle import checkpoint
+
+            # The provider is about to cut off: the worker saves its work mid-turn.
+            current = db.get_agent(agent_id)
+            return checkpoint.hook_context(db, current) if current is not None else None
     elif event == "stop":
         from brindle import inbox, tasks
 
@@ -6789,6 +6876,11 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         elif not is_auth and not is_model:
             _note_health(provider_health.record_error, agent.provider)
         if is_auth or is_model:
+            if is_auth:
+                from brindle import limit_report
+
+                # Before the reviewer's ending is noted: a sign-in stop isn't the model's.
+                limit_report.park(db, agent, provider_health.SIGNED_OUT)
             db.update_agent(agent_id, failed_why="auth" if is_auth else "model")
             db.set_status(agent_id, "failed")
             db.clear_permission_requests(agent_id)

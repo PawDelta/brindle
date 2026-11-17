@@ -19,7 +19,8 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import agents, autopilot, bus, git, identity_lock, permissions, prompt_answer, provider_switch, session_sync, tmux, view
+from brindle import (agents, autopilot, bus, git, handover, identity_lock, permissions, prompt_answer, provider_switch,
+                     session_sync, tmux, view)
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent, Workspace, request_subagent
@@ -283,7 +284,10 @@ def permission_dismiss_key(agent_id: str, request_id: str) -> str:
 def _dismiss_key(item: InboxItemDTO) -> str:
     if item.kind == "permission" and item.agent_id and item.permission and item.permission.request_id:
         return permission_dismiss_key(item.agent_id, item.permission.request_id)
-    return hashlib.sha256(json.dumps(item.to_json(), sort_keys=True).encode()).hexdigest()
+    data = item.to_json()
+    if data.get("choices") is None:
+        data.pop("choices", None)   # added later: an item without choices keeps the key it always had
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
 def dismissed_keys(db: DB) -> set[str]:
@@ -377,7 +381,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
                                         detail=login.refresh_cmd))
     all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _review_items(db, repo_root)
                  + _visual_items(db, repo_root) + provider_switch.inbox_items(db, repo_root)
-                 + _plan_offer_items(db, repo_root) + _setup_items()
+                 + handover.inbox_items(db, repo_root) + _plan_offer_items(db, repo_root) + _setup_items()
                  + _org_blocks(db, repo_root) + _org_notices())
     # Requests can outlive the live snapshot (notably document requests).
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask

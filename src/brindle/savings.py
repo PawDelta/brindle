@@ -42,6 +42,7 @@ log = logging.getLogger(__name__)
 MIN_TASKS = 5       # finished tasks learning rerouted, before an estimate is shown
 MIN_BASELINE = 3    # tasks on the baseline profile at a weight, before their average is used
 FAILED = "removed_unmerged"
+INTERRUPTED = "interrupted"     # removed unmerged while stopped for a provider cause: not the model's
 ESTIMATE_NOTE = ("Estimates: each task learning sent to a different profile, against what the "
                  "baseline profile would likely have cost (this repo's average for it at that "
                  "weight when there is one, else the profiles' relative cost). "
@@ -81,15 +82,19 @@ def attach_agent(db: DB, task_id: str, agent_id: str) -> None:
 
 
 def note_outcome(db: DB, worker, *, approved: bool | None = None, escalated: bool = False,
-                 merged: bool | None = None, **_ignored) -> None:
+                 merged: bool | None = None, interrupted: bool = False, **_ignored) -> None:
     """One event in ``worker``'s task (the same events ``learning.note``
-    hears), counted on its decision. Never raises."""
+    hears), counted on its decision. ``interrupted``: it is stopped for a
+    provider cause (``learning.stop_cause``), so neither an escalation nor an
+    unmerged removal counts against it: the decision ends "interrupted", which
+    `brindle learning seed` never sends. Never raises."""
     try:
         if worker is None:
             return
-        outcome = None if merged is None else ("merged" if merged else FAILED)
-        db.note_routing_outcome(worker.id, review=approved is not None, escalated=bool(escalated),
-                                outcome=outcome)
+        outcome = None if merged is None else (
+            "merged" if merged else INTERRUPTED if interrupted else FAILED)
+        db.note_routing_outcome(worker.id, review=approved is not None,
+                                escalated=bool(escalated) and not interrupted, outcome=outcome)
     except Exception:
         log.exception("brindle: couldn't record the routing outcome")
 

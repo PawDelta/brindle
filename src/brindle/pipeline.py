@@ -345,12 +345,14 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
             and d.outcome is not None)
     ))
     if not already:
+        # read before note: the removal's captured ending goes with it
+        interrupted = learning.stop_cause(db, worker) is not None
         try:
             learning.note(db, cfg, worker, ws, **event)
         except Exception:
             pass
         if not event.get("reported"):
-            savings.note_outcome(db, worker, **event)
+            savings.note_outcome(db, worker, interrupted=interrupted, **event)
     if event.get("approved") is not None:
         if isinstance(actor, Agent):
             learning.note_reviewer(db, cfg, actor, ws, approved=event["approved"], worker=worker)
@@ -431,8 +433,9 @@ def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
               and a.result is None and not merged and not learning.settled(a.id)):
             d = db.routing_decision_for_agent(a.id)
             if not (d and d.outcome is not None):
+                interrupted = learning.stop_cause(db, a) is not None
                 learning.note(db, cfg, a, ws, merged=False)
-                savings.note_outcome(db, a, merged=False)
+                savings.note_outcome(db, a, merged=False, interrupted=interrupted)
 
 
 def note_removed_merged(db: DB, ws: Workspace, actor: Agent | None = None,

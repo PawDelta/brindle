@@ -224,6 +224,29 @@ CREATE TABLE IF NOT EXISTS provider_switches (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS provider_switches_open ON provider_switches(root_id)
     WHERE state IN ('open', 'switching');
+-- A worker whose provider ran out mid-task, and what brindle did about it
+-- (brindle.handover): one row per stop, claimed by one INSERT so a second
+-- trigger of the same stop (the hook and a sweep) starts nothing.
+CREATE TABLE IF NOT EXISTS handovers (
+    id TEXT PRIMARY KEY,
+    chain TEXT NOT NULL,         -- the task's first worker: every hop of one task shares it
+    from_agent TEXT NOT NULL,    -- the worker that stopped
+    stop TEXT NOT NULL,          -- which stop of it (agents.api_error_stop), never changed
+    at_stop TEXT NOT NULL,       -- the stop the worker must still be at for brindle to act on it
+    from_profile TEXT NOT NULL,
+    to_profile TEXT,             -- the replacement picked (or offered on the Inbox card)
+    to_agent TEXT,               -- the replacement, once started
+    launch TEXT,                 -- the replacement's brief (sha256), recorded before it launches
+    state TEXT NOT NULL,         -- claimed | parked | asking | held | started | resumed | stopped | released | failed
+    snapshot INTEGER,            -- the turn snapshot taken at the stop
+    until_ts REAL,               -- when from_agent's provider is back, where known
+    claimed_at REAL,             -- when a process last took the row to act on it
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    detail TEXT,                 -- what brindle did, as its supervisor was told
+    UNIQUE (from_agent, stop)
+);
+CREATE INDEX IF NOT EXISTS handovers_chain ON handovers(chain);
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
 CREATE TABLE IF NOT EXISTS session_repos (
@@ -260,6 +283,38 @@ CREATE TABLE IF NOT EXISTS agent_marks (
     kind TEXT NOT NULL,
     value TEXT NOT NULL,
     PRIMARY KEY (agent_id, kind)
+);
+-- An agent stopped for a provider cause (brindle.limit_report.park), which
+-- the learner never counts against its model. ``cause`` (limit | rate_limited
+-- | signed_out | provider_error | not_installed) stands while it is parked;
+-- ``parked_seconds`` is the time parked in spells already over, the open
+-- spell's from ``parked_since``. The agent's next start of work (the trigger
+-- below, whichever path sets it) ends the spell and clears the cause. A table
+-- of its own: a released table gains no column (the brief's agents.stop_cause).
+CREATE TABLE IF NOT EXISTS agent_stops (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    cause TEXT,
+    parked_since REAL,
+    parked_seconds REAL NOT NULL DEFAULT 0
+);
+CREATE TRIGGER IF NOT EXISTS agent_stops_unpark AFTER UPDATE OF status ON agents
+WHEN NEW.status IN ('starting', 'processing') AND NEW.status IS NOT OLD.status
+BEGIN
+    UPDATE agent_stops
+       SET parked_seconds = parked_seconds
+               + MAX(0, COALESCE(NEW.status_since, parked_since) - parked_since),
+           parked_since = NULL, cause = NULL
+     WHERE agent_id = NEW.id AND parked_since IS NOT NULL;
+END;
+-- A task that took over from a worker stopped for a provider cause
+-- (open_items.reassign): the profile it replaced and how many takeovers the
+-- work has had, this one included. Its worker's merge sends them to the
+-- learner. Keyed by task: the replaced worker's rows go with its retirement,
+-- and the replacing worker doesn't exist yet when the takeover is prepared.
+CREATE TABLE IF NOT EXISTS task_handovers (
+    task_id TEXT PRIMARY KEY,
+    handed_from TEXT NOT NULL,
+    handovers INTEGER NOT NULL
 );
 -- A worker's question or stall its supervisor hasn't dealt with (brindle.open_items):
 -- one row per worker, deleted when it closes. level: the notices sent past the
@@ -2680,6 +2735,39 @@ class DB:
                                 " AND head != '' ORDER BY id DESC LIMIT 1", (agent_id,)).fetchone()
         return row["head"] if row else None
 
+    def park(self, agent_id: str, cause: str, now: float) -> None:
+        """``agent_id`` stopped for provider ``cause`` at ``now``: it is parked
+        from then (an open spell keeps its start) until it is next at work."""
+        with self.tx() as c:
+            c.execute("INSERT INTO agent_stops (agent_id, cause, parked_since) VALUES (?,?,?) "
+                      "ON CONFLICT(agent_id) DO UPDATE SET cause=excluded.cause, "
+                      "parked_since=COALESCE(agent_stops.parked_since, excluded.parked_since)",
+                      (agent_id, cause, now))
+
+    def stop_of(self, agent_id: str, now: float) -> tuple[str | None, float, float | None]:
+        """(cause, seconds parked by ``now``, when the open spell began) for
+        ``agent_id``: no cause once it was back at work, (None, 0, None) never parked."""
+        row = self.conn.execute("SELECT cause, parked_since, parked_seconds FROM agent_stops "
+                                "WHERE agent_id=?", (agent_id,)).fetchone()
+        if row is None:
+            return None, 0.0, None
+        since = row["parked_since"]
+        open_spell = max(0.0, now - since) if since is not None else 0.0
+        return row["cause"], float(row["parked_seconds"] or 0) + open_spell, since
+
+    def note_handover(self, task_id: str, handed_from: str, handovers: int) -> None:
+        """Task ``task_id`` takes over from a worker of profile ``handed_from``
+        stopped for a provider cause, its work's ``handovers``-th takeover."""
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO task_handovers (task_id, handed_from, handovers) "
+                      "VALUES (?,?,?)", (task_id, handed_from, int(handovers)))
+
+    def handover_of(self, task_id: str) -> tuple[str | None, int]:
+        """(the profile task ``task_id`` took over from, takeovers so far), (None, 0) for none."""
+        row = self.conn.execute("SELECT handed_from, handovers FROM task_handovers WHERE task_id=?",
+                                (task_id,)).fetchone()
+        return (row["handed_from"], int(row["handovers"])) if row else (None, 0)
+
     def mark(self, agent_id: str, kind: str) -> str | None:
         """The value of ``agent_id``'s ``agent_marks`` row of ``kind``, if any."""
         row = self.conn.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
@@ -3232,6 +3320,12 @@ class DB:
             "SELECT 1 FROM inbox WHERE agent_id=? AND delivered_at > ? LIMIT 1", (agent_id, since),
         ).fetchone()
         return row is not None
+
+    def message_settled(self, message_id: int) -> bool:
+        """Whether queued message ``message_id`` is no longer waiting to go in:
+        delivered, kept unresolved, held for read_messages, or gone."""
+        row = self.conn.execute("SELECT delivered_at, held FROM inbox WHERE id=?", (message_id,)).fetchone()
+        return row is None or row["delivered_at"] is not None or bool(row["held"])
 
     def pending_count(self, agent_id: str) -> int:
         row = self.conn.execute(

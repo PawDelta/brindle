@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from brindle import agents, autopilot, git, open_items, tasks, workspaces
-from brindle.config import load_repo_config
+from brindle import (agents, autopilot, git, learning, limit_report, open_items, provider_health, tasks,
+                     workspaces)
+from brindle.config import RepoConfig, load_repo_config
 from brindle.db import Agent
+from brindle.pro import learning as pro_learning
+from test_learning_signals import KEY, recorder
 from test_merge_order import fake_spawn, quiet_removal, repo, worktree
 from test_routing import everything_available
 from test_stuck_workers import T0, boss, told
@@ -39,7 +42,7 @@ def test_routing_reserves_headroom_for_task_size(db, repo, boss, everything_avai
 
 
 @pytest.mark.slow("Exercises real git branch creation, retirement and re-staffing")
-def test_restaffed_worker_continues_commits_and_notes(db, repo, boss, told, monkeypatch):
+def test_restaffed_worker_continues_commits_and_notes(db, repo, boss, told, recorder, monkeypatch):
     (repo / ".brindle" / "config.json").write_text(json.dumps({"branch_prefix": "feat/"}))
     quiet_removal(monkeypatch)
     monkeypatch.setattr(agents, "_stop", lambda *a, **k: None)
@@ -65,6 +68,7 @@ def test_restaffed_worker_continues_commits_and_notes(db, repo, boss, told, monk
     pointer = db.enqueue(boss.id, agents.one_line(db, note_id, note, "old"), sender_id="old")
     db.mark_delivered(pointer)
     open_items.track(db, db.get_agent("old"), "worker died during fixes", T0)
+    limit_report.park(db, db.get_agent("old"), provider_health.LIMITED)   # it stopped on its limit
 
     item = db.get_open_item("old")
     open_items.reassign(db, item, T0 + open_items.AUTO_REASSIGN_AFTER, actor=boss)
@@ -76,6 +80,12 @@ def test_restaffed_worker_continues_commits_and_notes(db, repo, boss, told, monk
     assert git.out(["rev-parse", "HEAD"], resumed.path) == tip
     assert (Path(resumed.path) / "progress.py").read_text() == "implemented = True\n"
     assert report in worker.task and note in worker.task
+    # It took over from a provider stop: its merge names the profile it replaced.
+    learning.note(db, RepoConfig(learning="cloud"), worker, resumed, merged=True)
+    body = pro_learning.record_payload(KEY, "repo", *recorder.events[-1], signals=2)
+    assert (body["event"], body["handovers"], body["handed_from"]) == ("merged", 1, "developer")
+    older = pro_learning.record_payload(KEY, "repo", *recorder.events[-1], signals=1)
+    assert older["event"] == "merged" and not {"handovers", "handed_from"} & set(older)
     # A repeated trigger must respect the replacement already in flight.
     assert open_items.reassign(db, item,
                                T0 + open_items.AUTO_REASSIGN_AFTER, actor=boss) is None

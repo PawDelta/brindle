@@ -19,10 +19,10 @@ exactly what it was, and the learner is sent no weights. The org's policy
 every suggest and never trusts this clamp.
 
 Before any hosted estimate exists (Free, offline, a new install: §4.1), the
-goal orders each tier's eligible candidates by §1's score on the shipped
-priors (``brindle/data/routing_priors.json``): that order is routing's pick
-without hosted learning and the default the learner must beat. A tier the
-owner locked keeps its order.
+goal's weights order the candidates the shipped table has measured
+(``brindle/data/routing_priors.json``) by §1's score, through the cascade
+(brindle.cascade): that order is routing's pick without hosted learning and
+the default the learner must beat. A tier the owner locked keeps its order.
 
 The triangle (§6a) places a *setup* (an outcome: $ a task, minutes, first try)
 against one yardstick, the shipped Fable 5.2 alone reference, at the centre.
@@ -291,7 +291,6 @@ SETUP_FIELDS = ("name", "usd", "minutes", "first_try", "measured", "runs", "note
 
 # -- cold-start ranking (§1, §4.1) -------------------------------------------------------------------
 
-P_FLOOR = 0.5           # a candidate likelier to fail than merge is never put first by the goal
 MIN_USD = 0.01          # a free (local) model still costs something to run and review
 GAP_CAP = 5.0           # doublings: no goal swamps the others by more than 32x
 YARDSTICK_PROFILE = "developer-fable"     # "one model doing everything", as the references' yardstick
@@ -353,23 +352,6 @@ def scores(est: dict[str, dict], weights: dict) -> dict[str, float]:
                 + weights["first_try"] * _gap(surest / odds[c])) for c in est}
 
 
-def rank(candidates: list[str], tier: str, weights: dict | None, repo_root: str) -> list[str]:
-    """``candidates`` (already eligible, in routing's order) reordered for the
-    goal by the shipped priors: lowest §1 score first, ties keeping routing's
-    order, any candidate under the success floor last. No goal, or nothing to
-    choose between: the order as given."""
-    from brindle.config import normalize_weight
-
-    tier = normalize_weight(tier)
-    pri = priors()
-    if not weights or len(candidates) < 2 or tier not in pri["tiers"]:
-        return list(candidates)
-    est = estimates(candidates, tier, repo_root, pri)
-    s = scores(est, weights)
-    sure = [c for c in candidates if est[c]["p"] >= P_FLOOR]
-    return sorted(sure, key=lambda c: s[c]) + [c for c in candidates if c not in sure]
-
-
 def tier_mix(db, repo_root: str) -> tuple[dict[str, float], int]:
     """({tier: share}, tasks): the tiers of this repo's last tasks, else the priors' default mix."""
     from brindle.config import WEIGHTS, normalize_weight
@@ -397,7 +379,7 @@ def preview(weights: dict | None, repo_root: str, db=None) -> dict:
     false: not yet measured on your tasks; ``runs``: the tasks the mix is
     from). ``landed`` places ``you`` against that same Fable reference (§6a),
     so the point and the table's numbers always agree."""
-    from brindle import autopilot, config
+    from brindle import autopilot, cascade, config
 
     cfg = config.load_repo_config(repo_root)
     pri = priors()
@@ -407,9 +389,10 @@ def preview(weights: dict | None, repo_root: str, db=None) -> dict:
     roles, covered = [], 0.0
     for t in config.WEIGHTS:
         _, usable, _, _ = autopilot.eligible(cfg, repo_root, t)
-        previous = usable[0] if usable else None
         locked = bool(cfg.routing_locked.get(t))
-        pick = previous if (weights is None or locked) else (rank(usable, t, weights, repo_root) or [None])[0]
+        # As routing orders them (brindle.cascade): the measured table, on the goal's weights.
+        previous = (usable if locked else cascade.order(usable, t) or [None])[0] if usable else None
+        pick = previous if (weights is None or locked) else (cascade.order(usable, t, weights=weights) or [None])[0]
         roles.append({"kind": t, "profile": pick, "previous": previous})
         if pick is None or t not in mix:
             continue
