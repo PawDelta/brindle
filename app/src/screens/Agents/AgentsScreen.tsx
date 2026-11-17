@@ -68,7 +68,6 @@ import {
   type KindState,
 } from "./agents";
 import { Mark } from "./Mark";
-import { RoutingGoal } from "./RoutingGoal";
 
 export interface AgentsScreenProps {
   client: DaemonClient;
@@ -869,7 +868,6 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       )}
       {repo && !routing && !loadError && <p className="text-ink-3">Loading…</p>}
 
-      {repo && <RoutingGoal key={repo} client={client} repo={repo} />}
 
       <section className={`${card} flex flex-col gap-s2 px-s2 py-s2`} aria-labelledby="how-title">
         <header className="flex flex-wrap items-baseline gap-x-s2">

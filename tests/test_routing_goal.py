@@ -173,9 +173,9 @@ def test_the_preview_reflects_this_repos_routing_and_goal(db, repo, offline):
     ((0.5, 0.2, 0.3), True, {"cost": 0.5, "speed": 0.2, "first_try": 0.3}),
     pytest.param((0.5, 0.2, 0.3), False, None,
                  marks=pytest.mark.variant("an older server rejects unknown keys: no weights without signals")),
-    pytest.param(None, True, None, marks=pytest.mark.variant("no goal set: nothing sent, the server's default applies")),
+    (None, True, {"cost": 0.45, "speed": 0.25, "first_try": 0.3}),
 ])
-def test_the_goal_reaches_the_suggest_payload_only_when_set_and_taken(weights, signals, sent):
+def test_the_goal_reaches_the_suggest_payload_only_when_taken(weights, signals, sent):
     task = learning.TaskInfo(repo_root="/r", task="fix the login bug", weight="medium", weights=weights)
     body = pro_learning.suggest_payload(KEY, "repo", task, ["developer", "developer-codex"], signals=signals)
     assert body.get("weights") == sent
