@@ -464,6 +464,7 @@ export interface VisualDTO {
   question?: string;
   options?: VisualOption[];
   answer?: VisualAnswer | null;
+  answered_in_chat?: boolean;
   kept: boolean;
   unread: boolean;
   created_at: number;
