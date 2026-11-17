@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from brindle import git, pool, trash, workspaces
-from brindle.db import DB
+from brindle.db import DB, PoolEntry
+from brindle.config import RepoConfig
 
 from conftest import sh
 from git_snapshots import fast_host_tools, repo  # noqa: F401  (fixtures)
@@ -16,6 +17,37 @@ from git_snapshots import fast_host_tools, repo  # noqa: F401  (fixtures)
 def write_config(repo, **cfg):
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps(cfg))
+
+
+@pytest.mark.parametrize("cleanup", ["sweep", pytest.param("trim", marks=pytest.mark.variant(
+    "the same disk-full failure while shrinking the configured pool"))])
+def test_pool_cleanup_continues_after_a_failed_removal(db, tmp_path, monkeypatch, cleanup):
+    entries = [PoolEntry(str(tmp_path / n), str(tmp_path), "main", "sha", n, "", None, int(cleanup == "trim"), i)
+               for i, n in enumerate(("before", "blocked", "after"))]
+    for entry in entries:
+        Path(entry.path).mkdir()
+        Path(entry.path, "setup-artifact").touch()
+        db.add_pool_entry(entry)
+    def teardown(commands, cwd, env):
+        Path(cwd, "setup-artifact").unlink(missing_ok=True)
+        return workspaces.SetupResult(True, "")
+    def remove(root, path, force=False):
+        if path == entries[1].path:
+            raise git.GitError("disk full")
+        Path(path).rmdir()
+    monkeypatch.setattr(git, "remove_worktree", remove)
+    monkeypatch.setattr(git, "run", lambda *a, **k: None)
+    monkeypatch.setattr(git, "list_branches", lambda *a: [])
+    monkeypatch.setattr(git, "list_worktrees", lambda *a: [])
+    monkeypatch.setattr(workspaces, "run_commands", teardown)
+    monkeypatch.setattr(pool, "load_repo_config", lambda *a: RepoConfig(
+        base_branch="main", pool_size=0, teardown=["remove setup artifact"]))
+    getattr(pool, cleanup)(db, str(tmp_path))
+    assert not Path(entries[1].path, "setup-artifact").exists()
+    assert pool.claim(db, str(tmp_path), "main") is None
+    entries[1].ready = 0
+    assert db.pool_entries(str(tmp_path), ready_only=False) == [entries[1]]
+    assert not Path(entries[0].path).exists() and not Path(entries[2].path).exists()
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +77,28 @@ def test_lockfile_change_triggers_setup_again(db, repo, tmp_path):
     assert git.out(["rev-parse", "HEAD"], created.workspace.path) == git.out(
         ["rev-parse", "main"], str(repo)
     )
+
+
+@pytest.mark.variant("a session cut from origin's tip must reuse the warm pool entry instead of a fresh worktree")
+def test_session_worktree_from_origins_tip_claims_the_pool_entry(db, repo, tmp_path):
+    """A new session's worktree starts at origin's tip as just fetched, ahead of
+    the local main the entry was built from: it still takes the ready entry
+    (moved forward), so its setup isn't run again behind the session's start."""
+    counter = tmp_path / "counter"
+    write_config(repo, setup=[f'echo x >> "{counter}"'])
+    sh("git add -A && git commit -qm setup && git push -q origin main", repo)
+    pool.fill(db, str(repo))
+    assert counter.read_text().count("x") == 1
+    (repo / "new.txt").write_text("from origin\n")
+    sh("git add -A && git commit -qm ahead && git push -q origin main && git reset -q --hard HEAD~1", repo)
+    tip = git.out(["rev-parse", "origin/main"], str(repo))
+    assert tip != git.out(["rev-parse", "main"], str(repo))
+
+    created = workspaces.create(db, str(repo), "brindle/session-2", base="main", start=tip, apply_prefix=False)
+    assert created.how == "pool"
+    assert git.out(["rev-parse", "HEAD"], created.workspace.path) == tip
+    assert git.out(["branch", "--show-current"], created.workspace.path) == "brindle/session-2"
+    assert counter.read_text().count("x") == 1
 
 
 def test_failed_claim_falls_back(db, repo, tmp_path, monkeypatch):
@@ -113,6 +167,7 @@ def test_claim_skipped_when_the_branch_exists(db, repo, tmp_path, where):
     assert db.count_pool_entries(str(repo), "main") == 1  # entry left untouched
 
 
+@pytest.mark.variant("Two independent connections racing for one pool entry must never both claim it")
 def test_two_concurrent_claims_only_one_wins(db, repo):
     """take_pool_entry uses BEGIN IMMEDIATE, so two connections racing to
     claim the same entry must never both succeed."""

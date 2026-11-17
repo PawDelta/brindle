@@ -98,6 +98,7 @@ def test_unknown_answers_never_block(monkeypatch):
     assert not any(providers.seen_signed_in(p) for p in ("claude", "codex", "antigravity"))
 
 
+@pytest.mark.variant("routing: signed-out Codex and Antigravity providers must be excluded before launch")
 def test_routing_skips_a_signed_out_cli(repo, monkeypatch, tmp_path):
     fake_probe(monkeypatch, {"login": CODEX_OUT, "models": AGY_OUT})
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")

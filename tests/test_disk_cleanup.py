@@ -2,6 +2,7 @@
 abandoned ones reported, retention of brindle's own files, the free-disk
 guard, and dead branches."""
 
+import contextlib
 import dataclasses
 import errno
 import json
@@ -27,9 +28,33 @@ from git_snapshots import fast_host_tools, repo, restore_or_build, workspaces_on
 DAY = 86400
 
 
-@pytest.mark.parametrize("action", ["restore", "expiry", "refused", "path", "cap", "empty",
-                                  "registration-failure", "moved", "deleted", "restore-race",
-                                  "path-race", "locked", "prune"])
+@pytest.mark.parametrize("metadata", [None, {"repo_root": None}, {"branch": []},
+    pytest.param({"removed_at": "yesterday"}, marks=pytest.mark.variant("corrupt trash: a timestamp written as text")),
+    pytest.param({"size": -1}, marks=pytest.mark.variant("corrupt trash: a negative size")),
+    pytest.param({"removed_at": float("inf")}, marks=pytest.mark.variant("corrupt trash: an infinite timestamp")),
+    pytest.param({"removed_at": 10 ** 400}, marks=pytest.mark.variant(
+        "corrupt JSON timestamp exceeds float range; retention must not overflow"))])
+def test_corrupt_trash_does_not_block_retention(brindle_home, monkeypatch, metadata):
+    from brindle import trash
+
+    entry = {"repo_root": "/gone", "path": "/gone/tree", "branch": None,
+             "sha": None, "removed_at": 0, "size": 10}
+    for ident, data in (("broken", None if metadata is None else {**entry, **metadata}), ("old", entry)):
+        folder = trash.directory() / ident
+        (folder / "tree").mkdir(parents=True)
+        (folder / "entry.json").write_text(json.dumps(None if data is None else {**data, "id": ident}))
+    monkeypatch.setattr(trash, "_unpin", lambda *a: None)
+    assert trash.retain(now=1, cap=9) == ["old"]
+    assert (trash.directory() / "broken" / "tree").is_dir()
+
+
+@pytest.mark.parametrize("action", ["restore",
+    pytest.param("expiry", marks=pytest.mark.variant("Expired trash must be removed without affecting recoverable entries")),
+    "refused", "path",
+    pytest.param("cap", marks=pytest.mark.variant("Trash exceeding its disk cap must evict entries through the retention path")),
+    "empty", "registration-failure", "moved", "deleted", "restore-race", "path-race", "locked",
+    pytest.param("prune", marks=pytest.mark.variant("Restore survives pruning of the saved worktree registration")),
+])
 def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     from brindle import trash
 
@@ -148,6 +173,8 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
             walked = []
             size_of = disk.size_of
             monkeypatch.setattr(disk, "size_of", lambda p: walked.append(p) or size_of(p))
+            if action == "cap":
+                assert trash.retain(now=entry["removed_at"], cap=entry["size"]) == []
             trash.retain(now=entry["removed_at"] + (trash.RETENTION + 1 if action == "expiry" else 0),
                          cap=0 if action == "cap" else trash.SIZE_CAP)
             assert walked == []   # sized once, when it was trashed
@@ -311,7 +338,12 @@ def test_upgrade_sweep_removes_merged_worktrees_whole_once_and_never_a_dirty_one
     assert disk.upgrade_sweep(db) is None   # recorded: it runs once
 
 
-@pytest.mark.parametrize("state", ["dirty", "live", "process", "unknown"])
+@pytest.mark.parametrize("state", [
+    pytest.param("dirty", marks=pytest.mark.variant("Abandoned cleanup must preserve uncommitted work")),
+    "live",
+    pytest.param("process", marks=pytest.mark.variant("A detached process in a nested directory must protect its abandoned worktree")),
+    pytest.param("unknown", marks=pytest.mark.variant("An unreadable process scan must fail closed before deleting abandoned work")),
+])
 def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, old_worktree, monkeypatch, state):
     wt = old_worktree("idea")
     if state == "dirty":
@@ -337,6 +369,7 @@ def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, old_worktre
 
 @pytest.mark.parametrize("cleanup", ["post-merge", "retired"])
 @pytest.mark.parametrize("other", ["pane", "process", None])
+@pytest.mark.variant("Post-merge and retired cleanup must distinguish foreign panes and detached processes from the workspace's own session")
 def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, shipped, process_scan, cleanup, other,
                                                                   monkeypatch):
     """The pipeline's post-merge removal and the sweep of retired workspaces
@@ -399,38 +432,60 @@ def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, mo
     assert Path(path).is_dir()
 
 
-@pytest.mark.parametrize("cleanup,child,attached", [
-    ("retired", None, False),
-    ("retired", "vite", False),
-    ("retired", "pytest", False),
+@pytest.mark.parametrize("cleanup,child,onlooker", [
+    pytest.param("retired", None, False, marks=pytest.mark.variant("Its own idle shell must not prevent cleanup")),
+    pytest.param("retired", "vite", False, marks=pytest.mark.variant("Inherited worker identity must not excuse a dev server")),
+    pytest.param("retired", "pytest", False, marks=pytest.mark.variant("A project venv test runner is not a Brindle helper")),
     ("retired", None, True),     # someone sits in its shell pane
-    ("post-merge", None, False),
+    pytest.param("post-merge", None, False, marks=pytest.mark.variant("Reviewer cleanup must recognize the worker's own CLI")),
     ("post-merge", "vite", False),
+    pytest.param("tool", None, False, marks=pytest.mark.variant(
+        "real incident (release.153): remove_workspace refused a reported, idle worker for its own CLI and MCP")),
+    ("tool", None, "viewer"),    # the app's terminal view shows the worker's pane
+    pytest.param("tool", None, "other", marks=pytest.mark.variant(
+        "the same pane linked into another session still keeps it, now its agents are stopped")),
+    pytest.param("merged", None, False, marks=pytest.mark.variant(
+        "real incident (release.153): the pipeline's cleanup with no reviewer logged 'worktree kept: in use'")),
+    pytest.param("resumed", None, False, marks=pytest.mark.variant(
+        "a race from review: the retired sweep's worker resumes between selection and removal")),
 ])
 def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipped, monkeypatch, cleanup, child,
-                                                                 attached):
+                                                                 onlooker):
     """What the removal ends (the pane's own process when its session is
-    killed, the agents the pipeline stops) is excused; a dev server or test
-    run started in the workspace's own pane is not, though its environment
-    (TMUX=, a PWD in the worktree) and its paths there look like brindle's."""
+    killed, the agents it stops: by default every live one, with its CLI and
+    MCP server) is excused, and so is the app's view of that pane; a dev
+    server or test run started in the workspace's own pane is not, though
+    its environment (TMUX=, a PWD in the worktree) and its paths there look
+    like brindle's, and nor is another session the pane is linked into.
+    ``onlooker``: True, someone attached to its own session; "viewer" or
+    "other", its pane shown in an app view or in another session.
+    "resumed": the sweep chose it while its worker was done, and the worker
+    resumes (status and CLI) during the sweep's dirty-files check: kept,
+    never stopped."""
     ws = shipped
     wt = os.path.realpath(ws.path)
     keep = None
+    mcp = json.dumps({"mcpServers": {"brindle": {"env": {
+        "BRINDLE_AGENT_ID": "w1", "BRINDLE_HOME": os.environ.get("BRINDLE_HOME")}}}})
+    cli = []   # the worker's CLI and its brindle MCP server, under the pane's shell
     if cleanup == "post-merge":   # the worker's CLI in the pane; the approving reviewer runs this
-        mcp = json.dumps({"mcpServers": {"brindle": {"env": {
-            "BRINDLE_AGENT_ID": "w1", "BRINDLE_HOME": os.environ.get("BRINDLE_HOME")}}}})
         pane = f"claude --mcp-config {mcp}"
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
                            "@998", None, time.time()))
         keep = Agent("r1", ws.id, "reviewer", "claude", None, "review", "done", "@999", None, time.time())
         db.add_agent(keep)
+    elif cleanup in ("tool", "merged"):
+        pane = "-bash"
+        cli = [(510, 500, f"claude --mcp-config {mcp}"), (511, 510, "/u/.local/bin/brindle mcp")]
+        db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
+                           "@998", None, time.time()))
     else:
-        pane = "-zsh"
+        pane = "-bash" if cleanup == "resumed" else "-zsh"
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done",
                            "@999", None, time.time() - 7200))
     command = {"vite": f"node {wt}/node_modules/.bin/vite",
                "pytest": f"{wt}/.venv/bin/python3 {wt}/.venv/bin/pytest -q"}.get(child)
-    rows = [(500, 1, pane)] + ([(501, 500, command)] if command else [])
+    rows = [(500, 1, pane)] + cli + ([(501, 500, command)] if command else [])
     env = f"TMUX=/private/tmp/tmux-501/default,1,0 PWD={wt} HOME=/u"
 
     def ps(argv, **kw):   # the faked process table, read as procs.table reads it
@@ -446,22 +501,70 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipp
     monkeypatch.setattr(procs, "cwds", lambda *_: {pid: wt for pid, _ppid, _cmd in rows}
                         | {os.getpid(): os.getcwd()})
     real_panes, real_sessions = tmux.session_panes, tmux.list_sessions
-    monkeypatch.setattr(tmux, "session_panes", lambda s: [(500, wt)] if s == ws.tmux_session else real_panes(s))
-    monkeypatch.setattr(tmux, "list_sessions", lambda: real_sessions() + [(ws.tmux_session, attached)])
+    shown = {"viewer": "brindle-view-4321-1", "other": "someone-else"}.get(onlooker)   # the app's view names
+    monkeypatch.setattr(tmux, "session_panes", lambda s: [(500, wt)] if s in (ws.tmux_session, shown)
+                        else real_panes(s))
+    monkeypatch.setattr(tmux, "list_sessions", lambda: real_sessions() + [(ws.tmux_session, onlooker is True)]
+                        + ([(shown, True)] if shown else []))
     stopped = []
     monkeypatch.setattr(agents, "is_alive", lambda a, *rest, **kw: a.id == "w1" and a.status == "waiting"
                         and "w1" not in stopped)
     monkeypatch.setattr(agents, "_stop", lambda db, a: stopped.append(a.id))
+    if cleanup == "resumed":   # after the sweep chose it, at its dirty-files check
+        dirty_files = git.dirty_files
+
+        def resume(path):
+            if (510, 500, f"claude --mcp-config {mcp}") not in rows:
+                db.set_status("w1", "waiting")
+                rows.extend([(510, 500, f"claude --mcp-config {mcp}"), (511, 510, "/u/.local/bin/brindle mcp")])
+            return dirty_files(path)
+        monkeypatch.setattr(git, "dirty_files", resume)
 
     if cleanup == "post-merge":
         pipeline._remove(db, ws, keep=keep)
+    elif cleanup == "merged":
+        pipeline._remove(db, ws)
+    elif cleanup == "tool":
+        with contextlib.suppress(workspaces.WorkspaceError):
+            workspaces.remove(db, ws, delete_branch=True)
     else:
         cull.prune_retired(db)
 
-    removed = child is None and not attached
+    removed = child is None and onlooker in (False, "viewer") and cleanup != "resumed"
     assert Path(ws.path).is_dir() == (not removed)
     assert (db.get_workspace(ws.id) is None) == removed
-    assert stopped == (["w1"] if removed and keep else [])
+    assert stopped == (["w1"] if removed and cleanup != "retired" else [])
+
+
+def test_pipeline_cleanup_keeps_worker_messaged_after_initial_check(db, shipped, monkeypatch):
+    ws = shipped
+    worker = Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
+                   "@998", "Ready", 1)
+    db.add_agent(worker)
+    stopped = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, *args, **kw: a.id not in stopped)
+    monkeypatch.setattr(agents, "reconcile", lambda db, a, **kw: a)
+    monkeypatch.setattr(agents, "_stop", lambda db, a: stopped.append(a.id))
+    monkeypatch.setattr(disk, "live_in", lambda *args, **kw: False)
+    monkeypatch.setattr(pipeline, "_try_merge", lambda *args: "Merged shipped")
+    notices = []
+
+    def tell(db, parent_id, text, sender_id):
+        notices.append(text)
+        if len(notices) == 1:
+            assert db.pending_count(worker.id) == 0
+            db.enqueue(worker.id, "Please handle the follow-up", None)
+
+    monkeypatch.setattr(pipeline, "_tell", tell)
+
+    pipeline._finish_locked(db, worker, ws, None)
+
+    assert Path(ws.path).is_dir()
+    assert db.get_workspace(ws.id) is not None
+    assert db.get_agent(worker.id) is not None
+    assert stopped == []
+    assert db.pending_count(worker.id) == 1
+    assert len(notices) == 2
 
 
 def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, old_worktree, monkeypatch):
@@ -509,28 +612,31 @@ STARTED = f"started {123456 / os.sysconf('SC_CLK_TCK'):.2f}s after boot, argv[0]
     # more than a root process is.
     ("runner", _status(uids=(0, UID, 0, UID)), False,
      "runs with another's ids (uid real 0, uid saved 0), so it isn't this user's: pid 1354, Name runsvc"),
-    ("runner", _status(gids=(GID + 1,) * 4), False,
-     f"runs with another's ids (gid real {GID + 1}, gid effective {GID + 1}"),
+    pytest.param("runner", _status(gids=(GID + 1,) * 4), False,
+     f"runs with another's ids (gid real {GID + 1}, gid effective {GID + 1}",
+     marks=pytest.mark.variant("Issue 344: a foreign group must distinguish a protected host runner from a project process")),
     # Refused with this user's own ids (capabilities, non-dumpable, a
     # security module): can't be told, so in use; logged to tell what it is.
-    ("runner", _status(cap_prm=1 << 10), True, "CapEff 0000000000000400"),
-    ("runner", _status(), True, "a process with this user's ids has a folder that can't be read, so it "
+    pytest.param("runner", _status(cap_prm=1 << 10), True, "CapEff 0000000000000400", marks=pytest.mark.variant("Issue 344: capabilities do not excuse an unreadable cwd")),
+    pytest.param("runner", _status(), True, "a process with this user's ids has a folder that can't be read, so it "
      "counts as in use: pid 1354, Name runsvc, State R (running), PPid 1 (systemd), "
-     f"{IDS}, CapEff 0000000000000000, NoNewPrivs 0, Seccomp 0, {STARTED}"),
-    ("runner", None, True, f"nor can its ids (FileNotFoundError), so it counts as in use: pid 1354, "
-     f"Name ?, State ?, PPid 1 (systemd), Uid ?, Gid ?, CapEff ?, NoNewPrivs ?, Seccomp ?, {STARTED}"),
+     f"{IDS}, CapEff 0000000000000000, NoNewPrivs 0, Seccomp 0, {STARTED}",
+     marks=pytest.mark.variant("Issue 344: an unreadable cwd with this user's IDs must fail closed")),
+    pytest.param("runner", None, True, f"nor can its ids (FileNotFoundError), so it counts as in use: pid 1354, "
+     f"Name ?, State ?, PPid 1 (systemd), Uid ?, Gid ?, CapEff ?, NoNewPrivs ?, Seccomp ?, {STARTED}",
+     marks=pytest.mark.variant("Issue 344: missing process identity must not authorize worktree deletion")),
     # Whatever the service, this user's own process in the worktree keeps it.
-    ("runner+shell", _status(uids=(0, UID, 0, UID)), True, "uid real 0, uid saved 0"),
+    pytest.param("runner+shell", _status(uids=(0, UID, 0, UID)), True, "uid real 0, uid saved 0", marks=pytest.mark.variant("Issue 344: exempt runner must not hide a live shell")),
     # Linux's per-user service manager (``systemd --user``), refused for its
     # CAP_WAKE_ALARM with this user's ids: it never runs in a project.
     ("systemd", _status(name="systemd", cap_prm=1 << 35), False, None),
     # Something else calling itself systemd, not started by PID 1: unknown.
     ("systemd", _status(name="systemd", ppid=2000, cap_prm=1 << 35), True, "Name systemd, State R (running), "
      "PPid 2000"),
-    ("ssh-agent", _status(name="ssh-agent"), False, None),   # it chdirs to / as it daemonizes
+    pytest.param("ssh-agent", _status(name="ssh-agent"), False, None, marks=pytest.mark.variant("Issue 344: SSH agent must not block all cleanup")),
     ("ignored", _status(name="syncd"), False, None),   # the repo's live_check_ignore names it
     # Anything else refused keeps every worktree, and a removal says what it was.
-    ("unknown", _status(name="syncd"), True, "Name syncd"),
+    pytest.param("unknown", _status(name="syncd"), True, "Name syncd", marks=pytest.mark.variant("Unknown daemon with unreadable cwd fails closed")),
     # A worktree's own config can't excuse what holds it: only the repo's base config does.
     ("own-config", _status(name="syncd"), True, "Name syncd"),
 ], ids=["proc-unreadable", "lsof-partial", "runner-root-ids", "runner-other-group", "runner-capabilities",
@@ -712,7 +818,7 @@ def test_setup_waits_for_disk_unless_overridden(db, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("held", [
-    lambda repo: agents.admission("developer", str(repo)),
+    pytest.param(lambda repo: agents.admission("developer", str(repo)), marks=pytest.mark.variant("Worker admission honors disk pressure")),
     lambda repo: spawn.check_no_room(str(repo)),
 ])
 def test_low_free_disk_holds_a_launch(repo, monkeypatch, held):
@@ -724,6 +830,7 @@ def test_low_free_disk_holds_a_launch(repo, monkeypatch, held):
     assert tasks.room_wait(str(repo)) == why
 
 
+@pytest.mark.slow("end-to-end clean/doctor CLI workflow uses real Git worktrees and verifies archived branch tips")
 def test_clean_lists_then_removes_merged_and_archives_stale_branches(db, repo, monkeypatch):
     wt = _worktree(repo, "feat", merge="merge")
     when = f"{int(time.time() - 30 * DAY)} +0000"
@@ -830,13 +937,11 @@ def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo, monkeypatch
     assert sh("git ls-remote --heads origin brindle/session-1", repo).strip() == ""
 
 
+@pytest.mark.variant("macOS root creation excludes both worktree storage and Brindle home from Spotlight")
 def test_spotlight_is_kept_out_of_brindle_dirs(db, repo, monkeypatch):
     monkeypatch.setattr(disk.sys, "platform", "darwin")
-    # Faked darwin makes spawn.ensure_git probe xcode-select, which a Linux host lacks: the tools are present here.
     monkeypatch.setattr(spawn, "_tools_checked", True)
-
     root = workspaces.new_worktree_root(str(repo))
     workspaces.new_worktree_root(str(repo))
-
     assert (root / disk.NEVER_INDEX).is_file()
     assert (config.brindle_home() / disk.NEVER_INDEX).is_file()

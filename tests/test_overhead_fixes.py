@@ -48,6 +48,7 @@ def branch(db, repo, tmp_path):
     return ws
 
 
+@pytest.mark.variant("e67a8d8c: shared check cache")
 def test_check_result_is_cached_by_commit_and_reused(db, branch, repo, tmp_path):
     from brindle.config import load_repo_config
 
@@ -58,6 +59,7 @@ def test_check_result_is_cached_by_commit_and_reused(db, branch, repo, tmp_path)
     assert (tmp_path / "check.log").read_text().count("checked") == 1
 
 
+@pytest.mark.variant("e67a8d8c: report warms checks")
 def test_report_warms_the_checks(db, branch, monkeypatch):
     started = []
     monkeypatch.setattr(agents, "_detach", started.append)
@@ -82,6 +84,7 @@ def test_milestone_check_runs_in_the_background_and_holds_the_nudge(db, repo, mo
 
 # -- 4. a review carries over a clean sync --------------------------------------
 
+@pytest.mark.variant("e67a8d8c: clean sync keeps approval")
 def test_approval_carries_over_a_clean_sync(db, repo, monkeypatch):
     (repo / ".brindle").mkdir()
     (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True}))
@@ -101,6 +104,7 @@ def test_approval_carries_over_a_clean_sync(db, repo, monkeypatch):
     assert carried and carried.approved and "Carried over" in carried.summary
 
 
+@pytest.mark.variant("e67a8d8c: unreviewed sync stays blocked")
 def test_unreviewed_sync_still_needs_a_review(db, repo, monkeypatch):
     (repo / ".brindle").mkdir()
     (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True}))
@@ -190,6 +194,7 @@ def _without_machine_probes(monkeypatch):
     monkeypatch.setattr(procs, "table", lambda *a, **kw: {})
 
 
+@pytest.mark.variant("e67a8d8c: doctor detects missing tmux")
 def test_doctor_reports_what_is_missing(repo, monkeypatch):
     _without_machine_probes(monkeypatch)
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None if name == "tmux" else f"/bin/{name}")

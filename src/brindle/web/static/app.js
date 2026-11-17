@@ -206,7 +206,9 @@ async function pollChat() {
     const log = document.getElementById("chat-log");
     const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
     if (data.reset) log.replaceChildren();
-    for (const m of data.messages) log.append(el("div", { class: "msg " + m.role }, m.text));
+    for (const m of data.messages) log.append(m.role === "restart"
+      ? el("div", { class: "restart-divider", role: "separator" }, m.text)
+      : el("div", { class: "msg " + m.role }, m.text));
     chat.cursor = data.cursor;
     if ((data.messages.length || data.reset) && atEnd) log.scrollTop = log.scrollHeight;
   } catch (e) {

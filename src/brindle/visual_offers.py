@@ -24,6 +24,8 @@ FOLD = 30 * 60
 MIN_QUOTE_WORDS = 2     # a lone "yes" or "the" shows nothing about what was asked for
 MAX_KEPT_MESSAGES = 8   # per session
 MAX_KEPT_CHARS = 32000  # the most the app's input route accepts: a long message can end with an ask
+MARK_WINDOW = 15        # how long before its prompt was sent an Enter's report can stand for it
+SAID_AT_TICK = 0.001    # a transcript's send times are whole milliseconds, rounded down
 
 
 def _expire(c, root: str, now: float) -> None:
@@ -41,11 +43,6 @@ def current(db: DB, root: str) -> dict | None:
     visuals._unlocked(root)
     with db.tx() as c:
         _expire(c, root, time.time())
-        c.execute("DELETE FROM visual_requests WHERE root_id=? AND created_at<=?", (root, time.time() - FOLD))
-        request = c.execute("SELECT * FROM visual_requests WHERE root_id=?", (root,)).fetchone()
-        if request:
-            return {"id": request["id"], "kind": "request", "counts": {},
-                    "confirmation": request["scope"], "expires_at": request["created_at"] + FOLD}
         if config.visuals_setting() != "on":
             return None
         return _dto(c.execute("SELECT * FROM visual_offers WHERE root_id=? AND state='open'",
@@ -113,29 +110,17 @@ def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
     visuals._unlocked(root)
     with db.tx() as c:
         _expire(c, root, time.time())
-        request = c.execute("SELECT * FROM visual_requests WHERE id=? AND root_id=? AND created_at>?",
-                            (oid, root, time.time() - FOLD)).fetchone()
         row = c.execute("SELECT * FROM visual_offers WHERE id=? AND root_id=? AND state='open'",
                         (oid, root)).fetchone()
-        if request is None and (row is None or config.visuals_setting() != "on"):
+        if row is None or config.visuals_setting() != "on":
             raise ServiceError("stale", "this offer is no longer open", 409)
-        if request:
-            c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
-            # Their answer on the card is that message's one say, yes or no, however often they typed it.
-            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND words IN "
-                      "(SELECT words FROM visual_person_words WHERE root_id=? AND source='request')", (root, root))
-            scope = request["scope"]
-            message = f"The person confirmed: create the {scope} they mentioned now."
-        else:
-            c.execute("UPDATE visual_offers SET state=?, changed_at=? WHERE id=?",
-                      ("accepted" if accept else "dismissed", time.time(), oid))
-            scope = "visual"
-            message = f"The person asked for a visual of: {row['question']}"
+        c.execute("UPDATE visual_offers SET state=?, changed_at=? WHERE id=?",
+                  ("accepted" if accept else "dismissed", time.time(), oid))
         if accept:
-            _grant(c, root, scope)
+            _grant(c, root)
             # Queue in the same transaction as the grant: no double delivery on repeated clicks.
             c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at, held) VALUES (?,NULL,?,?,0)",
-                      (root, message, time.time()))
+                      (root, f"The person asked for a visual of: {row['question']}", time.time()))
     if accept:
         agents.flush(db, root)
     log.debug("visual offer %s", "accepted" if accept else "dismissed")
@@ -145,7 +130,7 @@ def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
 
 
 def _unlink(c, root: str, source: str) -> None:
-    """The grant or confirmation a typed message raised is gone; the message itself isn't spent."""
+    """The grant a typed message raised is gone; the message itself isn't spent."""
     c.execute("UPDATE visual_person_words SET source=NULL WHERE root_id=? AND source=?", (root, source))
 
 
@@ -162,30 +147,30 @@ def _grant(c, root: str, scope: str = "visual") -> None:
 
 _REQUEST = re.compile(
     r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
-    r"(?:(?P<visualize>visualize)\b|(?:(?:make|create|show|draw|build|generate|render)\s+(?:(?:me|us)\s+)?|"
+    r"(?:visualize\b|(?:(?:make|create|show|draw|build|generate|render)\s+(?:(?:me|us)\s+)?|"
     r"(?:I want|I'd like|I would like)\s+)"
     r"(?:(?:a|an|the|this|that)\s+)?(?:(?:simple|interactive|quick|small|new)\s+)*"
-    r"(?P<artifact>visual(?:ization)?|diagram|chart|mockup|planning doc(?:ument)?|plan document)\b)", re.I)
-_REFERENT = re.compile(r"(?:\s+(?:(?:of|for|about|showing)\s+)?(?:this|that|these|those|it)"
-                       r"(?:\s+(?:layout|change|choices|options|flow|pipeline|decision))?)?[.!?]*", re.I)
-# "visualize the changes for 0.6.3" / "show me the flow visually": a plain object phrase,
-# no joining word that could add a second instruction.
-_OBJECT = re.compile(r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}[.!?]*", re.I)
+    r"(?P<artifact>visual(?:ization)?|diagram|chart|mockup|planning doc(?:ument)?|plan document)\b|render\b)", re.I)
+# "show me the flow visually": a plain object phrase, no joining word that could add a second instruction.
 _SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?show\s+(?:me|us)"
                             r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}\s+visually[.!?]*", re.I)
-# A deferral or approval clause inside an object phrase (not a subject word like "approval flow").
-_DEFERRED = re.compile(r"\b(?:once|tomorrow|tonight|soon|eventually|whenever|next\s+(?:week|month|year|day|time|sprint|quarter)|(?:I|we|you|they)\s+approve[sd]?)\b", re.I)
-_QUALIFIED = re.compile(r"\b(?:if|unless|when|after|before|later|only|maybe|perhaps|not|never|"
-                        r"don't|do not|wait|until|provided|assuming)\b|[\"`“”]", re.I)
-_CONTEXT = re.compile(r"(?:compare|consider|examine|review)\s+(?:this|that|these|those|the)\s+"
-                      r"(?:choices|options|layouts|designs|flow|pipeline|change|decision)[.!?]*", re.I)
+# Plan wordings: a writing verb plus the plan, or "plan it first". A bare "plan" needs the verb, so
+# "I want the plan to use X" and "the plan looks good" grant nothing; a purpose clause is fine.
+_PLAN_REQUEST = re.compile(
+    r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
+    r"(?:(?:write|draft|prepare|put together|draw up|do|make|create|build)\s+(?:(?:me|us)\s+)?(?:up\s+)?"
+    r"(?:(?:a|an|the|my|our)\s+)?(?:(?:simple|quick|short|small|new|first)\s+)*"
+    r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
+    r"|plan\s+(?:it|this|that)\s+first\b)", re.I)
 _CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
-_CANCEL_ARTIFACT = r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan document|request)\b"
+_CANCEL_ARTIFACT = (r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan docs?|"
+                    r"plan document|plans?|request)\b")
 # Names the artifact, or says not to make it: a cancel in any clause of a message.
 _CANCEL_REQUEST = re.compile(
     _CANCEL_LEAD + r"(?:(?:cancel|stop|skip|drop|scratch|never\s*mind|forget(?:\s+about)?)\s+(?:(?:the|this|that|my)\s+)?" + _CANCEL_ARTIFACT
-    + r"|(?:don['’]?t|do not)\s+(?:make|create|show|draw|build|generate|render)\b(?:\s+(?:me|us|a|an|the|it|this|that))*"
-    r"(?:\s+" + _CANCEL_ARTIFACT + r"|\W*$)|no\s+(?:need\s+for\s+)?(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + ")", re.I)
+    + r"|(?:don['’]?t|do not)\s+(?:make|create|show|draw|build|generate|render|write|draft|prepare|put together|draw up)\b"
+    r"(?:\s+(?:me|us|a|an|the|it|this|that))*(?:\s+" + _CANCEL_ARTIFACT + r"|\W*$)"
+    r"|(?:don['’]?t|do not)\s+do\s+(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + r"|no\s+(?:need\s+for\s+)?(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + ")", re.I)
 # Says only "stop", or "never mind I found it": it cancels unless a new ask follows, as in "never mind, render it".
 _CANCEL_BARE = re.compile(_CANCEL_LEAD + r"(?:(?:never\s*mind|nvm)\s+(?:i|i['’]m|i['’]ve|we|we['’]re|it['’]s|its|got|found|figured|all)\b"
                           r"|(?:never\s*mind|nvm|forget\s+(?:it|that|about\s+it)|scratch\s+that|"
@@ -195,8 +180,10 @@ _ASKS_AGAIN = re.compile(r"(?:(?:please|just|then|instead|but|and|so|ok|okay|now
                          r"|(?:make|create|build|generate)\s+(?:(?:me|us|a|an|the|this|that)\s+)*" + _CANCEL_ARTIFACT + r")\b", re.I)
 _COURTESY = re.compile(r"(?:thanks|thank you|thx|please|sorry)\W*$", re.I)
 _CLAUSES = re.compile(r"(?<=[.!?,;:])\s+|[…。！？，；、]+\s*|\s+[-–—]+\s+|[–—]+\s*|\n+")
-_NOT = (r"(?<!why )\b(?:not|never|cannot|without|avoid|stop|no need to|rather than|instead of|"
-        r"(?:do|does|did|should|must|need)n['’]?t|(?:ca|could|wo|would)n['’]?t(?! you))"
+# "should you not…" / "shouldn't you…" ask why something hasn't been done: a request, not a negation.
+_ASKING = "".join(f"(?<!{a} you )" for a in ("should", "can", "could", "would", "will"))
+_NOT = (r"(?<!why )\b(?:" + _ASKING + r"not|never|cannot|without|avoid|stop|no need to|rather than|instead of|"
+        r"(?:do|does|did|must|need)n['’]?t|(?:should|ca|could|wo|would)n['’]?t(?! you))"
         r"(?: (?:ever|even|bother|need|needed|want|wanted|have|ask|asked|try|go|to|you|i|me|us|just|really|please|actually|yet))*")
 _NEGATED = re.compile(_NOT + " $")     # just before a quote it takes the quote back: "don't ever <quote>"
 _NEGATES = re.compile(_NOT + r" \w")    # the quote carries its own "don't"
@@ -226,32 +213,23 @@ def _cancels(text: str) -> bool:
     return bool(bare) and not any(_ASKS_AGAIN.match(c) for c in clauses[bare[-1] + 1:])
 
 
-def request_intent(text: str) -> tuple[str | None, bool]:
-    """Recognize complete direct request sentences; uncertain intent needs a real confirmation.
+def request_intent(text: str) -> str | None:
+    """What a sentence of the person's own message asks for ("visual" or "plan"), if one does.
 
-    Surrounding context is allowed. Arbitrary trailing clauses, quotations,
-    conditions and deferrals cannot authorize anything from a matched prefix.
+    A recognized request authorizes one, whatever surrounds it: there is no
+    second confirmation. Whether they really meant it now is the agent's to
+    judge; an explicit cancel (``_cancels``) still takes it back.
     """
-    found = []
-    context_clear = True
+    scope = None
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", text.strip()):
         match = _REQUEST.match(sentence)
         if match:
             scope = "plan" if (match["artifact"] or "").lower().startswith(("planning", "plan ")) else "visual"
-            rest = sentence[match.end():]
-            clear = _REFERENT.fullmatch(rest) is not None or (
-                match["visualize"] is not None and _OBJECT.fullmatch(rest) is not None)
-            found.append((scope, clear and not _DEFERRED.search(sentence)))
+        elif _PLAN_REQUEST.match(sentence):
+            scope = "plan"
         elif _SHOW_VISUALLY.fullmatch(sentence):
-            found.append(("visual", not _DEFERRED.search(sentence)))
-        elif sentence:
-            # Unknown discourse may be an example, quotation, or instruction
-            # to defer. Recognize the request but let the person confirm it.
-            context_clear = context_clear and _CONTEXT.fullmatch(sentence) is not None
-    if not found:
-        return None, False
-    scopes = {scope for scope, _ in found}
-    return found[-1][0], context_clear and len(scopes) == 1 and all(clear for _, clear in found) and not _QUALIFIED.search(text)
+            scope = "visual"
+    return scope
 
 
 def begin_input(db: DB, agent: Agent, expires_at: float | None = None) -> int:
@@ -290,19 +268,26 @@ def refresh_input(db: DB, agent: Agent, observer: int, submitted_at: float, expi
 
 def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
-                 fold_only: bool = False, typed: bool = False, cli_prompt: bool = False) -> None:
+                 fold_only: bool = False, typed: bool = False, cli_prompt: bool = False,
+                 said_at: float | None = None, mid_turn: bool = False, carries_delivery: bool = False) -> None:
     """Called only for authenticated person input, never for agent messages.
 
     ``typed``: the app watched the person key in all of ``text`` themselves.
     Only then can its words back a publish_visual ``asked``. ``cli_prompt``:
     this is a CLI hook's report of ``text``, which makes words the app staged
-    for this same prompt quotable."""
+    for this same prompt quotable. ``said_at``: when the person sent ``text``,
+    if that was earlier than now (a message read back after the fact): a cancel
+    then ends only the words they typed before it. ``mid_turn``: the CLI took
+    ``text`` into a turn still running, so it was sent before the agent had
+    finished asking anything: it answers no offer. ``carries_delivery``: the
+    prompt holds a brindle delivery the person typed onto, words that aren't
+    theirs, so the app's mark for that Enter (see keep_typed) can't stand for it."""
     if not visuals.enabled():
         return
     root, ws = visuals._session(db, agent)
     if root.id != agent.id:
         return
-    scope, clear = request_intent(text)
+    scope = request_intent(text)
     with db.tx() as c:
         if expires_at is not None and time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
@@ -320,11 +305,9 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                       "VALUES (?,1,0,0,?) ON CONFLICT(root_id) DO UPDATE SET "
                       "generation=generation+1, invalidated_at=MAX(invalidated_at,excluded.invalidated_at)",
                       (root.id, time.time()))
-        c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
-                  (time.time(), root.id))
-        if not fold_only:
-            c.execute("DELETE FROM visual_requests WHERE root_id=?", (root.id,))
-            _unlink(c, root.id, "request")
+        if not mid_turn:
+            c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
+                      (time.time(), root.id))
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
@@ -332,29 +315,37 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
             _unlink(c, root.id, "grant")
         if cancelled:
-            c.execute("DELETE FROM visual_person_words WHERE root_id=?", (root.id,))
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND created_at<=?",
+                      (root.id, time.time() if said_at is None else min(said_at, time.time())))
         elif typed and not fold_only:
             _keep_words(c, root.id, text)
         elif cli_prompt:
-            c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
-                      "WHERE root_id=? AND words=? AND staged=1)", (root.id, _words(text)))
+            confirmed = c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
+                                  "WHERE root_id=? AND words=? AND staged=1)", (root.id, _words(text))).rowcount
+            if not confirmed and not carries_delivery:
+                _fill_mark(c, root.id, text, said_at)
         # Tie the words to what this message raises, so one spends the other.
-        if not fold_only and scope and clear:
+        # A cancel in the same message wins over the request it calls off.
+        if not fold_only and scope and not cancelled:
             _grant(c, root.id, scope)
             _link(c, root.id, text, "grant")
-        elif not fold_only and scope:
-            c.execute("INSERT INTO visual_requests VALUES (?,?,?,?)",
-                      (root.id, "r_" + secrets.token_hex(6), scope, time.time()))
-            _link(c, root.id, text, "request")
     bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
 
 
-def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at: float) -> None:
+def keep_typed(db: DB, agent: Agent, text: str | None, expires_at: float, submitted_at: float,
+               typed: bool = True) -> None:
     """The app watched the person key in ``text``, for a CLI whose prompt hook
     can't say what was typed. Sent before the app lets Enter through: a report
     that fails, comes late or predates newer person input leaves nothing. What
     it leaves is staged: only that prompt's own hook makes the words quotable,
-    in the transaction that raises any grant, so a message can't be spent twice."""
+    in the transaction that raises any grant, so a message can't be spent twice.
+
+    ``text`` None: the person sent it with their own keys, nothing pasted, but
+    the app can't say what it says: a suggestion of the CLI's they accepted
+    (Tab, or Enter on an empty box), or an edit the app can't follow. It stages
+    a mark the prompt's own hook fills in with what it says. ``typed`` False:
+    an Enter that sent something not typed (a paste), staged too, so the order
+    of Enters is known and a paste's prompt can't take another Enter's mark."""
     # Each refusal goes to the debug log (why and how late, never the words), so a real one can be seen.
     if not visuals.enabled():
         return _typed_refused(agent, "visuals are off")
@@ -370,7 +361,13 @@ def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at:
             state = c.execute("SELECT invalidated_at FROM visual_input_state WHERE root_id=?", (root.id,)).fetchone()
             if state and submitted_at <= state["invalidated_at"]:
                 raise ServiceError("stale", "this submission predates a direct person message", 409)
-            if _cancels(text):
+            if not typed or text is None:
+                # An entry in the order of Enters: the prompt each stands for claims it (see _fill_mark).
+                kind = "pasted" if not typed else "unseen" if root.status == "idle" else "unseen-busy"
+                c.execute("INSERT INTO visual_person_words (root_id, words, source, staged, created_at) "
+                          "VALUES (?,'',?,1,?)", (root.id, kind, now))
+                kept = None
+            elif _cancels(text):
                 kept = "it cancels a request"
             else:
                 kept = _keep_words(c, root.id, text, staged=True)
@@ -379,6 +376,32 @@ def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at:
         raise
     if kept is not None:
         _typed_refused(agent, kept)
+
+
+def _fill_mark(c, root: str, text: str, said_at: float | None) -> None:
+    """The Enter reported last before this prompt was sent (see keep_typed) is the one that sent it. If
+    its words were unseen but typed, keep what the prompt says, if that can be kept. That entry and any
+    before it are used up; a later Enter's entry is left for its own prompt, so messages a running turn
+    takes in together each find their own. ``said_at``: when the prompt was sent, if the CLI says;
+    else now, and then only an Enter made while the agent was idle counts: a message queued during a
+    turn and sent after it can't be told apart from the others queued with it. Only a recent Enter
+    counts: one that sent no prompt (a menu's) can't stand for a later prompt whose report was lost."""
+    at = time.time() if said_at is None else said_at
+    # A CLI's send time is cut to its clock's tick: the prompt went in somewhere in [said_at, said_at + tick),
+    # so an Enter reported at said_at + tick or later came after it.
+    before = "created_at<=?" if said_at is None else "created_at<?"
+    entries = c.execute("SELECT id, source, created_at FROM visual_person_words WHERE root_id=? AND staged=1 "
+                        f"AND words='' AND {before} AND created_at>? ORDER BY id DESC LIMIT 2",
+                        (root, at if said_at is None else at + SAID_AT_TICK, at - MARK_WINDOW)).fetchall()
+    if not entries:
+        return
+    entry = entries[0]
+    if entry["created_at"] > at and len(entries) > 1:
+        return   # it fell in the tick the prompt went in: this Enter or the one before may have sent it
+    c.execute("DELETE FROM visual_person_words WHERE root_id=? AND staged=1 AND words='' AND id<=?",
+              (root, entry["id"]))
+    if entry["source"] == "unseen" or (entry["source"] == "unseen-busy" and said_at is not None):
+        _keep_words(c, root, text)
 
 
 def _typed_refused(agent: Agent, why: str, **detail) -> None:
@@ -407,7 +430,7 @@ def _keep_words(c, root: str, text: str, staged: bool = False) -> str | None:
     """Keep a typed message for ``asked`` to be checked against, briefly. Why it wasn't kept, if it wasn't."""
     now = time.time()
     words = _words(text)
-    unkept = ("too few words" if _word_count(words) < MIN_QUOTE_WORDS else "too long" if len(words) > MAX_KEPT_CHARS
+    unkept = ("too few words" if not words else "too long" if len(words) > MAX_KEPT_CHARS
               else "it looks like a secret" if visuals.secret_finding(text, "the message") else None)
     if unkept is None:
         c.execute("INSERT INTO visual_person_words (root_id, words, staged, created_at) VALUES (?,?,?,?)",
@@ -433,19 +456,33 @@ def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple
         at = stop
     holds_a_mention = bool(own)
     own.append(words[at:end])
-    return _word_count(" ".join(own)) >= MIN_QUOTE_WORDS and (not holds_a_mention or _ASKS_FOR.match(own[0]) is not None)
+    own_words = _word_count(" ".join(own))
+    whole_one_word_message = (begin == 0 and end == len(words) and len(words.split()) == 1
+                              and words.isascii() and own_words == 1)
+    return (own_words >= MIN_QUOTE_WORDS or whole_one_word_message) and (
+        not holds_a_mention or _ASKS_FOR.match(own[0]) is not None)
 
 
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
     """Whether ``asked`` is the person's recent words; the message backing it is used up."""
     quote = _words(asked)
-    if _word_count(quote) < MIN_QUOTE_WORDS or _NEGATES.search(quote):
+    if not quote or _NEGATES.search(quote):
         return False
     # Whole words, and not a piece cut from "don't render it".
     pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)")
     for row in c.execute("SELECT id, words, source FROM visual_person_words WHERE root_id=? AND staged=0 "
                          "AND created_at>? ORDER BY id DESC", (root, now - FOLD)).fetchall():
         words = row["words"]
+        if words == quote and _word_count(quote) == 1:
+            mentioned = [q.span() for q in _QUOTED.finditer(words)]
+            if mentioned or _NEGATED.search(words) or not _says_it_themselves(words, (0, len(words)), mentioned):
+                continue
+            c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
+            if row["source"] == "grant":
+                c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
+            return True
+        if _word_count(quote) < MIN_QUOTE_WORDS:
+            continue
         mentioned = [q.span() for q in _QUOTED.finditer(words)]
         if any(not _NEGATED.search(words[max(0, m.start() - _NEGATION_REACH):m.start()])
                and _says_it_themselves(words, m.span(), mentioned)
@@ -453,26 +490,48 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
             if row["source"] == "grant":
                 c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
-            elif row["source"] == "request":
-                c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
             return True
+    if c.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND created_at>? AND instr(words, ?)",
+                 (root, now - FOLD, quote)).fetchone():
+        # The app vouched for these words, but no prompt of the CLI's has said it took that message in.
+        debuglog.record("visuals", "warning", "asked words refused: their message is still staged", {"agent": root})
     return False
 
 
 def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = None,
-              answered: str | None = None) -> None:
+              answered: str | None = None, consented: bool = False,
+              decision: bool = False, visual_id: str | None = None) -> bool:
     """Allow one publication or refuse it, in the publishing transaction.
+    Whether the person consented to this one (a quote or a grant).
 
     ``answered`` is the stored answer of the visual being revised. Revising
-    clears it, so an answer allows one revision. That and ``asked`` are the
-    supervisor's own to use, and neither reaches a planning document."""
+    clears it, so an answer allows one revision. ``consented``: the visual
+    being revised was published by this supervisor with the person's
+    consent, so it stays theirs to update. These and ``asked`` are the
+    supervisor's own to use, and none reaches a planning document.
+    A supervisor may ask one open decision without consent; that does not
+    earn consent for future revisions without a decision."""
     now = time.time()
+    if kind == "visual" and decision:
+        open_prompt = c.execute(
+            "SELECT id FROM visuals WHERE root_id=? AND kind='visual' AND question IS NOT NULL "
+            "AND options IS NOT NULL AND answer IS NULL AND dismissed_rev < rev AND id != ?",
+            (root, visual_id or "")).fetchone()
+        if open_prompt:
+            raise ServiceError("open_decision_prompt",
+                               f"decision prompt {open_prompt['id']} is still open; revise that prompt "
+                               "or wait for the person to answer or dismiss it", 409)
     if kind == "visual" and supervisor:
+        if consented:
+            return True
         if answered and now - json.loads(answered)["at"] < FOLD:
-            return
+            return False
         if asked is not None and _spend_quote(c, root, asked, now):
-            return
+            return True
+        if decision:
+            return False
     consume(c, root, kind)
+    return True
 
 
 def consume(c, root: str, kind: str = "visual") -> None:
@@ -484,7 +543,7 @@ def consume(c, root: str, kind: str = "visual") -> None:
                                "or to accept an offer", 403)
         raise ServiceError("visual_request_required",
                            "nothing shows the person asked for this. If they asked to see it, the supervisor "
-                           "publishes again with asked=\"...\": at least two of their words, copied exactly from "
+                           "publishes again with asked=\"...\": their whole message, or at least two of their words, copied exactly from "
                            "one message they typed themselves in the app in the last 30 minutes (not pasted, not "
                            "words they were quoting or saying not to do, and not a message that already allowed a "
                            "publication). Otherwise use offer_visual so they "

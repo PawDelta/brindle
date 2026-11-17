@@ -36,6 +36,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 [dev-dependencies]
 tauri = { version = "2", features = ["tray-icon", "unstable", "test"] }
 minisign-verify = "0.3"
+tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

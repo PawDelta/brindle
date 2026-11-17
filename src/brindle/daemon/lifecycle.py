@@ -50,6 +50,9 @@ HOST = "127.0.0.1"
 IDLE_SECONDS = 600.0
 WATCH_INTERVAL = 5.0     # seconds between the idle / upgrade checks
 CODEX_HOOK_EVERY = 60.0  # seconds between looks at the Codex hook's trust (codex_hook.keep_trusted)
+SHARED_DOCS_EVERY = 30.0  # seconds between bringing back what teammates wrote on shared plans
+CULL_EVERY = 60.0       # seconds between cull sweeps when no sidebar has run one (cull.claim)
+PROVIDER_SWITCH_EVERY = 30.0  # seconds between provider switch sweeps (offers, and automatic switches)
 CODEX_HOOK_SETTLE = 120.0    # and how long another install's fresh trust is left alone
 STOP_GRACE = 5.0         # seconds `daemon stop` waits before SIGKILL
 SHUTDOWN_GRACE = 1.0     # seconds for requests on shutdown, within the app's replacement budget
@@ -350,6 +353,7 @@ def pause_for_exit(recovery: Recovery | None = None) -> list[str]:
             entries = [recorded(root.id) for root in roots]
             if not _record_resume(left + entries) or not roots:
                 return []
+            _record_window_size()       # before the windows close; after the record, which matters more
             closings = agents.record_pauses(db, [entry["id"] for entry in entries])
         finally:
             db.conn.close()
@@ -392,6 +396,37 @@ def _read_resume() -> list[dict] | None:
     return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
 
 
+WINDOW_SIZE_FILE = "agent-window-size"      # the size recovered windows start at (_record_window_size)
+
+
+def _window_size_path() -> Path:
+    return brindle_home() / WINDOW_SIZE_FILE
+
+
+def _record_window_size() -> None:
+    """The size the agents' windows were last shown at, for the next start:
+    no view is attached while it brings them back and the daemon has no
+    terminal, so they would come back at tmux's 80x24 and the resumed chats
+    draw there. Kept when nothing can be read now. A hint: failing is only logged."""
+    from brindle import tmux
+
+    try:
+        size = tmux.agent_window_size()
+        if size:
+            _write_private(_window_size_path(), json.dumps(size))
+    except (tmux.TmuxError, OSError):
+        log.warning("brindle: couldn't record the agents' window size", exc_info=True)
+
+
+def _read_window_size() -> tuple[int, int] | None:
+    """What _record_window_size kept, or None when there is nothing usable."""
+    try:
+        cols, rows = json.loads(_window_size_path().read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    return (cols, rows) if isinstance(cols, int) and isinstance(rows, int) and cols > 0 and rows > 0 else None
+
+
 VIEWED_FILE = "viewed-session"      # the session the app last showed (record_viewed)
 
 
@@ -419,10 +454,11 @@ def record_viewed(root_id: str) -> None:
 
 
 def _read_viewed() -> str | None:
-    """The session the app last showed, or None when none is recorded."""
+    """The session the app last showed, or None when none is recorded or it
+    can't be read (a hint only: recovery goes on without it)."""
     try:
         return _viewed_path().read_text().strip() or None
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -431,8 +467,8 @@ LAUNCH_WAIT = 8.0      # and in all, launches under way included (within daemon.
 RESUME_STALL = 120.0   # seconds with no session finished after which a start stops waiting (a resume that hangs)
 RESUME_TRIES = 2       # starts that may fail to bring one session back before it is left paused
 RESUME_PARALLEL = 4    # sessions a start brings back at once (resume_after_start)
-RESUME_BUSY_WAIT = 3.0  # seconds a session coming back waits on a machine short of CPU only: the person is waiting for it
-VIEWED_HEAD_START = 8.0     # seconds the session on screen comes back alone before the others start, if it hangs
+RESUME_BUSY_WAIT = 3.0  # seconds a session other than the person's own waits on a machine short of CPU only
+RESUME_PROMPT_WAIT = 90.0   # seconds to wait for Claude's input box after its pane is launched
 
 
 class Recovery:
@@ -465,9 +501,12 @@ class Recovery:
         self.idle.set()
         self.record: list[dict] = []    # what is on disk: sessions not confirmed back yet
         self.pending: list[dict] = []   # those whose turn in this start isn't over
+        self.returning: set[str] = set()  # eligible sessions queued or launching in this start
         self.lanes: deque[list[dict]] = deque()     # those whose turn hasn't begun, under lock
         self.total = 0                  # how many entries the record had
         self.handed_over = False        # stop has returned: the record is the way out's now
+        self.ordered = False            # ``lanes`` is in place: a prioritize moves them at once
+        self.wanted: list[str] = []     # sessions opened before then, in order, under lock
 
     def _save(self) -> bool:
         if self.handed_over:
@@ -494,6 +533,12 @@ class Recovery:
         """``entry``'s turn in this start is over, back or not."""
         with self.lock:
             self.pending.remove(entry)
+            self.returning.discard(entry["id"])
+
+    def resuming(self) -> set[str]:
+        """Sessions this start is bringing back, until their attempt ends."""
+        with self.lock:
+            return set() if self.idle.is_set() or self.stopping.is_set() else set(self.returning)
 
     def next_lane(self) -> list[dict] | None:
         with self.lock:
@@ -501,13 +546,29 @@ class Recovery:
 
     def prioritize(self, root_id: str) -> None:
         """Bring session ``root_id``'s lane to the front of those not yet begun
-        (the person has opened it). Nothing, if it has begun or none is under way."""
+        (the person has opened it). Nothing, if it has begun or none is under way.
+        Opened before the start has put its sessions in order, it goes first
+        once it has (order)."""
         with self.lock:
-            for lane in self.lanes:
-                if any(e["id"] == root_id for e in lane):
-                    self.lanes.remove(lane)
-                    self.lanes.appendleft(lane)
-                    return
+            if not self.ordered:
+                self.wanted.append(root_id)
+                return
+            self._forward(root_id)
+
+    def _forward(self, root_id: str) -> list[dict] | None:
+        for lane in self.lanes:
+            if any(e["id"] == root_id for e in lane):
+                self.lanes.remove(lane)
+                self.lanes.appendleft(lane)
+                return lane
+        return None
+
+    def order(self, lanes: deque[list[dict]]) -> None:
+        """The start's ``lanes`` in place, behind any session opened meanwhile."""
+        with self.lock:
+            self.lanes, self.ordered = lanes, True
+            for root_id in self.wanted:
+                self._forward(root_id)
 
     def progress(self) -> dict | None:
         """How far the start's resume has come (the app's "3 of 6"): sessions
@@ -626,16 +687,45 @@ def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env
             recovery.settled(entry)
             return False
         steps: list[str] = [f"room {waited:.2f}s"]     # how long it waited for the machine to have room
+        size = _read_window_size()
         try:
             with _timed(steps, "resume"):
                 agents.resume(db, root.id, only={a.id for a in tree} - held, settle=True,
-                              gate=recovery.launching, recovery_env=env)
+                              gate=recovery.launching, recovery_env=env, **({"window_size": size} if size else {}))
         finally:
             # A warning, so it's seen: the daemon's log is its stderr (app-daemon.log), warnings only.
             debuglog.recovery_timing(log, "brindle: session %s recovery: %s", root.id, ", ".join(steps))
         if agents.panes_match(db, root.id, held):
             recovery.settled(entry)
         return True
+
+
+def _await_resume_prompt(db, root_id: str, recovery: Recovery) -> None:
+    """Keep the recovery display until Claude can take input. SessionStart
+    marks it idle before a large conversation has finished loading; neither
+    that status nor a live pane means its prompt is up. Read the pane using
+    the provider's existing input detection, outside the resume/launch locks.
+    If it never draws (or can't be read), expose the real status at the bound.
+    Other providers and headless sessions keep their existing readiness path.
+    """
+    from brindle import agents, providers, tmux
+
+    until = time.monotonic() + RESUME_PROMPT_WAIT
+    while not recovery.stopping.is_set():
+        root = db.get_agent(root_id)
+        if (root is None or root.provider != "claude" or root.headless or root.mode != "interactive"
+                or root.status not in ("starting", "idle", "processing", "waiting") or not root.tmux_window):
+            return
+        left = until - time.monotonic()
+        if left <= 0:
+            return
+        try:
+            screen = tmux.capture(root.tmux_window, lines=40, server=agents.server_of(root))
+            if providers.get_provider(root.provider).input_ready(screen):
+                return
+        except tmux.TmuxError:
+            pass   # a transient capture failure must not announce that it is ready
+        recovery.stopping.wait(min(left, 0.5))
 
 
 def _join(threads: list[threading.Thread], recovery: Recovery) -> None:
@@ -670,15 +760,19 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
 
     Up to RESUME_PARALLEL sessions come back at once, the one last at work
     first (_most_recent_first), each when the machine has room for it
-    (spawn.wait_for_room); sessions sharing a tmux session go one after
+    (spawn.wait_for_room): for the person's own (interactive) sessions,
+    only critical memory pressure holds them, a machine short of CPU doesn't
+    (the person is waiting for them; workers keep their gate, spawn.no_room);
+    sessions sharing a tmux session go one after
     another (_lanes). A session that fails doesn't hold up the others.
-    The session the app showed last (record_viewed) goes before all of them,
-    alone, so it is back sooner: the others start once it is, or after
-    VIEWED_HEAD_START seconds if it hangs.
+    The session the app showed last (record_viewed) is taken first, and the
+    others come back beside it: N sessions take about as long as the slowest.
+    Their launches share each model check and preflight per provider and
+    identity (agents.shared_launch_checks), rather than run them per agent.
 
     ``recovery``: the daemon's (serve), which may be stopped meanwhile: then
     nothing more is launched, and what is left stays on the record."""
-    from brindle import agents, secrets, tmux
+    from brindle import agents, bus, secrets, signin_pause, tmux
     from brindle.db import DB
 
     recovery = recovery or Recovery()
@@ -701,22 +795,30 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
         env = {k: v for k, v in os.environ.items() if v and not secrets.is_job_secret(k)}
         db = DB()
         try:
+            held = set(signin_pause.paused_for_signin())
+            with recovery.lock:
+                recovery.returning = {
+                    entry["id"] for entry in entries
+                    if entry.get("tries", 0) < RESUME_TRIES and entry.get("server") == server
+                    and (root := db.get_agent(entry["id"])) is not None
+                    and root.status != "done" and agents.same_server(root) and root.id not in held
+                }
             lanes = _lanes(db, _most_recent_first(db, entries))
+            for root_id in recovery.resuming():
+                bus.publish_agent(db, "session.changed", root_id)
         finally:
             db.conn.close()
-        # The session the app showed last comes back first, before its lane's others, and alone.
+        # The session the app showed last is taken first, before its lane's others.
         viewed = _read_viewed()
         first = next((lane for lane in lanes if any(e["id"] == viewed for e in lane)), None)
         if first is not None:
             lanes.remove(first)
             first.sort(key=lambda e: e["id"] != viewed)
             lanes.appendleft(first)
-        alone = threading.Event()       # the viewed session's turn is over: the others may start
-        with recovery.lock:
-            recovery.lanes = lanes
+        recovery.order(lanes)     # behind any session the person opened meanwhile
         ordered = time.monotonic() - began
 
-        def work(lead: bool = False) -> None:
+        def work() -> None:
             db = DB()       # its own: SQLite connections stay on their thread
             try:
                 while not recovery.stopping.is_set():
@@ -725,7 +827,10 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                         return
                     for entry in lane:
                         waiting = time.monotonic()
-                        spawn.wait_for_room(recovery.stopping, busy_limit=RESUME_BUSY_WAIT)
+                        root = db.get_agent(entry["id"])
+                        # The person's own session: they are waiting for it, so only critical memory holds it.
+                        busy = 0.0 if root is not None and root.mode == "interactive" else RESUME_BUSY_WAIT
+                        spawn.wait_for_room(recovery.stopping, busy_limit=busy)
                         waited = time.monotonic() - waiting
                         if recovery.stopping.is_set():
                             return
@@ -734,6 +839,7 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                                 log.warning("brindle: session %s couldn't be noted as tried; left to the next start",
                                             entry["id"])
                             elif _resume_session(db, entry, server, recovery, env, waited=waited):
+                                _await_resume_prompt(db, entry["id"], recovery)
                                 resumed.append(entry["id"])
                         except agents.Cancelled:
                             entry["tries"] -= 1     # stopped, it didn't fail
@@ -741,27 +847,18 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                         except Exception:  # noqa: BLE001 - the others still come back
                             log.warning("brindle: couldn't resume session %s", entry["id"], exc_info=True)
                         recovery.finished(entry)
-                        if entry["id"] == viewed:
-                            alone.set()
+                        bus.publish_agent(db, "session.changed", entry["id"])
             finally:
-                if lead:
-                    alone.set()
                 db.conn.close()
 
-        # A copy of this context each (one can't be entered twice at once): a new thread starts with none.
-        threads = [threading.Thread(target=contextvars.copy_context().run, args=(work, n == 0),
-                                    name=f"brindle-resume-{n}", daemon=True)
-                   for n in range(min(RESUME_PARALLEL, len(lanes)))]
-        rest = threads
-        if first is not None:
-            # The CPU and the keychain to itself, for the head start at most: one that hangs holds up no other.
-            threads[0].start()
-            if not alone.wait(VIEWED_HEAD_START):
-                log.warning("brindle: session %s not back after %gs; the others start", viewed, VIEWED_HEAD_START)
-            rest = threads[1:]
-        for thread in rest:
-            thread.start()
-        _join(threads, recovery)
+        with agents.shared_launch_checks():
+            # A copy of this context each (one can't be entered twice at once): a new thread starts with none.
+            threads = [threading.Thread(target=contextvars.copy_context().run, args=(work,),
+                                        name=f"brindle-resume-{n}", daemon=True)
+                       for n in range(min(RESUME_PARALLEL, len(lanes)))]
+            for thread in threads:
+                thread.start()
+            _join(threads, recovery)
     finally:
         recovery.idle.set()
         debuglog.recovery_timing(log, "brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
@@ -804,6 +901,10 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     ready = ReadinessWatch()
     monitor = health.Monitor(clock)
     hook_due = clock() + CODEX_HOOK_EVERY
+    shared_due = clock() + SHARED_DOCS_EVERY
+    cull_due = clock() + CULL_EVERY
+    switch_due = clock() + PROVIDER_SWITCH_EVERY
+    sharing: asyncio.Task | None = None     # on its own task: a slow Library never holds up these checks
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
         await wait(WATCH_INTERVAL)
@@ -820,12 +921,59 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
         if clock() >= hook_due:
             hook_due = clock() + CODEX_HOOK_EVERY
             await asyncio.to_thread(_keep_codex_hook, CODEX_HOOK_SETTLE)
+        if clock() >= cull_due:
+            cull_due = clock() + CULL_EVERY
+            await asyncio.to_thread(_cull_sweep)
+        if clock() >= switch_due:
+            switch_due = clock() + PROVIDER_SWITCH_EVERY
+            await asyncio.to_thread(_provider_switch_sweep)
+        if clock() >= shared_due and (sharing is None or sharing.done()):
+            shared_due = clock() + SHARED_DOCS_EVERY
+            sharing = asyncio.create_task(asyncio.to_thread(_sync_shared_docs))
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0
               and time.monotonic() - activity.last >= IDLE_SECONDS
               and not await asyncio.to_thread(_agents_running)):
             server.should_exit = True
+
+
+def _cull_sweep() -> None:
+    """The sweep the sidebars run (cull.sweep_quietly), for sessions no
+    sidebar watches (the app alone, --no-watch): without it a worker held on
+    its CLI's own prompt was never marked waiting nor its supervisor told.
+    Claimed on the stamp the sidebars share (cull.claim), so one sweep runs a
+    minute between them all; a failure is only logged."""
+    from brindle import cull
+    from brindle.db import DB
+
+    try:
+        if not cull.claim(time.time()):
+            return
+        db = DB()
+        try:
+            cull.sweep_quietly(db)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a sweep must never stop the watch
+        log.debug("brindle: couldn't run the cull sweep", exc_info=True)
+
+
+def _provider_switch_sweep() -> None:
+    """provider_switch.sweep, off the daemon's way: offers, and automatic
+    switches, without a manual call. Run one tick at a time by the watch, so a
+    slow switch never overlaps the next; a failure is only logged."""
+    from brindle import provider_switch
+    from brindle.db import DB
+
+    try:
+        db = DB()
+        try:
+            provider_switch.sweep(db, time.time())
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a sweep must never stop the watch
+        log.debug("brindle: couldn't run the provider switch sweep", exc_info=True)
 
 
 def _purge_typed_words() -> None:
@@ -841,6 +989,32 @@ def _purge_typed_words() -> None:
             db.conn.close()
     except Exception:  # noqa: BLE001 - a purge must never stop the watch
         log.debug("brindle: couldn't purge old typed words", exc_info=True)
+
+
+def _sync_shared_docs() -> None:
+    """shared_docs.sync_open, off the daemon's way: a failure is only logged."""
+    from brindle.db import DB
+    from brindle.pro import shared_docs
+
+    try:
+        db = DB()
+        try:
+            shared_docs.sync_open(db)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a sync must never stop the watch
+        log.debug("brindle: couldn't sync shared plans", exc_info=True)
+    _poll_review_queue()
+
+
+def _poll_review_queue() -> None:
+    """review_queue.poll for the signed-in account; a failure is only logged."""
+    from brindle.pro import review_queue
+
+    try:
+        review_queue.poll()
+    except Exception:  # noqa: BLE001 - a poll must never stop the watch
+        log.debug("brindle: couldn't poll the review queue", exc_info=True)
 
 
 def _reset_window_sizes() -> None:
@@ -879,6 +1053,33 @@ def _upgrade_sweep() -> None:
             db.conn.close()
     except Exception:
         log.warning("brindle: the one-time disk sweep didn't run", exc_info=True)
+
+
+def start_live_docs(state):
+    """The shared docs' relay links (pro.live_docs), on the running loop, where
+    the local live socket finds them. None if they couldn't start: shared docs
+    still edit together on this machine."""
+    from brindle.pro import live_docs
+
+    try:
+        manager = live_docs.Manager()
+        manager.start()
+    except Exception:  # noqa: BLE001 - co-editing between machines is never worth the daemon
+        log.warning("brindle: the live relay links didn't start", exc_info=True)
+        return None
+    state.live_docs = manager
+    return manager
+
+
+async def stop_live_docs(manager) -> None:
+    """Close every relay link cleanly on the way out: a clean close is not an
+    author dropping mid-edit. Unsent edits wait in the outbox for the next daemon."""
+    if manager is None:
+        return
+    try:
+        await manager.stop()
+    except Exception:  # noqa: BLE001
+        log.warning("brindle: the live relay links didn't close cleanly", exc_info=True)
 
 
 def _exit(sig, frame) -> None:
@@ -922,6 +1123,10 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     from brindle import spawn
 
     spawn.enable()      # every process the daemon starts waits for room (brindle.spawn)
+    from brindle import login_shell_env
+
+    # The person's proxy and certificate settings, read once, for the CLIs this daemon launches.
+    login_shell_env.load_in_background()
     from brindle.daemon.events import start_poller
 
     poller = start_poller()
@@ -955,6 +1160,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
         hook = asyncio.create_task(asyncio.to_thread(_keep_codex_hook))   # an update may have changed it
         # The app's daemon brings back what the last one paused on its way out.
         resumer = asyncio.create_task(resume()) if idle_exit else None
+        live = start_live_docs(activity.state)
         try:
             await server.serve(sockets=socks)
         finally:
@@ -964,6 +1170,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
             hook.cancel()
             if resumer:
                 resumer.cancel()
+            await stop_live_docs(live)
 
     # uvicorn shuts down gracefully on SIGTERM, then raises it again with the
     # handler it found: make that an exit that still runs the cleanup below.

@@ -81,6 +81,53 @@ def waits_on_supervisor(db: DB, agent: Agent) -> bool:
     return time.time() < row["created_at"] + seconds
 
 
+def waits_on_person(db: DB, agent: Agent):
+    """The request ``agent``'s hook holds for the person to answer (its
+    ``permission_requests`` row), or None: none is held, or it is still its
+    supervisor's (``waits_on_supervisor``). A worker so held does nothing
+    until the person answers, so it never counts as work in progress that
+    will wake its supervisor on its own."""
+    row = db.hook_permission_request(agent.id)
+    if row is None or waits_on_supervisor(db, agent):
+        return None
+    return row
+
+
+def tell_waiting_on_person(db: DB, agent_id: str, what: str) -> bool:
+    """Tell worker ``agent_id``'s supervisor, once per spell of waiting, that
+    the worker waits on the person to answer the permission request ``what``
+    and can't go on until they do. Sent when the request becomes the person's
+    (and by the stuck sweep, cull.note_stuck, which shares the claim): an idle
+    supervisor otherwise hears nothing and waits on a result that never comes.
+    False when it wasn't sent: no live supervisor, or already told."""
+    from brindle import agents, tmux
+
+    a = db.get_agent(agent_id)
+    if a is None or not a.parent_id or a.parent_id == a.id or a.mode not in agents.REPORTING_MODES:
+        return False
+    supervisor = db.get_agent(a.parent_id)
+    if supervisor is None or agents._closed(supervisor) or not agents.runs_process(supervisor):
+        return False
+    since = a.status_since or a.created_at
+    won, previous = db.claim_note(a.id, since)
+    if not won:
+        return False
+    ws = db.get_workspace(a.workspace_id)
+    where = f" on branch `{ws.branch}`" if ws else ""
+    attach = f", or in its pane (`brindle attach {ws.name}`)" if ws else ""
+    body = (f"[brindle] Worker {a.id} ({a.profile}){where} is waiting for the person to answer a "
+            f"permission request: {what}\n\nIt can't continue until they answer it in the brindle "
+            f"app{attach}. Tell the person exactly what is pending, plan around it, or remove the "
+            "workspace if the work is no longer needed.")
+    try:
+        agents.send_message(db, supervisor.id, body, sender_id=a.id)
+    except (agents.AgentError, tmux.TmuxError, OSError):
+        db.release_note(a.id, since, previous)
+        log.info("brindle: couldn't tell supervisor %s that %s waits on the person", supervisor.id, a.id)
+        return False
+    return True
+
+
 def _fenced(text: str) -> str:
     """``text`` verbatim (newlines kept) in a code fence no line of it can close."""
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)

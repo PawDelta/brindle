@@ -65,7 +65,10 @@ def test_a_reused_pane_id_only_counts_for_the_newest_agent(db, repo, root):
 # old autopilot goal, while the real session looked idle.
 
 
-@pytest.mark.parametrize("explicit_agent", [True, False])
+@pytest.mark.parametrize("explicit_agent", [
+    pytest.param(True, marks=pytest.mark.variant("A hook's explicit agent ID must override the stale environment inherited from Claude's daemon")),
+    False,
+])
 def test_the_hook_command_wins_over_a_stale_environment(db, repo, root, monkeypatch, explicit_agent):
     from typer.testing import CliRunner
 

@@ -15,7 +15,13 @@ const isBurst = (data: string) => data.length > 4 && !data.startsWith("\x1b");
 const REPLY = /^(?:\x1b\[[?>=]?[0-9;]*[cnRt]|\x1b\[\??[0-9;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[^\x1b]*\x1b\\)+$/;
 const isReply = (data: string) => REPLY.test(data);
 
-type Submission = { text: string; typed: boolean; sequence: number };
+/* Up and down recall history (any earlier draft, pasted ones too); so do Ctrl+R and Ctrl+Y (search, yank). */
+const RECALL = /^\x1b(?:\[[0-9;]*|O)[AB]$/;
+
+/* `known`: `text` is the whole draft. Not known when the person pressed Enter on an empty box (a CLI sends its
+   own suggestion then) or edited in ways not followed (Tab accepting a suggestion, Esc, word deletes): the CLI's
+   hook says what it was. `typed`: nothing in it was pasted or recalled. */
+type Submission = { text: string; typed: boolean; known: boolean; sequence: number };
 type Recorder = (messages: Submission[], at: { submittedAt: number; expiresAt: number; signal: AbortSignal }) => Promise<void>;
 
 /* Observe the person's submitted input, never the terminal's output or agent deliveries.
@@ -23,7 +29,7 @@ type Recorder = (messages: Submission[], at: { submittedAt: number; expiresAt: n
    completion, etc.) are not treated as chat submissions or guessed consent.
    An Enter that submits something `matters` waits for `recorder` (at most RECORD_WINDOW). */
 function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => Recorder,
-                  matters: (message: Submission) => boolean = () => true): PtyViewOpener {
+                  matters: (message: Submission) => boolean): PtyViewOpener {
   return (at, size, handlers) => {
     const view = open(at, size, handlers);
     const record = recorder();
@@ -31,18 +37,19 @@ function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => R
     let valid = true, paste = false, closed = false, pasted = false;
     let held: { release(): void } | null = null;
     let sequence = 0;
-    const submitted = (data: string): { text: string; typed: boolean }[] => {
+    const submitted = (data: string): Omit<Submission, "sequence">[] => {
       // Not the person's: the draft (and anything held over from before) stays as it is.
       if (isReply(data)) return [];
       pending += data;
       const burst = isBurst(data);
       if (burst) pasted = true;
-      const messages: { text: string; typed: boolean }[] = [];
+      const messages: Omit<Submission, "sequence">[] = [];
       while (pending) {
         if (pending.startsWith("\x1b")) {
-          const sequence = /^\x1b\[[0-9;?<>]*[A-Za-z~]/.exec(pending)?.[0];
-          if (!sequence && /^\x1b(?:\[[0-9;?<>]*)?$/.test(pending)) break;
+          const sequence = /^\x1b(?:\[[0-9;?<>]*[A-Za-z~]|O[A-Za-z])/.exec(pending)?.[0];
+          if (!sequence && /^\x1b(?:\[[0-9;?<>]*|O)?$/.test(pending)) break;
           pending = pending.slice(sequence?.length ?? 2);
+          if (sequence && RECALL.test(sequence)) pasted = true;
           // Home/End can target a line or the whole editor in multiline drafts.
           if (draft.includes("\n") && (sequence === "\x1b[H" || sequence === "\x1b[F")) valid = false;
           switch (sequence) {
@@ -62,10 +69,12 @@ function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => R
         const char = pending[0];
         pending = pending.slice(1);
         if (!paste && draft.includes("\n") && /[\x01\x05\x0b\x15]/.test(char)) valid = false;
+        if (!paste && (char === "\x12" || char === "\x19")) pasted = true;
         if (!paste && char === "\r") {
           // Short answers may answer a chat choice; the engine folds offers
-          // separately from publication consent. Only empty/unknown drafts are skipped.
-          if (valid && draft.trim()) messages.push({ text: draft, typed: !pasted });
+          // separately from publication consent.
+          const known = valid && !!draft.trim();
+          messages.push({ text: known ? draft : "", typed: !pasted, known });
           draft = ""; cursor = 0; valid = true; pasted = burst;
         } else if (!paste && (char === "\x7f" || char === "\b")) {
           if (cursor) { draft = draft.slice(0, cursor - 1) + draft.slice(cursor); cursor--; }
@@ -166,22 +175,24 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
         }
       } catch { if (observer === used) observer = null; }
     };
-  });
+  }, message => message.known);
 }
 
 /* Claude and OpenCode report a prompt through their hook, which can't say what was typed rather than
    pasted. Vouch for what the person keyed in, before Enter goes through. Only this makes those words
-   quotable: a report that fails or comes late leaves nothing, and the engine refuses a late one. */
+   quotable: a report that fails or comes late leaves nothing, and the engine refuses a late one.
+   Every Enter is reported: one whose words aren't known as typed but unseen (the hook fills them in),
+   a pasted one as not typed, so an earlier unseen Enter can't stand for it. */
 export function withTypedWords(client: Pick<DaemonClient, "visualTypedWords">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
   return observed(open, enabled, () => async (messages, { submittedAt, expiresAt, signal }) => {
     try {
       for (const message of messages) {
         if (signal.aborted) break;
-        await client.visualTypedWords(agent, message.text, expiresAt, submittedAt, signal);
+        await client.visualTypedWords(agent, message.typed && message.known ? message.text : null, expiresAt, submittedAt, signal, message.typed);
       }
     } catch (error) {
       // Not vouched for: the Enter still goes through. Why, never the words, to the debug log while it's on.
       logDebug("visuals", "warning", "typed words not vouched for", { agent, why: error instanceof Error ? error.message : String(error) });
     }
-  }, message => message.typed);
+  }, () => true);
 }

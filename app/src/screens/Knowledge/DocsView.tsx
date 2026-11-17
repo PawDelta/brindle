@@ -1,76 +1,67 @@
-/* Knowledge › Docs: the analysis docs people requested, from
-   brindle Pro's library through the daemon (GET /v1/analysis-docs and its
-   topics; nothing is kept on disk). On top, the results panel
-   (GET /v1/analysis-docs/results, worked out on this machine): review rounds
-   of tasks whose brief drew on the docs against similar tasks without one,
-   or "not enough data yet". Below it, scope chips and a search box, a rail
-   of categories (filtered here, when the server gave any) and topics (the
-   server's, filtered there), and a card per doc (its kind on the card),
-   under collapsible category headers when there are categories (the
-   largest first, uncategorised last; which are collapsed is remembered on
-   this device, per repo). A card opens the reader: the doc exactly as written
-   (Markdown, rendered safely) beside what the server read from it, with
-   Share, Export and Delete. `session` narrows the list to the docs one
-   session wrote or used (the session goal panel links here with it). */
+/* The Library's designs (library-redesign option A, states 1 and 2): a title naming what the
+   sidebar picked (All designs, a stage, a repo or a folder) with a List / Board switch, one search
+   box, one filter row (scope, author, reviewer, when it changed) and then the designs, as a table
+   (screens/Library/LibraryList) or as columns by stage (LibraryBoard). Both views are the same
+   Library: switching keeps the search, the filters and the folder picked, and the view is
+   remembered on this device. Stage lives only in the sidebar, scope only in the filter row. A
+   search also reaches repo decisions, indexed document passages and kept visuals, listed under
+   the designs. The foot says in one line what the docs did. A row or card opens the design's
+   saved text beside its record (Reader). */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { DaemonError, type AnalysisDoc, type AnalysisDocDetail, type DaemonClient, type DocResults, type DocScope, type DocTopic } from "../../api/client";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { DaemonError, type AnalysisDoc, type AnalysisDocDetail, type DaemonClient, type DocResults, type DocScope, type FolderGroup } from "../../api/client";
 import type { PickFolder } from "../../api/open";
+import type { RepoDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
-import { alert, button, card, field, h2, label, notice, pill, quiet } from "../../components/ui";
-import { ChevronDownIcon, ShareIcon } from "../../components/icons";
+import { alert, button, card, h2, label, notice, pill, quiet } from "../../components/ui";
+import { ChevronDownIcon, SearchIcon, ShareIcon } from "../../components/icons";
 import { ExportMenu, type ExportClient } from "./ExportMenu";
 import { Markdown } from "./Markdown";
+import { docMatch, useLibrarySearch, type LibraryHit, type SearchClient } from "./librarySearch";
+import { ReaderChrome } from "../Session/Visuals/VisualReader";
+import { setReaderDoc, useLibraryChanges, useLibraryPicks } from "../../store/libraryReader";
+import { LIBRARY_STAGES, type LibraryStage } from "../../routes";
+import { atStage, folderOf, groupDocs, loadRecords, placedFolders, repoName, signOffRows, type DesignRecord, type GroupBy, type Queue } from "../Library/libraryStages";
+import { LibraryList } from "../Library/LibraryList";
+import { LibraryBoard } from "../Library/LibraryBoard";
 
-export type DocsClient = Pick<DaemonClient, "docs" | "docTopics" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc"> & ExportClient;
+export type DocsClient = Pick<DaemonClient, "docs" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc"> & Partial<Pick<DaemonClient, "libraryFolders">> & ExportClient & SearchClient;
 
 export interface DocsViewProps {
   client: DocsClient;
+  /* The repo whose account reads the Library (the docs themselves are every repo's). */
   repo?: string;
   /* Only this session's docs (its root agent id). */
   session?: string;
   /* A doc to open in the reader on arrival. */
   doc?: string;
   pickFolder?: PickFolder;
+  /* What the sidebar picked: a stage, a folder (libraryStages.folderKey) or a repo (its root). */
+  stage?: LibraryStage;
+  folder?: string;
+  inRepo?: string;
+  /* What the person's own queue says of each design (libraryStages.docQueue). */
+  queue?: Queue;
+  /* The repos the app knows, for their names. */
+  repos?: Pick<RepoDTO, "name" | "repo_root">[] | null;
   /* Back to the session the person came from; the filter's chip clears only the filter. */
   onBack?(): void;
+  /* A design opens in the design reader (Session/Visuals/SharedDesignReader), here in the Library:
+     Back comes back to this list as it was. `design`: `doc` is one, before the list says so. */
+  designReader?(id: string, title: string | undefined, onBack: () => void, repo: string | undefined): ReactNode;
+  design?: boolean;
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
-const UNCATEGORISED = "Uncategorised";
-const COLLAPSED_KEY = "brindle.docs.collapsed";
-
-/* Docs under their categories: the largest first, then by name, and the
-   docs without one last. */
-export function byCategory(docs: AnalysisDoc[]): [string, AnalysisDoc[]][] {
-  const groups = new Map<string, AnalysisDoc[]>();
-  for (const d of docs) {
-    const name = d.category ?? UNCATEGORISED;
-    if (!groups.has(name)) groups.set(name, []);
-    groups.get(name)!.push(d);
-  }
-  return [...groups].sort(([a, x], [b, y]) => Number(a === UNCATEGORISED) - Number(b === UNCATEGORISED) || y.length - x.length || a.localeCompare(b));
-}
-
-/* The categories collapsed in a repo's list, kept in this device's storage. */
-function readCollapsed(repo = ""): Set<string> {
+const VIEW_KEY = "brindle.library.view";
+type Layout = "list" | "board";
+/* List or Board, as the person last left it on this device. */
+function readLayout(): Layout {
   try {
-    const got: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "{}");
-    const list: unknown = got && typeof got === "object" ? (got as Record<string, unknown>)[repo] : null;
-    return new Set(Array.isArray(list) ? list.filter((s): s is string => typeof s === "string") : []);
+    return localStorage.getItem(VIEW_KEY) === "board" ? "board" : "list";
   } catch {
-    return new Set();
-  }
-}
-
-function writeCollapsed(repo = "", collapsed: Set<string>): void {
-  try {
-    const got: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "{}");
-    const all = got && typeof got === "object" ? (got as Record<string, unknown>) : {};
-    localStorage.setItem(COLLAPSED_KEY, JSON.stringify({ ...all, [repo]: [...collapsed] }));
-  } catch {
-    // No storage: the headers stay as they are for this window.
+    return "list";
   }
 }
 
@@ -99,8 +90,6 @@ const withScopes = (had: DocScope[], more: DocScope[]) => {
   }
   return changed ? [...seen.values()] : had;
 };
-
-const scopeTone = (s?: DocScope) => (!s || s.kind === "user" ? "bg-surface-2 text-ink-2" : s.kind === "org" ? "bg-branch-soft text-branch" : "bg-fawn-soft text-fawn");
 
 /* "Oct 12": a server time (seconds, milliseconds or an ISO string) as a short date. */
 export function shortDate(v: number | string | undefined): string | null {
@@ -180,30 +169,6 @@ export function ResultsPanel({ results, error, docs }: { results: DocResults | n
   );
 }
 
-/* `scope` is the doc's, named from the scopes list when it is there. */
-function DocCard({ d, scope, onOpen }: { d: AnalysisDoc; scope?: DocScope; onOpen(): void }) {
-  const date = shortDate(d.created_at);
-  const findings = d.findings?.length ?? 0;
-  const questions = d.open_questions?.length ?? 0;
-  return (
-    <li data-doc={d.id}>
-      <button type="button" className={`${card} flex w-full flex-col gap-1 px-s2 py-s1 text-left hover:border-line-strong`} onClick={onOpen}>
-        <span className="flex flex-wrap items-center gap-s1">
-          <span className="mr-auto font-semibold">{d.title || d.id}</span>
-          {d.kind && <span className={`${pill} border border-line bg-surface-2 text-ink-2`}>{d.kind}</span>}
-          {scope && <span className={`${pill} ${scopeTone(scope)}`}>{scopeName(scope)}</span>}
-        </span>
-        {d.summary && <span className="text-sm text-ink-2">{d.summary}</span>}
-        <span className="flex flex-wrap items-center gap-x-s2 text-xs text-ink-3">
-          {(date || d.version) && <span>{[date, d.version ? `v${d.version}` : null].filter(Boolean).join(" · ")}</span>}
-          {(findings > 0 || questions > 0) && <span>{[findings ? plural(findings, "finding") : null, questions ? plural(questions, "open question") : null].filter(Boolean).join(" · ")}</span>}
-          <span className="font-mono">used in {plural(d.used_in_briefs ?? 0, "brief")}</span>
-        </span>
-      </button>
-    </li>
-  );
-}
-
 interface ReaderProps {
   client: DocsClient;
   repo?: string;
@@ -234,14 +199,17 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
 
   const load = useCallback(() => {
     if (local) return;
+    let live = true;
     client.doc(id, repo).then(
       (d) => {
+        if (!live) return;
         setDoc(d);
         setError(null);
         onScopes([...(d.scope ? [d.scope] : []), ...d.shared_with]);
       },
-      (e: unknown) => setError(message(e)),
+      (e: unknown) => live && setError(message(e)),
     );
+    return () => { live = false; };
   }, [client, id, repo, onScopes, local]);
   useEffect(load, [load]);
 
@@ -285,6 +253,10 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
     ...(doc?.related ?? []).map((d): [string, string] => ["Related", d]),
   ];
   const mentions = doc?.mentions ?? [];
+  const taken = doc?.verdict?.approved ? (doc.decisions ?? []).flatMap((d) => {
+    const pick = doc.verdict?.picks?.[d.id] || d.mine;
+    return pick ? [{ decision: d, pick }] : [];
+  }) : [];
 
   return (
     <section className="flex flex-col gap-s2" aria-label="Doc" data-testid="reader">
@@ -353,7 +325,23 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
               </div>
             ))}
           </article>
-          <aside className="flex min-w-0 flex-col gap-s1 text-sm" aria-label="What brindle read from it">
+          <aside className="flex min-w-0 flex-col gap-s1 text-sm" aria-label="Design record">
+            {!!doc.revisions?.length && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Revisions">
+              <h3 className={label}>Revisions</h3>
+              {doc.revisions.map((r) => <div key={r.rev} data-revision={r.rev}><b>rev {r.rev}</b><span className="text-ink-3"> · {r.author} · {shortDate(r.at)}</span><p>{r.source}{r.changed.length > 0 && ` · ${r.changed.join(", ")}`}</p></div>)}
+            </section>}
+            {taken.length > 0 && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Decisions taken">
+              <h3 className={label}>Decisions taken</h3>
+              {taken.map(({ decision: d, pick }) => <div key={d.id} data-decision={d.id}><b>{d.title}</b><p>{d.options.find((o) => o.id === pick)?.label ?? pick}</p></div>)}
+            </section>}
+            {signOffRows(doc.design).length > 0 && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Sign-offs">
+              <h3 className={label}>Sign-offs</h3>
+              {signOffRows(doc.design).map((r) => <div key={`${r.sub}@${r.rev ?? "waiting"}`} data-signoff={r.sub} data-signed={r.signed ? "yes" : "no"} data-rev={r.rev ?? ""}><b>{r.sub}</b><span className="text-ink-3"> · {r.role}{r.rev !== undefined ? ` · signed rev ${r.rev}${r.signed ? "" : " (earlier)"}` : " · waiting"}</span></div>)}
+            </section>}
+            {!!doc.threads?.length && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Comments">
+              <h3 className={label}>Comments</h3>
+              {doc.threads.map((t) => <div key={t.id}><b>{t.author}</b><p>{t.text}</p>{t.replies.map((r, i) => <p key={i} className="pl-s2 text-ink-2">{r.text}</p>)}</div>)}
+            </section>}
             {doc.summary && (
               <div className={`${card} flex flex-col gap-1 border-branch/40 px-s2 py-s1`}>
                 <span className="flex items-center justify-between">
@@ -401,10 +389,10 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
                 {mentions.length > 0 && <span className="text-xs text-ink-3">Mentions: {mentions.join(" · ")}</span>}
               </div>
             )}
-            <div className={`${card} flex flex-col gap-1 px-s2 py-s1`}>
+            {doc.used_in_briefs !== undefined && <div className={`${card} flex flex-col gap-1 px-s2 py-s1`}>
               <span className={label}>Used in briefs</span>
               <span className="text-xs text-ink-3">{(doc.used_in_briefs ?? 0) === 0 ? "Not yet" : plural(doc.used_in_briefs!, "time")}</span>
-            </div>
+            </div>}
           </aside>
         </div>
       )}
@@ -413,41 +401,83 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
 }
 
 type Listing = { state: "loading" } | { state: "loaded"; docs: AnalysisDoc[] } | { state: "unavailable"; error: string } | { state: "failed"; error: string };
+const EMPTY_DOCS: AnalysisDoc[] = [];
+const EMPTY_QUEUE: Queue = new Map();
+const NO_FOLDERS: FolderGroup[] = [];
 
-export function DocsView({ client, repo, session: initialSession, doc, pickFolder, onBack }: DocsViewProps) {
+/* A filter as a chip: its name, or what is picked (then in the accent), over a native select
+   laid on top unseen, so the chip is as wide as what it says rather than its longest option. */
+function ChipSelect({ name, value, options, onChange }: { name: string; value: string; options: [string, string][]; onChange(value: string): void }) {
+  const shown = options.find(([id]) => id === value)?.[1];
+  return (
+    <span className={`relative inline-flex items-center gap-[5px] rounded-full border px-[9px] py-0.5 text-xs focus-within:outline-2 focus-within:outline-branch ${value ? "border-transparent bg-branch-soft text-branch" : "border-line text-ink-2 hover:bg-surface-2"}`}>
+      <span className="max-w-[14rem] truncate">{shown ?? name}</span>
+      <ChevronDownIcon size={14} className={value ? "text-branch" : "text-ink-3"} />
+      <select aria-label={name} value={value} onChange={(e) => onChange(e.target.value)} className="absolute inset-0 cursor-pointer appearance-none opacity-0">
+        <option value="">{value ? `Any ${name.toLowerCase()}` : name}</option>
+        {options.map(([id, text]) => <option key={id} value={id}>{text}</option>)}
+      </select>
+    </span>
+  );
+}
+
+/* A segmented choice: one button pressed. */
+function Seg<T extends string>({ name, value, options, onChange }: { name: string; value: T; options: [T, string][]; onChange(value: T): void }) {
+  return (
+    <span role="group" aria-label={name} className="inline-flex overflow-hidden rounded border border-line-strong text-xs">
+      {options.map(([id, text]) => (
+        <button key={id || "all"} type="button" aria-pressed={value === id} className={`px-2.5 py-0.5 ${value === id ? "bg-branch-soft font-medium text-branch" : "text-ink-3 hover:text-ink"}`} onClick={() => onChange(id)}>
+          {text}
+        </button>
+      ))}
+    </span>
+  );
+}
+
+const signed = (n: number) => `${n < 0 ? "−" : "+"}${Math.abs(n)}%`;
+
+export function DocsView({ client, repo, session: initialSession, doc, pickFolder, stage, folder, inRepo, queue = EMPTY_QUEUE, repos, onBack, designReader, design }: DocsViewProps) {
+  const [layout, setLayout] = useState<Layout>(readLayout);
+  const pickLayout = (next: Layout) => {
+    setLayout(next);
+    try {
+      localStorage.setItem(VIEW_KEY, next);
+    } catch {
+      // No storage: the view stays as picked for this window.
+    }
+  };
   const [scope, setScope] = useState("");
-  const [topic, setTopic] = useState("");
-  const [category, setCategory] = useState("");
   const [query, setQuery] = useState("");
+  const [author, setAuthor] = useState("");
+  const [changed, setChanged] = useState("");
+  const [groupBy, setGroupBy] = useState<GroupBy>("folder");
+  const [showResults, setShowResults] = useState(false);
+  const [sourceOpen, setSourceOpen] = useState<LibraryHit | null>(null);
   const [session, setSession] = useState(initialSession);
   const [listing, setListing] = useState<Listing>({ state: "loading" });
-  const [topics, setTopics] = useState<DocTopic[]>([]);
   const [results, setResults] = useState<DocResults | null>(null);
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(doc ?? null);
+  // A row picked in the sidebar (a stage, a repo, a folder, All designs, even the one already picked)
+  // closes whatever is open here and shows what was picked; the search and filters stay. Going to
+  // Settings and back is not a pick: the design stays open.
+  const picks = useLibraryPicks();
+  const [seenPicks, setSeenPicks] = useState(picks);
+  if (picks !== seenPicks) {
+    setSeenPicks(picks);
+    setOpen(null);
+    setSourceOpen(null);
+  }
+  // The Library rail moves the design that is open here, so it is told which, and when none.
+  useEffect(() => {
+    setReaderDoc(sourceOpen ? null : open);
+  }, [open, sourceOpen]);
+  useEffect(() => () => setReaderDoc(null), []);
   /* The scopes the person reads (GET /analysis-docs/scopes: theirs, their teams', their
      org's, named, with can_share), plus any other a listed or opened doc is in; a chip
      stays while another is picked. */
   const [scopes, setScopes] = useState<DocScope[]>([]);
   const learn = useCallback((more: DocScope[]) => setScopes((had) => withScopes(had, more)), []);
-  /* The collapsed headers belong to the repo they were read for; another
-     repo reads its own. */
-  const [stored, setStored] = useState(() => ({ repo, collapsed: readCollapsed(repo) }));
-  const collapsed = stored.repo === repo ? stored.collapsed : readCollapsed(repo);
-  const setOpenHeader = (name: string, open: boolean) => {
-    const next = new Set(collapsed);
-    if (open) next.delete(name);
-    else next.add(name);
-    setStored({ repo, collapsed: next });
-    writeCollapsed(repo, next);
-  };
-  const toggle = (name: string) => setOpenHeader(name, collapsed.has(name));
-  /* Picking a category in the rail opens its header once; the header then
-     collapses as any other. */
-  const pickCategory = (name: string) => {
-    setCategory(name);
-    if (name && collapsed.has(name)) setOpenHeader(name, true);
-  };
 
   useEffect(() => {
     client.docScopes(repo).then(
@@ -459,7 +489,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   const load = useCallback(() => {
     let live = true;
     setListing({ state: "loading" });
-    client.docs({ repo, scope: scope || undefined, topic: topic || undefined, session }).then(
+    client.docs({ repo, scope: scope || undefined, session }).then(
       (got) => {
         if (!live) return;
         setListing({ state: "loaded", docs: got.docs });
@@ -470,19 +500,23 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
     return () => {
       live = false;
     };
-  }, [client, repo, scope, topic, session]);
+  }, [client, repo, scope, session]);
   useEffect(load, [load]);
 
+  /* The folders, for the groups' names and the folder or repo the sidebar picked; read again with
+     every design's record when the sidebar makes a folder or moves a design (libraryChanged). */
+  const changes = useLibraryChanges();
+  const [folderGroups, setFolderGroups] = useState<FolderGroup[]>(NO_FOLDERS);
   useEffect(() => {
     let live = true;
-    client.docTopics({ repo, scope: scope || undefined }).then(
-      (got) => live && setTopics(got.topics),
-      () => live && setTopics([]),
+    client.libraryFolders?.().then(
+      (got) => live && setFolderGroups(Array.isArray(got?.scopes) ? got.scopes : NO_FOLDERS),
+      () => live && setFolderGroups(NO_FOLDERS),
     );
     return () => {
       live = false;
     };
-  }, [client, repo, scope]);
+  }, [client, changes]);
 
   useEffect(() => {
     let live = true;
@@ -492,32 +526,79 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
         setResults(r);
         setResultsError(null);
       },
-      (e: unknown) => live && setResultsError(message(e)),
+      (e: unknown) => {
+        if (!live) return;
+        setResults(null);
+        setResultsError(e instanceof DaemonError && e.status === 404 ? null : message(e));
+      },
     );
     return () => {
       live = false;
     };
   }, [client, repo]);
 
-  const docs = listing.state === "loaded" ? listing.docs : [];
-  const q = query.trim().toLowerCase();
-  /* The rail's categories, in the list's order, when the server gave any. */
-  const categories = useMemo((): [string, number][] => (docs.some((d) => d.category) ? byCategory(docs).map(([name, list]) => [name, list.length]) : []), [docs]);
-  /* A picked category that the listing no longer has filters nothing, and is
-     dropped once that listing has loaded, so no doc is hidden behind a
-     filter the rail can't show. */
-  const picked = categories.some(([name]) => name === category) ? category : "";
+  const docs = listing.state === "loaded" ? listing.docs : EMPTY_DOCS;
+  /* What each listed design's detail says (its review, its plan's tasks, its folder): read once per
+     listing, and again after a change in the sidebar. */
+  const [records, setRecords] = useState<Map<string, DesignRecord>>(() => new Map());
   useEffect(() => {
-    if (listing.state === "loaded" && category && !picked) setCategory("");
-  }, [listing.state, category, picked]);
-  const shown = docs.filter((d) => (!picked || (d.category ?? UNCATEGORISED) === picked) && (!q || [d.title, d.summary, ...(d.topics ?? [])].some((t) => t?.toLowerCase().includes(q))));
-  const docCard = (d: AnalysisDoc) => (
-    <DocCard key={d.id} d={d} scope={d.scope && (scopes.find((s) => scopeSpec(s) === scopeSpec(d.scope!)) ?? d.scope)} onOpen={() => setOpen(d.id)} />
-  );
-  const chips: [string, string][] = [["", "All"], ["user", "Mine"], ...scopes.filter((s) => s.kind !== "user").map((s): [string, string] => [scopeSpec(s), scopeName(s)])];
+    let live = true;
+    if (docs.length === 0) { setRecords(new Map()); return; }
+    loadRecords(client, docs, repo).then((got) => live && setRecords(got));
+    return () => {
+      live = false;
+    };
+  }, [client, docs, repo, changes]);
+  const placed = useMemo(() => placedFolders(folderGroups), [folderGroups]);
+  const placeOf = useCallback((id: string) => {
+    const key = folderOf(records.get(id));
+    return key ? placed.find((f) => f.key === key) : undefined;
+  }, [records, placed]);
+  const [reviewer, setReviewer] = useState("");
+  const reviewers = [...new Set([...records.values()].flatMap((r) => (r.design?.reviewers ?? []).map((x) => x.sub)))];
+  const q = query.trim().toLowerCase();
+  const narrowed = !!(scope || session || stage || folder || inRepo);
+  // The Sources are searched only for a query, over the whole Library.
+  const search = useLibrarySearch(client, docs, repo, q, !narrowed && !!q);
+  const authors = [...new Set(docs.flatMap((d) => d.created_by ? [d.created_by] : []))];
+  const recent = (at: number | undefined) => !changed || (at !== undefined && at >= Date.now() / 1000 - Number(changed) * 86400);
+  const inPlace = (d: AnalysisDoc) => (folder ? folderOf(records.get(d.id)) === folder : !inRepo || placeOf(d.id)?.repo === inRepo);
+  const matches = new Map(docs.map((d) => [d.id, docMatch(d, search.details?.get(d.id), q)]));
+  const shown = docs.filter((d) => (!author || d.created_by === author) && (!stage || atStage(stage, d.id, queue, records.get(d.id))) && (!reviewer || !!records.get(d.id)?.design?.reviewers?.some((r) => r.sub === reviewer)) && recent(d.updated_at ?? d.created_at) && inPlace(d) && matches.get(d.id) !== null);
+  // Decisions, imported passages and kept visuals show only for a search, over the whole Library.
+  const sourceHits = q ? search.hits.filter((d) => !reviewer && (!author || author === d.author) && recent(d.changed)) : [];
+  const groups = groupDocs(shown, groupBy, queue, records, placed, repos);
+  const chips: [string, string][] = [["", "Everyone's"], ["user", "Mine"], ...scopes.filter((s) => s.kind !== "user").map((s): [string, string] => [scopeSpec(s), scopeName(s)])];
+  const filtered = !!(scope || author || reviewer || changed || query);
+  const clear = () => { setQuery(""); setScope(""); setAuthor(""); setReviewer(""); setChanged(""); setSession(undefined); };
 
+  const picked = folder ? placed.find((f) => f.key === folder) : undefined;
+  const heading = picked ? picked.name : inRepo ? repoName(inRepo, repos) : stage ? LIBRARY_STAGES.find((s) => s.id === stage)!.label : "All designs";
+  const repoCount = new Set(shown.flatMap((d) => placeOf(d.id)?.repo ?? [])).size;
+  const counted = `${shown.length}${repoCount > 1 ? ` in ${repoCount} repos` : ""}`;
+
+  // ⌘K (Ctrl+K) finds: it goes to the search box.
+  const box = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const find = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && box.current) {
+        e.preventDefault();
+        box.current.focus();
+      }
+    };
+    window.addEventListener("keydown", find);
+    return () => window.removeEventListener("keydown", find);
+  }, []);
+
+  const scroll = (node: ReactNode) => <div className="flex min-h-0 flex-1 flex-col overflow-auto p-s3">{node}</div>;
+  if (sourceOpen?.kept) return <div className="flex min-h-0 flex-1 flex-col p-s3"><ReaderChrome title={sourceOpen.title} meta={sourceOpen.kept.from_session_name} source={{ kind: "kept", id: sourceOpen.kept.id }} onBack={() => setSourceOpen(null)} backLabel="Library" /></div>;
+  if (sourceOpen) return scroll(<Reader client={client} repo={repo} id={sourceOpen.id} targets={[]} titles={new Map()} local={{ title: sourceOpen.title, markdown: sourceOpen.text }} onBack={() => setSourceOpen(null)} onDeleted={() => undefined} onOpen={setOpen} onScopes={learn} />);
+
+  const listed = open ? docs.find((d) => d.id === open) : undefined;
+  // The design's project: the repo picked in the sidebar, else the one its own folder is in.
+  if (open && designReader && (listed?.kind === "design" || (design && open === doc))) return designReader(open, listed?.title, () => setOpen(null), inRepo ?? placeOf(open)?.repo ?? undefined);
   if (open) {
-    return (
+    return scroll(
       <Reader
         key={open}
         client={client}
@@ -533,33 +614,14 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
           setOpen(null);
           load();
         }}
-      />
+      />,
     );
   }
 
-  const rail = (title: string, items: [string, number | undefined][], on: string, pick: (v: string) => void) => (
-    <div className="flex flex-col gap-0.5">
-      <span className={`${label} px-s1 pb-1`}>{title}</span>
-      {items.map(([name, count]) => (
-        <button
-          key={name}
-          type="button"
-          aria-pressed={on === name}
-          className={`flex justify-between rounded-md px-s1 py-1 text-left text-sm ${on === name ? "bg-surface font-medium text-ink shadow-[inset_0_0_0_1px_var(--color-line)]" : "text-ink-2 hover:bg-surface-2"}`}
-          onClick={() => pick(on === name ? "" : name)}
-        >
-          <span>{name}</span>
-          {count !== undefined && <span className="font-mono text-xs text-ink-3">{count}</span>}
-        </button>
-      ))}
-    </div>
-  );
-
   return (
-    <section className="flex flex-col gap-s2" aria-label="Library" data-testid="docs">
-      <ResultsPanel results={results} error={resultsError} docs={docs} />
+    <section className={`flex min-h-0 flex-1 flex-col ${layout === "board" && shown.length > 0 ? "overflow-hidden" : "overflow-auto"}`} aria-label="Docs" data-testid="docs" data-layout={layout}>
       {(session || onBack) && (
-        <div className="flex flex-wrap items-center gap-s1" data-testid="session-filter">
+        <div className="flex flex-wrap items-center gap-s1 px-8 pt-s2" data-testid="session-filter">
           {session && (
             <span className={`${pill} inline-flex items-center gap-1 bg-branch-soft text-branch`}>
               Session {session}
@@ -577,62 +639,83 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
           )}
         </div>
       )}
-      <div className="flex flex-wrap items-center justify-between gap-s1">
-        <input type="search" className={`${field} min-w-56 flex-1`} aria-label="Search the library" placeholder="Search the library: titles, summaries, topics…" value={query} onChange={(e) => setQuery(e.target.value)} />
-        <div className="flex flex-wrap gap-1" role="group" aria-label="Scope">
-          {chips.map(([spec, name]) => (
-            <button key={spec || "all"} type="button" aria-pressed={scope === spec} className={`rounded-full border px-s1 py-0.5 text-xs ${scope === spec ? "border-transparent bg-fawn-soft font-medium text-ink" : "border-line text-ink-2 hover:bg-surface-2"}`} onClick={() => setScope(spec)}>
-              {name}
-            </button>
-          ))}
-        </div>
+      <div className="flex items-center gap-3 px-8 pt-5">
+        <h2 className="text-[22px] font-semibold tracking-[-0.015em]">{heading}</h2>
+        {listing.state === "loaded" && <span className="text-xs text-ink-3" data-testid="library-count">{counted}</span>}
+        {picked?.private && <span className="text-xs text-ink-3">only you see this folder</span>}
+        <span className="flex-1" />
+        <Seg<Layout> name="View" value={layout} options={[["list", "List"], ["board", "Board"]]} onChange={pickLayout} />
       </div>
+      <label className="mx-8 mt-3.5 flex items-center gap-2.5 border-b border-line-strong px-0.5 py-1.5 text-ink-3">
+        <SearchIcon size={14} />
+        <input ref={box} type="search" className="flex-1 border-0 bg-transparent text-sm text-ink outline-none placeholder:text-ink-3" aria-label="Search the library" placeholder="Search designs, comments, decisions and imported docs" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <kbd className="rounded-[3px] border border-line-strong px-1 font-mono text-[10.5px] text-ink-3">⌘K</kbd>
+      </label>
+      <div className="flex flex-wrap items-center gap-1.5 px-8 pb-3.5 pt-3" role="group" aria-label="Library filters">
+        <Seg name="Scope" value={scope} options={chips} onChange={setScope} />
+        {authors.length > 0 && <ChipSelect name="Author" value={author} options={authors.map((a) => [a, a])} onChange={setAuthor} />}
+        {reviewers.length > 0 && <ChipSelect name="Reviewer" value={reviewer} options={reviewers.map((r) => [r, r])} onChange={setReviewer} />}
+        <ChipSelect name="Changed" value={changed} options={[["1", "Last day"], ["7", "Last week"], ["30", "Last month"]]} onChange={setChanged} />
+        {filtered && <button type="button" className={`${quiet} text-xs`} onClick={clear}>Clear</button>}
+        <span className="flex-1" />
+        {layout === "list" ? (
+          <>
+            <span className="text-xs text-ink-3">Newest first · group by</span>
+            <Seg<GroupBy> name="Group by" value={groupBy} options={[["folder", "Folder"], ["stage", "Stage"], ["none", "None"]]} onChange={setGroupBy} />
+          </>
+        ) : (
+          <span className="text-xs text-ink-3">Newest first in each column</span>
+        )}
+      </div>
+      {(q || search.searching || search.incomplete) && <p role="status" className="px-8 pb-2 text-xs text-ink-3">{search.searching ? "Searching…" : `${shown.length + sourceHits.length} matches`}{search.incomplete && " · Some sources could not be searched."}</p>}
       {listing.state === "unavailable" && (
-        <div className={`${card} flex flex-col gap-1 px-s2 py-s2 text-sm`} data-testid="docs-unavailable">
-          <h2 className={h2}>The library is part of brindle Pro</h2>
-          <p className="text-ink-2">When you approve a plan, brindle Pro stores it encrypted in your library, with what you picked and why, and uses it to brief related work later.</p>
+        <div className={`${card} mx-8 flex flex-col gap-1 py-s2 text-sm`} data-testid="docs-unavailable">
+          <h2 className={h2}>No designs available</h2>
+          <p className="text-ink-2">Plans you approve and designs you share are saved here, with the record of what was agreed and why.</p>
           <p className="text-xs text-ink-3">{listing.error}</p>
         </div>
       )}
       {listing.state === "failed" && (
-        <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
+        <div role="alert" className={`${alert} mx-8 flex items-center justify-between gap-s2`}>
           <span>Could not load the library: {listing.error}</span>
           <button type="button" className={button} onClick={load}>
             Try again
           </button>
         </div>
       )}
-      {listing.state !== "unavailable" && (
-        <div className="grid gap-s2 md:grid-cols-[12rem_minmax(0,1fr)]">
-          <nav className="flex flex-col gap-s2" aria-label="Topics and kinds">
-            {categories.length > 0 && rail("Categories", categories, picked, pickCategory)}
-            {rail(
-              "Topics",
-              topics.map((t) => [t.name, t.count]),
-              topic,
-              setTopic,
+      {listing.state === "loading" && <p className="px-8 text-sm text-ink-3">Loading…</p>}
+      {listing.state === "loaded" && docs.length === 0 && sourceHits.length === 0 && !search.searching && !q && <div data-testid="library-empty" className={`${card} mx-8 flex flex-col gap-s1 py-s3`}><h2 className={h2}>No designs saved yet</h2><p className="text-sm text-ink-2">Plans you approve and designs you share are saved here, with the record of what was agreed and why.</p><ol className="list-decimal pl-s2 text-sm text-ink-2"><li>Ask for a plan in a session.</li><li>Review it and approve the design.</li><li>Find it here when you need it again.</li></ol></div>}
+      {listing.state === "loaded" && (docs.length > 0 || q) && shown.length === 0 && sourceHits.length === 0 && !search.searching && <p className="px-8 text-sm text-ink-2">No design matches.</p>}
+      {shown.length > 0 && layout === "list" && <LibraryList groups={groups} queue={queue} records={records} scopes={scopes} matches={q ? matches : undefined} onOpen={setOpen} />}
+      {shown.length > 0 && layout === "board" && (
+        <LibraryBoard docs={shown} queue={queue} records={records} onOpen={setOpen} folderOf={(id) => {
+          const f = placeOf(id);
+          return f && { label: f.repo ? `${repoName(f.repo, repos)} / ${f.name}` : f.name, private: f.private };
+        }} />
+      )}
+      {sourceHits.length > 0 && (
+        <section aria-label="Also in the Library" className="px-8 pt-s2">
+          <h3 className={`${label} pb-1`}>Also in the Library</h3>
+          <ul className="flex flex-col divide-y divide-line">{sourceHits.map((hit) => <li key={hit.id} data-library-hit={hit.id}><button type="button" className="flex w-full flex-col gap-1 py-s1 text-left hover:bg-surface-2" onClick={() => setSourceOpen(hit)}><b className="text-[13.5px] font-semibold">{hit.title}</b><span className="text-xs text-ink-3">{hit.type === "imported" ? "Imported doc · matching passage" : hit.type === "kept" ? "Kept visual" : "Decision"}{hit.changed && ` · ${shortDate(hit.changed)}`}</span><span className="line-clamp-2 text-[12.5px] text-ink-2">{hit.text}</span></button></li>)}</ul>
+        </section>
+      )}
+      {(results || resultsError) && (
+        <>
+          {showResults && <div className="px-8 pt-s2"><ResultsPanel results={results} error={resultsError} docs={docs} /></div>}
+          <div className="sticky bottom-0 z-[2] mx-8 mt-auto flex flex-wrap items-center gap-[18px] border-t border-line bg-canvas pb-3.5 pt-3 text-[12.5px] text-ink-3" data-testid="results-line">
+            {results && <span className={label}>Last {results.days} days</span>}
+            {results?.enough && results.with_brief !== null && results.without_brief !== null ? (
+              <>
+                <span><b className="font-mono text-sm font-semibold text-ink">{results.briefed}</b> tasks started from a design's brief</span>
+                {results.without_brief > 0 && <span><b className="font-mono text-sm font-semibold text-ink">{signed(Math.round(((results.with_brief - results.without_brief) / results.without_brief) * 100))}</b> review rounds against similar tasks without one</span>}
+              </>
+            ) : (
+              <span>{resultsError ? "Could not work out what your docs did." : "Not enough finished tasks yet to say what your docs did."}</span>
             )}
-          </nav>
-          <div className="flex min-w-0 flex-col gap-s1">
-            {listing.state === "loading" && <p className="text-sm text-ink-3">Loading…</p>}
-            {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">Nothing in the library yet. Approved plans are stored here.</p>}
-            {listing.state === "loaded" && docs.length > 0 && shown.length === 0 && <p className="text-sm text-ink-2">No doc matches.</p>}
-            {shown.length > 0 && !shown.some((d) => d.category) && <ul className="flex flex-col gap-s1">{shown.map(docCard)}</ul>}
-            {shown.some((d) => d.category) && byCategory(shown).map(([name, list]) => {
-              const closed = collapsed.has(name);
-              return (
-                <section key={name} aria-label={name} className="flex flex-col gap-s1">
-                  <button type="button" aria-expanded={!closed} onClick={() => toggle(name)} className="flex items-center gap-1.5 border-b border-line pb-1 pt-s2 text-left text-[15px] font-semibold text-ink hover:text-branch">
-                    <span aria-hidden className={`inline-block w-3 text-ink-3 transition-transform ${closed ? "" : "rotate-90"}`}>›</span>
-                    {name}
-                    <span className="text-sm font-normal text-ink-3">{list.length}</span>
-                  </button>
-                  {!closed && <ul className="flex flex-col gap-s1">{list.map(docCard)}</ul>}
-                </section>
-              );
-            })}
+            <span className="flex-1" />
+            <button type="button" className={`${quiet} text-xs`} aria-expanded={showResults} onClick={() => setShowResults(!showResults)}>What your docs did {showResults ? "▾" : "▸"}</button>
           </div>
-        </div>
+        </>
       )}
     </section>
   );

@@ -66,7 +66,7 @@ export function AppUpdateProvider({ updates, children }: { updates?: AppUpdates;
 function useOffer(): { status: AppUpdateStatus; version: string; install: Install } | null {
   const status = useAppState((s) => s.appUpdate);
   const install = useContext(InstallContext);
-  if (!install || !status?.automatic || !status.available) return null;
+  if (!install || !status?.automatic || status.pending || !status.available) return null;
   return { status, version: status.available.version, install };
 }
 
@@ -102,13 +102,14 @@ function copy(phase: UpdatePhase, version: string, notes: string | null, rollbac
 const BUTTON = "inline-flex min-h-8 shrink-0 items-center whitespace-nowrap rounded-md px-s2 text-[13px] disabled:opacity-60";
 
 /* The strip: the offer, or Update now under way (a thin bar as it downloads).
-   Set aside ("Later"), it shows only while an Update now runs or failed. */
+   Set aside ("Later"), keep a compact way to install: there is no other
+   Update now action in Settings or the sidebar. */
 export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
   const offer = useOffer();
   if (!offer) return null;
   const { status, version, install } = offer;
   const { phase } = install;
-  if (status.later && phase.kind === "idle") return null;
+  const compact = status.later && phase.kind === "idle";
   const [headline, detail] = copy(phase, version, status.available?.notes ?? null, status.available?.rollback ?? false);
   const busy = phase.kind === "downloading" || phase.kind === "installing" || phase.kind === "restarting";
   const bar = phase.kind === "downloading" && phase.pct !== null ? phase.pct : 100;
@@ -120,7 +121,7 @@ export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
       </svg>
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <strong className="font-semibold text-ink">{headline}</strong>
-        <span className="truncate text-[13px] text-ink-2" title={detail}>{detail}</span>
+        {!compact && <span className="truncate text-[13px] text-ink-2" title={detail}>{detail}</span>}
         {busy && (
           <div className="mt-1 h-1 w-80 max-w-full overflow-hidden rounded-sm bg-pass/20" aria-hidden>
             <div className="h-1 rounded-sm bg-pass" style={{ width: `${bar}%` }} data-testid="app-update-bar" />
@@ -132,9 +133,11 @@ export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
           <button type="button" className="px-1 text-[13px] text-pass hover:underline" onClick={() => void openUrl(releaseNotesUrl(version))}>
             What's new
           </button>
-          <button type="button" className={`${BUTTON} border border-line-strong text-ink-2 hover:bg-surface-2`} onClick={install.later} data-testid="app-update-later">
-            Later
-          </button>
+          {!compact && (
+            <button type="button" className={`${BUTTON} border border-line-strong text-ink-2 hover:bg-surface-2`} onClick={install.later} data-testid="app-update-later">
+              Later
+            </button>
+          )}
           <button type="button" className={`${BUTTON} bg-pass font-semibold text-canvas hover:opacity-90`} onClick={install.start} data-testid="app-update-now">
             {phase.kind === "failed" ? "Update failed · Try again" : "Update now"}
           </button>

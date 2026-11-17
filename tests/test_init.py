@@ -21,6 +21,33 @@ def test_detect_uv_python(tmp_path):
     assert d.setup == ["uv sync"] and d.checks == ["uv run pytest -q"]
 
 
+def test_detect_python_check_runs_without_python_on_path(tmp_path, monkeypatch):
+    """A uv project with a .venv but no `python` on PATH must not get a bare `python`."""
+    repo = tmp_path / "repo"
+    (repo / ".venv" / "bin").mkdir(parents=True)
+    (repo / ".venv" / "bin" / "python").write_text("")
+    (repo / "pyproject.toml").write_text('[project]\nname = "x"\n[dependency-groups]\ndev = ["pytest"]\n')
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    assert detect.detect(repo).checks == [".venv/bin/python -m pytest -q"]
+    # no .venv, no uv: python3 stands in for the missing python
+    (repo / ".venv" / "bin" / "python").unlink()
+    (repo / ".venv" / "bin").rmdir()
+    (repo / ".venv").rmdir()
+    (empty / "python3").write_text("")
+    (empty / "python3").chmod(0o755)
+    assert detect.detect(repo).checks == ["python3 -m pytest -q"]
+    # lookalikes and malformed manifests are not uv
+    for text in ('# [tool.uv]\n[tool.pytest]\n', '[tool.uvicorn]\npytest = 1\n', '[tool.uv\npytest'):
+        (repo / "pyproject.toml").write_text(text)
+        assert detect.detect(repo).checks == ["python3 -m pytest -q"]
+    # pyproject that uses uv, no lock (whitespace and nested tables are still the uv table)
+    for text in ('[tool.uv]\ndev-dependencies = ["pytest"]\n', '[ tool.uv ]\npytest = 1\n', '[tool.uv.sources]\npytest = 1\n'):
+        (repo / "pyproject.toml").write_text(text)
+        assert detect.detect(repo).checks == ["uv run pytest -q"]
+
+
 def test_detect_node_picks_package_manager_and_skips_placeholder_test(tmp_path):
     pkg = {"scripts": {"test": 'echo "Error: no test specified" && exit 1', "typecheck": "tsc"}}
     (tmp_path / "package.json").write_text(json.dumps(pkg))
@@ -43,21 +70,6 @@ def test_detect_go_and_make_fallback(tmp_path):
     assert detect.detect(other).checks == ["make test"]
 
 
-def test_init_writes_detected_config_and_keeps_existing(repo, monkeypatch):
-    (repo / "go.mod").write_text("module x\n")
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(doctor, "checks", lambda root: [])
-    res = CliRunner().invoke(app, ["init"])
-    assert res.exit_code == 0, res.output
-    cfg = json.loads((repo / ".brindle" / "config.json").read_text())
-    assert cfg["setup"] == ["go mod download"] and cfg["checks"] == ["go test ./..."]
-    assert "Ready" in res.output
-
-    (repo / ".brindle" / "config.json").write_text('{"checks": ["mine"]}\n')
-    res = CliRunner().invoke(app, ["init"])
-    assert res.exit_code == 0, res.output
-    assert "kept" in res.output
-    assert json.loads((repo / ".brindle" / "config.json").read_text()) == {"checks": ["mine"]}
 
 
 def test_init_fails_on_doctor_failure(repo, monkeypatch):

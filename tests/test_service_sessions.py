@@ -1,11 +1,12 @@
 """brindle.service.sessions: the CLI's prompts come back as a Conflict the
 caller answers, and the answer is what the next call does."""
 
+import dataclasses
 import time
 
 import pytest
 
-from brindle import agents, doctor, workspaces
+from brindle import agents, codemap, doctor, workspaces
 from brindle.db import Agent
 from brindle.service import sessions as svc
 
@@ -51,7 +52,50 @@ def test_start_asks_about_a_running_session_then_does_what_was_chosen(db, repo, 
     assert running == paused
 
 
-@pytest.mark.parametrize("caller_id", [pytest.param("caller", id="concurrent_sessions")])
+@pytest.mark.parametrize("start, branch, rebuild_fails", [
+    ({"choice": "n", "session_id": "sup1"}, "brindle/session-2", False),
+    # Options → Branch: a worktree checkout_for creates; a failed rebuild still leaves its setup to run.
+    ({"branch": "feat/cache"}, "feat/cache", True),
+])
+def test_a_new_worktree_session_launches_before_its_setup_and_code_map_rebuild(db, repo, running, monkeypatch,
+                                                                                start, branch, rebuild_fails):
+    """Under load a new session's worktree setup (npm ci) and graphify's rebuild
+    (every core) ran before its supervisor started: they now run after it."""
+    order = []
+
+    def rebuild(*a, **kw):
+        order.append("rebuild")
+        if rebuild_fails:
+            raise OSError("graph lock unreadable")
+
+    real_config = workspaces.load_repo_config
+    monkeypatch.setattr(workspaces, "load_repo_config", lambda root, **kw: dataclasses.replace(
+        real_config(root, **kw), setup=["npm ci"]))
+    monkeypatch.setattr(workspaces, "run_setup_commands", lambda ws, cfg, **kw: order.append("setup"))
+    monkeypatch.setattr(codemap, "seed_session", lambda checkout, repo_root=None: codemap.refresh_later(checkout, repo_root))
+    monkeypatch.setattr(codemap, "_request_refresh", rebuild)
+    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, profile, **kw: order.append("launch") or Agent(
+        "sup2", ws_.id, profile, "claude", None, "interactive", "starting", "%6", None, time.time()))
+    monkeypatch.setattr(svc, "after_launch", lambda work: work())
+    got = svc.start(db, str(repo), **start)
+    assert got.workspace.branch == branch
+    assert order == ["launch", "rebuild", "setup"]
+
+
+@pytest.mark.variant("Send beside a paused session only: no running session to pick, and it must not start in the checkout")
+def test_a_new_worktree_is_made_when_asked_with_only_a_paused_session_here(db, repo, running, monkeypatch):
+    """The app's Send goes on a new branch beside a paused session too: no
+    session runs, so none is picked, and it must not start in the checkout."""
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
+    db.update_agent("sup1", status="paused")
+    monkeypatch.setattr(svc, "after_launch", lambda work: None)
+    got = svc.start(db, str(repo), choice="n")
+    assert got.workspace.branch == "brindle/session-2"
+    assert got.workspace.path != workspaces.adopt_root(db, str(repo)).path
+
+
+@pytest.mark.parametrize("caller_id", [pytest.param("caller", id="concurrent_sessions",
+    marks=pytest.mark.variant("Continuing another session must not pause the live session issuing the command"))])
 def test_continue_refuses_to_pause_the_session_running_it(db, repo, monkeypatch, caller_id):
     ws = workspaces.adopt_root(db, str(repo))
     caller = add(db, ws, caller_id)

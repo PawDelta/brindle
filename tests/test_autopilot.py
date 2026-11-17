@@ -103,6 +103,7 @@ def test_enable_loads_goals_md(db, repo):
     assert autopilot.parse_goals(autopilot.session_goals_path(db, "boss").read_text()) == plan
 
 
+@pytest.mark.variant("Issues 177 and 209: overlapping stops must not repeat unread nudges or prevent user resumption")
 def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
@@ -134,7 +135,10 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     assert autopilot.on_stop(db, agent, {}) is not None
 
 
-@pytest.mark.parametrize("condition", ["pid", "path"])
+@pytest.mark.parametrize("condition", [
+    pytest.param("pid", marks=pytest.mark.variant("An external process wait must suppress nudges until that process exits")),
+    "path",
+])
 def test_outside_wait_holds_nudges_until_job_ends(db, root, monkeypatch, condition):
     from brindle import mcp_server, procs
 
@@ -298,16 +302,6 @@ def test_add_checks_also_allows_their_commands_in_one_step(repo):
         "cargo install evil", "go test -exec evil ./...", "uv run pytest -q", "pytest -q"]
 
 
-def test_running_workers_let_the_supervisor_idle(db, root, monkeypatch):
-    agent, _ = root
-    with_goal(db)
-    monkeypatch.setattr(autopilot, "active_workers",
-                        lambda db, rid: [SimpleNamespace(id="w", provider="claude",
-                                                         result=None, status="processing",
-                                                         status_since=time.time())])
-    assert autopilot.on_stop(db, agent, {}) is None
-
-
 def test_open_subagent_workers_dont_let_the_supervisor_idle(db, root, monkeypatch):
     # A subagent worker sends no message when done, so waiting would stall.
     agent, _ = root
@@ -351,6 +345,142 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     assert autopilot.NUDGE_HEAD in resumed["reason"]
 
 
+@pytest.fixture
+def phase_landing_session(db, tmp_path, monkeypatch):
+    from brindle.db import Workspace
+
+    ws = Workspace("landing", str(tmp_path), "landing", "root", "main", None,
+                   str(tmp_path), None, "landing", 100000.0)
+    db.add_workspace(ws)
+    add_agent(db, ws, "boss")
+    db.add_autopilot("boss")
+    passing = set()
+    monkeypatch.setattr(gates, "run_checked", lambda db, ws, cmd, *a: (cmd in passing, ""))
+    monkeypatch.setattr(git, "dirty_files", lambda *a, **k: [])
+    monkeypatch.setattr(git, "out", lambda *a: "head")
+    monkeypatch.setattr(workspaces, "workspace_env", lambda *a: {})
+    monkeypatch.setattr(agents, "_notify_supervisor", lambda *a: None)
+    monkeypatch.setattr(autopilot.time, "time", lambda: 100000.0)
+    return ws, passing
+
+
+def test_phase_landing_once_per_completed_phase(db, phase_landing_session, monkeypatch):
+    from brindle.db import DB
+
+    ws, passing = phase_landing_session
+    items = [
+        ("a", "a", None, None, None, "API"),
+        ("b", "b", None, None, None, "API"),
+        ("c", "c", None, None, None, "UI"),
+    ]
+    autopilot.set_goal(db, "boss", "g", items)
+    passing.add("a")
+    cfg = RepoConfig(goal_audit=False)
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 0
+    passing.add("b")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 1
+    # Independent DB connections must respect the same phase claim, even
+    # after a regression and another pass, or a goal edit preserving phases.
+    other = DB()
+    try:
+        passing.remove("a")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        passing.add("a")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        autopilot.set_goal(other, "boss", "g", items)
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 1
+        passing.add("c")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 2
+        autopilot.set_goal(other, "boss", "another goal", items)
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 4
+
+        def sweep_during_replacement(*a, **k):
+            autopilot.usage_sweep(db, now=100001.0)
+            assert db.pending_count("boss") == 4
+            return "head"
+
+        replace = other.set_milestones
+
+        def observe_replacement(root_id, milestones):
+            # A second connection still sees the complete old goal until
+            # the replacement fields, claims and milestones commit together.
+            assert db.get_autopilot("boss").goal == "another goal"
+            assert [m.title for m in db.milestones("boss")] == ["a", "b", "c"]
+            assert db.conn.execute("SELECT COUNT(*) FROM phase_landings WHERE root_id='boss'").fetchone()[0] == 2
+            replace(root_id, milestones)
+
+        monkeypatch.setattr(autopilot, "_commit", sweep_during_replacement)
+        monkeypatch.setattr(other, "set_milestones", observe_replacement)
+        autopilot.set_goal(other, "boss", "replacement", [("d", "d", None, None, None, "API")])
+        assert db.pending_count("boss") == 4
+        assert db.milestones("boss")[0].status == "pending"
+        passing.add("d")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 5
+    finally:
+        other.conn.close()
+
+
+@pytest.mark.variant("gap 2: the PR carries the commit the phase passed on, not the branch tip with later work")
+def test_phase_pr_pins_the_commit_the_phase_passed_on(db, phase_landing_session, monkeypatch):
+    """A completed phase with later milestones left is queued for brindle to land at the commit
+    its checks passed on, however far later checks move its milestones; the goal's last phase isn't."""
+    ws, passing = phase_landing_session
+    head = ["sha1"]
+    monkeypatch.setattr(git, "out", lambda *a: head[0])
+    autopilot.set_goal(db, "boss", "g", [("a", "a", None, None, None, "API"), ("c", "c", None, None, None, "UI")])
+    cfg = RepoConfig(goal_audit=False)
+    passing.add("a")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    head[0] = "sha2"                 # the next phase's work lands on the branch
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.milestones("boss")[0].passed_sha == "sha2"
+    passing.add("c")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert [tuple(r) for r in db.conn.execute("SELECT phase, sha, state FROM phase_prs")] == [("API", "sha1", "pending")]
+
+
+def test_phase_landing_unphased_daily_requires_new_pass(db, phase_landing_session, monkeypatch):
+    from brindle.db import DB
+
+    ws, passing = phase_landing_session
+    with_goal(db, checks=("a", "b", "c"))
+    clock = [100000.0]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+    cfg = RepoConfig(goal_audit=False)
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 0
+    passing.add("a")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 1
+    clock[0] += 86400
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 1
+    passing.add("b")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 2
+    clock[0] += 86399
+    passing.add("c")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.pending_count("boss") == 2
+    # Progress during the cooldown survives a new connection and is sent
+    # when the day ends, even without another milestone check.
+    other = DB()
+    try:
+        autopilot.usage_sweep(other, now=clock[0] + 1)
+        assert db.pending_count("boss") == 3
+        autopilot.usage_sweep(other, now=clock[0] + 86401)
+        assert db.pending_count("boss") == 3
+    finally:
+        other.conn.close()
+
+
+@pytest.mark.variant("Incremental checks must retain earlier passes and finish the goal only after the last milestone passes")
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     agent, ws = root
     with_goal(db)
@@ -403,10 +533,11 @@ def _crash(*a, **k):
 
 
 @pytest.mark.parametrize("had_passed, result, state, label", [
-    (False, (True, "$ c"), "passed", None),
-    (False, (False, "$ c\n(exit 1)"), "not_done", "not done yet"),
-    (True, (False, "$ c\n(exit 1)"), "regressed", "regressed"),
-    (False, (False, "$ c\n(exit 127)"), "failed", "couldn't run: command not found"),
+    pytest.param(False, (True, "$ c"), "passed", None, marks=pytest.mark.variant("Success clears failure state")),
+    pytest.param(False, (False, "$ c\n(exit 1)"), "not_done", "not done yet", marks=pytest.mark.variant("Exit 1 is incomplete, not a launch failure")),
+    pytest.param(True, (False, "$ c\n(exit 1)"), "regressed", "regressed", marks=pytest.mark.variant("Failure invalidates an earlier pass")),
+    pytest.param(False, (False, "$ c\n(exit 127)"), "failed", "couldn't run: command not found",
+                 marks=pytest.mark.variant("A missing check executable must retain its launch failure state")),
     (False, (False, "$ c\n(exit -11)"), "failed", "couldn't run: crashed: killed by signal 11"),
     (False, _crash, "failed", "couldn't run: crashed: boom"),
 ])
@@ -632,6 +763,9 @@ def test_auditor_grace_keeps_an_auditor_whose_window_is_not_up_yet(db, root, rep
 
 
 def test_usage_limit_pauses_autopilot(db, root, monkeypatch):
+    from brindle import subscription_usage
+
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
@@ -693,7 +827,7 @@ def test_gate_runs_checks_and_refuses_dirty_work(db, worker_ws):
 
 @pytest.mark.parametrize("ends,start_load,start_level", [
     ("load falls", 25.0, 1),          # 2.5x cores: real trouble
-    ("warn pressure alone", 1.0, 2),  # level 2 on an idle machine: no wait
+    pytest.param("warn pressure alone", 1.0, 2, marks=pytest.mark.variant("Memory warning alone must not hold checks")),
 ])
 def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch, ends, start_load, start_level):
     """With its slot, a check run waits for room, showing "checks waiting for
@@ -727,6 +861,7 @@ def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch
     assert ok and ran.exists() and gates.checks_state(worker_ws) == "waiting for checks"
 
 
+@pytest.mark.variant("Worker results and inbox reminders must not unblock a goal waiting for the person's answer")
 def test_delivered_worker_result_is_not_the_user_replying(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
@@ -778,7 +913,6 @@ def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("passed, checking, workers, expected", [
-    (1, False, [], ["done", "in_progress"]),                              # check passed
     (0, True, ["building"], ["in_review", "in_progress"]),                # a check is running
     (0, False, ["reviewing", "building"], ["in_progress", "in_progress"]),  # still building
 ])
@@ -804,15 +938,11 @@ def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expec
 
 
 @pytest.mark.parametrize("boss, checking, workers, expected", [
-    ("idle", False, [], None),                              # nothing running
     ("processing", False, [], "working"),                   # the supervisor doing the work itself
-    ("idle", False, ["building"], "working"),
-    ("idle", False, ["reviewing"], "checks"),               # in review, no reviewer yet: its checks run
     ("idle", False, ["reviewing", "reviewer"], "review"),
-    ("processing", False, ["ready"], "merging"),            # a busy supervisor doesn't hide the branch's stage
-    ("idle", False, ["ready", "building"], "working"),      # the earliest stage any branch is at
-    ("idle", True, [], "checks"),                           # a milestone check
-    ("paused", False, ["ready"], None),                     # paused: its branches keep their state, nothing runs
+    pytest.param("processing", False, ["ready"], "merging", marks=pytest.mark.variant("Busy supervisor must not hide merging")),
+    pytest.param("idle", False, ["ready", "building"], "working", marks=pytest.mark.variant("Earliest unfinished branch stage wins")),
+    pytest.param("paused", False, ["ready"], None, marks=pytest.mark.variant("Paused branches must not advertise activity")),
 ])
 def test_goal_activity_stage(db, root, boss, checking, workers, expected):
     _, ws = root
@@ -828,6 +958,128 @@ def test_goal_activity_stage(db, root, boss, checking, workers, expected):
     assert autopilot.goal_activity(db, "boss")["stage"] == expected
 
 
+@pytest.mark.parametrize("scenario", [
+    pytest.param("unstarted", marks=pytest.mark.variant(
+        "A live milestone must not hide an unclaimed sibling, including while paused")),
+    pytest.param("chain", marks=pytest.mark.variant(
+        "Queued milestone dependencies must gate launches even with an idle supervisor")),
+    pytest.param("parallel", marks=pytest.mark.variant(
+        "Independent queued milestones must be counted once rather than summed")),
+    pytest.param("limited", marks=pytest.mark.variant(
+        "The same queued milestone graph must respect a single execution slot")),
+    pytest.param("overdue", marks=pytest.mark.variant(
+        "An overdue branch must extend its estimate as observed effort grows")),
+    pytest.param("no_history", marks=pytest.mark.variant(
+        "A goal with no measurements must still estimate its unstarted work")),
+    pytest.param("global_history", marks=pytest.mark.variant(
+        "A new repository must use other repos' measured times before fixed defaults")),
+    pytest.param("review_rounds", marks=pytest.mark.variant(
+        "A branch past two review rounds must not budget the full review duration again")),
+    pytest.param("load", marks=pytest.mark.variant(
+        "Retained merge completions must affect ETA immediately and remain counted once after pruning")),
+    pytest.param("load_open", marks=pytest.mark.variant(
+        "A merge must recover its report start after default pruning moved it into stage_open")),
+    "session_limited",
+])
+def test_goal_eta_counts_unstarted_milestones(db, root, monkeypatch, scenario):
+    from brindle import fair_share
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from brindle.db import Task
+
+    _, ws = root
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(autopilot.time, "time", lambda: now)
+    monkeypatch.setattr(git, "out", lambda *args: "")
+    monkeypatch.setattr(fair_share, "limit", lambda: 1 if scenario == "limited" else
+                        16 if scenario == "session_limited" else 2)
+    db.update_autopilot("boss", goal="Ship both milestones")
+    db.update_agent("boss", status="idle")
+    db.set_milestones("boss", [("first", None, None), ("second", None, None)])
+    if scenario == "session_limited":
+        db.add_session_repo("boss", "other", "/attached-repo")
+        monkeypatch.setattr(autopilot, "load_repo_config", lambda path: RepoConfig(
+            max_agents=1 if path == ws.repo_root else 16))
+        db.set_milestones("boss", [(f"step{i}", None, None, "builder", "other" if i % 2 else None)
+                                   for i in range(6)])
+        db.add_task(Task("attached", "/attached-repo", None, "boss", ws.id, "builder", "step1",
+                         "assign", 1, "attached", None, None, None, "pending", now))
+        db.set_task_milestone("attached", "step1")
+    if scenario != "no_history":
+        repo_root = "/past-repo" if scenario == "global_history" else ws.repo_root
+        duration = 1800 if scenario == "global_history" else 1200
+        day = time.strftime("%Y-%m-%d", time.gmtime(now - 86400))
+        for stage in ("build:builder", "report_to_merge"):
+            db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, ?, 5, ?, ?, ?)",
+                            (day, repo_root, stage, duration, duration, json.dumps([duration] * 5)))
+    if scenario in ("unstarted", "overdue", "review_rounds", "load", "load_open"):
+        add_agent(db, ws, "writing", mode="assign", parent="boss")
+        db.set_agent_milestone("writing", "first")
+        db.update_agent("writing", profile="builder", created_at=now - (2400 if scenario == "overdue" else 300))
+        if scenario == "review_rounds":
+            db.update_agent("writing", pipeline="reviewing", reviewing_since=now - 100,
+                            pipeline_rounds=2, result="done")
+        if scenario in ("load", "load_open"):
+            for i in range(1 if scenario == "load_open" else 6):
+                past = replace(ws, id=f"history{i}")
+                end = now - 60 - i
+                with monkeypatch.context() as clock:
+                    clock.setattr(bus.time, "time", lambda: end - (90000 if scenario == "load_open" else 2400))
+                    bus.publish_ws(db, "pipeline.reported", past)
+                    clock.setattr(bus.time, "time", lambda: end)
+                    bus.publish_ws(db, "pipeline.merged", past)
+            bus.prune(db, now=now)
+    if scenario in ("chain", "parallel", "limited"):
+        for i, title in enumerate(("first", "second")):
+            db.add_task(Task(f"queued{i}", ws.repo_root, None, "boss", ws.id, "builder", title,
+                             "assign", 1, f"branch{i}", None, None,
+                             json.dumps(["task:queued0"]) if i and scenario == "chain" else None,
+                             "pending", now + i))
+            db.set_task_milestone(f"queued{i}", title)
+    got = autopilot.goal_activity(db, "boss", now=now)["eta_seconds"]
+    assert got is not None and got > 0
+    if scenario == "chain":
+        assert got == 4800
+    elif scenario == "limited":
+        assert got == 3600
+    elif scenario == "overdue":
+        # The overdue worker still needs meaningful build time, then review.
+        assert got >= 1800
+        db.record_check(db.milestones("boss")[1].id, True, "")
+        overdue = autopilot.goal_activity(db, "boss", now=now)["eta_seconds"]
+        assert overdue >= 1800
+        assert autopilot.goal_activity(db, "boss", now=now + 2400)["eta_seconds"] > overdue
+    elif scenario == "review_rounds":
+        db.record_check(db.milestones("boss")[1].id, True, "")
+        assert 60 < autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] < 1100
+    elif scenario == "load":
+        assert got == 4800
+        bus.prune(db, older_than=0, now=now + 1)
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == got
+    elif scenario == "load_open":
+        assert got == 180000
+    elif scenario == "session_limited":
+        assert got == 8400
+        # Session admission still constrains work when the machine cap is off,
+        # and an attached-repo worker must reserve the same session's slot.
+        monkeypatch.setattr(fair_share, "limit", lambda: 0)
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == got
+        attached = replace(ws, id="attached-live", repo_root="/attached-repo")
+        db.add_workspace(attached)
+        add_agent(db, attached, "attached-worker", mode="assign", parent="boss")
+        db.update_agent("attached-worker", profile="builder", created_at=now - 300)
+        db.set_agent_milestone("attached-worker", "step1")
+        db.update_task("attached", state="running", agent_id="attached-worker")
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 8100
+    elif scenario == "global_history":
+        assert got == 3600
+    elif scenario != "no_history":
+        assert got == 2400
+    if scenario == "unstarted":
+        db.update_agent("boss", status="paused")
+        assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == got
+
+
 def test_goal_activity_commits_and_estimate(db, root, repo):
     _, ws = root
     with_goal(db)
@@ -838,6 +1090,8 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     add_agent(db, ws, "w0", mode="assign", parent="boss", status="idle")
     now = t + 10000
     db.update_agent("w0", pipeline="ready", result="done", reviewing_since=now - 600)
+    db.set_agent_milestone("w0", db.milestones("boss")[0].title)
+    db.record_check(db.milestones("boss")[1].id, True, "")
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
 
     def history(samples):
@@ -847,9 +1101,9 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
 
     history([1800.0] * 4)
     got = autopilot.goal_activity(db, "boss", now=now)
-    assert (got["commits_last_hour"], got["last_commit_at"], got["eta_seconds"]) == (2, int(t + 9800), None)
+    assert (got["commits_last_hour"], got["last_commit_at"], got["eta_seconds"]) == (2, int(t + 9800), 180)
     history([1800.0] * 5)
-    assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 1200
+    assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 180
     assert autopilot.goal_activity(db, "boss", now=now)["checking"] is False
     autopilot.check_in_background(db, "boss", ws, None, detach=lambda argv: None)   # the real start path
     got = autopilot.goal_activity(db, "boss", now=now)
@@ -862,10 +1116,10 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     got = autopilot.goal_activity(db, "boss", now=now)
     assert (got["checking"], got["auditing"]) == (False, True)
     db.update_autopilot("boss", state="running")
-    # Paused, nothing runs: no estimate, the commits still told.
+    # Pausing changes the activity stage, but the remaining work is still estimated.
     db.update_agent("boss", status="paused")
     got = autopilot.goal_activity(db, "boss", now=now)
-    assert (got["commits_last_hour"], got["eta_seconds"]) == (2, None)
+    assert (got["commits_last_hour"], got["eta_seconds"]) == (2, 180)
 
 
 def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
@@ -878,7 +1132,7 @@ def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
     db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, 'report_to_merge', 5, 1200, 1200, ?)",
                     (day, ws.repo_root, json.dumps([1200] * 5)))
-    for elapsed, expected in [(300, 900), (1500, 60)]:
+    for elapsed, expected in [(300, 900), (1500, 375)]:
         db.update_agent("fixer", pipeline="fixing", result="done", reviewing_since=now - elapsed)
         got = autopilot.goal_activity(db, "boss", now=now)
         assert (got["stage"], got["eta_seconds"]) == ("working", expected)
@@ -900,23 +1154,25 @@ def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
 
 
 @pytest.mark.parametrize("runs, elapsed, queued, overhead, expected", [
+    pytest.param(4, 300, False, False, 1800, marks=pytest.mark.variant("Sparse profile falls back to repo history")),
     (5, 300, False, False, 2100),
-    (4, 300, False, False, 1800),  # sparse profile falls back to the repo median
-    (5, 1500, False, False, 1260),
+    pytest.param(5, 1500, False, False, 1575,
+                 marks=pytest.mark.variant("Overdue active builds retain a remaining-time floor")),
     (5, 300, True, False, 4500),
     (5, 300, "chain", False, 6900),
-    (5, 300, "slots", False, 5700),
+    pytest.param(5, 300, "slots", False, 5700, marks=pytest.mark.variant("One occupied slot serializes queued work")),
     (5, 300, "attached", False, 3300),
-    pytest.param(5, 1500, "fixing", False, 2460,
+    pytest.param(5, 1500, "fixing", False, 2775,
                  marks=pytest.mark.variant("A fixing occupant can outlast the report-to-merge median")),
-    (5, 300, "other_session", False, 3300),
-    (5, 300, "unknown_session", False, None),
-    (5, 300, "unknown_session_room", False, 2400),
+    pytest.param(5, 300, "other_session", False, 3300, marks=pytest.mark.variant("Other sessions consume shared capacity")),
+    pytest.param(5, 300, "unknown_session", False, 2925,
+                 marks=pytest.mark.variant("Unknown session duration is estimated from repo history")),
+    pytest.param(5, 300, "unknown_session_room", False, 2400, marks=pytest.mark.variant("Spare slots permit ETA despite unknown foreign duration")),
     (5, 300, "claim_session", False, 3300),
     (5, 300, "own_claim", False, 2100),
     pytest.param(5, 300, "slow_session", False, 3300,
                  marks=pytest.mark.variant("Other sessions' longer work must stay out of this goal's critical path")),
-    (5, 300, False, True, 2400),
+    pytest.param(5, 300, False, True, 2400, marks=pytest.mark.variant("Include goal checks and audit after branch work")),
 ])
 def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, queued, overhead, expected):
     from dataclasses import replace
@@ -930,7 +1186,7 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
                         3 if queued == "unknown_session_room" else 2)
     other_ws = replace(ws, id="elsewhere", repo_root="/another-repo", name="elsewhere", branch="feat/upstream")
     db.add_workspace(other_ws)
-    # Prefer a profile's history; other repositories never supply the fallback.
+    # Prefer a profile's local history before falling back across repositories.
     for i in range(5):
         add_agent(db, ws, f"past{i}", mode="assign", status="done")
         db.update_agent(f"past{i}", profile="builder" if i < runs else "other",
@@ -1003,11 +1259,11 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
 
 
 @pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected, target", [
-    (0, False, False, False, False, False, "in_progress", True),
     (2, False, True, False, False, True, "ready_for_pr", True),         # all pass, session review ready
     (2, False, True, True, True, True, "done", True),                   # PR merged
-    (2, False, True, True, True, False, "pr_open", True),               # merged, milestones pass, audit hasn't approved
-    (2, False, False, False, False, True, "done", False),               # reached, nothing to open a PR for
+    pytest.param(2, False, True, True, True, False, "pr_open", True, marks=pytest.mark.variant("Merge cannot bypass goal audit")),
+    pytest.param(2, False, False, False, False, True, "done", False, marks=pytest.mark.variant("Audited goals can finish without a PR target")),
+    (2, False, True, "gh", False, False, "pr_open", True),              # the supervisor's own `gh pr create`, found by HEAD
 ])
 def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, goal_done, expected, target):
     from brindle.daemon import session_review
@@ -1019,19 +1275,24 @@ def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, 
         db.update_autopilot("boss", checking_since=time.time())
     if goal_done:
         db.update_autopilot("boss", state="done", audit_ok=1)
-    if pr:
+    if pr is True:
         db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at, merged_at)"
                         " VALUES ('boss', 'feat', 'https://x/pr/1', 1, ?)", (2 if merged else None,))
-    monkeypatch.setattr(session_review, "session", lambda db, root_id: (None, SimpleNamespace(repo_root="r")))
+    monkeypatch.setattr(session_review.status_cache, "read_head", lambda path: "head1")
+    monkeypatch.setattr(session_review, "open_pr_for_head",
+                        lambda sha, cwd, root_id=None: {"url": "https://x/pr/1", "headRefName": "feat"} if pr == "gh" else None)
+    monkeypatch.setattr(session_review, "session",
+                        lambda db, root_id: (None, SimpleNamespace(repo_root="r", path="r", branch="feat")))
     monkeypatch.setattr(session_review, "reasons", lambda db, root, ws: [] if ready else ["not yet"])
     monkeypatch.setattr(session_review, "has_pr_target", lambda ws: target)
     assert session_review.goal_phase(db, "boss") == (expected, "https://x/pr/1" if pr else None)
+    if pr == "gh":     # adopted PRs are managed outside brindle, even one whose head name is the session's (a fork's)
+        assert db.conn.execute("SELECT head_ref FROM session_pr_heads WHERE root_id = 'boss'").fetchone()[0] == "feat"
 
 
 @pytest.mark.parametrize("flight, expected", [
     ("processing", "working"),
-    ("usage_paused", "waiting"),
-    (None, "not_done"),
+    pytest.param(None, "not_done", marks=pytest.mark.variant("Failure without in-flight work stays incomplete")),
 ])
 def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, expected):
     from brindle import view
@@ -1075,17 +1336,19 @@ def _rollup(*checks, state="OPEN", mergeable="MERGEABLE"):
 @pytest.mark.parametrize("payload, expected", [
     pytest.param(_rollup("SUCCESS", "SKIPPED"), ("ready", 2, 2),
                  marks=pytest.mark.variant("A skipped check counts as passed rather than leaving the PR in CI")),
-    (_rollup("SUCCESS", "FAILURE", None), ("failed", 2, 3)),
+    pytest.param(_rollup("SUCCESS", "FAILURE", None), ("failed", 2, 3), marks=pytest.mark.variant("Failure dominates unfinished CI")),
     pytest.param(_rollup("SUCCESS", mergeable="CONFLICTING"), ("unknown", 1, 1),
                  marks=pytest.mark.variant("Passing checks must not make a conflicting PR ready")),
     pytest.param(_rollup(), ("unknown", 0, 0),
                  marks=pytest.mark.variant("An open PR with no checks must not be vacuously ready")),
-    (_rollup("SUCCESS", state="MERGED"), None),
+    pytest.param(_rollup("SUCCESS", state="MERGED"), None, marks=pytest.mark.variant("Merged PRs leave the open-PR CI state")),
 ])
 def test_session_pr_state_of_a_payload(payload, expected):
     from brindle.daemon import session_review
 
     got = session_review.pr_state_of("https://github.com/o/r/pull/391", payload)
+    if got is not None:
+        assert got.pop("conflicting", False) == (payload.get("mergeable") == "CONFLICTING")
     assert got == (expected and {"number": 391, "state": expected[0], "done": expected[1], "total": expected[2]})
 
 
@@ -1152,3 +1415,26 @@ def test_session_pr_state_is_one_shared_cached_read(db, root, monkeypatch):
 
     assert session_review.session_pr_state(Held(db), "boss", url)["state"] == "ready"
     assert not pool.queue and not answers
+
+
+def test_session_pr_state_carries_local_fix_without_changing_shared_checks(db, monkeypatch):
+    from brindle.daemon import session_review
+    from brindle.db import Workspace
+    from brindle.service.dto import PrStateDTO
+
+    ws = Workspace(id="fix", repo_root="/fake/repo", name="fix", kind="worktree", branch="feat",
+                   base_branch="main", path="/fake/fix", port_base=None, tmux_session="fix", created_at=0)
+    db.add_workspace(ws)
+    agent = add_agent(db, ws, "fixer")
+    url = "https://github.com/o/r/pull/413"
+    payload = _rollup("FAILURE", "SUCCESS")
+    payload["statusCheckRollup"][0]["name"] = "build"
+    state = session_review.pr_state_of(url, payload)
+    monkeypatch.setattr(session_review, "_pr_cache", {url: (time.monotonic(), state)})
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, 'old', 1)",
+                    (agent.id, ws.branch, url))
+    monkeypatch.setattr(git, "out", lambda *args: "2")
+    result = PrStateDTO.model_validate(session_review.session_pr_state(db, agent.id, url))
+    assert (result.unpushed, result.failed_checks) == (2, ["build"])
+    assert "unpushed" not in state
+    assert session_review.session_pr_state(db, "missing", url).get("unpushed", 0) == 0

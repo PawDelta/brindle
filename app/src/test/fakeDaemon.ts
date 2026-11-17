@@ -8,7 +8,9 @@
    screen, then what it prints, and tmux's "Pane is dead" once its command
    has exited. */
 
-import { DaemonClient, type GithubConnection } from "../api/client";
+import { EphemeralStore, LoroDoc, decodeImportBlobMeta } from "loro-crdt";
+import { DaemonClient, fromBase64, toBase64, type GithubConnection, type LiveDocState, type Plan, type RoutingGoalDTO, type RoutingWeights } from "../api/client";
+import { liveReviewGate } from "../api/liveReview";
 import type { BusEvent, StreamMessage, WebSocketLike } from "../api/events";
 import { WS_UNAUTHORIZED } from "../api/events";
 import type { PtyStatus, PtyViewHandlers, PtyViewOpener, PtyViews, PtyViewTarget } from "../api/ptyView";
@@ -39,6 +41,7 @@ import type {
 } from "../api/schema";
 import { LOGIN_PROVIDERS } from "../api/client";
 import { hunksOf, parseDiff } from "../screens/Branch/parseDiff";
+import type { DocFormat, DocFormatView } from "../api/client";
 import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
 
 export const BASE_URL = "http://127.0.0.1:47321";
@@ -54,6 +57,8 @@ export interface DaemonData {
   decisions: DecisionDTO[];
   /* Optional hosted library fixtures, independent of the local KB. */
   docScopes?: import("../api/client").DocScope[];
+  /* The Library's designs as the server lists them (doc_id) with each one's `design` review state; none: not entitled. */
+  libraryDocs?: { doc_id: string; title: string; kind?: string; updated_at?: number; design?: object }[];
   knowledgeMap?: import("../api/client").KnowledgeMap;
   kbDocuments?: import("../api/client").MapNode[];
   profiles: ProfileDTO[];
@@ -153,6 +158,11 @@ export interface DaemonData {
   debugLog: DebugEntry[];
   /* GET /doctor. */
   doctor: DoctorCheck[];
+  /* GET / PUT /routing/goal (engine branch feat/routing-goal-api): what
+     routing aims for and the preview at that point. None: the engine doesn't
+     have the route yet (404). A PUT stores the weights (refused while
+     `locked`) and answers with the preview's aim moved to them. */
+  routingGoal?: RoutingGoalDTO | null;
   /* GET /cost: refused (402 not_entitled, as cost.require_entitled does) unless `costEntitled`. */
   cost: Cost;
   costEntitled: boolean;
@@ -610,6 +620,53 @@ export class FakeSocket implements WebSocketLike {
   }
 }
 
+/* A client on WS /v1/visuals/{id}/live (DaemonClient.visualLive): the token as its first frame,
+   then its update and awareness frames, which the daemon keeps and relays to the visual's other
+   clients (FakeDaemon.joinLive, relayLive). */
+export class FakeLiveSocket implements WebSocketLike {
+  readonly writers = new Set<string>();
+  /* The number this window was lent to write under (FakeDaemon.joinLive), as a decimal string. */
+  peer: string | null = null;
+  onopen: WebSocketLike["onopen"] = null;
+  onmessage: WebSocketLike["onmessage"] = null;
+  onclose: WebSocketLike["onclose"] = null;
+  onerror: WebSocketLike["onerror"] = null;
+  readonly frames: string[] = [];
+  authed = false;
+  closed = false;
+  readonly visual: string;
+  private readonly daemon: FakeDaemon;
+
+  constructor(daemon: FakeDaemon, visual: string) {
+    this.daemon = daemon;
+    this.visual = visual;
+    queueMicrotask(() => {
+      if (!this.closed) this.onopen?.({});
+    });
+  }
+
+  send(data: string): void {
+    if (this.closed) return;
+    this.frames.push(data);
+    if (this.frames.length === 1) this.daemon.joinLive(this, data);
+    else if (this.authed) this.daemon.relayLive(this, data);
+  }
+
+  close(code = 1000): void {
+    if (this.closed) return;
+    this.closed = true;
+    queueMicrotask(() => this.onclose?.({ code }));
+  }
+
+  push(frame: object): void {
+    if (this.closed) return;
+    const text = JSON.stringify(frame);
+    queueMicrotask(() => {
+      if (!this.closed) this.onmessage?.({ data: text });
+    });
+  }
+}
+
 const TOOLS_MESSAGE = "git needs Apple's Command Line Developer Tools, which aren't installed. Install them with `xcode-select --install` (or `brew install git`), then try again.";
 
 export class FakeDaemon {
@@ -755,6 +812,27 @@ export class FakeDaemon {
   /* The session roots POST /recovery/viewed said were on screen, in order. */
   readonly viewed: string[] = [];
   readonly sockets: FakeSocket[] = [];
+  /* Each visual's live text (seedLive), and the clients on it. */
+  private readonly live = new Map<string, { doc: LoroDoc; presence: Map<string, EphemeralStore>; state: LiveDocState; writers: Set<string>; nextVersion: number; canFreeze: boolean; review?: { plan: Plan; gate: Plan["gate"]; me: string } }>();
+  readonly liveSockets: FakeLiveSocket[] = [];
+  /* Numbers lent to live windows (joinLive), and writers whose changes were refused for not
+     being under the number their window was lent. holdLivePeers: none free until lendLivePeers. */
+  private nextLivePeer = 2n ** 60n;
+  readonly liveRefused: string[] = [];
+  /* How many times a window asked for the frozen version again (after its person signed off). */
+  liveRefreshes = 0;
+  /* Library doc id → the plan (visual id) it was shared from on this machine. */
+  readonly libraryPlans = new Map<string, string>();
+  holdLivePeers = false;
+
+  lendLivePeers(): void {
+    this.holdLivePeers = false;
+    for (const s of this.liveSockets) {
+      if (!s.authed || s.closed || s.peer !== null) continue;
+      s.peer = String(this.nextLivePeer++);
+      s.push({ peer: s.peer });
+    }
+  }
   private nextId = 1;
   private nextSession = 1;
   private nextJob = 1;
@@ -893,7 +971,6 @@ export class FakeDaemon {
       }));
       return json({ root_id: root, branch: review.branch, base: review.base, base_sha: "b".repeat(40), head: `h${this.nextId}`.padEnd(40, "0"), files, workers: [] });
     }
-    if (!review.ready) return json({ error: { code: "not_ready", message: `the session isn't ready for a PR: ${review.reasons.join("; ")}` }, reasons: review.reasons }, 409);
     if (what === "pr/draft") {
       const goal = d.goal?.root_id === root ? d.goal : null;
       const titles = goal?.milestones?.map((m) => `- ${m.title}`) ?? [];
@@ -2182,6 +2259,15 @@ export class FakeDaemon {
   /* PUT /routing (routes_actions.put_routing): the tiers given replace theirs
      in the scope's file (the others stay), as do a reviewer or an exclusion
      list given; every name must be a known profile, every provider a known one. */
+  private putRoutingGoal(body: { weights?: RoutingWeights }): Response {
+    const goal = this.data.routingGoal;
+    if (!goal) return error("not_found", "no route PUT /routing/goal", 404);
+    if (goal.locked) return error("forbidden", goal.lock_reason ?? "your org locks what routing aims for", 403);
+    if (!body.weights) return error("invalid", "weights are required", 400);
+    this.data.routingGoal = { ...goal, weights: body.weights, preview: { ...goal.preview, aim: body.weights } };
+    return json(this.data.routingGoal);
+  }
+
   private putRouting(body: Record<string, unknown>): Response {
     const repo = body.repo;
     if (typeof repo !== "string") return error("invalid", "repo is required", 400);
@@ -2294,7 +2380,7 @@ export class FakeDaemon {
   }
 
   client(token = this.token): DaemonClient {
-    return new DaemonClient({ baseUrl: BASE_URL, token, fetch: this.fetch });
+    return new DaemonClient({ baseUrl: BASE_URL, token, fetch: this.fetch, connect: this.connect });
   }
 
   /* The live /v1/events sockets that passed the guard. */
@@ -2403,7 +2489,150 @@ export class FakeDaemon {
     for (const s of this.sockets) s.close(code);
   }
 
-  connect = (url: string): FakeSocket => {
+  /* A visual's live text, seeded with each section's text as the daemon seeds it from the doc's
+     current revision (DaemonClient.visualLive). */
+  seedLive(visual: string, sections: Record<string, string>, options: { author?: string; canFreeze?: boolean; plan?: Plan; me?: string } = {}): LoroDoc {
+    const doc = new LoroDoc();
+    for (const [section, text] of Object.entries(sections)) doc.getText(section).insert(0, text);
+    doc.commit();
+    this.live.set(visual, { doc, presence: new Map(), state: { author: options.author ?? "Author", lock: null, version: null }, writers: new Set(), nextVersion: 1, canFreeze: options.canFreeze ?? true,
+      review: options.plan ? { plan: structuredClone(options.plan), gate: structuredClone(options.plan.gate), me: options.me ?? "Author" } : undefined });
+    this.setLiveState(visual, {});
+    return doc;
+  }
+
+  /* A section's live text as the daemon holds it. */
+  liveText(visual: string, section: string): string {
+    return this.live.get(visual)?.doc.getText(section).toString() ?? "";
+  }
+
+  /* A section's presence as the daemon holds it (what a client joining now is sent): key → value. */
+  livePresence(visual: string, section: string): Record<string, unknown> {
+    return (this.live.get(visual)?.presence.get(section)?.getAllStates() ?? {}) as Record<string, unknown>;
+  }
+
+  /* The fake's authenticated account is the author unless seedLive says otherwise. */
+  setLiveState(visual: string, state: Partial<LiveDocState>): void {
+    const live = this.live.get(visual)!;
+    live.state = { ...live.state, ...state };
+    if (live.review) {
+      const gate = liveReviewGate(live.review.gate, { ...live.state, gate: undefined });
+      live.review.plan = { ...live.review.plan, gate };
+      live.state = { ...live.state, gate };
+    }
+    for (const s of this.liveSockets) if (s.authed && !s.closed && s.visual === visual) s.push({ state: live.state });
+  }
+
+  liveState(visual: string): LiveDocState {
+    return this.live.get(visual)!.state;
+  }
+
+  /* The HTTP review and live version share one gate: reads cannot resurrect withdrawn sign-offs. */
+  private liveReviewRoute(method: string, path: string, body: Record<string, unknown>): Response | null {
+    if (method === "GET" && path === "/library/people") {
+      const review = [...this.live.values()].find((live) => live.review)?.review;
+      return review ? json({ people: [], me: review.me }) : null;
+    }
+    const route = /^\/(plans|shared-designs)\/([^/]+)(?:\/(.*))?$/.exec(path);
+    if (!route) return null;
+    const live = this.live.get(route[2]);
+    const review = live?.review;
+    if (!live || !review) return null;
+    const result = () => route[1] === "plans" ? review.plan : { ...review.plan, me: review.me, author: live.state.author,
+      can_comment: true, can_suggest: true, can_sign_off: true, signed_off: live.state.version?.signOffs.includes(review.me) ?? false };
+    if ((method === "GET" && !route[3]) || (method === "POST" && route[3] === "sync")) return json(result());
+    if (method !== "POST") return null;
+    if (route[3] === "sign-off" || route[3] === "sign-offs" || route[3] === "decide") {
+      const version = live.state.version;
+      if (!version || body.version !== version.id || body.rev !== review.plan.rev || live.state.lock !== "sign_off") return error("stale", "This live version is no longer in review", 409);
+      if (route[3] === "decide") {
+        if (body.approved && review.plan.gate?.state !== "ready") return error("gate_closed", "The live version still needs sign-offs", 409);
+        review.plan = { ...review.plan, state: body.approved ? "approved" : "redirected" };
+      } else {
+        const row = review.plan.gate?.reviewers?.find((r) => r.sub === review.me);
+        if (!row) return error("forbidden", "This account is not a reviewer", 403);
+        this.setLiveState(route[2], { version: { ...version, signOffs: [...new Set([...version.signOffs, review.me])] } });
+      }
+      return json(result());
+    }
+    return null;
+  }
+
+  joinLive(socket: FakeLiveSocket, frame: string): void {
+    if (frame !== this.token) {
+      socket.close(WS_UNAUTHORIZED);
+      return;
+    }
+    const live = this.live.get(socket.visual);
+    if (!live) {
+      socket.close(4404);
+      return;
+    }
+    socket.authed = true;
+    // The number this window writes under, as the daemon lends one from the server relay's: past
+    // 2**53, so only a string carries it whole. Held back: {"peer": null} until lendLivePeers().
+    if (!this.holdLivePeers) socket.peer = String(this.nextLivePeer++);
+    socket.push({ peer: socket.peer });
+    socket.push({ state: live.state });
+    socket.push({ update: toBase64(live.doc.export({ mode: "snapshot" })) });
+    for (const [section, store] of live.presence) socket.push({ awareness: toBase64(store.encodeAll()), section });
+  }
+
+  relayLive(from: FakeLiveSocket, frame: string): void {
+    const live = this.live.get(from.visual);
+    if (!live) return;
+    const said = JSON.parse(frame) as { update?: string; awareness?: string; section?: string; freeze?: boolean; reopen?: boolean; refresh?: boolean };
+    if (said.refresh) {     // a window's person signed off: the version, as the review has it now, to every window
+      this.liveRefreshes++;
+      this.setLiveState(from.visual, {});
+      return;
+    }
+    if (said.freeze || said.reopen) {
+      if (!live.canFreeze) {    // as the daemon answers a Freeze or Reopen the Library refused: to the asking window
+        from.push({ refused: { action: said.freeze ? "freeze" : "reopen", reason: "only the design's author can freeze its draft" } });
+        return;
+      }
+      if (said.freeze && !live.state.lock) this.setLiveState(from.visual, {
+        lock: "sign_off",
+        version: { id: live.nextVersion++, writers: [...live.writers], signOffs: [], snapshot: toBase64(live.doc.export({ mode: "snapshot" })) },
+      });
+      else if (said.reopen && live.state.lock === "sign_off") this.setLiveState(from.visual, { lock: null, version: null });
+      return;
+    }
+    if (said.update !== undefined) {
+      if (live.state.lock === "sign_off" || (live.state.lock === "author_offline" && !live.canFreeze)) return;
+      const bytes = fromBase64(said.update);
+      // As the server's relay does: a change under any number but the one lent is refused.
+      const writers = [...decodeImportBlobMeta(bytes, true).partialEndVersionVector.toJSON().keys()];
+      if (writers.some((peer) => peer !== from.peer)) {
+        this.liveRefused.push(...writers.filter((peer) => peer !== from.peer));
+        return;
+      }
+      live.doc.import(bytes);
+      for (const name of from.writers) live.writers.add(name);
+    }
+    else if (said.awareness !== undefined && said.section !== undefined) {
+      const store = live.presence.get(said.section) ?? new EphemeralStore(30_000);
+      live.presence.set(said.section, store);
+      store.apply(fromBase64(said.awareness));
+      const sent = new EphemeralStore(30_000);
+      sent.apply(fromBase64(said.awareness));
+      for (const user of Object.values(sent.getAllStates())) {
+        if (user && typeof user === "object" && "name" in user && typeof user.name === "string") from.writers.add(user.name);
+      }
+      sent.destroy();
+    } else return;
+    for (const s of this.liveSockets) if (s !== from && s.authed && !s.closed && s.visual === from.visual) s.push(said);
+  }
+
+  connect = (url: string): FakeSocket | FakeLiveSocket => {
+    const live = /^\/v1\/visuals\/([^/]+)\/live$/.exec(new URL(url).pathname);
+    if (live) {
+      const socket = new FakeLiveSocket(this, decodeURIComponent(live[1]));
+      this.liveSockets.push(socket);
+      if (this.dead) socket.close(1006);
+      return socket;
+    }
     const socket = new FakeSocket(this, url);
     this.sockets.push(socket);
     // Dead: the connection is refused (closed before it opens, as the shell's 1006 says).
@@ -2434,6 +2663,15 @@ export class FakeDaemon {
 
   private matches(socket: FakeSocket, event: BusEvent): boolean {
     return socket.repo === null || event.repo_root === socket.repo;
+  }
+
+  /* GET /doc-format (brindle.doc_templates.view) for the org level: what it sets over the defaults. */
+  docFormat: Partial<DocFormat> = {};
+
+  private docFormatView(): DocFormatView {
+    const resolved: DocFormat = { templates: [], naming: { title_hint: null, reference: null }, blocks: ["sign_off"], ...this.docFormat };
+    const reference = resolved.naming.reference;
+    return { level: "org", format: this.docFormat, version: 0, resolved, source: "local", editable: true, next_reference: reference ? reference.replace("{number}", "0001") : null, used: {} };
   }
 
   /* The goal's POST route, answering as the engine does (routes_actions.py):
@@ -2472,6 +2710,8 @@ export class FakeDaemon {
     if (auth !== `Bearer ${this.token}`) {
       return error("unauthorized", "missing or wrong token (see ~/.brindle/daemon.json)", 401);
     }
+    const liveReview = this.liveReviewRoute(method, path, (body ?? {}) as Record<string, unknown>);
+    if (liveReview) return liveReview;
     const policy = this.permissionRoute(method, path, (body ?? {}) as Record<string, unknown>, query);
     if (policy) {
       if (method === "PUT" && path === "/permissions/preset" && this.holdPreset) {
@@ -2520,6 +2760,14 @@ export class FakeDaemon {
       if (connection && this.holdConnections) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>))));
       if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
+      if (path === "/routing/goal") return this.putRoutingGoal((body ?? {}) as { weights?: RoutingWeights });
+      if (path === "/doc-format") {
+        // The engine replaces what the level sets (doc_templates.save), keeping no key the body leaves out.
+        const format = ((body ?? {}) as { format?: Partial<DocFormat> }).format;
+        if (!format || typeof format !== "object") return error("invalid", "format is required", 400);
+        this.docFormat = format;
+        return json(this.docFormatView());
+      }
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);
       if (key && this.holdKeys) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putKey(key[1], (body ?? {}) as Record<string, unknown>))));
       if (key) return this.putKey(key[1], (body ?? {}) as Record<string, unknown>);
@@ -2583,8 +2831,19 @@ export class FakeDaemon {
         const [id, action] = [m[1], m[2]];
         const answer = INBOX_ACTIONS[action];
         if (!answer) return error("invalid", `unknown inbox action '${action}'`, 400);
-        const item = d.inbox.find((i) => (action === "dismiss" ? i.request_id : action === "read" ? i.notice_id : i.agent_id) === id
-          && (action !== "pr-not-now" || i.kind === "pr_ready"));
+        const dismissed = action === "dismiss" ? fields.item as InboxItemDTO | undefined : undefined;
+        if (dismissed?.kind === "permission" && dismissed.permission?.request_id) {
+          d.asks = d.asks.map((g) => ({ ...g, items: g.items.filter((a) => a.agent_id !== dismissed.agent_id || a.request_id !== dismissed.permission?.request_id) })).filter((g) => g.items.length > 0);
+        }
+        const item = d.inbox.find((i) => (dismissed ? i.kind === dismissed.kind && i.agent_id === dismissed.agent_id
+          && i.permission?.request_id === dismissed.permission?.request_id && i.request_id === dismissed.request_id
+          && i.visual_id === dismissed.visual_id && i.fix === dismissed.fix && i.notice_id === dismissed.notice_id && i.doc === dismissed.doc
+          : (action === "dismiss" ? i.request_id : action === "read" ? i.notice_id : i.agent_id) === id)
+          && (action !== "pr-not-now" || i.kind === "pr_ready" || i.kind === "pr_opened" || i.kind === "pr_failed"));
+        if (!item && dismissed) {
+          this.publish("inbox.dismissed", { agent_id: dismissed.agent_id ?? null });
+          return json(answer);
+        }
         if (!item) return error("not_found", `no agent ${id}`, 404);
         // The action settles the item, and the bus row it writes sends clients for a fresh inbox.
         d.inbox = d.inbox.filter((i) => i !== item);
@@ -2663,6 +2922,8 @@ export class FakeDaemon {
         return json((repo && d.profilesByRepo[repo]) || d.profiles);
       case "/routing":
         return needRepo() ?? json(this.routing(repo, query.scope === "user", query.learned !== "0"));
+      case "/routing/goal":
+        return needRepo() ?? (d.routingGoal ? json(d.routingGoal) : error("not_found", "no route GET /routing/goal", 404));
       case "/rules":
         return needRepo() ?? json(d.rulePacks);
       case "/config":
@@ -2677,6 +2938,8 @@ export class FakeDaemon {
         return json(d.debug);
       case "/doctor":
         return json(d.doctor);
+      case "/doc-format":
+        return json(this.docFormatView());
       case "/account":
         return json(d.account);
       case "/cost":
@@ -2691,6 +2954,9 @@ export class FakeDaemon {
       if (!p) return error("not_found", `no profile ${name}`, 404);
       const extra = d.profileDetails[name] ?? {};
       return json({ ...p, source: `built-in profile ${name}`, extends: [], rules: [], prompt: "", lint: { errors: [], warnings: [] }, ...extra });
+    }
+    if ((m = path.match(/^\/agents\/([^/]+)\/transcript$/))) {
+      return json({ messages: [], cursor: "0:0", reset: false });
     }
     if ((m = path.match(/^\/agents\/([^/]+)$/))) {
       const id = m[1];
@@ -2726,8 +2992,19 @@ export class FakeDaemon {
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
     if ((m = path.match(/^\/providers\/([^/]+)\/connection$/))) return this.connectionOf(m[1]);
     if ((m = path.match(/^\/sessions\/([^/]+)\/visuals$/))) return json(this.visualRows.filter((v) => v.session === m![1]));
+    // A Library design shared from here: its plan's visual (routes_visuals.library_design_plan).
+    if ((m = path.match(/^\/library\/designs\/([^/]+)\/plan$/))) {
+      const plan = this.libraryPlans.get(m[1]);
+      const row = plan && this.visualRows.find((v) => v.id === plan);
+      return row ? json(row) : error("not_found", "this design wasn't shared from here", 404);
+    }
     if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
     // The doc library, as an engine not signed in to a plan answers it (routes_actions._docs_entitlement).
+    if (this.data.libraryDocs) {
+      if (path === "/analysis-docs") return json({ docs: this.data.libraryDocs.map(({ design: _, ...doc }) => doc) });
+      const one = this.data.libraryDocs.find((doc) => path === `/analysis-docs/${doc.doc_id}`);
+      if (one) return json({ ...one, id: one.doc_id, files: [] });
+    }
     if (path === "/analysis-docs") return error("not_entitled", "analysis docs need brindle Pro", 402);
     return error("not_found", `no route ${path}`, 404);
   };
@@ -2871,7 +3148,10 @@ export class FakeDaemon {
       if (refused) return refused;
       const running = d.sessions.filter((s) => this.sessionInRepo(s, repo.repo_root) && !PAUSED.has(s.status) && s.status !== "done");
       let workspace = repo.name;
-      if (running.length > 0 && !body.branch && !body.worktree) {
+      // "n" needs no session picked, nor any running (service.sessions.place).
+      if (body.choice === "n" && !body.branch && !body.worktree) {
+        workspace = `${repo.name}/session-${this.nextSession + 1}`;
+      } else if (running.length > 0 && !body.branch && !body.worktree) {
         if (body.choice === undefined) {
           return json(
             {
@@ -2891,12 +3171,11 @@ export class FakeDaemon {
           );
         }
         const picked = running.find((s) => s.id === body.session_id);
-        if (!picked || !["o", "n", "p"].includes(String(body.choice))) {
+        if (!picked || !["o", "p"].includes(String(body.choice))) {
           return error("invalid", `no running session ${JSON.stringify(body.session_id ?? null)} to ${String(body.choice)}`, 400);
         }
         if (body.choice === "o") return json({ opened: picked });
-        if (body.choice === "n") workspace = `${repo.name}/session-${this.nextSession + 1}`;
-        else this.setStatus(picked.id, "paused");
+        this.setStatus(picked.id, "paused");
       } else if (typeof body.branch === "string" && body.branch) {
         workspace = `${repo.name}/${body.branch.replace(/\//g, "-")}`;
       }
@@ -2965,6 +3244,8 @@ export class FakeDaemon {
       const url = `https://github.com/example/proj/pull/${this.prs.length + 1}`;
       this.prs.push({ root, title: body.title as string | undefined, body: body.body as string | undefined, draft: body.draft as boolean | undefined, url });
       review.pr = { url, unpushed: 0 };
+      // The engine's next inbox: the prepared PR's card is now "PR opened" (service/inbox._pr_items).
+      d.inbox = d.inbox.map((i) => (i.kind === "pr_ready" && i.root_id === root ? { ...i, kind: "pr_opened", reason: "PR opened", detail: `#${this.prs.length} ${body.title ?? i.detail ?? ""}`.trim(), url } : i));
       this.setGoalPhase(root, "pr_open", url);
       setTimeout(() => this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.pr", result: { url, keeps_merged_branches: true } } }), 0);
       return json({ job, kind: "session.pr" }, 202);

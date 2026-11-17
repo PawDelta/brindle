@@ -52,6 +52,30 @@ def _locked():
         yield
 
 
+def _valid_metadata(data: object, ident: str) -> bool:
+    """Validate the fields shared by listing, retention and restoration.
+
+    Corrupt entries stay on disk for manual recovery. They must not break
+    processing of intact entries, or supply invalid sizes to the cap.
+    Missing required fields are handled by entries() alongside bad JSON.
+    """
+    if not isinstance(data, dict) or data["id"] != ident:
+        return False
+    for key in ("repo_root", "path"):
+        if not isinstance(data[key], str) or not data[key]:
+            return False
+    for key in ("branch", "sha"):
+        if data[key] is not None and not isinstance(data[key], str):
+            return False
+    removed_at = data["removed_at"]
+    # Comparisons also reject NaN/infinity and huge JSON integers without
+    # converting them to float (which can itself overflow).
+    if type(removed_at) not in (int, float) or not 0 <= removed_at <= sys.float_info.max:
+        return False
+    size = data.get("size", 0)  # older entries are measured on read
+    return type(size) is int and size >= 0
+
+
 def entries() -> list[dict]:
     from brindle.disk import size_of
 
@@ -61,7 +85,7 @@ def entries() -> list[dict]:
             continue
         try:
             data = json.loads(p.read_text())
-            if data["id"] != p.parent.name or not (p.parent / "tree").is_dir():
+            if not _valid_metadata(data, p.parent.name) or not (p.parent / "tree").is_dir():
                 continue
             # Entries trashed before sizes were stored are measured here.
             result.append({**data, "size": data["size"] if "size" in data else size_of(p.parent)})

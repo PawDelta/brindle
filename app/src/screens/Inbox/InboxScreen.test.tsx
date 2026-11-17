@@ -1,39 +1,33 @@
+import { connectDaemon, inTestContext, inTestStore } from "../../test/harness";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
-import { DaemonContext } from "../../api/context";
 import { scopesFor } from "../../api/permissions";
 import type { AskDTO, AskDecisionDTO, AskGroupDTO, GoalDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
-import { SessionsProvider } from "../../store/sessions";
-import { createAppStore } from "../../store/store";
-import { startSync } from "../../store/sync";
-import { StoreContext } from "../../store/useStore";
+import type { AppUpdateStatus, AppUpdates } from "../../api/tauri";
+import { AppUpdateBanner, AppUpdateProvider } from "../../components/AppUpdateBanner";
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { Permissions } from "../Settings/Permissions";
+import { forgetReclaimable } from "../../store/storage";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
+import { tauriSink, watchInbox } from "./notify";
 import { usePermissionAsks } from "./PermissionAsks";
 
 afterEach(cleanup);
 
 const notice: InboxItemDTO = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
-const prReady: InboxItemDTO = { kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
+const prOpened: InboxItemDTO = { kind: "pr_opened", reason: "PR opened", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "#408 Ship ls --json", url: "https://github.com/o/r/pull/408" };
+const prReady: InboxItemDTO ={ kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
 function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client(), props: Partial<InboxScreenProps> = {}) {
-  const store = createAppStore();
-  const sync = startSync({ client, store, connect: daemon.connect });
+  const { store, sync } = connectDaemon(daemon, client);
   const onOpen = vi.fn();
   const onNavigate = vi.fn();
   const onOpenRule = vi.fn();
   render(
-    <DaemonContext.Provider value={client}>
-      <StoreContext.Provider value={store}>
-        <SessionsProvider client={client}>
-          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onNavigate={onNavigate} onOpenRule={onOpenRule} {...props} />
-        </SessionsProvider>
-      </StoreContext.Provider>
-    </DaemonContext.Provider>,
+    inTestContext(<><InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onNavigate={onNavigate} onOpenRule={onOpenRule} {...props} /></>, { client, store }, { daemon: true, sessions: true }),
   );
   return { store, sync, onOpen, onNavigate, onOpenRule };
 }
@@ -57,30 +51,140 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
-  it("inbox dismiss clears the PR card while a read from before Not now finishes", async () => {
+  it.each([
+    "doc", "review_requested", "changes_requested", "signed_off", "waiting", "question", "plan",
+    "review", "merge_failed", "pr_ready", "pr_failed", "pr_opened", "proposed_checks", "credentials",
+    "login", "org_notice", "org_blocked", "setup", "idle_stopped", "plan_offer", "visual", "failed",
+    "sync_conflict", "permission", "permission-window", "permission-group", "update-pending", "update-updated", "storage",
+  ])("offers Dismiss for %s", async (kind) => {
+    forgetReclaimable();
+    const item: InboxItemDTO = kind.startsWith("permission") ? (kind === "permission-window" ? permissionInTerminal : permission)
+      : { kind, reason: "Needs attention", agent_id: "w1", workspace_id: worker.id, root_id: "sup1", request_id: "dr1", notice_id: "n1", doc: "d1" };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: kind.startsWith("update-") || kind === "storage" ? [] : [item], asks: kind === "permission-group" ? [pushes] : [] });
+    const client = daemon.client();
+    if (kind === "storage") vi.spyOn(client, "storage").mockResolvedValue({ worktrees: [], categories: [], reclaimable: 10 * 1024 ** 3, free_bytes: null, low_disk: null, dead_branches: [] });
+    const { store, sync } = mount(daemon, client, { appUpdates: {} as AppUpdates });
+    if (kind.startsWith("update-")) act(() => store.dispatch({ type: "app_update", status: { version: "0.6.2", automatic: true, available: null, pending: kind === "update-pending" ? "0.6.3" : null, updated: kind === "update-updated" ? "0.6.2" : null, later: false, checking: false, last_checked: null } }));
+    const target = kind === "storage" ? await screen.findByTestId("storage-nudge")
+      : kind.startsWith("update-") ? await screen.findByTestId("app-update-card")
+      : kind === "permission-group" ? await screen.findByRole("article", { name: pushes.title })
+      : kind.startsWith("permission") ? await screen.findByTestId("permission-card")
+      : await waitFor(() => { expect(card(kind)).toBeTruthy(); return card(kind); });
+    expect(within(target).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    if (kind === "permission-group") {
+      fireEvent.click(within(target).getByRole("button", { name: "Dismiss" }));
+      await waitFor(() => expect(screen.queryByRole("article", { name: pushes.title })).toBeNull());
+      expect(daemon.permissionAnswers).toEqual([]);
+    }
+    sync.stop();
+  });
+
+  it("renders a provider-switch notice with Switch back now and Dismiss, and the offer without them", async () => {
+    const route = { method: "POST", path: "/v1/sessions/sup1/provider-switch" };
+    const switchNotice: InboxItemDTO = { kind: "provider_switch_back", reason: "Switched to codex · claude was out of quota, back at 09:30", detail: "notice: claude → codex · 09:30", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", request_id: "sw1", action: route };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [switchNotice] });
+    const answers: unknown[] = [];
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/provider-switch")) { answers.push(JSON.parse(String(init?.body))); return new Response("{}", { status: 200 }); }
+      return realFetch(input, init);
+    });
+    const { sync } = mount(daemon);
+    const row = await waitFor(() => { expect(card("provider_switch_back")).toBeTruthy(); return card("provider_switch_back"); });
+    expect(within(row).getByTestId("provider-switch").dataset.variant).toBe("notice");
+    expect(row.textContent).toContain("Switched to Codex · Claude was out of quota, back at 09:30");
+    expect(row.textContent).not.toContain("has quota again");
+    expect(within(row).queryByRole("button", { name: "Switch" })).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Switch back now" }));
+    await waitFor(() => expect(answers).toEqual([{ offer: "sw1", accept: true }]));
+    expect(within(within(row).getByTestId("provider-switch")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    sync.stop();
+    vi.restoreAllMocks();
+  });
+
+  it("dismisses a notification through the daemon and keeps it gone after another snapshot", async () => {
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [question] });
+    const { sync } = mount(daemon);
+    await waitFor(() => expect(card("question")).toBeTruthy());
+    fireEvent.click(within(card("question")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(card("question")).toBeNull());
+    expect(daemon.data.inbox).toEqual([]);
+    await act(async () => sync.refresh());
+    expect(card("question")).toBeNull();
+    sync.stop();
+  });
+
+  it("keeps a deferred update actionable, then replaces the offer with the installed card", async () => {
+    const updates = { updateNow: async () => null } as unknown as AppUpdates;
+    const { store } = mount(new FakeDaemon(), undefined, { appUpdates: updates });
+    render(inTestStore(<><AppUpdateProvider updates={updates}><AppUpdateBanner openUrl={async () => {}} /></AppUpdateProvider></>, store));
+    const status: AppUpdateStatus = { version: "0.6.2", automatic: true, available: { version: "0.6.3", notes: null }, pending: null, updated: null, later: false, checking: false, last_checked: null };
+    act(() => store.dispatch({ type: "app_update", status }));
+    expect(screen.getByTestId("app-update-now")).toBeTruthy();
+    act(() => store.dispatch({ type: "app_update", status: { ...status, later: true } }));
+    fireEvent.click(screen.getByTestId("app-update-now"));
+    expect(screen.getByTestId("app-update-banner").dataset.phase).toBe("downloading");
+    act(() => store.dispatch({ type: "app_update", status: { ...status, pending: "0.6.3" } }));
+    expect(screen.getByTestId("app-update-card").dataset.kind).toBe("pending");
+    expect(screen.queryByTestId("app-update-banner")).toBeNull();
+    await act(async () => {});
+  });
+
+  it("inbox dismiss clears the PR card while a read from before Dismiss finishes", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [prReady, { ...prReady, kind: "pr_failed" }] });
     const client = daemon.client(), reads: ((items: InboxItemDTO[]) => void)[] = [];
     const { sync } = mount(daemon, client);
     await screen.findByRole("region", { name: "Ship ls --json" }); await act(async () => sync.idle()); vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve))); act(() => { void sync.refresh(); });
-    expect(within(card("pr_failed")).queryByRole("button", { name: "Not now" })).toBeNull();
-    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Not now" }));
+    expect(within(card("pr_failed")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/sup1/pr-not-now", query: {}, body: {} }]));
     await waitFor(() => expect(card("pr_ready")).toBeNull());
     await act(async () => reads[0]([prReady, { ...prReady, kind: "pr_failed" }])); expect(card("pr_ready")).toBeNull(); await act(async () => { reads[1](daemon.data.inbox); await sync.idle(); });
     expect(card("pr_failed")).toBeTruthy();
+  });
+
+  it("dismisses a failed PR and opens an existing PR on GitHub", async () => {
+    const failed: InboxItemDTO = { ...prOpened, kind: "pr_failed" };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root], inbox: [failed] });
+    const openUrl = vi.fn(async () => {});
+    const { sync, onOpen } = mount(daemon, undefined, { openUrl });
+    await waitFor(() => expect(card("pr_failed")).toBeTruthy());
+    const buttons = within(card("pr_failed"));
+    expect(buttons.getAllByRole("button")).toHaveLength(2);
+    fireEvent.click(buttons.getByRole("button", { name: "Open on GitHub" }));
+    expect(openUrl).toHaveBeenCalledWith(failed.url);
+    expect(onOpen).not.toHaveBeenCalled();
+    // Opening it on GitHub dismisses the card.
+    await waitFor(() => expect(card("pr_failed")).toBeNull());
     sync.stop();
+    cleanup();
+    daemon.data.inbox = [{ ...failed, url: null }];
+    const { sync: noReviewSync } = mount(daemon, undefined, { onOpen: undefined });
+    await waitFor(() => expect(card("pr_failed")).toBeTruthy());
+    expect(within(card("pr_failed")).getAllByRole("button")).toHaveLength(1);
+    fireEvent.click(within(card("pr_failed")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(card("pr_failed")).toBeNull());
+    noReviewSync.stop();
+  });
+
+  it("dismisses an opened PR without a URL", async () => {
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root], inbox: [{ ...prOpened, url: null }] });
+    mount(daemon);
+    await waitFor(() => expect(card("pr_opened")).toBeTruthy());
+    expect(within(card("pr_opened")).getAllByRole("button")).toHaveLength(1);
+    fireEvent.click(within(card("pr_opened")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(card("pr_opened")).toBeNull());
   });
 
   it.each([["rewound", "card"], ["dismissed", "card"], ["rewound", "permission group"], ["dismissed", "permission group"]])("omits stale Inbox %s worker %s", async (reason, surface) => {
     const past = { ...worker.agents![0], status: reason === "rewound" ? "rewound" : "exited", dismissed_at: reason === "dismissed" ? 1 : null };
     const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, { ...worker, agents: [past] }], inbox: [question, waiting], asks: surface === "permission group" ? [{ ...pushes, items: [pushes.items[0]] }] : [] });
-    const { store, sync } = mount(daemon);
+    const { store } = mount(daemon);
     await waitFor(() => expect(store.getState().synced).toBe(true));
     await act(async () => {});
     expect(screen.queryByTestId("permission-card")).toBeNull();
     expect(card("waiting")).toBeNull();
     expect(card("question")).toBeTruthy();
-    sync.stop();
   });
 
   it.each(["reload", "inbox", "client"])("discards older permission groups after a newer %s response", async (trigger) => {
@@ -115,7 +219,7 @@ describe("inbox", () => {
     const doc: InboxItemDTO = { kind: "doc", reason: "Check the storage design.", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", request_id: "dr1", doc: reference, section: "Storage" };
     // A paused session remains in the sessions feed after all its agents leave the snapshot.
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: typeof reference === "string" ? "paused" : "idle" }], workspaces: typeof reference === "string" ? [] : [root, worker], inbox: [doc] });
-    const { sync, onOpen, onNavigate } = mount(daemon);
+    const { onOpen, onNavigate } = mount(daemon);
     await screen.findByRole("region", { name: "Ship ls --json" });
     fireEvent.click(within(card("doc")).getByRole("button", { name: "Open" }));
     expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: reference, section: "Storage" });
@@ -124,6 +228,19 @@ describe("inbox", () => {
     fireEvent.click(within(card("doc")).getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/dr1/dismiss", query: {}, body: {} }]));
     await waitFor(() => expect(card("doc")).toBeNull());
+  });
+
+  it("review requested card opens the shared doc, and the author's cards open it too", async () => {
+    const asked: InboxItemDTO = { kind: "review_requested", reason: "Review requested", detail: "Org presets", doc: "lib-1", request_id: "p1" };
+    const changes: InboxItemDTO = { kind: "changes_requested", reason: "Changes requested", detail: "Other plan", doc: "lib-2", request_id: "p2" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [asked, changes] });
+    const { sync, onNavigate } = mount(daemon);
+    await waitFor(() => expect(card("review_requested")).toBeTruthy());
+    expect(card("changes_requested")).toBeTruthy();
+    fireEvent.click(within(card("review_requested")).getByRole("button", { name: "Open" }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "shared-design", doc: "lib-1", title: "Org presets", repo: REPO });
+    fireEvent.click(within(card("changes_requested")).getByRole("button", { name: "Open" }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: "lib-2" });
     sync.stop();
   });
 
@@ -134,13 +251,29 @@ describe("inbox", () => {
       workspaces: [root, worker],
       inbox: [question, waiting, notice, prReady],
     });
-    const { sync, onOpen } = mount(daemon);
+    const openUrl = vi.fn(async () => {});
+    const { onOpen } = mount(daemon, daemon.client(), { openUrl });
     const group = await screen.findByRole("region", { name: "Ship ls --json" });
     expect(within(group).getAllByTestId("inbox-card")).toHaveLength(3);
-    // The PR brindle prepared (its checks passed, nothing pushed): Review & open PR opens the session's sheet.
-    expect(card("pr_ready").textContent).toContain("PR ready for your approval");
-    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Review & open PR" }));
-    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "review" });
+    // The PR brindle prepared (its checks passed, nothing pushed): one press of Open PR opens it, no review sheet.
+    expect(card("pr_ready").textContent).toContain("PR ready");
+    expect(card("pr_ready").textContent).toContain("Ship ls --json");
+    expect(within(card("pr_ready")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    daemon.readyForPr("sup1");
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Open PR" }));
+    expect(within(card("pr_ready")).getByRole("button", { name: "Opening…" })).toHaveProperty("disabled", true);
+    await waitFor(() => expect(daemon.prs).toHaveLength(1));
+    expect(daemon.prs[0].title).toBe("Ship ls --json");
+    // The job ended with a real PR: the card becomes "PR opened" (one line, the PR, Open on GitHub, Dismiss), no review sheet.
+    await waitFor(() => expect(card("pr_opened")).toBeTruthy());
+    expect(card("pr_ready")).toBeNull();
+    expect(card("pr_opened").textContent).toContain("PR opened");
+    expect(card("pr_opened").textContent).toContain("#1 Ship ls --json");
+    expect(within(card("pr_opened")).queryByRole("button", { name: "Review & open PR" })).toBeNull();
+    expect(within(card("pr_opened")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    fireEvent.click(within(card("pr_opened")).getByRole("button", { name: "Open on GitHub" }));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/example/proj/pull/1");
+    expect(onOpen).not.toHaveBeenCalled();
     expect(group.textContent).toContain("sup1 · proj");
     fireEvent.click(within(group).getByRole("button", { name: "Open the session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO);
@@ -165,9 +298,50 @@ describe("inbox", () => {
     expect(card("org_notice").textContent).toContain("from your org's admin");
     expect(within(card("org_notice")).queryByRole("button", { name: "Go to session ›" })).toBeNull();
     fireEvent.click(within(card("org_notice")).getByRole("button", { name: "Mark read" }));
-    await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/n-18/read", query: {}, body: {} }]));
+    await waitFor(() => expect(posts(daemon).filter((p) => p.path.startsWith("/inbox/"))).toEqual([
+      { method: "POST", path: "/inbox/sup1/pr-not-now", query: {}, body: {} },   // opening the PR on GitHub dismissed its card
+      { method: "POST", path: "/inbox/n-18/read", query: {}, body: {} }]));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Your org" })).toBeNull());
-    sync.stop();
+  });
+
+  it("Open PR when gh can't open the PR: no PR exists, so the card stays and offers the compare page; a PR opened elsewhere notifies with its number, title and link", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [prReady] });
+    daemon.readyForPr("sup1");
+    const client = daemon.client(), openUrl = vi.fn(async () => {});
+    vi.spyOn(client, "openSessionPr").mockResolvedValue({ job: "j9", kind: "session.pr" } as never);
+    const { store } = mount(daemon, client, { openUrl });
+    await screen.findByRole("region", { name: "Ship ls --json" });
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Open PR" }));
+    await waitFor(() => expect(client.openSessionPr).toHaveBeenCalled());
+    const compare = "https://github.com/o/r/compare/main...sess?expand=1";
+    act(() => daemon.publish("job.done", { root_id: "sup1", agent_id: "sup1", payload: { job: "j9", job_kind: "session.pr", result: { url: compare } } }));
+    await waitFor(() => expect(within(card("pr_ready")).getByRole("alert").textContent).toContain("compare page"));
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Open on GitHub" }));
+    expect(openUrl).toHaveBeenCalledWith(compare);
+
+    // The OS notification for an opened PR carries which one and its link.
+    const notes: string[] = [];
+    const stop = watchInbox(store, { notify: (title, body, link) => notes.push(`${title}|${body}|${link}`), count: () => undefined });
+    act(() => store.dispatch({ type: "snapshot", workspaces: [], inbox: [prReady] }));
+    act(() => store.dispatch({ type: "snapshot", workspaces: [], inbox: [prReady, prOpened] }));
+    expect(notes).toEqual(["Pull request|sup1: PR opened: #408 Ship ls --json · https://github.com/o/r/pull/408|https://github.com/o/r/pull/408"]);
+    stop();
+
+    // The real sink: the link rides in the notification, and the Open on GitHub action opens it in the browser.
+    let performed: ((e: { actionId: string; notification: { extra?: Record<string, unknown> } | null }) => void) | undefined;
+    const shown: unknown[] = [];
+    const opened = vi.fn(async () => {});
+    const sink = tauriSink({
+      isPermissionGranted: async () => true,
+      requestPermission: async () => "granted",
+      sendNotification: (o) => shown.push(o),
+      registerActionTypes: async () => {},
+      onAction: async (cb) => { performed = cb; },
+    }, opened);
+    sink.notify("Pull request", "PR opened", "https://github.com/o/r/pull/408");
+    await waitFor(() => expect(shown).toEqual([{ title: "Pull request", body: "PR opened", actionTypeId: "pr-opened", extra: { url: "https://github.com/o/r/pull/408" } }]));
+    performed!({ actionId: "open-github", notification: { extra: { url: "https://github.com/o/r/pull/408" } } });
+    expect(opened).toHaveBeenCalledWith("https://github.com/o/r/pull/408");
   });
 
   it("visual ready card opens the reader and dismisses independently on a read refresh", async () => {
@@ -190,26 +364,31 @@ describe("inbox", () => {
     expect(screen.queryByText("Flow A")).toBeNull();
     expect(screen.getByText("Flow B")).toBeTruthy();
     expect(screen.queryByText("Pick a flow")).toBeNull();
-    sync.stop();
   });
 
   it("a visual decision whose session hasn't loaded yet waits to open and never reads as answered", async () => {
     const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "asks you to choose" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [], inbox: [visualItem] });
-    const { sync } = mount(daemon);
+    mount(daemon);
     await screen.findAllByTestId("inbox-card");
     expect((within(card("visual")).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(true);
     expect(card("visual").textContent).not.toContain("answered in its session");
-    sync.stop();
   });
 
-  it.each([[true, "Yes"], [false, "Not now"]])("an offer to plan first is an Inbox card answered %s with %s through the goal route", async (accepted, label) => {
+  it.each([[true, "Yes", false], [false, "Not now", false], [true, "Yes", true]])("plan offer opens the session after the answer (failure: %s)", async (accepted, label, fails) => {
     const context = { session_name: "Command tools", goal: "Ship ls --json", detail: "Support shell scripts", workers: 3, repos: 2,
       milestones: [{ title: "Parse arguments", verified: true }, { title: "Encode output", verified: false }],
       reasons: ["This work spans 2 repositories.", "3 workers have been assigned to this goal."] };
     const offer: InboxItemDTO = { kind: "plan_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "This looks big: plan it first?", detail: context.goal, plan_offer: context };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [offer], goal: { root_id: "sup1", plan_offer: "o1" } as GoalDTO });
-    const { sync, onOpen } = mount(daemon);
+    const client = daemon.client();
+    const actionClient = fails
+      ? new DaemonClient({ baseUrl: client.baseUrl, token: client.token, fetch: async (input, init) => {
+        if (String(input).endsWith("/goal/plan-offer")) throw new Error("offer unavailable");
+        return daemon.fetch(input, init);
+      } })
+      : client;
+    const { onOpen } = mount(daemon, actionClient);
     await screen.findByText("This looks big: plan it first?");
     const body = within(card("plan_offer")).getByTestId("card-detail");
     for (const value of [context.session_name, context.goal, context.detail, ...context.milestones.map((m) => m.title), ...context.reasons]) {
@@ -222,9 +401,22 @@ describe("inbox", () => {
     // The link appears once the session list has loaded, which may land after the inbox.
     fireEvent.click(await within(card("plan_offer")).findByRole("button", { name: "Go to session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
-    fireEvent.click(within(card("plan_offer")).getByRole("button", { name: label }));
-    await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
-    sync.stop();
+    onOpen.mockClear();
+    act(() => {
+      const button = within(card("plan_offer")).getByRole("button", { name: label });
+      fireEvent.click(button);
+      fireEvent.click(button);
+    });
+    if (fails) {
+      expect(await screen.findByText("offer unavailable")).toBeTruthy();
+      expect(onOpen).not.toHaveBeenCalled();
+      expect(screen.getByTestId("inbox-card")).toBeTruthy();
+    } else {
+      await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
+      expect(posts(daemon).filter((r) => r.path === "/goal/plan-offer")).toHaveLength(1);
+      await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+      expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+    }
   });
 
   it("starts a sign-in from its card", async () => {
@@ -234,7 +426,7 @@ describe("inbox", () => {
     const credentials: InboxItemDTO = { kind: "credentials", reason: "credentials need attention", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: null, action: { method: "POST", path: "/v1/providers/codex/login" } };
     const login: InboxItemDTO = { kind: "login", reason: "cloud login expired", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "brindle account login" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, codexWorker], inbox: [credentials, login, notice] });
-    const { sync } = mount(daemon);
+    mount(daemon);
     await screen.findByRole("region", { name: "Ship ls --json" });
 
     // A lapsed sign-in: Sign in starts that provider CLI's own login on the engine (Codex, as the engine's route
@@ -251,7 +443,6 @@ describe("inbox", () => {
     fireEvent.click(within(cloud).getByRole("button", { name: "Sign in to brindle" }));
     await waitFor(() => expect(posts(daemon).map((r) => r.path)).toContain("/account/login"));
     await waitFor(() => expect(within(cloud).getByTestId("cloud-login").textContent).toContain("Signed in again"));
-    sync.stop();
   });
 
   it("approves a plan, accepts or declines proposed checks, on the card, at once; a refusal comes back as one line on the card", async () => {
@@ -259,7 +450,7 @@ describe("inbox", () => {
     const checks: InboxItemDTO = { kind: "proposed_checks", reason: "checks proposed", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "npm test\nnpm run build" };
     const review: InboxItemDTO = { kind: "review", reason: "to review", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, name: "Login fix" }], workspaces: [root, worker], inbox: [plan, checks, review] });
-    const { sync, onOpen } = mount(daemon);
+    const { onOpen } = mount(daemon);
     // A named session is headed by its name, not its goal.
     const group = await screen.findByRole("region", { name: "Login fix" });
     // A plan: Approve alone (changes are asked for in its session), no reply field, no undo; the plan whole on the
@@ -286,7 +477,6 @@ describe("inbox", () => {
     expect(card("review").textContent).toContain("handled in its session");
     fireEvent.click(within(card("review")).getByRole("button", { name: "Go to session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "w1");
-    sync.stop();
   });
 
   it("self-repair: a setup problem the engine can fix is a card with one Fix, a job on the engine; the card clears when it is done, or shows the job's error", async () => {
@@ -295,14 +485,15 @@ describe("inbox", () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [setupItem, question] });
     daemon.deferFixes = true;
     daemon.fixFails = true;
-    const { sync } = mount(daemon);
+    mount(daemon);
     const group = await screen.findByRole("region", { name: "Setup" });
     expect(group.textContent).toContain("brindle on this computer");
     const setup = card("setup");
     expect(setup.textContent).toContain("Codex's trust of brindle's permission hook was removed");
     expect(setup.textContent).toContain("Fix makes Codex trust brindle's permission hook again");
-    // One button, inline: no confirmation, no sheet, no Go to session (it has none).
-    expect(within(setup).getAllByRole("button").map((b) => b.textContent)).toEqual(["Fix"]);
+    // Inline repair and dismissal; setup has no session to open.
+    expect(within(setup).getByRole("button", { name: "Fix" })).toBeTruthy();
+    expect(within(setup).queryByRole("button", { name: "Go to session ›" })).toBeNull();
     fireEvent.click(within(setup).getByRole("button", { name: "Fix" }));
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/setup/codex-hook", query: {}, body: {} }]));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -323,12 +514,11 @@ describe("inbox", () => {
     // The question's card is untouched by any of it.
     expect(card("question")).toBeTruthy();
     expect(posts(daemon).map((r) => r.path)).toEqual(["/setup/codex-hook", "/setup/codex-hook"]);
-    sync.stop();
   });
 
   it("one permission card per source: a held request (Deny, Allow once, Allow ▾, details collapsed) and an agent-window prompt (a way to the window), under a one-line stall banner", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal], asks: [pushes] });
-    const { sync, onOpen } = mount(daemon);
+    const { onOpen } = mount(daemon);
     const held = await screen.findByRole("article", { name: "Allow pushes into main?" });
     const cards = screen.getAllByTestId("permission-card");
     expect(cards.map((c) => c.dataset.source)).toEqual(["hook", "window"]);
@@ -349,7 +539,27 @@ describe("inbox", () => {
 
     fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
     await waitFor(() => expect(posts(daemon).find((r) => r.path === "/permissions/asks/decide")?.body).toEqual({ key: pushes.key, scope: "general", mode: "once" }));
-    sync.stop();
+  });
+
+  it("a bare push offers only Allow once and Deny, explains why, and translates a stale refusal", async () => {
+    const reason = "This push doesn't name its branch, so it can only be allowed once.";
+    const exact = { ...pushes.scopes[0], pattern: "? → ? @ ?", modes: ["once", "deny"] };
+    const bare: AskGroupDTO = {
+      ...pushes, general: exact, scopes: [exact], modes: ["once", "deny"], limits: null,
+      save_reason: reason, items: [{ ...pushes.items[0], summary: "git push", exact: exact.pattern }],
+    };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [bare] });
+    const client = daemon.client();
+    vi.spyOn(client, "decidePermissionAsks").mockRejectedValue(new Error("nothing in this scope can be approved: pushes outside this scope"));
+    mount(daemon, client);
+    const held = await screen.findByRole("article", { name: bare.title });
+    expect(within(within(held).getByRole("group", { name: "Decision" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Deny", "Allow once"]);
+    expect(within(held).getByText(reason)).toBeTruthy();
+    fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
+    const refusal = await screen.findByRole("alert");
+    expect(refusal.textContent).not.toContain("nothing in this scope can be approved");
+    expect(refusal.textContent).not.toContain("pushes outside this scope");
+    expect(refusal.textContent).toContain("Allow once");
   });
 
   it.each([
@@ -358,18 +568,17 @@ describe("inbox", () => {
   ])("unchecked commands opt-in: the ask (%s) offers only Deny and Allow once, and a link to the Settings row", async (_, rule, reason) => {
     const unchecked: AskGroupDTO = { ...pushes, key: "k-unchecked", title: "Allow this unchecked command?", modes: ["once", "deny"], rule, items: pushes.items.map((a) => ({ ...a, rule, reason })) };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [unchecked] });
-    const { sync, onOpenRule } = mount(daemon);
+    const { onOpenRule } = mount(daemon);
     const held = await screen.findByRole("article", { name: "Allow this unchecked command?" });
     expect(within(held).getAllByRole("button").filter((b) => ["Deny", "Allow once", "Allow"].includes(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Deny", "Allow once"]);
     fireEvent.click(within(held).getByRole("button", { name: "Stop asking for these…" }));
     expect(within(held).queryByRole("button", { name: /rule/ })).toBeNull();
     expect(onOpenRule).toHaveBeenCalledWith("unchecked-commands");
-    sync.stop();
   });
 
   it("a hold with no group: the request is in the headline, Allow never saves a grant by itself, and a refusal shows on the card", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal] });
-    const { sync } = mount(daemon);
+    mount(daemon);
     const cards = await screen.findAllByTestId("permission-card");
     expect(cards.map((c) => c.dataset.source)).toEqual(["hook", "window"]);
     // Both requests are named with Details closed.
@@ -383,7 +592,6 @@ describe("inbox", () => {
     daemon.data.inbox = [];
     fireEvent.click(within(cards[0]).getByRole("button", { name: "Deny" }));
     await waitFor(() => expect(within(cards[0]).getByRole("alert")).toBeTruthy());
-    sync.stop();
   });
 
   it("a decision out blocks a second one from the menu's duration button", async () => {
@@ -391,7 +599,7 @@ describe("inbox", () => {
     const client = daemon.client();
     let settle!: (got: AskDecisionDTO) => void;
     const decide = vi.spyOn(client, "decidePermissionAsks").mockImplementation(() => new Promise<AskDecisionDTO>((resolve) => (settle = resolve)));
-    const { sync } = mount(daemon, client);
+    mount(daemon, client);
     const item = await screen.findByRole("article", { name: "Allow pushes into main?" });
     fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
     fireEvent.click(within(item).getByRole("menuitem", { name: /^For 30 minutes/ }));
@@ -407,7 +615,6 @@ describe("inbox", () => {
     await waitFor(() => expect(within(item).getByRole("button", { name: "Allow once" })).toHaveProperty("disabled", false));
     fireEvent.click(within(item).getByRole("button", { name: "Allow once" }));
     expect(decide).toHaveBeenCalledTimes(2);
-    sync.stop();
   });
 
   it("Always for <group item> sets that subcategory's override through the group baselines, then resumes the request", async () => {
@@ -417,7 +624,7 @@ describe("inbox", () => {
       items: [{ ...ask("w1", "req-1", "bash", "npm install left-pad", 60, "d-none"), rule: null, limits: null, reason: "the shell/install baseline is ask" }],
     };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [install] });
-    const { sync } = mount(daemon);
+    mount(daemon);
     const item = await screen.findByRole("article", { name: "Allow npm install?" });
     expect(within(item).getByTestId("permission-chip")).toBeTruthy();
     fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
@@ -427,7 +634,6 @@ describe("inbox", () => {
     // An override, not a saved action.
     expect(daemon.data.policy.saved).toEqual([]);
     expect(daemon.data.policy.groups?.shell.subcategories).toEqual({ install: "allow" });
-    sync.stop();
   });
 
   it("org policy shown to member: an org Ask is labelled with the org and its reason, saves only what the org allows; a Block is one calm notice; Settings shows locked rows", async () => {
@@ -470,7 +676,7 @@ describe("inbox", () => {
       token: TOKEN,
       fetch: (input, init) => (down ? Promise.reject(new TypeError("connection refused")) : daemon.fetch(input, init)),
     });
-    const { sync } = mount(daemon, client);
+    mount(daemon, client);
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("connection refused"));
     down = false;
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -478,7 +684,6 @@ describe("inbox", () => {
     daemon.data.inbox = [];
     daemon.publish("message.queued", { agent_id: "sup1" });
     await waitFor(() => expect(screen.getByTestId("all-clear")).toBeTruthy());
-    sync.stop();
   });
 
 });

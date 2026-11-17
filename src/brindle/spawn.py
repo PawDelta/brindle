@@ -594,6 +594,17 @@ def detach(argv: list[str], **popen: Any) -> subprocess.Popen:
     return start(argv, start_new_session=True, **popen)
 
 
+def become(argv: list[str]) -> None:
+    """Replace this process with ``argv`` (found on PATH), in this process's
+    environment: the last step of a pane's shim (brindle.login_shell_env).
+    No process is started, so there is nothing to gate or to look after."""
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as e:
+        print(f"brindle: could not start {argv[0]}: {e.strerror}", file=sys.stderr)
+        raise SystemExit(127) from None
+
+
 @dataclass
 class ReadTiming:
     """Process wall time for an observed read, excluding admission waits."""

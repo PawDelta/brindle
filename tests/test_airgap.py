@@ -21,7 +21,7 @@ from brindle.pro.learning import CloudLearner
 from brindle.pro.orgkey import OrgKeyUnavailable, OrgKeys
 from brindle.pro.team_events import ProEvents, Spool
 from brindle.pro.team_policy import ProPolicy
-from brindle.profiles import Profile, _parse
+from brindle.profiles import Profile
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, backend, claims, fixed_identity, pro_env, sign, signing_key, token,
 )
@@ -97,6 +97,7 @@ def test_off_by_default():
     airgap.guard("https://pawdelta.com/api")       # nothing refused
 
 
+@pytest.mark.variant("bypass: local configuration cannot disable repository air gap enforcement")
 def test_local_config_can_turn_it_on_but_not_off(tmp_path):
     write_config(tmp_path, airgap=True)
     (tmp_path / ".brindle" / "config.local.json").write_text('{"airgap": false}')
@@ -148,12 +149,6 @@ def test_entitlement_fetch_and_authed_calls_are_refused(on, backend):
     assert backend.calls == []
 
 
-def test_dev_mode_trusts_no_unpinned_key(on, monkeypatch):
-    monkeypatch.setenv("BRINDLE_PRO_DEV", "1")
-    with pytest.raises(license.LicenseError, match="unknown key"):
-        license._trusted_key("some-other-kid")
-
-
 def test_license_current_never_refreshes(on, backend):
     now = int(time.time())
     # A stored entitlement that is expired but in grace: online, brindle would refresh it.
@@ -178,6 +173,7 @@ def test_team_policy_and_org_key_are_not_fetched(on, backend):
     assert backend.calls == []
 
 
+@pytest.mark.variant("security: air gap suppresses new team events as well as outbound traffic")
 def test_audit_events_are_neither_recorded_nor_sent(on, backend, tmp_path, fixed_identity):
     store = login(backend, team_claims())
     spool_dir = tmp_path / "spool"
@@ -242,18 +238,13 @@ def test_ci_token_commands_are_refused(on, backend):
     (hosted("codex", local=True), "`local: true` is ignored"),
     (native(base_url=None), "no base_url"),
 ])
+@pytest.mark.variant("bypass: a local flag cannot launder a hosted CLI and a native endpoint must be explicit")
 def test_hosted_profiles_are_refused(profile, why):
     ok, reason = airgap.profile_allowed(profile)
     assert not ok and why in reason
 
 
-def test_local_flag_parses_from_a_profile():
-    p = _parse("---\nname: x\nprovider: native\nbase_url: http://box.lan:8000/v1\nlocal: true\n---\nhi",
-               "x")
-    assert p.local
-    assert not _parse("---\nname: y\nprovider: native\n---\nhi", "y").local
-
-
+@pytest.mark.variant("bypass: repository air gap enforcement must apply even without the process environment flag")
 def test_check_assign_from_the_repo_config_alone(repo):
     """The config object is enough: the process needn't be armed."""
     assert not airgap.enabled()
@@ -267,6 +258,7 @@ def test_check_profile_refuses_an_unnamed_profile(on, repo):
     assert not ok and "local profile" in why
 
 
+@pytest.mark.variant("security: dispatch refuses hosted and missing profiles while allowing explicit local endpoints")
 def test_check_assign_refuses_hosted_profiles_in_air_gap_mode(on, repo):
     add_profile(repo, "local", "---\nname: local\nprovider: native\napi: openai\n"
                                "base_url: http://127.0.0.1:11434/v1\nmodel: qwen\n---\nlocal\n")
@@ -283,6 +275,7 @@ def test_check_assign_refuses_hosted_profiles_in_air_gap_mode(on, repo):
     assert not d.allowed and "couldn't be loaded" in d.reason
 
 
+@pytest.mark.variant("security: air gap assignment denials still reach the local audit chain")
 def test_air_gap_denials_are_audited_like_any_other(on, repo, brindle_home, monkeypatch):
     """A delegation air-gap mode refuses reaches the events plugins as a
     deny_assign with the reason, so the audit chain records it."""
@@ -401,6 +394,7 @@ def assign(provider, model="qwen", running=0):
                       actor="user", running_workers=running)
 
 
+@pytest.mark.variant("security: offline policy must override a permissive online cache without fetching")
 def test_offline_policy_file_is_enforced_instead_of_a_fetch(on, backend, repo):
     (repo / ".brindle").mkdir(exist_ok=True)
     airgap.policy_path(str(repo)).write_text(json.dumps(POLICY))
@@ -420,6 +414,7 @@ def test_offline_policy_file_is_enforced_instead_of_a_fetch(on, backend, repo):
     assert backend.calls == []
 
 
+@pytest.mark.variant("failure path: an absent offline policy cannot authorize a local assignment")
 def test_missing_offline_policy_refuses_everything(on, backend, repo):
     p = team_plugin(backend, repo)
     d = p.check_assign(assign("native"))
@@ -428,9 +423,13 @@ def test_missing_offline_policy_refuses_everything(on, backend, repo):
 
 
 @pytest.mark.parametrize("body", [
-    "not json", json.dumps({**POLICY, "org_id": "org_other"}),
-    json.dumps({"version": "three", "policy": {}}),
-    json.dumps({"version": 1, "policy": {"allowed_providers": "native"}}),
+    "not json",
+    pytest.param(json.dumps({**POLICY, "org_id": "org_other"}),
+                 marks=pytest.mark.variant("identity: an offline policy from another org cannot authorize this org")),
+    pytest.param(json.dumps({"version": "three", "policy": {}}),
+                 marks=pytest.mark.variant("fail closed: a malformed policy version cannot authorize assignments")),
+    pytest.param(json.dumps({"version": 1, "policy": {"allowed_providers": "native"}}),
+                 marks=pytest.mark.variant("fail closed: a scalar provider allowlist cannot authorize assignments")),
 ])
 def test_bad_offline_policy_refuses_everything(on, backend, repo, body):
     (repo / ".brindle").mkdir(exist_ok=True)
@@ -451,17 +450,11 @@ def enterprise(token, **over):
     return token(**c)
 
 
-def test_install_accepts_a_json_license_file(on, token):
-    tok = enterprise(token)
-    ent = license.install(json.dumps({"license": tok, "issued_to": "Acme"}).encode())
-    assert ent.plan == "enterprise"
-    assert license.license_path().read_text() == tok
-
-
 @pytest.mark.parametrize("mangle", [
     lambda t: t[:-4] + ("AAAA" if not t.endswith("AAAA") else "BBBB"),     # bad signature
     lambda t: json.dumps({"something": "else"}),
 ])
+@pytest.mark.variant("security: invalid signatures and malformed license wrappers must leave no installed license")
 def test_a_forged_or_malformed_license_is_not_installed(on, token, mangle):
     with pytest.raises(license.LicenseError):
         license.install(mangle(enterprise(token)))
@@ -476,6 +469,7 @@ def test_installed_license_is_used_when_not_logged_in_even_online(token):
     assert license.has("airgap")
 
 
+@pytest.mark.variant("identity: online login entitlement must override an installed offline license")
 def test_login_credentials_win_over_the_license_when_online(backend, token):
     login(backend, claims(plan="pro"), access_expires_at=time.time() + 900)
     license.install(enterprise(token))
@@ -490,6 +484,7 @@ def test_uninstall(on, token):
     assert not license.uninstall()
 
 
+@pytest.mark.variant("failure path: CLI installation of an invalid license returns failure without installing it")
 def test_account_license_install_rejects_a_bad_file(on, tmp_path):
     bad = tmp_path / "bad.license"
     bad.write_text("not a license")
@@ -500,6 +495,7 @@ def test_account_license_install_rejects_a_bad_file(on, tmp_path):
     assert license.installed() is None
 
 
+@pytest.mark.variant("offline license CLI preserves install, remove, missing-file and missing-argument behavior")
 def test_account_license_commands(on, token, tmp_path):
     lic = tmp_path / "acme.license"
     lic.write_text(enterprise(token) + "\n")

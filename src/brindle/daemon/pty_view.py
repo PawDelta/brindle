@@ -55,7 +55,7 @@ log = logging.getLogger(__name__)
 FEATURES = ("RGB,256,mouse,title,bpaste,focus,sync,usstyle,strikethrough,overline,cstyle,"
             "clipboard,hyperlinks")
 MIN_TMUX = (3, 2)               # `-T` (client features) is 3.2's
-VIEW_PREFIX = "brindle-view-"
+VIEW_PREFIX = tmux.VIEW_PREFIX
 KEY_TABLE = "brindle-view"
 # tmux's stock root-table bindings for the pane's own mouse, by the oldest
 # server each is for (pty_view.rs's MOUSE_BINDINGS: a later one replaces its key's).

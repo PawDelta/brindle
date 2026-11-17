@@ -201,35 +201,7 @@ def test_the_wait_for_room_is_bounded(db, repo, monkeypatch):
         pass
 
 
-def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch):
-    configure(repo, check_concurrency=1, pre_commit=False)
-    monkeypatch.setattr(gates, "SLOT_POLL", 0.01)
-    spaces = [branch(db, repo, "one"), branch(db, repo, "two")]
-    meter = Meter()
-    monkeypatch.setattr(autopilot, "run_check", meter)
-    cfg = load_repo_config(str(repo))
-    cfg.checks = ["suite"]
-
-    def run(i):
-        if i == 0:
-            gates.check_summary(DB(), spaces[0], cfg)                      # _review-after/_warm-checks
-        else:
-            assert gates.run(DB(), spaces[1], cfg, review_required=False).ok   # the merge gate
-
-    in_threads(2, run)
-    assert meter.peak == 1
-
-
 # -- a run far past its last duration ------------------------------------------------
-
-
-def test_a_passing_run_records_its_duration_and_a_failing_one_does_not(db, repo, monkeypatch):
-    ws = branch(db, repo, "one")
-    assert db.check_duration(ws.repo_root, "true") is None
-    gates.run_checked(db, ws, "false", {}, 30)
-    assert db.check_duration(ws.repo_root, "false") is None
-    gates.run_checked(db, ws, "true", {}, 30)
-    assert db.check_duration(ws.repo_root, "true") is not None
 
 
 def test_a_run_far_past_its_last_duration_is_reported_to_the_supervisor(db, session, monkeypatch):

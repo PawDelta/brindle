@@ -19,7 +19,7 @@ ENTERPRISE_URL = "https://pawdelta.com/brindle/enterprise"
 
 # The paid features: (entitlement feature, cheapest plan with it, what it is, how to use it).
 FEATURES = (
-    ("analysis_docs", "pro", "analysis deliverables and personal library",
+    ("analysis_docs", "pro", "approved plans and personal library",
      "docs you explicitly request, uploaded when their branch merges"),
     ("analysis_docs_team", "team", "shared team analysis library", "team analysis document scopes"),
     ("analysis_docs_enterprise", "enterprise", "org analysis library and controls",
@@ -738,15 +738,16 @@ class ProAccount(_OrgCommands):
                   "(pool coarse records with the other orgs in your company only; "
                   "`brindle account org learning-share`)")
 
-    def cmd_login(self, base: str | None, device: bool = False, open_url=None) -> int:
+    def cmd_login(self, base: str | None, device: bool = False, open_url=None, watch=None) -> int:
         """Browser sign-in when a browser can open here (a terminal, not SSH,
         a display on Linux), else, or with ``--device``, the device code.
         ``open_url``: what opens the authorize URL instead (the desktop app
         opens it in the system browser), which also makes the browser flow
-        the first try."""
+        the first try. ``watch``: as for :func:`auth.login`."""
         client = auth.Client(base, transport=self.transport)
         browser = not device and (open_url is not None or loopback.can_open_browser(self.out))
-        ent = auth.login(client, self.store, show=self._say, browser=browser, open_url=open_url)
+        ent = auth.login(client, self.store, show=self._say, browser=browser, open_url=open_url,
+                         watch=watch)
         back = cloud_credential.take_reauth()   # a federated org's sign-in expired: return to it
         if back and back != ent.org_id:
             try:

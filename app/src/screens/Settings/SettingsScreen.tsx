@@ -88,10 +88,13 @@ import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PRO
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
+import { DocFormat } from "./DocFormat";
 import { DocSwitches } from "./DocSwitches";
 import { Storage } from "./Storage";
 import { TeamDestination } from "./TeamDestination";
+import { Integrations } from "./Integrations";
 import { OrgApprovals } from "./OrgApprovals";
+import { ReviewPolicies } from "./ReviewPolicies";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
@@ -174,6 +177,7 @@ const LEDE: Record<SettingsTab, string> = {
   general: "Your settings apply to every project; a project can override them.",
   providers: "How brindle reaches each model and your repositories.",
   permissions: "How Claude's permission requests are handled, your rules, and your organization's limits.",
+  format: "The templates designs start from, how they are named, and what an empty required section stops.",
   storage: "What brindle keeps on this machine.",
   project: "This repo's settings: what the team sets, what is just for you, and what follows your own.",
   about: "The engine's version and health, and this app.",
@@ -464,6 +468,51 @@ const MODE_ROWS: { key: ModeKey; name: string; testId: string; modes: ModeChoice
     ],
   },
 ];
+
+/* Local extension until the shared client includes the new daemon setting. */
+type QuotaSettings = UserSettings & { quota_switch?: "ask" | "auto" };
+
+function QuotaSwitchSetting({ client }: { client: DaemonClient }) {
+  const id = useId();
+  const [mode, setMode] = useState<"ask" | "auto" | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const seq = useRef(0);
+  useEffect(() => {
+    const mine = ++seq.current;
+    setMode(null);
+    setSaving(false);
+    setError(null);
+    client.userSettings().then(
+      (s: QuotaSettings) => { if (mine === seq.current) setMode(s.quota_switch ?? "ask"); },
+      (e: unknown) => { if (mine === seq.current) setError(message(e)); },
+    );
+    return () => { ++seq.current; };
+  }, [client]);
+  const pick = async (next: "ask" | "auto") => {
+    if (mode === null || saving || mode === next) return;
+    const mine = ++seq.current;
+    setSaving(true);
+    setError(null);
+    try {
+      const body: Partial<QuotaSettings> = { quota_switch: next };
+      const settings: QuotaSettings = await client.patchUserSettings(body);
+      if (mine === seq.current) setMode(settings.quota_switch ?? "ask");
+    } catch (e) {
+      if (mine === seq.current) setError(message(e));
+    } finally {
+      if (mine === seq.current) setSaving(false);
+    }
+  };
+  return <Row label="When quota runs out" htmlFor={id} help="Choose whether brindle asks before switching providers.">
+    <select id={id} className={`${field} max-w-72`} value={mode ?? "ask"} disabled={mode === null || saving}
+      onChange={(e) => void pick(e.target.value as "ask" | "auto")}>
+      <option value="ask">Ask me</option>
+      <option value="auto">Switch automatically</option>
+    </select>
+    {error && <span role="alert">{error}</span>}
+  </Row>;
+}
 
 function PermissionMode({ client }: { client: DaemonClient }) {
   const [settings, setSettings] = useState<UserSettings | null>(null);
@@ -1404,6 +1453,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       {config && (
         <Section id="your-settings" title="Your settings" blurb="Saved to ~/.brindle/config.json and applied to every project, unless a repo sets one itself." testId="your-settings">
           {common.map(yourRow)}
+          <QuotaSwitchSetting client={client} />
           {more && others.map(yourRow)}
           <div className="flex flex-col gap-1 px-s2 py-1">
             <div className="flex flex-wrap items-center gap-s2">
@@ -1448,6 +1498,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
 
       <DocSwitches client={client} />
       <TeamDestination client={client} />
+      <Integrations client={client} />
       </Pane>
 
       <Pane id="permissions" {...panes}>
@@ -1462,6 +1513,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
           <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
             <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
               <OrgApprovals client={client} />
+            </Row>
+            <Row label="Review policies" help="Enterprise: who must approve a design before it is built." wide>
+              <ReviewPolicies client={client} />
             </Row>
           </Section>
       </Pane>
@@ -1588,6 +1642,10 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       <Section id="github" title="GitHub" blurb="How brindle reaches your private repositories over HTTPS." testId="github">
         <GithubRow client={client} />
       </Section>
+      </Pane>
+
+      <Pane id="format" {...panes}>
+        <DocFormat client={client} />
       </Pane>
 
       <Pane id="storage" {...panes}>

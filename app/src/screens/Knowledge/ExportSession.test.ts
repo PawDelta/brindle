@@ -7,7 +7,7 @@ afterEach(() => {
 });
 
 describe("ExportSession", () => {
-  it("signs in with PKCE through the system browser and keeps the tokens out of storage", async () => {
+  it.each([null, "SECRET"])("signs in with PKCE, optional client secret %s, and keeps tokens out of storage", async (secret) => {
     let opened = new URL("https://x.test");
     const requests: { url: string; body?: BodyInit | null }[] = [];
     const deps: ExportDeps = {
@@ -22,7 +22,7 @@ describe("ExportSession", () => {
       },
     };
     const session = new ExportSession(deps);
-    await session.signIn("google", "client-1");
+    await session.signIn("google", "client-1", secret);
 
     expect(opened.searchParams.get("redirect_uri")).toBe("http://127.0.0.1:5151/callback");
     expect(opened.searchParams.get("code_challenge_method")).toBe("S256");
@@ -30,6 +30,7 @@ describe("ExportSession", () => {
     const exchanged = requests[0].body as URLSearchParams;
     expect(exchanged.get("code")).toBe("abc");
     expect(exchanged.get("code_verifier")).toBeTruthy();
+    expect(exchanged.get("client_secret")).toBe(secret);
     expect(session.signedIn("google")).toBe(true);
     expect((await session.uploadToGoogle("Doc", new Uint8Array([1]))).url).toBe("https://docs.google.com/d/1");
     await session.upload("Snapshot", "text/html", new TextEncoder().encode("<p>hello</p>"), false);
@@ -41,26 +42,6 @@ describe("ExportSession", () => {
     expect(sessionStorage.length).toBe(0);
     session.signOut();
     expect(session.signedIn("google")).toBe(false);
-  });
-
-  it("sends the Google client secret in the token request only when export-config gave one", async () => {
-    let opened = new URL("https://x.test");
-    const bodies: URLSearchParams[] = [];
-    const deps: ExportDeps = {
-      openUrl: async (u) => void (opened = new URL(u)),
-      listen: async () => 5151,
-      wait: async () => `code=abc&state=${opened.searchParams.get("state")}`,
-      cancel: vi.fn(),
-      fetch: async (_input, init) => {
-        bodies.push(init?.body as URLSearchParams);
-        return new Response(JSON.stringify({ access_token: "ACCESS" }), { status: 200 });
-      },
-    };
-    const session = new ExportSession(deps);
-    await session.signIn("google", "client-1", "SECRET");
-    await session.signIn("google", "client-1", null);
-    expect(bodies[0].get("client_secret")).toBe("SECRET");
-    expect(bodies[1].has("client_secret")).toBe(false);
   });
 
   it("ignores an answer whose state isn't the one it sent", async () => {

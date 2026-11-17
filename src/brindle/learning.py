@@ -42,6 +42,8 @@ class TaskInfo:
     provider: str | None = None
     model: str | None = None
     started_at: float | None = None
+    # What routing aims for (brindle.routing_goal): (cost, speed, first_try), None: no goal
+    weights: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -50,13 +52,30 @@ class Outcome:
     first report_result), "review" (with ``approved``), "escalated" (the
     supervisor was asked to step in), "merged" or "removed_unmerged" (the
     worker task is over), or "verdict" (with ``approved``) or "no_verdict"
-    (a reviewer run ended)."""
+    (a reviewer run ended).
+
+    On terminal events also: ``cost_usd`` (this agent's dollars at list price
+    from its token usage; None when its price is unknown, never 0 for
+    "unknown"), and for a worker ``review_cost_usd`` (its reviewers' summed
+    dollars, None unless all are priced), ``queue_seconds`` (its task waited
+    before starting), ``idle_seconds`` (it sat idle with no result at the end)
+    and ``failure`` ("no_report", "idle" or "no_commits": it produced
+    nothing usable; None otherwise)."""
     event: str
     approved: bool | None = None
     checks_passed: bool = False
     tokens: int = 0
     wall_seconds: float = 0.0
     at: float = field(default_factory=time.time)
+    cost_usd: float | None = None
+    review_cost_usd: float | None = None
+    queue_seconds: float = 0.0
+    idle_seconds: float = 0.0
+    failure: str | None = None
+
+    @property
+    def stalled(self) -> bool:
+        return self.failure is not None
 
 
 class LearningPlugin(ABC):
@@ -88,6 +107,8 @@ class LearningPlugin(ABC):
 _learners: dict[str, LearningPlugin] = {}
 _settled: set[str] = set()
 _no_verdict: set[str] = set()
+# worker id -> what its unmerged ending looked like before its worktree and rows went
+_captured: dict[str, dict] = {}
 
 
 def plugin(cfg: RepoConfig, repo_root: str) -> LearningPlugin | None:
@@ -108,6 +129,7 @@ def reset() -> None:
     _learners.clear()
     _settled.clear()
     _no_verdict.clear()
+    _captured.clear()
 
 
 def settled(agent_id: str) -> bool:
@@ -140,6 +162,112 @@ def _tokens(db: DB, worker: Agent) -> int:
         return int(u.total) if u else 0
     except Exception:
         return 0
+
+
+def _dollars(db: DB, agent: Agent, repo_root: str) -> float | None:
+    """``agent``'s spend in US dollars at list price, or None when its usage
+    or its model's price is unknown."""
+    try:
+        from brindle import pricing
+        from brindle.usage import agent_usage, usage_cost
+
+        u = agent_usage(db, agent)
+        if u is None:
+            return None
+        extra = pricing.repo_overrides(repo_root)
+        price = pricing.price_for(u.model, extra) or pricing.profile_price(agent.profile, repo_root, extra)
+        return usage_cost(u, extra, fallback=price)
+    except Exception:  # noqa: BLE001 - unknown rather than a failed record
+        return None
+
+
+def _review_dollars(db: DB, ws: Workspace) -> float | None:
+    """The summed spend of ``ws``'s reviewers; 0.0 with none, None when any is
+    unpriced or the workspace's rows are already gone (unknown, not free)."""
+    try:
+        if db.get_workspace(ws.id) is None:
+            return None
+        total = 0.0
+        for a in db.list_agents(ws.id):
+            if a.mode != "review":
+                continue
+            d = _dollars(db, a, ws.repo_root)
+            if d is None:
+                return None
+            total += d
+        return total
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _queue_seconds(db: DB, worker: Agent, repo_root: str) -> float:
+    """How long ``worker``'s task waited (for room or its dependencies) before starting."""
+    try:
+        for t in db.list_tasks(repo_root):
+            if t.agent_id == worker.id and t.started_at and t.created_at:
+                return max(0.0, t.started_at - t.created_at)
+    except Exception:  # noqa: BLE001
+        pass
+    return 0.0
+
+
+def _failure(db: DB, worker: Agent, ws: Workspace) -> tuple[str | None, float]:
+    """(failure, idle seconds) for a worker whose task ended unmerged: "idle"
+    (idle with no report), "no_report" (never reported), "no_commits" (reported
+    but its branch never moved from where it started), else None."""
+    current = db.get_agent(worker.id) or worker
+    if current.result is None:
+        if current.status == "idle":
+            since = current.status_since or current.created_at
+            return "idle", max(0.0, time.time() - since)
+        return "no_report", 0.0
+    if produced_nothing(worker, ws):
+        return "no_commits", 0.0
+    return None, 0.0
+
+
+def produced_nothing(worker: Agent | None, ws: Workspace) -> bool:
+    """Whether ``worker``'s branch is still exactly where it started: its
+    recorded start (rewind's baseline ref, set at session start) equals the
+    branch head. False whenever that can't be shown, e.g. no recorded start:
+    a branch level with its base may just have been merged by plain git."""
+    if worker is None:
+        return False
+    try:
+        from brindle import git, rewind
+
+        ref = rewind.baseline_ref(worker.id)
+        if not git.ok(["rev-parse", "--verify", "-q", ref], ws.repo_root):
+            return False
+        start = git.out(["rev-parse", ref], ws.repo_root)
+        return bool(start) and start == git.out(["rev-parse", f"refs/heads/{ws.branch}"], ws.repo_root)
+    except Exception:  # noqa: BLE001 - no evidence: don't claim it did nothing
+        return False
+
+
+def _ending(db: DB, worker: Agent, ws: Workspace, merged: bool = False) -> dict:
+    failure, idle = (None, 0.0) if merged else _failure(db, worker, ws)
+    return {"failure": failure, "idle_seconds": idle, "review_cost_usd": _review_dollars(db, ws),
+            "queue_seconds": _queue_seconds(db, worker, ws.repo_root),
+            "cost_usd": _dollars(db, worker, ws.repo_root)}
+
+
+def capture(db: DB, ws: Workspace, worker: Agent | None) -> None:
+    """Before removing ``ws`` unmerged: note how ``worker``'s task ended
+    (failure, idle time, its own and its reviewers' spend) while its worktree
+    and rows still exist, for the ``note(merged=False)`` that follows the
+    removal. Never raises."""
+    try:
+        if worker is not None:
+            _captured[worker.id] = _ending(db, worker, ws)
+    except Exception:  # noqa: BLE001
+        log.info("brindle: couldn't capture a worker's ending for the learner", exc_info=True)
+
+
+def forget_capture(worker: Agent | None) -> None:
+    """Drop ``worker``'s captured ending (its removal was refused)."""
+    if worker is not None:
+        _captured.pop(worker.id, None)
 
 
 def _task_info(db: DB, worker: Agent, ws: Workspace) -> TaskInfo:
@@ -186,8 +314,10 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
     """Tell the learner about one event in ``worker``'s task. Does nothing
     without a learner, and never raises."""
     try:
+        captured = None
         if merged is not None and worker is not None:
             _settled.add(worker.id)
+            captured = _captured.pop(worker.id, None)
         p = plugin(cfg, ws.repo_root)
         if p is None or worker is None:
             return
@@ -200,9 +330,11 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
         if escalated:
             p.record(info, Outcome("escalated"))
         if merged is not None:
+            ending = (captured if captured is not None and not merged
+                      else _ending(db, worker, ws, merged=bool(merged)))
             p.record(info, Outcome(
                 "merged" if merged else "removed_unmerged", checks_passed=checks_passed,
-                tokens=_tokens(db, worker), wall_seconds=wall,
+                tokens=_tokens(db, worker), wall_seconds=wall, **ending,
             ))
     except Exception:
         log.exception("brindle: the learner failed to record an outcome")
@@ -234,7 +366,8 @@ def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace
         info = _reviewer_info(db, reviewer, ws, worker)
         wall = max(0.0, time.time() - reviewer.created_at)
         p.record(info, Outcome(event, approved=approved if isinstance(approved, bool) else None,
-                               tokens=_tokens(db, reviewer), wall_seconds=wall))
+                               tokens=_tokens(db, reviewer), wall_seconds=wall,
+                               cost_usd=_dollars(db, reviewer, ws.repo_root)))
     except Exception:
         log.exception("brindle: the learner failed to record a reviewer outcome")
 
@@ -242,19 +375,22 @@ def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace
 def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
                files: list[str] | None = None, candidates: list[str] | None = None,
                weight: str | None = None,
-               default: str | None = None) -> tuple[str | None, str | None]:
+               default: str | None = None, *, design_heavy: bool = False,
+               goal: dict | None = None) -> tuple[str | None, str | None]:
     """(override, reason): the learner's pick among ``candidates`` (default:
     the repo's ``learning_candidates``, else the medium tier's routing list)
     when it overrides ``default`` (what brindle would use: the first
     candidate unless given), else (None, None). The learner is not asked with
-    fewer than two candidates."""
+    fewer than two candidates. ``goal``: the routing goal's weights in force
+    (brindle.routing_goal.resolve, with the session and task levels); without
+    it, the personal and repo levels'."""
     _forget_note(cfg, repo_root)
     if candidates is None:
         candidates = cfg.learning_candidates or cfg.routing.get("medium") or []
-    names = [c for c in candidates if isinstance(c, str)]
+    names = [c for c in candidates if isinstance(c, str) and cfg.routing_allows(c, design_heavy)]
     if not names:
         return None, None
-    default = default or names[0]
+    default = default if default and cfg.routing_allows(default, design_heavy) else names[0]
     if default not in names:
         # e.g. default_agent outside learning_candidates: it's still the baseline to beat
         names.insert(0, default)
@@ -266,8 +402,12 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
             return None, None
         p.last_reason = None
         p.last_prior = False
-        pick = p.suggest(TaskInfo(repo_root=repo_root, task=task or "",
-                                  files=tuple(files or ()), weight=weight), names, default)
+        from brindle import routing_goal
+
+        if goal is None:
+            goal = routing_goal.for_learner(repo_root)
+        pick = p.suggest(TaskInfo(repo_root=repo_root, task=task or "", files=tuple(files or ()),
+                                  weight=weight, weights=routing_goal.as_tuple(goal)), names, default)
         if pick not in names or pick == default:
             return None, None
         return pick, p.last_reason
@@ -278,10 +418,14 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
 
 def choose(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
            files: list[str] | None = None, candidates: list[str] | None = None,
-           weight: str | None = None, default: str | None = None) -> str | None:
+           weight: str | None = None, default: str | None = None, *,
+           design_heavy: bool = False, goal: dict | None = None) -> str | None:
     """The learner's override of ``default`` among ``candidates``, or None
     (no learner, nothing to choose between, or it kept the default)."""
-    return choose_why(db, cfg, repo_root, task, files, candidates, weight, default)[0]
+    options: dict = {"design_heavy": True} if design_heavy else {}
+    if goal is not None:
+        options["goal"] = goal
+    return choose_why(db, cfg, repo_root, task, files, candidates, weight, default, **options)[0]
 
 
 def _forget_note(cfg: RepoConfig, repo_root: str) -> None:
@@ -314,5 +458,6 @@ def used_prior(cfg: RepoConfig, repo_root: str) -> bool:
         return False
 
 
-__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "choose", "choose_why", "kept_note", "note",
-           "note_reviewer", "plugin", "reset", "settled", "used_prior"]
+__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "capture", "choose", "choose_why",
+           "forget_capture", "kept_note", "note", "note_reviewer", "plugin", "reset", "settled",
+           "used_prior"]

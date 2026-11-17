@@ -34,7 +34,11 @@ def test_native_subscription_credentials_follow_existing_auth_guard():
 
 
 
-@pytest.mark.parametrize("error", [ValueError("secret-token"), subprocess.TimeoutExpired(["secret-token"], 1)])
+@pytest.mark.parametrize("error", [
+    ValueError("secret-token"),
+    pytest.param(subprocess.TimeoutExpired(["secret-token"], 1),
+                 marks=pytest.mark.variant("failure path: an expired catalog request stays unverified and cannot expose command secrets")),
+])
 def test_errors_are_unverified_and_do_not_disclose_details(error):
     check = ma.ModelAvailabilityChecker(discover=Mock(side_effect=error))
     result = check.check(profile(model="secret-model", base_url="https://secret-url"), effective_env={})
@@ -231,7 +235,8 @@ def test_unsupported_or_missing_native_configuration_never_sends():
 
 
 @pytest.mark.parametrize("code,target", [
-    (302, "http://elsewhere/models"),
+    pytest.param(302, "http://elsewhere/models",
+                 marks=pytest.mark.variant("credential leakage: catalog discovery must refuse a method-changing plaintext redirect")),
     (308, "https://elsewhere/models"),
 ])
 def test_http_is_get_only_and_refuses_redirects(monkeypatch, code, target):
@@ -428,6 +433,7 @@ def test_worker_preserves_codex_notice_metadata_without_provider_prose(monkeypat
     assert json.loads(out.getvalue())["availability_notices"] == ["wanted"]
 
 
+@pytest.mark.variant("credential isolation: model discovery uses the managed model and the fully scrubbed pane environment")
 def test_provisioning_checks_managed_model_and_exact_pane_environment(db, repo, monkeypatch):
     from brindle import agents, guardrails, keystore, secrets, tmux, workspaces
     from brindle.pro import managed_models
@@ -467,6 +473,7 @@ def test_provisioning_checks_managed_model_and_exact_pane_environment(db, repo, 
     assert request.env["STORED_KEY"] == "stored"
 
 
+@pytest.mark.variant("credential isolation: subscription catalog discovery cannot receive profile or inherited API keys")
 def test_subscription_excludes_personal_keys_from_catalog(db, repo, monkeypatch):
     from brindle import agents, keystore, tmux, workspaces
     p = profile("codex", auth="subscription", env={"OPENAI_API_KEY": "profile-secret"})
@@ -523,6 +530,7 @@ def test_provisioning_cache_preserves_catalog_identity(tmp_path):
     assert discover.call_args.args[0].env == other  # normalized cache identity never alters discovery env
 
 
+@pytest.mark.variant("identity: launch cooldown lookup must use the effective provider rather than the saved provider")
 def test_launch_provider_override_uses_same_cooldown_as_preflight(db, repo, monkeypatch):
     from brindle import agents, workspaces, launch_health, model_access
     from brindle.db import Agent

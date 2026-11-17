@@ -1,12 +1,12 @@
+import { inTestContext } from "../test/harness";
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonClient } from "../api/client";
 import { BASE_URL, FakeDaemon, TOKEN } from "../test/fakeDaemon";
 import { REPO } from "../test/fixtures";
-import { SessionsProvider, useSessions } from "./sessions";
+import { useSessions } from "./sessions";
 import { createAppStore } from "./store";
 import { startSync } from "./sync";
-import { StoreContext } from "./useStore";
 
 afterEach(cleanup);
 
@@ -49,11 +49,7 @@ describe("SessionsProvider", () => {
     }
     await act(async () => {
       render(
-        <StoreContext.Provider value={store}>
-          <SessionsProvider client={client}>
-            <Probe />
-          </SessionsProvider>
-        </StoreContext.Provider>,
+        inTestContext(<><Probe /></>, { client, store }, { sessions: true }),
       );
       await sync.idle();
     });

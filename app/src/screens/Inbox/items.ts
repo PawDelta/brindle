@@ -5,6 +5,7 @@
 import { LOGIN_PROVIDERS, type InboxAction, type LoginProvider } from "../../api/client";
 import type { InboxItemDTO } from "../../api/schema";
 import { providerLabel } from "../../api/providers";
+import { isNotice, offerOf, switchLine } from "../../components/ProviderSwitch/ProviderSwitch";
 
 /* The provider a credentials item is about: the sign-in route the engine
    names on the item (`action`: POST /v1/providers/{p}/login, engine branch
@@ -21,8 +22,14 @@ export function loginProvider(item: InboxItemDTO, provider?: string | null): Log
   return known(provider) ? provider : "claude";
 }
 
+/* Shared design docs (service/inbox._review_items): each card opens the doc. */
+export const REVIEW_KINDS = ["review_requested", "changes_requested", "signed_off"];
+
 export const KIND_LABEL: Record<string, string> = {
   doc: "Doc to read",
+  review_requested: "Review requested",
+  changes_requested: "Changes requested",
+  signed_off: "Signed off",
   waiting: "Waiting for you",
   permission: "Permission",
   question: "Question",
@@ -31,6 +38,7 @@ export const KIND_LABEL: Record<string, string> = {
   merge_failed: "Merge failed",
   pr_ready: "Pull request",
   pr_failed: "Pull request",
+  pr_opened: "Pull request",
   proposed_checks: "Proposed checks",
   credentials: "Credentials",
   login: "Cloud login",
@@ -39,6 +47,8 @@ export const KIND_LABEL: Record<string, string> = {
   setup: "Setup",
   idle_stopped: "Stopped while idle",
   plan_offer: "Plan first?",
+  provider_switch: "Provider switch",
+  provider_switch_back: "Provider switch",
 };
 
 /* What the app can repair itself for a `setup` item, by its `fix` (engine
@@ -61,6 +71,9 @@ export const kindLabel = (item: InboxItemDTO) => KIND_LABEL[item.kind] ?? item.k
 /* A short word for the kind, as a pill. */
 export const KIND_SHORT: Record<string, string> = {
   doc: "Doc to read",
+  review_requested: "review requested",
+  changes_requested: "changes requested",
+  signed_off: "signed off",
   waiting: "waiting",
   permission: "permission",
   question: "question",
@@ -69,6 +82,7 @@ export const KIND_SHORT: Record<string, string> = {
   merge_failed: "merge",
   pr_ready: "PR",
   pr_failed: "PR",
+  pr_opened: "PR",
   proposed_checks: "checks",
   credentials: "login",
   login: "login",
@@ -77,6 +91,8 @@ export const KIND_SHORT: Record<string, string> = {
   setup: "setup",
   idle_stopped: "idle",
   plan_offer: "plan first?",
+  provider_switch: "provider",
+  provider_switch_back: "provider",
 };
 
 /* An item whose card opens a visual in its reader. */
@@ -103,8 +119,9 @@ export function describeItem(item: InboxItemDTO): string {
       return item.reason;
     /* brindle prepared the session's PR (service/inbox._pr_items): the person's Open PR is the only push. */
     case "pr_ready":
-      return "PR ready for your approval";
+      return "PR ready";
     case "pr_failed":
+    case "pr_opened":
       return item.reason;
     case "proposed_checks": {
       const n = (item.detail ?? "").split("\n").filter(Boolean).length;
@@ -116,6 +133,9 @@ export function describeItem(item: InboxItemDTO): string {
       return "brindle's cloud sign-in expired";
     case "plan_offer":
       return "This looks big: plan it first?";
+    case "provider_switch":
+    case "provider_switch_back":
+      return switchLine(offerOf(item), isNotice(item) ? "notice" : "offer");
     case "org_notice":
     /* An org Block, every request it stopped in one notice (service/inbox._org_blocks): "Blocked by <org> policy: <why>". */
     case "org_blocked":
@@ -189,7 +209,8 @@ export const completable = (item: InboxItemDTO): boolean => item.kind === "crede
 export const needsDecision = (item: InboxItemDTO): boolean => ["plan", "review", "merge_failed", "proposed_checks"].includes(item.kind);
 
 /* The id POST /inbox/{id}/{action} takes: an org notice's notice_id, else the agent's. */
-export const actionId = (item: InboxItemDTO) => (item.kind === "doc" ? item.request_id : item.kind === "org_notice" ? item.notice_id : item.agent_id) ?? "";
+export const actionId = (item: InboxItemDTO) =>
+  (item.kind === "doc" ? item.request_id : REVIEW_KINDS.includes(item.kind) ? `${item.doc ?? ""}` : item.kind === "org_notice" ? item.notice_id : item.agent_id) ?? "";
 
 /* Stable across snapshots, so a new item can be told from one already seen.
    A setup item belongs to no agent: it is told by what it fixes; an org Block by what it says. */
@@ -213,7 +234,7 @@ export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
   { key: "plans", label: "Plans", kinds: ["plan", "plan_offer"] },
   { key: "reviews", label: "Reviews", kinds: ["review", "merge_failed"] },
   { key: "checks", label: "Checks", kinds: ["proposed_checks"] },
-  { key: "docs", label: "Docs", kinds: ["doc"] },
+  { key: "docs", label: "Docs", kinds: ["doc", ...REVIEW_KINDS] },
   { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup", "idle_stopped"] },
 ];
 

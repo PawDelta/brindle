@@ -44,12 +44,13 @@ describe("ExportMenu", () => {
     } });
     const source = kind === "visual" ? { kind, id: "v1", rev: 1, html: content } : { kind, id: "v1", rev: 1, markdown: content };
     const session = new ExportSession(deps);
+    const completed = vi.fn();
     let post: VisualFrameProps["onMessage"] = () => undefined;
     let requested = 0;
     const Frame = (props: VisualFrameProps) => { post = props.onMessage; requested = props.snapshotRequest ?? 0; return <div />; };
     const view = render(mode === "reader"
       ? <ReaderChrome title="Release" source={{ kind: "session", id: "v1", rev: 1 }} meta="" exportClient={client} Frame={Frame} onBack={() => undefined} />
-      : <ExportMenu client={client} source={source} session={session} onSaid={() => undefined} />);
+      : <ExportMenu client={client} source={source} session={session} onSaid={() => undefined} onComplete={completed} />);
     if (mode === "reader") {
       fireEvent.click(screen.getByRole("button", { name: /Export/ }));
       expect(requested).toBeGreaterThan(0);
@@ -88,6 +89,7 @@ describe("ExportMenu", () => {
       release();
       await waitFor(() => expect((screen.getByRole("button", { name: "Google Drive" }) as HTMLButtonElement).disabled).toBe(false));
       expect(requests).toHaveLength(0);
+      expect(completed).not.toHaveBeenCalled();
       return;
     }
     await waitFor(() => expect(requests.some((r) => r.url.includes("upload/drive"))).toBe(true));
@@ -97,14 +99,17 @@ describe("ExportMenu", () => {
     expect(body).toContain(`Content-Type: ${mime}`);
     expect(body).toContain(content);
     await waitFor(() => expect((screen.getByRole("button", { name: "SharePoint" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(completed).toHaveBeenCalledTimes(2); // Download and Drive each finish an export.
     fireEvent.click(screen.getByRole("button", { name: "SharePoint" }));
     fireEvent.click(screen.getByRole("button", { name: "Find" }));
     fireEvent.click(await screen.findByRole("button", { name: "Save here" }));
+    expect(completed).toHaveBeenCalledTimes(2); // Finding a folder must leave the menu open.
     await waitFor(() => expect(requests.some((r) => r.init?.method === "PUT")).toBe(true));
     const sharepoint = requests.find((r) => r.init?.method === "PUT")!;
     expect(sharepoint.url).toContain(`/Release.${ext}:/content`);
     expect(sharepoint.init!.headers).toMatchObject({ "Content-Type": mime });
     expect(await (sharepoint.init!.body as Blob).text()).toBe(content);
+    await waitFor(() => expect(completed).toHaveBeenCalledTimes(3));
   });
 
   it.each([

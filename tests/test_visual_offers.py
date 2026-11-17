@@ -1,4 +1,5 @@
 import threading
+from datetime import datetime, timezone
 
 import pytest
 from starlette.testclient import TestClient
@@ -49,18 +50,18 @@ def session(db, tmp_path, monkeypatch):
     ("off", "layout", {}, "setting_off"),
     ("worker", "layout", {}, "only_supervisors"),
     ("threshold", "options", {"options": 2, "attributes": 2}, "below_threshold"),
-    ("on", "options", {"options": 3}, None),
-    ("two", "options", {"options": 2, "attributes": 3}, None),
-    ("small_table", "comparison", {"rows": 4, "columns": 2}, "below_threshold"),
-    ("table", "comparison", {"rows": 4, "columns": 3}, None),
-    ("short_flow", "flow", {"steps": 4}, "below_threshold"),
-    ("flow", "flow", {"steps": 5}, None),
-    ("branch", "flow", {"branches": 1}, None),
-    ("short_diff", "diff", {"lines": 12}, "below_threshold"),
-    ("diff", "diff", {"lines": 13}, None),
-    ("unknown", "status", {}, "below_threshold"),
+    pytest.param("on", "options", {"options": 3}, None, marks=pytest.mark.variant("three options qualify without attributes")),
+    pytest.param("two", "options", {"options": 2, "attributes": 3}, None, marks=pytest.mark.variant("two options need three attributes")),
+    pytest.param("small_table", "comparison", {"rows": 4, "columns": 2}, "below_threshold", marks=pytest.mark.variant("enough rows but too few columns")),
+    pytest.param("table", "comparison", {"rows": 4, "columns": 3}, None, marks=pytest.mark.variant("comparison at both boundaries qualifies")),
+    pytest.param("short_flow", "flow", {"steps": 4}, "below_threshold", marks=pytest.mark.variant("four steps without a branch cannot qualify")),
+    pytest.param("flow", "flow", {"steps": 5}, None, marks=pytest.mark.variant("five steps qualify without a branch")),
+    pytest.param("branch", "flow", {"branches": 1}, None, marks=pytest.mark.variant("a branch qualifies without five steps")),
+    pytest.param("short_diff", "diff", {"lines": 12}, "below_threshold", marks=pytest.mark.variant("twelve-line diffs cannot qualify")),
+    pytest.param("diff", "diff", {"lines": 13}, None, marks=pytest.mark.variant("a diff must exceed twelve lines")),
+    pytest.param("unknown", "status", {}, "below_threshold", marks=pytest.mark.variant("unknown visual kinds fail closed")),
     ("invalid", "options", {"options": -1}, "invalid"),
-    ("expired", "layout", {}, None),
+    pytest.param("expired", "layout", {}, None, marks=pytest.mark.variant("an expired open offer must not prevent a new offer")),
     ("old_dismissals", "layout", {}, None),
 ])
 def test_offer_limits(db, session, monkeypatch, case, kind, counts, reason):
@@ -96,6 +97,48 @@ def test_offer_limits(db, session, monkeypatch, case, kind, counts, reason):
         assert offers.current(db, boss.id)["id"] == result["id"]
 
 
+@pytest.mark.variant("regression: a supervisor's decision prompt was refused without the person's quoted words")
+def test_supervisor_decision_needs_no_visual_consent(db, session):
+    boss, worker = session
+    choices = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    for caller, kind in [(worker, "visual"), (boss, "plan")]:
+        with pytest.raises(ServiceError) as error:
+            visuals.publish(db, caller, "Decision", "<p>Choose</p>", "Which?", choices, kind=kind)
+        assert error.value.code == "visual_request_required"
+    v = visuals.publish(db, boss, "Decision", "<p>Choose</p>", "Which?", choices)
+    assert v["rev"] == 1
+    assert v["options"] and v["answer"] is None
+    assert v["consented_by"] is None
+
+
+def test_second_open_decision_is_refused(db, session):
+    boss, _ = session
+    choices = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    v = visuals.publish(db, boss, "Decision", "<p>Choose</p>", "Which?", choices)
+    visuals.mark_read(db, v["id"])
+    offers.person_spoke(db, boss, "Show me a visual")
+    with pytest.raises(ServiceError) as error:
+        visuals.publish(db, boss, "Another", "<p>Choose</p>", "Which next?", choices)
+    assert error.value.code == "open_decision_prompt"
+    revised = visuals.publish(db, boss, "Revised", "<p>Choose again</p>", "Which now?", choices,
+                              visual_id=v["id"])
+    assert revised["rev"] == 2
+    with db.tx() as c:
+        c.execute("UPDATE visuals SET dismissed_rev=rev WHERE id=?", (v["id"],))
+    assert visuals.publish(db, boss, "Next", "<p>Choose</p>", "Which next?", choices)["rev"] == 1
+
+
+@pytest.mark.variant("a decision exception must not grant consent for plain visuals or question-only publications")
+def test_plain_visual_still_needs_consent_after_decision(db, session):
+    boss, _ = session
+    choices = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    v = visuals.publish(db, boss, "Decision", "<p>Choose</p>", "Which?", choices)
+    for question, visual_id in [(None, None), ("Which?", None), (None, v["id"])]:
+        with pytest.raises(ServiceError) as error:
+            visuals.publish(db, boss, "Plain", "<p>Unrequested</p>", question, visual_id=visual_id)
+        assert error.value.code == "visual_request_required"
+
+
 def test_accept_and_explicit_ask_allow_one_publish(db, session):
     boss, worker = session
     feed = Feed(db, repo_root=db.get_workspace(boss.workspace_id).repo_root)
@@ -115,7 +158,6 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Unasked plan", "<p>no</p>", kind="plan")
         visuals.publish(db, worker, "Layout", "<p>layout</p>")
-        assert any(e["kind"] == "visual.offer_resolved" for e in feed.events())
         with pytest.raises(ServiceError, match="accept an offer"):
             visuals.publish(db, boss, "Another", "<p>no</p>")
         assert client.patch("/v1/user-settings", json={"visuals": "off"}).json()["visuals"] == "off"
@@ -138,39 +180,48 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         assert any(e["kind"] == "visual.offers_setting" for e in feed.events())
 
 
-@pytest.mark.parametrize("text,scope,allowed", [
-    ("Make a visual only if I ask you later.", "visual", False),
-    ("Compare these choices. Please make a visual.", "visual", True),
-    ("Create a planning document once I approve the approach.", "plan", False),
-    ("Please visualize this layout.", "visual", True),
-    ("I am quoting a sentence.\nMake a visual.", "visual", False),
-    ("can you visualize the changes made that we are planning to release for 0.6.3?", "visual", True),
-    ("Show me the release flow visually.", "visual", True),
-    ("Visualize the flow and then delete the branch.", "visual", False),
-    ("Visualize the flow once I approve the approach.", "visual", False),
-    pytest.param("Can you visualize the flow tomorrow?", "visual", False, marks=pytest.mark.variant("tomorrow deferral reported in review")),
-    pytest.param("Can you visualize the approval flow since 0.6.2?", "visual", True, marks=pytest.mark.variant("subject words approval/since must not count as deferral")),
-    pytest.param("Show me the flow once I approve visually.", "visual", False, marks=pytest.mark.variant("deferral inside the show-visually form")),
-    pytest.param("Show me the flow tomorrow visually.", "visual", False, marks=pytest.mark.variant("tomorrow inside the show-visually form")),
-    pytest.param("Can you visualize the flow next week?", "visual", False, marks=pytest.mark.variant("temporal next week is a deferral")),
-    pytest.param("Show me the next release visually.", "visual", True, marks=pytest.mark.variant("next in a subject phrase is not a deferral")),
+@pytest.mark.parametrize("text,scope", [
+    ("Show me the release flow visually.", "visual"),
+    pytest.param("can you render out what this new structure is again/", "visual",
+                 marks=pytest.mark.variant("the owner's exact message from the 2026-11-11 incident")),
+    pytest.param("please render possible options", "visual",
+                 marks=pytest.mark.variant("render without out or a named artifact")),
+    pytest.param('"can you render out what this new structure is again/"', None,
+                 marks=pytest.mark.variant("quoted render request must not grant consent")),
+    pytest.param("please don't render out what this new structure is again/", None,
+                 marks=pytest.mark.variant("declined render request must not grant consent")),
+    pytest.param("When I approve, please render out what this new structure is again/", None,
+                 marks=pytest.mark.variant("deferred render request must not grant consent")),
+    # Surrounding context or an open-ended object no longer waits for a confirmation click:
+    # the person's own request authorizes one, as a plain one does.
+    pytest.param("I am quoting a sentence.\nPlease render a mockup of the new session button", "visual",
+                 marks=pytest.mark.variant("a leading sentence cannot hide the person's actual render request")),
+    pytest.param("Create a planning document once I approve the approach.", "plan",
+                 marks=pytest.mark.variant("a named planning-document request retains plan scope")),
+    pytest.param("Please render a planning document", "plan",
+                 marks=pytest.mark.variant("render must preserve the named plan scope")),
+    pytest.param("write the plan, dont do that 9 run test though yet", "plan",
+                 marks=pytest.mark.variant("write + a bare plan was refused, blocking a plain planning ask")),
+    pytest.param("plan it first", "plan",
+                 marks=pytest.mark.variant("plan it first named no artifact and was refused")),
+    pytest.param("I want the plan to use X", None,
+                 marks=pytest.mark.variant("a bare plan must not grant one when it only describes the plan")),
+    pytest.param("don't write a plan", None,
+                 marks=pytest.mark.variant("the new verbs must still be cancellable")),
 ])
-def test_complete_request_intent(db, session, text, scope, allowed):
+def test_complete_request_intent(db, session, text, scope):
     boss, _ = session
+    config.set_user("visuals", "off")   # the offers setting never governs a request
     agents.send_message(db, boss.id, text, person=True)
-    if allowed:
-        visuals.publish(db, boss, "Requested", "<p>yes</p>", kind=scope)
-    else:
+    assert offers.current(db, boss.id) is None
+    assert offers.request_intent(text) == scope
+    if scope is None:
         with pytest.raises(ServiceError):
-            visuals.publish(db, boss, "Conditional", "<p>no</p>", kind=scope)
-        # Conditional intent requires a fresh host confirmation, even with offers off.
-        config.set_user("visuals", "off")
-        request = offers.current(db, boss.id)
-        assert request["confirmation"] == scope
-        offers.resolve(db, boss.id, request["id"], True)
-        visuals.publish(db, boss, "Confirmed now", "<p>yes</p>", kind=scope)
-        with pytest.raises(ServiceError):
-            offers.resolve(db, boss.id, request["id"], True)
+            visuals.publish(db, boss, "Unrequested", "<p>no</p>")
+        return
+    visuals.publish(db, boss, "Requested", "<p>yes</p>", kind=scope)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Again", "<p>no</p>", kind=scope)
 
 
 def test_codex_terminal_submission_folds_and_authorizes(db, session):
@@ -185,9 +236,6 @@ def test_codex_terminal_submission_folds_and_authorizes(db, session):
         assert offers.current(db, boss.id) is None
         with pytest.raises(ServiceError):
             offers.resolve(db, boss.id, oid, True)
-        assert send("Make a visual\nonly if I ask later").status_code == 200
-        with pytest.raises(ServiceError):
-            visuals.publish(db, worker, "Conditional multiline draft", "<p>no</p>")
         assert send("Make a visual").status_code == 200
         assert send("").status_code == 200
         assert send("y").status_code == 200
@@ -326,7 +374,12 @@ def typed_into_cli(db, boss, text, vouched=True):
 
 
 @pytest.mark.parametrize("typed,asked,terminal", [
-    ("render first", "render first", False),
+    pytest.param("status", "status", False,
+                 marks=pytest.mark.variant("a whole one-word message authorizes one visual")),
+    pytest.param("the status is ready", "status", False,
+                 marks=pytest.mark.variant("one word excerpted from a longer message does not authorize a visual")),
+    pytest.param("then render first", "render first", False,
+                 marks=pytest.mark.variant("the person's own quoted words authorize one visual without an intent grammar match")),
     pytest.param("please send me updated renders", "please send me updated renders", False,
                  marks=pytest.mark.variant("reported refusal")),
     pytest.param("can i see the new session button rendering?", "can i see the new session button rendering?", False,
@@ -335,17 +388,105 @@ def typed_into_cli(db, boss, text, vouched=True):
                  marks=pytest.mark.variant("reported refusal")),
     pytest.param("ok great, then render it", "then render it", False, marks=pytest.mark.variant("reported refusal, inside a longer message")),
     pytest.param("no, render first", "  RENDER\n first ", False, marks=pytest.mark.variant("case and whitespace; no is not a negation of the quote")),
-    ("then render it", "then render it", True),
+    pytest.param("then render it", "then render it", True,
+                 marks=pytest.mark.variant("typed app-terminal input must provide valid asked-word provenance")),
 ])
 def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, terminal):
     boss, _ = session
+    if typed == "the status is ready":
+        offers.person_spoke(db, boss, typed, typed=True)
+        with pytest.raises(ServiceError):
+            visuals.publish(db, boss, "Excerpt", "<p>no</p>", asked=asked)
+        return
     if terminal:
         token = "t" * 43
         with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
             assert terminal_input(client, boss.id)(typed, typed=True).status_code == 200
+    elif typed == "status":
+        offers.person_spoke(db, boss, typed, typed=True)
     else:
         typed_into_cli(db, boss, typed)
     assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
+
+
+def app_saw_enter(boss, typed=True):
+    """The app saw an Enter but not the words it sent: typed=False is a paste."""
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        return client.post(f"/v1/sessions/{boss.id}/visual-input", json={
+            "typed_words": None, "typed": typed, "expires_at": offers.time.time() + 60,
+            "submitted_at": offers.time.time()})
+
+
+@pytest.mark.variant("catches an accepted Claude Code suggestion being refused as the person's words")
+def test_accepted_suggestion_backs_a_visual(db, session):
+    """Real incident: Claude Code sends its own suggestion when the person accepts it (Tab, or Enter
+    on an empty box), so the app saw their keys but not the words. The prompt's hook says what they were."""
+    boss, _ = session
+    ask = "make a separate visual for stage 3"
+    assert app_saw_enter(boss).status_code == 200
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": ask})
+    assert visuals.publish(db, boss, "Stage 3", "<p>yes</p>", asked=ask)["rev"] == 1
+    # An Enter that sent nothing (a menu's) can't vouch for a paste sent after it.
+    assert app_saw_enter(boss).status_code == 200
+    assert app_saw_enter(boss, typed=False).status_code == 200
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": ask})
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Pasted", "<p>no</p>", asked=ask)
+    # Nor for brindle's own words in a stopped delivery the person typed onto.
+    db.set_mark(boss.id, "pane-delivery", offers.json.dumps(
+        {"message_id": 1, "stage": "body", "stopped": True, "body": "worker says: " + ask}))
+    assert app_saw_enter(boss).status_code == 200
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "worker says: " + ask + " ok"})
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Delivered", "<p>no</p>", asked=ask)
+
+
+PASTE, SUGGESTION = "put the pasted plan in a separate visual", "make a separate visual for stage 3"
+
+
+@pytest.mark.parametrize("texts,reported,sent,suggestion_backed", [
+    # Each Enter reported, then sent, the suggestion's both in the same millisecond (a transcript says .001 for both).
+    pytest.param((PASTE, SUGGESTION), (0.0002, 0.0012), (0.0004, 0.0015), True, id="send-in-the-report's-millisecond",
+                 marks=pytest.mark.variant("catches a send in the report's own millisecond losing a valid suggestion after a paste")),
+    # The next Enter is reported exactly as the suggestion's send millisecond (.000) ends: it came after.
+    pytest.param((SUGGESTION, PASTE), (0.0002, 0.0010), (0.0004, 0.0015), True, id="next-report-at-the-tick's-end",
+                 marks=pytest.mark.variant("catches an inclusive tick bound letting a later paste steal an earlier suggestion's mark")),
+    # Both reports and both sends in one millisecond: which Enter sent which can't be told, so neither counts.
+    pytest.param((PASTE, SUGGESTION), (0.0002, 0.0006), (0.0004, 0.0008), False, id="ambiguous",
+                 marks=pytest.mark.variant("two Enters in the tick a prompt went in: claim neither")),
+])
+def test_messages_taken_in_together_each_keep_their_own_enter(db, session, tmp_path, monkeypatch,
+                                                              texts, reported, sent, suggestion_backed):
+    """A paste and an accepted suggestion, both sent while a turn runs and taken in by one hook:
+    the paste can't claim the suggestion's Enter, and the suggestion keeps it, though Claude Code's
+    send times are whole milliseconds."""
+    boss, _ = session
+    clock = type("Clock", (), {"now": 1_000_000.0, "time": lambda self: self.now})()
+    monkeypatch.setattr(offers, "time", clock)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {}}
+    agents.handle_hook(db, boss.id, "pre-tool", hook)
+    absorbed = []
+    for text, report_at, send_at in zip(texts, reported, sent):
+        clock.now = 1_000_000.0 + report_at
+        assert app_saw_enter(boss, typed=text == SUGGESTION).status_code == 200
+        stamp = datetime.fromtimestamp(1_000_000.0 + send_at, timezone.utc).isoformat(timespec="milliseconds")
+        absorbed.append({"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": text, "commandMode": "prompt", "origin": {"kind": "human"},
+            "timestamp": stamp}})
+    clock.now = 1_000_001.0
+    with transcript.open("a") as f:
+        f.writelines(offers.json.dumps(line) + "\n" for line in absorbed)
+    agents.handle_hook(db, boss.id, "tool-done", hook)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Pasted", "<p>no</p>", asked=PASTE)
+    if suggestion_backed:
+        assert visuals.publish(db, boss, "Stage 3", "<p>yes</p>", asked=SUGGESTION)["rev"] == 1
+    else:
+        with pytest.raises(ServiceError):
+            visuals.publish(db, boss, "Stage 3", "<p>no</p>", asked=SUGGESTION)
 
 
 @pytest.mark.variant("real incident: a vouch arriving after its own prompt's hook, logged without the person's words")
@@ -359,16 +500,55 @@ def test_typed_words_reach_the_engine(db, session, monkeypatch):
     assert "typed words refused: this submission predates" in log and "show me again" not in log
 
 
+def test_mid_turn_message_backs_a_visual(db, session, tmp_path):
+    """Claude Code takes a message typed while it works into the running turn: no prompt hook runs,
+    only its transcript records it. Its words back ``asked`` once; an agent's note with the same words doesn't."""
+    boss, _ = session
+    ask = "PLEASE RENDER FOR ME BEFORE YOU IMPLEMENT"
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type":"user","message":{"role":"user","content":"plan the reader"}}\n')
+    hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {"file_path": str(transcript)}}
+    agents.handle_hook(db, boss.id, "prompt-submit", {**hook, "prompt": "plan the reader"})
+    agents.handle_hook(db, boss.id, "pre-tool", hook)
+    absorbed = []
+
+    def typed_mid_turn(text, origin="human", mode="prompt"):
+        assert app_vouches(boss, text, offers.time.time() + 60).status_code == 200   # keyed in, before Enter
+        at = datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat(timespec="milliseconds")
+        absorbed.append({"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": text, "commandMode": mode, "origin": {"kind": origin},
+            "timestamp": at.replace("+00:00", "Z")}})
+
+    def turn_takes_them_in():
+        with transcript.open("a") as f:
+            f.writelines(offers.json.dumps(line) + "\n" for line in absorbed)
+        absorbed.clear()
+        agents.handle_hook(db, boss.id, "tool-done", hook)
+        agents.handle_hook(db, boss.id, "pre-tool", {**hook, "tool_name": "mcp__brindle__publish_visual"})
+
+    typed_mid_turn(ask, "task-notification", "task-notification")
+    turn_takes_them_in()
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Not yet", "<p>no</p>", asked=ask)
+    typed_mid_turn("never mind")   # one hook takes in both: the cancel ends only what came before it
+    typed_mid_turn(ask)
+    turn_takes_them_in()
+    assert visuals.publish(db, boss, "Directions", "<p>yes</p>", asked=ask)["rev"] == 1
+    agents.handle_hook(db, boss.id, "stop", hook)   # read again: the same message isn't counted twice
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Twice", "<p>no</p>", asked=ask)
+
+
 def _report_came_late(db, boss, worker):
-    assert app_vouches(boss, "render first", offers.time.time() - 1).status_code == 409
-    typed_into_cli(db, boss, "render first", vouched=False)
+    assert app_vouches(boss, "then render first", offers.time.time() - 1).status_code == 409
+    typed_into_cli(db, boss, "then render first", vouched=False)
 
 
 def _report_lands_after_a_newer_cancel(db, boss, worker):
     submitted_at = offers.time.time()
     agents.send_message(db, boss.id, "Don't make a visual", person=True)
-    assert app_vouches(boss, "render first", offers.time.time() + 60, submitted_at).status_code == 409
-    typed_into_cli(db, boss, "render first", vouched=False)
+    assert app_vouches(boss, "then render first", offers.time.time() + 60, submitted_at).status_code == 409
+    typed_into_cli(db, boss, "then render first", vouched=False)
 
 
 def _report_with_no_prompt_yet(db, boss, worker):
@@ -376,20 +556,20 @@ def _report_with_no_prompt_yet(db, boss, worker):
 
 
 def _direct_message_cannot_stand_in_for_the_prompt(db, boss, worker):
-    assert app_vouches(boss, "render first", offers.time.time() + 60).status_code == 200
-    agents.send_message(db, boss.id, "render first", person=True)
+    assert app_vouches(boss, "then render first", offers.time.time() + 60).status_code == 200
+    agents.send_message(db, boss.id, "then render first", person=True)
 
 
 def _terminal(**fields):
     def send(db, boss, worker):
         token = "t" * 43
         with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
-            terminal_input(client, boss.id)("render first", **fields)
+            terminal_input(client, boss.id)("then render first", **fields)
     return send
 
 
 def _expired(db, boss, worker):
-    typed_into_cli(db, boss, "render first")
+    typed_into_cli(db, boss, "then render first")
     db.conn.execute("UPDATE visual_person_words SET created_at=created_at-?", (offers.FOLD + 1,))
 
 
@@ -403,23 +583,28 @@ def _says(*texts):
 
 
 @pytest.mark.parametrize("setup,asked", [
-    (_says("fix the login bug"), "render first"),
-    (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", sender_id=worker.id), "render first"),
+    pytest.param(_says("fix the login bug"), "render first", marks=pytest.mark.variant("an unrelated user message cannot authorize invented asked words")),
+    pytest.param(lambda db, boss, worker: agents.send_message(db, boss.id, "render first", sender_id=worker.id), "render first",
+                 marks=pytest.mark.variant("worker messages cannot supply the person's asked words")),
+    # Use a lead-in outside request_intent's grammar so these exercise asked-word
+    # provenance without a separate automatic grant masking a refused quote.
     # A hook prompt nobody vouched for: a paste, a failed report, a terminal outside the app.
-    (lambda db, boss, worker: typed_into_cli(db, boss, "render first", vouched=False), "render first"),
+    pytest.param(lambda db, boss, worker: typed_into_cli(db, boss, "then render first", vouched=False), "render first",
+                 marks=pytest.mark.variant("an unvouched CLI prompt cannot prove the person typed the quote")),
     (_report_came_late, "render first"),
-    (_report_lands_after_a_newer_cancel, "render first"),
-    (_report_with_no_prompt_yet, "render first"),
-    (_direct_message_cannot_stand_in_for_the_prompt, "render first"),
-    (_terminal(typed=False), "render first"),
-    (_terminal(), "render first"),
-    (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", person=True), "render first"),
-    (_says("surrender first please"), "render first"),
-    (_says("render first"), "render"),
-    (_says("please don't render it"), "render it"),
-    (_says("render first", "Don't make a visual"), "render first"),
-    (_expired, "render first"),
-    (_other_session, "render first"),
+    pytest.param(_report_lands_after_a_newer_cancel, "render first", marks=pytest.mark.variant("a late app report cannot revive consent after a newer cancellation")),
+    pytest.param(_report_with_no_prompt_yet, "render first", marks=pytest.mark.variant("an app report cannot grant consent before its prompt arrives")),
+    pytest.param(_direct_message_cannot_stand_in_for_the_prompt, "render first", marks=pytest.mark.variant("a direct message cannot stand in for the correlated terminal prompt")),
+    pytest.param(_terminal(typed=False), "render first", marks=pytest.mark.variant("pasted terminal content cannot count as the person's typed request")),
+    pytest.param(_terminal(), "render first", marks=pytest.mark.variant("raw terminal keystrokes without a correlated prompt cannot authorize publication")),
+    pytest.param(lambda db, boss, worker: agents.send_message(db, boss.id, "then render first", person=True), "render first",
+                 marks=pytest.mark.variant("a direct send marked person cannot replace app-vouched typed provenance")),
+    pytest.param(_says("surrender first please"), "render first", marks=pytest.mark.variant("asked words cannot match inside another word")),
+    pytest.param(_says("then render first"), "render", marks=pytest.mark.variant("a one-word quote cannot authorize publication")),
+    pytest.param(_says("please don't render it"), "render it", marks=pytest.mark.variant("a quote from a refusal cannot authorize publication")),
+    pytest.param(_says("render first", "Don't make a visual"), "render first", marks=pytest.mark.variant("a later refusal must revoke the earlier request")),
+    pytest.param(_expired, "render first", marks=pytest.mark.variant("asked words older than the consent window cannot authorize publication")),
+    pytest.param(_other_session, "render first", marks=pytest.mark.variant("asked words belong to one supervisor session and cannot authorize another")),
 ])
 def test_asked_quote_refuses_words_that_are_not_the_persons(db, session, setup, asked):
     boss, worker = session
@@ -429,10 +614,32 @@ def test_asked_quote_refuses_words_that_are_not_the_persons(db, session, setup, 
     assert refused.value.code == "visual_request_required"
 
 
+@pytest.mark.parametrize("typed,asked,accepted", [
+    pytest.param("should you not open this in app visuals?", "open this in app visuals", True,
+                 marks=pytest.mark.variant("real incident: a request phrased as a question")),
+    pytest.param("you should not open this in app visuals", "open this in app visuals", False,
+                 marks=pytest.mark.variant("bypass attempt: a plain negation must stay refused after the question exemption")),
+    pytest.param("would you stop showing me that?", "showing me that", False,
+                 marks=pytest.mark.variant("review: 'stop' after an auxiliary + you is still a refusal")),
+    pytest.param("could you never show me that again?", "show me that again", False,
+                 marks=pytest.mark.variant("review: 'never' after an auxiliary + you is still a refusal")),
+    pytest.param("don't you ever open this in app visuals", "open this in app visuals", False,
+                 marks=pytest.mark.variant("review: imperative don't you stays a prohibition")),
+])
+def test_question_form_is_not_a_negation(db, session, typed, asked, accepted):
+    boss, _ = session
+    typed_into_cli(db, boss, typed)
+    if accepted:
+        assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
+    else:
+        with pytest.raises(ServiceError):
+            visuals.publish(db, boss, "Not asked", "<p>no</p>", asked=asked)
+
+
 @pytest.mark.variant("a bypass attempt: a worker or a plan can't spend the person's quote")
 def test_asked_quote_is_not_for_workers_or_plans(db, session):
     boss, worker = session
-    typed_into_cli(db, boss, "render first")
+    typed_into_cli(db, boss, "then render first")
     with pytest.raises(ServiceError):
         visuals.publish(db, worker, "From a worker", "<p>no</p>", asked="render first")
     with pytest.raises(ServiceError):
@@ -440,10 +647,11 @@ def test_asked_quote_is_not_for_workers_or_plans(db, session):
     visuals.publish(db, boss, "Still unspent", "<p>yes</p>", asked="render first")
 
 
+@pytest.mark.variant("a typed message's automatic grant and asked quote must share one publication allowance")
 def test_asked_quote_allows_one_publication_per_message(db, session):
     boss, _ = session
-    typed_into_cli(db, boss, "render first")
-    typed_into_cli(db, boss, "render first")
+    typed_into_cli(db, boss, "then render first")
+    typed_into_cli(db, boss, "then render first")
     for title in ("One", "Two"):   # each message is its own ask
         visuals.publish(db, boss, title, "<p>yes</p>", asked="render first")
     with pytest.raises(ServiceError):
@@ -465,16 +673,6 @@ def test_asked_quote_allows_one_publication_per_message(db, session):
     visuals.publish(db, boss, "Then once", "<p>yes</p>", asked="Make a visual")
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Not twice", "<p>no</p>")
-    # Likewise a message that raised a confirmation card.
-    ask = "Please render a mockup of the new session button"
-    typed_into_cli(db, boss, ask)
-    visuals.publish(db, boss, "Quoted card", "<p>yes</p>", asked=ask)
-    assert offers.current(db, boss.id) is None
-    typed_into_cli(db, boss, ask)
-    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], True)
-    visuals.publish(db, boss, "Confirmed", "<p>yes</p>")
-    with pytest.raises(ServiceError):
-        visuals.publish(db, boss, "Again", "<p>no</p>", asked=ask)
 
 
 def test_asked_quote_words_are_purged_without_more_input(db, session, monkeypatch):
@@ -497,11 +695,12 @@ def test_asked_quote_words_are_purged_without_more_input(db, session, monkeypatc
     assert db.conn.execute("SELECT COUNT(*) FROM visual_person_words").fetchone()[0] == 0
 
 
-def test_asked_quote_answered_visual_allows_one_revision(db, session, monkeypatch):
+def test_answered_visual_allows_one_revision(db, session, monkeypatch):
     boss, worker = session
-    typed_into_cli(db, boss, "render first")
+    # A worker's visual, on the person's request: not the supervisor's to keep updating.
+    typed_into_cli(db, boss, "Please render a mockup of the new session button")
     choices = [{"id": "more", "label": "None, keep exploring"}, {"id": "a", "label": "A"}]
-    v = visuals.publish(db, boss, "Options", "<p>1</p>", "Which?", choices, asked="render first")
+    v = visuals.publish(db, worker, "Options", "<p>1</p>", "Which?", choices)
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Unanswered", "<p>no</p>", visual_id=v["id"])
     visuals.answer(db, v["id"], 1, "more", "you didnt render anything")
@@ -521,12 +720,6 @@ def _delivered_prompt(db, boss, worker):
     agents.send_message(db, boss.id, "render first", sender_id=worker.id)
     db.conn.execute("UPDATE inbox SET delivered_at=? WHERE agent_id=?", (offers.time.time(), boss.id))
     agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "render first"})
-
-
-def _declined_card_typed_twice(db, boss, worker):
-    typed_into_cli(db, boss, CARD_ASK)
-    typed_into_cli(db, boss, CARD_ASK)
-    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], False)
 
 
 def _publishers_race(db, boss, worker):
@@ -565,18 +758,19 @@ def _stress(why, *row):
     return pytest.param(*row, marks=pytest.mark.variant(why))
 
 
-CARD_ASK = "Please render a mockup of the new session button"
 FIRST = "render first"
+# Exercise the quote path independently of request_intent's automatic grants.
+QUOTE_ONLY = "then render first"
 LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in range(110))
 
 
 @pytest.mark.parametrize("said,asked,published", [
     # Words the person never asked with.
     _stress("punctuation is not words", ["hmm . . . ok go"], ". .", False),
-    _stress("empty quote", [FIRST], "", False),
+    _stress("empty quote", [QUOTE_ONLY], "", False),
     _stress("one ideograph is one word", ["画"], "画", False),
     _stress("a piece cut from a run of ideographs", ["把这个流程画出来"], "流程", False),
-    _stress("homoglyph", [FIRST], "rеnder first", False),
+    _stress("homoglyph", [QUOTE_ONLY], "rеnder first", False),
     _stress("a worker's message delivered as a prompt", [_delivered_prompt], FIRST, False),
     # Words that take the ask back.
     _stress("the quote carries the don't", ["please don't render it"], "don't render it", False),
@@ -600,24 +794,25 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     # Cancelled, in the person's own words, for a quote and for a grant.
     # Bare cancellation, negated requests, explicit artifacts, trailing clauses,
     # Unicode separators and an unpunctuated explanation take distinct paths.
-    *[_stress("cancel then quote", [FIRST, cancel], FIRST, False) for cancel in (
+    *[_stress("cancel then quote", [QUOTE_ONLY, cancel], FIRST, False) for cancel in (
         "actually never mind", "don’t make a visual", "no visual please",
         "thanks for that.\nNever mind the visual.", "Never mind — I found it", "never mind I found it")],
     _stress("cancel then grant", ["Make a visual", "actually never mind"], None, False),
     _stress("cancel with a reason, grant", ["Make a visual", "Never mind, I found the answer."], None, False),
     _stress("cancel with unicode punctuation, grant", ["Make a visual", "Never mind…"], None, False),
-    _stress("a declined card covers the same words typed earlier", [_declined_card_typed_twice], CARD_ASK, False),
+    _stress("ask and cancel in one message, grant", ["Make a visual. Don't make a visual."], None, False),
     # Capability, races, restarts.
-    _stress("capability off", [lambda db, boss, worker: config.set_user("visuals_enabled", "off"), FIRST], FIRST, False),
-    _stress("one quote, eight publishers", [FIRST, _publishers_race], FIRST, False),
-    _stress("a worker's refused call leaves the quote", [FIRST, _worker_calls_the_tool], FIRST, True),
-    _stress("the offers setting never governs asking", [lambda db, boss, worker: config.set_user("visuals", "off"), FIRST], FIRST, True),
-    _stress("a restart keeps the words", [FIRST, _restart], FIRST, True),
+    _stress("capability off", [lambda db, boss, worker: config.set_user("visuals_enabled", "off"), QUOTE_ONLY], FIRST, False),
+    _stress("one quote, eight publishers", [QUOTE_ONLY, _publishers_race], FIRST, False),
+    _stress("a worker's refused call leaves the quote", [QUOTE_ONLY, _worker_calls_the_tool], FIRST, True),
+    _stress("the offers setting never governs asking", [lambda db, boss, worker: config.set_user("visuals", "off"), QUOTE_ONLY], FIRST, True),
+    _stress("a restart keeps the words", [QUOTE_ONLY, _restart], FIRST, True),
     # Real asks these guards must not catch.
     _stress("why not", ["Why not render it?"], "render it", True),
     _stress("can't you", ["can't you just render it?"], "render it", True),
     _stress("negation in an earlier clause", ["I don't get it, render it"], "render it", True),
     _stress("ideographs have no spaces", ["把这个流程画出来"], "把这个流程画出来", True),
+    _stress("one ideograph alone is not a request", ["画"], "画", False),
     _stress("never mind something else", ["never mind the typo, render it"], "render it", True),
     _stress("never mind, then the ask", ["never mind, render it"], "render it", True),
     _stress("never mind, then a polite ask", ["Never mind — can you show me the flow"], "show me the flow", True),
@@ -629,7 +824,7 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     _stress("apostrophes are not quotation marks", ["let's see what's wrong, render it"], "render it", True),
     _stress("a long message ending in the ask", [LONG_NOTES + "\nThen render the options."], "render the options", True),
     _stress("stop something else", ["stop the server and render the flow"], "render the flow", True),
-    _stress("cancel, then ask again", [FIRST, "never mind", FIRST], FIRST, True),
+    _stress("cancel, then ask again", [QUOTE_ONLY, "never mind", QUOTE_ONLY], FIRST, True),
 ])
 def test_visual_request_stress(db, session, monkeypatch, said, asked, published):
     boss, worker = session
@@ -646,6 +841,27 @@ def test_visual_request_stress(db, session, monkeypatch, said, asked, published)
             mcp_server.publish_visual("Not asked", "<p>no</p>", asked=asked)
 
 
+@pytest.mark.variant("catches a message taken in mid-turn closing an open visual offer")
+def test_message_taken_mid_turn_leaves_the_offer_open(db, session, tmp_path):
+    """Real incident: a reply to something else, sent while the turn that made the offer still ran,
+    closed the offer a second after it was made. Only a prompt after the turn answers it."""
+    boss, _ = session
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {}}
+    agents.handle_hook(db, boss.id, "pre-tool", hook)
+    offers.offer(db, boss, "Which layout?", "layout")
+    with transcript.open("a") as f:
+        f.write(offers.json.dumps({"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": "yes delete that artifact", "commandMode": "prompt",
+            "origin": {"kind": "human"}}}) + "\n")
+    agents.handle_hook(db, boss.id, "tool-done", hook)
+    assert offers.current(db, boss.id) is not None
+    agents.handle_hook(db, boss.id, "prompt-submit", {**hook, "prompt": "the second one"})
+    assert offers.current(db, boss.id) is None
+
+
+@pytest.mark.variant("answering a choice must close its old offer without treating refusals or mentions as consent")
 def test_answer_folds_offer_and_setting_never_grants(db, session):
     boss, _ = session
     oid = offers.offer(db, boss, "Which layout?", "layout")["id"]

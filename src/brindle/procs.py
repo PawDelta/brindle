@@ -48,6 +48,7 @@ class Proc:
     ppid: int
     text: str    # command line, plus the process's environment
     cmd: str | None = None   # the command line alone (None: a hand-made table's ``text`` is one)
+    birth: str | None = None   # when it was started (lineage); None in a plain table
 
 
 def command_line(p: Proc) -> str:
@@ -478,11 +479,21 @@ def alive(pid: int) -> bool:
     return stat.rpartition(")")[2].split()[:1] != ["Z"]
 
 
-def terminate(pids: set[int] | list[int], grace: float = 3.0) -> int:
+def terminate(pids: set[int] | list[int], grace: float = 3.0, owned: dict[int, str] | None = None) -> int:
     """SIGTERM, then SIGKILL whatever is left after ``grace`` seconds.
-    Returns how many processes were signalled."""
+    Returns how many processes were signalled. ``owned`` (pid -> birth, from
+    lineage): each signal goes only to a pid that is still the process its
+    birth names, read for that pid alone just before its own signal is sent
+    (birth_of), so a pid that came round again meanwhile (another's process,
+    perhaps after an earlier signal of this batch ended the one it was) is
+    spared."""
+    def still(pid: int) -> bool:
+        return owned is None or birth_of(pid) == owned.get(pid)
+
     sent = []
     for pid in pids:
+        if not still(pid):
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
             sent.append(pid)
@@ -492,7 +503,7 @@ def terminate(pids: set[int] | list[int], grace: float = 3.0) -> int:
     while sent and time.time() < deadline and any(alive(p) for p in sent):
         time.sleep(0.1)
     for pid in sent:
-        if alive(pid):
+        if alive(pid) and still(pid):
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
@@ -505,3 +516,172 @@ def stop(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] | None
     """Stop every process belonging to these agents. Returns how many."""
     found = agent_pids(agent_ids, pane_pids)
     return terminate({p for pids in found.values() for p in pids}, grace)
+
+
+# -- panes closed with their processes left for later --------------------------------
+#
+# Closing a pane ends the CLI in it, and what that CLI started in a session of
+# its own (a Bash tool's shell, a background job) is left with launchd as its
+# parent: no agent's process tree reaches it any more, and its command line
+# names no agent. A close that doesn't stop the processes first (a pause that
+# leaves them to a cull, a batch of pauses on the daemon's way out, stale panes
+# settled) notes here what ran under the panes, and the cull ends whatever of
+# it was left that way (handed_orphans).
+
+HANDED = "closing-procs.json"
+HANDED_MAX_AGE = 24 * 3600.0     # a record this old is dropped: its pid may be anyone's by now
+
+
+def _handed_path() -> Path:
+    from brindle.config import brindle_home
+
+    return brindle_home() / HANDED
+
+
+def birth_of(pid: int) -> str | None:
+    """The birth of the process ``pid`` is now (as lineage gives it), read
+    for it alone; None when no process has that pid."""
+    if (PROC / "self" / "stat").exists():
+        try:
+            boot = (PROC / "sys" / "kernel" / "random" / "boot_id").read_text().strip()
+        except OSError:
+            boot = "?"
+        try:
+            after = (PROC / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            return None
+        return f"{boot}:{after[19]}" if len(after) > 19 else None
+    started = spawn.read(["ps", "-o", "lstart=", "-p", str(int(pid))], timeout=PS_LIMIT).stdout.split()
+    return " ".join(started) if len(started) == 5 else None
+
+
+def lineage() -> dict[int, Proc]:
+    """Every process with its parent, its command line and its birth (when
+    the kernel started it: with the pid, who a process is), each process's
+    three read together, so a parent and a command are never another
+    process's that took the pid between two reads. A pid that comes round
+    again has a later birth; a process that execs another program keeps its
+    own. Linux: the start time in clock ticks since boot, with the boot's id,
+    from one read of its stat (its command line is kept only if a second read
+    finds the same birth); macOS: one ``ps`` listing, its start time to the
+    second, a wall-clock date."""
+    out: dict[int, Proc] = {}
+    if (PROC / "self" / "stat").exists():
+        try:
+            boot = (PROC / "sys" / "kernel" / "random" / "boot_id").read_text().strip()
+        except OSError:
+            boot = "?"
+        for d in PROC.iterdir():
+            if not d.name.isdigit():
+                continue
+            try:
+                first = (d / "stat").read_text().rsplit(")", 1)[1].split()
+                cmd = (d / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+                again = (d / "stat").read_text().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            if len(first) > 19 and len(again) > 19 and first[19] == again[19]:   # field 22: starttime
+                out[int(d.name)] = Proc(int(d.name), int(first[1]), cmd, cmd, f"{boot}:{first[19]}")
+        return out
+    listing = spawn.read(["ps", "-axww", "-o", "pid=,ppid=,lstart=,command="], timeout=PS_LIMIT).stdout
+    for line in listing.splitlines():
+        parts = line.split(None, 7)     # pid, ppid, then lstart's five words, then the command
+        if len(parts) >= 7 and parts[0].isdigit() and parts[1].isdigit():
+            cmd = parts[7] if len(parts) == 8 else ""
+            out[int(parts[0])] = Proc(int(parts[0]), int(parts[1]), cmd, cmd, " ".join(parts[2:7]))
+    return out
+
+
+def _tree(roots: list[int], procs: dict[int, Proc]) -> set[int]:
+    """``roots`` and what they started, as :func:`descendants`, but never
+    Claude Code's daemon or anything under it (the sessions it hosts are
+    other agents' too), nor this process or its ancestors."""
+    children: dict[int, list[int]] = {}
+    for p in procs.values():
+        children.setdefault(p.ppid, []).append(p.pid)
+    skip, found, queue = _ancestors(procs), set(), [r for r in roots if r in procs]
+    while queue:
+        pid = queue.pop()
+        if pid in found or pid in skip or _is_daemon(procs[pid]):
+            continue
+        found.add(pid)
+        queue.extend(children.get(pid, []))
+    return found
+
+
+def _update_handed(change) -> object:
+    """Apply ``change`` to the records ({pid: [birth, noted at]}) under
+    an exclusive lock, written to a temporary file of its own and moved into
+    place; returns what ``change`` returned."""
+    import fcntl
+    import json
+
+    path = _handed_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(path.name + ".lock"), "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            records = {int(k): v for k, v in json.loads(path.read_text()).items()}
+        except (OSError, ValueError, AttributeError):
+            records = {}
+        result = change(records)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}")
+        try:
+            tmp.write_text(json.dumps({str(k): v for k, v in records.items()}))
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return result
+
+
+def hand_off(roots: list[int], now: float | None = None) -> int:
+    """Note ``roots`` (the programs of panes about to close) and everything
+    under them, for the cull to end what the close leaves behind. Returns how
+    many processes were noted."""
+    if not roots:
+        return 0
+    seen = lineage()     # parent and birth from the same read: the tree is the noted processes'
+    now = time.time() if now is None else now
+    found = {pid: [seen[pid].birth, now] for pid in _tree(roots, seen) if seen[pid].birth}
+
+    def add(records: dict) -> None:
+        records.update(found)
+
+    if found:
+        _update_handed(add)
+    return len(found)
+
+
+def handed_orphans(now: float | None = None) -> dict[int, str]:
+    """What closed panes left running (hand_off), to be ended at once
+    (terminate with ``owned``), by pid with its birth: each noted process that is
+    still the one noted (its birth) and whose noted parents lead to launchd
+    (they lost the CLI that started them), with whatever it has started
+    since (never Claude Code's daemon or what it hosts). Read as things are
+    now, in one lineage read. What is returned is noted too, until a later
+    look finds it gone; records of processes gone, or grown too old, are
+    dropped."""
+    if not _handed_path().exists():
+        return {}
+    now = time.time() if now is None else now
+
+    def take(records: dict) -> dict[int, str]:
+        current = lineage()
+        for pid in [pid for pid, (birth, at) in records.items()
+                    if pid not in current or current[pid].birth != birth or now - at > HANDED_MAX_AGE]:
+            del records[pid]
+
+        def orphaned(pid: int) -> bool:
+            seen = set()
+            while pid in records and pid not in seen:
+                seen.add(pid)
+                pid = current[pid].ppid
+            return pid == 1
+
+        out = {pid: current[pid].birth for pid in _tree([pid for pid in records if orphaned(pid)], current)
+               if current[pid].birth}
+        for pid, birth in out.items():
+            records.setdefault(pid, [birth, now])   # started since the note: noted from here on
+        return out
+
+    return _update_handed(take)  # type: ignore[return-value]

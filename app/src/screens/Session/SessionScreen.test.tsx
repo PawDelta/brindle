@@ -1,20 +1,16 @@
+import { connectDaemon, inTestContext } from "../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppStore } from "../../store/store";
-import { startSync } from "../../store/sync";
-import { StoreContext } from "../../store/useStore";
 import { DaemonClient } from "../../api/client";
-import { DaemonContext } from "../../api/context";
-import { PtyViewsProvider, type PtyStatus, type PtyViewHandlers, type PtyViews, type PtyViewTarget } from "../../api/ptyView";
+import { type PtyStatus, type PtyViewHandlers, type PtyViews, type PtyViewTarget } from "../../api/ptyView";
 import type { GoalDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import type { SheetRef } from "../../routes";
-import { SessionsProvider } from "../../store/sessions";
 import { BASE_URL, PANE_DEAD_LINE, TOKEN, flush, FakeDaemon, type DaemonData, type Pane } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, root, windowOf, windowed, worker } from "../../test/fixtures";
 import { NO_SHELL, NO_WINDOW } from "./ProviderSurface";
 import { SessionScreen } from "./SessionScreen";
-import { closeSessionLabel } from "./AgentMenu";
 import { agentIds, sessionTree, sessionWork } from "./tree";
 import { liveWorkers } from "../../store/overview";
 import { SessionContext, sidebarChanges } from "../../components/SessionContext";
@@ -45,18 +41,6 @@ describe("sessionWork", () => {
     expect(got.workspaces.map((w) => w.id)).toEqual(["proj", "proj/a", "proj/b"]);
     // An agent whose chain stops short of the root (an unknown left-out parent) isn't counted.
     expect(sessionWork(snapshot, "sup0", null, {}).agents.map((a) => a.id)).toEqual(["w1", "w2"]);
-  });
-});
-
-describe("closeSessionLabel", () => {
-  it.each([
-    [0, 0, "Close session"],
-    [2, 0, "Close session · 2 workers running"],
-    [1, 0, "Close session · 1 worker running"],
-    [0, 1, "Close session · 1 unmerged branch"],
-    [2, 3, "Close session · 2 workers running · 3 unmerged branches"],
-  ])("%i running, %i unmerged: '%s'", (running, unmerged, label) => {
-    expect(closeSessionLabel(running, unmerged)).toBe(label);
   });
 });
 
@@ -123,44 +107,22 @@ const fake = vi.hoisted(() => {
     observe() {}
     disconnect() {}
   }
-  /* WebGL is missing unless a test sets `supported`; `loseContext` fires what xterm.js fires on a lost context. */
-  class Webgl {
-    static supported = false;
-    static all: Webgl[] = [];
-    disposed = false;
-    private losses: (() => void)[] = [];
-    constructor() {
-      if (!Webgl.supported) throw new Error("WebGL2 not supported");
-      Webgl.all.push(this);
-    }
-    activate() {}
-    onContextLoss(fn: () => void) {
-      this.losses.push(fn);
-    }
-    loseContext() {
-      for (const fn of this.losses) fn();
-    }
-    dispose() {
-      this.disposed = true;
-    }
-  }
-  return { Xterm, Addon, Observer, Webgl };
+  return { Xterm, Addon, Observer };
 });
 
 vi.mock("@xterm/xterm", () => ({ Terminal: fake.Xterm }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: fake.Addon }));
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: fake.Addon }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: fake.Webgl }));
+vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { constructor() { throw new Error("WebGL2 not supported"); } } }));
 
 beforeEach(() => {
   fake.Xterm.all = [];
-  fake.Webgl.supported = false;
-  fake.Webgl.all = [];
   vi.stubGlobal("ResizeObserver", fake.Observer);
   localStorage.clear();
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   sidebarChanges.shown = false;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -206,20 +168,11 @@ function Harness({ client, root, repo, refresh, store, agents, onOpen }: {
 function mount(terminals: Record<string, Pane>, data: Partial<DaemonData> = {}, fetch?: (daemon: FakeDaemon) => typeof globalThis.fetch, sessionRoot = "sup1", agents = ["sup1", "w1"], repo = REPO, views?: PtyViews | null) {
   const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], terminals, ...data, workspaces: windowed(data.workspaces ?? [root, worker]) });
   const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: fetch?.(daemon) ?? daemon.fetch });
-  const store = createAppStore();
-  const sync = startSync({ client, store, connect: daemon.connect });
+  const { store, sync } = connectDaemon(daemon, client);
   // The sessions the view asked the app to open (a handover's).
   const opened: [string, string][] = [];
   render(
-    <DaemonContext.Provider value={client}>
-      <StoreContext.Provider value={store}>
-        <SessionsProvider client={client}>
-          <PtyViewsProvider value={views === undefined ? daemon.ptyViews() : views}>
-            <Harness client={client} root={sessionRoot} repo={repo} refresh={sync.refresh} store={store} agents={agents} onOpen={(r, repo) => opened.push([r, repo])} />
-          </PtyViewsProvider>
-        </SessionsProvider>
-      </StoreContext.Provider>
-    </DaemonContext.Provider>,
+    inTestContext(<><Harness client={client} root={sessionRoot} repo={repo} refresh={sync.refresh} store={store} agents={agents} onOpen={(r, repo) => opened.push([r, repo])} /></>, { client, store }, { daemon: true, sessions: true, views: views === undefined ? daemon.ptyViews() : views }),
   );
   const term = () => fake.Xterm.all.at(-1)!;
   return { daemon, sync, term, opened };
@@ -233,7 +186,7 @@ const title = () => screen.getByTestId("surface-title").textContent;
 describe("SessionScreen", () => {
   it.each(["rewound", "dismissed"])("drops a %s selection from the surface and agent menu without a stopped badge or worker tab", async (reason) => {
     const past = { ...worker.agents![0], status: reason === "rewound" ? "rewound" : "exited", dismissed_at: reason === "dismissed" ? 1 : null };
-    const { sync } = mount({ sup1: live }, { workspaces: [root, { ...worker, agents: [past] }] });
+    mount({ sup1: live }, { workspaces: [root, { ...worker, agents: [past] }] });
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
     pick("w1");
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
@@ -241,14 +194,13 @@ describe("SessionScreen", () => {
     expect(screen.queryByText("stopped", { exact: true })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     expect(screen.queryByRole("menuitem", { name: "Rewind…" })).toBeNull();
-    sync.stop();
   });
 
   it("shows live session changes before PR readiness in the chat's place, goes back to the chat with ← Chat or Esc keeping drafts, and edits hunks in either layout", async () => {
     sidebarChanges.shown = true;
     let holdDiff: Promise<void> | null = null;
     let diffReads = 0;
-    const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
+    const { daemon, term } = mount({ sup1: live, w1: live }, {
       workspaces: [{ ...root, branch: "brindle/session-18" }, worker],
       sessionReview: { sup1: { ready: false, reasons: ["work in progress"], branch: "brindle/session-18", base: "main", diff: "" } },
       sessionBase: { sup1: { "src/a.ts": "old\ncontext\n" } },
@@ -343,58 +295,55 @@ describe("SessionScreen", () => {
     fireEvent.click(screen.getByTestId("back-to-chat"));
     // An external amend can change content without changing any git-status field.
     vi.useFakeTimers();
-    try {
-      // Opening reads afresh; an amend arrives through the stream.
-      await act(async () => {
-        openChanges();
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      daemon.data.sessionFiles.sup1["docs/readme.md"] = "amended\nsecond\nthird\n";
-      await act(async () => { daemon.publish("session.changed", { root_id: "sup1" }); await vi.advanceTimersByTimeAsync(0); });
-      expect(summary()).toContain("+5 −1");
-      fireEvent.click(changes().getByTitle("docs/readme.md"));
-      expect(changes().getByTestId("hunk").textContent).toContain("+amended");
-      fireEvent.click(changes().getByTitle("src/a.ts"));
-      expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+    // Opening reads afresh; an amend arrives through the stream.
+    await act(async () => {
+      openChanges();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    daemon.data.sessionFiles.sup1["docs/readme.md"] = "amended\nsecond\nthird\n";
+    await act(async () => { daemon.publish("session.changed", { root_id: "sup1" }); await vi.advanceTimersByTimeAsync(0); });
+    expect(summary()).toContain("+5 −1");
+    fireEvent.click(changes().getByTitle("docs/readme.md"));
+    expect(changes().getByTestId("hunk").textContent).toContain("+amended");
+    fireEvent.click(changes().getByTitle("src/a.ts"));
+    expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
 
-      // Events and opening refreshes share one in-flight request and one queued refresh.
-      let release!: () => void;
-      holdDiff = new Promise<void>((resolve) => { release = resolve; });
-      await act(async () => { daemon.publish("session.changed", { root_id: "sup1" }); await vi.advanceTimersByTimeAsync(0); });
-      const pendingReads = diffReads;
-      fireEvent.click(screen.getByTestId("back-to-chat"));
-      await act(async () => {
-        openChanges();
-        await vi.advanceTimersByTimeAsync(10_000);
-      });
-      expect(diffReads).toBe(pendingReads);
-      holdDiff = null;
-      await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
-      expect(diffReads).toBe(pendingReads + 1);
+    // Events and opening refreshes share one in-flight request and one queued refresh.
+    let release!: () => void;
+    holdDiff = new Promise<void>((resolve) => { release = resolve; });
+    await act(async () => { daemon.publish("session.changed", { root_id: "sup1" }); await vi.advanceTimersByTimeAsync(0); });
+    const pendingReads = diffReads;
+    fireEvent.click(screen.getByTestId("back-to-chat"));
+    await act(async () => {
+      openChanges();
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(diffReads).toBe(pendingReads);
+    holdDiff = null;
+    await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
+    expect(diffReads).toBe(pendingReads + 1);
 
-      // Opening Changes reads immediately, without advancing the periodic clock.
-      fireEvent.click(screen.getByTestId("back-to-chat"));
-      daemon.data.sessionFiles.sup1["docs/readme.md"] = "on activation\n";
-      await act(async () => {
-        openChanges();
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(summary()).toContain("+3 −1");
-      expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
-      fireEvent.click(changes().getByTitle("docs/readme.md"));
-      expect(changes().getByTestId("hunk").textContent).toContain("+on activation");
-      cleanup();
-      const stoppedReads = diffReads;
-      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-      expect(diffReads).toBe(stoppedReads);
-    } finally {
-      vi.useRealTimers();
-      sync.stop();
-    }
+    // Opening Changes reads immediately, without advancing the periodic clock.
+    fireEvent.click(screen.getByTestId("back-to-chat"));
+    daemon.data.sessionFiles.sup1["docs/readme.md"] = "on activation\n";
+    await act(async () => {
+      openChanges();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(summary()).toContain("+3 −1");
+    expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+    fireEvent.click(changes().getByTitle("docs/readme.md"));
+    expect(changes().getByTestId("hunk").textContent).toContain("+on activation");
+    cleanup();
+    const stoppedReads = diffReads;
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(diffReads).toBe(stoppedReads);
   });
 
   it("shows the selected agent's pane, bare, named by provider and agent, through a tmux client on its window, and types into it as is", async () => {
-    const { daemon, sync, term } = mount({ sup1: live, w1: { ...live, screen: "worker" } });
+    const child = { ...worker.agents![0], id: "c1", parent_id: "w1", provider: "codex", window: windowOf("c1") };
+    const panes = { sup1: live, w1: { ...live, screen: "worker" }, c1: { ...live, screen: "reviewer" } };
+    const { daemon, term } = mount(panes, { workspaces: [{ ...root, agents: [{ ...root.agents![0], status: "starting" }] }, { ...worker, agents: [...worker.agents!, child] }], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1", "c1"]);
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
     expect(title()).toBe("Claude Code · supervisor");
     // The provider session alone fills the view: no panel beside it.
@@ -406,7 +355,12 @@ describe("SessionScreen", () => {
     expect(screen.getByTestId("terminal").dataset.renderer).toBe("dom");
     expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
     // The provider's screen alone: no header of the app's naming the pane, no state card over it.
-    expect(surface().dataset.card).toBe("live");
+    await waitFor(() => expect(surface().dataset.card).toBe("live"));
+    for (const status of ["waiting", "processing", "idle", "unknown"]) {
+      act(() => daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status } }));
+      await flush();
+      expect(surface().dataset.card).toBe("live");
+    }
     expect(screen.queryByTestId("state-card")).toBeNull();
     expect(surface().textContent).not.toContain("sup1");
 
@@ -426,7 +380,15 @@ describe("SessionScreen", () => {
     expect(title()).toBe("Claude Code · ls");
     expect(view.closed).toBe(true);
     expect(daemon.viewers("w1")).toHaveLength(1);
-    sync.stop();
+    for (const id of ["c1", "sup1", "w1"] as const) {
+      pick(id);
+      await waitFor(() => expect(shownAgent()).toBe(id));
+      await waitFor(() => expect(term().written).toContain(panes[id].screen.trimEnd().replaceAll("\n", "\r\n")));
+      const open = daemon.views.filter((v) => !v.closed);
+      expect(open).toHaveLength(1);
+      expect(open[0]).toMatchObject({ pane: id, at: { server: "brindle", target: windowOf(id) } });
+      if (id === "c1") expect(title()).toBe("Codex · claude");
+    }
   });
 
   it.each([true, false])("observes Codex input only with visuals available (%s), excluding output and permission replies", async (enabled) => {
@@ -434,7 +396,7 @@ describe("SessionScreen", () => {
     let bytesAtRecording: string | null = null;
     let release: () => void = () => {};
     const codex = { ...root, agents: root.agents!.map(a => ({ ...a, provider: "codex" })) };
-    const { daemon, sync, term } = mount({ sup1: live }, { workspaces: [codex] }, daemon => async (input, init) => {
+    const { daemon, term } = mount({ sup1: live }, { workspaces: [codex] }, daemon => async (input, init) => {
       if (String(input).endsWith("/meta")) return Response.json({ ...(await (await daemon.fetch(input, init)).json()), visuals: enabled });
       if (String(input).endsWith("/visual-input")) {
         if (JSON.parse(String(init?.body)).begin || JSON.parse(String(init?.body)).refresh) return Response.json({ generation: 1 });
@@ -445,28 +407,26 @@ describe("SessionScreen", () => {
       }
       return daemon.fetch(input, init);
     });
-    try {
-      await waitFor(() => expect(term().written).toBe(drawnLive));
-      const [view] = daemon.viewers("sup1");
-      term().type("Make a visual");
-      term().type("\r");
-      if (enabled) {
-        await waitFor(() => expect(submitted).toHaveLength(1));
-        expect(bytesAtRecording).toBe("Make a visual");
-        await act(async () => release());
-      }
-      await waitFor(() => expect(view.written.join("")).toBe("Make a visual\r"));
-      term().type("\r"); term().type("y\r");
-      await waitFor(() => expect(view.written.join("")).toBe("Make a visual\r\ry\r"));
-      daemon.print("sup1", "Make a visual\r");
-      await waitFor(() => expect(term().written).toContain("Make a visual"));
-      expect(submitted).toHaveLength(enabled ? 2 : 0);
-    } finally { sync.stop(); }
+    await waitFor(() => expect(term().written).toBe(drawnLive));
+    const [view] = daemon.viewers("sup1");
+    term().type("Make a visual");
+    term().type("\r");
+    if (enabled) {
+      await waitFor(() => expect(submitted).toHaveLength(1));
+      expect(bytesAtRecording).toBe("Make a visual");
+      await act(async () => release());
+    }
+    await waitFor(() => expect(view.written.join("")).toBe("Make a visual\r"));
+    term().type("\r"); term().type("y\r");
+    await waitFor(() => expect(view.written.join("")).toBe("Make a visual\r\ry\r"));
+    daemon.print("sup1", "Make a visual\r");
+    await waitFor(() => expect(term().written).toContain("Make a visual"));
+    expect(submitted).toHaveLength(enabled ? 2 : 0);
   });
 
   it("shows a native card, never a shell, for an agent whose process isn't running, with what it left behind a disclosure", async () => {
     // The supervisor's process is gone (liveness says so, the pane is dead): an ended card with Continue.
-    const { daemon, sync, term } = mount({ sup1: { live: false, text: "$ \n" } });
+    const { daemon, term } = mount({ sup1: { live: false, text: "$ \n" } });
     await waitFor(() => expect(daemon.open.length).toBeGreaterThan(0));
     daemon.send({ type: "liveness", agents: { sup1: false } });
     const card = await screen.findByTestId("state-card");
@@ -489,11 +449,10 @@ describe("SessionScreen", () => {
     await waitFor(() => expect(screen.queryByTestId("state-card")).toBeNull());
     await waitFor(() => expect(term().written).toBe(drawnLive));
     expect(daemon.viewers("sup1")).toHaveLength(1);
-    sync.stop();
   });
 
   it("reopens a view whose client exited on request: a fresh view, the pane drawn again", async () => {
-    const { daemon, sync, term } = mount({ sup1: live });
+    const { daemon, term } = mount({ sup1: live });
     await waitFor(() => expect(term().written).toBe(drawnLive));
     const [first] = daemon.viewers("sup1");
     // The client exits (its view session went): a card over the surface, not a bare pane, with Reconnect.
@@ -509,14 +468,13 @@ describe("SessionScreen", () => {
     await waitFor(() => expect(term().written).toBe(drawnLive));
     daemon.print("sup1", "more");
     await waitFor(() => expect(term().written).toContain("more"));
-    sync.stop();
   });
 
   it("shows a locked agent as a card, and a failed one saying why, with nothing popping up over it", async () => {
     const credentials: InboxItemDTO = { kind: "credentials", reason: "credentials need attention", agent_id: "w1", workspace_id: "proj/feat-ls", detail: "claude auth login" };
     const failed = { ...worker, agents: [{ ...worker.agents![0], status: "failed" }] };
     const locked = { ...root, agents: [{ ...root.agents![0], locked: "sam@example.com" }] };
-    const { daemon, sync } = mount({ sup1: live, w1: live }, { workspaces: [locked, failed], inbox: [credentials] });
+    const { daemon } = mount({ sup1: live, w1: live }, { workspaces: [locked, failed], inbox: [credentials] });
     const card = await screen.findByTestId("state-card");
     expect(card.textContent).toContain("Locked by sam@example.com");
     expect(within(card).queryByRole("button", { name: "Continue" })).toBeNull();
@@ -532,14 +490,13 @@ describe("SessionScreen", () => {
     expect(screen.queryByTestId("terminal")).toBeNull(); // its pane, a shell prompt by now, is never the surface
     expect(within(why).queryByRole("button", { name: /Sign in/ })).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
-    sync.stop();
   });
 
   it.each([
     ["Close", "Confirm close", "/agents/w1/close"],
     ["Kill", "Confirm kill", "/agents/w1/kill"],
   ])("%s falls back to the supervisor", async (label, confirm, path) => {
-    const { daemon, sync } = mount({ sup1: live, w1: live });
+    const { daemon } = mount({ sup1: live, w1: live });
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
     pick("w1");
     await waitFor(() => expect(shownAgent()).toBe("w1"));
@@ -550,7 +507,6 @@ describe("SessionScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: confirm }));
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
     expect(daemon.requests.filter((r) => r.method === "POST")).toEqual([{ method: "POST", path, query: {}, body: {} }]);
-    sync.stop();
   });
 
   it("rewinds a worker from its ⋯ to a turn, on a profile, with a note, saying first what goes; a turn it has no snapshot of is said, and the fresh worker is shown", async () => {
@@ -558,7 +514,7 @@ describe("SessionScreen", () => {
       { name: "claude", description: "Claude Code", provider: "claude" },
       { name: "codex", description: "Codex", provider: "codex" },
     ];
-    const { daemon, sync, term } = mount({ sup1: live, w1: { ...live, screen: "worker pane" } }, { turns: { w1: 3 }, profiles });
+    const { daemon, term } = mount({ sup1: live, w1: { ...live, screen: "worker pane" } }, { turns: { w1: 3 }, profiles });
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
     pick("w1");
     await waitFor(() => expect(shownAgent()).toBe("w1"));
@@ -593,7 +549,6 @@ describe("SessionScreen", () => {
     expect(daemon.data.workspaces.flatMap((w) => w.agents ?? []).find((a) => a.id === fresh)?.profile).toBe("codex");
     await waitFor(() => expect(daemon.viewers(fresh)).toHaveLength(1));
     await waitFor(() => expect(term().written).toContain("worker pane"));
-    sync.stop();
   });
 
   it("keeps a rewind's card through its worker leaving the tree, saying how it ended either way, with the profiles of the worker's own repo", async () => {
@@ -645,7 +600,6 @@ describe("SessionScreen", () => {
     daemon.releaseJobs();
     await waitFor(() => expect(within(dialog()).getByText("claude isn't signed in")).toBeTruthy());
     expect(shownAgent()).toBe("sup1");
-    sync.stop();
   });
 
   it("transfer: moves a scratch session's work into a repo from the supervisor's ⋯, saying first what happens; a folder outside a repo is refused there", async () => {
@@ -705,11 +659,10 @@ describe("SessionScreen", () => {
     ]);
     expect(first.status === "fulfilled" && again.status === "fulfilled" && again.value.job === first.value.job).toBe(true);
     expect(elsewhere.status === "rejected" && (elsewhere.reason as { status: number }).status).toBe(409);
-    sync.stop();
   });
 
   it("hands the session over from the supervisor's ⋯: a destination is required, the request carries it and the note, and the new session opens", async () => {
-    const { daemon, sync, opened } = mount({ sup1: live, w1: live });
+    const { daemon, opened } = mount({ sup1: live, w1: live });
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Hand over…" }));
@@ -721,32 +674,12 @@ describe("SessionScreen", () => {
     fireEvent.click(confirm);
     await waitFor(() => expect(opened).toEqual([["new1", REPO]]));
     expect(daemon.requests.filter((r) => r.method === "POST").map((r) => [r.path, r.body])).toEqual([["/sessions/sup1/handover", { to: "dev/next", note: "merge w1 first" }]]);
-    sync.stop();
-  });
-
-  it("opens a view on the window of the agent picked, for the supervisor and every worker, and shows that agent's own pane", async () => {
-    const child = { ...worker.agents![0], id: "c1", parent_id: "w1", provider: "codex", window: windowOf("c1") };
-    const panes: Record<string, Pane & { screen: string }> = { sup1: { ...live, screen: "supervisor pane" }, w1: { ...live, screen: "worker pane" }, c1: { ...live, screen: "reviewer pane" } };
-    const { daemon, sync, term } = mount(panes, { workspaces: [root, { ...worker, agents: [...worker.agents!, child] }] }, undefined, "sup1", ["sup1", "w1", "c1"]);
-    await waitFor(() => expect(shownAgent()).toBe("sup1"));
-    for (const id of ["sup1", "w1", "c1", "sup1", "w1"]) {
-      pick(id);
-      await waitFor(() => expect(shownAgent()).toBe(id));
-      // One view, on that agent's window, and its pane on screen; the one before it closed.
-      await waitFor(() => expect(term().written).toContain(panes[id].screen));
-      const open = daemon.views.filter((v) => !v.closed);
-      expect(open).toHaveLength(1);
-      expect(open[0].pane).toBe(id);
-      expect(open[0].at).toEqual({ server: "brindle", target: windowOf(id) });
-      expect(screen.getByTestId("surface-title").textContent).toBe(id === "sup1" ? "Claude Code · supervisor" : id === "w1" ? "Claude Code · ls" : "Codex · claude");
-    }
-    sync.stop();
   });
 
   it("shows a paused session as a card that names it, and continues it from the bar: the engine's preflight first when it asks", async () => {
     const paused: SessionDTO = { ...session, id: "sup0", status: "paused", goal: "Refactor the cache" };
     const goal: GoalDTO = { root_id: "sup0", enabled: false, goal: "Refactor the cache", state: "paused", progress: 0, milestones: [{ id: 1, position: 1, title: "Read it", status: "passed" }, { id: 2, position: 2, title: "Write it", status: "pending" }] };
-    const { daemon, sync } = mount({}, { sessions: [session, paused], goal, preflight: { claude: [{ id: "trust", kind: "trust", label: "Trust the folder /home/u/proj", detail: "Claude Code asks once per folder.", done: false }] } }, undefined, "sup0");
+    const { daemon } = mount({}, { sessions: [session, paused], goal, preflight: { claude: [{ id: "trust", kind: "trust", label: "Trust the folder /home/u/proj", detail: "Claude Code asks once per folder.", done: false }] } }, undefined, "sup0");
     const card = await screen.findByTestId("state-card");
     expect(card.dataset.kind).toBe("ended");
     expect(card.textContent).toContain("is paused");
@@ -778,7 +711,6 @@ describe("SessionScreen", () => {
     await waitFor(() => expect(daemon.requests.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/sessions/sup0/continue", "/providers/claude/preflight/trust", "/sessions/sup0/continue"]));
     await waitFor(() => expect(screen.getByTestId("session-status").textContent).toContain("idle"));
     expect(screen.queryByTestId("preflight")).toBeNull();
-    sync.stop();
   });
 });
 
@@ -832,7 +764,6 @@ describe("SessionScreen, the pty view", () => {
     await act(() => sync.refresh());
     act(() => v.opened.at(-1)!.handlers.onError("can't find pane: %103"));
     expect(screen.queryByTestId("terminal")).toBeNull();
-    sync.stop();
   });
 
   /* PtyViews recording each view the surface opens. */
@@ -853,29 +784,6 @@ describe("SessionScreen, the pty view", () => {
     };
     return { value, opened, copied, rechecks };
   }
-
-  it("shows the supervisor's and each worker's pane through a tmux client on its window, one view at a time", async () => {
-    const v = views({ kind: "ready", tmux: "tmux 3.8" });
-    const { daemon, sync, term } = mount({ sup1: live, w1: live }, { workspaces: [{ ...root, agents: [{ ...root.agents![0], status: "starting" }] }, worker], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
-    await waitFor(() => expect(v.opened).toHaveLength(1));
-    expect(v.opened[0].at).toEqual({ server: "brindle", target: windowOf("sup1") });
-    expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
-    await waitFor(() => expect(surface().dataset.card).toBe("live"));
-    for (const status of ["waiting", "processing", "idle", "unknown"]) { act(() => daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status } })); await flush(); expect(surface().dataset.card).toBe("live"); }
-    // The client's bytes are drawn as they come; what xterm.js says goes back as is.
-    act(() => v.opened[0].handlers.onData(new TextEncoder().encode("\x1b[?1049hclaude")));
-    expect(term().written).toBe("\x1b[?1049hclaude");
-    term().type("\x1b[<64;10;5M");
-    term().type("x");
-    expect(v.opened[0].written).toEqual(["\x1b[<64;10;5M", "x"]);
-
-    pick("w1");
-    await waitFor(() => expect(v.opened).toHaveLength(2));
-    expect(v.opened[1].at).toEqual({ server: "brindle", target: windowOf("w1") });
-    // The supervisor's view closed when the worker's opened: its view session goes with it.
-    expect(v.opened[0].closed).toBe(true);
-    sync.stop();
-  });
 
   it("says a browser tab, with no shell, can't show a pane, and neither can a window the engine names none for, offering to look again", async () => {
     const { sync } = mount({ sup1: live, w1: live }, {}, undefined, "sup1", ["sup1", "w1"], REPO, null);
@@ -902,7 +810,7 @@ describe("SessionScreen, the pty view", () => {
 
   it("says why a view couldn't open (the agents' tmux too old), and offers to look again, which opens it afresh, not to restart the agent", async () => {
     const v = views({ kind: "ready", tmux: "tmux 3.8" });
-    const { sync } = mount({ sup1: live, w1: live }, {}, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
+    mount({ sup1: live, w1: live }, {}, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
     await waitFor(() => expect(v.opened).toHaveLength(1));
     const message = "The agents' tmux server is tmux 3.0a, and brindle needs tmux 3.2 or newer to show a session. Update tmux, then reopen the session.";
     act(() => v.opened[0].handlers.onError(message));
@@ -918,7 +826,6 @@ describe("SessionScreen, the pty view", () => {
     expect(v.opened[1].at).toEqual(v.opened[0].at);
     expect(screen.queryByTestId("state-card")).toBeNull();
     expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
-    sync.stop();
   });
 
 });

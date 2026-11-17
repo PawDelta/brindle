@@ -1,6 +1,7 @@
 import json
 import time
 
+import pytest
 from typer.testing import CliRunner
 
 from brindle import permissions
@@ -35,6 +36,7 @@ def test_permissions_check_unknown_profile_and_default_all_profiles(monkeypatch)
     assert "Profile developer:" in all_profiles.output
 
 
+@pytest.mark.variant("both Claude and agy adapters must enforce the asking profile deny")
 def test_permission_hooks_enforce_profile_deny(db, repo):
     ws = workspaces.create(db, str(repo), "feature").workspace
     set_local(ws.repo_root, "permission_policy", "on")

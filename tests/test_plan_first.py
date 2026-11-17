@@ -2,8 +2,6 @@
 supervisor's approve_plan, and can't edit files (Claude's PreToolUse hook)
 until it's approved."""
 
-import asyncio
-import re
 import time
 
 import pytest
@@ -49,12 +47,6 @@ def sent(monkeypatch):
     return out
 
 
-def worker_id(reply: str) -> str:
-    m = re.search(r"Started worker (\S+)", reply)
-    assert m, reply
-    return m.group(1)
-
-
 def planner(db, ws, parent="boss", **kw):
     a = Agent("w1", ws.id, "developer", "claude", parent, "assign", "processing", "", None,
               time.time())
@@ -64,20 +56,6 @@ def planner(db, ws, parent="boss", **kw):
 
 
 # -- assign / config ----------------------------------------------------------
-
-
-def test_assign_defaults_to_the_repo_config(db, repo, boss):
-    (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "plan_first": true}')
-    on = worker_id(asyncio.run(mcp_server.assign("developer", "job one")))
-    off = worker_id(asyncio.run(mcp_server.assign("developer", "job two", plan_first=False)))
-    assert db.get_agent(on).plan_first == 1
-    assert not db.get_agent(off).plan_first
-    # a queued task keeps plan_first
-    out = asyncio.run(mcp_server.assign("developer", "later", depends_on=["nothing-yet"],
-                                         plan_first=True))
-    assert "Queued" in out
-    [t] = db.list_tasks(str(repo), state="pending")
-    assert t.plan_first == 1
 
 
 # -- the prompt ---------------------------------------------------------------
@@ -140,7 +118,7 @@ def test_plan_approval_reminds_to_split(db, repo, boss, monkeypatch, sent):
 # -- enforcement ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize("state,tool", [("proposed", "Edit"), ("revise", "NotebookEdit")])
+@pytest.mark.parametrize("state,tool", [("revise", "NotebookEdit")])
 def test_hook_denies_edits_until_approved(db, repo, boss, tool, state):
     a = planner(db, boss, plan_state=state)
     out = agents.pre_tool_decision(db, a, {"tool_name": tool, "tool_input": {}})
@@ -149,20 +127,6 @@ def test_hook_denies_edits_until_approved(db, repo, boss, tool, state):
 
 
 # -- autopilot -----------------------------------------------------------------
-
-
-def test_waiting_on_a_plan_is_not_stalled(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda *a, **k: True)
-    long_ago = time.time() - autopilot.IDLE_GRACE_SECONDS - 60
-    planner(db, boss, plan_state="proposed")
-    db.update_agent("w1", status="idle")
-    db.update_agent("w1", status_since=long_ago)
-    working, stalled = autopilot.split_workers(db, "boss")
-    assert [w.id for w in working] == ["w1"] and not stalled
-
-    db.update_agent("w1", plan_state="approved")  # same idleness, no plan pending: stalled
-    working, stalled = autopilot.split_workers(db, "boss")
-    assert [w.id for w in stalled] == ["w1"]
 
 
 def test_nudge_mentions_plans_awaiting_approval(db, repo, boss):

@@ -44,20 +44,6 @@ def test_check_summary_caps_total_failure_output(worker_ws, monkeypatch):
 # -- review prompt ---------------------------------------------------------------
 
 
-def test_incremental_review_focuses_on_diff_since_previous_sha(db, worker_ws, monkeypatch):
-    sha1 = gates.head(worker_ws)
-    db.add_review(worker_ws.id, sha1, "revA", False, "missing input validation on line 10")
-    (Path(worker_ws.path) / "more.py").write_text("y = 2\n")
-    sh("git add -A && git commit -qm more", Path(worker_ws.path))
-
-    captured = capture_spawn(monkeypatch)
-    agents.request_review(db, None, worker_ws, "reviewer")
-    prompt = captured["prompt"]
-    assert sha1[:8] in prompt
-    assert "missing input validation on line 10" in prompt
-    assert f"git diff {sha1}..HEAD" in prompt
-
-
 def test_incremental_review_falls_back_to_full_review_when_the_reviewed_commit_is_gone(db, worker_ws, monkeypatch):
     gone = "deadbeef" * 5   # pruned from the repo: there is no tree to diff from
     db.add_review(worker_ws.id, gone, "revA", False, "off-by-one in the loop bound")

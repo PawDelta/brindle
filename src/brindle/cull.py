@@ -51,7 +51,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from brindle import agents, git, procs, tmux
+from brindle import agents, config, git, procs, status_cache, tmux
 from brindle.config import CONFIG_DIR, WORKTREES_DIR, brindle_home, load_repo_config, worktrees_dir
 from brindle.db import DB, Agent, Workspace
 from brindle.pro import route_health
@@ -62,6 +62,43 @@ LOCK_MAX_AGE = 24 * 3600   # a lock file untouched this long is cleaned up
 # How long a message waits for its normal delivery (a hook, the start-up
 # flush) before a sweep retries it.
 FLUSH_RETRY_AFTER = 30.0
+
+
+# What runs the sweep on a clock (each sidebar, the daemon's watch) runs one a
+# minute between all of them, on the clock SWEEP_STAMP keeps (``claim``).
+SWEEP_SECONDS = 60.0
+SWEEP_STAMP = "cull.stamp"
+
+
+def claim(now: float) -> bool:
+    """Claim this minute's sweep. Every caller of this brindle home is due
+    once a minute; under a lock they all take, the shared stamp is read and,
+    when a sweep is due, set to ``now`` before the lock is let go, so with N
+    callers one sweeps a minute, not N. A stamp that can't be used (an
+    unwritable home) claims nothing: this caller sweeps."""
+    stamp = brindle_home() / SWEEP_STAMP
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        with open(stamp.with_name(stamp.name + ".lock"), "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                swept = stamp.stat().st_mtime
+            except FileNotFoundError:
+                swept = 0.0
+            if 0 <= now - swept < SWEEP_SECONDS:   # a stamp from the future: a clock set back
+                return False
+            stamp.touch()
+            os.utime(stamp, (now, now))
+    except OSError:
+        pass
+    return True
+
+
+def _judged(a: Agent | None) -> tuple | None:
+    """What a destructive step judged ``a`` by: read again just before the
+    step, a different value means it moved on since (a resume, a new turn,
+    a close) and the step is skipped for it."""
+    return None if a is None else (a.status, a.status_since, a.dismissed_at)
 
 
 def _root(db: DB, a: Agent) -> str:
@@ -141,24 +178,43 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     done.extend(note_dead_panes(db, now, panes))
 
     # 1. Processes of agents that shouldn't be running.
-    leftovers = []
+    def leftover(a: Agent | None, alive, here) -> bool:
+        return (a is None or a.status in ("paused", "done") or a.dismissed_at is not None
+                or (a.status == "failed" and here(a) and not alive(a)))
+
+    planned: dict[str, tuple | None] = {}    # agent id -> its row as judged (_judged)
     for aid in procs.all_agent_ids(table):
         a = db.get_agent(aid)
-        if (a is None or a.status in ("paused", "done") or a.dismissed_at is not None
-                or (a.status == "failed" and here(a) and not alive(a))):
-            leftovers.append(aid)
+        if leftover(a, alive, here):
+            planned[aid] = _judged(a)
         elif (agents.runs_process(a) and here(a) and not alive(a)
               and now - max(a.created_at, a.status_since or 0) > LAUNCH_GRACE):
             db.end_native_subagents(a.id)
             db.set_status(a.id, "done" if a.mode != "interactive" and a.result is not None
                           else "paused")
             agents._note_reviewer_end(db, a)
-            leftovers.append(aid)
-    if leftovers:
-        found = procs.agent_pids(leftovers, procs=table)
-        stopped = procs.terminate({p for pids in found.values() for p in pids})
+            planned[aid] = _judged(db.get_agent(aid))
+    if planned:
+        # Their processes found as they are now; then each agent judged again,
+        # from its row and the panes as they are after that scan, just before
+        # the signal: one resumed (or otherwise moved on) meanwhile is spared,
+        # and nothing is scanned between that judgement and the signal.
+        found = procs.agent_pids(list(planned), procs=procs.table())
+        now_panes = tmux.list_panes()
+        now_owners = agents.pane_owners(db, now_panes)
+        found = {aid: pids for aid, pids in found.items()
+                 if _judged(a := db.get_agent(aid)) == planned[aid]
+                 and leftover(a, lambda a: (agents.is_alive(a, now_panes)
+                                            and agents.owns_pane(db, a, now_owners)),
+                              lambda a: agents.same_server(a, now_panes))}
+        stopped = procs.terminate({p for pids in found.values() for p in pids}) if found else 0
         if stopped:
             done.append(f"stopped {stopped} leftover process(es) of {len(found)} agent(s)")
+    # What closed panes left with launchd as its parent, its CLI gone (procs.hand_off):
+    # judged from the process table as it is now, not as the sweep began.
+    orphans = procs.handed_orphans(now=now)
+    if orphans and (stopped := procs.terminate(set(orphans), owned=orphans)):
+        done.append(f"stopped {stopped} process(es) a closed pane left behind")
 
     # 1b. Autopilot sessions at the Claude usage limit: stop their workers,
     # or bring them back once the window has reset.
@@ -263,7 +319,16 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
                     "brindle left it open. Check it's not stuck: send_message it what it needs.")))
             continue
         if finished or gone:
-            agents.close(db, a.id, panes)
+            # Judged again just before closing: a worker that took a message,
+            # started a turn, reported or came back since is left open.
+            now_panes = tmux.list_panes()
+            fresh = db.get_agent(a.id)
+            if (fresh is None or _judged(fresh) != _judged(a) or fresh.result != a.result
+                    or (agents.is_alive(fresh, now_panes)
+                        and agents.owns_pane(db, fresh, agents.pane_owners(db, now_panes))) != running
+                    or (finished and db.pending_count(a.id))):
+                continue
+            agents.close(db, a.id, now_panes)
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
                         f"after {int(idle_for // 60)} min")
 
@@ -290,6 +355,9 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     # nobody is answering, or gone silent.
     decline_environment_setups(db, panes)
     done.extend(settle_startups(db, now, panes))
+    done.extend(read_busy_screens(db, panes))
+    # Before note_stuck: a goal loop marks the worker waiting, told once, here.
+    done.extend(note_goal_loops(db, now, panes))
     done.extend(note_stuck(db, now, panes))
     # Before the idle reminder: a stop on an API error is told with its kind.
     done.extend(note_api_errors(db, now, panes))
@@ -427,9 +495,38 @@ STUCK_AFTER = 90.0
 STARTUP_GRACE = 40.0
 
 
+# How old a window's last output must be before a screen read of it is
+# remembered: tmux counts that time in whole seconds, so an output in the same
+# second as the read would leave it looking unchanged.
+SCREEN_SETTLE = 2.0
+
+
+def _screen_key(a: Agent, panes) -> str | None:
+    """What a read of ``a``'s screen is remembered by: its pane and its window's
+    last output, from the sweep's one pane listing (``PaneSnapshot.activity``).
+    None when that's unknown or too recent to tell a later output apart."""
+    activity = getattr(panes, "activity", {}).get(a.tmux_window)
+    if activity is None or time.time() - activity < SCREEN_SETTLE:
+        return None
+    return f"{a.tmux_window}:{activity:.0f}"
+
+
+def _screen_unchanged(db: DB, a: Agent, reader: str, key: str | None) -> bool:
+    """Whether ``reader`` already read ``a``'s screen as it is (nothing printed
+    since) and found nothing to do: a capture of it would say the same again.
+    Kept in the DB, as the sidebars take turns at the cull."""
+    return key is not None and db.mark(a.id, f"screen:{reader}") == key
+
+
+def _screen_read(db: DB, a: Agent, reader: str, key: str | None) -> None:
+    if key is not None and db.mark(a.id, f"screen:{reader}") != key:
+        db.set_mark(a.id, f"screen:{reader}", key)
+
+
 def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
     """Dismiss Claude's environment upsell even in an interactive supervisor
-    with no queued delivery and no waiting hook."""
+    with no queued delivery and no waiting hook. A screen read once with no
+    upsell on it isn't read again until the pane prints something."""
     from brindle import prompt_answer
 
     owners = agents.pane_owners(db, panes)
@@ -438,6 +535,9 @@ def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
                 or a.status not in ("starting", "idle", "processing", "waiting")
                 or not agents.same_server(a, panes) or not agents.is_alive(a, panes)
                 or not agents.owns_pane(db, a, owners)):
+            continue
+        key = _screen_key(a, panes)
+        if db.mark(a.id, "teach-auto-mode") is None and _screen_unchanged(db, a, "setup", key):
             continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
@@ -450,6 +550,8 @@ def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
                 and provider.screen_state(screen) == "idle"):
             db.set_mark(a.id, "teach-auto-mode", None)
             agents.screen_status(db, a, samples=2, gap=0)
+        if db.mark(a.id, "teach-auto-mode") is None:
+            _screen_read(db, a, "setup", key)
 
 
 def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
@@ -496,6 +598,26 @@ def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     return done
 
 
+def read_busy_screens(db: DB, panes: dict[str, bool]) -> list[str]:
+    """Read the screen of each running worker marked busy, as the sidebar's
+    render does (agents.reconcile, one sample), so a wait no hook reports (a
+    Codex approval prompt with no permission hook) is marked 'waiting' for
+    note_stuck even where no sidebar runs. Each worker's row is read again
+    just before its screen: one a hook or a sweep moved on is left alone."""
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for listed in db.list_agents():
+        a = db.get_agent(listed.id)
+        if (a is None or a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.status != "processing" or a.headless
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        if agents.reconcile(db, a, samples=1).status == "waiting":
+            done.append(f"{a.id}'s screen shows it waiting on a prompt")
+    return done
+
+
 def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     """Forward the live menus of waiting workers immediately. Hook-only
     reviewer requests are immediate too; other waiting states retain their
@@ -535,7 +657,9 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 done.append(f"told {a.parent_id} that worker {a.id} is waiting on input")
             continue
         since = a.status_since or a.created_at
-        if a.stuck_noted == since or (a.mode != "review" and now - since < STUCK_AFTER):
+        # A request held for the person waits on them, not on a prompt that may yet clear: told at once.
+        if a.stuck_noted == since or (a.mode != "review" and now - since < STUCK_AFTER
+                                      and permission_routing.waits_on_person(db, a) is None):
             continue
         ws = db.get_workspace(a.workspace_id)
         tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])
@@ -556,6 +680,96 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         if not _send_note(db, a, since, body):
             continue  # noted by another sweep, or its supervisor isn't running (tried again later)
         done.append(f"told {a.parent_id} that worker {a.id} is stuck on a prompt")
+    return done
+
+
+# A Claude worker whose /goal (its finish line) can't be met keeps being sent
+# back by the goal's own Stop hook: it asks in its pane, nobody reads it, and
+# Claude Code's cap finally ends the turn. Either sign on its screen counts.
+GOAL_CAP = re.compile(r"hook blocked the turn from ending \d+ consecutive times", re.I)
+GOAL_NOT_MET = re.compile(r"goal not yet met", re.I)
+GOAL_LOOP_REPEATS = 3          # this many "Goal not yet met" on one screen is a loop
+GOAL_LOOP_MARK = "goal_loop"   # agent_marks: a digest of the question last told
+
+
+def _goal_loop_question(screen: str) -> str | None:
+    """The worker's last words before the goal sent it back, when ``screen``
+    shows it looping on its /goal (the stop-hook cap, or GOAL_LOOP_REPEATS
+    "Goal not yet met"); None when it doesn't. Up to 12 lines: the block
+    between the last goal or cap line and the one before it."""
+    lines = [ln.rstrip() for ln in screen.splitlines()]
+    marker = [bool(GOAL_CAP.search(ln) or GOAL_NOT_MET.search(ln)) for ln in lines]
+    if not (any(GOAL_CAP.search(ln) for ln in lines)
+            or sum(bool(GOAL_NOT_MET.search(ln)) for ln in lines) >= GOAL_LOOP_REPEATS):
+        return None
+    i = max(n for n, m in enumerate(marker) if m)
+    while i >= 0 and (marker[i] or not lines[i].strip()):
+        i -= 1
+    block = []
+    while i >= 0 and not marker[i] and len(block) < 12:
+        if lines[i].strip():
+            block.append(lines[i])
+        i -= 1
+    return "\n".join(reversed(block))
+
+
+def note_goal_loops(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell a Claude worker's supervisor, once per question, that the worker
+    is looping on a finish line (its /goal) it can't meet, with the question
+    it keeps asking in its own pane, and mark it 'waiting'. Its pane shows
+    Claude Code's stop-hook cap or repeated "Goal not yet met", and it hasn't
+    reported. The note is claimed on the waiting spell too (claim_note), so
+    note_stuck and prompt_answer.tell don't tell the same wait again."""
+    import hashlib
+
+    from brindle import prompt_answer
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.provider != "claude" or a.headless
+                or a.status not in ("processing", "idle")
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        key = _screen_key(a, panes)
+        if _screen_unchanged(db, a, "goal", key):
+            continue
+        try:
+            screen = tmux.capture(a.tmux_window, lines=120, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        question = _goal_loop_question(screen)
+        if question is None:
+            _screen_read(db, a, "goal", key)
+            continue
+        question = prompt_answer.redact(question)
+        digest = hashlib.sha256(question.encode()).hexdigest()[:16]
+        won, previous = db.claim_mark(a.id, GOAL_LOOP_MARK, digest)
+        if not won:
+            _screen_read(db, a, "goal", key)
+            continue   # this question was told already
+        db.set_status(a.id, "waiting", only_if=a.status)
+        fresh = db.get_agent(a.id)
+        if fresh is None or fresh.status != "waiting" or fresh.result is not None:
+            db.set_mark(a.id, GOAL_LOOP_MARK, previous)
+            continue   # a hook or a report moved it on first
+        ws = db.get_workspace(a.workspace_id)
+        where = f" on branch `{ws.branch}`" if ws else ""
+        attach = f" (or answer it in its pane: `brindle attach {ws.name}`)" if ws else ""
+        finish = f"\n\nIts finish line: {a.done_when.strip()}" if a.done_when else ""
+        body = (f"Worker {a.id} ({a.profile}){where} is looping on a finish line it can't meet"
+                f"{': ' + ' | '.join(question.splitlines()) if question else ''}\n\n"
+                "Its goal keeps sending it back and it keeps asking in its own pane, which nobody "
+                f"reads. Answer it with send_message{attach}, change its task, or remove the "
+                f"workspace if the work is no longer needed.{finish}\n\n"
+                f"Its last question:\n{question or '(none on its screen)'}")
+        if not _send_note(db, fresh, fresh.status_since or fresh.created_at, body):
+            db.set_mark(a.id, GOAL_LOOP_MARK, previous)
+            continue
+        _screen_read(db, a, "goal", key)
+        done.append(f"told {a.parent_id} that worker {a.id} is looping on its finish line")
     return done
 
 
@@ -590,7 +804,7 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = _idle_since(db, a, fix_round or 0)
+        since = _idle_since(db, a, fix_round or 0, panes)
         if since is None:
             continue  # no telling whether a later turn is running
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
@@ -610,10 +824,11 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
     return done
 
 
-def _idle_since(db: DB, a: Agent, floor: float = 0) -> float | None:
+def _idle_since(db: DB, a: Agent, floor: float = 0, panes=None) -> float | None:
     """When ``a``, which its hooks report idle, last showed any sign of work, or
     None when there's no telling. A provider with no hook for a turn starting
-    (Codex) stays 'idle' through later turns, so its pane's last output counts;
+    (Codex) stays 'idle' through later turns, so its pane's last output counts
+    (from the sweep's ``panes`` listing, asked of tmux only when it lacks it);
     files changing in its worktree (a script or a background command) count
     too. Commits don't: see _fix_round_since."""
     from brindle.providers import get_provider
@@ -621,7 +836,9 @@ def _idle_since(db: DB, a: Agent, floor: float = 0) -> float | None:
     since = max(a.status_since or a.created_at, floor)
     provider = get_provider(a.provider)
     if not (provider.uses_hooks and provider.announces_turns):
-        last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        last = getattr(panes, "activity", {}).get(a.tmux_window)
+        if last is None:
+            last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
         if last is None:
             return None
         since = max(since, last)
@@ -652,6 +869,16 @@ def _tell_once(db: DB, a: Agent, key: str, body: str) -> bool:
     return sent
 
 
+def count_unreported_commits(path: str, base_branch: str, reported: str | None) -> int:
+    """Commits on HEAD that neither its base branch nor the last delivered
+    report already has. Base commits merged into the branch after the report
+    (or after a merge by the pipeline) are not the worker's, so they never count."""
+    excludes = [f"^{base_branch}"]
+    if reported and git.ok(["merge-base", "--is-ancestor", reported, "HEAD"], path):
+        excludes.append(f"^{reported}")
+    return len(git.run(["rev-list", "HEAD", *excludes], path).stdout.split())
+
+
 def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     """Tell each supervisor, once, about a worker whose report may have been
     lost (a broken MCP connection, then back to waiting, with nobody told the
@@ -680,22 +907,33 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = _idle_since(db, a)
-        if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
-            continue
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path) or not ws.base_branch:
             continue
         reported = db.outbox_last_delivered_head(a.id)
+        # HEAD from the git files, and the notice's de-dupe, before any git (the idle
+        # look's status, the count): a worker already told about stays idle for its
+        # whole stale_after, and the cull looks once a minute.
+        # A count of none is remembered by what it was counted from (HEAD, the base,
+        # the reported head): the same commits count none again.
+        head = status_cache.read_head(ws.path)
+        base = config._branch_sha(Path(ws.path), ws.base_branch)
+        counted = f"{head} {base} {reported}" if head and base else None
+        if head is not None and (head == reported or db.mark(a.id, f"commits:{head}") == "told"
+                                 or (counted and db.mark(a.id, "commits-none") == counted)):
+            continue
+        since = _idle_since(db, a, panes=panes)
+        if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
+            continue
         try:
-            head = gates.head(ws)
-            if head == reported:
+            head = head or gates.head(ws)
+            if head == reported or db.mark(a.id, f"commits:{head}") == "told":
                 continue
-            span = f"{reported}..HEAD" if reported and git.ok(["merge-base", "--is-ancestor", reported, "HEAD"], ws.path) \
-                else f"{ws.base_branch}..HEAD"
-            covered = len(git.run(["rev-list", span], ws.path).stdout.split())
+            covered = count_unreported_commits(ws.path, ws.base_branch, reported)
         except git.GitError:
             continue
+        if not covered and counted:
+            db.set_mark(a.id, "commits-none", counted)
         if covered and _tell_once(db, a, f"commits:{head}", (
                 f"{ws.branch} has {covered} unreported commits; the worker may have failed to "
                 f"report (worker {a.id}, workspace {ws.id}). Ask it to call report_result again, "
@@ -705,27 +943,27 @@ def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[
 
 
 def _last_edit(ws: Workspace | None) -> float:
-    """When a file with uncommitted changes in ``ws`` was last written; 0 if none."""
+    """When a file with uncommitted changes in ``ws`` was last written; 0 if none.
+    Which files are uncommitted comes from ``status_cache`` (git only when the
+    checkout moved; the cull asks once a minute for every idle worker); each
+    one's time is stat'ed now."""
     newest = 0.0
     if ws is None or not os.path.isdir(ws.path):
         return newest
     try:
-        # -z: paths unquoted (git.dirty_files' would be C-quoted past ASCII),
-        # and a rename's source after its destination, as an entry of its own.
-        entries = git.run(["status", "--porcelain", "-z", "--untracked-files=all"],
-                          ws.path).stdout.split("\0")
+        entries = status_cache.cached_any_status(ws.path, ws.base_branch).dirty_files
     except git.GitError:
         return newest
-    source = False
+    root = os.fsencode(ws.path)
     for entry in entries:
-        if source or len(entry) < 4:
-            source = False
-            continue
-        source = entry[0] in "RC"
-        try:
-            newest = max(newest, os.stat(os.path.join(ws.path, entry[3:])).st_mtime)
-        except OSError:
-            pass   # deleted
+        # As porcelain v1 prints them: C-quoted past ASCII, a rename as "old -> new".
+        names = [entry, *(entry.rsplit(" -> ", 1)[1:])]
+        for name in names:
+            try:
+                newest = max(newest, os.stat(os.path.join(root, status_cache._unquote(name))).st_mtime)
+                break
+            except OSError:
+                pass   # deleted, or the rename's destination is the name to look at
     return newest
 
 
@@ -1068,8 +1306,14 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        # The window's last output from the sweep's pane listing; asked of tmux only when it lacks it.
+        activity = getattr(panes, "activity", {}).get(a.tmux_window)
+        if activity is None:
+            activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
         if activity is None or now - activity < API_ERROR_GRACE:
+            continue
+        key = _screen_key(a, panes)
+        if _screen_unchanged(db, a, "api", key):
             continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
@@ -1077,6 +1321,7 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         error = ClaudeCode.api_error(screen)
         if not error or model_access.classify(error):
+            _screen_read(db, a, "api", key)
             continue
         if a.status == "processing":
             db.set_status(a.id, "idle", only_if="processing")
@@ -1113,10 +1358,15 @@ def note_model_refused(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
+        # What a screen says is told once (first_time): one read until the pane prints again.
+        key = _screen_key(a, panes)
+        if _screen_unchanged(db, a, "refused", key):
+            continue
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
         except tmux.TmuxError:
             continue
+        _screen_read(db, a, "refused", key)
         ws = db.get_workspace(a.workspace_id)
         where = f" on branch `{ws.branch}`" if ws else ""
         error = ClaudeCode.api_error(screen)
@@ -1283,7 +1533,9 @@ def prune_retired(db: DB, now: float | None = None, *, cautious: bool = False) -
             done.append(f"kept {ws.branch}: merged, but {len(dirty)} uncommitted file(s) in {ws.path}")
             continue
         try:
-            removed = workspaces.remove(db, ws)
+            # Chosen from an earlier look: stop nothing, so a worker that is back
+            # at work since keeps it (its CLI is then in use there).
+            removed = workspaces.remove(db, ws, stop=())
         except (workspaces.WorkspaceError, git.GitError) as e:
             done.append(f"kept {ws.branch}: {e}")
             continue
@@ -1402,7 +1654,10 @@ def orphan_servers() -> list[str]:
             # server another pytest run is using right now.
             continue
         if homes is None:
-            tmux.remove_socket(name)  # nothing listening: just the file
+            if tmux.abandoned(name):
+                tmux.remove_socket(name)  # nothing listening: just the file
+            else:
+                done.append(f"left tmux server {name} alone: it is running but couldn't be asked")
             continue
         if m:
             reason = "its test run is over"

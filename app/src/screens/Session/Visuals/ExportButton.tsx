@@ -25,7 +25,7 @@ export function ExportButton({ client, source, repo, open, onOpenChange, onReque
     toggle.current?.focus();
   };
   return (
-    <div className="relative">
+    <div className="relative flex max-w-full flex-wrap items-center gap-2">
       <button ref={toggle} type="button" className={`${button} pl-2.5 pr-2 ${open ? "bg-surface-2" : ""}`} aria-haspopup="true" aria-expanded={open} data-testid="visual-export" onKeyDown={esc} onClick={() => {
         if (!open) onRequestSnapshot?.();
         onOpenChange(!open);
@@ -34,10 +34,12 @@ export function ExportButton({ client, source, repo, open, onOpenChange, onReque
         Export
         <ChevronDownIcon size={14} className={`text-ink-3 transition-transform duration-150 ${open ? "rotate-180" : ""}`} />
       </button>
+      {!open && said && <p role="status" className="max-w-80 break-words text-xs text-ink-2">{said}</p>}
       {open && (
         <div className="absolute right-0 top-full z-20 pt-1.5" onKeyDown={esc}>
           {source ? (
-            <ExportMenu key={`${source.kind}:${source.id}:${"rev" in source ? source.rev : ""}`} client={client} source={source} repo={repo} onSaid={setSaid} status={said} />
+            <ExportMenu key={`${source.kind}:${source.id}:${"rev" in source ? source.rev : ""}`} client={client} source={source} repo={repo} onSaid={setSaid} status={said}
+              onComplete={() => { onOpenChange(false); }} />
           ) : (
             <p role="status" className={`${exportPanel} flex-row items-center gap-2 px-3 py-3 text-sm text-ink-2`}>
               <span className="size-3 animate-spin rounded-full border-[1.5px] border-line-strong border-t-branch" aria-hidden />

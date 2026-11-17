@@ -1,0 +1,193 @@
+MCP stdio hang: alternatives to the visuals notification path
+2026-11-11; branch investigate/mcp-hang-other-causes
+Code baseline: 4094b712c. Investigation only; no src/ changes.
+
+Finding
+
+The strongest alternative is output backpressure on the MCP connection.
+One frame that cannot finish writing prevents every subsequent response from
+reaching the client, without consuming CPU or affecting hooks/the daemon.
+This is plausible, not a diagnosis of the incident: process inspection was
+denied, and there is no evidence here that the affected client stopped reading.
+Closing a connection can cancel outstanding client calls without completing
+their work; the reported clearing of calls does not distinguish those outcomes.
+
+Ranking among the requested candidates:
+1. (e) Stdout backpressure: PLAUSIBLE, strongest symptom fit and transport tests.
+2. (a) Reload: PLAUSIBLE only with a blocked output frame or diagnostic stream;
+   an ordinary pending reload holding calls indefinitely is RULED OUT.
+3. (b) Pool exhaustion: PLAUSIBLE for subsets of tools; the proposed shared
+   AnyIO pool exhausted by handoff/wait_for_worker/assign is RULED OUT.
+4. (c) SQLite: an infinite busy-handler wait is RULED OUT; repeated finite
+   contention remains a weaker possible contributor.
+5. (d) Missing socket/HTTP timeout: RULED OUT in the inspected common clients;
+   no connection-wide unbounded network wait was found.
+
+The exclusions describe the mechanisms inspected, not proof that the live
+processes were healthy. The _watch_visuals/notify_tools_changed implementation
+and its reproduction belong to worker f5d95ebd and were not investigated here.
+
+(e) Output backpressure
+
+src/brindle/mcp_stdio.py:181-182 creates zero-capacity inbound/outbound streams.
+Connection._write_all (337-361) consumes one outbound frame at a time. _write
+(363-373) waits for out_fd to become writable, then writes at most PIPE_BUF.
+There is no deadline on that await. A client that leaves the read end open
+without consuming bytes can hold the writer indefinitely. Subsequent responses
+queue behind it; response settlement is after the write, at 359-361.
+
+This is a response-delivery stall, not necessarily a tool-execution stall.
+The event loop can keep reading requests and cancellations. Closing stdin
+settles pending after_reply callbacks at 249; a failed output write settles
+them at 353. Closing only stdin does not itself promise that a full stdout
+pipe drains or that the outer writer task exits. Closing the output reader
+also lets the writer observe a broken pipe.
+
+Existing test tests/test_task_deps.py:762-853 exercises real pipes, Connection,
+the MCP dispatcher and assign. It fills the output pipe and verifies that
+unwritten work remains unanswered, then verifies cancellation/disconnection
+settles it before the pipe is drained. All four cases passed in this checkout.
+This establishes the transport behavior, not that the incident had a full pipe.
+
+Expected diagnostic evidence: an async task parked in _write/wait_writable,
+later replies awaiting the zero-capacity output stream, and an idle event loop.
+A native sample showing kevent alone would not prove this; an idle healthy
+async server also waits there. Python task state and client-side reader state
+would distinguish them. A native write syscall stuck on stdout is a different
+case from the intended async wait and should be recorded as such.
+
+(a) In-place reload
+
+git diff v0.6.2 v0.6.3 -- src/brindle/mcp_stdio.py src/brindle/upgrade.py is empty.
+These files are also unchanged between v0.6.3 and this checkout.
+
+Connection._hold starts a three-second window (mcp_stdio.py:61,263-266).
+_read_all:236-243 dispatches held requests locally when the window expires
+while other requests remain active, and defers replacement until idle.
+Long-lived subscription requests are tracked separately from _in_flight
+(317-322), so an ordinary open subscription does not prevent idle replacement.
+A failed replacement dispatches held lines and suppresses further attempts
+for the same install stamp (225-235,268-274).
+
+Preflight is synchronous on the event loop and can temporarily stop all
+dispatch, but _ready uses a 60-second subprocess budget (464-478), including
+admission in spawn.read. upgrade.exec_install:124-132 has at most two launcher
+candidates. This is not a normal path to an hours-long pending reload.
+The separate indefinite CLI reexec loop (upgrade.py:188 onward) is not called
+by Connection.replace.
+
+There is an important exception: _read_all:221-224 awaits _wrote before the
+hold-expiry branch. When idle with an unfinished notification frame, it can
+wait indefinitely for output, even after the hold window has expired. It also
+stops reading stdin/EOF/cancellations in that branch. This is a code-supported
+compound cause involving (e), not an independent reason an update would hang.
+The existing long-call test does not cover a permanently blocked notification.
+
+Another output-related possibility is synchronous stderr backpressure:
+_hand_over logs on the event loop at mcp_stdio.py:398 and 415;
+upgrade.exec_install flushes stdout/stderr at 122-123 before preflight starts.
+claim_stdio/_divert sends ordinary fd 1 output to stderr (444-461). An undrained
+diagnostic pipe or a blocked buffered-stream lock has no deadline here, and
+could stop the event loop itself. This is plausible but unobserved. A stack
+in logging, flush, buffered I/O locking or write would distinguish it.
+
+The reported install at 2026-11-10 22:28 and onset around 08:30 the next day
+do not by themselves support a pending reload: watch_install checks every
+five seconds (mcp_server.py:2106,2136-2143). Also, exec preserves PID/start
+time; a process that started at 22:28 need not still run its original image.
+
+Three existing tests passed (tests/test_mcp_stale_engine.py:482,509,541):
+idle update detection, an install completing during a failed replacement,
+and a new call answered while an older long call holds replacement open.
+
+(b) Worker pools
+
+The locked dependencies are MCP 2.2.0 and AnyIO 4.15.1, unchanged across these
+release tags (uv.lock). Cached copies of these exact versions were inspected.
+MCP's server/mcpserver/utilities/func_metadata.py:149-164 directly awaits async
+tools and sends sync tools to anyio.to_thread.run_sync. AnyIO's asyncio
+backend uses its own limiter with 40 tokens and shields active sync work
+from cancellation by default (_backends/_asyncio.py:2650-2705,3158-3164).
+
+However, handoff and assign are async tools. Their preparation runs through
+asyncio.to_thread in _answer (mcp_server.py:617-637), and worker startup is
+released only after delivery. handoff no longer waits for completion
+(823-827). wait_for_worker is also async and explicitly uses asyncio.to_thread
+(925-935), which uses a separate asyncio executor, not AnyIO's limiter.
+No MCP customization joining these pools was found.
+
+Large numbers of wait_for_worker calls can occupy the asyncio executor.
+Its default wait_seconds is 240, but callers can request arbitrarily large
+values. _await_task checks a monotonic deadline (696-714); wait_for_result
+uses wall time (agents.py:3514-3539). Neither loop has a cooperative request
+cancellation token, so cancelling an await does not stop an executing thread.
+Accumulated abandoned waits are therefore plausible for a long-lived process.
+They can delay assign/handoff and other asyncio executor users, but do not
+alone explain every ordinary sync tool failing to answer. Conversely, 40
+blocked sync tools can exhaust AnyIO without exhausting the asyncio executor.
+Both pools being full, or a separate common lock, requires additional evidence.
+Disconnect also need not promptly free shielded AnyIO work, weakening this
+candidate if the report means actual server work promptly finished on close.
+
+(c) SQLite
+
+DB opens connections with a 30-second busy budget and autocommit, enables WAL,
+and uses BEGIN IMMEDIATE/COMMIT with rollback on exceptions
+(src/brindle/db.py:1421-1447,1687-1695). migration_incompatibility opens a
+read-only connection using sqlite3's finite default busy budget (1388-1418).
+No overriding busy_timeout or custom infinite busy handler appears in src/.
+The v0.6.2-to-v0.6.3 DB diff changes schema/data operations, not these limits.
+
+There is a common synchronous event-loop path: _Server.call_tool calls
+_migrated_under_us and _calling_agent before dispatch (mcp_server.py:44-74).
+The latter constructs DB, including setup/migrations. Thus database contention
+can stall all dispatch for a finite interval even if pools have spare capacity.
+Many sequential requests could repeatedly incur that cost; a single busy
+handler is not an infinite wait, nor is there a single overall SQL deadline.
+Hooks and daemon writes continuing to work argue against one permanently
+held global writer lock, though merely being alive would not establish that.
+Client closure does not release another process's SQLite lock.
+
+(d) Daemon socket and HTTP
+
+The relevant new daemon call is holds.app_connected, added in 0.6.3. It calls
+the Unix-socket client with CALL_SECONDS (five seconds). The socket receives
+that limit before connect and request/read (daemon/holds.py:56,395-421,430-439).
+The daemon presence handler at 372-380 reads an in-memory connection counter,
+not a database or worker pool. Holder.wait supplies seconds plus ten at 465-468;
+it is a hook wait path, not a common tools/call dispatch gate.
+
+Other inspected clients likewise supply limits: inbox.send uses three seconds
+(inbox.py:82-105); Pro UrllibTransport uses fifteen seconds and passes it to
+opener.open (pro/auth.py:60,170-183,215-233); GitHub requests pass HTTP_SECONDS
+(github_connect.py:480). Repository searches found no raw no-limit HTTP call
+on the common MCP dispatch path. These are generally socket inactivity limits,
+not total elapsed deadlines: DNS resolution and a peer continually sending
+partial data are caveats, not evidence of this incident. A hung tool-specific
+network call alone does not block unrelated tools without pool exhaustion or
+running synchronously on the event loop.
+
+Evidence limits and validation
+
+No live stacks were obtained. sample 56413 3 and sample 58684 3 both returned
+"you do not have appropriate privileges to examine it". The same commands
+with sandbox escalation still failed. ps for just those PIDs returned
+"Operation not permitted", also after escalation. No process was killed or
+signalled. Their age, CPU and onset remain supplied incident facts, not
+independently verified observations. No sample files were created.
+
+uv run and uv venv failed with the macOS system-configuration NULL-object
+panic, including an escalated attempt. Tests instead used an existing cached
+Python/pytest plus cached MCP 2.2.0/AnyIO 4.15.1, explicitly selecting this
+worktree's src and tests. Commands (one per invocation):
+
+/Users/hannahlerner/.cache/uv/archive-v0/X17OfmhLHBZyYSFLM7WZu/bin/python -m pytest -o 'pythonpath=src tests /Users/hannahlerner/.cache/uv/archive-v0/zjsBSu31staP_3OoC7J2z/lib/python3.11/site-packages' tests/test_mcp_stale_engine.py -q -k 'call_after_an_update_is_not_held or idle_server_reloads or update_that_completes_during'
+Result: 3 passed, 15 deselected in 1.17s.
+
+/Users/hannahlerner/.cache/uv/archive-v0/X17OfmhLHBZyYSFLM7WZu/bin/python -m pytest -o 'pythonpath=src tests /Users/hannahlerner/.cache/uv/archive-v0/zjsBSu31staP_3OoC7J2z/lib/python3.11/site-packages' tests/test_task_deps.py -q -k cancelled_assign_never_launches
+Result: 4 passed, 40 deselected in 1.80s.
+
+No new test or production fix is claimed. No full suite was run. This report
+is the only committed change. To identify the incident cause, a permitted
+native sample plus Python task stacks/output-reader state at the time of the
+hang remain necessary; these PIDs could also be unrelated healthy servers.

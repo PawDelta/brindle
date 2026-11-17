@@ -46,6 +46,7 @@ import secrets
 import subprocess
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config, workspace_config
@@ -111,6 +112,14 @@ to be asked each step.
 - For a big goal brindle may ask the person whether to plan it first. While
   that question is open, workers you assign queue. If they say yes, you're
   told to write a planning doc with propose_plan before assigning more work.
+  Write it as a design doc: `sections` of markdown with mermaid or svg
+  diagrams, `decisions` with options (pros, cons, files touched), your pick
+  and your strongest argument against it, and a `split` with each worker's
+  files and the one test that proves it done. The person's comments,
+  suggestions and replies reach you as one message when they approve or
+  request changes, each naming its thread #N: answer with
+  reply_plan_thread, then publish the next revision with
+  propose_plan(plan_id=...), keeping section ids so comments stay put.
 - When a worker reports, brindle has its branch reviewed and, once approved and
   the checks pass, merges it and removes the worktree; you get one message
   per branch: merged, or "needs you" with the details. Don't request_review
@@ -684,10 +693,12 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
 
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None, *,
-             summary: str | None = None) -> None:
+             summary: str | None = None, replace: bool = False) -> None:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
     A milestone that keeps its title and check keeps its last result. A big
-    goal may open brindle's offer to plan it first (``consider_plan_offer``)."""
+    goal may open brindle's offer to plan it first (``consider_plan_offer``).
+    Rewording or growing the goal keeps the session's offer, answered or not;
+    only ``replace=True`` (an explicit, unrelated new goal) gives it a fresh one."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")
     if not milestones:
@@ -707,23 +718,33 @@ def set_goal(db: DB, root_id: str, goal: str,
     fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
-        fields["plan_offer"] = None     # a new goal gets its own, single offer
-        fields["offer_goal_at"] = time.time()
+        if ap is None or replace:
+            fields["plan_offer"] = None     # an unrelated goal gets its own, single offer
+            fields["offer_goal_at"] = time.time()
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
         fields["goal_sha"] = _commit(ws, tracked_only=True)
-    # Changed milestones need a fresh audit.
-    db.update_autopilot(root_id, goal=goal.strip(), detail=detail, state="running", note=None,
-                        auditor_id=None, audit_sha=None, audit_ok=None, **fields)
-    db.set_milestones(root_id, milestones)
-    for m in db.milestones(root_id):
-        prev = old.get((m.title, m.check_cmd))
-        if prev and prev.status != "pending":
-            db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
-                            passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
-                            ever_passed=prev.ever_passed)
-    db.bump_progress(root_id)
+    # Sweeps must see the old goal and its landing claims, or the complete
+    # replacement. Preserved check results belong to the same transaction.
+    with db.tx() as c:
+        if ap is None or ap.goal != goal.strip():
+            c.execute("DELETE FROM phase_landings WHERE root_id=?", (root_id,))
+            c.execute("DELETE FROM phase_prs WHERE root_id=?", (root_id,))
+        # Changed milestones need a fresh audit.
+        db.update_autopilot(root_id, goal=goal.strip(), detail=detail, state="running", note=None,
+                            auditor_id=None, audit_sha=None, audit_ok=None, **fields)
+        db.set_milestones(root_id, milestones)
+        for m in db.milestones(root_id):
+            prev = old.get((m.title, m.check_cmd))
+            if prev and prev.status != "pending":
+                db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
+                                passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
+                                ever_passed=prev.ever_passed)
+        db.bump_progress(root_id)
+    from brindle import visuals
+
+    visuals.claim_approvals(db, root_id, goal.strip())   # a design approved before this goal is its plan
     bus.publish_agent(db, "autopilot.goal", root_id, goal=goal.strip(), milestones=len(milestones))
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,
@@ -763,13 +784,14 @@ def plan_offer_scope(db: DB, root_id: str, ap: Autopilot) -> tuple[list[Mileston
 
 def consider_plan_offer(db: DB, root_id: str) -> None:
     """Open the one offer to plan this goal first if it now deserves it: large,
-    by milestones, repos (an omitted repo is the root checkout) or workers, or
+    by milestones or repos (an omitted repo is the root checkout), or
     design-heavy (brindle.pro.analysis_brief.offer_reasons). Never re-offers a
-    goal already offered or answered, and never while a plan is already open
+    goal already offered or answered, never for a goal whose design the person
+    approved in Visuals (``visuals.has_approved_design``), and never while a plan is already open
     or plans can't be answered (visuals off or no app connected). While the
     offer is open the session's tasks queue behind it (brindle.plans.holding); the person
     answers it from the Inbox (brindle.plans.answer_offer). Run when the goal
-    changes and when a worker is assigned; never raises."""
+    changes, and only before any worker is assigned for it; never raises."""
     try:
         from brindle import plans, visuals
         from brindle.daemon import holds
@@ -777,12 +799,20 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
 
         ap = db.get_autopilot(root_id)
         if ap is None or not ap.goal or ap.plan_offer is not None or not visuals.enabled() \
-                or not holds.app_connected() or plans.open_plan(db, root_id) is not None:
+                or not holds.app_connected() or plans.open_plan(db, root_id) is not None \
+                or visuals.has_approved_design(db, root_id, ap.goal):
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
+        queued = db.conn.execute(
+            "SELECT 1 FROM tasks WHERE state != 'cancelled' AND created_at >= ? AND (caller_id = ? "
+            "OR caller_id IN (SELECT id FROM agents WHERE parent_id = ?)) LIMIT 1",
+            (ap.offer_goal_at or 0, root_id, root_id)).fetchone()
+        if workers or queued:   # work already assigned, started or queued: an offer now would hold it
+            return
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
                 and db.open_plan_offer(root_id, ap.goal, plans.OFFER_OPEN + secrets.token_hex(4)):
             bus.publish_agent(db, "autopilot.goal", root_id)
+            visuals.settle_offer_for_approval(db, root_id)   # an approval delivered while this was evaluated
     except Exception:  # noqa: BLE001 - an offer is never a reason to fail a goal or a spawn
         log.info("plan offer not evaluated", exc_info=True)
 
@@ -842,7 +872,11 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
                 else f"{cli} isn't installed, skipped {name}")
     if p.provider in quota.PROVIDERS:
         room = quota.headroom(p.provider, cfg, repo_root)
-        if room <= 100 - cfg.usage_limit:
+        # Reserve enough allowance to finish the expected size of task. Unknown
+        # weights get the full margin; a local server has no usage allowance.
+        margin = (0 if p.provider == "native" else max(0, min(100, cfg.limit_headroom))
+                  * {"light": 0.25, "medium": 0.5}.get(weight, 1))
+        if room <= 100 - cfg.usage_limit + margin:
             label = quota.NAMES.get(p.provider, p.provider)
             if p.provider == "native":
                 return f"local model server not answering, skipped {name}"
@@ -852,26 +886,38 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     return None
 
 
-def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
-                     files: list[str] | None,
-                     decision: dict | None = None, gate=None,
-                     ceiling: str | None = None) -> tuple[str | None, bool, str]:
-    """(profile, learned, why) for a task of ``weight``; profile is None when
-    every candidate for the tier is out. ``decision`` gets the ``baseline``
-    (the pick without learning), and ``over_budget`` (why each candidate was
-    skipped) when a budget was what ruled every one out, or ``demoted_from``
-    when it moved the task to a cheaper candidate."""
-    from brindle import learning
+def tier_order(cfg: RepoConfig, weight: str) -> list[str]:
+    """``weight``'s candidates in the order routing tries them: the built-in
+    tier ranking for the default lists, the configured order otherwise."""
+    from brindle.worker_models import TIER_PREFERENCES
 
+    order = list(cfg.routing.get(weight, []))
+    if cfg.routing_sources.get(weight) == "DEFAULT_ROUTING" and not cfg.routing_locked.get(weight):
+        preferred = TIER_PREFERENCES.get(weight, ())
+        # Follow the built-in tier ranking; explicit routing keeps its configured order.
+        order = sorted(order, key=lambda name: preferred.index(name) if name in preferred else len(preferred))
+    return order
+
+
+def eligible(cfg: RepoConfig, repo_root: str, weight: str, gate=None, *, ceiling: str | None = None,
+             design_heavy: bool = False) -> tuple[list[str], list[str], list[str], dict[str, str]]:
+    """(order, remaining, skipped, over) for a ``weight`` task: the tier's
+    candidates in routing's order under the ceiling (``ceiling``, else the
+    repo's ``max_weight``), those it can run now, why each other was
+    skipped, and which a budget (``gate``) ruled out. Read-only: routing and
+    the goal preview both judge candidates by it."""
     skipped: list[str] = []
     remaining: list[str] = []
     over: dict[str, str] = {}
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
-    order = cfg.routing.get(weight, [])
+    order = tier_order(cfg, weight)
     if effective_ceiling:
         order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:
+        if not cfg.routing_allows(name, design_heavy):
+            skipped.append(f"Fable is reserved for design-heavy tasks, skipped {name}")
+            continue
         why = _unavailable(name, cfg, repo_root, gate, weight)
         if why:
             skipped.append(why)
@@ -879,6 +925,23 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
                 over[name] = why
         else:
             remaining.append(name)
+    return order, remaining, skipped, over
+
+
+def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
+                     files: list[str] | None,
+                     decision: dict | None = None, gate=None,
+                     ceiling: str | None = None, design_heavy: bool = False,
+                     goal: dict | None = None) -> tuple[str | None, bool, str]:
+    """(profile, learned, why) for a task of ``weight``; profile is None when
+    every candidate for the tier is out. ``decision`` gets the ``baseline``
+    (the pick without learning), and ``over_budget`` (why each candidate was
+    skipped) when a budget was what ruled every one out, or ``demoted_from``
+    when it moved the task to a cheaper candidate."""
+    from brindle import learning, routing_goal
+
+    order, remaining, skipped, over = eligible(cfg, repo_root, weight, gate, ceiling=ceiling,
+                                               design_heavy=design_heavy)
     if over and decision is not None:
         if not remaining:
             decision["over_budget"] = list(over.values())
@@ -891,8 +954,19 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if cfg.routing_locked.get(weight):
         pick, reason = None, None   # the owner pinned this tier: learning never overrides it
     else:
+        if goal is None:
+            goal = routing_goal.for_learner(repo_root)
+        # The goal orders what's left by the shipped priors (§4): the pick
+        # without hosted learning, and the default the learner must beat.
+        ranked = routing_goal.rank(remaining, weight, goal, repo_root)
+        if ranked[0] != remaining[0]:
+            skipped.insert(0, f"the routing goal put it ahead of {remaining[0]}")
+        remaining = ranked
+        options: dict = {"design_heavy": True} if design_heavy else {}
+        if goal is not None:
+            options["goal"] = goal
         pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
-                                           weight=weight, default=remaining[0])
+                                           weight=weight, default=remaining[0], **options)
     name = pick or remaining[0]
     if decision is not None:
         decision["baseline"] = remaining[0]
@@ -1029,10 +1103,26 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
     return "medium"
 
 
+def _goal_weights(db: DB, caller_id: str, repo_root: str, goal) -> dict | None:
+    """The routing goal's weights for a delegation by ``caller_id`` when its
+    task or session sets one (they need the session to resolve), else None:
+    the learner then resolves the person's and the repo's itself, and only
+    when it is asked. Raises GoalError for a malformed task ``goal``."""
+    from brindle import routing_goal
+
+    if goal is not None:
+        routing_goal.normalize(goal)
+    root = root_of(db, caller_id) if caller_id else None
+    if goal is None and not (root and db.session_routing_goal(root)):
+        return None
+    return routing_goal.for_learner(repo_root, db=db, root_id=root, task=goal)
+
+
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
                    task: str | None = None, files: list[str] | None = None,
                    weight: str | None = None, why: list[str] | None = None,
-                   decision: dict | None = None) -> tuple[str, bool]:
+                   decision: dict | None = None, *, design_heavy: bool = False,
+                   max_tier: str | None = None, goal=None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
     ``requested`` if given, else (when no ``weight`` is given) the first
     unverified milestone's profile in the caller's session, else the repo's
@@ -1042,10 +1132,23 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     ``default_agent``. Raises AutopilotError if it doesn't exist. An
     explanation of a routed pick is appended to ``why``. ``decision`` is
     filled with what ``brindle.savings`` records: the ``profile``, the
-    ``baseline`` (the pick without learning), ``learned`` and the ``weight``."""
+    ``baseline`` (the pick without learning), ``learned`` and the ``weight``.
+    ``design_heavy`` allows Fable when ``fable_for_design_only`` is enabled;
+    it does not change the task's weight. ``max_tier``: a ceiling for this
+    delegation alone (a fast-path task's "medium"), applied like the repo's
+    ``max_weight`` to routing, its fallbacks and the final pick; the tighter wins.
+    ``goal``: this task's own routing goal (a preset name or weights), over
+    the session's, the repo's and the person's (brindle.routing_goal); the
+    learner is asked with the one in force."""
     cfg = load_repo_config(repo_root)
+    options: dict = {"design_heavy": True} if design_heavy else {}
+    weights = _goal_weights(db, caller_id, repo_root, goal)
+    if weights is not None:
+        options["goal"] = weights
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
+    if max_tier in weight_order and (ceiling is None or weight_order[max_tier] < weight_order[ceiling]):
+        ceiling = max_tier
 
     if requested:
         req = requested.strip()
@@ -1105,7 +1208,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             from brindle import budget
 
             gate = budget.Gate(db, cfg, repo_root, caller_id)
-            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate, ceiling=ceiling)
+            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate, ceiling=ceiling, **options)
             if routed.get("over_budget"):
                 message = budget.refusal(routed["over_budget"])
                 try:
@@ -1119,6 +1222,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 candidates = [cfg.default_agent]
                 if ceiling and weight_order[profile_weight(cfg.default_agent, cfg, repo_root)] > weight_order[ceiling]:
                     candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
+                candidates = [n for n in candidates if cfg.routing_allows(n, design_heavy)]
                 fallback = next((n for n in candidates if not _excluded(n, cfg, repo_root)), None)
                 if not fallback and candidates:
                     raise AutopilotError(f"no agent profile left for a {weight} task: every candidate runs on a "
@@ -1131,16 +1235,24 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 why.append(note)
         if not name:
             name = learning.choose(db, cfg, repo_root, task, files, weight=weight,
-                                   default=cfg.default_agent) or ""
+                                   default=cfg.default_agent, **options) or ""
             learned = bool(name)
             name = name or cfg.default_agent
+            if not cfg.routing_allows(name, design_heavy):
+                name, learned, note = _route_by_weight(
+                    db, cfg, repo_root, ceiling or weight or "advanced", task, files, routed,
+                    ceiling=ceiling, **options)
+                if not name:
+                    raise AutopilotError("no available agent for a task without design-heavy routing")
+                if why is not None:
+                    why.append(note)
             if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
                 candidates = cfg.routing.get(ceiling, [cfg.default_agent])
                 orig_name = name
                 name = candidates[0] if candidates else cfg.default_agent
                 if why is not None:
                     why.append(f"fallback profile {orig_name} capped to {name} by max_weight {ceiling}")
-            routed["baseline"] = cfg.default_agent
+            routed.setdefault("baseline", cfg.default_agent)
         routed["prior"] = learned and learning.used_prior(cfg, repo_root)
     if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
         permissible = [
@@ -1174,6 +1286,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         tier = weight or profile_weight(name, cfg, repo_root)
         alternatives = list(dict.fromkeys([*cfg.routing.get(tier, []), *selected.fallback]))
         replacement = next((n for n in alternatives if n != name and
+                            cfg.routing_allows(n, design_heavy) and
                             (not ceiling or weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]) and
                             not _unavailable(n, cfg, repo_root, weight=tier)), None)
         if replacement is None:
@@ -1523,6 +1636,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         db.update_autopilot(root_id, state="running")
     elif ap and ap.state in ("done", "auditing"):
         db.update_autopilot(root_id, state="running")
+    phase_landing(db, root_id, newly_passed=newly_passed)
     bus.publish_agent(db, "autopilot.checked", root_id, position=position,
                       passed=sum(m.status == "passed" for m in ms), total=len(ms),
                       regressed=[m.position for m in regressed], done=done)
@@ -1709,7 +1823,7 @@ def record_accepted_decision(db: DB, root_id: str, decision: str) -> None:
     entry = f"Accepted decision / scope exclusion:\n{decision.strip()}"
     new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
     db.update_autopilot(root_id, audit_history=new_history, audit_sha=None, audit_ok=None, auditor_id=None, state="running")
-    bus.publish_agent(db, "autopilot.audit_decision", root_id)
+    bus.publish_agent(db, "autopilot.audit_decision", root_id, decision=decision.strip()[:1000])
 
 
 def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
@@ -1765,6 +1879,76 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 
 # -- progress -----------------------------------------------------------------
 
+
+def phase_commit(ms: list[Milestone], phase: str) -> str | None:
+    """The commit every milestone of ``phase`` checked in the session's own
+    checkout last passed on, or None when they didn't pass on one (a dirty
+    checkout records no commit)."""
+    own = [m for m in ms if m.phase_name == phase and not m.repo]
+    shas = {m.passed_sha for m in own} | {m.checked_sha for m in own}
+    return shas.pop() if len(shas) == 1 and None not in shas else None
+
+
+def phase_landing(db: DB, root_id: str, now: float | None = None, *,
+                  newly_passed: bool = False) -> None:
+    """Queue a landing once per completed goal phase, or daily after progress.
+
+    The claim and inbox message commit together. Unphased progress during
+    the cooldown stays pending until a later check or sweep can announce it.
+    A completed phase while later milestones remain is landed by brindle
+    itself (``phase_prs``, routes_actions.land_phase_prs), pinned to the
+    commit its checks passed on; the goal's last one goes to the end-of-goal
+    PR the person opens.
+    """
+    from brindle import agents
+
+    now = time.time() if now is None else now
+    root = db.get_agent(root_id)
+    if root is None:
+        return
+    held = agents._holds_for(db, root)
+    queued = []
+    with db.tx() as c:
+        ms = db.milestones(root_id)
+        phases = {m.phase_name for m in ms if m.phase_name}
+        complete = [phase for phase in sorted(phases)
+                    if all(m.status == "passed" for m in ms if m.phase_name == phase)]
+        if not phases and ms:
+            c.execute("INSERT INTO phase_landings (root_id, phase, pending) VALUES (?, '', ?) "
+                      "ON CONFLICT(root_id, phase) DO UPDATE SET pending=MAX(pending, excluded.pending)",
+                      (root_id, int(newly_passed)))
+            complete = [""]
+        for phase in complete:
+            previous = c.execute("SELECT notified_at, pending FROM phase_landings "
+                                 "WHERE root_id=? AND phase=?", (root_id, phase)).fetchone()
+            if phase:
+                if previous is not None:
+                    continue
+            elif not previous["pending"] or (previous["notified_at"] is not None
+                                             and now - previous["notified_at"] < 86400):
+                continue
+            subject = (f"Every milestone in phase {phase!r} has passed." if phase
+                       else "Milestones have passed since the last landing notice.")
+            message = f"[brindle autopilot] {subject} Open or push the session PR now."
+            pin = phase_commit(ms, phase) if phase else None
+            if pin and any(m.status != "passed" for m in ms):
+                c.execute("INSERT OR IGNORE INTO phase_prs (root_id, phase, sha) VALUES (?,?,?)",
+                          (root_id, phase, pin))
+                message = (f"[brindle autopilot] {subject} brindle is landing it: opening the session PR, "
+                           f"or pushing to the open one, at {pin[:12]}, the commit the phase's checks passed "
+                           "on. You're told if it can't.")
+            c.execute("INSERT INTO phase_landings (root_id, phase, notified_at, pending) VALUES (?,?,?,0) "
+                      "ON CONFLICT(root_id, phase) DO UPDATE SET notified_at=excluded.notified_at, pending=0",
+                      (root_id, phase, now))
+            cur = c.execute("INSERT INTO inbox (agent_id, body, created_at, held) VALUES (?,?,?,?)",
+                            (root_id, message, now, int(held)))
+            queued.append(cur.lastrowid)
+    for message_id in queued:
+        bus.publish_agent(db, "message.queued", root_id, message_id=message_id, sender_id=None, held=held)
+    if queued:
+        agents._notify_supervisor(db, root)
+
+
 MARK = {"passed": "✓", "failed": "✗", "not_done": "○", "regressed": "✗", "pending": "○",
         "working": "◐", "waiting": "◌", "checking": "◌"}
 
@@ -1813,65 +1997,103 @@ def milestone_phases(db: DB, root_id: str) -> dict[int, str]:
 
 
 STAGES = ("working", "checks", "review", "merging")   # a branch's way from its brief to its merge
-ESTIMATE_RUNS = 5        # samples required before the sidebar estimates a duration
+ESTIMATE_RUNS = 5        # samples preferred before falling back across repositories
 ESTIMATE_DAYS = 14
+ESTIMATE_BUILD = 1200.0
+ESTIMATE_MERGE = 1200.0
 
 
-def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float | None:
+def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float:
     """Remaining critical path through workers and queued dependencies, then goal checks/audit."""
     import statistics
-    from brindle import agents, fair_share, tasks
+    from brindle import agents, bus, fair_share, tasks
+    from brindle.db import Task
 
     since = now - ESTIMATE_DAYS * 86400
     day = time.strftime("%Y-%m-%d", time.gmtime(since))
-    medians: dict[tuple[str, str | None], float | None] = {}
+    medians: dict[tuple[str, str | None], float] = {}
+    with db.snapshot():
+        history = list(db.conn.execute("SELECT * FROM stage_timings WHERE day>=?", (day,)))
+        # Recent review/merge events remain on the bus for a day before pruning
+        # persists them. Read both sources in one snapshot so concurrent pruning
+        # cannot move a sample between sources while the estimate reads them.
+        pending_samples, _ = bus.stage_samples(db.conn, now)
+    history.extend({"day": ended, "repo_root": repo, "stage": stage, "samples": json.dumps(samples)}
+                   for (ended, repo, stage), samples in pending_samples.items() if ended >= day)
+    legacy = list(db.conn.execute(
+        "SELECT w.repo_root, a.profile, a.reviewing_since-a.created_at AS duration"
+        " FROM agents a JOIN workspaces w ON w.id=a.workspace_id"
+        " WHERE a.created_at>=? AND a.reviewing_since<=?"
+        " AND a.reviewing_since>a.created_at AND a.result IS NOT NULL"
+        " AND a.mode IN ('assign', 'handoff', 'handoff_detached')", (since, now)))
+    # Compare today's completed work with its usual duration, stage by stage:
+    # a slow machine affects builds and checks in every repository.
+    today = time.strftime("%Y-%m-%d", time.gmtime(now))
+    ratios = []
+    for stage in {r["stage"] for r in history}:
+        usual = [s for r in history if r["stage"] == stage and r["day"] < today
+                 for s in json.loads(r["samples"]) if s > 0]
+        recent = [s for r in history if r["stage"] == stage and r["day"] == today
+                  for s in json.loads(r["samples"]) if s > 0]
+        if len(usual) >= ESTIMATE_RUNS and recent:
+            ratios.append(statistics.median(recent) / statistics.median(usual))
+    load = max(1.0, statistics.median(ratios)) if ratios else 1.0
 
-    def typical(repo: str, profile: str | None = None) -> float | None:
+    def samples_at_usual_speed(row) -> list[float]:
+        # Today's measurements already include the load penalty. Normalize
+        # them before applying that penalty to the final estimate once.
+        factor = load if row["day"] == today else 1.0
+        return [s / factor for s in json.loads(row["samples"]) if s > 0]
+
+    def typical(repo: str, profile: str | None = None) -> float:
         key = (repo, profile)
         if key not in medians:
-            if profile is None:
-                samples = [s for r in db.conn.execute(
-                    "SELECT samples FROM stage_timings WHERE repo_root=? AND stage='report_to_merge' AND day>=?",
-                    (repo, day)) for s in json.loads(r["samples"])]
-            else:
-                history = list(db.conn.execute(
-                    "SELECT stage, samples FROM stage_timings WHERE repo_root=? AND stage GLOB 'build:*' AND day>=?",
-                    (repo, day)))
-                legacy = list(db.conn.execute(
-                    "SELECT a.profile, a.reviewing_since-a.created_at AS duration"
-                    " FROM agents a JOIN workspaces w ON w.id=a.workspace_id"
-                    " WHERE w.repo_root=? AND a.created_at>=? AND a.reviewing_since<=?"
-                    " AND a.reviewing_since>a.created_at AND a.result IS NOT NULL"
-                    " AND a.mode IN ('assign', 'handoff', 'handoff_detached')",
-                    (repo, since, now)))
-                # Prefer durable profile history, then legacy profile rows while
-                # it fills. Never combine them: the same build may be in both.
-                candidates = (
-                    [s for r in history if r["stage"] == f"build:{profile}" for s in json.loads(r["samples"])],
-                    [r["duration"] for r in legacy if r["profile"] == profile],
-                    [s for r in history for s in json.loads(r["samples"])],
-                    [r["duration"] for r in legacy],
-                )
-                samples = next((s for s in candidates if len(s) >= ESTIMATE_RUNS), [])
-            medians[key] = statistics.median(samples) if len(samples) >= ESTIMATE_RUNS else None
+            candidates = []
+            # Prefer repo/profile, then repo-wide, then the same across all
+            # repos. Keep durable and legacy samples separate to avoid counting
+            # the same build twice while durable history fills up.
+            for scope in (repo, None):
+                rows = [r for r in history if scope is None or r["repo_root"] == scope]
+                old = [r for r in legacy if scope is None or r["repo_root"] == scope]
+                if profile is None:
+                    candidates.append([s for r in rows if r["stage"] == "report_to_merge"
+                                       for s in samples_at_usual_speed(r)])
+                else:
+                    candidates.extend((
+                        [s for r in rows if r["stage"] == f"build:{profile}"
+                         for s in samples_at_usual_speed(r)],
+                        [r["duration"] for r in old if r["profile"] == profile],
+                        [s for r in rows if r["stage"].startswith("build:")
+                         for s in samples_at_usual_speed(r)],
+                        [r["duration"] for r in old],
+                    ))
+            samples = next((s for s in candidates if len(s) >= ESTIMATE_RUNS),
+                           next((s for s in candidates if s), []))
+            medians[key] = (statistics.median(samples) if samples else
+                            ESTIMATE_BUILD if profile is not None else ESTIMATE_MERGE) * load
         return medians[key]
 
-    def report_remaining(merge: float, reported: float) -> float:
-        return max(60.0, merge - max(0, now - reported))
+    def progress_remaining(usual: float, began: float, rounds: int = 0) -> float:
+        elapsed = max(0.0, now - began)
+        # Surviving a typical duration means the work is longer than typical.
+        # Extend with observed effort rather than pinning an overdue run at 1m.
+        return max(60.0, usual / (rounds + 1) - elapsed, elapsed / (4 * (rounds + 1)))
+
+    def report_remaining(merge: float, reported: float, worker: Agent | None = None) -> float:
+        if worker is not None and worker.pipeline == "ready":
+            return max(60.0, merge * 0.1, max(0.0, now - reported) * 0.1)
+        return progress_remaining(merge, reported, (worker.pipeline_rounds or 0) if worker else 0)
 
     remaining: dict[str, float] = {}
     for a in live:
         ws = db.get_workspace(a.workspace_id)
-        merge = typical(ws.repo_root) if ws else None
-        if merge is None:
-            return None
+        repo = ws.repo_root if ws else ""
+        merge = typical(repo)
         if a.pipeline in ("ready", "reviewing", "fixing") and a.reviewing_since:
-            remaining[a.id] = report_remaining(merge, a.reviewing_since)
+            remaining[a.id] = report_remaining(merge, a.reviewing_since, a)
         else:
-            build = typical(ws.repo_root, a.profile)
-            if build is None:
-                return None
-            release = max(60.0, build - max(0, now - a.created_at))
+            build = typical(repo, a.profile)
+            release = progress_remaining(build, a.created_at)
             remaining[a.id] = release + merge
 
     ids = {a.id for a in tree}
@@ -1882,16 +2104,16 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
     for t in queued.values():
         ws = db.get_workspace(t.caller_ws_id)
         build, merge = typical(t.repo_root, t.profile), typical(t.repo_root)
-        if ws is None or build is None or merge is None:
-            return None
         durations[t.id] = (build, merge)
         dependencies[t.id] = []
+        if ws is None:
+            continue
         session_repos = tasks._session_repos(db, ws, t.caller_id)
         for dep in json.loads(t.depends_on or "[]"):
             try:
                 _, upstream, branch = tasks._resolve_dependency(db, ws, dep, session_repos, dependent_task_id=t.id)
             except agents.AgentError:
-                return None
+                continue  # unresolved external work still gets a bounded estimate
             if upstream is not None and upstream.id in queued:
                 dependencies[t.id].append(f"task:{upstream.id}")
             elif upstream is not None and upstream.state == "merged":
@@ -1899,67 +2121,87 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
             else:
                 worker = next((a for a in live if a.id == dep or
                                (branch is not None and a.workspace_id == branch.id)), None)
-                if worker is None:
-                    return None
-                dependencies[t.id].append(worker.id)
+                if worker is not None:
+                    dependencies[t.id].append(worker.id)
+    home = db.get_workspace(tree[0].workspace_id)
+    if home is not None:
+        claimed = {db.agent_milestone(a.id) for a in live}
+        claimed.update(db.task_milestone(t.id) for t in queued.values())
+        repos = {r.alias: r.repo_root for r in db.session_repos(tree[0].id)}
+        for m in db.milestones(tree[0].id):
+            if m.status == "passed" or m.title in claimed:
+                continue
+            repo = repos.get(m.repo, home.repo_root)
+            task_id = f"milestone:{m.id}"
+            queued[task_id] = Task(task_id, repo, None, tree[0].id, home.id, m.profile or "", m.title,
+                                   "assign", 1, None, None, None, None, "pending", now + m.position)
+            durations[task_id] = (typical(repo, m.profile or ""), typical(repo))
+            dependencies[task_id] = []
     if queued:
         cap = fair_share.limit()
-        releases: list[float] = []
-        if cap > 0:
-            # Match fair_share.running: all sessions' process workers and unlinked launch claims.
-            with db.snapshot():
-                occupants = [a for a in db.list_agents() if a.mode in fair_share.WORKER_MODES
-                             and a.status in ("starting", "processing") and agents.runs_process(a)]
-                claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
+        # delegate/check_capacity use the owning session's configuration even
+        # when a task or milestone targets an attached repository.
+        session_cap = load_repo_config(home.repo_root).max_agents if home else 0
+        with db.snapshot():
+            occupants = [a for a in db.list_agents() if a.mode in fair_share.WORKER_MODES
+                         and a.status in ("starting", "processing") and agents.runs_process(a)]
+            claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
 
-            def release_at(repo: str | None, profile: str, began: float) -> float:
-                build = typical(repo, profile) if repo is not None else None
-                return max(60.0, build - max(0, now - began)) if build is not None else float("inf")
+        def release_at(repo: str | None, profile: str, began: float) -> float:
+            return progress_remaining(typical(repo or "", profile), began)
 
-            for a in occupants:
-                ws = db.get_workspace(a.workspace_id)
-                if a.pipeline == "fixing" and a.reviewing_since:
-                    merge = typical(ws.repo_root) if ws else None
-                    # Fixing occupies a process slot until its next report;
-                    # report-to-merge history bounds that remaining work.
-                    release = report_remaining(merge, a.reviewing_since) if merge is not None else float("inf")
-                elif a.pipeline in ("ready", "reviewing") and a.reviewing_since:
-                    release = 0.0
-                else:
-                    release = release_at(ws.repo_root if ws else None, a.profile, a.created_at)
-                releases.append(release)
-            for t in claims:
-                release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
-                releases.append(release)
-                if t.id in queued:
-                    # A claimed task already owns its slot; don't schedule it twice.
-                    remaining[f"task:{t.id}"] = release + durations[t.id][1]
-                    del queued[t.id]
-        else:
-            cap = len(queued)
-        # If already over capacity, enough workers must report before a slot opens.
-        slots = sorted(releases, reverse=True)[:cap]
-        slots.extend([0.0] * max(0, cap - len(slots)))
+        def worker_release(a: Agent) -> float:
+            ws = db.get_workspace(a.workspace_id)
+            if a.pipeline == "fixing" and a.reviewing_since:
+                # Fixing occupies a slot until its next report.
+                return report_remaining(typical(ws.repo_root if ws else ""), a.reviewing_since, a)
+            if a.pipeline in ("ready", "reviewing") and a.reviewing_since:
+                return 0.0
+            return release_at(ws.repo_root if ws else None, a.profile, a.created_at)
+
+        releases = [worker_release(a) for a in occupants]
+        session_releases = [worker_release(a) for a in live if a.status not in ("paused", "done")]
+        for t in claims:
+            release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
+            releases.append(release)
+            if t.caller_id in ids:
+                session_releases.append(release)
+            if t.id in queued:
+                # A claimed task already owns both slots; don't schedule it twice.
+                remaining[f"task:{t.id}"] = release + durations[t.id][1]
+                del queued[t.id]
+
+        def slots_for(limit: int, occupied: list[float]) -> list[float]:
+            if limit <= 0:
+                return [0.0] * max(1, len(queued))
+            # If already over capacity, enough workers must report first.
+            slots = sorted(occupied, reverse=True)[:limit]
+            return slots + [0.0] * max(0, limit - len(slots))
+
+        slots = slots_for(cap, releases)
+        session_slots = slots_for(session_cap, session_releases)
         while queued:
             candidates = []
             for t in queued.values():
                 deps = dependencies[t.id]
                 if all(dep in remaining for dep in deps):
                     ready = max((remaining[dep] for dep in deps), default=0.0)
-                    if min(slots) > ready and float("inf") in slots:
-                        return None   # an unknown occupant could determine when the next slot opens
-                    start = max(min(slots), ready)
+                    start = max(min(slots), min(session_slots), ready)
                     candidates.append((start, t.created_at, t.id))
-            if not candidates:   # cyclic dependencies have no estimable launch order
-                return None
+            if not candidates:
+                # A broken dependency graph has no launch order yet. Budget the
+                # unresolved work serially until the supervisor repairs it.
+                start = max(min(slots), min(session_slots), max(remaining.values(), default=0.0))
+                candidates = [(start, t.created_at, t.id) for t in queued.values()]
             start, _, task_id = min(candidates)
             build, merge = durations[task_id]
             # Reporting releases the execution slot; merging releases dependants.
             slots[slots.index(min(slots))] = start + build
+            session_slots[session_slots.index(min(session_slots))] = start + build
             remaining[f"task:{task_id}"] = start + build + merge
             del queued[task_id]
     if not remaining:
-        return None
+        return typical(home.repo_root if home else "")
     home = db.get_workspace(tree[0].workspace_id)
     overhead: dict[str, list[float]] = {"check": [], "audit": []}
     opened: dict[tuple[str, str], float] = {}
@@ -1979,6 +2221,14 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
     return max(remaining.values()) + sum(statistics.median(s) for s in overhead.values() if len(s) >= ESTIMATE_RUNS)
 
 
+@lru_cache(maxsize=256)
+def _goal_commit_log(path: str, head: str, since: int) -> str:
+    """History is immutable at a commit; ages are recomputed by the reader."""
+    from brindle import git
+
+    return git.out(["log", f"--since=@{since}", "--format=%H %ct", "-n", "500", head], path)
+
+
 def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     """What session ``root_id`` is doing now, for the sidebar's goal summary.
 
@@ -1987,10 +2237,10 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     working), None when nothing runs or the session is paused. Commits made
     since the session started, in its checkout and its live branches'
     worktrees: ``commits_last_hour`` and ``last_commit_at``. ``eta_seconds``:
-    the slowest live branch's remaining build and report-to-merge time,
-    including queued dependencies and known final check/audit overhead;
-    None with fewer than ``ESTIMATE_RUNS`` runs for a required duration."""
-    from brindle import agents, git
+    remaining critical path through live branches, queued dependencies and
+    unclaimed milestones within the worker limit, plus known check/audit
+    overhead. Sparse history falls back across repos, then to fixed durations."""
+    from brindle import agents, git, status_cache
 
     now = time.time() if now is None else now
     ap = db.get_autopilot(root_id)
@@ -2031,7 +2281,11 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     commits: dict[str, float] = {}
     for path in paths:
         try:
-            log = git.out(["log", f"--since=@{int(boss.created_at)}", "--format=%H %ct", "-n", "500", "HEAD"], path)
+            head = status_cache.read_head(path)
+            since = int(boss.created_at)
+            # An unreadable ref is unknown: never reuse a previous checkout's history.
+            log = (_goal_commit_log(path, head, since) if head else
+                   _goal_commit_log.__wrapped__(path, "HEAD", since))
         except (git.GitError, OSError):
             continue
         for line in log.splitlines():
@@ -2039,7 +2293,10 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
             if at.isdigit():
                 commits[sha] = float(at)
 
-    eta = _goal_eta(db, tree, live, now) if stage is not None and home is not None else None
+    unfinished = ap is not None and ap.goal and ap.state != "done"
+    eta = (_goal_eta(db, tree, live, now)
+           if home is not None and (ap is None or ap.state != "done")
+           and (stage is not None or unfinished) else None)
     return {"stage": stage, "commits_last_hour": sum(at > now - 3600 for at in commits.values()),
             "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta,
             "checking": ap is not None and checking(ap), "auditing": ap is not None and ap.state == "auditing"}
@@ -2050,10 +2307,11 @@ def counts(db: DB, root_id: str) -> tuple[int, int]:
     return sum(m.status == "passed" for m in ms), len(ms)
 
 
-def work_state(db: DB, root_id: str) -> str | None:
+def work_state(db: DB, root_id: str, panes: dict[str, bool] | None = None) -> str | None:
     """Display-only: "checking", "working" or "waiting" while the session has work in
     flight, else None. A failed milestone's last check is stale then, so it
     shouldn't read as a plain failure. Never stored on the milestone.
+    ``panes``: as for ``active_workers``.
 
     shortcut: work isn't tied to a milestone, so any in-flight work marks every
     failed milestone; upgrade if tasks get a milestone link."""
@@ -2064,7 +2322,7 @@ def work_state(db: DB, root_id: str) -> str | None:
         return "checking"
     if (ap is not None and (ap.state == "usage_paused" or ap.external_wait)) or login_pause.paused(db, root_id):
         return "waiting"
-    live = active_workers(db, root_id)
+    live = active_workers(db, root_id) if panes is None else active_workers(db, root_id, panes=panes)
     if any(a.status != "waiting" for a in live):
         return "working"
     if live or any(root_of(db, t.caller_id) == root_id
@@ -2153,21 +2411,25 @@ BUSY = ("starting", "processing", "waiting")
 IDLE_GRACE_SECONDS = 60  # how long a worker may sit idle and unreported before it's called out
 
 
-def active_workers(db: DB, root_id: str, *, reviewers: bool = True) -> list[Agent]:
+def active_workers(db: DB, root_id: str, *, reviewers: bool = True,
+                   panes: dict[str, bool] | None = None) -> list[Agent]:
     """Agents in the session still working: not yet reported, or back at work
     after reporting (e.g. on review feedback). Includes workers stalled idle
     and unreported past the grace period; see ``stalled_workers`` and
-    ``working_workers`` to tell those apart."""
+    ``working_workers`` to tell those apart. ``panes``: a tmux.list_panes()
+    snapshot to judge liveness by (agents.is_alive), when the caller has one."""
     from brindle import agents
 
     return [a for a in agents.tree(db, root_id)[1:]
             if a.mode in agents.REPORTING_MODES and (reviewers or a.mode != "review")
             and (a.result is None or a.status in BUSY or a.pipeline)
-            and a.status not in ("paused", "done") and agents.is_alive(a)
+            and a.status not in ("paused", "done")
+            and (agents.is_alive(a) if panes is None else agents.is_alive(a, panes))
             and not agents.review_moot(db, a)]
 
 
-def split_workers(db: DB, root_id: str, *, screen: bool = False) -> tuple[list[Agent], list[Agent]]:
+def split_workers(db: DB, root_id: str, *, screen: bool = False,
+                  panes: dict[str, bool] | None = None) -> tuple[list[Agent], list[Agent]]:
     """``active_workers`` split into (working, stalled). Stalled: idle without
     reporting a result for more than ``IDLE_GRACE_SECONDS``. Claude Code
     already reminded them once to call report_result (see agents.handle_hook's
@@ -2187,7 +2449,8 @@ def split_workers(db: DB, root_id: str, *, screen: bool = False) -> tuple[list[A
 
     now = time.time()
     working, stalled = [], []
-    for a in active_workers(db, root_id):
+    for a in (active_workers(db, root_id) if panes is None
+              else active_workers(db, root_id, panes=panes)):
         maybe = (a.result is None and a.status == "idle" and a.plan_state != "proposed"
                  and get_provider(a.provider).uses_hooks
                  and now - (a.status_since or a.created_at) >= IDLE_GRACE_SECONDS)
@@ -2203,9 +2466,9 @@ def stalled_workers(db: DB, root_id: str) -> list[Agent]:
     return split_workers(db, root_id)[1]
 
 
-def working_workers(db: DB, root_id: str) -> list[Agent]:
+def working_workers(db: DB, root_id: str, panes: dict[str, bool] | None = None) -> list[Agent]:
     """Active workers still expected to report on their own; see ``split_workers``."""
-    return split_workers(db, root_id)[0]
+    return (split_workers(db, root_id) if panes is None else split_workers(db, root_id, panes=panes))[0]
 
 
 def check_capacity(db: DB, caller_id: str | None, cfg: RepoConfig) -> None:
@@ -2347,6 +2610,8 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
         ap = db.get_autopilot(root.id)
         if ap is None:
             continue
+        if ap.goal:
+            phase_landing(db, root.id, now)
         if ap.state == "running" and ap.goal:
             ws = db.get_workspace(root.workspace_id)
             cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
@@ -2461,10 +2726,14 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if checking(ap):
         return None  # the check's result arrives as a message and wakes it up
     working, stalled = split_workers(db, agent.id, screen=True)
-    # A worker waiting on plan approval waits on the supervisor, so the supervisor
-    # can't stop for it (see nudge).
+    from brindle import permission_routing
+
+    # A worker waiting on plan approval waits on the supervisor, and one held on
+    # a permission ask the person must answer waits on them: neither sends a
+    # result that would wake the supervisor, so it can't stop for them (see nudge).
     if any(agents.runs_process(a) for a in working
-            if getattr(a, "plan_state", None) != "proposed"):
+            if getattr(a, "plan_state", None) != "proposed"
+            and permission_routing.waits_on_person(db, a) is None):
         return None  # their results arrive as messages and wake it up
     from brindle import tasks
 
@@ -2504,6 +2773,15 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
         pending += (f"Plans awaiting your approval: {', '.join(planning)}. Read each plan "
                     "(it arrived as a message) and call approve_plan, with feedback and "
                     "approved=false to ask for changes; the worker is waiting on you.\n\n")
+    from brindle import permission_routing
+
+    held = [a for a in working if permission_routing.waits_on_person(db, a) is not None]
+    if held:
+        lines = "\n".join(f"- {a.id}: {agents.pending_permission(db, a.id) or 'a permission request'}"
+                          for a in held)
+        pending += ("These workers are waiting for the person to answer a permission request and do "
+                    f"nothing until they do:\n{lines}\nTell the person exactly what is pending, and plan "
+                    "the work that doesn't depend on them meanwhile.\n\n")
     stuck = ""
     if stalled:
         seen = "\n".join(f"- {a.id}: {agents.liveness(db, a, db.get_workspace(a.workspace_id))}"
@@ -2637,8 +2915,23 @@ def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
     return f"{text} Allowed their commands in {settings_path}."
 
 
+FAST_PATH_GUIDE = """- Fast path (this repo's `fast_path` setting is on): a small request goes
+  straight to one worker with `assign(fast_path=true, weight="light" or
+  "medium", done_when=<the targeted tests>)`. Small means one area, no design
+  decisions, and roughly under 15 minutes of work. It needs no `set_goal`, no
+  milestones and no `check_milestone`, and gets no completion audit: brindle
+  gives the branch one light review and the repo's checks, then merges it.
+  That is its finish: don't run the full suite yourself afterwards, relay the
+  merged result to the user in one line. The user's word overrides
+  your sizing: "fast path" sends a request this way, "full path" (or asking
+  for a plan or milestones) sends it through the goal.
+"""
+
+
 def guide(cfg: RepoConfig, repo_root: str | None = None) -> str:
     text = GUIDE.format(max_agents=cfg.max_agents or "any number of")
+    if cfg.fast_path:
+        text += FAST_PATH_GUIDE
     if repo_root and not cfg.checks:
         from brindle import detect
 
@@ -2672,7 +2965,12 @@ def goal_reminder(db: DB, caller_id: str) -> str | None:
 
 def worker_goal(prompt: str, done_when: str, branch: str) -> str | None:
     """A worker's first message as a Claude Code ``/goal``: Claude keeps working
-    until a small model judges the finish line met. None if too long for one."""
+    until a small model judges the finish line met. None if too long for one.
+    A worker that can't meet it, and has sent its supervisor the question or
+    reported what blocks it, is done too: otherwise it asks in its own pane,
+    which nobody reads, until Claude Code's stop-hook cap ends the turn."""
     text = (f"/goal Finish line: {done_when.strip()} The work is committed on branch "
-            f"`{branch}` and reported with the brindle report_result tool.\n\nTask:\n{prompt}")
+            f"`{branch}` and reported with the brindle report_result tool; or, when the finish "
+            "line can't be met or needs a decision, the question was sent to the supervisor with "
+            f"send_message or what blocks it was reported with report_result.\n\nTask:\n{prompt}")
     return text if len(text) - len("/goal ") <= MAX_GOAL_CHARS else None

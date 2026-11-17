@@ -58,27 +58,28 @@ def large_work(weight: str | None = None, milestones: int = 0, requested: bool =
 
 
 _DESIGN = re.compile(r"\b(?:design|architect\w*|redesign|migrat\w+|rewrite|refactor\w*)\b", re.I)
-OFFER_MILESTONES = 4        # a goal this long, or several repos, deserves the offer
+_BUGFIX = re.compile(r"\b(?:fix\w*|bug\w*|regression\w*|crash\w*|broken|breakage|hang\w*)\b", re.I)
+OFFER_MILESTONES = 5        # a goal this long, or several repos, deserves the offer
 OFFER_DESIGN_MILESTONES = 3  # a design-heavy goal this long does
-OFFER_WORKERS = 3            # so does a goal that has had this many workers assigned
 
 
 def deserves_offer(milestones: int, repos: int = 1, text: str = "", workers: int = 0) -> bool:
     """Whether brindle should offer the person an analysis doc for a goal:
-    large (many milestones, several repos, several workers) or design-heavy.
-    Never writes one."""
+    large (many milestones, several repos) or design-heavy. Never writes one.
+    ``workers`` is accepted for callers' sake but never qualifies a goal:
+    parallel workers are how brindle works, not a sign of size."""
     return bool(offer_reasons(milestones, repos, text, workers))
 
 
 def offer_reasons(milestones: int, repos: int = 1, text: str = "", workers: int = 0) -> list[str]:
     """The conditions this work meets, shared by the offer and its explanation."""
+    if _BUGFIX.search(text):    # a bug fix is fixed, not planned first, however wide or worded
+        return []
     reasons = []
     if milestones >= OFFER_MILESTONES:
         reasons.append(f"This goal has {milestones} milestones.")
     if repos >= 2:
         reasons.append(f"This work spans {repos} repositories.")
-    if workers >= OFFER_WORKERS:
-        reasons.append(f"{workers} workers have been assigned to this goal.")
     if milestones >= OFFER_DESIGN_MILESTONES and _DESIGN.search(text):
         reasons.append(f"This goal includes design or restructuring work across {milestones} milestones.")
     return reasons

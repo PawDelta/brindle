@@ -127,8 +127,10 @@ def test_two_expired_cloud_identities_stay_held_until_both_recover(db, world, re
 
 
 @pytest.mark.parametrize("provider,model,extra,error", [
-    ("claude", "", "env.CLAUDE_CODE_USE_VERTEX: 1\nenv.ANTHROPIC_VERTEX_PROJECT_ID: company\n", ""),
-    ("opencode", "google-vertex/gemini-2.5-pro", "env.GOOGLE_CLOUD_PROJECT: company\n", "invalid_grant: invalid_rapt"),
+    pytest.param("claude", "", "env.CLAUDE_CODE_USE_VERTEX: 1\nenv.ANTHROPIC_VERTEX_PROJECT_ID: company\n", "",
+                 marks=pytest.mark.variant("identity: a Vertex Claude worker under a Codex root must pause and recover its own login")),
+    pytest.param("opencode", "google-vertex/gemini-2.5-pro", "env.GOOGLE_CLOUD_PROJECT: company\n", "invalid_grant: invalid_rapt",
+                 marks=pytest.mark.variant("Google reauthentication: repeated OpenCode hooks share one sign-in and recovery releases queued mail")),
     ("opencode", "azure/gpt-4.1", "env.AZURE_RESOURCE_NAME: company\n", "AADSTS700082: refresh token expired"),
 ])
 def test_cloud_worker_under_codex_root_holds_and_releases_mail(db, world, repo, monkeypatch, provider, model, extra, error):
@@ -168,7 +170,10 @@ def test_cloud_worker_under_codex_root_holds_and_releases_mail(db, world, repo, 
         assert not login_pause.paused(db, "boss")
 
 
-@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("active", [
+    pytest.param(False, marks=pytest.mark.variant("inactive login: hold queued mail and notify once until credentials are restored")),
+    True,
+])
 def test_a_login_only_the_person_can_renew_pauses_and_notifies_once(db, world, active, monkeypatch):
     world.active, world.login_ok, world.screens["@1"] = active, False, EXPIRED
     sweep(db, world, T0)
@@ -228,6 +233,7 @@ def test_one_signin_across_sessions(db, lapsed):
     assert all(login_pause.paused(db, r) for r in ("boss", "cli", "boss3"))
 
 
+@pytest.mark.variant("recovery: every paused pane, including a worker that became busy during the pause, resumes after sign-in")
 def test_panes_resume_after_signin(db, lapsed):
     db.add_agent(Agent("w2", db.get_agent("boss").workspace_id, "developer", "claude", "boss",
                        "assign", "idle", "@4", None, time.time()))
@@ -245,7 +251,7 @@ def test_panes_resume_after_signin(db, lapsed):
 
 @pytest.mark.parametrize("exits", [
     False,      # the tab is ignored: its sign-in keeps waiting
-    True,       # the sign-in exits (declined, failed, or its code expired)
+    pytest.param(True, marks=pytest.mark.variant("failed login: an exited sign-in tab can reopen only after fresh person input")),
 ])
 def test_closed_tab_reopens_only_on_input(db, world, exits):
     world.login_ok, world.screens["@1"] = False, EXPIRED

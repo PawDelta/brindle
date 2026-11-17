@@ -388,7 +388,8 @@ def _preset(kind: str, match: str, match_type: str, decision: str) -> Rule:
     return Rule(kind, match, match_type, decision, "preset", 0.0, "")
 
 
-PRESET_COMMANDS = ("aws", "uv", "pytest", "python", "npm", "pnpm", "yarn", "docker", "cargo", "go", "make", "gh")
+PRESET_COMMANDS = ("aws", "uv", "pytest", "python", "npm", "pnpm", "yarn", "docker", "cargo", "go", "make", "gh",
+                   "brindle baseline")
 # The everyday commands the Standard, Permissive and Autonomous presets allow outright.
 PRESET_RULES = tuple(
     rule
@@ -1192,7 +1193,7 @@ def compound_parts(command: str) -> list[list[str]] | None:
 
 
 def _part_decision(req: Request, words: list[str], checks: list[str] | None,
-                   rules: list[Rule]) -> Decision:
+                   rules: list[Rule], *, unresolved: list[str] | None = None) -> Decision:
     """One part of a compound command. A deny reads the words re-joined at
     every space, so a spaced word can't dodge it. An allow must see the
     words as the shell will run them: ``"./check --safe"`` is one word,
@@ -1200,21 +1201,54 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     re-join to exactly that; a word with spaces can only fall in the
     arguments of a prefix rule whose words come before it. The same holds
     for literal metacharacters: re-parsing them without their quotes would
-    mistake argument text for shell syntax."""
+    mistake argument text for shell syntax. Unknown arguments may follow a
+    literal allowed prefix, but cannot supply any word of that prefix."""
     from brindle.native.permissions import _joined
 
-    denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules, [words])
+    req = replace(req, command=_joined(words))
+    denied = _matching_restriction([req], checks, rules, [words])
     if denied is not None:
         return denied
     # (Not one that hands over code: deciding it reads it part by part, which brought us here.)
-    if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words) and not _hands_code(words):
+    if (not unresolved and all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words)
+            and not _hands_code(words)):
         return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules, unmatched="ask", saved=[])
+    literal = list(itertools.takewhile(lambda word: word not in (unresolved or ()), words))
+    # An allow vouches only for what it can see: where an unknown word (a
+    # $(...)'s output, $x) may be what a deny or ask names, even one that may
+    # match anywhere (*daemon.json*), no rule allows the part.
+    if unresolved and any(_may_match_unknown(rule, req, literal, checks) for rule in rules
+                          if rule.kind == "bash" and rule.decision in ("deny", "ask")
+                          and rule.match_type in MATCH_TYPES):
+        return Decision("ask", "a deny or ask rule could match a word only the run knows")
     for rule in rules:
         head = rule.match.split()
         if (rule.kind == "bash" and rule.decision == "allow" and rule.match_type == "prefix"
-                and head and words[:len(head)] == head and _in_scope(rule, req, checks)):
+                and head and words[:len(head)] == head and _in_scope(rule, req, checks)
+                and len(head) <= len(literal)
+                and not (unresolved and _prefix_may_be_excluded(rule, req, literal, checks))):
             return Decision("allow", f"allowed by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     return Decision("ask", "no rule allows it")
+
+
+def _prefix_may_be_excluded(rule: Rule, req: Request, literal: list[str], checks: list[str] | None) -> bool:
+    """Whether an exclusion could cover the part after its unknown words expand."""
+    return any(_may_match_unknown(excluded, req, literal, checks) for excluded in rule.exclusions)
+
+
+def _may_match_unknown(rule: Rule, req: Request, literal: list[str], checks: list[str] | None) -> bool:
+    """Whether ``rule`` could match a part whose words after ``literal`` only
+    the run knows: unless its fixed leading text and theirs diverge, it might."""
+    # Nested exceptions may depend on unknown words too; don't use them to
+    # dismiss the rule. Its kind, expiry and repository still apply.
+    if not _in_scope(replace(rule, exclusions=()), req, checks):
+        return False
+    if rule.match_type not in MATCH_TYPES:
+        return True
+    known = " ".join(" ".join(literal).split())
+    fixed = re.split(r"[*?\[]", rule.match, maxsplit=1)[0] if rule.match_type == "glob" else rule.match
+    fixed = " ".join(fixed.split())
+    return known.startswith(fixed) or fixed.startswith(known)
 
 
 def _inside(path: str, root: str) -> str | None:
@@ -1533,18 +1567,31 @@ def _git_calls(command: str, loose: bool = False) -> list[tuple[str, list[str]]]
 
 
 def _runs_no_command(words: list[str]) -> bool:
-    """Whether ``words`` is a READONLY_PROGRAMS program without an option that
-    runs another: its arguments are text (echo git push --force), never a command."""
-    audited = READONLY_PROGRAMS.get(words[0]) if words and "/" not in words[0] else None
+    """Whether ``words`` is an audited reader without an option that runs another:
+    its arguments are text (echo git push --force), never a command."""
+    if not words or os.path.dirname(words[0]) not in ("", "/bin", "/usr/bin"):
+        return False  # an arbitrary path named echo may itself be a launcher
+    program = os.path.basename(words[0])
+    if program == "git":
+        args = words[1:]
+        while args and args[0] in ("-C", "-c", "--no-pager"):
+            args = args[2:] if args[0] in ("-C", "-c") else args[1:]
+        return bool(args and (args[0] in READONLY_GIT and not any(
+            a.startswith(GIT_UNSAFE_OPTIONS) for a in args[1:])
+            or args[0] == "grep" and _grep_options_known(args[1:])))
+    audited = READONLY_PROGRAMS.get(program)
     return audited is not None and not _has_option(words[1:], *audited)
 
 
-def _git_invocations(command: str, loose: bool = False) -> list[tuple[list[str], str, list[str]]]:
-    """(its -C folders, subcommand, its arguments) for every git invocation in
-    ``command``: git as a part's first word or behind a plain wrapper. With
-    ``loose`` (a deny or an ask), a part whose program is neither may run its
-    arguments (uv run, find -exec, xargs), so its first word named git counts
-    too, unless the program only prints or reads its arguments (_runs_no_command)."""
+def _program_invocations(command: str, program: str, loose: bool = False, *,
+                         conservative: bool = False) -> list[list[str]]:
+    """Commands headed by ``program``, including behind plain wrappers.
+
+    Restrictions also inspect every matching word behind unknown launchers.
+    An earlier operand with the same name must not hide the actual command.
+    Audited readers' arguments remain data, and allows never use this fallback.
+    ``conservative`` retains rm's legacy deny scan alongside the structured reader.
+    """
     argv = simple_argv(command)
     if argv is not None:
         while argv and _ASSIGNMENT.match(argv[0]):
@@ -1552,22 +1599,34 @@ def _git_invocations(command: str, loose: bool = False) -> list[tuple[list[str],
         segments = [argv]
     else:
         reader = _PartReader(Request("", "bash", "", command=command))
+        # rm's deny scan also handles heredoc continuations and arithmetic that
+        # the structured reader may misinterpret or stop reading partway through.
+        segments = _segments(command) if loose and conservative else []
         try:
             reader.read(command)
         except ValueError:
             # Keep recognizable invocations even when another part cannot be read.
             # The parser's scan still distinguishes arguments and heredoc data from code.
             reader.scan(command)
-        segments = [part.words for part in reader.parts]
+        segments.extend(part.words for part in reader.parts)
     calls = []
     for segment in segments:
         forms = _wrapped_forms(segment)
-        words = next((w for w in forms if w and os.path.basename(w[0]) == "git"), None)
+        words = next((w for w in forms if w and os.path.basename(w[0]) == program), None)
         if words is None and loose and not _runs_no_command(forms[-1]):
-            at = next((i for i, w in enumerate(forms[-1]) if os.path.basename(w) == "git"), None)
-            words = forms[-1][at:] if at is not None else None
-        if words is None:
-            continue
+            calls.extend(forms[-1][i:] for i, w in enumerate(forms[-1]) if os.path.basename(w) == program)
+        elif words is not None:
+            calls.append(words)
+    return calls
+
+
+def _git_invocations(command: str, loose: bool = False) -> list[tuple[list[str], str, list[str]]]:
+    """(its -C folders, subcommand, its arguments) for every git invocation.
+
+    ``loose`` is only for deny/ask rules: see _program_invocations.
+    """
+    calls = []
+    for words in _program_invocations(command, "git", loose):
         rest, j, folders = words[1:], 0, []
         while j < len(rest) and rest[j].startswith("-"):
             if rest[j] == "-C" and j + 1 < len(rest):
@@ -2491,9 +2550,11 @@ def readonly_pipeline(req: Request, rules: list[Rule], checks: list[str] | None 
     if not all(_readonly_part(req, words) for words, _ in parsed):
         return False
     restrictions = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask")]
-    parts = [req, *(replace(req, command=_joined(words)) for words, _ in parsed)]
-    if any(rule_matches(rule, part, checks) for rule in restrictions for part in parts):
-        return False
+    for rule in restrictions:
+        join = shlex.join if rule.match_type in _WORD_MATCHERS else _joined
+        parts = [req, *(replace(req, command=join(words)) for words, _ in parsed)]
+        if any(rule_matches(rule, part, checks) for part in parts):
+            return False
     path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny"]
     if (restrictions or path_denies) and _restriction_parts(command) is None:
         # Unquoted pathname patterns: a restriction may match what they expand to.
@@ -2516,24 +2577,23 @@ def destructive_rm(command: str) -> bool:
     in any flag cluster or spelling) at the root, a top-level folder, the home
     directory or the working directory itself, or with ``--no-preserve-root``,
     itself or through a program that runs what it's given (sudo rm, xargs rm)."""
-    for words in _segments(command):
-        if not words:
-            continue
-        runs = [words]
-        if os.path.basename(words[0]) in (*_WRAPPERS, "find"):
-            runs = [words[i:] for i, word in enumerate(words) if os.path.basename(word) == "rm"]
-        for run in runs:
-            if os.path.basename(run[0]) != "rm":
-                continue
-            flags = [w for w in run[1:] if w.startswith("-")]
-            targets = [w for w in run[1:] if not w.startswith("-")]
-            if any(f == "--no-preserve-root" for f in flags):
-                return True
-            recursive = any(f in ("--recursive",) or (not f.startswith("--") and any(c in f for c in "rR"))
-                            for f in flags)
-            home = os.path.expanduser("~")
-            if recursive and any(DESTRUCTIVE_TARGETS.fullmatch(t) or t.rstrip("/") == home for t in targets):
-                return True
+    for run in _program_invocations(command, "rm", loose=True, conservative=True):
+        flags, targets, options = [], [], True
+        for word in run[1:]:
+            if options and word == "--":
+                options = False
+            elif options and word.startswith("-"):
+                flags.append(word)
+            else:
+                targets.append(word)
+        # GNU rm accepts unambiguous long-option prefixes.
+        if any(f.startswith("--no") and "--no-preserve-root".startswith(f) for f in flags):
+            return True
+        recursive = any(f.startswith("--r") and "--recursive".startswith(f)
+                        or not f.startswith("--") and any(c in f for c in "rR") for f in flags)
+        home = os.path.expanduser("~")
+        if recursive and any(DESTRUCTIVE_TARGETS.fullmatch(t) or t.rstrip("/") == home for t in targets):
+            return True
     return False
 
 
@@ -3761,7 +3821,7 @@ def _may_name_token(req: Request, word: str) -> bool:
 
 # Matchers that must tell a word from its neighbours (an option from a message
 # that mentions one), so they see the words quoted as written, not re-joined.
-_WORD_MATCHERS = ("git-force", "git-push", "push")
+_WORD_MATCHERS = ("git-force", "git-push", "push", "rm-destructive")
 
 # Wrappers that only run their arguments: per program, the options that take a
 # value in the next word, the flags that take none, and the options with a value
@@ -3808,6 +3868,18 @@ _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 def _unwrapped(words: list[str]) -> list[str] | None:
     """The command a plain wrapper (_PLAIN_WRAPPERS) runs, or None when ``words``
     isn't one, an option isn't known, or nothing is left to run."""
+    if len(words) > 2 and os.path.basename(words[0]) == "brindle" and words[1] == "baseline":
+        at = 2
+        while at < len(words):
+            if words[at] == "--base":
+                at += 2
+            elif words[at].startswith("--base="):
+                at += 1
+            else:
+                break
+        if words[at:at + 1] == ["--"]:
+            at += 1
+        return words[at:] or None
     spec = _PLAIN_WRAPPERS.get(os.path.basename(words[0])) if words else None
     if spec is None:
         return None
@@ -4951,7 +5023,7 @@ _CODE_RUNNERS = _STDIN_RUNNERS | _INTERPRETERS | _COMMAND_READERS
 # Programs that run another program named among their arguments.
 _WRAPPERS = _STDIN_RUNNERS | {"builtin", "stdbuf", "caffeinate", "flock", "unbuffer", "chroot"}
 # ... and that run a project's own tool the same way (uv run python).
-_TOOL_RUNNERS = _WRAPPERS | {"uv", "poetry", "pipenv", "pdm", "hatch", "rye", "conda", "bundle", "npx"}
+_TOOL_RUNNERS = _WRAPPERS | {"uv", "poetry", "pipenv", "pdm", "hatch", "rye", "conda", "bundle", "npx", "brindle"}
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 # Fed a heredoc, these run its lines as commands: brindle doesn't take that for data, whatever
 # the store answers for what no rule covers. (The other _STDIN_RUNNERS only pass it on.)
@@ -5124,6 +5196,7 @@ class _PartReader:
         self.unread = False   # the splitter couldn't read the whole command (parts are what scan() found)
         self.named: list[str] = []    # assignment values and loop lists, resolved (_Flattener.named)
         self.wrote = False    # an earlier part may have made files a later pattern would match
+        self.glob_options = False    # an inner shell's options may change pattern expansion
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
         # The subshell the part being read runs in (_Flattener.scopes), and dotglob as each
         # subshell last left it: one starts from its parent's, and its changes stay in it.
@@ -5430,7 +5503,14 @@ class _PartReader:
             if source is None and fed:
                 raise _Unverifiable(f"{name} runs what it is fed")
             if code:
-                self.inner(source)
+                # nullglob drops unmatched words instead of passing them literally.
+                # Keep pattern proofs conservative inside that shell.
+                previous = self.glob_options
+                self.glob_options |= "nullglob" in args[:args.index(source)]
+                try:
+                    self.inner(source)
+                finally:
+                    self.glob_options = previous
         elif name == "sqlite3" and len(args) > 1 and not any(arg.startswith("-") for arg in args):
             return    # a database and its SQL: it reads nothing it's fed
         elif fed and (name in _RUNS_ITS_INPUT or name in _COMMAND_READERS):
@@ -5470,6 +5550,7 @@ class _PartReader:
         except ValueError:
             return [raw], False, None
         if re.search(r"\{[^}\s]*,", bare):
+            self.expanded = True
             return [raw], False, None    # a brace expansion
         if bare.startswith("~"):
             if not re.match(r"~(/|$)", raw):
@@ -5480,7 +5561,8 @@ class _PartReader:
             self.expanded = self.tilde = True    # bash may expand it (path=~/x) or not
         if names and re.search(r"[*?]|\[.+\]", bare):    # an unclosed [ (test's) is literal
             names = self.expand(value)
-            # One that matches nothing stays as written (--include=*.py): the program gets it as is.
+            # An unmatched pattern stays literal to the shell, but a program
+            # may still interpret it (git push's wildcard refspecs).
             self.expanded |= names != []
             return ([raw], False, value) if names is None else (names or [value], True, value)
         return [value], True, None
@@ -5488,6 +5570,8 @@ class _PartReader:
     def expand(self, pattern: str) -> list[str] | None:
         """The names ``pattern`` matches where it runs, None when brindle
         can't know them before it runs."""
+        if self.glob_options:
+            raise _Unverifiable("a shell option may remove unmatched words")
         if self.wrote or self.cwd is None and not os.path.isabs(pattern):
             return None
         if "[:" in pattern or "[=" in pattern or "[." in pattern:
@@ -5555,7 +5639,8 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
     pattern that may match anywhere in a command (``*daemon.json*``) is
     matched against what brindle can read of it (a variable known or not as
     written, a pattern expanded), as it is against what an interpreter's
-    code names: text only the run produces is beyond what text matching sees."""
+    code names; only a person's own such pattern also covers the words only
+    the run knows."""
     program = os.path.basename(part.words[0])
     if rule.match_type in ("git-push", "push", "git-force"):
         if program != "git":
@@ -5574,7 +5659,11 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
     fixed = re.split(r"[*?\[]", rule.match, maxsplit=1)[0] if rule.match_type == "glob" else rule.match
     fixed = " ".join(fixed.split())
     if not fixed:
-        return False
+        # A person's own pattern may match what only the run knows ($x, a
+        # $(...)'s output naming the file): written out, it would be denied.
+        # A preset's (*daemon.json*) is left to the OS sandbox, or no
+        # command with a variable would run unasked.
+        return rule.source != "preset" and part.unknown
     head = []    # the words before the first one only the run knows
     for word in part.words:
         if _unread(word):
@@ -5619,6 +5708,52 @@ def _without_pattern(part: ShellPart, *, scripts: bool = False) -> list[str]:
     return [*words[:at], "pattern", *words[at + 1:]]
 
 
+def _glob_patterns_overlap(left: str, right: str) -> bool:
+    """Whether two * / ? patterns may share a string. Unsupported classes
+    and a proof too large to finish are overlap, never proof of disjointness.
+    Stars may also consume spaces and slashes: this overestimates shell globs."""
+    if "[" in left or "[" in right:
+        return True
+    pending = [(0, 0)]
+    seen = set()
+    while pending:
+        i, j = pending.pop()
+        if (i, j) in seen:
+            continue
+        seen.add((i, j))
+        if len(seen) > 4096:
+            return True
+        if i == len(left) and j == len(right):
+            return True
+        a, b = left[i:i + 1], right[j:j + 1]
+        if a == "*":
+            pending.append((i + 1, j))
+        if b == "*":
+            pending.append((i, j + 1))
+        if a and b and (a == b or a in "*?" or b in "*?"):
+            pending.append((i if a == "*" else i + 1, j if b == "*" else j + 1))
+    return False
+
+
+def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
+    """Only exclude a restriction when a required literal fragment cannot
+    occur in any argument. Multiple glob matches add spaces between words,
+    so cannot create a missing fragment. Ignore order and word boundaries
+    deliberately: possible overlap keeps the existing conservative proof."""
+    # Classes and shell quoting need more than this fragment proof. Quoting
+    # introduced when joining arguments may itself match a textual rule.
+    if rule.match_type in _LISTING_SAFE:
+        literals = ["rm" if rule.match_type == "rm-destructive" else "git"]
+    elif rule.match_type not in MATCH_TYPES or any(c in rule.match for c in "[\\\"'"):
+        return True
+    else:
+        literals = re.split(r"[*?]", rule.match) if rule.match_type == "glob" else [rule.match]
+    words = [*zip(part.written, part.patterned), *((path, False) for path in [*part.writes, *part.reads])]
+    return all(any(_glob_patterns_overlap(word, f"*{fragment}*") if patterned else fragment in word
+                   for word, patterned in words)
+               for literal in literals for fragment in literal.split())
+
+
 def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                why: list[ValueError] | None = None) -> tuple[list[ShellPart], Decision | None] | None:
     """``req``'s shell command as ShellParts with the deny (else ask) a rule
@@ -5651,7 +5786,19 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             return None
         if part.data and any(_could_cover(rule, " ".join(part.words[:2])) for rule in restrictions):
             return None    # the message may be one a rule names
-        if restrictions and (part.redirect_glob or part.globs and not (places and (
+        # With the files it redirects to too: a deny on a name sees them.
+        spans = [part.words, [*part.words, *part.writes, *part.reads]]
+        texts = [replace(at, command=_joined(words)) for words in spans]
+        matched = _matching_restriction(texts, checks, restrictions, spans)
+        # An unmatched pattern (an API URL's ? too) needs no expansion proof
+        # when neither its unchanged words nor a possible expansion can match
+        # a restriction: a matching file can appear before the command runs. The
+        # bounded matcher does not prove recursive ** forms unmatched: shells
+        # can expand **/ across zero directories as well as several levels.
+        literal_patterns = (not part.expanded and not part.unknown and matched is None
+                            and not any(_patterns_may_restrict(rule, part) for rule in restrictions)
+                            and not any("**" in word for word in part.written))
+        if restrictions and (part.redirect_glob or part.globs and not literal_patterns and not (places and (
                 _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
                                                         [part.assigned], [("<", path) for path in part.reads])
                                         for place in places)))):
@@ -5668,10 +5815,6 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             if not places or not all(_reads_clear(place, operands, kept) for place in places):
                 covered("it may read a file a deny covers, or where brindle can't tell")
             return None
-        # With the files it redirects to too: a deny on a name sees them.
-        spans = [part.words, [*part.words, *part.writes, *part.reads]]
-        texts = [replace(at, command=_joined(words)) for words in spans]
-        matched = _matching_restriction(texts, checks, restrictions, spans)
         if matched is not None and matched.decision == "deny":
             return parts, matched
         for path in part.reads:

@@ -34,6 +34,7 @@ def ws_path(proj, db):
     return ws
 
 
+@pytest.mark.slow("The one real init flow: runs the brindle CLI twice against a real repo")
 def test_init_writes_config_and_is_idempotent(proj):
     res = run("init", "--yes", ok=False)
     assert (proj / ".brindle" / "config.json").is_file(), res.output
@@ -96,6 +97,7 @@ def test_new_ls_status_diff_commit(proj, ws_path):
     assert run("cd", ws.name).output.strip() == ws.path
 
 
+@pytest.mark.variant("workspace inference inside a worktree must resolve that worktree rather than the root checkout")
 def test_commands_resolve_the_workspace_from_inside_it(proj, ws_path, monkeypatch):
     monkeypatch.chdir(ws_path.path)
     assert ws_path.id in run("status").output
@@ -164,6 +166,7 @@ def test_new_reports_when_the_branch_is_taken(proj, ws_path):
     assert res.exit_code == 1 and "Traceback" not in res.output
 
 
+@pytest.mark.variant("history kind filtering must exclude other event kinds from the CLI result")
 def test_history_lists_rows_and_filters_by_kind(proj, db):
     root = git.main_repo_root(str(proj))
     history.record(db, root, "merge", branch="feat/a", result="merged")

@@ -99,6 +99,7 @@ def test_overloaded_stop_failure_tells_the_supervisor_its_kind_once(db, repo, mo
     assert "overloaded (529)" in told[0][1] and "req_011CUxyz" not in told[0][1]
 
 
+@pytest.mark.variant("credential recovery must use a freshly exported API key in the launch environment")
 def test_fresh_exported_key_included_in_agent_env(db, repo, monkeypatch):
     from brindle.db import Workspace, Agent
     from brindle import agents, keystore
@@ -125,6 +126,7 @@ def test_fresh_exported_key_included_in_agent_env(db, repo, monkeypatch):
     assert agents.agent_env(ws, "a", a, m=None)["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "8"
 
 
+@pytest.mark.variant("ownership: recovery cannot kill a pane on a foreign tmux server")
 def test_resume_failed_agent_does_not_kill_foreign_server_or_unowned_pane(db, repo, monkeypatch, no_pane):
     from brindle.db import Workspace
     ws = Workspace("ws-foreign", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-foreign", 0)
@@ -142,6 +144,7 @@ def test_resume_failed_agent_does_not_kill_foreign_server_or_unowned_pane(db, re
     assert "%7" not in killed
 
 
+@pytest.mark.variant("failure path: an exited authentication failure must stay failed and request credentials")
 def test_dead_failed_agent_preserves_failed_status_in_view_and_watch(db, repo, no_pane):
     from brindle.db import Workspace
     from brindle import view, watch
@@ -262,6 +265,7 @@ def test_paused_session_continue_clears_credential_block_and_resumes_autopilot_d
     assert decision.get("decision") == "block"
 
 
+@pytest.mark.variant("security: opening the database and saving credentials must repair loose file permissions")
 def test_set_session_credential_enforces_0600_permissions(tmp_path):
     db_file = tmp_path / "test.db"
     db_file.write_text("")
@@ -411,6 +415,7 @@ def test_resume_fresh_exported_key_wins_over_stale_keystore_key(db, repo, monkey
     assert delegated_env.get("ANTHROPIC_API_KEY") == "fresh-replacement-key-999"
 
 
+@pytest.mark.variant("credential rotation: resume must prefer the newer stored key over the stale shell key")
 def test_resume_store_rotation_wins_over_stale_inherited_shell_env(db, repo, monkeypatch, no_pane):
     from brindle.db import Workspace
     from brindle import keystore, identity_lock

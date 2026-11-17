@@ -100,7 +100,7 @@ signed in. Claude Code is the default for the supervisor, workers and reviewer
 There's also a free brindle desktop app for macOS and Linux (on Windows, use the CLI inside WSL2). It's a download from the brindle website and runs on the same engine; the CLI keeps working alongside it. `brindle app` opens the app, or prints the download link if it isn't installed. `brindle daemon` runs the local API the app talks to: over a Unix socket by default, or on `--tcp` at 127.0.0.1 for WSL. Over `--tcp` the daemon can't check whether a caller is an agent, so its token is the only gate: keep TCP for the WSL client.
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.6.2`). A session started before an upgrade keeps
+session shows it too (`brindle 0.6.3`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -324,6 +324,19 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    different model on purpose. With hosted learning on, the learner may
    choose `reviewer-codex` or `reviewer-local` instead when they can run here
    and its evidence says they review this kind of work better.
+   `review_sizing` (on by default; `false` turns it off) gives reviews a bounded
+   diff, touched-file list and caller context from graphify (or git grep). Re-reviews get only the
+   current round's diff. Automatic reviews of docs/test-only branches, or
+   branches within both `review_small_max_files` and `review_small_max_lines`,
+   use `reviewer-light` (Sonnet, low effort). When the writer used Claude and
+   the usual reviewer uses Codex, sizing uses `reviewer-codex-light` instead,
+   keeping its Codex model and lowering effort. An existing cross-vendor
+   pairing is preserved; unknown or unsupported pairings keep the usual
+   reviewer. This preserves a pairing already selected by the repo, without
+   requiring cross-vendor review by default. Binary changes and paths matching
+   `review_risky_paths` keep the usual reviewer. Explicit profile requests and
+   locked reviewer routing take precedence; an unavailable cheaper profile falls back to
+   the usual reviewer. Sizing uses the whole branch even on later rounds.
 4. **It keeps going.** If the supervisor stops while milestones are still
    unverified and no worker is running, brindle tells it to continue. It stops
    when every check passes, when it needs a decision from you, after three
@@ -732,6 +745,7 @@ Goal driving, merge gates and cleanup:
 |---|---|---|
 | `claude_permission_mode` | `"default"` | the `--permission-mode` for Claude Code sessions whose profile sets no `permission_mode`; the default holds permission requests for the brindle app, set `"auto"` to opt into auto mode. Only read from `~/.brindle/config.json` |
 | `opencode_permission_mode` | `"ask"` | how OpenCode sessions whose profile sets no `permission_mode` ask: `"ask"` keeps OpenCode's own prompts, `"auto"` lets edits run, `"autonomous"` asks nothing and brindle's plugin decides each call, failing closed (needs `permission_policy` on; see OpenCode below). Only read from `~/.brindle/config.json` |
+| `login_shell_env` | `"on"` | when the daemon starts, it runs your login shell once (`$SHELL -l -c`, no terminal, 5 seconds at most) and reads a fixed list of proxy and certificate settings from it: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` (and their lowercase forms), `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and Claude Code's `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY` and `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE` (those three for Claude Code only). A value that isn't a proxy URL, a host list or an existing file or directory is dropped. The settings are added to the environment of the CLIs the daemon itself launches (a session's own CLI, and every agent of a session it resumes) where they would otherwise start without them, kept in memory only, and never logged. A worker a session starts later is launched under that session's CLI, not by the daemon, so its pane asks the daemon for the same settings as it starts, over the daemon's Unix socket; the daemon answers only that worker's own pane, and the worker starts without them when no daemon is running or it doesn't answer within 10 seconds. A non-interactive login shell doesn't read `~/.zshrc`: export them from `~/.zprofile` (or `~/.bash_profile`). `"off"` turns it off. Only read from `~/.brindle/config.json` |
 | `auto_update` | `false` | run `uv tool upgrade brindle` in the background at session start when PyPI has a newer version; restart to use it. Can also be set in `~/.brindle/config.json` for every repo |
 | `scoped_checks` | unset (acts as `"off"`) | `"infer"` narrows a bare pytest check (`pytest ...`, `python -m pytest ...`, `uv run pytest ...`, options only) on a worker's branch to the tests `graphify affected` reaches plus the touched test files, when the repo has a stored graph; it runs in full when the mapping fails or `conftest.py`, `pyproject.toml`, `setup.cfg`, `pytest.ini`, `tox.ini` or a lockfile changed. A pytest command that already names test paths (`pytest tests/`) and every other command always run in full. `"off"` narrows nothing. It becomes the default next release; until you set it, brindle tells you once |
 | `scoped_checks_max_files` | `40` | with `scoped_checks`, a worker's branch whose selected tests exceed this many files runs only its own changed test files and each changed module's namesake tests (`tests/test_<module>.py`, `tests/test_<module>_*.py`) instead, and the check output carries a one-line note saying so. The session branch and the full run before a PR (`gates.pr_checked`) always run everything. `0`: no cap |
@@ -739,6 +753,10 @@ Goal driving, merge gates and cleanup:
 | `review` | required for sessions | require a reviewer's approval before merging |
 | `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |
 | `review_profile` | none | force `request_review`'s profile, skipping its automatic cross-model pick (see below) |
+| `review_sizing` | `true` | scoped review context and cheaper profiles preserving existing cross-vendor pairings; explicit profile requests still win |
+| `review_small_max_files` | `5` | maximum touched files for a small review |
+| `review_small_max_lines` | `200` | maximum added + deleted lines for a small review; docs/test-only branches also qualify |
+| `review_risky_paths` | `*auth*`, `*permission*`, `*daemon*`, `*concurr*`, `*thread*`, `*lock*`, `*async*` | globs over repo-relative paths that retain the usual reviewer, including deleted paths |
 | `pre_commit` | `true` | run [pre-commit](https://pre-commit.com) over the branch, if the repo uses it |
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
@@ -756,6 +774,9 @@ Goal driving, merge gates and cleanup:
 | `pipeline` | `true` | brindle reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
+| `fast_path` | `true` | the supervisor may send a small request straight to one light or medium worker (`assign(fast_path=true)`): no goal, milestones or audit; one light review and the checks before it merges |
+| `supervisor_state` | `true` | brindle keeps a compact goal state for the supervisor; automatic restarts require an enterprise admin's org-policy opt-in |
+| `supervisor_restart_tokens` | `0` (off) | dangerous, enterprise-admin-only org policy (`dangerous.supervisor_restart_tokens`); the context tokens that trigger a fresh supervisor session. 0 (the default) never restarts. Can make the supervisor lose track of work. Repo, local and user config values have no effect |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `permission_policy` | `"on"` | `"on"`: brindle answers agents' permission requests from its rules, on every plan (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. A value you set always wins over the default. The only permission switch: a leftover `permission_essentials` key is ignored |
@@ -764,6 +785,7 @@ Goal driving, merge gates and cleanup:
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
 | `overlap` | unset | a task whose `files` overlap a running task's: `"block"` refuses it, `"warn"` starts it with a warning, `"queue"` queues it until that task merges. Unset, it is refused within a session and queued behind another session's task (both sessions' supervisors are told; the other session's work is never cancelled), and the queued task starts from that task's merge commit |
+| `overlap_granularity` | `"hunk"` | what counts as an overlap. `"file"`: any shared file. `"hunk"`: a shared file only when the line regions the tasks declare in `files` (`"src/a.py:120-180"`) meet each other or the hunks the running task has actually changed (committed or not), so parts of one file can run in parallel. Regions are line numbers of the commit the supervisor's checkout was on when the task was queued, and are moved across later commits before they're compared; a file declared without a region, or whose lines can't be moved, still counts whole. Overlapping regions are handled by `overlap` as before, and a merge (by hand or by the pipeline) warns when the merged branch's hunks meet a running task's |
 | `protected_paths` | `[]` | paths or globs (`"migrations/"`, `"*.lock"`) whose merge conflicts brindle never hands to a worker to resolve: the branch waits for you instead (see "Conflict-aware merging") |
 | `live_check_ignore` | `[]` | names of processes (`["my-sync-daemon"]`) that never run in your projects, so a worktree is removed even though Linux won't show brindle their folder. Anything else whose folder can't be read keeps every worktree; systemd's user manager, `ssh-agent` and `gpg-agent` are excused already |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
@@ -1567,6 +1589,16 @@ approval of that commit finishes the goal. If it finds gaps, the supervisor gets
 them as a message and keeps working until a fresh audit approves.
 `"goal_audit": false` turns it off.
 
+**The fast path.** For a small request, the goal, milestones, milestone checks and
+completion audit can cost more than the work itself. With `fast_path` on (the
+default) the supervisor sends a small, well-scoped request (one area, no design decisions, roughly
+under 15 minutes of work) straight to one light or medium worker with a finish line:
+`assign(fast_path=true, weight="medium", done_when=...)`. There is no goal, no
+milestones and no audit. The branch gets one light review (blockers only, no second
+review) and the repo's checks, then merges, and the supervisor relays the result in
+one line. The supervisor decides what counts as small. Say "fast path" or "full path"
+to override it. `"fast_path": false` turns it off.
+
 **Spending fewer tokens.** Workers run only the tests that cover their change while
 they work. The full suite runs once: as the repo's `checks` before a branch merges,
 or, with no `checks`, by the worker just before it commits. brindle runs the checks
@@ -1590,6 +1622,24 @@ git-tracked files under `graphify-out/`, preserving richer semantic graphs and
 their generated reports. Update tracked graphs explicitly with graphify.
 Set `"graphify_auto_refresh": false` in `.brindle/config.json` to also disable
 automatic rebuilds and session seeding for untracked graphs while keeping queries.
+
+**A lean supervisor.** A supervisor rereads its whole chat on every turn, so a long
+session costs more per turn the longer it runs. With `supervisor_state` on (the
+default), brindle keeps a compact state of the session from what it already sees: the
+milestones and their status, each branch and where it stands (in review, approved,
+merged), the decisions recorded, the questions still open for you and each worker's
+last result. Automatic supervisor restarts are off by default. Only an enterprise
+org admin can enable them with a positive `dangerous.supervisor_restart_tokens`
+in the org policy (under the `managed_rollout` entitlement). This is dangerous:
+it can make the supervisor lose track of work. An absent or zero org-policy limit
+keeps restarts off; values in `.brindle/config.json`, `config.local.json` or
+`~/.brindle/config.json` have no effect. When enabled and the supervisor's context
+passes that limit, brindle ends its turn and starts a fresh session of it, seeded
+with that state, the request it started from and the latest messages, instead of
+carrying the full chat. Workers keep running, queued messages wait for the fresh
+session, and nothing in the state is cleared by a restart. It uses only what the
+Claude CLI already supports (a new session with a first prompt).
+`"supervisor_state": false` turns it off.
 
 When `pool_size` is greater than `0`, a claimed worktree keeps the path and
 port block it was built with -- it's never moved, and its port block is fixed

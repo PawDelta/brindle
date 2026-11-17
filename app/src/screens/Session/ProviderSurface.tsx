@@ -32,6 +32,7 @@ import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
 import { PanesReadyContext, panesReadyFor } from "../../store/panes";
 import type { Recovery } from "./useContinue";
+import { RestartHistory } from "./RestartHistory";
 import { visualsGate, withTypedWords, withVisualInput } from "./Visuals/terminalInput";
 
 export interface ProviderSurfaceProps {
@@ -43,7 +44,7 @@ export interface ProviderSurfaceProps {
   agent: AgentDTO | null;
   /* Whether its process is alive, from the liveness sweep (undefined: not known yet). */
   alive?: boolean;
-  /* The root's listed state; omitted when showing a worker. */
+  /* The root's listed state; only resuming also applies while showing a worker. */
   sessionStatus?: string | null;
   /* The session's name or goal: with no agent to show, what tells one stopped session's card from another's. */
   sessionName?: string | null;
@@ -67,6 +68,7 @@ type Card =
 /* The card the surface shows instead of a pane, or null for a live pane.
    `unshowable`: why a live pane can't be shown here (the pty view's status). */
 export function surfaceCard(agent: AgentDTO | null, alive: boolean | undefined, sessionStatus: string | null | undefined, view: TerminalView | null, credentials: InboxItemDTO | null | undefined, unshowable?: string | null): Card | null {
+  if (sessionStatus === "resuming" && !agent?.locked) return { kind: "returning" };
   const name = agent ? providerName(agent.provider) : "The session";
   if (!agent) {
     if (sessionStatus === "failed") return { kind: "failed", title: `${name} failed`, why: "Its supervisor stopped with an error." };
@@ -149,8 +151,10 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
   // Panes ready again after the engine was away (store/panes.ts): whatever the old view said is
   // forgotten, and the pane opens afresh on the rows read since.
   const panes = useContext(PanesReadyContext);
-  // A session released ahead of the rest is a fresh view of its own too, without touching the others'.
-  const epoch = `${panes.epoch}:${root ? panes.back?.indexOf(root) ?? -1 : -1}`;
+  // A session released ahead of the rest is a fresh view of its own too, without touching the others',
+  // and keeps it when the recovery ends: the view it opened on release is already the new daemon's.
+  const released = root ? panes.back?.indexOf(root) ?? -1 : -1;
+  const epoch = released >= 0 ? `back:${released}` : `${panes.epoch}`;
   const lifecycle = JSON.stringify([agent?.id, agent?.status, agent?.window, agent?.tmux_server, alive, recovery.attempt, epoch]);
   const [seen, setSeen] = useState({ lifecycle, attempt, epoch });
   if (seen.lifecycle !== lifecycle) {
@@ -179,7 +183,8 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
   const returning = !panesReadyFor(panes, root) && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
   const card: Card | null = returning ? { kind: "returning" } : surfaceCard(agent, alive, sessionStatus, view, credentials, unshowable);
   const name = agent ? providerName(agent.provider) : "the session";
-  const { resume, busy, notice, preflight, setPreflight } = recovery;
+  const { resume, busy, notice, preflight: savedPreflight, setPreflight } = recovery;
+  const preflight = sessionStatus === "resuming" ? null : savedPreflight;
 
   /* A fresh socket to the pane after a dropped stream. */
   const reconnect = () => {
@@ -206,9 +211,15 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
     attach: (file: Attachment) => client.attach(agent.id, file),
   } : undefined, [client, agent?.id, agent?.accepts_files]);
   const left = agent && card && card.kind !== "starting" && card.kind !== "returning" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));
+  // Paused roots may be absent from the snapshot; their saved chat is still
+  // available by root id. The endpoint checks the session's identity lock.
+  const historyId = !agent ? root : !agent.locked && agent.provider === "claude" && (!root || root === agent.id) ? agent.id : undefined;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"}>
+      {historyId && (
+        <RestartHistory key={historyId} id={historyId} revision={agent ?? sessionStatus} />
+      )}
       {/* A real tmux client on a pty; nothing until the shell has said it can (its status). */}
       {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
           that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}
@@ -218,7 +229,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
           worker's pane (the supervisor's chat is what the continue brings back) as a strip, else as the surface. */}
       {preflight && (
-        <div className={`${live ? "shrink-0 border-b border-shell-line" : "flex-1"} flex items-start justify-center overflow-auto bg-canvas p-s4`}>
+        <div className={`${live ? "shrink-0 border-b border-shell-line" : "flex-1"} flex items-start justify-center overflow-auto bg-canvas p-s4`} data-session-start={root ?? agent?.id}>
           <Preflight preflight={preflight} onRefresh={setPreflight} onLaunch={() => void resume()} launchLabel="Continue" repo={repo} />
         </div>
       )}
@@ -273,7 +284,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
                       </button>
                     )}
                     {!(card.kind === "ended" && card.locked) && !(card.kind === "failed" && card.unshowable) && (
-                      <LoadingButton className={credentials && card.kind === "failed" ? button : main} busy={busy} disabled={busy} onClick={() => resume()}>
+                      <LoadingButton className={credentials && card.kind === "failed" ? button : main} data-session-start={root ?? agent?.id} busy={busy} disabled={busy} onClick={() => resume()}>
                         {card.kind === "failed" ? "Restart" : "Continue"}
                       </LoadingButton>
                     )}

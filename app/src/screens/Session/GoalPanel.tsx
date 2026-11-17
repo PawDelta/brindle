@@ -19,8 +19,8 @@
    goal_phase: the PR readiness (review.ts) and the milestones stand in for
    it. Nothing here ever says "failed".
 
-   Only the newest GET answers: a slower, older response is dropped, and so is
-   any response that arrives after the panel has moved to another session. */
+   Rows and panels share one read per session. Events during a read invalidate
+   its answer and queue one refresh; a closed session drops pending answers. */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { BusEvent } from "../../api/events";
@@ -180,6 +180,11 @@ export function activeMilestoneStages(workspaces: WorkspaceDTO[], alive: Record<
 const ACTIVITY_REFRESH_MS = 60_000;
 
 export type GoalPhase ="in_progress" | "in_review" | "ready_for_pr" | "pr_open" | "done";
+/* A pull request URL's number (…/pull/413 → "413"); null for a URL without one. */
+export function prNumber(url: string): string | null {
+  return /\/pull\/(\d+)(?:[/?#]|$)/.exec(url)?.[1] ?? null;
+}
+
 export const GOAL_PHASE_LABEL: Record<GoalPhase, string> = {
   in_progress: "In progress",
   in_review: "In review",
@@ -201,10 +206,15 @@ const isGoalPhase = (p: string | null | undefined): p is GoalPhase => !!p && p i
    it opened reads PR open, its word that the session is ready reads Ready for
    PR, every milestone passed reads In review (brindle is still judging it), or
    Done when the engine can't judge PRs at all and calls the goal done; else In
-   progress. */
+   progress. Only PR open and Done have a PR: once the session's PR merged and
+   its branch moved on to the next, the engine's phase has none, and the merged
+   one (a readiness read older than the goal's) is never shown as its PR. */
 export function goalPhase(goal: GoalDTO, readiness: Pick<Readiness, "state" | "pr">): { phase: GoalPhase; prUrl: string | null } {
   const prUrl = goal.pr_url ?? readiness.pr?.url ?? null;
-  if (isGoalPhase(goal.goal_phase)) return { phase: goal.goal_phase, prUrl };
+  if (isGoalPhase(goal.goal_phase)) {
+    const hasPr = goal.goal_phase === "pr_open" || goal.goal_phase === "done";
+    return { phase: goal.goal_phase, prUrl: hasPr ? prUrl : null };
+  }
   if (readiness.pr) return { phase: "pr_open", prUrl };
   if (readiness.state === "ready") return { phase: "ready_for_pr", prUrl };
   const { passed, total } = completion(goal.milestones);
@@ -290,17 +300,21 @@ function shortAgo(at: number, now: number): string {
   return `${Math.round(s / 86400)}d`;
 }
 
-/* The sidebar's activity line: commits in the last hour, else when the last one landed, and how long is left
-   when brindle can say and something runs. Null when there is nothing to say (an older engine sends none of it). */
+/* The sidebar's activity line, including queued work. Older engines and sparse
+   snapshots use a 40-minute build/review budget per unfinished milestone. */
 export function activityLine(goal: GoalDTO, now = Date.now() / 1000): { what: string | null; eta: string | null; checks: boolean } | null {
   const commits = goal.commits_last_hour ?? 0;
-  if (goal.checking || goal.auditing) return { what: "Finishing up", eta: null, checks: true };
-  const what = commits > 0
+  const checks = !!(goal.checking || goal.auditing);
+  const what = checks ? "Finishing up" : commits > 0
     ? `${commits} ${commits === 1 ? "commit" : "commits"} in the last hour`
     : goal.last_commit_at != null ? `last commit ${shortAgo(goal.last_commit_at, now)} ago` : null;
-  const minutes = isStage(goal.stage) && goal.eta_seconds != null ? Math.max(1, Math.round(goal.eta_seconds / 60)) : null;
+  const unfinished = goal.milestones?.filter((m) => m.status !== "passed").length ?? 0;
+  const active = goal.state !== "done" && (!!goal.goal || isStage(goal.stage));
+  const estimate = active && goal.eta_seconds != null && Number.isFinite(goal.eta_seconds) && goal.eta_seconds > 0
+    ? goal.eta_seconds : active ? Math.max(1, unfinished) * 2400 : null;
+  const minutes = estimate === null ? null : Math.max(1, Math.round(estimate / 60));
   const eta = minutes === null ? null : minutes < 90 ? `~${minutes}m left` : `~${Math.round(minutes / 60)}h left`;
-  return what || eta ? { what, eta, checks: false } : null;
+  return what || eta ? { what, eta, checks } : null;
 }
 
 const CHEV = (
@@ -309,10 +323,10 @@ const CHEV = (
   </svg>
 );
 
-/* The milestones under their phase folds: a done phase is one line with its green count, the active one lists
-   every row (passed ones too, as they look today), an upcoming one is folded with its count. Any fold opens or
+/* The milestones under their phase folds: completed phases stay open in the sidebar and fold to their green
+   count in the full view; active phases list every row, and upcoming ones fold to a count. Any fold opens or
    closes on a click. The full panel's fold line carries a tiny bar, one segment per milestone. */
-function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, rows, finishedOpen, onFinishedToggle }: {
+function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, rows }: {
   folds: PhaseFold[];
   open: Record<number, boolean>;
   onToggle(key: number, next: boolean): void;
@@ -321,26 +335,20 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
   rowsClass: string;
   row(m: MilestoneDTO): ReactNode;
   rows?(milestones: MilestoneDTO[], key: number): ReactNode;
-  /* The sidebar's finished rows: the phase's count toggles them (absent in the full view, where every row shows). */
-  finishedOpen?: Record<number, boolean>;
-  onFinishedToggle?(key: number, next: boolean): void;
 }) {
   return (
     <ul className={`ms-folds${large ? " lg" : ""}`} aria-label="Milestones">
       {folds.map((f) => {
         const children = () => rows ? rows(f.milestones, f.key) : f.milestones.map(row);
         if (f.name === null) return <li key={f.key}><ul className={rowsClass}>{children()}</ul></li>;
-        const isOpen = open[f.key] ?? f.state === "active";
+        const isOpen = open[f.key] ?? (f.state === "active" || (!large && f.state === "done"));
         const passed = f.milestones.filter(isDone).length;
         const n = f.milestones.length;
         const count = f.state === "done" ? `✓ ${n} of ${n}` : f.state === "todo" ? `${n} upcoming` : `${passed} of ${n}`;
-        const toggles = !!onFinishedToggle && passed > 0;
-        // Finished rows show only while the phase is open too: the count reads as expanded only when they do.
-        const finished = (finishedOpen?.[f.key] ?? false) && isOpen;
         return (
           <li key={f.key} data-st={f.state}>
-            <div className={toggles ? "flex min-w-0 items-center" : undefined}>
-              <button type="button" className={`ms-fold${toggles ? " min-w-0 flex-1" : ""}`} data-st={f.state} data-testid="phase-fold" data-phase-key={f.key} aria-expanded={isOpen} onClick={() => onToggle(f.key, !isOpen)}>
+            <div>
+              <button type="button" className="ms-fold" data-st={f.state} data-testid="phase-fold" data-phase-key={f.key} aria-expanded={isOpen} onClick={() => onToggle(f.key, !isOpen)}>
                 {CHEV}
                 <span className="n">{f.name}</span>
                 {large && (
@@ -350,26 +358,8 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
                     ))}
                   </span>
                 )}
-                {!toggles && <span className="k">{count}</span>}
+                <span className="k">{count}</span>
               </button>
-              {toggles && (
-                <button
-                  type="button"
-                  data-testid="phase-done-toggle"
-                  aria-expanded={finished}
-                  aria-label={`${count}: ${finished ? "hide" : "show"} finished milestones in ${f.name}`}
-                  onClick={() => {
-                    // Showing opens the phase too; hiding only clears the finished rows.
-                    if (!finished) {
-                      if (!isOpen) onToggle(f.key, true);
-                      onFinishedToggle!(f.key, true);
-                    } else onFinishedToggle!(f.key, false);
-                  }}
-                  className={`ms-count shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10.5px] hover:text-ink ${f.state === "done" ? "text-pass" : "text-ink-3"}`}
-                >
-                  {count}
-                </button>
-              )}
             </div>
             {isOpen && <ul className={`${rowsClass} ms-kids`}>{children()}</ul>}
           </li>
@@ -456,43 +446,109 @@ function Milestone({ milestone, finished, pending }: { milestone: MilestoneDTO; 
   );
 }
 
-/* The goal as the session bar reads it: fetched on mount and again after
-   any event that may have changed it (an action's ack, a check's end, a
-   resnapshot); null for a session without one, undefined while unknown
-   (or with no engine to ask). The panel above keeps its own, finer, copy. */
-export function useGoal(client: DaemonClient | null, repo: string, root: string, store: AppStore): GoalDTO | null | undefined {
-  const [goal, setGoal] = useState<GoalDTO | null | undefined>(undefined);
-  useEffect(() => {
-    if (!client) return;
-    let live = true;
-    let seq = 0;
-    const load = () => {
-      const mine = ++seq;
-      client.goal(repo, root).then(
-        (got) => live && mine === seq && setGoal(got),
-        () => undefined,
-      );
-    };
-    setGoal(undefined);
-    load();
+type GoalReadState = { goal: GoalDTO | null | undefined; error: string | null };
+const UNKNOWN_GOAL: GoalReadState = { goal: undefined, error: null };
+const goalReads = new WeakMap<AppStore, WeakMap<DaemonClient, Map<string, ReturnType<typeof createGoalRead>>>>();
+
+/* One subscription and request stream per session. Events arriving during a
+   read invalidate its answer and coalesce into one subsequent read. */
+function createGoalRead(client: DaemonClient, repo: string, root: string, store: AppStore) {
+  let state = UNKNOWN_GOAL;
+  const listeners = new Set<() => void>();
+  let generation = 0;
+  let pending = false;
+  let dirty = false;
+  let stop: (() => void) | undefined;
+  const publish = (next: GoalReadState) => {
+    state = next;
+    listeners.forEach((listener) => listener());
+  };
+  const refresh = () => {
+    if (!listeners.size) return;
+    if (pending) { dirty = true; return; }
+    pending = true;
+    dirty = false;
+    const mine = generation;
+    void client.goal(repo, root).then(
+      (goal) => { if (mine === generation && !dirty) publish({ goal, error: null }); },
+      (error: unknown) => { if (mine === generation && !dirty) publish({ ...state, error: message(error) }); },
+    ).finally(() => {
+      if (mine !== generation) return;
+      pending = false;
+      if (dirty) refresh();
+    });
+  };
+  const start = () => {
+    refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
+    let workspaces = store.getState().workspaces;
+    let gitMark = sessionGitMark(workspaces, root);
     const unsubscribe = store.subscribe(() => {
       const s = store.getState();
+      let again = false;
       if (s.lastEventId !== seen) {
         const fresh = s.recent.filter((e) => e.id > seen);
         seen = s.lastEventId;
-        if (fresh.some((e) => concernsGoal(e, root))) load();
+        again ||= fresh.some((e) => concernsGoal(e, root));
       }
-      if (s.stale && !stale) load();
+      again ||= s.stale && !stale;
       stale = s.stale;
+      if (s.workspaces !== workspaces) {
+        workspaces = s.workspaces;
+        const mark = sessionGitMark(workspaces, root);
+        again ||= mark !== gitMark;
+        gitMark = mark;
+      }
+      if (again) refresh();
     });
+    const tick = window.setInterval(refresh, ACTIVITY_REFRESH_MS);
     return () => {
-      live = false;
       unsubscribe();
+      window.clearInterval(tick);
     };
+  };
+  return {
+    snapshot: () => state,
+    refresh,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      if (listeners.size === 1) stop = start();
+      return () => {
+        listeners.delete(listener);
+        if (!listeners.size) {
+          stop?.();
+          generation++;
+          pending = dirty = false;
+          state = UNKNOWN_GOAL;
+        }
+      };
+    },
+  };
+}
+
+function useGoalRead(client: DaemonClient | null, repo: string, root: string, store: AppStore) {
+  const read = useMemo(() => {
+    if (!client) return null;
+    let clients = goalReads.get(store);
+    if (!clients) goalReads.set(store, clients = new WeakMap());
+    let reads = clients.get(client);
+    if (!reads) clients.set(client, reads = new Map());
+    const key = JSON.stringify([repo, root]);
+    let entry = reads.get(key);
+    if (!entry) reads.set(key, entry = createGoalRead(client, repo, root, store));
+    return entry;
   }, [client, repo, root, store]);
-  return goal;
+  const state = useSyncExternalStore(read?.subscribe ?? subscribeNoGoal, read?.snapshot ?? unknownGoal);
+  return { ...state, refresh: read?.refresh };
+}
+
+const subscribeNoGoal = () => () => undefined;
+const unknownGoal = () => UNKNOWN_GOAL;
+
+/* Shared by sidebar rows and the panel; undefined until the first answer. */
+export function useGoal(client: DaemonClient | null, repo: string, root: string, store: AppStore): GoalDTO | null | undefined {
+  return useGoalRead(client, repo, root, store).goal;
 }
 
 export interface GoalPanelProps {
@@ -517,104 +573,48 @@ export interface GoalPanelProps {
   openUrl?: OpenUrl;
   /* Closes the whole session, at once and unasked: the Done step's action. */
   onCloseSession?(): void;
-  /* Opens Knowledge › Docs filtered to this session: the docs line's action. */
+  /* Opens the Library's docs filtered to this session: the docs line's action. */
   onOpenDocs?(): void;
 }
 
 export function GoalPanel({ client, repo, root, store, compact = false, title, loadingTitle, request, onReview, openUrl = openExternal, onCloseSession, onOpenDocs }: GoalPanelProps) {
-  const [goal, setGoal] = useState<GoalDTO | null>(null);
+  const { goal, error: loadError, refresh } = useGoalRead(client, repo, root, store);
+  const loaded = goal !== undefined;
   // The docs this session wrote or used; null while unknown or unreachable (the line stays hidden).
   const [docSummary, setDocSummary] = useState<{ total: number; writing: number; updated: number; using: number } | null>(null);
   // An older engine's stand-in for goal_phase: its word on the session's PR.
   const readiness = usePrReadiness(client, root, store);
-  const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Beside a terminal the milestones fold away by default (it wants the room); in the sidebar they show.
   const [open, setOpen] = useState(compact);
   const [fullGoalOpen, setFullGoalOpen] = useState(false);
-  // The phase folds the person opened or closed, by fold key; the rest keep their default (only the active phase open).
+  // The phase folds the person opened or closed, by fold key; the sidebar also keeps completed phases open.
   const [foldOpen, setFoldOpen] = useState<Record<number, boolean>>({});
   // Pending rows fold independently within each phase (key 0 is the list without phases).
   const [pendingOpen, setPendingOpen] = useState<Record<number, boolean>>({});
-  const [doneOpen, setDoneOpen] = useState<Record<number, boolean>>({});
   const toggleFold = useCallback((key: number, next: boolean) => setFoldOpen((o) => ({ ...o, [key]: next })), []);
-  const toggleDone = useCallback((key: number, next: boolean) => setDoneOpen((o) => ({ ...o, [key]: next })), []);
   const frame = compact ? "flex min-w-0 flex-1 flex-col gap-1.5 overflow-hidden px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
-  /* This session: its client, repo and root. Every continuation (a GET, an action's
-     ack, its error or end) applies only while it is still the session on screen, so
-     one started for an earlier session can't touch this one. */
   const session = useMemo(() => ({ client, repo, root }), [client, repo, root]);
-  const activeSession = useRef<typeof session | null>(null);
-  /* The newest GET /goal asked for; only the newest response applies. */
-  const requestSeq = useRef(0);
-
-  const refresh = useCallback(() => {
-    // A refresh from an earlier session's closure does nothing; it must not bump the counter.
-    if (activeSession.current !== session) return Promise.resolve();
-    const seq = ++requestSeq.current;
-    const current = () => activeSession.current === session && seq === requestSeq.current;
-    void client.docSessionSummary(root).then(
-      (got) => current() && setDocSummary(got),
-      () => current() && setDocSummary(null),
-    );
-    return client
-      .goal(repo, root)
-      .then((next) => {
-        if (!current()) return;
-        setGoal(next);
-        setLoaded(true);
-        setLoadError(null);
-      })
-      .catch((e: unknown) => {
-        if (current()) setLoadError(message(e));
-      });
-  }, [session, client, repo, root]);
 
   useEffect(() => {
-    activeSession.current = session;
-    // Whatever was on screen belongs to an earlier session: this one starts afresh.
-    setGoal(null);
-    setLoaded(false);
-    setLoadError(null);
     setActionError(null);
     setDocSummary(null);
     setFullGoalOpen(false);
     setFoldOpen({});
     setPendingOpen({});
-    setDoneOpen({});
-    void refresh();
-    let seen = store.getState().lastEventId;
-    let stale = store.getState().stale;
-    let workspaces = store.getState().workspaces;
-    let gitMark = sessionGitMark(workspaces, root);
-    const unsubscribe = store.subscribe(() => {
-      const s = store.getState();
-      let again = false;
-      if (s.lastEventId !== seen) {
-        const fresh = s.recent.filter((e) => e.id > seen);
-        seen = s.lastEventId;
-        again ||= fresh.some((e) => concernsGoal(e, root));
-      }
-      again ||= s.stale && !stale;
-      stale = s.stale;
-      // The sidebar counts the session's commits: a git sweep of one of its worktrees may have new ones.
-      if (compact && s.workspaces !== workspaces) {
-        workspaces = s.workspaces;
-        const mark = sessionGitMark(workspaces, root);
-        again ||= mark !== gitMark;
-        gitMark = mark;
-      }
-      if (again) void refresh();
-    });
-    // The activity line's last hour, ages and estimate move with the clock.
-    const tick = compact ? window.setInterval(() => void refresh(), ACTIVITY_REFRESH_MS) : undefined;
+  }, [session]);
+
+  useEffect(() => {
+    if (goal === undefined) return;
+    let live = true;
+    void client.docSessionSummary(root).then(
+      (got) => live && setDocSummary(got),
+      () => live && setDocSummary(null),
+    );
     return () => {
-      activeSession.current = null;
-      unsubscribe();
-      window.clearInterval(tick);
+      live = false;
     };
-  }, [session, store, refresh, root, compact]);
+  }, [client, repo, root, goal]);
 
   const storeWorkspaces = useSyncExternalStore(store.subscribe, () => store.getState().workspaces);
   const storeAlive = useSyncExternalStore(store.subscribe, () => store.getState().alive);
@@ -635,8 +635,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
           type="button"
           className={button}
           onClick={() => {
-            setLoadError(null);
-            void refresh();
+            refresh?.();
           }}
         >
           Retry
@@ -697,28 +696,48 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
      way back into Review, where the session's commits not on the PR yet wait for the person's Push. */
   const unpushed = readiness.pr?.unpushed ?? 0;
   const step =
-    phase === "pr_open" && prUrl ? (
-      <div className={`flex flex-col gap-0.5 ${compact ? "mx-0.5" : ""}`}>
+    phase === "ready_for_pr" && onReview ? (
+      <button
+        type="button"
+        className={`flex items-center gap-s1 rounded-md border px-s1 py-1 text-left ${mainTone} ${compact ? "mx-0.5" : ""}`}
+        data-testid="goal-review"
+        title="brindle judges the session ready: review its changes and open the PR"
+        onClick={onReview}
+      >
+        Review &amp; open PR
+        <span className="flex-1" />›
+      </button>
+    ) : phase === "pr_open" && prUrl ? (
+      <div className={`flex items-center gap-1.5 ${compact ? "mx-0.5" : ""}`}>
+        {/* The PR as a chip: its number (from the URL) and ↗; the URL itself only on hover. */}
         <button
           type="button"
-          className="flex items-center gap-s1 rounded-md bg-pass-soft px-s1 py-1 text-left text-xs font-medium text-pass hover:opacity-90"
+          className="inline-flex shrink-0 items-center gap-1 rounded-full bg-pass-soft px-2 py-0.5 text-[11.5px] font-medium text-pass hover:opacity-90"
           data-testid="goal-pr"
           title={prUrl}
+          aria-label="Open the PR"
           onClick={() => void openUrl(prUrl).catch((e: unknown) => setActionError(message(e)))}
         >
-          <span className="min-w-0 truncate">{prUrl.replace(/^https?:\/\//, "")}</span>
-          <span className="flex-1" />
-          Open the PR ↗
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+            <circle cx="4" cy="3.5" r="1.8" />
+            <circle cx="4" cy="12.5" r="1.8" />
+            <circle cx="12" cy="12.5" r="1.8" />
+            <path d="M4 5.3v5.4M12 10.7V6.5a2 2 0 0 0-2-2H7.5" />
+            <path d="M9 3l-1.5 1.5L9 6" />
+          </svg>
+          <span className="font-mono">{prNumber(prUrl) ? `#${prNumber(prUrl)}` : "PR"}</span> ↗
         </button>
         {onReview && (
           <button
             type="button"
-            className="flex items-center gap-s1 rounded-md px-s1 py-0.5 text-left text-xs text-ink-2 hover:bg-surface-2"
+            className="flex min-w-0 flex-1 items-center gap-s1 rounded-md px-1.5 py-0.5 text-left text-xs text-ink-2 hover:bg-surface-2"
             data-testid="goal-pr-review"
+            data-unpushed={unpushed}
+            title={unpushed > 0 ? `${unpushed} not on the PR yet` : undefined}
             onClick={onReview}
           >
-            Review changes
-            {unpushed > 0 && <span className="text-sap">· {unpushed} not on the PR</span>}
+            <span className="truncate">Review changes</span>
+            {unpushed > 0 && <span className="shrink-0 text-sap">· {unpushed}</span>}
             <span className="flex-1" />›
           </button>
         )}
@@ -727,7 +746,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
   /* The session's docs, one quiet line under the milestones; hidden with none. */
   const docsLine =
     docSummary && docSummary.total > 0 ? (
-      <button type="button" className={`${quiet} self-start text-xs`} data-testid="goal-docs" title="Knowledge › Docs for this session" onClick={onOpenDocs}>
+      <button type="button" className={`${quiet} self-start text-xs`} data-testid="goal-docs" title="This session's docs in the Library" onClick={onOpenDocs}>
         {docSummary.total} {docSummary.total === 1 ? "doc" : "docs"} · writing {docSummary.writing}, using {docSummary.using} →
       </button>
     ) : null;
@@ -756,9 +775,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
     // The stage the active step is at; none once the goal is finished or while nothing runs.
     const barStages = [...activeStage.values()].filter((s): s is Stage => s !== null);
     const activity = finished ? null : activityLine(goal);
-    // The fold whose finished rows the goal count toggles: the list without phases (key 0), or the leading unnamed
-    // group when phases exist. Undefined when that group has no finished row, so the count is plain.
-    const countKey = folds ? folds.find((f) => f.name === null && f.milestones.some(isDone))?.key : passed > 0 ? 0 : undefined;
     const stateOf = (m: MilestoneDTO): "done" | "now" | "pending" => (isDone(m) ? "done" : isPending(m) ? "pending" : "now");
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
@@ -782,10 +798,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
       const done = items.filter(isDone);
       const pending = items.filter(isPending);
       const expanded = pendingOpen[key] ?? false;
-      const doneExpanded = doneOpen[key] ?? false;
       return (
         <>
-          {doneExpanded && done.map(sideRow)}
+          {done.map(sideRow)}
           {items.filter((m) => !isDone(m) && !isPending(m)).map(sideRow)}
           {pending.length > 0 && (
             <li>
@@ -811,22 +826,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
         <div className="flex shrink-0 flex-col gap-1.5" data-testid="goal-header">
         <div data-testid="goal-line" className={`flex min-w-0 flex-nowrap items-center gap-s1 px-0.5 text-[13px] font-medium ${finished ? "text-pass" : "text-ink"}`}>
           {contextTitle ?? <SessionGoal text={goal.goal} className="block w-full truncate text-left" onOpen={() => setFullGoalOpen((o) => !o)}>{goal.summary || goal.goal}</SessionGoal>}
-          {countKey !== undefined && total > 0 ? (
-            <button
-              type="button"
-              data-testid="goal-count"
-              aria-expanded={doneOpen[countKey] ?? false}
-              aria-label={`${passed} of ${total} milestones: ${doneOpen[countKey] ? "hide" : "show"} finished milestones`}
-              onClick={() => setDoneOpen((o) => ({ ...o, [countKey]: !(o[countKey] ?? false) }))}
-              className="shrink-0 cursor-pointer whitespace-nowrap rounded font-mono text-[11px] font-normal text-ink-3 hover:text-ink"
-            >
-              {`${passed} of ${total}`}
-            </button>
-          ) : (
-            <span data-testid="goal-count" className="shrink-0 whitespace-nowrap font-mono text-[11px] font-normal text-ink-3">
-              {total > 0 ? `${passed} of ${total}` : ""}
-            </span>
-          )}
+          <span data-testid="goal-count" className="shrink-0 whitespace-nowrap font-mono text-[11px] font-normal text-ink-3">
+            {total > 0 ? `${passed} of ${total}` : ""}
+          </span>
         </div>
         <div className="side-bar" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(donePct)} title={goal.detail ?? undefined}>
           <span className="d" style={{ width: `${donePct}%` }} />
@@ -834,7 +836,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
         </div>
         {activity && (
           <div className="side-act" data-testid="goal-activity">
-            <span data-testid="goal-activity-what">{activity.what}</span>
+            {activity.what && <span data-testid="goal-activity-what">{activity.what}</span>}
             {activity.what && activity.eta && ", "}
             {activity.eta && <span data-testid="goal-eta">{activity.eta.replace("~", "about ")}</span>}
           </div>
@@ -846,7 +848,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
         </div>}
         {fullGoal}
         {total > 0 && folds ? (
-          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} rows={sideRows} finishedOpen={doneOpen} onFinishedToggle={toggleDone} />
+          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} rows={sideRows} />
         ) : total > 0 ? (
           <ul className="side-ms" aria-label="Milestones">
             {sideRows(milestones, 0)}
@@ -857,8 +859,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
         {docsLine}
         {closeSession}
         {step}
-        {shownError && <p className={`${alert} text-xs`}>{shownError}</p>}
-        {goal.note && <p className="px-0.5 text-[11px] text-ink-3">{goal.note}</p>}
+        {shownError && <p className={`${alert} line-clamp-2 break-words text-xs`} title={shownError}>{shownError}</p>}
+        {goal.note && <p className="line-clamp-2 break-words px-0.5 text-[11px] text-ink-3" title={goal.note}>{goal.note}</p>}
         </PhaseScroll>
       </section>
     );

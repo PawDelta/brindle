@@ -10,12 +10,17 @@ order."""
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import logging
 import os
+import threading
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Iterator
 
-from brindle import agents, git, scratch, session_sync, spawn, tmux, view, workspaces
+from brindle import agents, codemap, debuglog, git, scratch, session_sync, spawn, tmux, view, workspaces
 from brindle import sessions as sessions_mod
 from brindle.db import DB, Agent, Workspace
 from brindle.service.dto import SessionDTO
@@ -25,6 +30,8 @@ RUNNING_CHOICES = {"o": "open", "a": "start another here, alongside it",
                    "n": "new session in its own worktree", "p": "pause it and start fresh"}
 PAUSED_CHOICES = {"r": "resume it"}
 NO_PAUSED = "no paused sessions here. Run `brindle` to start a fresh one."
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,10 @@ class Conflict:
 class Placed:
     workspace: Workspace          # where the new session runs
     notes: list[Note] = field(default_factory=list)
+    # A worktree made for it just now, from origin's default branch as just fetched:
+    # nothing to tidy or pull, and its setup (``finish``) still to run, after the launch.
+    fresh: bool = False
+    finish: Callable[[], Any] | None = None
 
 
 @dataclass
@@ -151,30 +162,69 @@ def cull_detached(repo_root: str | None = None) -> None:
 # -- start -------------------------------------------------------------------
 
 
+def prefetch(repo_root: str) -> Future[str]:
+    """Where a new session worktree starts (session_sync.fresh_start: origin's
+    tip, as just fetched), fetched on a thread of its own under the request's
+    deadline, so a start's checks run while it fetches (start's ``fetched``)."""
+    done: Future[str] = Future()
+    work = spawn.carry(session_sync.fresh_start)
+
+    def run() -> None:
+        try:
+            done.set_result(work(repo_root))
+        except BaseException as e:  # noqa: BLE001 - handed to whoever waits on it
+            done.set_exception(e)
+
+    threading.Thread(target=run, name="brindle-session-fetch", daemon=True).start()
+    return done
+
+
 def session_worktree(db: DB, ws: Workspace) -> Workspace:
     """A worktree for a second session in this repo: branch brindle/session-N,
     cut from origin's default branch as just fetched (session_sync.fresh_start:
     WorkspaceError when it can't be), so the two sessions never share files
     or a branch."""
+    return _new_session_worktree(db, ws).workspace
+
+
+def _new_session_worktree(db: DB, ws: Workspace, *, defer_setup: bool = False,
+                          fetched: Future[str] | None = None) -> workspaces.Created:
+    """session_worktree's; ``defer_setup``: its setup is left in ``finish``.
+    ``fetched``: origin's tip, already being fetched (prefetch), to wait for
+    instead of fetching here."""
+    # Every session branch in one read, not a git call per number taken (a repo
+    # many sessions old waited a second or two on those).
+    taken = set(git.out(["for-each-ref", "--format=%(refname)", "refs/heads/brindle/session-*"],
+                        ws.repo_root).split())
     n = 2
-    while git.ok(["rev-parse", "--verify", "--quiet", f"refs/heads/brindle/session-{n}"], ws.repo_root):
+    while f"refs/heads/brindle/session-{n}" in taken:
         n += 1
-    start = session_sync.fresh_start(ws.repo_root)
-    created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}",
-                                base=session_sync.default_branch(ws.repo_root), start=start,
-                                apply_prefix=False).workspace
-    from brindle import codemap
-    codemap.seed_session(created.path, created.repo_root)
+    with create_step("fetch_s"):
+        start = fetched.result() if fetched is not None else session_sync.fresh_start(ws.repo_root)
+    with create_step("worktree_s"):
+        created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}",
+                                    base=session_sync.default_branch(ws.repo_root), start=start,
+                                    apply_prefix=False, defer_setup=defer_setup)
+    with create_step("codemap_s"):
+        codemap.seed_session(created.workspace.path, created.workspace.repo_root)
     return created
 
 
 def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | None = None, *,
-          live: list | None = None) -> Placed | Opened | Conflict:
+          live: list | None = None, fetched: Future[str] | None = None) -> Placed | Opened | Conflict:
     """Where a new session in ``ws``'s checkout runs, given the repo's live
     sessions (in any worktree). With some running and no ``choice``, a
     Conflict: open one ("o"), start another here alongside them ("a"), start
     in a new worktree ("n"), or pause one and start fresh here ("p").
-    ``live`` is the Conflict's list, to skip asking tmux again."""
+    "n" needs no session picked, nor any running: the app's Send asks for it
+    whenever a session is there, running or paused.
+    ``live`` is the Conflict's list, to skip asking tmux again. ``fetched``:
+    for "n", origin's tip already being fetched (prefetch)."""
+    if choice == "n":
+        made = _new_session_worktree(db, ws, defer_setup=True, fetched=fetched)
+        created = made.workspace
+        return Placed(created, [Note(f"✓ new session in its own worktree: {created.path} ({created.branch})")],
+                      fresh=True, finish=made.finish)
     live = sessions_mod.live(db, ws.repo_root) if live is None else live
     if not live:
         return Placed(ws)
@@ -187,9 +237,6 @@ def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | No
         return Opened(picked.workspace, picked.root)
     if choice == "a":
         return Placed(ws)
-    if choice == "n":
-        created = session_worktree(db, ws)
-        return Placed(created, [Note(f"✓ new session in its own worktree: {created.path} ({created.branch})")])
     # A session starts here next: keep its local models loaded.
     agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
     return Placed(ws, [Note(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back.")])
@@ -354,36 +401,144 @@ def launch(db: DB, ws: Workspace, *, provider: str | None = None, prompt: str | 
     return Started(a, ws, True)
 
 
+_create_steps: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "brindle_create_steps", default=None)
+
+
+@contextlib.contextmanager
+def create_timing() -> Iterator[dict[str, Any]]:
+    """Time a session's start, step by step (create_step), and log what each
+    took as a "create detail" line, as a resume logs its "resume detail"
+    (debuglog.recovery_timing: staff only). Nested: the outer one's."""
+    outer = _create_steps.get()
+    if outer is not None:
+        yield outer
+        return
+    steps: dict[str, Any] = {}
+    token = _create_steps.set(steps)
+    began = time.monotonic()
+    try:
+        yield steps
+    finally:
+        _create_steps.reset(token)
+        steps["total_s"] = time.monotonic() - began
+        if "root" in steps:     # a supervisor launched (not a conflict or a refusal)
+            _log_steps("create detail", steps)
+
+
+@contextlib.contextmanager
+def create_step(name: str) -> Iterator[None]:
+    """Add the seconds the block takes to the start being timed, if any."""
+    steps = _create_steps.get()
+    if steps is None:
+        yield
+        return
+    began = time.monotonic()
+    try:
+        yield
+    finally:
+        steps[name] = steps.get(name, 0.0) + time.monotonic() - began
+
+
+def _log_steps(what: str, steps: dict[str, Any]) -> None:
+    root = steps.pop("root", None)
+    detail = {k: round(v, 3) if isinstance(v, float) else v for k, v in steps.items()}
+    with debuglog.recovery_timings():
+        debuglog.recovery_timing(log, "brindle: session %s %s: %s", root or "-", what, detail)
+
+
+def after_launch(work: Callable[[], None]) -> None:
+    """Run what a new session's supervisor doesn't need to start (its
+    worktree's setup, its code map's rebuild) once it has started, on a
+    thread of its own: the start answers without waiting for it, and none of
+    the request's deadline applies (the thread starts with a fresh context)."""
+    threading.Thread(target=work, name="brindle-after-launch").start()
+
+
+def _finish_start(root_id: str, refreshes: list[tuple[str, str | None]],
+                  finish: Callable[[], Any] | None) -> None:
+    steps: dict[str, Any] = {"root": root_id}
+    began = time.monotonic()
+    for checkout, repo in refreshes:
+        try:
+            codemap.refresh_later(checkout, repo)
+        except Exception:  # noqa: BLE001 - an optional rebuild never keeps the setup from running
+            log.exception("brindle: rebuilding session %s's code map failed", root_id)
+    steps["codemap_refresh_s"] = time.monotonic() - began
+    if finish is not None:
+        began = time.monotonic()
+        try:
+            result = finish()
+        except Exception:  # noqa: BLE001 - the session runs either way
+            log.exception("brindle: setting up session %s's worktree failed", root_id)
+        else:
+            if result is not None and not result.ok:
+                log.warning("brindle: session %s's worktree setup failed: %s", root_id, result.log)
+        steps["setup_s"] = time.monotonic() - began
+    _log_steps("create after-launch detail", steps)
+
+
 def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | None = None,
           watch: bool = True, autopilot: bool | None = None, branch: str | None = None,
           worktree: str | None = None, choice: str | None = None,
-          session_id: str | None = None) -> Started | Opened | Conflict:
+          session_id: str | None = None, fetched: Future[str] | None = None) -> Started | Opened | Conflict:
     """A fresh supervisor session in ``repo_root``'s checkout, or (with
     ``branch``/``worktree``) in that worktree. With a session already running
     in the repo, a Conflict until ``choice`` and ``session_id`` say what to do
-    (see place); only "p" pauses one, "a" starts this one alongside them."""
-    notes: list[Note] = []
-    if branch or worktree:
-        ws = workspaces.checkout_for(db, repo_root, branch=branch, worktree=worktree)
-    else:
-        got = place(db, workspaces.adopt_root(db, repo_root), choice, session_id)
-        if not isinstance(got, Placed):
-            return got
-        ws, more = tidy_branch(db, got.workspace)
-        notes = got.notes + more
-    provider = supervisor_provider(ws.repo_root, provider)
-    if provider is None:
-        raise no_usable_provider()
-    problems = preflight(agents.SUPERVISOR, provider, ws.repo_root)
-    if problems:
-        raise ServiceError("unavailable", "; ".join(problems), 503)
-    notes += pause_transferred(db, ws)
-    notes += pull_main(db, ws)
-    started = launch(db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot)
-    # After the chat's window exists and is recorded: the cull's session
-    # retention closes dropped sessions' windows by their stored pane ids,
-    # which a freshly started tmux server hands out again from %0.
-    cull_detached(ws.repo_root)
+    (see place); only "p" pauses one, "a" starts this one alongside them.
+
+    Only what the supervisor needs runs before it starts: a new worktree's
+    setup commands and its code map's rebuild (graphify, which takes every
+    core) run after, on their own thread (after_launch). ``fetched``: a new
+    worktree's start point already being fetched (prefetch)."""
+    with create_timing() as steps, codemap.refreshes_held() as refreshes:
+        notes: list[Note] = []
+        finish, fresh = None, False
+        if branch or worktree:
+            deferred: list[Callable[[], Any]] = []
+            with create_step("place_s"):
+                ws = workspaces.checkout_for(db, repo_root, branch=branch, worktree=worktree, deferred=deferred)
+            finish = deferred[0] if deferred else None
+        else:
+            with create_step("place_s"):
+                got = place(db, workspaces.adopt_root(db, repo_root), choice, session_id, fetched=fetched)
+            if not isinstance(got, Placed):
+                return got
+            ws, notes, finish, fresh = got.workspace, got.notes, got.finish, got.fresh
+            if not fresh:     # a worktree cut just now is on origin's tip already
+                with create_step("tidy_s"):
+                    ws, more = tidy_branch(db, ws)
+                notes = notes + more
+        with create_step("provider_s"):
+            provider = supervisor_provider(ws.repo_root, provider)
+        if provider is None:
+            raise no_usable_provider()
+        with create_step("preflight_s"):
+            problems = preflight(agents.SUPERVISOR, provider, ws.repo_root)
+        if problems:
+            raise ServiceError("unavailable", "; ".join(problems), 503)
+        with create_step("pause_transferred_s"):
+            notes += pause_transferred(db, ws)
+        if not fresh:
+            with create_step("pull_main_s"):
+                notes += pull_main(db, ws)
+        launch_steps: dict[str, float] = {}
+        token = agents._launch_steps.set(launch_steps)
+        try:
+            with create_step("launch_s"):
+                started = launch(db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot)
+        finally:
+            agents._launch_steps.reset(token)
+        steps["root"] = started.agent.id
+        if launch_steps:
+            steps["launch_steps"] = {k: round(v, 3) for k, v in launch_steps.items()}
+        # After the chat's window exists and is recorded: the cull's session
+        # retention closes dropped sessions' windows by their stored pane ids,
+        # which a freshly started tmux server hands out again from %0.
+        cull_detached(ws.repo_root)
+    if refreshes or finish is not None:
+        held = list(refreshes)
+        after_launch(lambda: _finish_start(started.agent.id, held, finish))
     started.notes = notes
     return started
 

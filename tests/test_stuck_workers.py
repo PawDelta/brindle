@@ -33,6 +33,8 @@ def told(monkeypatch):
     monkeypatch.setattr(agents, "command_running", lambda db, a: False)
     monkeypatch.setattr(agents, "transcript_active", lambda a, now=None: False)
     monkeypatch.setattr(cull, "_last_edit", lambda ws: 0)
+    monkeypatch.setattr(disk, "live_in", lambda *a, **k: False)
+    monkeypatch.setattr(cull.procs, "table", lambda: {})
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes())
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: "")
     return sent
@@ -76,7 +78,10 @@ def test_the_supervisor_cannot_stop_until_it_deals_with_the_worker(db, boss, wor
     assert "w1" not in (autopilot.on_stop(db, boss, {}) or {"reason": ""})["reason"]
 
 
-@pytest.mark.parametrize("case", ["gave_up", "budget"])
+@pytest.mark.parametrize("case", [
+    pytest.param("gave_up", marks=pytest.mark.variant("A worker whose takeover gave up must not block its supervisor again on later stops")),
+    "budget",
+])
 def test_gave_up_stops_blocking(db, boss, worker, told, monkeypatch, case):
     now = T0
     monkeypatch.setattr(open_items.time, "time", lambda: now)
@@ -176,14 +181,14 @@ def test_a_stuck_worker_is_taken_over_after_the_hour(db, boss, takeover, told, v
         assert "feat/stuck" in mcp_server.requeue("w1")
 
     assert takeover["removed"] == [("w", {"force": True, "delete_branch": False})]
-    assert [ws for ws, _ in takeover["started"]] == [boss.workspace_id]   # cut from the supervisor's branch
+    assert [ws for ws, _ in takeover["started"]] == [boss.workspace_id]   # launched on behalf of the supervisor
     assert "Build the thing" in takeover["started"][0][1] and "feat/stuck" in takeover["started"][0][1]
     assert db.open_items("boss") == []
 
 
 @pytest.mark.parametrize("wakes", [
     pytest.param("claim", marks=pytest.mark.variant("the worker wakes between the sweep's read and the claim")),
-    "preparing",
+    pytest.param("preparing", marks=pytest.mark.variant("Issue 384: a worker waking during replacement preparation must keep its work and dependencies")),
 ])
 def test_a_worker_that_came_back_is_not_retired(db, boss, takeover, monkeypatch, wakes):
     """Checked once more after everything that can take a while, and what

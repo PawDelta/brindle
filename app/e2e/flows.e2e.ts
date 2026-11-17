@@ -51,7 +51,7 @@ test("sidebar keeps its goal pinned and its lists reachable when resized", async
     await page.setViewportSize({ width, height });
     await milestones.evaluate((el) => { el.scrollTop = 0; });
     const lineHeight = await line.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
-    expect((await box(line)).height).toBeLessThanOrEqual(lineHeight + 1);
+    expect((await box(line)).height).toBeLessThanOrEqual(2 * lineHeight + 1); // the goal title clamps to two lines
     await fullyInView(line);
     await fullyInView(count);
     expect(await count.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
@@ -123,23 +123,22 @@ test("sidebar: a deep worker tree stays inside the list, and a tall split leaves
   await expect.poll(async () => (await sessions.boundingBox())!.height).toBeGreaterThanOrEqual(70);
 });
 
-test("New Session: the project search filters, and closes on an outside click and on Esc", async ({ page }) => {
+test("New Session: the project chip's menu closes on an outside click and on Esc", async ({ page }) => {
   await open(page, "new");
   await expect(page.getByRole("button", { name: "Start the demo" })).toHaveCount(0); // the offer stays hidden once decided
-  const repo = page.getByRole("combobox", { name: "Repo" });
-  const list = page.getByRole("listbox", { name: "Projects" });
+  const chip = page.getByRole("button", { name: /^Project:/ });
+  const menu = page.getByRole("menu", { name: "Project" });
 
-  await repo.click();
-  await repo.fill("paw");
-  await expect(list.getByRole("option")).toHaveText(["pawdelta"]);
+  await chip.click();
+  await expect(menu.getByRole("menuitemradio", { name: /^pawdelta/ })).toHaveAttribute("aria-checked", "true");
 
   await page.getByRole("region", { name: "New session" }).click({ position: { x: 4, y: 4 } });
-  await expect(list).toHaveCount(0);
+  await expect(menu).toHaveCount(0);
 
-  await repo.click();
-  await expect(list).toBeVisible();
+  await chip.click();
+  await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(list).toHaveCount(0);
+  await expect(menu).toHaveCount(0);
 });
 
 test("session terminal: a paste reaches the pty, and a printed URL opens in the app's opener", async ({ page }) => {

@@ -1,6 +1,11 @@
+import os
+import re
 import time
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from brindle import agents, bus, git, mcp_server, visual_offers, visuals
@@ -13,6 +18,7 @@ TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 OPTIONS = [{"id": "A", "label": "Tag first"}, {"id": "B", "label": "Gate on CI"}]
 SECRET = "api_key = " + "Zq8vR2mK7pX4tL9w" + "B3nY6cH1"   # secret-shaped, not a real one
+REAL_CONSUME = visual_offers.consume
 
 
 @pytest.fixture
@@ -40,12 +46,14 @@ def client():
 
 
 @pytest.mark.parametrize("caller,html,options,enabled,refused", [
-    ("w1", "<p>ok</p>", OPTIONS, True, None),
+    pytest.param("w1", "<p>ok</p>", OPTIONS, True, None, marks=pytest.mark.variant(
+        "a worker's requested visual must be stored in its supervisor's session")),
     ("w1", "x" * (visuals.MAX_BYTES + 1), None, True, "too_big"),
     ("w1", "<p>ok</p>", [{"id": "A", "label": "a"}, {"id": "A", "label": "b"}], True, "invalid"),
     ("w1", f"<p>{SECRET}</p>", None, True, "secret"),
     (None, "<p>ok</p>", None, True, "invalid"),
-    ("w1", "<p>ok</p>", None, False, "not_enabled"),
+    pytest.param("w1", "<p>ok</p>", None, False, "not_enabled", marks=pytest.mark.variant(
+        "the environment kill switch must refuse publication without leaving a visual row")),
 ])
 def test_publish_refuses_each_bad_page(db, session, monkeypatch, caller, html, options, enabled, refused):
     ws, boss, worker = session
@@ -63,6 +71,96 @@ def test_publish_refuses_each_bad_page(db, session, monkeypatch, caller, html, o
     assert (v["root_id"], v["by_agent"], v["rev"]) == ("boss", "w1", 1)
     assert visuals.page_path(ws.repo_root, "boss", v["id"], 1).read_text() == html
     assert (visuals.store_root(ws.repo_root) / ".gitignore").exists()
+
+
+def test_publish_visual_from_a_file(db, session, tmp_path, monkeypatch):
+    ws, boss, worker = session
+    worktree = tmp_path / "worker"
+    worktree.mkdir()
+    db.conn.execute("UPDATE workspaces SET path=? WHERE id=?", (str(worktree), ws.id))
+    db.conn.commit()
+    monkeypatch.setenv("BRINDLE_AGENT_ID", boss.id)
+    # Platform temp roots may be aliases, such as macOS /tmp -> /private/tmp.
+    temp_alias = tmp_path / "temp-alias"
+    temp_alias.symlink_to(tmp_path, target_is_directory=True)
+    monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(temp_alias))
+    scratchpad = (tmp_path / f"claude-{os.getuid()}" / re.sub(r"[^A-Za-z0-9]", "-", str(worktree))
+                  / "session" / "scratchpad")
+    scratchpad.mkdir(parents=True)
+    page = worktree / "page.html"
+    html = '<p>café</p><img src="data:image/png;base64,aGk=">'
+    page.write_text(html, encoding="utf-8")
+    scratch_page = scratchpad / "page.html"
+    scratch_page.write_text(html, encoding="utf-8")
+    inside_link = worktree / "inside.html"
+    inside_link.symlink_to(page)
+
+    monkeypatch.setattr(visual_offers, "consume", REAL_CONSUME)
+    for source in (page, scratch_page, inside_link.relative_to(worktree)):
+        visual_offers.person_spoke(db, boss, "show this page", typed=True)
+        mcp_server.publish_visual("Page", html_path=str(source), asked="show this page")
+        v = visuals.for_session(db, boss.id)[-1]
+        assert visuals.page_path(ws.repo_root, boss.id, v["id"], 1).read_text(encoding="utf-8") == html
+
+    outside = tmp_path / "outside.html"
+    outside.write_text("outside", encoding="utf-8")
+    repo_page = Path(ws.repo_root) / "page.html"
+    repo_page.write_text("other checkout", encoding="utf-8")
+    escaped = worktree / "escaped.html"
+    escaped.symlink_to(outside)
+    scratch_escape = scratchpad / "escaped.html"
+    scratch_escape.symlink_to(outside)
+    outside_session = tmp_path / "outside-session"
+    outside_scratchpad = outside_session / "scratchpad"
+    outside_scratchpad.mkdir(parents=True)
+    outside_scratch_page = outside_scratchpad / "page.html"
+    outside_scratch_page.write_text("outside scratchpad", encoding="utf-8")
+    linked_session = scratchpad.parent.parent / "linked-session"
+    linked_session.symlink_to(outside_session, target_is_directory=True)
+    real_read = Path.read_text
+
+    def guarded_read(path, *args, **kwargs):
+        assert path.resolve() not in (outside.resolve(), repo_page.resolve(), outside_scratch_page.resolve(),
+                                     tmp_path / "outside-project" / "session" / "scratchpad" / "page.html"), \
+            "outside file must never be read"
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read)
+    for source in (outside, escaped, scratch_escape, repo_page, linked_session / "scratchpad" / "page.html"):
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("Page", html_path=str(source), asked="show this page")
+    # The project ancestor can redirect scratchpad discovery too.
+    project = scratchpad.parent.parent
+    moved_project = tmp_path / "outside-project"
+    project.rename(moved_project)
+    project.symlink_to(moved_project, target_is_directory=True)
+    with pytest.raises(ToolError):
+        mcp_server.publish_visual("Page", html_path=str(scratch_page), asked="show this page")
+    project.unlink()
+    moved_project.rename(project)
+    for kwargs in ({}, {"html": html, "html_path": str(page)}):
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("Page", **kwargs)
+    for source in (worktree / "missing.html", worktree):
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("Page", html_path=str(source))
+    page.write_bytes(b"\xff")
+    with pytest.raises(ToolError):
+        mcp_server.publish_visual("Page", html_path=str(page))
+    for content, code in (("x" * (visuals.MAX_BYTES + 1), "too_big"), (SECRET, "secret")):
+        page.write_text(content, encoding="utf-8")
+        with pytest.raises(ToolError) as refused:
+            mcp_server.publish_visual("Page", html_path=str(page))
+        assert refused.value.__cause__.code == code
+    page.write_text(html, encoding="utf-8")
+    with pytest.raises(ToolError) as refused:
+        mcp_server.publish_visual("Page", html_path=str(page))
+    assert refused.value.__cause__.code == "visual_request_required"
+    monkeypatch.delenv("BRINDLE_AGENT_ID")
+    monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, ws))
+    with pytest.raises(ToolError):
+        mcp_server.publish_visual("Page", html_path=str(page))
+    assert len(visuals.for_session(db, boss.id)) == 3
 
 
 def test_note_only_answers_reach_the_supervisor(db, session, client):
@@ -88,9 +186,9 @@ def test_note_only_answers_reach_the_supervisor(db, session, client):
 
 def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_again(db, session, client, monkeypatch):
     _, boss, worker = session
-    v = visuals.publish(db, worker, "Release flow", "<p>flow</p>", "Which flow?", OPTIONS)
     answered = visuals.publish(db, worker, "Answered", "<p>x</p>", "Which?", OPTIONS)
     visuals.answer(db, answered["id"], 1, "A")
+    v = visuals.publish(db, worker, "Release flow", "<p>flow</p>", "Which flow?", OPTIONS)
     assert [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     def notices(agent):
         return db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (agent,)).fetchone()[0]
@@ -226,6 +324,8 @@ def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session,
     assert (item.visual_id, item.root_id) == (v["id"], boss.id)
     assert client.post(f"/v1/visuals/{v['id']}/read").json()["unread"] is False
     assert [i.visual_id for i in inbox.items(db, None, panes={}) if i.kind == "visual"] == [v["id"]]
+    # Each read says whether its visual still waits in the Inbox: the app drops the card at once if not.
+    assert [e["payload"]["pending"] for e in bus.tail(db, kinds=("visual.read",))] == [False, False, True, False, True]
     assert client.post(f"/v1/visuals/{v['id']}/keep").json()["kept"] is True     # r1 is kept
 
     # A new revision arrives while r1 is on screen: r1's answer is refused, not read against r2.
@@ -250,6 +350,21 @@ def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session,
     assert client.get(f"/v1/kept-visuals/{v['id']}").json()["answer"] is None
 
 
+@pytest.mark.variant("real incident: a status board the person asked for was refused on every update (0.6.3, Nov 10)")
+def test_asked_visual_updates_without_a_new_request(db, session, monkeypatch):
+    ws, boss, worker = session
+    monkeypatch.setattr(visual_offers, "consume", REAL_CONSUME)
+    visual_offers.person_spoke(db, boss, "render as you go", typed=True)
+    v = visuals.publish(db, boss, "Status", "<p>r1</p>", asked="render as you go")
+    # The board the person asked for stays the supervisor's to update, with no new quote.
+    assert visuals.publish(db, boss, "Status", "<p>r2</p>", visual_id=v["id"])["rev"] == 2
+    assert visuals.publish(db, boss, "Status", "<p>r3</p>", visual_id=v["id"])["rev"] == 3
+    for who, vid in ((boss, None), (worker, v["id"])):
+        with pytest.raises(ServiceError) as refused:
+            visuals.publish(db, who, "Other", "<p>no</p>", visual_id=vid)
+        assert refused.value.code == "visual_request_required"
+
+
 @pytest.mark.variant("publication race: another publisher writes r2 between the first publisher's checks and write")
 def test_a_revision_published_meanwhile_keeps_its_page(db, session, monkeypatch):
     ws, boss, worker = session
@@ -269,6 +384,71 @@ def test_a_revision_published_meanwhile_keeps_its_page(db, session, monkeypatch)
     assert (interleaved[0]["rev"], loser["rev"]) == (2, 3)
     assert visuals.page_path(ws.repo_root, boss.id, v["id"], 2).read_text() == "<p>winner</p>"
     assert visuals.page_path(ws.repo_root, boss.id, v["id"], 3).read_text() == "<p>later</p>"
+
+
+def test_a_visual_can_be_revised_past_the_old_cap_and_old_pages_are_pruned(db, session, monkeypatch):
+    ws, boss, _ = session
+    monkeypatch.setattr(visuals, "KEEP_REVISIONS", 5)
+    v = visuals.publish(db, boss, "Board", "<p>r1</p>")
+    for n in range(2, 26):
+        v = visuals.publish(db, boss, "Board", f"<p>r{n}</p>", visual_id=v["id"])
+    assert v["rev"] == 25
+    kept = [n for n in range(1, 26) if visuals.page_path(ws.repo_root, boss.id, v["id"], n).exists()]
+    assert kept == [21, 22, 23, 24, 25]
+    with pytest.raises(ServiceError) as e:
+        visuals.page(db, v["id"], "3")
+    assert e.value.code == "not_found"
+
+
+def test_failed_answer_removes_the_claim_from_a_concurrently_kept_copy(db, session, monkeypatch):
+    _, boss, _ = session
+    v = visuals.publish(db, boss, "Flow", "<p>flow</p>", "Which?", OPTIONS)
+
+    def fail(*args, **kwargs):
+        visuals.keep(db, v["id"])
+        raise ServiceError("paused", "session paused", 409)
+
+    monkeypatch.setattr(agents, "send_message", fail)
+    with pytest.raises(ServiceError):
+        visuals.answer(db, v["id"], 1, "A")
+    assert visuals.get(db, v["id"])["answer"] is None
+    assert visuals.get_kept(db, v["id"])["answer"] is None
+
+
+@pytest.mark.variant("Keep races answers, revisions and Unkeep at the writer transaction boundary")
+@pytest.mark.parametrize("interleaved", ["answer", "revision", "unkeep", "late_keep"])
+def test_keep_reads_and_copies_after_acquiring_the_write_lock(db, session, monkeypatch, interleaved):
+    from brindle.db import DB
+
+    _, boss, _ = session
+    v = visuals.publish(db, boss, "Flow", "<p>first</p>", "Which?", OPTIONS)
+    visuals.keep(db, v["id"])
+    other = DB()
+    tx = db.tx
+
+    @contextmanager
+    def preempted():
+        monkeypatch.setattr(db, "tx", tx)
+        if interleaved == "answer":
+            visuals.answer(other, v["id"], 1, "A")
+        elif interleaved == "revision":
+            visuals.publish(other, boss, "New flow", "<p>second</p>", "Which?", OPTIONS, visual_id=v["id"])
+        elif interleaved == "unkeep":
+            visuals.unkeep(other, v["id"])
+        with tx() as c:
+            yield c
+        if interleaved == "late_keep":
+            visuals.keep(other, v["id"])
+
+    monkeypatch.setattr(db, "tx", preempted)
+    try:
+        current = (visuals.unkeep if interleaved == "late_keep" else visuals.keep)(db, v["id"])
+        kept = visuals.get_kept(db, v["id"])
+        assert kept["rev"] == current["rev"]
+        assert visuals.kept_to_dto(kept)["answer"] == visuals.to_dto(db, current)["answer"]
+        assert visuals.kept_page(db, v["id"]).read_bytes() == visuals.page(db, v["id"], str(current["rev"])).read_bytes()
+    finally:
+        other.conn.close()
 
 
 def test_removing_a_session_deletes_its_visuals_but_not_the_kept_one(db, session, client):
@@ -299,9 +479,9 @@ def test_removing_a_session_deletes_its_visuals_but_not_the_kept_one(db, session
 
 
 @pytest.mark.parametrize("ref,rev,status", [
-    ("own", "1", 200),
-    ("own", "2", 404),                 # a revision the store doesn't have
-    ("v_000000000000", "1", 404),      # another, unknown id
+    pytest.param("own", "1", 200, marks=pytest.mark.variant("serving a stored visual must apply the restrictive CSP")),
+    pytest.param("own", "2", 404, marks=pytest.mark.variant("a nonexistent revision must not serve the latest page")),
+    pytest.param("v_000000000000", "1", 404, marks=pytest.mark.variant("an unknown visual identity must not expose another stored page")),
     pytest.param("%2e%2e", "1", 404, marks=pytest.mark.variant("a path step out of the store")),
     pytest.param("own", "1.html", 404, marks=pytest.mark.variant("a file name instead of a revision")),
 ])
@@ -324,6 +504,7 @@ def test_visuals_are_on_unless_switched_off(monkeypatch):
     assert not visuals.enabled()
 
 
+@pytest.mark.variant("a live MCP connection must receive tool-list changes when visuals are disabled")
 def test_the_visuals_setting_flips_the_feature_and_every_running_agents_tools_live(monkeypatch):
     import asyncio
 

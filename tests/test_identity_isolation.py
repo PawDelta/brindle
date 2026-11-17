@@ -119,6 +119,7 @@ def test_rewind_is_refused_under_a_different_identity(db, ws, who, spawned):
 # -- messages and handoffs --------------------------------------------------------------
 
 
+@pytest.mark.variant("identity: neither agent messages nor person messages may reach another locked identity")
 def test_messages_into_a_locked_agent_are_refused(db, ws, who, monkeypatch):
     worker(db, ws)
     sent = []

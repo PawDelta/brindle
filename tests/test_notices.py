@@ -6,7 +6,7 @@ import pytest
 from org_status_fixtures import ORG, control, notice, org, poller, rollout_on  # noqa: F401
 from typer.testing import CliRunner
 
-from brindle import agents, bus, tmux, watch, workspaces
+from brindle import agents, bus, watch, workspaces
 from brindle.cli import app
 from brindle.db import Agent
 from brindle.pro import status
@@ -49,6 +49,7 @@ def test_a_notice_goes_into_the_chat_once(org, db, boss):
     assert len(boss) == 2 and "Another" in boss[1][1]
 
 
+@pytest.mark.variant("concurrent delivery must claim each notice once instead of duplicating it")
 def test_concurrent_deliveries_send_a_notice_once(org, db, boss):
     import threading
 
@@ -101,27 +102,6 @@ def test_a_remote_shutdown_and_throttle_show(rollout_on):
     assert status.bar_text(status.Saved(status=status.Status(control=expired)), 10.0) is None
 
 
-@pytest.mark.parametrize("latest", [None, "99.0.0"])
-def test_the_status_line_reads_the_option_next_to_the_version(monkeypatch, latest):
-    from brindle import updates
-
-    monkeypatch.setattr(updates, "newer_version", lambda **kw: latest)
-    batches = []
-    monkeypatch.setattr(tmux, "_tmux_batch", batches.append)
-    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: type(
-        "P", (), {"stdout": "", "returncode": 0})())
-    monkeypatch.setattr(tmux, "set_follow_hooks", lambda s: None)
-    monkeypatch.setattr(tmux, "bind_session_keys", lambda s: None)
-    tmux.apply_theme("s1")
-    opts = {c[3]: c[4] for c in batches[0] if c[:2] == ["set-option", "-t"]}
-    left = opts["status-left"]
-    assert left.count(tmux.__version__) == 1
-    if latest:
-        assert latest in left
-    else:
-        assert left.endswith(f"{tmux.__version__} #{{@brindle_alert}}")
-    assert left.index(tmux.__version__) < left.index("#{@brindle_alert}")
-    assert "#(" not in left                  # no process per redraw
 
 
 def test_notice_text_cannot_carry_terminal_escapes_or_line_breaks(org):

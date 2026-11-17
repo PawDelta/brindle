@@ -41,7 +41,10 @@ def test_native_profile_naming_the_oauth_token_is_refused_at_runner(monkeypatch)
         endpoint_for(_native(env={"CLAUDE_CODE_OAUTH_TOKEN": "fake-oauth"}))
 
 
-@pytest.mark.parametrize("line", ["api_key_env: CLAUDE_CODE_OAUTH_TOKEN", "env.CLAUDE_CODE_OAUTH_TOKEN: fake"])
+@pytest.mark.parametrize("line", [
+    pytest.param("api_key_env: CLAUDE_CODE_OAUTH_TOKEN", marks=pytest.mark.variant("bypass: an OAuth token cannot be used indirectly through api_key_env")),
+    "env.CLAUDE_CODE_OAUTH_TOKEN: fake",
+])
 def test_profile_loading_refuses_the_oauth_token(tmp_path, line):
     d = tmp_path / ".brindle" / "agents"
     d.mkdir(parents=True)
@@ -59,12 +62,16 @@ def _upload(tmp_path, body):
     return org_profiles.read_item(f, "profile")
 
 
-@pytest.mark.parametrize("name", ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"])
+@pytest.mark.parametrize("name", [
+    pytest.param("ANTHROPIC_API_KEY", marks=pytest.mark.variant("bypass: uploaded organization profiles cannot contain literal API keys")),
+    "CLAUDE_CODE_OAUTH_TOKEN",
+])
 def test_org_upload_with_a_literal_key_is_refused(tmp_path, name):
     with pytest.raises(auth.AuthError, match=name):
         _upload(tmp_path, f"env.{name}: sk-fake-not-a-real-key")
 
 
+@pytest.mark.variant("credential boundary: organization profiles may reference an API key variable without containing its value")
 def test_org_upload_naming_the_variable_is_accepted(tmp_path):
     item = _upload(tmp_path, "api_key_env: ANTHROPIC_API_KEY")
     assert item["name"] == "p"

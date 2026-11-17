@@ -165,7 +165,7 @@ def test_second_review_needs_both_approvals_before_it_merges(db, repo, piped):
     setup, started = piped
     ws = setup(second={"heavy": "reviewer-codex"})
     agents.report_result(db, "w1", "added new.py")
-    assert started == ["reviewer", "reviewer-codex"]   # both carry a concrete profile
+    assert started == ["reviewer-sonnet-high", "reviewer-codex"]   # both carry a concrete profile
     agents.submit_review(db, "rev0", True, "lgtm")
     assert not merged(repo) and db.get_agent("w1").pipeline == "reviewing"
     agents.submit_review(db, "rev1", True, "also lgtm")
@@ -173,7 +173,7 @@ def test_second_review_needs_both_approvals_before_it_merges(db, repo, piped):
 
 
 @pytest.mark.parametrize("slot", [
-    None,
+    pytest.param(None, marks=pytest.mark.variant("a second review arriving first cannot bypass the primary approval")),
     pytest.param("", marks=pytest.mark.variant("#216 fallback race: two profiles approve only the primary slot")),
 ])
 def test_the_second_reviewer_approving_first_still_waits_for_the_other(db, repo, piped, slot):
@@ -228,6 +228,20 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, mo
     assert merged(repo)
 
 
+@pytest.mark.variant("a counter, not a branch: two rejecting reviewers on one report counted two rounds (0.6.3 stress test)")
+def test_both_reviewers_asking_for_changes_is_one_fix_round(db, repo, piped):
+    """Two verdicts on one report send the worker both sets of findings, but
+    count one round: the second must not bring the cap, or the tests-only
+    waiver, a round early."""
+    setup, _ = piped
+    setup(second={"heavy": "reviewer-codex"})
+    agents.report_result(db, "w1", "added new.py")
+    agents.submit_review(db, "rev0", False, "missing a test")
+    agents.submit_review(db, "rev1", False, "new.py:1 is wrong")
+    assert db.get_agent("w1").pipeline == "fixing"
+    assert db.get_agent("w1").pipeline_rounds == 1
+
+
 @pytest.mark.variant("race: a commit pushed while the reviewer is reading must not inherit its approval")
 def test_a_commit_during_review_gets_no_approval(db, repo, piped):
     setup, _ = piped
@@ -243,6 +257,7 @@ def test_a_commit_during_review_gets_no_approval(db, repo, piped):
     assert not merged(repo)
 
 
+@pytest.mark.variant("parallel review requests must not deduplicate away the other required review slot")
 def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     from brindle import knowledge
     from brindle.pro import analysis_brief

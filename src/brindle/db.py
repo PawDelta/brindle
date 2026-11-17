@@ -13,7 +13,7 @@ import re
 import signal
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from typing import Callable, Iterator
 
@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS workspaces (
 -- A suggested review cap is announced once for the branch's workspace,
 -- including when a replacement worker starts immediately or from the queue.
 CREATE TABLE IF NOT EXISTS review_cap_notices (
+    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS review_stall_notices (
     workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS agents (
@@ -168,6 +171,26 @@ CREATE TABLE IF NOT EXISTS milestone_phases (
     milestone_id INTEGER PRIMARY KEY REFERENCES milestones(id) ON DELETE CASCADE,
     phase TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS phase_landings (
+    root_id TEXT NOT NULL REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    phase TEXT NOT NULL,           -- empty for a goal without phases
+    notified_at REAL,
+    pending INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (root_id, phase)
+);
+-- A completed goal phase brindle lands itself while later milestones remain
+-- (autopilot.phase_landing; routes_actions.land_phase_prs opens the session PR
+-- or pushes to the open one). sha: the commit the phase's milestone checks
+-- passed on, the one pushed (never the branch's tip). state: pending | pushed |
+-- refused | failed; why: what refused or failed it.
+CREATE TABLE IF NOT EXISTS phase_prs (
+    root_id TEXT NOT NULL REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    phase TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    why TEXT,
+    PRIMARY KEY (root_id, phase)
+);
 -- Short goal labels live outside the released autopilot table.
 CREATE TABLE IF NOT EXISTS goal_summaries (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
@@ -182,6 +205,25 @@ CREATE TABLE IF NOT EXISTS goal_doc_requests (
                                 -- (open:<id> | accepted | dismissed: the retired analysis-doc offer; inert)
     goal_at REAL                -- when this goal began: only workers assigned since count toward its offer
 );
+-- brindle's offer to move an out-of-quota supervisor to another provider, and
+-- back once the original provider's limit resets (brindle.provider_switch).
+-- One open offer per session root; the person's Switch claims it (open ->
+-- switching) in one UPDATE, so a second press finds it taken.
+CREATE TABLE IF NOT EXISTS provider_switches (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,  -- the supervisor the offer is for
+    kind TEXT NOT NULL,          -- switch | back
+    from_provider TEXT NOT NULL, -- the root's provider when offered
+    to_provider TEXT NOT NULL,   -- where Switch moves it
+    state TEXT NOT NULL,         -- open | switching | done | dismissed | failed
+    limited_until REAL,          -- when from_provider's limit lifts (switch); when it lifted (back)
+    new_root_id TEXT,            -- the supervisor started on to_provider (state done)
+    back_of TEXT,                -- a back offer: the switch it undoes
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS provider_switches_open ON provider_switches(root_id)
+    WHERE state IN ('open', 'switching');
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
 CREATE TABLE IF NOT EXISTS session_repos (
@@ -261,6 +303,13 @@ CREATE TABLE IF NOT EXISTS session_credentials (
     value TEXT NOT NULL,
     updated_at REAL NOT NULL,
     PRIMARY KEY (session_id, key)
+);
+-- What routing aims for in one session (brindle.routing_goal): JSON weights
+-- {cost, speed, first_try}, set by the session's chip in the app.
+CREATE TABLE IF NOT EXISTS session_routing_goals (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    weights TEXT NOT NULL,
+    updated_at REAL NOT NULL
 );
 -- A reviewer agent's verdict on a branch at one commit. A merge gate only
 -- accepts an approval of the commit it is about to merge.
@@ -637,6 +686,28 @@ CREATE TABLE IF NOT EXISTS session_prs (
     merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
     PRIMARY KEY (root_id, branch)
 );
+-- A durable claim prevents overlapping daemons from merging the same PR twice.
+-- Keep failed attempts for the Inbox; only poll_merged records an actual merge.
+CREATE TABLE IF NOT EXISTS session_pr_merges (
+    url TEXT PRIMARY KEY,
+    state TEXT NOT NULL,            -- merging | submitted | failed | pushing (a phase landing's push)
+    owner TEXT,                    -- unique token whose session-pr-merge marker is held while acting
+    error TEXT
+);
+-- What a phase landing's push (session_pr_merges state 'pushing') sends to the PR at url: kept with
+-- the claim, so a push whose owner went away is reconciled against the PR's head before any merge.
+CREATE TABLE IF NOT EXISTS session_pr_pushes (
+    url TEXT PRIMARY KEY,
+    sha TEXT NOT NULL
+);
+-- A session PR adopted from one opened with gh on another branch name: where it really lives,
+-- so a Push of the session branch is refused instead of missing it.
+CREATE TABLE IF NOT EXISTS session_pr_heads (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    head_ref TEXT NOT NULL,
+    PRIMARY KEY (root_id, branch)
+);
 -- A ready session's PR as brindle prepared it for the person's approval
 -- (routes_actions.prepare_pr): the pre-PR checks run on sha, nothing pushed.
 -- state: checking | passed | failed (check_cmd and output: the failing check);
@@ -652,6 +723,15 @@ CREATE TABLE IF NOT EXISTS session_pr_prep (
     output TEXT,
     prepared_at REAL NOT NULL,
     PRIMARY KEY (root_id, branch)
+);
+-- Notification acknowledgements, separate from the requests they describe.
+CREATE TABLE IF NOT EXISTS inbox_dismissed (
+    key TEXT PRIMARY KEY
+);
+-- Recurring requests whose Inbox presentation alone has no occurrence id.
+CREATE TABLE IF NOT EXISTS inbox_occurrences (
+    source TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL
 );
 -- Inbox's Not now choice: only hides a ready PR at this branch head.
 -- Separate from preparation so rechecking the same head preserves the choice.
@@ -673,6 +753,24 @@ CREATE TABLE IF NOT EXISTS session_sync (
     files TEXT,
     told_sha TEXT,
     updated_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, branch)
+);
+-- One automatic resolution attempt per conflicting origin commit, retained
+-- after failure so repeated syncs do not start another worker.
+CREATE TABLE IF NOT EXISTS session_sync_resolvers (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    upstream_sha TEXT NOT NULL,
+    task_id TEXT,
+    PRIMARY KEY (repo_root, branch, upstream_sha)
+);
+-- Unlanded session work, independent of whether origin has been merged in.
+CREATE TABLE IF NOT EXISTS session_drift (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    oldest_at REAL,
+    file_count INTEGER NOT NULL,
+    drifting INTEGER NOT NULL,
     PRIMARY KEY (repo_root, branch)
 );
 -- The supervisors told that a repo no longer refreshes on its own: origin wants
@@ -899,6 +997,16 @@ CREATE TABLE IF NOT EXISTS doc_requests (
     why TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- A supervisor's operational memory (brindle.supervisor_state owns this): a
+-- compact JSON state folded from the event bus up to ``last_event``, which a
+-- restart seeds the fresh session with.
+CREATE TABLE IF NOT EXISTS supervisor_state (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    last_event INTEGER NOT NULL DEFAULT 0,
+    restarts INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+);
 -- What the sweep reaped (brindle.reap): tmux sessions, stopped supervisors,
 -- superseded workers, notices sent once. `brindle doctor` lists recent rows;
 -- an 'idle_supervisor' row is an Inbox item while its root stays paused.
@@ -947,16 +1055,10 @@ CREATE TABLE IF NOT EXISTS visual_input_state (
     observer INTEGER NOT NULL,
     invalidated_at REAL NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS visual_requests (
-    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
-    id TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    created_at REAL NOT NULL
-);
 -- What the person typed lately, for publish_visual's `asked` to be checked
 -- against. A row is spent by the one publication it allows; the rest go after
--- visual_offers.FOLD. source: the grant or confirmation this same message
--- raised ('grant', 'request'), which spending the row also spends. staged:
+-- visual_offers.FOLD. source: 'grant' when this same message raised the
+-- session's grant, which spending the row also spends. staged:
 -- reported by the app, waiting for the CLI's hook to report that same prompt.
 CREATE TABLE IF NOT EXISTS visual_person_words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -982,6 +1084,7 @@ CREATE TABLE IF NOT EXISTS visuals (
     answer TEXT,                   -- JSON {option, note, at, rev}
     read_rev INTEGER NOT NULL DEFAULT 0,
     dismissed_rev INTEGER NOT NULL DEFAULT 0,  -- the revision the person dismissed without answering
+    consented_by TEXT,             -- the session supervisor that published it with the person's consent
     kept_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -1014,6 +1117,215 @@ CREATE TABLE IF NOT EXISTS plans (
     ask TEXT                       -- the person's request restated by the supervisor, if given
 );
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
+-- A plan as a design doc (brindle.plan_docs): every revision, the supervisor's
+-- and the person's own edits alike; the plans row holds the current one.
+CREATE TABLE IF NOT EXISTS plan_history_events (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    rev INTEGER,
+    version INTEGER,
+    at REAL NOT NULL,
+    observed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (plan_id, event_key)
+);
+CREATE TABLE IF NOT EXISTS plan_revisions (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    rev INTEGER NOT NULL,
+    author TEXT NOT NULL,          -- supervisor | person | teammate:<sub> (from the Library)
+    source TEXT NOT NULL,          -- proposal | edit | suggestion
+    lede TEXT NOT NULL,
+    sections TEXT NOT NULL,        -- JSON [{id, title, kind, markdown, caption}]
+    markdown TEXT NOT NULL,
+    decisions TEXT NOT NULL,
+    split TEXT NOT NULL,
+    ask TEXT,
+    changed TEXT NOT NULL,         -- JSON: the section ids this revision changed
+    created_at REAL NOT NULL,
+    PRIMARY KEY (plan_id, rev)
+);
+-- Comment threads on a plan, anchored to a text range, a diagram, a decision
+-- or a whole section; a suggestion is a thread with a replacement; replies
+-- name their thread in parent_id.
+CREATE TABLE IF NOT EXISTS plan_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    parent_id INTEGER REFERENCES plan_threads(id) ON DELETE CASCADE,
+    rev INTEGER NOT NULL,          -- the revision it was written on
+    kind TEXT NOT NULL,            -- comment | suggestion | reply
+    anchor TEXT,                   -- JSON, see brindle.plan_docs
+    author TEXT NOT NULL,          -- person | supervisor | teammate:<sub> (from the Library)
+    body TEXT NOT NULL,
+    after TEXT,                    -- a suggestion's replacement for the anchored text
+    attachments TEXT NOT NULL,     -- JSON [{name, ref}]
+    status TEXT NOT NULL,          -- open | resolved | accepted | rejected
+    sent_rev INTEGER,              -- the verdict that carried it to the supervisor
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_threads_plan ON plan_threads(plan_id, parent_id);
+-- Exact Brindle account ownership, recorded at supervisor launch. Unknown is
+-- deliberately absent, never a wildcard when routing a shared-doc question.
+CREATE TABLE IF NOT EXISTS supervisor_accounts (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    owner TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS doc_questions (
+    doc_id TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    owner TEXT NOT NULL,
+    agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (doc_id, thread_id, owner)
+);
+-- Votes on a plan's decisions (Confirm A): one per voter and decision.
+CREATE TABLE IF NOT EXISTS plan_votes (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    decision_id TEXT NOT NULL,
+    voter TEXT NOT NULL,
+    option_id TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    at REAL NOT NULL,
+    PRIMARY KEY (plan_id, decision_id, voter)
+);
+-- The doc format a plan was written with (brindle.doc_templates): its
+-- template, kept as it was so a later change never rewrites the doc, and
+-- its reference (DES-0042). No row: the plan was written without a format.
+CREATE TABLE IF NOT EXISTS plan_formats (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
+    template TEXT,                 -- JSON {id, name, default, sections}; NULL with a reference only
+    reference TEXT,
+    team TEXT,                     -- the team it was shared with, whose format its gates follow
+    created_at REAL NOT NULL
+);
+-- The next number of each reference pattern (DES-{number}) on this machine.
+CREATE TABLE IF NOT EXISTS doc_references (
+    pattern TEXT PRIMARY KEY,
+    next INTEGER NOT NULL
+);
+-- A plan shared through the Library (brindle.pro.shared_docs): its document,
+-- which local revision the Library's head holds, and the last review state.
+CREATE TABLE IF NOT EXISTS plan_shares (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
+    doc_id TEXT,                   -- NULL while the document is being created
+    owner TEXT NOT NULL,           -- the account that shared it
+    remote_rev INTEGER NOT NULL DEFAULT 0,
+    local_rev INTEGER NOT NULL DEFAULT 0,
+    review TEXT NOT NULL DEFAULT '{}',   -- JSON: reviewers, sign-offs, who is pending, ready
+    claimed_at REAL,               -- set while a create or a push is under way
+    org_id TEXT,                   -- the org it was shared from; NULL on a share older than this column
+    lapsed_at REAL,                -- when the server last confirmed that account and org have no Team plan;
+                                   -- NULL once a check fails. Honoured while recent (shared_docs.lapse_stands)
+    unconfirmed TEXT,              -- why the Library couldn't confirm the review (plans.UNCONFIRMED); NULL once it answers
+    approve_wanted TEXT,           -- JSON: the person's Approve, held until the Library answers (plans.settle_held_approval)
+    approve_refused TEXT,          -- why a held Approve wasn't applied, for the person
+    access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
+    review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
+);
+-- The repo a Library folder was made for (brindle.pro.library_folders): the
+-- server keeps folders per person, team or org and refuses any other field,
+-- so which repo a folder belongs to is kept here, by the folder it names.
+CREATE TABLE IF NOT EXISTS library_folder_repos (
+    scope_kind TEXT NOT NULL,      -- user | group | org
+    scope_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    repo TEXT NOT NULL,            -- the repo's root, as the app names it
+    PRIMARY KEY (scope_kind, scope_id, folder_id)
+);
+-- This machine's replica of a shared doc's live draft (brindle.plan_drafts):
+-- its Loro state and the peer id it writes under, in one row, so the id is
+-- never used without the changes already written under it. seq goes up on
+-- every write, so a holder that missed one reloads before writing.
+CREATE TABLE IF NOT EXISTS plan_drafts (
+    doc_id TEXT PRIMARY KEY,       -- the Library document
+    peer_id INTEGER NOT NULL UNIQUE,
+    state BLOB NOT NULL,           -- a Loro snapshot
+    seq INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    supervisor_peer INTEGER        -- the peer id the session's supervisor writes under; NULL until it first does
+);
+-- The draft text handed to the supervisor (plans.read_draft), by the id its
+-- next write names: its changes are worked out against this, never against
+-- the draft as it is when they land. Gone with the replica.
+CREATE TABLE IF NOT EXISTS plan_draft_bases (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    doc_id TEXT NOT NULL REFERENCES plan_drafts(doc_id) ON DELETE CASCADE,
+    texts TEXT NOT NULL,           -- JSON: section id (or lede) -> the text handed over
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_draft_bases_plan ON plan_draft_bases(plan_id, created_at);
+-- Updates a replica received before the changes they build on: a snapshot
+-- leaves them out, so they wait here and are imported again on every load.
+CREATE TABLE IF NOT EXISTS plan_draft_pending (
+    n INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id TEXT NOT NULL REFERENCES plan_drafts(doc_id) ON DELETE CASCADE,
+    data BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_draft_pending_doc ON plan_draft_pending(doc_id, n);
+-- A replica's last generations before plan_drafts.rebuild replaced it: their
+-- state and held-back updates, so an app window still on one has its late
+-- changes translated onto the current replica, never merged into it as is.
+CREATE TABLE IF NOT EXISTS plan_draft_retired (
+    doc_id TEXT NOT NULL,
+    made REAL NOT NULL,            -- the generation (plan_drafts.created_at) it was
+    state BLOB NOT NULL,           -- a Loro snapshot
+    pending TEXT NOT NULL,         -- JSON list of base64 updates still waiting on others
+    PRIMARY KEY (doc_id, made)
+);
+-- A replica's link to the server's live relay (brindle.pro.live_docs). The
+-- outbox is every change the replica holds past relay_version, so unsent
+-- edits outlive a restart with the replica itself. seed: the texts a replica
+-- made here before its first join was seeded with, the base its local edits
+-- are re-typed from onto the relay's own seed.
+CREATE TABLE IF NOT EXISTS live_docs (
+    doc_id TEXT PRIMARY KEY,
+    relay_version BLOB,            -- a Loro version vector; NULL until the first join
+    seed TEXT,                     -- JSON {section: text}, until the first join
+    seed_version BLOB,             -- the replica's version once seeded (who changed what since), likewise
+    updated_at REAL NOT NULL
+);
+-- Replica numbers the relay issued to this account for a doc: the replica's
+-- own, and those lent to the app's windows. Claimed again on every join.
+CREATE TABLE IF NOT EXISTS live_doc_peers (
+    doc_id TEXT NOT NULL,
+    peer INTEGER NOT NULL,
+    role TEXT NOT NULL,            -- 'replica' | 'window'
+    PRIMARY KEY (doc_id, peer)
+);
+-- Edits typed offline that the relay refused as stale (the author-offline
+-- lock lapsed): each kept here, with the text it was made against, until it
+-- stands on the plan as a suggestion or comment (brindle.pro.live_docs).
+CREATE TABLE IF NOT EXISTS live_doc_offline (
+    n INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id TEXT NOT NULL,
+    section TEXT NOT NULL,
+    base TEXT NOT NULL,            -- the section's live text the edit was made against
+    start INTEGER NOT NULL,        -- where in base
+    before TEXT NOT NULL,          -- what it replaced there ('' for an insertion)
+    after TEXT NOT NULL,           -- what it wrote ('' for a deletion)
+    key TEXT NOT NULL UNIQUE       -- its identity: the plan_threads.origin of what it is filed as
+);
+-- Documents whose owner chose Stop sharing while the Library was out of reach:
+-- their teams and org lose access at the next pass that reaches it.
+CREATE TABLE IF NOT EXISTS plan_unshares (
+    doc_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+-- Which local thread or reply each Library thread or reply became, so a pull
+-- adds it once; status is the Library's as last seen. A negative remote_id is
+-- a thread with no Library thread: status 'sending' for one sent whose answer
+-- hasn't come back, otherwise one written before sharing, which stays here.
+CREATE TABLE IF NOT EXISTS plan_share_threads (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    remote_id INTEGER NOT NULL,
+    local_id INTEGER NOT NULL REFERENCES plan_threads(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    PRIMARY KEY (plan_id, remote_id)
+);
 """
 
 
@@ -1329,6 +1641,46 @@ def request_subagent(row) -> str | None:
 
 
 WAITER_CLAIM = "waiter-claim:"   # agent_marks kind prefix, then the waiter's pid (DB.pop_pending)
+# agent_marks kind: a supervisor restart under way (brindle.supervisor_state), JSON
+# {token, ref, until}. Until ``until`` it holds the supervisor's queue (DB.pop_pending):
+# mail waits for the fresh session instead of waking the one about to stop.
+RESTART_HOLD = "supervisor-restart"
+RESULT_EVENT_CHARS = 2000   # of a result carried in its "agent.result" event
+
+
+def _restart_holds(c: sqlite3.Connection, agent_id: str, now: float | None = None) -> bool:
+    """Whether a restart that hasn't expired holds ``agent_id``'s queue."""
+    row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                    (agent_id, RESTART_HOLD)).fetchone()
+    if row is None:
+        return False
+    try:
+        return float(json.loads(row["value"])["until"]) > (time.time() if now is None else now)
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+INBOX_SEND = "inbox-send:"   # agent_marks kind prefix, then the message id: a direct inbox send under way
+INBOX_SEND_EXPIRES = 120.0   # seconds after which such a mark is a dead sender's, holding nothing
+
+
+def _deliveries_in_flight(c: sqlite3.Connection, agent_id: str, now: float | None = None) -> bool:
+    """Whether mail to ``agent_id`` is part way to it: a pane delivery typing
+    it, a waiter that took it and hasn't finished handing it over, or a
+    direct inbox send (DB.claim_delivery) that hasn't finished."""
+    if (_pane_delivery_message(c, agent_id) is not None
+            or c.execute(f"SELECT 1 FROM agent_marks WHERE agent_id=? AND kind LIKE '{WAITER_CLAIM}%' LIMIT 1",
+                         (agent_id,)).fetchone() is not None):
+        return True
+    now = time.time() if now is None else now
+    for row in c.execute(f"SELECT value FROM agent_marks WHERE agent_id=? AND kind LIKE '{INBOX_SEND}%'",
+                         (agent_id,)):
+        try:
+            if now - float(json.loads(row["value"])["at"]) < INBOX_SEND_EXPIRES:
+                return True
+        except (ValueError, TypeError, KeyError):
+            continue
+    return False
 
 
 def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
@@ -1409,6 +1761,14 @@ def migration_incompatibility() -> str | None:
         conn.close()
 
 
+# Each database file this process has set up (schema and migrations), with
+# SQLite's schema_version as it left it. A DB() of that file whose schema is
+# still exactly that skips the setup: the daemon opens one per request, and the
+# setup's ~60 schema reads made a burst of reads (the app's per-repo
+# GET /sessions) queue for a fifth of a second each.
+_set_up: dict[str, int] = {}
+
+
 class DB:
     def __init__(self, path: str | None = None) -> None:
         p = str(path) if path is not None else str(db_path())
@@ -1425,6 +1785,11 @@ class DB:
                 raise RuntimeError(
                     "This database was written by a newer brindle. Update brindle."
                 )
+            if (version == SCHEMA_VERSION and p in _set_up
+                    and self.conn.execute("PRAGMA schema_version").fetchone()[0] == _set_up[p]):
+                self.conn.execute("PRAGMA foreign_keys=ON")     # a connection's own setting
+                self._enforce_permissions()     # SQLite makes its -wal and -shm files afresh
+                return
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA foreign_keys=ON")
             self.conn.executescript(SCHEMA)
@@ -1433,6 +1798,8 @@ class DB:
             # Mark the upgrade only after all required migrations succeed.
             if version < SCHEMA_VERSION:
                 self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            if p != ":memory:":
+                _set_up[p] = self.conn.execute("PRAGMA schema_version").fetchone()[0]
         except BaseException:
             self.conn.close()
             raise
@@ -1452,6 +1819,20 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        thread_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_threads)")}
+        for flag in ("question", "from_supervisor"):
+            if flag not in thread_cols:
+                self.conn.execute(f"ALTER TABLE plan_threads ADD COLUMN {flag} INTEGER NOT NULL DEFAULT 0")
+        if "origin" not in thread_cols:
+            # What made a thread, when that must be found again (an offline edit filed by
+            # brindle.pro.live_docs): one thread per origin, written in the thread's own insert.
+            self.conn.execute("ALTER TABLE plan_threads ADD COLUMN origin TEXT")
+        if not self._has_schema_object("plan_threads_origin"):
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS plan_threads_origin ON plan_threads(origin)"
+                              " WHERE origin IS NOT NULL")
+        merge_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(session_pr_merges)")}
+        if "owner" not in merge_cols:
+            self.conn.execute("ALTER TABLE session_pr_merges ADD COLUMN owner TEXT")
         input_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_input_state)")}
         if "observer" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN observer INTEGER NOT NULL DEFAULT 0")
@@ -1466,8 +1847,21 @@ class DB:
         visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
         if "dismissed_rev" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN dismissed_rev INTEGER NOT NULL DEFAULT 0")
+        if "consented_by" not in visual_cols:
+            self.conn.execute("ALTER TABLE visuals ADD COLUMN consented_by TEXT")
         if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
             self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
+        share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
+        for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL"), ("unconfirmed", "TEXT"),
+                          ("approve_wanted", "TEXT"), ("approve_refused", "TEXT"), ("access_refused", "TEXT")):
+            if col not in share_cols:
+                self.conn.execute(f"ALTER TABLE plan_shares ADD COLUMN {col} {kind}")
+        if "review_asked" not in share_cols:
+            self.conn.execute("ALTER TABLE plan_shares ADD COLUMN review_asked INTEGER NOT NULL DEFAULT 0")
+            # What these shares saw before it was kept is unknown: nothing may be assumed unreviewed.
+            self.conn.execute("UPDATE plan_shares SET review_asked=1")
+        if "supervisor_peer" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_drafts)")}:
+            self.conn.execute("ALTER TABLE plan_drafts ADD COLUMN supervisor_peer INTEGER")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:
@@ -1570,8 +1964,11 @@ class DB:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
         if "ever_passed" not in cols:
             self.conn.execute("ALTER TABLE milestones ADD COLUMN ever_passed INTEGER")
-        self.conn.execute("UPDATE milestones SET ever_passed=1 WHERE ever_passed IS NULL "
-                          "AND (status='passed' OR passed_sha IS NOT NULL)")
+        # Asked first: an UPDATE takes the write lock even when it matches nothing, so every
+        # open queued behind every other (a burst of daemon reads, each opening its own DB).
+        legacy = "ever_passed IS NULL AND (status='passed' OR passed_sha IS NOT NULL)"
+        if self.conn.execute(f"SELECT 1 FROM milestones WHERE {legacy} LIMIT 1").fetchone():
+            self.conn.execute(f"UPDATE milestones SET ever_passed=1 WHERE {legacy}")
         # Rows checked before states were stored: work them out from what was recorded.
         for r in self.conn.execute("SELECT id, status, output, passed_sha FROM milestones "
                                    "WHERE state IS NULL AND status IN ('passed', 'failed')").fetchall():
@@ -1635,10 +2032,17 @@ class DB:
         if "delivery_lead" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN delivery_lead TEXT")
         try:   # only brindle.kb needs FTS5: a SQLite built without it still opens
-            self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5("
-                              "text, heading_path, chunk_id UNINDEXED)")
+            if not self._has_schema_object("kb_fts"):
+                self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5("
+                                  "text, heading_path, chunk_id UNINDEXED)")
         except sqlite3.OperationalError:
             pass
+
+    def _has_schema_object(self, name: str) -> bool:
+        """Whether table or index ``name`` exists, asked by a read: a CREATE ... IF NOT
+        EXISTS takes the write lock even when there is nothing to create, so every
+        open would queue behind every other."""
+        return self.conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (name,)).fetchone() is not None
 
     def _move_session_repo_branches(self) -> None:
         """A development build kept the branch on session_repos itself: copy
@@ -1719,14 +2123,15 @@ class DB:
         row = self.conn.execute("SELECT * FROM workspaces WHERE id=?", (ws_id,)).fetchone()
         return _load(Workspace, row) if row else None
 
-    def claim_review_cap_notice(self, workspace_id: str) -> bool:
-        """Claim a workspace's cap notice once, across worker replacements.
+    def claim_review_cap_notice(self, workspace_id: str, *, stalled: bool = False) -> bool:
+        """Claim a workspace's cap or stall notice once, across worker replacements.
 
         Consult persisted state rather than a worker's round count or a
         caller's workspace snapshot; removal clears the claim by cascade.
         """
+        table = "review_stall_notices" if stalled else "review_cap_notices"
         with self.tx() as c:
-            return c.execute("INSERT OR IGNORE INTO review_cap_notices (workspace_id) VALUES (?)",
+            return c.execute(f"INSERT OR IGNORE INTO {table} (workspace_id) VALUES (?)",
                              (workspace_id,)).rowcount == 1
 
     def find_workspaces(self, repo_root: str | None = None) -> list[Workspace]:
@@ -1737,6 +2142,19 @@ class DB:
         else:
             rows = self.conn.execute("SELECT * FROM workspaces ORDER BY created_at")
         return [_load(Workspace, r) for r in rows]
+
+    def repo_activity(self) -> dict[str, tuple[float, list[str]]]:
+        """Every repo with a workspace: when it was last used (its newest
+        workspace or agent) and the session chats there that may still be
+        running (interactive agents not paused, done or dismissed: a "failed"
+        one's pane may still be up), for the caller to ask their panes. One
+        query, for a list that must answer at once."""
+        rows = self.conn.execute(
+            "SELECT w.repo_root, MAX(MAX(w.created_at), COALESCE(MAX(a.created_at), 0)),"
+            " GROUP_CONCAT(CASE WHEN a.mode='interactive' AND a.status NOT IN ('paused','done')"
+            "          AND a.dismissed_at IS NULL THEN a.id END)"
+            " FROM workspaces w LEFT JOIN agents a ON a.workspace_id = w.id GROUP BY w.repo_root")
+        return {root: (float(used or 0), chats.split(",") if chats else []) for root, used, chats in rows}
 
     def workspace_by_path(self, path: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE path=?", (path,)).fetchone()
@@ -1903,6 +2321,28 @@ class DB:
                 (session_id, key, value, ts),
             )
         self._enforce_permissions()
+
+    def session_routing_goal(self, root_id: str) -> dict | None:
+        """The weights session ``root_id`` aims routing for, or None (not set there)."""
+        row = self.conn.execute("SELECT weights FROM session_routing_goals WHERE root_id=?",
+                                (root_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            got = json.loads(row["weights"])
+        except ValueError:
+            return None
+        return got if isinstance(got, dict) else None
+
+    def set_session_routing_goal(self, root_id: str, weights: dict | None) -> None:
+        """Set (None: clear) session ``root_id``'s routing goal."""
+        with self.tx() as c:
+            if weights is None:
+                c.execute("DELETE FROM session_routing_goals WHERE root_id=?", (root_id,))
+            else:
+                c.execute("INSERT INTO session_routing_goals (root_id, weights, updated_at) VALUES (?, ?, ?) "
+                          "ON CONFLICT(root_id) DO UPDATE SET weights=excluded.weights, "
+                          "updated_at=excluded.updated_at", (root_id, json.dumps(weights), time.time()))
 
     def get_session_credentials(self, session_id: str) -> dict[str, str]:
         rows = self.conn.execute(
@@ -2093,8 +2533,22 @@ class DB:
             if won:
                 c.execute("UPDATE agents SET result=? WHERE id=?", (mask(payload), agent_id))
         if won:
-            bus.publish_agent(self, "agent.result", agent_id)
+            self._publish_result(agent_id)
         return won
+
+    def _publish_result(self, agent_id: str) -> None:
+        """The "agent.result" event, carrying what readers need once the
+        agent's row may be gone (brindle.supervisor_state): its mode, profile,
+        branch and (the start of its masked) result."""
+        try:
+            row = self.conn.execute(
+                "SELECT a.mode, a.profile, a.result, w.branch FROM agents a"
+                " LEFT JOIN workspaces w ON w.id = a.workspace_id WHERE a.id=?", (agent_id,)).fetchone()
+        except sqlite3.Error:
+            row = None
+        fields = ({"mode": row["mode"], "profile": row["profile"], "branch": row["branch"],
+                   "result": (row["result"] or "")[:RESULT_EVENT_CHARS]} if row else {})
+        bus.publish_agent(self, "agent.result", agent_id, **fields)
 
     def outbox_deliver(self, row_id: int, *, message: tuple | None = None,
                        agent_fields: dict | None = None, nothing: bool = False) -> bool:
@@ -2155,6 +2609,11 @@ class DB:
                 c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*agent_fields.values(), row["agent_id"]))
                 if agent_fields.get("reviewing_since") is not None:
                     ids.append(f"review {agent_fields['reviewing_since']}")
+                    if agent_fields.get("pipeline") == "reviewing":
+                        # A new accepted review attempt replaces the previous
+                        # escalation before its reviewer can escalate again.
+                        c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pipeline-escalated'",
+                                  (row["agent_id"],))
             c.execute("UPDATE report_outbox SET delivery=? WHERE id=?",
                       (", ".join(ids) or "nothing to tell", row_id))
             c.execute("UPDATE report_outbox SET state='superseded', updated_at=? WHERE agent_id=? AND id<?"
@@ -2231,6 +2690,12 @@ class DB:
                       "ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
                       (agent_id, kind, value))
         return True, row["value"] if row else None
+
+    def add_mark(self, agent_id: str, kind: str, value: str) -> bool:
+        """Create the mark unless one exists already. Returns whether it did."""
+        with self.tx() as c:
+            return bool(c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                                  "ON CONFLICT(agent_id, kind) DO NOTHING", (agent_id, kind, value)).rowcount)
 
     def replace_mark(self, agent_id: str, kind: str, old: str, new: str) -> bool:
         """Set an existing mark from ``old`` to ``new``, never recreating one
@@ -2369,7 +2834,7 @@ class DB:
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE agents SET result=? WHERE id=?", (mask(result), agent_id))
-        bus.publish_agent(self, "agent.result", agent_id)
+        self._publish_result(agent_id)
 
     def delete_agent(self, agent_id: str) -> None:
         with self.tx() as c:
@@ -2455,21 +2920,33 @@ class DB:
         other path (read_messages, the waiter, a pane delivery) takes it too.
         Returns the claim's time, or None if another path already had it: one
         that delivered it, or a pane delivery typing it (its row stays
-        undelivered while its mark owns it)."""
+        undelivered while its mark owns it). None too while a supervisor
+        restart holds the recipient's queue (RESTART_HOLD). Until
+        ``finish_delivery`` or ``release_delivery``, the send counts as in
+        flight (_deliveries_in_flight), so no restart stops the recipient under it."""
         now = time.time()
         with self.tx() as c:
             row = c.execute("SELECT agent_id FROM inbox WHERE id=? AND delivered_at IS NULL",
                             (message_id,)).fetchone()
-            if row is None or _pane_delivery_message(c, row["agent_id"]) == message_id:
+            if (row is None or _pane_delivery_message(c, row["agent_id"]) == message_id
+                    or _restart_holds(c, row["agent_id"], now)):
                 return None
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (now, message_id))
+            c.execute("INSERT OR REPLACE INTO agent_marks (agent_id, kind, value) VALUES (?, ?, ?)",
+                      (row["agent_id"], f"{INBOX_SEND}{message_id}", json.dumps({"at": now})))
         return now
+
+    def finish_delivery(self, message_id: int) -> None:
+        """A claimed send (claim_delivery) is over, sent or put back: no longer in flight."""
+        with self.tx() as c:
+            c.execute("DELETE FROM agent_marks WHERE kind=?", (f"{INBOX_SEND}{message_id}",))
 
     def release_delivery(self, message_id: int, claimed_at: float) -> None:
         """Put back a message whose send failed, only if the claim is still this one's."""
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND delivered_at=?",
                       (message_id, claimed_at))
+        self.finish_delivery(message_id)
 
     # -- permission requests left to the person (brindle.permissions) --
 
@@ -2543,9 +3020,10 @@ class DB:
         ``pane_mark``: the claim is a pane delivery's, whose mark (what this
         returns for the message) owns the undelivered row from here on, so a
         process that dies before its first write loses nothing. ``waiter_pid``:
-        the claim is that waiter's, recorded with it (see ``waiter_claims``)."""
+        the claim is that waiter's, recorded with it (see ``waiter_claims``).
+        None too while a supervisor restart holds the queue (RESTART_HOLD)."""
         with self.tx() as c:
-            if _pane_delivery_message(c, agent_id) is not None:
+            if _pane_delivery_message(c, agent_id) is not None or _restart_holds(c, agent_id):
                 return None
             row = c.execute(
                 "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL "
@@ -2615,6 +3093,15 @@ class DB:
     def pane_delivery_holds(self, agent_id: str) -> bool:
         """Whether a pane delivery's mark is holding ``agent_id``'s queue."""
         return _pane_delivery_message(self.conn, agent_id) is not None
+
+    def restart_holding(self, agent_id: str) -> bool:
+        """Whether a supervisor restart holds ``agent_id``'s queue (RESTART_HOLD)."""
+        return _restart_holds(self.conn, agent_id)
+
+    def deliveries_in_flight(self, agent_id: str) -> bool:
+        """Whether mail to ``agent_id`` is part way to it: a pane delivery
+        typing it, or a waiter that took it and hasn't finished handing it over."""
+        return _deliveries_in_flight(self.conn, agent_id)
 
     @staticmethod
     def _drop_unwritten_pane_mark(c: sqlite3.Connection, agent_id: str, message_id: int) -> None:
@@ -2921,12 +3408,18 @@ class DB:
             )
 
     def update_autopilot(self, root_id: str, **fields: object) -> None:
+        """Update goal fields, joining a caller's goal-replacement transaction."""
         has_summary = "summary" in fields
         summary = fields.pop("summary", None)
         offer = fields.pop("plan_offer", "keep")
         goal_at = fields.pop("offer_goal_at", None)
         cols = ", ".join(f"{k}=?" for k in fields)
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
+            if fields.keys() & {"state", "note", "question"}:
+                before = c.execute("SELECT state, note, question FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
+                if before and any(fields[k] != before[k] for k in fields.keys() & {"state", "note", "question"}):
+                    c.execute("INSERT INTO inbox_occurrences (source, generation) VALUES (?,1) "
+                              "ON CONFLICT(source) DO UPDATE SET generation=generation+1", (f"question:{root_id}",))
             if has_summary:
                 if summary is None:
                     c.execute("DELETE FROM goal_summaries WHERE root_id=?", (root_id,))
@@ -2976,12 +3469,12 @@ class DB:
             return bool(changed)
 
     def bump_progress(self, root_id: str) -> None:
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
 
     def set_milestones(self, root_id: str, items: list[tuple]) -> None:
         """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo[, phase]]])`` items."""
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
             for i, (title, check, detail, *rest) in enumerate(items, start=1):
                 cur = c.execute(
@@ -3012,7 +3505,7 @@ class DB:
         the milestone is done."""
         if state is None:
             state, state_why = check_state(passed, output, False)
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute(
                 "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=?, "
                 "passed_sha=COALESCE(?, passed_sha), state=?, state_why=?, "
@@ -3288,6 +3781,11 @@ class DB:
         marks = ", ".join("?" for _ in fields)
         update = ", ".join(f"{k}=excluded.{k}" for k in fields)
         with self.tx() as c:
+            if fields.keys() & {"state", "expired_at"}:
+                before = c.execute("SELECT state, expired_at FROM login_state WHERE root_id=?", (root_id,)).fetchone()
+                if before is None or any(fields[k] != before[k] for k in fields.keys() & {"state", "expired_at"}):
+                    c.execute("INSERT INTO inbox_occurrences (source, generation) VALUES (?,1) "
+                              "ON CONFLICT(source) DO UPDATE SET generation=generation+1", (f"login:{root_id}",))
             c.execute(f"INSERT INTO login_state (root_id, {cols}) VALUES (?, {marks}) "
                       f"ON CONFLICT(root_id) DO UPDATE SET {update}", (root_id, *fields.values()))
 

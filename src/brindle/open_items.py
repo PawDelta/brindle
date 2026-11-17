@@ -301,8 +301,8 @@ def _give_up(db: DB, item: OpenItem, worker: Agent, why: str, actor: Agent | Non
 
 
 def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent | None = None) -> str | None:
-    """Give the stuck worker's task to a fresh worker cut from the supervisor's
-    current branch, and retire the stuck one the way remove_workspace would
+    """Give the stuck worker's task to a fresh worker on its existing branch,
+    and retire the stuck one the way remove_workspace would
     (its branch kept, its uncommitted changes in the trash). ``actor``: the
     supervisor who asked for it; otherwise it's the sweep's, and the supervisor
     is told. Returns what happened, or None if another sweep has it or the
@@ -328,9 +328,19 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
         _hold_off(db, item, now, actor)
         return None
 
-    unmerged_note = (f"\n\n(An earlier worker on this task stopped; its unmerged work is on branch "
-                     f"`{ws.branch}`. Check `git log {ws.branch}` and reuse what fits. "
+    unmerged_note = (f"\n\n(Continue the earlier worker's work on branch "
+                     f"`{ws.branch}`; its commits are already in your checkout. "
                      f"What it was stuck on: {item.detail})")
+    if worker.result:
+        unmerged_note += f"\n\nPrevious worker's report:\n{worker.result}"
+    # Held bodies remain genuine notes after notification and reading. Prefer
+    # them to the later condensed pointers recorded by push delivery.
+    note = db.conn.execute(
+        "SELECT body FROM inbox WHERE sender_id=? AND agent_id=? "
+        "AND (held=1 OR noticed_at IS NULL) "
+        "ORDER BY COALESCE(held,0) DESC, id DESC LIMIT 1", (worker.id, supervisor.id)).fetchone()
+    if note:
+        unmerged_note += f"\n\nPrevious worker's latest note:\n{note['body']}"
     pipeline.note_removed_unmerged(db, ws, actor=actor)
     text = brief + unmerged_note
     prior = _takeover_state(db, worker.id)
@@ -343,7 +353,7 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
     # A takeover that died part way (the claim held here has expired) left
     # its unstarted replacement: this one carries on with it.
     new = _unstarted(db, ws.repo_root, supervisor.id, text) or tasks.enqueue(
-        db, supervisor, caller_ws, worker.profile, text, "assign", isolate=True, branch=None,
+        db, supervisor, caller_ws, worker.profile, text, "assign", isolate=True, branch=ws.branch,
         done_when=worker.done_when, files=tasks._loads(task.files) if task else None, depends_on=[],
         plan_first=None if worker.plan_first is None else bool(worker.plan_first), weight=worker.weight,
         unanswered=True,

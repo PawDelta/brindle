@@ -97,7 +97,11 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
                            (autopilot.WAIT_ENDED_HEAD,)).fetchall()
     assert [r["agent_id"] for r in told] == ["new"]
 
-@pytest.mark.parametrize("own_goal", [None, "done", "running", "handed_away", "send_fails"])
+@pytest.mark.parametrize("own_goal", [
+    pytest.param(None, marks=pytest.mark.variant("Handover must reuse a live supervisor with no goal and migrate its worker and queued task")),
+    pytest.param("done", marks=pytest.mark.variant("A completed destination goal must allow reuse of its supervisor without starting another")),
+    "running", "handed_away", "send_fails",
+])
 def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_another(db, repo, monkeypatch, own_goal):
     from brindle import tmux
 

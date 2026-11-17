@@ -1,6 +1,7 @@
 import asyncio
 import time
 
+import pytest
 from typer.testing import CliRunner
 
 from brindle import cli, agents, autopilot, cull, history, mcp_server, sessions, workspaces
@@ -35,7 +36,8 @@ def test_check_milestone_writes_check_and_milestone_rows(db, repo, monkeypatch):
     out = asyncio.run(mcp_server.check_milestone())
     assert "background" in out and started and "_check-milestones" in started[0]
     cli.check_milestones_cmd("boss", root_ws.id, position=None)
-    assert db.pending_count("boss") == 1 and db.get_autopilot("boss").checking_since is None
+    # The first pass queues both the landing notice and the check result.
+    assert db.pending_count("boss") == 2 and db.get_autopilot("boss").checking_since is None
 
     rows = db.list_history(root_ws.repo_root)
     kinds = {r.kind for r in rows}
@@ -240,6 +242,7 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
 # -- /clear and other transcript resets ---------------------------------------
 
 
+@pytest.mark.variant("a larger transcript after /clear must not subtract the previous transcript's usage")
 def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db):
     """After /clear a brand-new, larger transcript has nothing to do with the old mark."""
     history.record(db, "/r", "worker_result", agent_id="a1", transcript_path="/t/old.jsonl",

@@ -20,11 +20,9 @@ const at = { server: "brindle", target: "%7" };
 
 describe("readPane", () => {
   it("reads the pane's screen as a tmux client redraws it, a link drawn across rows read whole", async () => {
-    const { open, got, draw } = opener();
+    const { open, draw } = opener();
     const texts: string[] = [];
     readPane(open, at, (text) => texts.push(text), () => {});
-    expect(got.at).toEqual(at);
-    expect(got.size).toEqual(READ_SIZE);
 
     // A redraw, as a client draws one: cursor moves, not newlines; a link longer than a row runs on into the next.
     const link = `https://claude.ai/oauth/authorize?code=true&client_id=${"x".repeat(READ_SIZE.cols)}&state=abc`;

@@ -110,6 +110,7 @@ def cached(db):
     return {r["external_id"]: r["doc_id"] for r in db.conn.execute("SELECT * FROM kb_import_uploads")}
 
 
+@pytest.mark.variant("secret-looking documents must stay local even while an overlapping sync attempts upload")
 def test_secret_looking_files_are_never_sent(folder, remote, deps):
     db, source, _ = folder
     plan = imports.dry_run(db, source)
@@ -123,7 +124,8 @@ def test_secret_looking_files_are_never_sent(folder, remote, deps):
     assert [["md" in f for f in files] for files in remote.posts] == [[False], [True]]   # hashes first, then text
 
 
-@pytest.mark.parametrize("off", ["switch", "airgap"])
+@pytest.mark.parametrize("off", [pytest.param("switch", marks=pytest.mark.variant(
+    "import-upload opt-out must prevent sending files and library registration")), "airgap"])
 def test_nothing_is_sent_when_uploading_is_off(off, folder, remote, deps, monkeypatch):
     db, source, _ = folder
     if off == "switch":
@@ -152,6 +154,7 @@ def test_only_the_confirmed_files_go_and_a_rejected_upload_is_surfaced(folder, r
     assert len(remote.docs) == 2 and imports.in_library(db, source)
 
 
+@pytest.mark.variant("sync must prune removed files while preserving the identity of updated documents")
 def test_a_deleted_file_is_pruned_and_a_changed_one_updates_in_place(folder, remote, deps):
     db, source, docs = folder
     (docs / "more.md").write_text("# More")
@@ -199,6 +202,7 @@ def test_a_folder_over_the_prune_limit_is_refused_before_anything_is_sent(folder
     assert remote.posts == [] and not imports.in_library(db, source)
 
 
+@pytest.mark.variant("a stolen sync lease must prevent stale deletion and leave a later sync able to converge")
 def test_a_run_that_loses_its_claim_deletes_nothing_and_the_next_sync_converges(folder, remote, deps):
     db, source, docs = folder
     (docs / "more.md").write_text("# More")

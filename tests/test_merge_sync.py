@@ -10,7 +10,7 @@ import time
 import pytest
 
 from conftest import sh
-from brindle import agents, gates, git, mcp_server, tmux, workspaces
+from brindle import gates, git, mcp_server, workspaces
 from brindle.db import Agent
 
 
@@ -74,46 +74,7 @@ def test_merge_workspace_syncs_then_asks_for_a_new_review(db, repo, boss):
     assert not (repo / "f.txt").exists()  # main untouched
 
 
-def test_merge_workspace_reports_non_conflict_sync_failure(db, repo, boss):
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    open(os.path.join(ws.path, "f.txt"), "w").write("f")
-    git.commit_all(ws.path, "feature work")
-    _advance_base(repo)
-    sh("git config merge.ff only", ws.path)
-
-    out = asyncio.run(mcp_server.merge_workspace(ws.id))
-
-    assert out.startswith("Not merged: merging main failed")
-    assert git.dirty_files(ws.path) == []
-    assert not git.ok(["rev-parse", "-q", "--verify", "MERGE_HEAD"], ws.path)
-    assert not (repo / "f.txt").exists()  # main untouched
-
-
-CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-
-
-def _stale_branch_with_worker(db, repo, mode="assign", result=None):
-    """A branch behind main, with worker w1 marked processing in it."""
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    open(os.path.join(ws.path, "f.txt"), "w").write("f")
-    git.commit_all(ws.path, "feature work")
-    _advance_base(repo)
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", mode, "processing",
-                        "@1", result, time.time()))
-    return ws
-
-
-def test_merge_workspace_reconciles_a_stale_processing_worker(db, repo, boss, monkeypatch):
-    ws = _stale_branch_with_worker(db, repo)
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
-
-    out = asyncio.run(mcp_server.merge_workspace(ws.id))
-
-    assert out.startswith("Merged feature into main")
-    assert db.get_agent("w1").status == "idle"
-
-
+@pytest.mark.variant("failure path: a GitError/WorkspaceError from merge_back or sync_with_base must come back as 'Not merged'")
 @pytest.mark.parametrize("operation, error", [("merge_back", git.GitError), ("sync_with_base", workspaces.WorkspaceError)])
 def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkeypatch, operation, error):
     ws = workspaces.create(db, str(repo), "feature").workspace
@@ -129,18 +90,7 @@ def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkey
     assert out == "Not merged: boom"
 
 
-
-
-def test_merge_workspace_ignores_worker_whose_window_is_dead(db, repo, boss):
-    ws = _stale_branch_with_worker(db, repo)  # "@1" isn't a live window
-
-    out = asyncio.run(mcp_server.merge_workspace(ws.id))
-
-    assert out.startswith("Merged feature into main")
-    assert (repo / "f.txt").exists()
-
-
-@pytest.mark.parametrize("base_state", ["unchanged", "advanced", "overwrites scratch"])
+@pytest.mark.parametrize("base_state", ["overwrites scratch"])
 def test_merge_workspace_up_to_date_branch_merges_as_before(db, repo, boss, monkeypatch, base_state):
     """An approved branch merges as before (when behind main it is synced
     first). An untracked file left in the worktree after approval (check

@@ -101,6 +101,15 @@ def parse_hunks(patch: str) -> Hunks:
     insertion covers the line it's inserted after). Two branches' hunks are
     comparable on that side, since both diff against the same base."""
     hunks: Hunks = {}
+    for path, start, count, _new_start, _new_count in _iter_hunks(patch):
+        end = start + count - 1 if count else start
+        hunks.setdefault(path, []).append((start, end))
+    return hunks
+
+
+def _iter_hunks(patch: str):
+    """Each hunk of a unified diff: (path, old start, old count, new start,
+    new count)."""
     current: str | None = None
     # The ``---``/``+++`` file headers sit between a file's ``diff --git``
     # line and its first hunk. Inside a hunk, a removed line that itself
@@ -124,11 +133,8 @@ def parse_hunks(patch: str) -> Hunks:
         m = _HUNK.match(line)
         if m and current is not None:
             in_hunk = True
-            start = int(m.group(1))
-            count = int(m.group(2)) if m.group(2) is not None else 1
-            end = start + count - 1 if count else start
-            hunks.setdefault(current, []).append((start, end))
-    return hunks
+            yield (current, int(m.group(1)), int(m.group(2)) if m.group(2) is not None else 1,
+                   int(m.group(3)), int(m.group(4)) if m.group(4) is not None else 1)
 
 
 def hunks(ws: Workspace) -> Hunks:
@@ -141,6 +147,61 @@ def hunks(ws: Workspace) -> Hunks:
         return parse_hunks(git.out(["diff", "-U0", "--no-color", mb, "HEAD"], ws.path))
     except git.GitError:
         return {}
+
+
+def worktree_hunks(ws: Workspace) -> tuple[str, Hunks] | None:
+    """``ws``'s base commit and every hunk its worktree changes against it,
+    committed, staged or not (untracked files have none), or None when they
+    can't be read."""
+    mb = _base_ref(ws)
+    if mb is None:
+        return None
+    try:
+        return mb, parse_hunks(git.out(["diff", "-U0", "--no-color", "--no-renames", mb], ws.path))
+    except git.GitError:
+        return None
+
+
+# Per file, a diff's hunks as (old start, old count, new start, new count).
+LineMaps = dict[str, list[tuple[int, int, int, int]]]
+
+
+def line_maps(path: str, old: str, new: str) -> LineMaps | None:
+    """How commit ``old``'s lines moved by commit ``new``, per file, or None
+    when git can't tell. Renames read as a delete and an add."""
+    try:
+        patch = git.out(["diff", "-U0", "--no-color", "--no-renames", old, new], path)
+    except git.GitError:
+        return None
+    maps: LineMaps = {}
+    for file, *hunk in _iter_hunks(patch):
+        maps.setdefault(file, []).append((hunk[0], hunk[1], hunk[2], hunk[3]))
+    return maps
+
+
+def _map_line(line: int, hunks: list[tuple[int, int, int, int]]) -> tuple[int, int]:
+    """Where old ``line`` sits on the new side: one line, or the whole
+    replacement when a hunk changed it."""
+    delta = 0
+    for start, count, new_start, new_count in hunks:
+        if count and start <= line < start + count:
+            return new_start, new_start + max(new_count, 1) - 1
+        if (count and start + count <= line) or (not count and start < line):
+            delta += new_count - count
+        else:
+            break
+    return line + delta, line + delta
+
+
+def map_region(region: tuple[int, int], hunks: list[tuple[int, int, int, int]]) -> tuple[int, int] | None:
+    """``region`` (old-side lines of one file) on the new side of the diff
+    whose hunks are ``hunks``, widened over any line a hunk changed; None
+    when the file is gone on the new side (nothing to map onto)."""
+    if any(count and new_start == 0 and new_count == 0 for _s, count, new_start, new_count in hunks):
+        return None
+    first = _map_line(region[0], hunks)
+    last = _map_line(region[1], hunks)
+    return min(first[0], last[0]), max(first[1], last[1])
 
 
 def overlapping_hunks(a: Hunks, b: Hunks) -> int:

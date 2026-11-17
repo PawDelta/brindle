@@ -90,6 +90,7 @@ def test_the_kill_switch_refuses_an_assign(entitled, library, monkeypatch, db, r
 # -- required packs reach every worker --------------------------------------------------------------------------
 
 
+@pytest.mark.variant("bypass: a repository rule file cannot satisfy a missing required organization pack")
 def test_a_repo_file_cannot_stand_in_for_a_required_pack(entitled, library, monkeypatch, repo):
     monkeypatch.setattr(rollout, "current", lambda root=None: policy(required_rule_packs=["only/local"]))
     (repo / ".brindle" / "rules" / "only").mkdir(parents=True)
@@ -101,6 +102,7 @@ def test_a_repo_file_cannot_stand_in_for_a_required_pack(entitled, library, monk
         profiles.load_rule_packs(profiles.load_profile("dev", str(repo)), str(repo))
 
 
+@pytest.mark.variant("bypass: a profile cannot replace a required organization rule pack with a local namesake")
 def test_a_profile_naming_a_required_pack_still_gets_the_org_one(entitled, library, monkeypatch, repo):
     monkeypatch.setattr(rollout, "current", lambda root=None: policy(required_rule_packs=["security/org"]))
     (repo / ".brindle" / "rules" / "security").mkdir(parents=True)
@@ -145,17 +147,19 @@ def worker(db, repo, monkeypatch):
     return stopped, sent
 
 
-def test_the_sweep_stops_running_workers_when_the_switch_is_on(entitled, db, worker, monkeypatch):
+@pytest.mark.parametrize("enabled", [
+    pytest.param(True, marks=pytest.mark.variant("kill switch: enforcement stops live workers and notifies their supervisor")),
+    pytest.param(False, marks=pytest.mark.variant("kill switch: the disabled switch must leave live workers running")),
+])
+def test_the_sweep_obeys_the_kill_switch(entitled, db, worker, monkeypatch, enabled):
     stopped, sent = worker
-    monkeypatch.setattr(rollout, "current", lambda root=None: policy(kill_switch=True))
-    assert rollout.sweep(db) == ["stopped worker w1: org kill switch"]
-    assert stopped == ["w1"] and sent[0][0] == "boss" and "kill switch" in sent[0][1]
-
-
-def test_the_sweep_leaves_workers_alone_with_the_switch_off(entitled, db, worker, monkeypatch):
-    stopped, sent = worker
-    monkeypatch.setattr(rollout, "current", lambda root=None: policy())
-    assert rollout.sweep(db) == [] and not stopped and not sent
+    monkeypatch.setattr(rollout, "current", lambda root=None: policy(kill_switch=enabled))
+    result = rollout.sweep(db)
+    if enabled:
+        assert result == ["stopped worker w1: org kill switch"]
+        assert stopped == ["w1"] and sent[0][0] == "boss" and "kill switch" in sent[0][1]
+    else:
+        assert result == [] and not stopped and not sent
 
 
 def test_the_cull_pass_runs_the_sweep(db, monkeypatch):

@@ -27,4 +27,4 @@ def test_reviewer_brief_lists_every_new_test_and_row_worth_committing(tmp_path, 
                         lambda args, cwd: "tests/test_a.py" if args[0] == "diff" else computed % 2)
     assert "CASES = list(range(3))` is not a literal" in new_tests.review_section(tmp_path, "main")
     monkeypatch.setattr(new_tests.git, "out", lambda args, cwd: "")
-    assert new_tests.review_section(tmp_path, "main") == ""
+    assert new_tests.added_tests(tmp_path, "main") == []

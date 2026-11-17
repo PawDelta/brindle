@@ -23,42 +23,25 @@ direct_spawn_allowed:
   - src/brindle/native/lsp.py     # the native agent runner's language server
   - scripts/*                     # repo scripts
 ---
-Tests in this repo must earn their place. There is no limit on how many tests a
-branch adds, but each new test function and each new parametrize row must be worth
-committing. scripts/check_new_tests.py (a repo check on every branch before review,
-and in CI) fails a test or row that covers no line or branch other tests don't, unless
-it is marked `@pytest.mark.variant("why")`. The reviewer is given every test and row
-the diff adds and must be told what bug each would catch; one with no answer is a blocker.
-- Add the fewest tests that would fail without your change: usually one, a
-  regression test for the bug or the new branch. Extend an existing test or
-  parametrize table before writing a new test, and a new file only for a new module.
-- Never test wording (help, prompts, docs, messages), constants, defaults, enum
-  values or entry-point registration; never assert that a mock was called with
-  what the test just gave it.
-- A parametrize table gets one row per branch plus real edge cases, not one per
-  input. A row or test that covers no new code is fine only as a deliberate input
-  variant (a bypass attempt, a race, an input from a real incident), marked
-  `@pytest.mark.variant("why")`.
-- Use database rows and fakes, not real tmux sessions, subprocesses or sleeps,
-  unless spawning or timing is what the test is about.
-Tests must also be fast. The whole suite runs on every branch, so a slow test
-costs every worker, every time.
-- Each test's call phase must finish within 10 seconds (tests/conftest.py fails
-  the run otherwise; BRINDLE_TEST_DURATION_LIMIT overrides it). Aim for well
-  under one second. Mark a genuinely slow test `@pytest.mark.slow("why")`, and
-  expect reviewers to ask why.
-- Test the function, not the program: call the pure function or seed DB rows
-  instead of running the brindle CLI, a git repo, tmux or a subprocess.
-- At most one end-to-end test per feature; every other case goes in unit tests.
-- Build expensive setup (a git repo, a DB with many rows) once, in a
-  module-scoped fixture, and copy it rather than rebuild it per test.
-- Never wait on the wall clock: pass a fake clock or `now`, and drive events
-  directly instead of polling for them.
-- No network: fake the HTTP client or the server it talks to.
-- Reviewers: treat any of the above in a diff as a blocker, the same as a missing
-  test. Deleting a redundant test is an improvement, not a coverage loss.
+Full coverage is not a goal. A new feature needs a test proving its main path
+works; add a failure-path test only when that path matters. A bug fix needs one
+regression test that fails on the base and passes after the fix. Refactors,
+renames, docs, config, wording and pure glue need no new tests.
+- Extend an existing test or parametrize table first. Never test wording,
+  constants, defaults, enum values, entry-point registration or mock arguments.
+- Every added test or row must catch a distinct bug. Missing feature or regression
+  tests and added tests with no distinct bug are blockers.
+- scripts/check_new_tests.py checks for unique coverage. Use
+  `@pytest.mark.variant("why")` for a deliberate input variant that catches a
+  distinct bug without adding coverage.
+- Use database rows and fakes. Test functions directly, avoid network calls and
+  drive events with a fake clock. Keep at most one end-to-end test per feature.
+- Aim for under one second per test; the call-phase limit is 10 seconds.
+  Mark a necessary slow test `@pytest.mark.slow("why")`. Share expensive setup
+  in a module-scoped fixture and copy it per test.
 - When a lookup takes an optional filter (such as a profile), treat None as 'no filter' only when the caller truly means any; never let a missing value match a live resource that belongs to a different identity. When an action can be triggered twice, make the second trigger check for and respect existing in-flight work instead of cancelling or replacing it, and cover that path with a test that runs the real dispatch code rather than a mock. (learned 2026-10-13 from 4 reviews of developer-sonnet work: Lookup ignores caller's filter and races on detached work; rule 8967a6e2)
 - Before changing code for a reported bug, write a test that reproduces the reported symptom and fails on the unmodified code. Fix the root cause in the source, then confirm that test passes. A test that already passes before the change is not evidence of a fix. (learned 2026-10-13 from 3 reviews of developer-codex-heavy work: Bug fix not reproduced or root-caused; rule 634c00cd)
+- Use `brindle baseline -- <test command>` to check the regression test against base source with your test files overlaid in a temporary worktree, instead of stashing changes. Select one test per command; `--base REF` overrides the default merge-base with the workspace's base branch.
 - When a lookup takes an optional filter (such as a profile), treat None as 'no filter' only when the caller truly means any; never let a missing value match a live resource that belongs to a different identity. When an action can be triggered twice, make the second trigger check for and respect existing in-flight work instead of cancelling or replacing it, and cover that path with a test that runs the real dispatch code rather than a mock. (learned 2026-10-19 from 3 reviews of developer-heavy work: Lookup ignores caller's filter and races on detached work; rule 6bd8a8a9)
 - When a worker commits changes before the stop hook in the first turn, ensure that a snapshot is created for that turn's committed state. Track the initial baseline separately or detect when HEAD advances from the worktree’s starting commit and snapshot accordingly. (learned 2026-10-20 from 3 reviews of developer-heavy work: Rewind Point Missing for First Turn; rule 05a9357b)
 - When a function calls another function that wasn't previously called, ensure all tests that mock the original function also mock the new function. Add mocks for any newly added calls in existing test patches. (learned 2026-10-20 from 3 reviews of developer-codex work: Test Mock Incomplete After Function Addition; rule ed107119)
@@ -86,3 +69,15 @@ costs every worker, every time.
 - A regression test must correctly detect the issue it is meant to prevent. When using frame or observer callbacks, ensure assertions are executed after React commits updates and schedules additional frames, using flushed act() boundaries to capture all side effects. (learned 2026-11-08 from 3 reviews of developer-haiku work: Regression Test Ineffective; rule 51af2bc2)
 - Before a doc states what the product enforces, what a statistic measures, or what an installer does, check it against the code and the guide, and use the same scope and denominator as the source (review events, not distinct branches). Qualify any limit that only some providers enforce, and describe per-platform install behavior as the installer script actually does it. (learned 2026-11-08 from 5 reviews of developer-heavy work: Docs claims stronger than their source; rule 1946ec21)
 - When a request hands out or starts work that its reply promises, commit that state only after the transport confirms the response was written. Cancel or roll back that work on client disconnect or cancellation, and keep any slow start-up off the reply path. Never leave a worker waiting on that confirmation: if it does not arrive, release or cancel the work so nothing is left hung. Cover this with a test that goes through the real transport, including a blocked response write and a cancellation notification. (learned 2026-11-08 from 3 reviews of developer-heavy work: Work released before the reply is delivered; rule a6cd1967)
+- When reducing or consolidating tests, do not delete a test that guards a failure path. Each protected scenario, such as a launch failure converting to its error code, must still be exercised by a retained test, and coverage should confirm this before anything is removed. (learned 2026-11-13 from 4 reviews of developer-codex work: Regression coverage removed while trimming tests; rule 4a977e9a)
+- When a fix adds a shared predicate or guard (such as busy detection), apply it to every decision path that reads the same state, including status reconciliation and stuck or notification sweeps, not just the call site you patched. Add a regression test that runs the full reconciliation and sweep path through the new predicate, rather than returning early after the patched function. (learned 2026-11-16 from 9 reviews of developer-heavy work: Shared guard applied at one call site only; rule f5acb9e9)
+- Validate a worker's state and acquire its transition claim in one atomic step, under the same per-worker lock, and revalidate after acquiring it. Publish a result or verdict only after the decision is owned, so a concurrent transition cannot discard or overwrite it. (learned 2026-11-16 from 6 reviews of developer-heavy work: Check-then-act race in review state transitions; rule 15ac2877)
+- Attempt every probe or check the task requests through the normal permission mechanism, and record the actual outcome and exact permission reason. If a step cannot run under your profile or needs an allowlist change, escalate it to the supervisor and do not infer or bypass it. (learned 2026-11-16 from 5 reviews of developer-codex work: Requested probes skipped or inferred instead of run; rule ed9980c4)
+- A hook or check that decides whether a tool call runs must allow only on an explicit success (exit code 0 with no signal). If it is killed by a signal, times out, or exits with any other status, or produces no usable output, return the deny or failure result. Cover signal termination in the tests as well as nonzero exit. (learned 2026-11-16 from 4 reviews of developer-heavy work: Failed hook exit treated as allow; rule c12d66a1)
+- Before terminating a process, require positive evidence that it cannot be preserved. A missing mark, record, or flag means unknown, not 'cannot reload', so leave the process running. Add a regression test where the marker is already absent and assert the real sweep does not request termination. (learned 2026-11-16 from 4 reviews of developer-heavy work: Termination inferred from a missing marker; rule e428ea32)
+- When a git or overlap computation fails, propagate the error or fall back to the safe whole-diff path. Never return an empty result that looks like a successful zero-overlap check. Choose the review prompt only after the overlap is known, and add a test that makes the git call raise and asserts the whole-diff prompt is used. (learned 2026-11-16 from 4 reviews of developer-sonnet work: Failed git or overlap check reads as empty result; rule fcf5f071)
+- When one delivery takes several steps (for example paste then submit), durably record each completed step as it happens. If a failure or denial lands between steps, resume only the remaining steps after re-authorization, and never leave a partly delivered item that a later check reads as user input and refuses to resend. (learned 2026-11-16 from 4 reviews of developer-heavy work: Partial multi-step delivery stranded after failure; rule 6efef4af)
+- Background and periodic calls must never open an interactive credential prompt. Before enabling any fallback in a background path, confirm every subprocess it reaches (such as a credential helper and its keychain backend) is noninteractive, and if it is not, keep that fallback out of background calls. When the person refuses a prompt, persist the refusal until they explicitly re-enable it, never expire it on a timer. (learned 2026-11-16 from 3 reviews of developer-heavy work: Background git or keychain call re-prompts the person; rule f236c4fa)
+- When a result is computed from an earlier snapshot and applied to live state, record the base version for each request and apply only the changes derived against that base, rebased onto the current state. Test the case where a concurrent edit lands while the request is pending. (learned 2026-11-16 from 3 reviews of developer-heavy work: Stale snapshot overwrites concurrent edits; rule c784ecbb)
+- A regression test must correctly detect the issue it is meant to prevent. When using frame or observer callbacks, ensure assertions are executed after React commits updates and schedules additional frames, using flushed act() boundaries to capture all side effects. (learned 2026-11-16 from 3 reviews of developer-codex work: Regression Test Ineffective; rule a5242626)
+- Before reporting a documentation or launch deliverable as ready, check the finished text against every explicit requirement in the task brief: required sections and length, visuals and their order, figures to include, and content the brief says to leave out. Any unmet item is a blocker, not a note. (learned 2026-11-16 from 3 reviews of developer-sonnet work: Docs deliverable ignores the brief's requirements; rule 226b9029)

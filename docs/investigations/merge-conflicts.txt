@@ -1,0 +1,309 @@
+MERGE CONFLICTS IN BRINDLE: INVESTIGATION (revision 4, 2026-11-11)
+================================================================
+
+Scope: read-only. Repository: /Users/hannahlerner/Projects/brindle only.
+Sources: ~/.brindle/brindle.db (opened -readonly), git history of this repo, and this
+worktree's code. No src changes.
+
+SCOPE AND RETENTION (read first)
+  - Days are New York time: date(created_at,'unixepoch','-5 hours'). Queries were run
+    on 2026-11-11; 11-11 is a partial day.
+  - Repo filter, step 1 (recipient): inbox i JOIN agents a ON a.id = i.agent_id JOIN
+    workspaces w ON w.id = a.workspace_id WHERE w.repo_root = '/Users/hannahlerner/Projects/brindle'.
+  - Repo filter, step 2 (cross-repo work): the recipient's workspace is not enough. A
+    supervisor in this repo can start work in another repo (pawdelta-web) and receive
+    that work's notices. Those are removed by checking the work's own start message,
+    which names its workspace, for example:
+      19419 (11-08) "Started worker d9c87612 ... in workspace pawdelta-web/fix-settings-org-deep-link"
+      19483 (11-08) "Merged fix/settings-org-deep-link into brindle/session-10 at
+                     /Users/hannahlerner/Projects/pawdelta-web/.brindle/worktrees/brindle/session-10"
+      21577 (11-10) "Started worker 69ddf894 ... in workspace pawdelta-web/fix-byok-shared-designs"
+    Their conflict notices, 19474 (backend/pro_api/account_models.py, 11-08) and 21621
+    (backend/pro_api/analysis_*.py, design_models.py, docs/shared-designs-api.md, 11-10),
+    belong to pawdelta-web and are excluded from every Brindle count below. Successful
+    merges are classified by the repository path in their own text.
+  - Retention: rows cascade with their agent and workspace. Only 59 agents for this repo
+    still exist, and the inbox starts 2026-10-05. Zero rows in a day means zero SURVIVING
+    rows, not zero notifications. Missing rows are not evidence of absence.
+  - The notice text for conflicts exists since 62723dba (2026-10-31, src/brindle/pipeline.py
+    ~L1177-1349), so the absence of notices on 11-02 is not explained by missing text.
+    Unexplained.
+  - Paired rows: a main-sync failure produces two notices (an "origin/main has ... conflicts
+    in:" notice and a "... couldn't be merged" refusal for the same branch). Counts are per
+    notice; incidents are counted separately.
+  - Unresolved: a few cross-repo cases may remain unidentified if their start message has
+    scrolled out of the surviving rows. None were found beyond the three above.
+
+
+1. IS THERE A CHANGE IN CONFLICTS?
+----------------------------------
+
+A. Git (merge commits whose message contains "# Conflicts:", all refs; commit author dates).
+   Not affected by inbox retention.
+
+   day      10-29 10-30 11-02 11-03 11-04 11-05 11-06 11-07 11-08 11-09 11-10
+   count      1     1     9     1     2     4     9     2     2     3     4
+
+   The 11-02 count (9) equals the 11-06 count (9). Git does not show a step on 11-06.
+
+B. Surviving Brindle notices (repo-scoped, cross-repo excluded, "Merged" messages excluded):
+
+   day      feature-vs-session   main-sync notices   main-sync refusals (paired)
+   11-06          5                    0                     0
+   11-07          0                    1                     1
+   11-08          1                    1                     1
+   11-09          1                    1                     1
+   11-10          6                    2                     2
+   total         13                    5                     5
+
+   Surviving notices start on 11-06. Given the retention bias, this does not show that
+   conflicts or notices started on 11-06.
+
+C. Successful session merges (surviving rows), by New York day and repository path:
+
+   day      Brindle (into brindle/session-N)   pawdelta-web (excluded)
+   11-06           47                                0
+   11-07           27                                0
+   11-08           43                                7
+   11-09           34                                0
+   11-10           57                                3
+   11-11            5 (partial)                      0
+
+   Git shows session integration before 11-06: brindle/session-23 was integrating
+   features on 11-04 and 11-05 (for example 76af9074, 0e901b2f).
+
+D. Main traffic (git, origin/main, New York days; --since/--until use local time):
+
+   day      single-parent commits   merge commits
+   11-06          4                       0
+   11-10         10                       0
+
+   Main traffic is mostly single-parent landings (PRs and squashes), so counting merges
+   alone would miss them. session_squashes has 0 rows and is not a ledger. I did not count
+   main traffic for other days.
+
+E. Overlap warnings (repo-scoped, cross-repo not excluded here because the warning text does
+   not name a repo; treat as an upper bound). overlap = body LIKE '%overlap%'. broad =
+   overlap AND a broad glob (src/**, app/**, tests/**). broad is a subset of overlap.
+
+   day      overlap   broad
+   10-30      22        22
+   10-31      10        10
+   11-02      43        43
+   11-03      48        48
+   11-04      26        26
+   11-05      16        16
+   11-06     133       126
+   11-07      82        78
+   11-08     156       145
+   11-09     122       121
+   11-10     226       189
+   11-11      28        25   (partial)
+
+Conclusion, stated narrowly:
+  - Git shows conflict-resolution merges at a background rate (1 to 9 a day), with no clear
+    step on 11-06. This is the only series not affected by retention.
+  - Surviving Brindle notices and overlap warnings rise from 11-06, coinciding with more
+    session-branch merges. Retention means I cannot tell whether notices were rarer before
+    11-06. The change is not established as a change in conflicts.
+
+
+2. WHICH BRANCH PAIRS CONFLICTED, WITH FILES
+---------------------------------------------
+
+Two coordination paths produce different notices. They are reported separately.
+
+Path 1: feature-vs-session merge conflicts. Message form: "`<feature>` was approved, but
+merging `<session>` into it conflicts in: <files>". Repo-scoped, cross-repo excluded: 13 notices.
+
+  brindle/session-3 (9):
+    11-06  feat/os-sandbox (18016): tests/test_antigravity.py
+    11-06  feat/milestones-folded-list (18048): app/src/styles.css, tests/test_daemon_api.py
+    11-06  feat/opencode-autonomy-modes (18078): tests/test_analysis_docs.py,
+           tests/test_analysis_editing.py, tests/test_daemon_api.py
+    11-06  fix/delivery-respects-typed-draft (18171): src/brindle/db.py
+    11-06  feat/visuals-offers (18267): app/src/screens/Session/Visuals/Visuals.test.tsx
+    11-08  perf/parallel-session-resume (19762): tests/test_check_new_tests.py
+    11-09  feat/session-pr-line (19865): app/src/components/Sidebar.test.tsx
+    11-10  feat/running-agents-count (20750): app/src/components/Sidebar.test.tsx
+    11-10  stress/updates (20753): app/src/components/Sidebar.test.tsx
+  brindle/session-8 (4), all 11-10:
+    fix/inbox-drops-read-visual (20941): app/src/store/store.ts, app/src/store/sync.ts
+    fix/shared-doc-two-way (21376): src/brindle/plans.py, src/brindle/pro/shared_docs.py
+    feat/library-outage-handling (21750): tests/test_plans.py
+    feat/teammate-design-reader (21773): app/src/screens/Session/Visuals/PlanReader.tsx
+
+  Path 1 is always "feature with the session branch merged in" (feature branch is the
+  target of the merge). The session branch is the source. It is not a session/session
+  conflict.
+
+Path 2: main-sync failures. Message form: "origin/main has N commit(s) <session> lacks, and
+merging it conflicts in: <files>", followed by a paired "... was approved but couldn't be
+merged (Not merged: <session> must be synced ...)" refusal. These are main-versus-session
+conflicts: the session lacks incoming main commits. Five incidents, two notices each:
+
+  11-07  brindle/session-3   tests/test_visuals.py                   (18423, 18425)
+  11-08  brindle/session-3   GoalPanel.test.tsx, GoalPanel.tsx        (19485, 19487)
+  11-09  brindle/session-3   ReviewSheet.test.tsx                     (20293, 20295)
+  11-10  brindle/session-8   InboxScreen.test.tsx                     (20890, 20891)
+  11-10  brindle/session-8   tests/test_visual_offers.py, tests/test_visuals.py (21109, 21111)
+
+Git corroboration, verified:
+  - 089fd244 (11-07) "Merge remote-tracking branch 'origin/main' into brindle/session-3",
+    changes tests/test_visuals.py. Matches incident 11-07 above (same session, same file).
+  - 0eb17aa8 (11-09) "... origin/main into brindle/session-8", changes app/src/App.focus.test.tsx,
+    App.test.tsx, App.tsx, Sidebar.test.tsx, Sidebar.tsx, store/sync.ts, agents.py,
+    test_sessions.py. Session-8 resolution one day before the 11-10 incident. Its files do not
+    include InboxScreen.test.tsx, so it does not directly match that incident.
+  - b9c3f0bd (11-09) "... origin/main into brindle/session-8", changes tests/test_visual_offers.py.
+    Session-8 resolution of a file in incident 21109, one day earlier.
+  - 93e29618 (11-10) "... origin/main into brindle/session-8" (also in the git log, not re-verified here).
+
+brindle/session-8 vs sync/session-18-into-governance (the supervisor's lead):
+  - Refs: origin/main 4094b712, brindle/session-8 47ab9e81, sync/session-18-into-governance b4ff7ffa.
+  - Commits ahead of origin/main: session-8 251, governance 176 (git rev-list --count).
+  - Changed files since merge-base, intersected as sets: 30 shared paths, out of 121 (session-8)
+    and 114 (governance). The reviewer reproduced 30 with a set intersection; my hand count was 29.
+  - No surviving notice names both branches. The one recorded coordinator link is inbox 20168
+    (11-09, repo-scoped): a new task "overlaps on tests/** with fab0aafc
+    (sync/session-18-into-governance)" with "expect merge conflicts in tests/**". A prediction,
+    not an observed conflict.
+  - So the pair is an established RISK (30 shared paths), not an observed collision.
+
+What this says about the supervisor's question:
+  - Main/session conflicts are recorded (5 incidents, session-3 and session-8).
+  - Feature/session conflicts are recorded (13 notices; session-3 9, session-8 4, session-10 0
+    after the cross-repo exclusion).
+  - Session/session conflicts are not established.
+
+
+3. WHY THE COORDINATOR DIDN'T PREVENT THEM
+------------------------------------------
+
+Recent changes on the overlap path (git log on src/brindle/tasks.py, coordinator.py, config.py):
+
+  09582ca9  2026-11-02  Overlap check: no fetch, cached cheap merged check, session branch counts as landed
+            _reported_unmerged (tasks.py ~L105-132) treats work merged into its session base as
+            landed, not only work merged into main. The changed-file scan of reported worktrees now
+            runs only when the new task declares files (~L211).
+  6f87124a  2026-11-02  queued tasks count for overlap
+            adds _queued_overlap (tasks.py ~L192-208): declared files of queued and starting tasks
+            now clash.
+  6817fa3a  2026-11-09  Enable coordinator by default for entitled accounts
+            config.py coordinator default becomes None ("on when the plan includes it");
+            coordinator.py changed (19 lines). Coordinator advice appears from 11-09 (inbox 20168).
+  12bed04e  2026-10-19  shared knowledge layer and coordinator (#205): the original design.
+
+Ranked causes:
+
+(a) Session-branch work is invisible to the overlap check. Since 09582ca9, work merged into its
+    session base counts as landed in _reported_unmerged, so a worker's changes in a session
+    branch no longer clash with other tasks, though main does not have them. Confirmed in the
+    diff. Its effect on the recorded conflicts is not measured.
+
+(b) Warnings are not enforced, and broad globs make most of them fire. _held (tasks.py ~L175)
+    reports a clash; overlap_mode (tasks.py ~L291) decides whether it blocks, warns or queues.
+    _glob_match (tasks.py ~L59-80) uses fnmatch in both directions, and fnmatch lets `*` cross
+    `/`, so `src/**` and `app/**` match every file in those trees. Broad is 84-100% of overlap
+    on each day from 11-06 (11-10: 189 of 226).
+
+(c) Shared test files. Of the 13 feature notices and 5 incidents, most name a test file (for
+    example Sidebar.test.tsx on three notices, tests/test_daemon_api.py on two, tests/test_visuals.py
+    on two incidents). The coordinator matches declared globs such as tests/**, so concurrent
+    features collide on the same tests.
+
+(d) The conflict forecast ignores reported work. conflict_forecast (tasks.py ~L338-355) uses
+    running_tasks only, so a branch drops out when its worker reports, which is when it is
+    merged. Not changed since 10-19.
+
+(e) Minor: conflict_notices rows (39 now) cascade with their workspace (db.py ~L318), so removal
+    re-warns on the next turn.
+
+Ranking, most to least supported:
+  1. Session-branch work is hidden from overlap checks (a). Confirmed in code.
+  2. Warnings are unenforced and broad-glob noise (b). Supported by the counts.
+  3. Shared test files as the collision surface (c). Supported by the file lists.
+  4. The forecast ignores reported work (d). Confirmed in code; contribution not measured.
+  5. Session-8 / governance overlap is a risk, not a recorded cause.
+  6. Notice cascade (e), minor.
+
+
+4. WHAT CHANGED, AND THE EFFECTIVE OVERLAP MODE
+------------------------------------------------
+
+Effective mode (current, with attribution):
+  - src/brindle/config.py load_repo_config (~L435-467) reads each key from the local file
+    (.brindle/config.local.json) first, then the shared file (.brindle/config.json), then
+    ~/.brindle/config.json. The first source with the key wins; "overlap" is in that list (~L455).
+  - The reviewer (round 2) reports that the main checkout's .brindle/config.local.json sets
+    overlap = "warn". I could not read it (the main checkout is off-limits to me), so this is
+    attributed to the reviewer, not verified by me. If correct, the current effective mode is
+    "warn", and setting "block" in the shared config would not override it.
+  - The shared .brindle/config.json in this worktree has no overlap key. The local file takes
+    precedence, so this does not mean the default applies in the repo. The default (block within
+    a session, queue across sessions, tasks.py ~L291 and config.py ~L183) applies only when no
+    local or user file sets it.
+
+Historical settings: unknown. The local file is untracked, so its history is not available.
+
+Fixes:
+  1. Make the work hidden by 09582ca9 visible: keep "landed" only when merged into main, or keep
+     the session-base rule but still compare that branch's changed files against new tasks.
+     Test: a task on files held only by a session-8 branch still warns. Target: tasks.py
+     _reported_unmerged and find_clash.
+  2. Set the intended overlap value where it takes effect: the local file (and the user file if
+     the person wants it everywhere), then remove conflicting values.
+  3. Narrow broad globs: count the repo files each glob matches; a pattern matching more than N
+     files, or a bare `src/**`, is reported as "broad: N files" and compared with other branches'
+     changed files. Test: `src/**` does not match `src/brindle/tasks.py` unless that file is in
+     another branch's diff.
+  4. Dedupe warnings per (task, holder, shared files) instead of per assign.
+  5. Cap session-branch divergence: track commits ahead of origin/main and days since the last
+     sync per session branch; past a threshold, prompt a PR to main and absorb main before new
+     merges. Hook point: session_sync.py Drift (~L50) and the "behind" outcome (~L252).
+  6. Let conflict_forecast include reported-but-unmerged work (tasks.py ~L338-355).
+  7. Split the hot test files: new feature tests in new per-feature modules. Start with
+     test_visuals.py, test_daemon_api.py and Sidebar.test.tsx.
+  8. Keep warned pairs past workspace removal, in the merges ledger rather than only in the
+     cascading conflict_notices table.
+  9. Add conflict and overlap event kinds to the events table; today it has none, so these counts
+     come from inbox text and are subject to retention.
+
+
+5. ANSWERS TO THE SUPERVISOR (839dd990)
+---------------------------------------
+
+(a) Did conflicts happen when session branches synced with main, or with each other? Main/session
+    conflicts are recorded (5 incidents). Feature/session conflicts are recorded (13 notices).
+    Session/session conflicts are not established.
+(b) Does anything warn about or limit divergence? No. session_sync reports "behind" and the
+    conflicting files (session_sync.py ~L252-273). There is no cap and no PR nudge.
+(c) Concrete fixes: section 4 items 1, 5 and 3.
+
+
+6. NOT ESTABLISHED
+------------------
+
+- The historical overlap mode (the local file is unread and untracked; the current value is
+  attributed to the reviewer).
+- Whether notices or conflicts were rarer before 11-06 (retention prunes rows with their agents).
+- Whether the 09582ca9 change caused any specific recorded conflict (effect not measured).
+- Whether session-8 and the governance branch have conflicted (not recorded; a risk).
+- Main traffic beyond 11-06 and 11-10 (git counts only for those two days).
+- Cross-repo classification beyond the three identified start messages.
+- 11-11 counts are partial.
+
+
+7. CORRECTION (supervisor, 2026-11-11)
+--------------------------------------
+
+Section 1A's "merges into session: 0" before 11-06 is wrong. It counted only
+pipeline message text. Git shows session branches took worker merges before
+11-06 too (e.g. 93 into brindle/session-23 between 10-28 and 11-05). The branch
+model did not change. What changed is how often sessions landed on main:
+brindle/session-23 and brindle/session-24 merged 12 PRs to main on 11-03 and
+11-04 (#344 to #361), and only one session PR (#390) merged after 11-04.
+Meanwhile the governance branch has been unlanded since 10-29, and
+brindle/session-8 held 251 commits until #412. The primary cause is therefore
+infrequent landing of long-lived session branches. The coordinator gaps in
+section 2 are contributing causes.

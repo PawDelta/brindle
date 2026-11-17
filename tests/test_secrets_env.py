@@ -14,6 +14,7 @@ from brindle.db import Agent
 # -- the shared module -----------------------------------------------------------------------
 
 
+@pytest.mark.variant("bypass: api_key_env cannot relabel CI and account tokens as model credentials")
 def test_a_profiles_api_key_env_naming_a_job_secret_is_not_a_credential():
     assert "BRINDLE_PRO_TOKEN" not in secrets.provider_credentials("native", "BRINDLE_PRO_TOKEN")
     assert "GH_TOKEN" not in secrets.provider_credentials("native", "GH_TOKEN")
@@ -86,6 +87,7 @@ def _unset_for(provider, api_key_env=None, present=()):
     return secrets.pane_unset([*present, *keep, "GH_TOKEN", "BRINDLE_PRO_TOKEN"], keep=keep)
 
 
+@pytest.mark.variant("bypass: native profile loading and pane scrubbing must reject job tokens claimed as API credentials")
 def test_native_profiles_keep_their_api_key_env_but_never_a_job_secret(repo):
     # A profile can't claim a job secret (a GitHub Models profile needs its own, differently named, variable).
     assert "GITHUB_TOKEN" in _unset_for("native", "GITHUB_TOKEN")

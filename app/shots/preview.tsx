@@ -19,6 +19,8 @@ import { startSync } from "../src/store/sync";
 import { usageScenario } from "../src/test/usage";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
 import { ORGS, REPO, data } from "./fixtures";
+import { installLibrary, libraryInbox } from "./library";
+import { wideCheckout, wideDiff } from "./wideDiff";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
 import "../src/styles.css";
 
@@ -53,8 +55,16 @@ if (params.get("renderer") === "dom") {
 const SCENES: Record<string, Route> = {
   new: { screen: "new" },
   "new-first": { screen: "new" },
+  // The first run with Clone expanded; the composer with its project or CLI menu open.
+  "new-first-clone": { screen: "new" },
+  "new-projects": { screen: "new" },
+  "new-cli": { screen: "new" },
+  // A practice run under way, and finished: the session's repo is brindle's practice repo.
+  practice: { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
+  "practice-done": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
   flow: { screen: "new" },
   "new-composer": { screen: "new" },
+  "new-conflict": { screen: "new" },
   "new-codex-only": { screen: "new" },
   inbox: { screen: "inbox" },
   "session-failed": { screen: "session", root: "sup-42", repo: REPO, agent: "e9a0b6c3" },
@@ -69,6 +79,11 @@ const SCENES: Record<string, Route> = {
   agents: { screen: "agents" },
   "agents-make": { screen: "agents" },
   knowledge: { screen: "knowledge" },
+  // The Library open from the foot's button: the sidebar is its navigation; then one of its Sources.
+  library: { screen: "knowledge" },
+  // The same Library as columns by stage (the List / Board switch, remembered).
+  "library-board": { screen: "knowledge" },
+  "library-decisions": { screen: "knowledge", view: "decisions" },
   "knowledge-map": { screen: "knowledge", view: "map" },
   "knowledge-record": { screen: "knowledge" },
   "knowledge-search": { screen: "knowledge" },
@@ -82,6 +97,8 @@ const SCENES: Record<string, Route> = {
   "sidebar-foot-busy": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "sidebar-resize": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "session-review": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
+  "session-review-diff": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
+  "session-review-diff-split": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
   // One scene per agent of the session: the supervisor, each worker, the reviewer, in the state its row shows.
   "agent-supervisor": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
   "agent-working": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
@@ -101,6 +118,18 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+// Keep the common sidebar shots representative of full requests and descriptive session names.
+if (scene === "session" || scene === "new") {
+  const longGoal = "Update the desktop sidebar so a detailed goal stays readable beside the active session, even when the request describes several milestones, review requirements, project constraints, and the final checks needed before shipping the finished work.";
+  daemon.data.sessions[0].goal = longGoal;
+  daemon.data.sessions[1].name = "Investigate terminal rendering and preserve shell state across project switches and application restarts";
+  daemon.data.sessions[3].name = "Prepare comprehensive release notes covering desktop improvements, command line changes, and migration guidance";
+  if (daemon.data.goal) {
+    daemon.data.goal.goal = longGoal;
+    daemon.data.goal.note = "The latest audit found that the implementation covers the primary desktop workflow, but several details still need review: project navigation, session recovery, provider status, keyboard shortcuts, and the final checks for each milestone. Keep the full audit available while leaving enough room to see completed work and the active session tree.";
+  }
+}
+if (scene === "new-conflict") daemon.data.sessions[0].name = "Desktop polish";
 if (scene.startsWith("sidebar-foot-")) {
   const busy = scene === "sidebar-foot-busy";
   daemon.data.usage = usageScenario(busy ? "several" : "normal");
@@ -136,7 +165,9 @@ if (scene === "sidebar-resize" && daemon.data.goal) {
   }));
 }
 // First run: no project yet.
-if (scene === "new-first") daemon.data.repos = [];
+if (scene === "new-first" || scene === "new-first-clone") daemon.data.repos = [];
+if (scene === "practice" || scene === "practice-done") daemon.data.repos = daemon.data.repos.map((r) => (r.repo_root === REPO ? { ...r, demo: true } : r));
+if (scene === "practice-done") daemon.completeGoal("sup-42");
 // Only Codex on this Mac: Claude Code neither installed nor signed in.
 if (scene === "new-codex-only") daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
 // The first-run walk-through: no project yet, only Codex on this Mac, and the folder the picker returns isn't a git repository.
@@ -150,10 +181,16 @@ if (scene === "flow") {
     antigravity: [{ id: "antigravity.signin", kind: "signin", label: "Sign in to Antigravity", detail: "Antigravity isn't signed in on this Mac.", done: false }],
   };
 }
-if (scene === "session-review") {
+if (scene === "session-review" || scene.startsWith("session-review-diff")) {
   daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
   daemon.data.sessionBase["sup-42"] = { "src/session.ts": "export const ready = false;\n" };
   daemon.data.sessionFiles["sup-42"] = { "src/session.ts": "export const ready = true;\n", "src/review.ts": "export const review = 'PR';\n" };
+  if (scene.startsWith("session-review-diff")) {
+    // A realistic diff (shots/wideDiff.ts): the plain two-file one hides layout overlaps.
+    delete daemon.data.sessionBase["sup-42"];
+    daemon.data.sessionReview["sup-42"].diff = wideDiff();
+    daemon.data.sessionFiles["sup-42"] = wideCheckout();
+  }
   if (daemon.data.goal) {
     daemon.data.goal.goal_phase = "ready_for_pr";
     daemon.data.goal.milestones.forEach((m) => { m.status = "passed"; m.state = "passed"; });
@@ -246,7 +283,14 @@ if (scene.startsWith("update-") || scene === "sidebar-foot-busy") {
     watch: () => Promise.resolve(() => {}),
   };
 }
+// The Library's designs (shots/library.ts), two waiting on the person; the board scene opens on Board.
+const libraryScene = scene === "library" || scene === "library-board";
+if (libraryScene) {
+  daemon.data.inbox = [...libraryInbox, ...daemon.data.inbox];
+  localStorage.setItem("brindle.library.view", scene === "library-board" ? "board" : "list");
+}
 const client = daemon.client();
+if (libraryScene) installLibrary(client);
 const sync = startSync({ client, store, connect: daemon.connect });
 
 // No StrictMode here: its second mount trips an xterm.js timer on the disposed
@@ -268,8 +312,14 @@ const OPENS: Record<string, string> = {
   "agents-make": 'css:button[aria-label="Medium runs on"]',
   "knowledge-record": "Record a decision",
   "new-composer": "Options ▾",
+  "new-first-clone": "Clone a repository…",
+  "new-projects": 'css:button[aria-label^="Project:"]',
+  "new-cli": 'css:button[aria-label^="Supervisor CLI:"]',
+  "new-conflict": 'css:button[aria-label="Other ways to start"]',
   "new-codex-only": "Options ▾",
   "knowledge-add": "Add folder",
+  "session-review-diff": "Review changes →",
+  "session-review-diff-split": "Review changes →",
   "update-downloading": 'css:[data-testid="app-update-now"]',
 };
 
@@ -286,11 +336,13 @@ const THEN: Record<string, () => void> = {
   "agents-make": () => [...document.querySelectorAll("button")].find((b) => b.textContent?.startsWith("+ Make a custom agent"))?.click(),
   // The settings page scrolled to its foot: the engine's health list.
   "settings-health": () => document.getElementById("engine")?.scrollIntoView({ block: "end" }),
+  // The PR diff in its Split layout.
+  "session-review-diff-split": () => press("Split"),
   // The sign-in card, up in its provider's row, brought into view.
   "settings-signin": () => document.querySelector('[data-testid="provider-codex"]')?.scrollIntoView({ block: "center" }),
   // A search that finds a decision and the documents' chunks alike.
   "knowledge-search": () => {
-    const box = document.querySelector<HTMLInputElement>('input[aria-label="Search knowledge"]');
+    const box = document.querySelector<HTMLInputElement>('input[aria-label="Search the Library"]');
     if (!box) return;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(box, "tmux");
     box.dispatchEvent(new Event("input", { bubbles: true }));

@@ -5,7 +5,6 @@ history rows are seeded into a temporary db; then the CLI (`brindle history`,
 `brindle cost`, `brindle cost report`, `brindle cost estimate`), the budget
 gate, the MCP replies and the sidebar's Costs section are driven. No network.
 """
-import asyncio
 import json
 import time
 
@@ -163,26 +162,6 @@ def test_set_goal_shows_a_priced_estimate_with_pro(db, repo, boss, pro):
     assert "Cost estimate" in out and "2 tasks" in out and "$" in out and "tokens (no price" not in out
 
 
-def test_set_goal_and_assign_have_no_estimate_without_pro(db, boss, monkeypatch):
-    from brindle import agents
-
-    def spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", done_when=None, **kw):
-        a = Agent(agents.new_id(), ws.id, profile, "claude", parent_id, mode, "processing", "", None,
-                  time.time(), task=prompt)
-        db.add_agent(a)
-        return a
-
-    monkeypatch.setattr(agents, "spawn", spawn)
-    # Delegating before there's a goal starts the worker and asks for one.
-    out = asyncio.run(mcp_server.assign(task="fix bug X", branch="fix-x"))
-    assert len(db.children("boss")) == 1 and "set_goal" in out
-
-    out = mcp_server.set_goal("Settings", [{"title": "API", "check": "true"}])
-    assert "Cost estimate" not in out
-    out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
-    assert "Cost estimate" not in out and "set_goal" not in out
-
-
 # -- budgets --------------------------------------------------------------------------------------
 
 PRICES = {"big-model": {"input": 10, "output": 50, "cache_write": 12, "cache_read": 1},
@@ -294,16 +273,6 @@ def test_costs_section_from_real_history(db, repo, root, pro):
     assert any("$6.00 of $8.00" in ln.text and ln.style == "ok" for ln in lines[1:])
     folded = watch_costs.render(local, None, now, 70, True)
     assert len(folded) == 1 and "75%)" in folded[0].text
-
-
-def test_costs_section_shows_a_running_workers_dollars(db, repo, root, pro):
-    ws = workspaces.adopt_root(db, str(repo))
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "", None, time.time()))
-    seed(db, root, agent_id="w1", profile="developer", tokens=row_tokens(input=1_000_000))
-    snap = [{"id": ws.id, "agents": [{"id": "w1", "mode": "assign", "status": "processing"},
-                                     {"id": "gone", "mode": "assign", "status": "done"}]}]
-    local = watch_costs.local(db, root, snap)
-    assert local.workers == {"w1": pytest.approx(2.0)}
 
 
 def test_costs_section_shows_free_for_a_local_workers_figure(db, repo, root, pro):

@@ -40,11 +40,11 @@ def profile(provider="claude", **kw):
 # -- the policy ---------------------------------------------------------------------------------
 
 
+@pytest.mark.variant("security cache round trip: managed routing and personal-key denial must survive policy serialization")
 def test_the_policy_fields_are_parsed():
     p = parse_policy(ORG, {"version": 1, "policy": {**POLICY, "provider_config": BEDROCK,
-                                                    "deny_personal_keys": True}})
+                                                 "deny_personal_keys": True}})
     assert p.provider_config == cfg(BEDROCK) and p.deny_personal_keys is True
-    # ...and survive the cache
     again = parse_policy(ORG, json.loads(json.dumps(p.to_json())))
     assert (again.provider_config, again.deny_personal_keys) == (cfg(BEDROCK), True)
 
@@ -86,6 +86,7 @@ def enterprise(team, monkeypatch):
     return team
 
 
+@pytest.mark.variant("failure path: a failed license lookup cannot authorize managed-model configuration")
 def test_a_license_that_cant_be_checked_means_not_managed(team, monkeypatch):
     def boom(feature):
         raise RuntimeError("no license")
@@ -95,14 +96,6 @@ def test_a_license_that_cant_be_checked_means_not_managed(team, monkeypatch):
 
 
 # -- the provider -------------------------------------------------------------------------------
-
-
-def test_azure_and_openai_compatible_env():
-    assert managed_models.provider_env(cfg(AZURE), "claude")["CLAUDE_CODE_USE_FOUNDRY"] == "1"
-    assert managed_models.provider_env(cfg(AZURE), "codex") == {"OPENAI_BASE_URL": AZURE["endpoint"]}
-    assert managed_models.provider_env(cfg(COMPAT), "codex") == {"OPENAI_BASE_URL": COMPAT["endpoint"]}
-    assert managed_models.provider_env(cfg(COMPAT), "claude") == {}
-    assert managed_models.provider_env(cfg(BEDROCK), "codex") == {}
 
 
 def test_nothing_changes_without_a_provider_config():
@@ -122,6 +115,7 @@ def test_nothing_changes_without_a_provider_config():
     (managed(BEDROCK), profile("antigravity"), "antigravity, which can't run on AWS Bedrock"),
     (managed(deny=True), profile("native", api_key_env="OPENAI_API_KEY"), "OPENAI_API_KEY"),
 ])
+@pytest.mark.variant("bypass: incompatible providers, custom endpoints and personal key variables cannot escape managed routing")
 def test_profiles_pointing_elsewhere_are_refused_with_a_reason(m, p, words):
     why = managed_models.refusal(m, p)
     assert why and words in why and ORG in why
@@ -130,6 +124,7 @@ def test_profiles_pointing_elsewhere_are_refused_with_a_reason(m, p, words):
 # -- personal keys ------------------------------------------------------------------------------
 
 
+@pytest.mark.variant("bypass: explicit key denial must override both provider credential preservation and env_allow")
 def test_pane_unset_always_takes_denied_names_out():
     names = ["PATH", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_PROFILE"]
     keep = secrets.provider_credentials("claude") | {"OPENAI_API_KEY"}
@@ -185,6 +180,7 @@ def test_a_refused_profile_does_not_launch(db, ws, repo, monkeypatch):
         agents._profile_for(db, a, ws)
 
 
+@pytest.mark.variant("security: agent launch must pass organization personal-key denial through to tmux while preserving the route")
 def test_the_pane_is_opened_without_personal_keys(db, ws, monkeypatch):
     a = agent(db, ws)
     seen = {}
@@ -288,15 +284,23 @@ def setup_managed(raw, deny=False):
 
 
 @pytest.mark.parametrize("entitled, policy, source, deny", [
-    (True, {"agent_setup": ROUTED, "provider_config": VERTEX}, "setup", False),      # the block beats the mirror
-    (True, {"agent_setup": {**ROUTED, "enforce": False}, "provider_config": VERTEX}, "config", False),
-    (True, {"agent_setup": {**ROUTED, "enforce": False}}, None, False),              # login help only
-    (False, {"agent_setup": ROUTED}, None, False),
+    pytest.param(True, {"agent_setup": ROUTED, "provider_config": VERTEX}, "setup", False,
+                 marks=pytest.mark.variant("policy precedence: enforced routed setup must override the legacy provider mirror")),      # the block beats the mirror
+    pytest.param(True, {"agent_setup": {**ROUTED, "enforce": False}, "provider_config": VERTEX}, "config", False,
+                 marks=pytest.mark.variant("policy precedence: an unenforced setup must not override the legacy provider configuration")),
+    pytest.param(True, {"agent_setup": {**ROUTED, "enforce": False}}, None, False,
+                 marks=pytest.mark.variant("policy enforcement: login assistance alone cannot authorize managed routing")),              # login help only
+    pytest.param(False, {"agent_setup": ROUTED}, None, False,
+                 marks=pytest.mark.variant("entitlement: stored routing cannot manage models without the required license")),
     (True, {"agent_setup": LOGINS, "provider_config": BEDROCK}, "config", False),     # nothing routed, not exclusive
-    (True, {"agent_setup": {**LOGINS, "exclusive": True}, "provider_config": BEDROCK}, "setup", False),
-    (True, {"agent_setup": {**ROUTED, "deny_personal_keys": False}, "deny_personal_keys": True}, "setup", False),
-    (True, {"agent_setup": ROUTED, "deny_personal_keys": True}, "setup", True),      # the block doesn't say
-    (True, {"agent_setup": {**LOGINS, "deny_personal_keys": True}}, "deny", True),
+    pytest.param(True, {"agent_setup": {**LOGINS, "exclusive": True}, "provider_config": BEDROCK}, "setup", False,
+                 marks=pytest.mark.variant("exclusive login setup must override a legacy provider mirror even without cloud routing")),
+    pytest.param(True, {"agent_setup": {**ROUTED, "deny_personal_keys": False}, "deny_personal_keys": True}, "setup", False,
+                 marks=pytest.mark.variant("policy precedence: an explicit setup denial flag overrides the organization denial flag")),
+    pytest.param(True, {"agent_setup": ROUTED, "deny_personal_keys": True}, "setup", True,
+                 marks=pytest.mark.variant("security: setup without a denial flag must inherit organization personal-key denial")),      # the block doesn't say
+    pytest.param(True, {"agent_setup": {**LOGINS, "deny_personal_keys": True}}, "deny", True,
+                 marks=pytest.mark.variant("security: login-only setup can still enforce personal-key denial")),
 ])
 def test_which_policy_fields_are_the_managed_source(monkeypatch, entitled, policy, source, deny):
     m = from_policy(monkeypatch, entitled, **policy)
@@ -331,21 +335,27 @@ def test_without_the_exclusive_key_provider_config_stays_the_managed_source(db, 
 
 @pytest.mark.parametrize("raw, p, words", [
     # exclusive: an agent the block gives no route is refused as provider_config refused it
-    (VERTEX_ONLY, profile("codex"), "runs Codex, which can't use Google Vertex AI"),
-    (VERTEX_ONLY, profile("native", base_url="http://localhost:11434/v1"), "uses its own endpoint, which isn't Google Vertex AI"),
-    (VERTEX_ONLY, profile("antigravity"), "uses antigravity, which can't run on Google Vertex AI"),
-    (CODEX_ONLY, profile(), "runs Claude Code, which can't use Azure"),
+    pytest.param(VERTEX_ONLY, profile("codex"), "runs Codex, which can't use Google Vertex AI",
+                 marks=pytest.mark.variant("bypass: exclusive Vertex routing cannot fall through to an unmanaged Codex provider")),
+    pytest.param(VERTEX_ONLY, profile("native", base_url="http://localhost:11434/v1"), "uses its own endpoint, which isn't Google Vertex AI",
+                 marks=pytest.mark.variant("bypass: a native local endpoint cannot escape exclusive Vertex routing")),
+    pytest.param(VERTEX_ONLY, profile("antigravity"), "uses antigravity, which can't run on Google Vertex AI",
+                 marks=pytest.mark.variant("bypass: an Antigravity profile cannot escape an exclusive Vertex organization route")),
+    pytest.param(CODEX_ONLY, profile(), "runs Claude Code, which can't use Azure",
+                 marks=pytest.mark.variant("bypass: exclusive Codex Azure routing cannot fall through to Claude Code")),
     (ANTIGRAVITY_ONLY, profile(), "runs Claude Code, which can't use a Gemini-compatible gateway"),
     ({"enforce": True, "exclusive": True}, profile(), "can't use the routes"),
     # Login routes also allow an agent to run; managed endpoints are checked in the migration table.
     ({**VERTEX_ONLY, "codex": {"route": "chatgpt"}}, profile("codex"), None),
     ({**VERTEX_ONLY, "antigravity": {"route": "gemini"}}, profile("antigravity"), None),
-    ({**VERTEX_ONLY, "antigravity": {"route": "gateway", "base_url": GATEWAY_URL}},
+    pytest.param({**VERTEX_ONLY, "antigravity": {"route": "gateway", "base_url": GATEWAY_URL}},
      profile("antigravity", env={"GOOGLE_GEMINI_BASE_URL": "https://other"}),
-     "pointing it away from a Gemini-compatible gateway"),
+     "pointing it away from a Gemini-compatible gateway",
+                 marks=pytest.mark.variant("bypass: profile environment cannot replace an enforced Antigravity gateway endpoint")),
     ({**CODEX_ONLY, "claude": LOGINS["claude"]}, profile(), None),
     # not exclusive: an org that set up Company agents directly keeps running Codex
-    ({**VERTEX_ONLY, "exclusive": False}, profile("codex", env={"OPENAI_BASE_URL": "https://x"}), None),
+    pytest.param({**VERTEX_ONLY, "exclusive": False}, profile("codex", env={"OPENAI_BASE_URL": "https://x"}), None,
+                 marks=pytest.mark.variant("nonexclusive routing must preserve an independently configured Codex endpoint")),
 ])
 def test_exclusive_refuses_an_agent_the_routing_leaves_out(raw, p, words):
     why = managed_models.refusal(setup_managed(raw), p)

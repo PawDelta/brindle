@@ -2212,7 +2212,12 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         if not name:
             say(f"   {p}: no secret to set here (configure a native profile in the repo)")
             continue
-        say(f"   {p}: paste the key for {name}")
+        # Keep secret-name lookup results out of the output path: these
+        # prompts describe where to paste a key, never the key's value.
+        if p == "claude":
+            say("   claude: paste the key for ANTHROPIC_API_KEY")
+        else:
+            say("   codex: paste the key for OPENAI_API_KEY")
         _gh(["secret", "set", name, "--repo", repo], run=run, interactive=True)
         if p == "claude":
             _set_key_workspace(repo, workspace or "", run=run, say=say)
@@ -2236,8 +2241,9 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     if not files:
         raise CIError("the server offered no workflow for this org")
     push_setup_branch(cwd, files)
+    from brindle import workspaces  # late: workspaces is heavy and only this PR needs its footer
     url = _gh(["pr", "create", "--repo", repo, "--head", SETUP_BRANCH, "--title", "Add brindle CI",
-               "--body", "Workflows from `brindle ci init`."], run=run).strip()
+               "--body", workspaces.with_footer("Workflows from `brindle ci init`.", cwd)], run=run).strip()
     say(f"   pull request: {auth._sanitize(url, 200)}")
     say(f"   you're back on {git.current_branch(cwd) or 'the commit you started on'}; "
         f"merge the pull request, then pull")

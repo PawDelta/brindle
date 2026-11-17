@@ -14,8 +14,8 @@ import { isTauri } from "@tauri-apps/api/core";
 import { clipboardAttachments, listenForDrops, type Attachment } from "../../../api/attachments";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, main, mono } from "../../../components/ui";
-import type { PlansClient, VisualsClient } from "./client";
-import { BackButton, KeepButton, message, useEscBack } from "./chrome";
+import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
+import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { PlanReader } from "./PlanReader";
 import { VisualFrame, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
 import { ExportButton } from "./ExportButton";
@@ -83,7 +83,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   repo?: string;
   /* The engine marked this revision read. */
   onRead?(id: string, rev: number): void;
-  client: VisualsClient & Partial<ExportClient> & Partial<PlansClient> & Partial<Pick<DaemonClient, "attach">>;
+  client: VisualsClient & Partial<ExportClient> & Partial<PlansClient> & Partial<PlanDocClient> & Partial<Pick<DaemonClient, "attach">>;
   /* The visual opened; null when the session has no such visual (gone, or a link to another session's). */
   visual: VisualDTO | null;
   /* The session's visuals aren't read yet. */
@@ -114,7 +114,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   const source: VisualSource | null = visual ? { kind: "session", id: visual.id, rev: visual.rev } : null;
   if (visual?.kind === "plan" && client.plan && client.decidePlan) {
     // A plan is brindle's own page, rendered here from its markdown: no frame.
-    return <PlanReader client={client as VisualsClient & PlansClient & Partial<ExportClient>} visual={visual} repo={repo} onBack={onBack} asking={asking} onChanged={onAnswered} />;
+    return <PlanReader client={client as VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">>} visual={visual} repo={repo} onBack={onBack} asking={asking} onChanged={onAnswered} />;
   }
   return (
     <ReaderChrome
@@ -137,18 +137,6 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
       }} />}
     />
   );
-}
-
-const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
-
-/* A browser File (picker, paste) as the upload body: its bytes, base64. */
-function fileAttachment(file: File): Promise<Attachment> {
-  return new Promise((done, fail) => {
-    const reader = new FileReader();
-    reader.onload = () => done({ name: file.name || "pasted-file", data_base64: String(reader.result).split(",")[1] ?? "" });
-    reader.onerror = () => fail(new Error("couldn't read the file"));
-    reader.readAsDataURL(file);
-  });
 }
 
 /* The question, the options as host buttons, a note, and Send. Answered: what was picked. */
@@ -261,6 +249,31 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
       if (active.current) setSending(false);
     }
   };
+  useEffect(() => {
+    if (visual.answer) return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      const target = event.target;
+      // The note keeps normal typing and its existing Enter handler. Other editable controls do too.
+      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+      if (event.key === "Enter") {
+        // Focused controls retain their own activation; the answer bar handles its chosen option.
+        if (target instanceof HTMLElement && target.closest("button, a")) return;
+        if (!canSend || sending) return;
+        event.preventDefault();
+        void send();
+        return;
+      }
+      const index = /^[1-9]$/.test(event.key) ? Number(event.key) - 1
+        : /^[a-z]$/i.test(event.key) ? event.key.toLowerCase().charCodeAt(0) - 97 : -1;
+      const option = options[index];
+      if (!option || sending) return;
+      event.preventDefault();
+      if (picked !== option.id) onPick(option.id);
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  });
   return (
     <footer ref={bar} className="flex flex-col gap-s1 border-t border-line px-s2 py-s1" data-testid="visual-answer">
       {visual.question && <p className="text-sm text-ink-2">{visual.question}</p>}
@@ -282,8 +295,9 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           void send();
         }}>
           <div role="radiogroup" aria-label="Options" className="flex flex-wrap gap-1">
-            {options.map((o) => (
+            {options.map((o, index) => (
               <button key={o.id} type="button" role="radio" aria-checked={picked === o.id} title={o.detail} className={`${button} ${picked === o.id ? "border-branch bg-branch-soft" : ""}`} onClick={() => onPick(o.id)}>
+                {index < 26 && <kbd aria-hidden="true" className="mr-1 rounded-[3px] border border-line bg-surface-2 px-1 font-mono text-[10px] font-medium leading-4 text-ink-3">{index < 9 ? `${index + 1} / ` : ""}{String.fromCharCode(97 + index)}</kbd>}
                 {o.label}
               </button>
             ))}

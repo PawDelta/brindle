@@ -70,6 +70,7 @@ def test_new_reviewers_are_refused(rollout_on, org, db, repo, worker):
         agents.request_review(db, None, ws)
 
 
+@pytest.mark.variant("a managed shutdown must reach assignment policy as a denial")
 def test_check_assign_denies_with_the_reason(rollout_on, org, monkeypatch):
     p = policy_of()
     monkeypatch.setattr(team_policy, "current_policy", lambda *a, **k: p)
@@ -78,6 +79,7 @@ def test_check_assign_denies_with_the_reason(rollout_on, org, monkeypatch):
     assert not d.allowed and "shut down by your org: maintenance" in d.reason
 
 
+@pytest.mark.variant("an unentitled remote shutdown must not stop local workers")
 def test_without_managed_rollout_a_shutdown_is_ignored(org, db, worker, monkeypatch):
     stopped, _ = worker
     monkeypatch.setattr(license, "has", lambda feature: False)

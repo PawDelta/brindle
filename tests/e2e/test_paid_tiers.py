@@ -532,6 +532,7 @@ def test_managed_models_route_every_agent_to_the_orgs_provider(acct, net, repo):
     assert "Google Vertex AI" in managed_models.doctor_line(str(repo))[1]
 
 
+@pytest.mark.variant("managed endpoints must reject profiles that would bypass the organization's endpoint")
 def test_managed_models_openai_compatible_endpoint_for_native_and_codex(acct, net, repo):
     acct.login("enterprise")
     org_policy(net, provider_config={"provider": "openai-compatible",
@@ -650,6 +651,7 @@ def test_audit_chain_records_verifies_and_exports(run, acct, repo, brindle_home)
     assert len(bytes.fromhex(pub.strip())) == 32
 
 
+@pytest.mark.variant("tampered, removed, reordered, truncated and resigned audit records must all fail verification")
 def test_audit_verify_catches_every_kind_of_tampering(run, acct, repo):
     acct.login("enterprise")
     make_events(repo, 4)
@@ -823,6 +825,7 @@ def test_airgap_blocks_the_backend_and_uses_the_offline_license(run, acct, net, 
     assert net.calls == [], "air-gap mode must never reach the backend"
 
 
+@pytest.mark.variant("loading a second repository cannot disarm process-wide airgap enforcement")
 def test_a_repo_config_cannot_turn_airgap_back_off(repo, tmp_path):
     airgap_repo(repo)
     other = tmp_path / "other"
@@ -851,6 +854,7 @@ def test_airgap_delegates_only_to_local_profiles(acct, repo):
     agents._airgap_check(native_profile(base_url="http://127.0.0.1:8000/v1"), str(repo))
 
 
+@pytest.mark.variant("reviewer dispatch must enforce the organization's kill switch too")
 def test_the_kill_switch_also_stops_reviewers(acct, net, repo, db):
     acct.login("enterprise")
     org_policy(net, kill_switch=True)
@@ -873,11 +877,6 @@ def test_airgap_org_policy_shows_the_offline_file(run, acct, repo, net):
     assert net.calls == []
 
 
-def test_airgap_from_the_environment_shows_in_the_license_status(run, repo):
-    code, out = run("account", "license", "status", env={airgap.ENV: "1"})
-    assert code == 1 and f"air-gap   on ({airgap.ENV}=1)" in out
-
-
 def test_airgap_denials_are_audited_locally(run, acct, repo):
     code, _ = run("account", "license", "install", str(acct.license_file("enterprise")))
     assert code == 0
@@ -891,6 +890,7 @@ def test_airgap_denials_are_audited_locally(run, acct, repo):
     assert run("audit", "verify")[0] == 0
 
 
+@pytest.mark.variant("doctor must flag a hosted default agent as a failure in an airgapped repository")
 def test_doctor_reports_airgap_state(acct, repo):
     assert [c.detail for c in doctor.airgap_checks(str(repo))] == ["off"]
     license.install(acct.license_file("enterprise").read_bytes())

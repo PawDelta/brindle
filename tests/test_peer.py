@@ -107,9 +107,9 @@ _TREE = {p.pid: p for p in [
 @pytest.mark.parametrize("caller,agent", [
     (511, "ab1"),   # under a daemon-hosted session, outside any pane
     (610, "ab2"),   # under the pre-started spare that owns ab2's MCP server
-    (710, "ab3"),   # an ancestor's environment names the agent
+    pytest.param(710, "ab3", marks=pytest.mark.variant("caller identity must resolve from an ancestor's environment without a pane")),
     (810, None),    # the daemon's environment belongs to whoever started it
-    (730, "ab3"),   # a command line naming a daemon hides no ancestor's environment
+    pytest.param(730, "ab3", marks=pytest.mark.variant("a daemon-like command line cannot hide the caller's owning ancestor")),
 ])
 def test_caller_ancestry_finds_agents_without_a_pane(monkeypatch, caller, agent):
     monkeypatch.setenv("BRINDLE_HOME", "/h")

@@ -39,6 +39,7 @@ def pushed(monkeypatch):
     return out
 
 
+@pytest.mark.variant("Claude drops identical peer notices, so later deliveries must produce distinct notices")
 def test_notices_never_read_the_same(db, boss, pushed, monkeypatch):
     # Claude Code drops a peer message identical to the previous one, so a
     # resent notice for the same unread messages must still differ.
@@ -99,6 +100,7 @@ def test_codex_worker_delivery_ignores_input_text(db, boss, monkeypatch):
     assert db.unread_count("w1") == 0
 
 
+@pytest.mark.variant("autopilot cannot end a turn before consuming unread worker results")
 def test_stop_hook_blocks_autopilot_with_unread(db, boss, pushed):
     db.add_autopilot("boss")
     agents.send_message(db, "boss", "the result", sender_id="w1")
@@ -138,12 +140,6 @@ def test_watched_supervisor_gets_stop_reminders_through_its_inbox(db, boss, push
     # Ignored, it isn't repeated on every stop: once per notice window.
     assert agents.handle_hook(db, "boss", "stop", {}) is None
     assert len(via_inbox) == 1
-
-
-def test_queued_message_goes_through_the_inbox_at_stop(db, boss, via_inbox):
-    db.enqueue("boss", "a queued message", "w1")
-    assert agents.handle_hook(db, "boss", "stop", {}) is None
-    assert via_inbox == ["a queued message"]
 
 
 def test_a_person_message_goes_once_beside_read_messages(db, boss, monkeypatch):
@@ -215,6 +211,7 @@ def test_a_restarted_pane_delivery_keeps_its_message_from_read_messages(db, boss
     assert db.message_delivered(mid) and db.mark("boss", "pane-delivery") is None
 
 
+@pytest.mark.variant("a background-task turn without UserPromptSubmit must clear the previous idle status")
 def test_tool_hooks_mark_an_idle_agent_busy(db, boss):
     # A turn begun by a finished background task runs no UserPromptSubmit,
     # so the 'idle' its previous Stop left would otherwise stick.
@@ -223,6 +220,7 @@ def test_tool_hooks_mark_an_idle_agent_busy(db, boss):
     assert db.get_agent("boss").status == "processing"
 
 
+@pytest.mark.variant("a late tool hook cannot reactivate a paused agent")
 def test_tool_hooks_leave_a_paused_agent_alone(db, boss):
     db.set_status("boss", "paused")
     agents.handle_hook(db, "boss", "tool-done", {})

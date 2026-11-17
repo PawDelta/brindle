@@ -51,6 +51,7 @@ def refs(repo, agent_id):
 # -- snapshots -----------------------------------------------------------------------
 
 
+@pytest.mark.variant("Snapshots must exclude supervisors, reviewers, and workers sharing the main checkout")
 def test_only_workers_in_their_own_worktree_get_snapshots(db, repo, ws):
     worker(db, ws, agent_id="boss", mode="interactive")
     worker(db, ws, agent_id="rev", mode="review")
@@ -77,6 +78,7 @@ def test_a_turn_without_a_transcript_is_summed_up_from_its_live_pane(monkeypatch
     assert rewind.turn_words(a) == "added the login page"
 
 
+@pytest.mark.variant("Codex turn-complete notifications must create rewind snapshots just as Claude stop hooks do")
 def test_codex_turn_complete_snapshots_too(db, repo, ws):
     worker(db, ws, provider="codex")
     write(ws, "app.py", "print('login')\n")

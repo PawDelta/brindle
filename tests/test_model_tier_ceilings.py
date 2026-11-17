@@ -84,6 +84,7 @@ def test_fallback_heavy_capped_under_light_ceiling(db, repo, monkeypatch):
     assert profile in cfg.routing["light"]
 
 
+@pytest.mark.variant("budget ceiling: medium routing cannot expose heavy profiles to the learner")
 def test_max_weight_medium_filters_heavy_candidate_from_medium_routing(db, repo, monkeypatch):
     from brindle import learning
     cfg = RepoConfig(max_weight="medium")

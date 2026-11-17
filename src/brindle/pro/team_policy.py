@@ -344,6 +344,11 @@ class OrgPolicy:
     agent_setup: AgentSetup | None = None
     # The org's ``permission_grants`` block (None: absent, so no grants at all).
     permission_grants: GrantPolicy | None = None
+    # Dangerous enterprise admin opt-in: restarting can make the supervisor lose track of work.
+    supervisor_restart_tokens: int = 0
+    # The org's ``routing_goal`` block (brindle.routing_goal.OrgGoal; None: absent,
+    # or malformed and ignored): a default, floors and ceilings, or a lock.
+    routing_goal: object | None = None
     # Keep the server answer separate from the interpreted policy: newer
     # servers may send fields this client cannot model yet. Do not serialize
     # the interpreted policy back over those fields when caching it.
@@ -381,11 +386,15 @@ class OrgPolicy:
         return {"permission_grants": None if g is None else {
             k: list(v) if isinstance(v, tuple) else v for k, v in asdict(g).items()}}
 
+    def dangerous(self) -> dict:
+        return {"dangerous": {"supervisor_restart_tokens": self.supervisor_restart_tokens}}
+
     def to_json(self) -> dict:
         out = {"org_id": self.org_id, "version": self.version, "fetched_at": self.fetched_at,
                "policy": {**self.rules(), **self.budgets(), **self.rollout(), **self.managed(),
-                          **self.grants(),
+                          **self.grants(), **self.dangerous(),
                           "agent_setup": asdict(self.agent_setup) if self.agent_setup else None,
+                          "routing_goal": self.routing_goal.to_json() if self.routing_goal else None,
                           "roles": {r: {k: _list(v) if k in LISTS else v
                                         for k, v in o.items()}
                                     for r, o in self.roles.items()}},
@@ -393,13 +402,35 @@ class OrgPolicy:
         if self.effective is not None:
             out["effective"] = {**self.effective.rules(), **self.effective.budgets(),
                                 **self.effective.rollout(), **self.effective.managed(),
-                                **self.effective.grants()}
+                                **self.effective.grants(), **self.effective.dangerous()}
         out["visibility"] = dict(self.visibility)
         if self.cached_for is not None:
             out["cached_for"] = list(self.cached_for)
         if self.spend_seat_usd is not None:
             out["spend"] = {"month": self.spend_month, "seat_usd": self.spend_seat_usd}
         return out
+
+
+def _dangerous(p: dict) -> dict:
+    """Dangerous org-wide experiments; only an enterprise admin may enable them.
+
+    Automatic restarts can make the supervisor lose track of work.
+    """
+    group = p.get("dangerous", {})
+    if not isinstance(group, dict):
+        raise PolicyUnavailable("malformed dangerous settings")
+    limit = group.get("supervisor_restart_tokens", 0)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise PolicyUnavailable("malformed supervisor restart limit")
+    return {"supervisor_restart_tokens": limit}
+
+
+def effective_supervisor_restart_tokens(repo_root: str) -> int:
+    """The enterprise admin's dangerous restart limit; ordinary config has no say."""
+    from brindle.pro import rollout
+
+    p = rollout.current(repo_root)
+    return p.supervisor_restart_tokens if isinstance(p, OrgPolicy) else 0
 
 
 def _list(v):
@@ -909,6 +940,18 @@ def _agent_setup(p: dict) -> AgentSetup | None:
         return None
 
 
+def _routing_goal(p: dict):
+    """The policy's ``routing_goal`` block. A malformed one is ignored with one
+    warning (the server clamps every suggest again), and never raises."""
+    from brindle import routing_goal
+
+    try:
+        return routing_goal.parse_org_goal(p.get("routing_goal"))
+    except routing_goal.GoalError as e:
+        log.warning("ignoring the org policy's routing_goal block (%s)", e)
+        return None
+
+
 def _spend(v) -> dict:
     if not isinstance(v, dict):
         return {}
@@ -975,14 +1018,18 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
     managed = _managed(p)
     setup = _agent_setup(p)       # org-wide, like the rollout: the effective policy carries it too
     grants = _grants(p)
+    dangerous = _dangerous(p)     # org-wide: member overrides cannot enable restarts
+    goal = _routing_goal(p)
     return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p), **_budgets(p),
-                     **roll, **managed, **grants, roles=_roles(p.get("roles")),
+                     **roll, **managed, **grants, **dangerous, roles=_roles(p.get("roles")),
                      effective=None if eff is None else OrgPolicy(
                          org_id=org_id, version=version, fetched_at=at, **_rules(eff),
-                         **_budgets(eff), **roll, **(_managed(eff) if (
+                         **_budgets(eff), **roll, **dangerous, **(_managed(eff) if (
                              "provider_config" in eff or "deny_personal_keys" in eff) else managed),
                          agent_setup=setup,
+                         routing_goal=_routing_goal(eff) if "routing_goal" in eff else goal,
                          **(_grants(eff) if "permission_grants" in eff else grants), **spend),
+                     routing_goal=goal,
                      role=_role_name(body.get("role")),
                      policy_role=_role_name(body.get("policy_role")),
                      cached_for=tuple(key) if ok_key else None,
@@ -1065,6 +1112,7 @@ def with_role_overrides(p: OrgPolicy, role: str | None, policy_role: str | None)
                                           deny_personal_keys=p.deny_personal_keys,
                                           agent_setup=p.agent_setup,
                                           permission_grants=grants,
+                                          supervisor_restart_tokens=p.supervisor_restart_tokens,
                                           spend_seat_usd=p.spend_seat_usd,
                                           spend_month=p.spend_month,
                                           visibility=p.visibility))
@@ -1326,6 +1374,7 @@ class Access:
     unrouted: dict = field(default_factory=dict)        # CLI -> why the managed routing refuses it
     error: str | None = None
     agent_setup: AgentSetup | None = None               # its Claude route may pin an alias to an allowed id
+    routing_goal: object | None = None                  # brindle.routing_goal.OrgGoal, or None
 
     def pinned(self, provider: str | None, model: str | None) -> str | None:
         """The route id the org's Claude route pins ``model`` (an alias) to, or None."""
@@ -1395,7 +1444,8 @@ def access(repo_root: str | None) -> Access:
     deny_keys = m.deny_personal_keys if m is not None else p.deny_personal_keys
     return Access(org_id=p.org_id, allowed_providers=p.allowed_providers,
                   allowed_models=p.allowed_models, allowed_profiles=p.allowed_profiles,
-                  deny_personal_keys=deny_keys, unrouted=unrouted, agent_setup=p.agent_setup)
+                  deny_personal_keys=deny_keys, unrouted=unrouted, agent_setup=p.agent_setup,
+                  routing_goal=p.routing_goal)
 
 
 def make(repo_root: str) -> ProPolicy:

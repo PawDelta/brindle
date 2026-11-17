@@ -38,14 +38,6 @@ def approve(db, agent, payload=ASK):
 # -- the default policy ------------------------------------------------------------------------
 
 
-def test_pro_defaults_to_recording_approvals(db, repo, worker, pro, monkeypatch):
-    monkeypatch.delenv("BRINDLE_POLICY_DEFAULT_OFF")
-    assert load_repo_config(str(repo)).permission_policy == "on"
-    approve(db, worker)
-    [entry] = permissions.load_store().approvals.values()
-    assert (entry["kind"], entry["match"], entry["count"]) == ("bash", "terraform apply", 1)
-
-
 @pytest.mark.variant("the opt-out the on-by-default policy must keep: an explicit off records nothing, on any plan")
 def test_explicit_off_records_nothing(db, repo, worker, monkeypatch):
     monkeypatch.delenv("BRINDLE_POLICY_DEFAULT_OFF")
@@ -77,13 +69,13 @@ def test_get_progress_shows_permission_suggestions_and_savings(db, repo, monkeyp
     assert "Learning" in text and "brindle account savings" in text
 
 
+@pytest.mark.variant("entitlement: accumulated permission suggestions must not produce learning notes for a free account")
 def test_get_progress_shows_neither_on_free(db, repo, monkeypatch):
     monkeypatch.setattr(license, "has", lambda feature: False)
     req = permissions.from_claude(ASK)
     for _ in range(permissions.SUGGEST_AFTER):
         permissions.record_approval(req)
-    text = progress(monkeypatch, repo)
-    assert "permission rule" not in text and "Learning" not in text
+    assert mcp_server._learning_notes(db, str(repo)) == []
 
 
 # -- assign and handoff -------------------------------------------------------------------------

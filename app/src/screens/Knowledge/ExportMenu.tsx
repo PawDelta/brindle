@@ -35,6 +35,8 @@ export interface ExportMenuProps {
   pickFolder?: PickFolder;
   /* Tells the reader what happened (or why not). */
   onSaid(text: string): void;
+  /* An export finished (success or failure); folder searches keep the menu open. */
+  onComplete?(): void;
   /* What happened last, shown at the panel's foot (the reader keeps it). */
   status?: string;
   /* Where the tokens of this session live; the menu's own by default. */
@@ -51,9 +53,10 @@ const bytesOf = (b64: string | undefined) => Uint8Array.from(atob(b64 ?? ""), (c
 
 type Running = "md" | "docx" | "zip" | "google" | "sites" | "sharepoint";
 
-export function ExportMenu({ client, id, source, title, repo, pickFolder, onSaid, status, session }: ExportMenuProps) {
+export function ExportMenu({ client, id, source, title, repo, pickFolder, onSaid, onComplete, status, session }: ExportMenuProps) {
   const src = source ?? { kind: "doc" as const, id: id! };
   const isDoc = src.kind === "doc";
+  const formatName = src.kind === "plan" ? "Markdown" : "HTML";
   const [policy, setPolicy] = useState<DocPolicy | null>(null);
   const [gated, setGated] = useState(false);
   const [config, setConfig] = useState<DocExportConfig | null>(null);
@@ -116,10 +119,11 @@ export function ExportMenu({ client, id, source, title, repo, pickFolder, onSaid
       const said = await run();
       if (current.current === context) onSaid(said);
     } catch (e) {
-      if (current.current === context) onSaid(message(e));
+      if (current.current === context) onSaid(!isDoc && what !== "sites" ? `Export failed: ${message(e)}` : message(e));
     } finally {
       active.current = false;
       setRunning(null);
+      if (current.current === context && what !== "sites") onComplete?.();
     }
   };
 
@@ -139,7 +143,7 @@ export function ExportMenu({ client, id, source, title, repo, pickFolder, onSaid
       a.download = got.filename;
       a.click();
       URL.revokeObjectURL(url);
-      return `Exported ${got.filename}.`;
+      return isDoc ? `Exported ${got.filename}.` : `Exported ${formatName} to your download location: ${got.filename}.`;
     });
 
   const file = async (destination: ExportDestination, format: "md" | "docx" | "zip" = "docx") => {
@@ -161,6 +165,7 @@ export function ExportMenu({ client, id, source, title, repo, pickFolder, onSaid
       if (!sess.signedIn("google")) await sess.signIn("google", config!.google_client_id!, config!.google_client_secret);
       checkCurrent();
       const up = await sess.upload(got.name, got.mime, got.bytes, true);
+      if (!isDoc) return up.url ? `Exported ${formatName} to Google Drive: ${up.url}` : `Exported ${formatName} to Google Drive.`;
       return up.url ? `Opened as a Google Doc: ${up.url}` : "Saved as a Google Doc in your Drive.";
     });
 
@@ -181,6 +186,7 @@ export function ExportMenu({ client, id, source, title, repo, pickFolder, onSaid
       const got = await file("sharepoint");
       checkCurrent();
       const up = await sess.uploadToSharePoint(site, folder.trim(), isDoc ? `${got.name}.docx` : got.filename, got.bytes, got.mime);
+      if (!isDoc) return up.url ? `Exported ${formatName} to SharePoint: ${up.url}` : `Exported ${formatName} to SharePoint.`;
       return up.url ? `Saved to SharePoint: ${up.url}` : "Saved to SharePoint.";
     });
 

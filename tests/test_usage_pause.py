@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from brindle import agents, autopilot, cull, quota, workspaces
+from brindle import agents, autopilot, cull, quota, subscription_usage, workspaces
 from brindle.db import Agent
 
 NOW = time.time()
@@ -14,6 +14,7 @@ RESET = NOW + 30 * 86400
 
 @pytest.fixture
 def session(db, repo, monkeypatch):
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "test-subscription")
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive",
                        "processing", "@0", None, time.time()))
@@ -47,6 +48,7 @@ def use(percent, resets_at=RESET):
     autopilot.record_usage({"rate_limits": {"five_hour": {"used_percentage": percent, "resets_at": resets_at}}})
 
 
+@pytest.mark.variant("budget enforcement: stopping the supervisor at its usage limit must also pause live workers")
 def test_on_stop_pauses_even_with_workers_running(db, session):
     use(95)
     assert autopilot.on_stop(db, db.get_agent("boss"), {}) is None

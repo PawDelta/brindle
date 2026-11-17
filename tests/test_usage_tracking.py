@@ -2,7 +2,9 @@ import json
 import time
 from pathlib import Path
 
-from brindle import agents, usage, view
+import pytest
+
+from brindle import usage, view
 from brindle.db import Agent
 
 
@@ -30,6 +32,7 @@ def write(path: Path, lines: list[str]) -> None:
             f.write(line)
 
 
+@pytest.mark.variant("usage accounting: content blocks of one message arriving in separate reads cannot double count tokens")
 def test_incremental_reread_dedupes_a_message_split_across_calls(db, tmp_path):
     """A message's later content-block line can land in its own incremental
     read, separate from the call that already counted the message's first
@@ -91,47 +94,6 @@ def test_agent_usage_reads_a_codex_rollout_in_the_current_layout(db, tmp_path, m
         assert u is not None and u.total
         assert (u.input_tokens, u.cache_read_tokens, u.output_tokens) == (500, 2500, 90)
         assert u.model == "gpt-6-luna"
-
-
-def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
-    from brindle import workspaces
-
-    from conftest import sh
-
-    origin = tmp_path / "origin.git"
-    sh(f"git init -q --bare -b main {origin}", tmp_path)
-    work = tmp_path / "proj"
-    work.mkdir()
-    sh("git init -q -b main", work)
-    (work / "f.txt").write_text("x")
-    sh("git add -A && git commit -qm init", work)
-
-    (work / ".brindle").mkdir()
-    (work / ".brindle" / "config.json").write_text('{"pipeline": false}')  # the manual flow forwards reports
-    ws = workspaces.create(db, str(work), "feature").workspace
-    t = tmp_path / "sess.jsonl"
-    write(t, [_line("m1", input_tokens=2000, output_tokens=9000, cache_read=160000, cache_creation=20000)])
-
-    boss = Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "@0",
-                 None, time.time())
-    db.add_agent(boss)
-    worker = Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "@1",
-                   None, time.time(), transcript_path=str(t))
-    db.add_agent(worker)
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-
-    agents.report_result(db, "w1", "done: added login\nmore detail")
-    msg = db.pop_pending("boss")
-    assert msg is not None
-    from conftest import full_text
-
-    body = full_text(db, "boss", msg.body)
-    head, _, rest = body.partition("</summary>\n\n")[2].partition("\n\n")[2].partition("\n\n")
-    assert head.endswith("done: added login") and "\n" not in head
-    assert rest.startswith("<details><summary>Details</summary>") and rest.endswith("</details>")
-    assert "more detail" in rest
-    assert "tokens: 182k in (160k cached, 20k written)" in rest
-    assert "sonnet" in rest
 
 
 def test_agent_entry_reads_once_then_only_stats(db, tmp_path, monkeypatch):

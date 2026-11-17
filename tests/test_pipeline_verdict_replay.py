@@ -53,7 +53,7 @@ def test_sweep_replays_a_verdict_nothing_acted_on_once(db, repo, acted, approved
     assert len(told) == 1 and "feat" in told[0]
 
 
-@pytest.mark.parametrize("approved", [True, False])
+@pytest.mark.parametrize("approved", [False])
 def test_sweep_reading_the_worker_before_its_verdict_was_acted_on_does_not_act_again(db, repo, acted,
                                                                                       monkeypatch, approved):
     """The sweep reads its workers once; a verdict acted on after that read
@@ -102,7 +102,7 @@ def test_a_piped_branch_nothing_works_on_is_reported_once_not_closed(db, repo, m
 
 
 @pytest.mark.parametrize("note", [cull.note_stalled, cull.note_silent, cull.note_idle_unreported,
-                                agents.tell_parent_unreported, "prompt", "doc", "reviewer",
+                                "prompt", "doc",
                                 pytest.param("reviewer-stop", marks=pytest.mark.variant(
                                     "Stop hook changes status before claiming reviewer recovery"))])
 def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypatch, note):

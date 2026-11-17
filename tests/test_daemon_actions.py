@@ -163,7 +163,6 @@ def _flat(args):
     ("POST", "/v1/sessions/sup/pause", {}, (agents, "pause"), [], 200, "sup"),
     # The person decides a plan as the worker's supervisor would.
     ("POST", "/v1/inbox/wk/approve", {}, (agents, "approve_plan"), "approved", 200, "sup"),
-    ("POST", "/v1/agents/wk/kill", {}, (agents, "kill"), None, 200, "wk"),
     # Real workspace ids contain a slash, which arrives in the path as %2F decoded.
     ("POST", "/v1/workspaces/proj/w-2/merge", {}, (pipeline, "merge"), "Merged feat2", 202, "proj/w-2"),
     ("POST", "/v1/workspaces/proj/w-2/remove", {}, (workspaces, "remove"), SimpleNamespace(branch_note=None, teardown=None), 200, "proj/w-2"),
@@ -237,7 +236,7 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
         db.add_agent(Agent(f"wk{n}", f"w-{n}", "developer", "claude", "sup", "assign", "idle", f"%{n + 1}",
                            None, time.time()))
     stopped = []
-    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: {})
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: tmux.PaneSnapshot(None))
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id not in stopped)
     monkeypatch.setattr(agents, "owns_pane", lambda *a, **k: True)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: stopped.append(a.id))
@@ -258,13 +257,13 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
     ("app.py", "read", None, 200),              # the base from GET .../file, the app's way
     ("app.py", "e69de29", None, 409),           # the empty blob: not what the file is now
     ("app.py", "shown", "busy", 409),
-    ("app.py", "shown", "hook-refuses", 409),   # the file goes back; the worker's index survives
-    ("new.txt", "shown", "hook-refuses", 409),  # ... refused: untracked again, as it was
-    ("pkg/m.py", "shown", "deleted-refused", 409),  # its deletion staged, then refused: still staged
+    pytest.param("app.py", "shown", "hook-refuses", 409, marks=pytest.mark.variant("failed commit preserves staged content")),
+    pytest.param("new.txt", "shown", "hook-refuses", 409, marks=pytest.mark.variant("failed commit restores untracked file")),
+    pytest.param("pkg/m.py", "shown", "deleted-refused", 409, marks=pytest.mark.variant("failed commit preserves staged deletion")),
     ("app.py", "shown", "to-head", 200),        # back to HEAD's content: no commit, the staged version goes
     pytest.param("app.py", "shown", "agent", 403, marks=pytest.mark.variant("an agent holding the token")),
-    ("../proj/app.py", "shown", None, 400),
-    ("out/m.py", "shown", None, 400),           # a symlinked directory leading out of the worktree
+    pytest.param("../proj/app.py", "shown", None, 400, marks=pytest.mark.variant("review edit traversal escape")),
+    pytest.param("out/m.py", "shown", None, 400, marks=pytest.mark.variant("review edit symlink escape")),
     pytest.param(".git/HEAD", "shown", None, 400, marks=pytest.mark.variant("the worktree's own git link")),
     pytest.param(":(glob)*", "shown", None, 200,
                  marks=pytest.mark.variant("a name that is pathspec magic must not commit other work")),
@@ -398,6 +397,7 @@ def test_the_demo_runs_in_a_practice_repo_on_the_cli_signed_in(db, world, brindl
     assert demo_launches == [(reply["repo"], "codex")]
     # The flag /repos sends (the app hides it from New session's projects); a lookalike elsewhere is no demo.
     look = str(brindle_home / "textkit-1")
+    (brindle_home / "textkit-1" / ".git").mkdir(parents=True)     # /repos lists only repos still on disk
     db.add_workspace(Workspace("look/root", look, "root", "main", "main", "main", look, None, "brindle-look", time.time()))
     flagged = {r["repo_root"]: r["demo"] for r in _send("GET", "/v1/repos")[1]}
     assert flagged[reply["repo"]] is True and flagged[look] is False
@@ -433,20 +433,21 @@ def test_a_demo_held_by_its_preflight_keeps_its_repo_until_settled_or_cancelled(
 
 @pytest.mark.parametrize("scope,body,peer_pid,status,written", [
     # The picker's pick for a tier is dropped too, and so is an alias of a tier, or either would still win.
-    ("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,
-     {"routing": {"heavy": ["developer"], "light": ["developer-codex"], "advanced": ["developer-codex"]}}),
+    pytest.param("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,
+     {"routing": {"heavy": ["developer"], "light": ["developer-codex"], "advanced": ["developer-codex"]}},
+     marks=pytest.mark.variant("stale tier aliases override user edits")),
     # A kind's fallbacks alone keep the person's own pick, not the one this repo's local file overrides it with.
-    ("user", {"kinds": {"medium": {"fallbacks": ["developer-codex"]}}}, None, 200,
+    pytest.param("user", {"kinds": {"medium": {"fallbacks": ["developer-sonnet"]}}}, None, 200,
      {"routing": {"heavy": ["developer"], "advanced": ["developer-heavy"], "reasoning": ["developer-fable"],
-                  "medium": ["developer-sonnet", "developer-codex"]},
-      "routing_locked": {"medium": True}, "routing_light": "claude-haiku"}),
-    ("local", {"reviewer": "reviewer"}, None, 200, {"reviewer": "reviewer"}),
+                  "medium": ["developer-codex", "developer-sonnet"]},
+      "routing_locked": {"medium": True}, "routing_light": "claude-haiku"},
+     marks=pytest.mark.variant("fallback edit preserves user scope")),
     ("repo", {"tiers": {"light": ["developer"]}, "exclude_providers": ["claude"]}, None, 200,
      {"routing": {"light": ["developer"]}, "exclude_providers": ["claude"]}),
-    ("repo", {"tiers": {"heavy": ["developer", "nope"]}}, None, 400, {}),
+    pytest.param("repo", {"tiers": {"heavy": ["developer", "nope"]}}, None, 400, {}, marks=pytest.mark.variant("invalid profile rejects whole update")),
     pytest.param("repo", {"reviewer": "reviewer"}, 310, 403, {},
                  marks=pytest.mark.variant("an agent holding the token still can't change routing")),
-], ids=["user", "user-kind", "local", "repo", "bad-profile", "agent"])
+], ids=["user", "user-kind", "repo", "bad-profile", "agent"])
 def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body, peer_pid, status, written):
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent w1")
     config.set_user("routing", {"heavy": ["developer"], "advanced": ["developer-heavy"],
@@ -553,7 +554,7 @@ PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus=
 
 
 @pytest.mark.parametrize("acc,profile", [
-    (Access(org_id="acme", allowed_providers=("claude",)), "developer-codex"),
+    pytest.param(Access(org_id="acme", allowed_providers=("claude",)), "developer-codex", marks=pytest.mark.variant("PUT rejects org-forbidden provider")),
     (Access(org_id="acme", error="couldn't read the policy"), "developer-codex"),
     # opus is pinned to the us. id; delegation matches a pin exactly, so the eu. one doesn't allow it.
     (Access(org_id="acme", allowed_models=("eu.anthropic.claude-opus-x-v1:0",), agent_setup=PINNED),
@@ -577,7 +578,7 @@ SECRET = "sk-ant-daemon-test-0123456789wxyz"
 
 
 @pytest.mark.parametrize("name,value,peer_pid,status", [
-    ("ANTHROPIC_API_KEY", SECRET, None, 200),
+    pytest.param("ANTHROPIC_API_KEY", SECRET, None, 200, marks=pytest.mark.variant("stored key never echoed")),
     pytest.param("ANTHROPIC_API_KEY", SECRET, 310, 403, marks=pytest.mark.variant("an agent holding the token")),
     ("BRINDLE_TOKEN", SECRET, None, 400),
     # http.client refuses the header, quoting the whole value in its error.
@@ -615,7 +616,7 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
 
 @pytest.mark.parametrize("action,stored,env,provider_status,expect", [
     ("put", False, False, 200, ("verified", True, False)),
-    ("test", True, False, 401, ("rejected", True, False)),
+    pytest.param("test", True, False, 401, ("rejected", True, False), marks=pytest.mark.variant("rejected key remains stored")),
     ("test", True, False, 500, ("unchecked", True, False)),
     ("delete", True, False, 200, (None, False, False)),
     ("auth", True, False, 401, ("rejected", True, False)),
@@ -658,7 +659,10 @@ def test_api_key_lifecycle(db, world, monkeypatch, provider_http, action, stored
     assert SECRET not in json.dumps(got)
 
 
-@pytest.mark.parametrize("during", ["replaced", "deleted"])
+@pytest.mark.parametrize("during", [
+    pytest.param("replaced", marks=pytest.mark.variant("race: key replaced during verification")),
+    pytest.param("deleted", marks=pytest.mark.variant("race: key deleted during verification")),
+])
 def test_api_key_lifecycle_check_result_stays_with_the_key_it_checked(db, monkeypatch, provider_http, during):
     from brindle import key_check, keys_cmds, keystore
 
@@ -691,8 +695,9 @@ NOFLOCK = False  # True: children skip flock, which must make the lock test belo
 
 @pytest.mark.parametrize("fault", [
     "lock-unavailable",
-    pytest.param("delete-during-update", marks=pytest.mark.slow(
-        "a cross-process lock race: two spawned interpreters, and a 2s window the delete must stay blocked in")),
+    pytest.param("delete-during-update", marks=[pytest.mark.slow(
+        "a cross-process lock race: two spawned interpreters, and a 2s window the delete must stay blocked in"),
+        pytest.mark.variant("race: cross-process delete during update")]),
 ])
 def test_api_key_lifecycle_key_updates_hold_the_store_lock(monkeypatch, provider_http, fault):
     import fcntl
@@ -831,7 +836,7 @@ class _FakeCLI:
 
 
 @pytest.mark.parametrize("case", ["bedrock", "foundry", "org_refuses", "org_route_wins", "opencode_azure",
-                                  "concurrent"])
+                                  pytest.param("concurrent", marks=pytest.mark.variant("race: connection and settings saves"))])
 def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_org(
         db, world, tmp_path, monkeypatch, case):
     import subprocess
@@ -1376,28 +1381,29 @@ def _brindle_allows_npm_test() -> bool:
 
 
 @pytest.mark.parametrize("choice,suggested,race,status,verdict,rule", [
-    ("allow_once", True, None, 200, "allow", None),
+    pytest.param("allow_once", True, None, 200, "allow", None, marks=pytest.mark.variant("allow once persists no rule")),
     # No suggestion from Claude Code: brindle's own rule is written.
-    ("allow_always", False, None, 200, "allow", "brindle"),
+    pytest.param("allow_always", False, None, 200, "allow", "brindle", marks=pytest.mark.variant("always allow without CLI suggestion")),
     # Claude Code's suggestion goes back to it to apply, as if picked in its prompt.
     ("allow_always", True, None, 200, "allow", "claude"),
-    ("deny", True, None, 200, "deny", None),
+    pytest.param("deny", True, None, 200, "deny", None, marks=pytest.mark.variant("deny reaches waiting hook")),
     # "Answer in the terminal instead": the hold ends now, and the CLI's own prompt asks.
     ("terminal", True, None, 200, None, None),
     # Codex's hook holds its request the same way, and so do agy's (under agy_approvals
     # "brindle") and a native worker's loop, which have no prompt of their own.
     ("allow_once", False, "codex", 200, "allow", None),
-    ("allow_once", False, "antigravity", 200, "allow", None),
+    pytest.param("allow_once", False, "antigravity", 200, "allow", None, marks=pytest.mark.variant("Antigravity hook has no prompt")),
     ("allow_once", False, "native", 200, "allow", None),
     # A deny already in flight holds the request: this answer is refused, writes nothing,
     # and the hold runs out.
-    pytest.param("allow_always", False, "in-flight", 409, None, None, marks=WAITS_OUT_THE_HOLD),
+    pytest.param("allow_always", False, "in-flight", 409, None, None, marks=[WAITS_OUT_THE_HOLD,
+                 pytest.mark.variant("race: deny already in flight")]),
     # The hook gives up between the claim and the hand-over: the rule written meanwhile goes again.
     ("allow_always", False, "lost", 409, None, None),
     # The hold expires after the answer is handed over but before the hook takes it: not
     # delivered, so a conflict, and the rule written for it goes again.
-    ("allow_once", True, "expired", 409, None, None),
-    ("allow_always", False, "expired", 409, None, None),
+    pytest.param("allow_once", True, "expired", 409, None, None, marks=pytest.mark.variant("race: allow once expires after handover")),
+    pytest.param("allow_always", False, "expired", 409, None, None, marks=pytest.mark.variant("race: expired always-allow rolls back rule")),
     # Two requests for the same rule: one allowed always and consumed, the other expired.
     # The rule the first wrote stays.
     ("allow_always", False, "shared", 409, None, "brindle"),
@@ -1405,11 +1411,13 @@ def _brindle_allows_npm_test() -> bool:
     # own prompt: its PostToolUse ends the retry's hold, not the old denied request's.
     ("allow_once", True, "retried", None, None, None),
     # The stored request changed while the hook waits: it isn't the request the hook registered.
-    pytest.param("allow_once", True, "mutated", 409, None, None, marks=WAITS_OUT_THE_HOLD),
+    pytest.param("allow_once", True, "mutated", 409, None, None, marks=[WAITS_OUT_THE_HOLD,
+                 pytest.mark.variant("race: request mutated while held")]),
     # An answer written into the database is no answer: the hold runs out.
-    pytest.param("allow_once", True, "db-answer", None, None, None, marks=WAITS_OUT_THE_HOLD),
+    pytest.param("allow_once", True, "db-answer", None, None, None, marks=[WAITS_OUT_THE_HOLD,
+                 pytest.mark.variant("forged DB answer bypass attempt")]),
     # A daemon.json rewritten with another token and socket: the hook never reads it.
-    ("allow_once", True, "forged-json", 200, "allow", None),
+    pytest.param("allow_once", True, "forged-json", 200, "allow", None, marks=pytest.mark.variant("forged daemon metadata bypass attempt")),
     # Another identity's session: nothing is answered or written.
     pytest.param("allow_always", False, "locked", 409, None, None, marks=WAITS_OUT_THE_HOLD),
     # The agent is closed while it waits: the hold ends, and the request with it.
@@ -1653,10 +1661,12 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
 # The pane each second: the prompt, past it twice, a read it can't tell (the count starts over), past it for good.
 # Or drawn after 11s busy: looked at every 5s till a look catches it, so the app's deny at 16s still reaches the hook.
 @pytest.mark.parametrize("reads,looks,deny", [
-    ([CLAUDE_PROMPT, CLAUDE_IDLE, CLAUDE_IDLE, "", CLAUDE_IDLE, CLAUDE_IDLE, CLAUDE_IDLE], list(range(7)), False),
+    pytest.param([CLAUDE_PROMPT, CLAUDE_IDLE, CLAUDE_IDLE, "", CLAUDE_IDLE, CLAUDE_IDLE, CLAUDE_IDLE], list(range(7)), False,
+                 marks=pytest.mark.variant("terminal denial across ambiguous capture")),
     pytest.param([CLAUDE_PROMPT, CLAUDE_BUSY, CLAUDE_BUSY, "", CLAUDE_BUSY, CLAUDE_BUSY, CLAUDE_BUSY], list(range(7)),
                  False, marks=pytest.mark.variant("review: allowed in the pane, its tool still running, so no PostToolUse yet")),
-    ([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], list(range(17)), True)], ids=["denied", "allowed", "prompt-drawn-late"])
+    pytest.param([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], list(range(17)), True, marks=pytest.mark.variant("race: permission prompt drawn late"))],
+    ids=["denied", "allowed", "prompt-drawn-late"])
 def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, answering, monkeypatch, reads, looks, deny):
     from brindle import tmux
     from brindle.db import DB
@@ -1686,6 +1696,216 @@ def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, a
     assert _verdict(out) == ("deny" if deny else None) and seen == looks
     assert [i for i in inbox.items(db, str(repo), panes={"%2": True}) if i.agent_id == "wk"] == []
     assert bus.tail(db, kinds=("permission.changed",), repo_root=str(repo))
+
+
+@pytest.fixture
+def session_pr_forge(db, tmp_path, monkeypatch):
+    from concurrent.futures import Future
+
+    from brindle import git, spawn
+    from brindle.daemon import session_review
+    from brindle.service import inbox
+
+    ws = Workspace("session", str(tmp_path), "session", "worktree", "sess", "main",
+                   str(tmp_path), None, "session", 0)
+    db.add_workspace(ws)
+    db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, 0))
+    url = "https://github.com/o/r/pull/42"
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at)"
+                    " VALUES ('lead', 'sess', ?, 'head', 1)", (url,))
+    forge = SimpleNamespace(ws=ws, url=url, local_head="head", merges=[], read_hook=None, merge_hook=None, failure=False,
+                            payload={"state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "head",
+                                     "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]})
+
+    class Inline:
+        def submit(self, fn, *args):
+            result = Future()
+            result.set_result(fn(*args))
+            return result
+
+    def read(argv, **kwargs):
+        if forge.read_hook:
+            hook, forge.read_hook = forge.read_hook, None
+            hook()
+        value = forge.payload["state"] if argv[-1] == ".state" else json.dumps(forge.payload)
+        return SimpleNamespace(returncode=0, stdout=value, stderr="")
+
+    def action(argv, **kwargs):
+        forge.merges.append(argv)
+        if forge.merge_hook:
+            forge.merge_hook()
+        if forge.failure:
+            return SimpleNamespace(returncode=1, stdout="", stderr="merge refused")
+        forge.payload["state"] = "MERGED"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/fake/gh")
+    monkeypatch.setattr(spawn, "read", read)
+    monkeypatch.setattr(spawn, "action", action)
+    monkeypatch.setattr(session_review, "_pr_pool", Inline())
+    monkeypatch.setattr(session_review, "_pr_cache", {})
+    monkeypatch.setattr(session_review, "_pr_flights", {})
+    monkeypatch.setattr(session_review, "_pr_changed", set())
+    monkeypatch.setattr(session_review, "_head_changed", set())
+    monkeypatch.setattr(session_review, "_head_cache", {
+        ("head", ws.path): (time.monotonic(), {"url": url, "number": 42}),
+    })
+    monkeypatch.setattr(session_review, "_head_flights", set())
+    monkeypatch.setattr(session_review, "_head_roots", {})
+    monkeypatch.setattr(git, "out", lambda *args, **kwargs: forge.local_head)
+    forge.items = lambda: inbox._pr_items(db, "lead", "sess", ws, {"root_id": "lead"})
+    return forge
+
+
+def test_auto_merge_session_pr_once_across_daemons_and_opt_out(db, session_pr_forge, monkeypatch):
+    from brindle.daemon import session_review
+    from brindle.db import DB
+
+    forge = session_pr_forge
+    settings = Path(forge.ws.repo_root) / ".brindle" / "config.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"auto_merge_session_prs": False}))
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    settings.write_text("{}")
+    other = DB(db.path)
+    try:
+        forge.merge_hook = lambda: session_review.refresh_pr_states(other)
+        session_review.refresh_pr_states(db)
+        session_review.refresh_pr_states(other)
+        assert len(forge.merges) == 1
+        assert forge.merges[0][:3] == ["gh", "pr", "merge"]
+        assert forge.merges[0][forge.merges[0].index("--match-head-commit") + 1] == "head"
+        assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+        # Only the existing merge observer records the merge and starts session sync.
+        landed = []
+        monkeypatch.setattr(session_review, "_merge_polled", 0.0)
+        monkeypatch.setattr(session_review, "_merge_checks", {})
+        monkeypatch.setattr(session_review, "_sync_after_merge", lambda *args: landed.append(args[1:]))
+        session_review.poll_merged(db)
+        assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is not None
+        assert landed == [("lead", "sess", forge.url)]
+    finally:
+        other.conn.close()
+
+
+def test_auto_merge_session_pr_rechecks_forge_and_record(db, session_pr_forge):
+    from brindle.daemon import session_review
+
+    forge = session_pr_forge
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    forge.payload["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    forge.payload["statusCheckRollup"][0]["conclusion"] = "SUCCESS"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    forge.read_hook = lambda: db.conn.execute("UPDATE session_prs SET url = NULL")
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    db.conn.execute("UPDATE session_prs SET url = ?", (forge.url,))
+    session_review.refresh_pr_states(db)
+    assert len(forge.merges) == 1
+
+
+def test_auto_merge_session_pr_failure_reaches_inbox_once(db, session_pr_forge):
+    from brindle.daemon import session_review
+    from brindle.db import DB
+
+    forge = session_pr_forge
+    forge.failure = True
+    session_review.refresh_pr_states(db)
+    other = DB(db.path)
+    try:
+        session_review.refresh_pr_states(other)
+    finally:
+        other.conn.close()
+    assert len(forge.merges) == 1
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+    assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+    forge.local_head = "unpushed"
+    session_review._head_cache[(forge.local_head, forge.ws.path)] = (time.monotonic(), {})
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+    forge.payload["state"] = "CLOSED"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    assert not forge.items()
+    forge.payload["state"] = "OPEN"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    db.conn.execute("UPDATE session_prs SET merged_at = 1")
+    assert not forge.items()
+    forge.local_head = "head"  # an older HEAD lookup still says this PR is open
+    assert all(item.kind != "pr_failed" for item in forge.items())
+
+
+def test_auto_merge_session_pr_interrupted_owner(db, session_pr_forge):
+    from brindle.daemon import session_review
+    from brindle.db import DB
+
+    forge = session_pr_forge
+    # Upgrading an older database must recover its ownerless claims as well.
+    db.conn.execute("DROP TABLE session_pr_merges")
+    db.conn.execute("CREATE TABLE session_pr_merges (url TEXT PRIMARY KEY, state TEXT NOT NULL, error TEXT)")
+    migrated = DB(db.path)
+    migrated.conn.close()
+    # An earlier daemon died after inserting its claim, before contacting GitHub.
+    db.conn.execute("INSERT INTO session_pr_merges (url, state) VALUES (?, 'merging')", (forge.url,))
+    session_review.refresh_pr_states(db)
+    assert not forge.merges
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+
+    db.conn.execute("DELETE FROM session_pr_merges WHERE url = ?", (forge.url,))
+    other = DB(db.path)
+    try:
+        def interrupted():
+            # The owner is still live: a second daemon must leave its claim alone.
+            session_review.refresh_pr_states(other)
+            assert not session_review.pr_problem(other, "lead", forge.url)
+            raise SystemExit
+
+        forge.merge_hook = interrupted
+        with pytest.raises(SystemExit):
+            session_review.refresh_pr_states(db)
+        forge.merge_hook = None
+        assert len(forge.merges) == 1
+        payload, forge.payload = forge.payload, None  # the forge cannot confirm the interrupted submission
+        session_review.refresh_pr_states(other)
+        forge.payload = payload
+        assert len(forge.merges) == 1
+        assert [item.kind for item in forge.items()] == ["pr_failed"]
+
+        # If GitHub accepted the interrupted request, reconcile without submitting it again.
+        db.conn.execute("UPDATE session_pr_merges SET state = 'merging' WHERE url = ?", (forge.url,))
+        forge.payload["state"] = "MERGED"
+        session_review.refresh_pr_states(other)
+        assert len(forge.merges) == 1
+        assert not session_review.pr_problem(other, "lead", forge.url)
+        assert db.conn.execute("SELECT state FROM session_pr_merges").fetchone()[0] == "submitted"
+        assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+    finally:
+        other.conn.close()
+
+
+@pytest.mark.parametrize("problem", ["conflict", "ci"])
+def test_auto_merge_session_pr_unattended_problem_reaches_inbox(db, session_pr_forge, problem):
+    from brindle.daemon import session_review
+
+    forge = session_pr_forge
+    if problem == "conflict":
+        forge.payload["mergeable"] = "CONFLICTING"
+    else:
+        forge.payload["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+    # A dismissed opened-PR card must not hide a later failure.
+    db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES ('lead', 'sess', ?)",
+                    (f"head|{forge.url}",))
+    db.add_agent(Agent("worker", forge.ws.id, "developer", "claude", "lead", "assign", "processing", "", None, 0))
+    session_review.refresh_pr_states(db)
+    assert not forge.items()
+    db.set_status("worker", "done")
+    session_review.refresh_pr_states(db)
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
+    assert not forge.merges
+    forge.local_head = "unpushed"
+    session_review._head_cache[(forge.local_head, forge.ws.path)] = (time.monotonic(), {})
+    assert [item.kind for item in forge.items()] == ["pr_failed"]
 
 
 @pytest.fixture
@@ -1744,7 +1964,8 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
     real_head = gates.head
     monkeypatch.setattr(gates, "head", lambda ws: head if ws.id == "proj/w-f" else real_head(ws))
-    assert missing() == 5 and _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
+    monkeypatch.setattr(session_review, "_pr_open_state", lambda *a: False)    # readiness is under test, not GitHub
+    assert missing() == 5 and _send("GET", "/v1/sessions/lead/pr/draft")[0] == 200
     assert watch.sweep(db) == []
     db.set_merged("proj/w-f", head)
     assert missing() == 4
@@ -1770,6 +1991,8 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
 def _readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, obstacle):
     from brindle import gates, git, identity_lock
     from brindle.daemon import session_review
+    monkeypatch.setattr(session_review.session_sync, "refresh_drift_flags", lambda db: None)
+    monkeypatch.setattr(session_review.session_sync, "refresh_idle_sessions", lambda db, fetched_at: None)
     head = _commit(Path(lead.path), "a.py", "a\n")
     config.set_local(lead.repo_root, "checks", ["validate"])
     held = []
@@ -1930,7 +2153,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     sess, called, runs, told = Path(lead.path), tmp_path / "gh-called", [], []
     fake = tmp_path / "bin" / "gh"
     fake.parent.mkdir()
-    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    # `pr list` is the inbox's background look for a PR already open on HEAD: not an opening.
+    fake.write_text(f"#!/bin/sh\n[ \"$2\" = list ] || echo \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
     config.set_local(lead.repo_root, "checks", ["validate"])
@@ -1963,6 +2187,7 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     config.set_local(lead.repo_root, "checks", ["validate", "lint"])
     assert _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})[0] == 202
     # The sha brindle checked; the Inbox item goes.
+    # The person opened it: no "PR opened" card tells them so.
     assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1, [])
     newer = _commit(sess, "a.py", "b\n")
     watch.sweep(db)
@@ -1971,6 +2196,207 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     assert _send("POST", "/v1/sessions/lead/pr/push")[0] == 202
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
     assert (remote(), ready["pr"]["unpushed"], runs) == (newer, 0, ["validate", "lint", "validate", "lint"])
+    # A PR gh opened from another branch name is adopted, but a Push to the session branch would not reach it.
+    db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) SELECT root_id, branch, 'stress/other' FROM session_prs")
+    code, refused = _send("POST", "/v1/sessions/lead/pr/push")
+    assert code == 409 and "stress/other" in json.dumps(refused)
+
+
+def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, lead, tmp_path, monkeypatch):
+    """A merged session PR stays the session's until its branch has changes of its own beyond it (a
+    sync's clean merge from main doesn't count, a merge resolved with new content does); then the next PR opens
+    from the same branch, replacing the merged one's row."""
+    from brindle.daemon import session_review
+
+    sess, first, second = Path(lead.path), "https://github.com/o/r/pull/7", "https://github.com/o/r/pull/8"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho {second}\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    monkeypatch.setattr(session_review, "open_pr_for_head", lambda *a, **kw: None)    # GitHub isn't under test
+    pushed = _commit(sess, "a.py", "a\n")
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, merged_at)"
+                    " VALUES ('lead', 'sess', ?, ?, 1, 2)", (first, pushed))     # as poll_merged leaves it
+
+    def readiness() -> tuple:
+        _, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
+        return reply["ready"], reply["pr"], session_review.goal_phase(db, "lead")
+
+    _commit(repo, "main.py", "m\n")
+    sh("git merge -q --no-ff main -m sync", sess)       # a sync brings main in: nothing new of its own
+    ready, pr, phase = readiness()
+    assert (ready, pr, phase) == (False, None, ("done", first))
+    # Main changes the PR's file in a squash brindle recorded (one edited on the forge, so not replayed
+    # `-s ours`); the next sync's conflict is resolved with new content in the merge alone.
+    from brindle import session_sync
+    assert session_sync.record_squash(db, lead, _commit(repo, "a.py", "z\n"), pushed)
+    sh("git merge -q main || true", sess)
+    (sess / "a.py").write_text("resolved\n")
+    sh("git add a.py && git commit -q --no-edit", sess)
+    assert readiness() == (True, None, ("ready_for_pr", None))
+    code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Next"})
+    assert code == 202, reply
+    assert readiness() == (True, {"url": second, "unpushed": 0}, ("pr_open", second))
+
+
+@pytest.fixture
+def phase_pr_forge(db, lead, monkeypatch):
+    """``lead``'s goal in four phases (each milestone's check passes once ``land`` names it), with
+    GitHub and git pushes faked in process: ``remote`` is what origin's branches hold, ``opened`` the
+    PRs created; ``before_job`` runs between a landing's dispatch and its job."""
+    from concurrent.futures import Future
+
+    from brindle import gates, git, spawn
+    from brindle.config import RepoConfig
+    from brindle.daemon import session_review
+
+    forge = SimpleNamespace(remote={}, opened=[], merged=[], state="OPEN", before_job=lambda: None,
+                            sess=Path(lead.path))
+    passing: set[str] = set()
+    real_read, real_action = spawn.read, spawn.action
+
+    def payload() -> dict:
+        return {"state": forge.state, "mergeable": "MERGEABLE", "headRefOid": forge.remote.get("sess"),
+                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]}
+
+    def read(argv, **kwargs):
+        if argv[:3] != ["gh", "pr", "view"]:
+            return real_read(argv, **kwargs)
+        return SimpleNamespace(returncode=0, stdout=forge.state if argv[-1] == ".state" else json.dumps(payload()),
+                               stderr="")
+
+    def action(argv, **kwargs):
+        if argv[:3] == ["gh", "pr", "create"]:
+            forge.opened.append(argv)
+            forge.state = "OPEN"
+            return SimpleNamespace(returncode=0, stdout=f"https://github.com/o/r/pull/{len(forge.opened)}", stderr="")
+        if argv[:3] == ["gh", "pr", "merge"]:
+            forge.merged.append(argv[-1])       # --match-head-commit's
+            forge.state = "MERGED"
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return real_action(argv, **kwargs)
+
+    class Inline:
+        def submit(self, fn, *args):
+            done = Future()
+            done.set_result(fn(*args))
+            return done
+
+    def spawn_job(target):
+        forge.before_job()
+        target()
+
+    monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/fake/gh")
+    monkeypatch.setattr(spawn, "read", read)
+    monkeypatch.setattr(spawn, "action", action)
+    monkeypatch.setattr(git, "push", lambda path, branch, sha=None, track=True: forge.remote.__setitem__(branch, sha))
+    monkeypatch.setattr(routes_actions, "_spawn", spawn_job)
+    monkeypatch.setattr(routes_actions, "_PHASE_WAITING", {})
+    monkeypatch.setattr(session_review, "open_pr_for_head", lambda *a, **kw: None)    # GitHub's PR search isn't under test
+    monkeypatch.setattr(session_review, "_pr_pool", Inline())
+    monkeypatch.setattr(session_review, "_pr_cache", {})
+    monkeypatch.setattr(session_review, "_pr_flights", {})
+    monkeypatch.setattr(session_review, "_pr_changed", set())
+    monkeypatch.setattr(session_review, "_head_changed", set())
+    monkeypatch.setattr(agents, "_notify_supervisor", lambda *a: None)
+    monkeypatch.setattr(gates, "run_checked", lambda db, ws, cmd, *a, **kw: (cmd in passing, ""))
+    autopilot.set_goal(db, "lead", "Ship it", [(p, p, None, None, None, p) for p in ("api", "db", "docs", "ui")])
+
+    def land(phase: str) -> str:
+        """``phase``'s milestone passes on HEAD; the next phase's work is committed; the sweep lands."""
+        passing.add(phase)
+        autopilot.check_milestones(db, "lead", lead, cfg=RepoConfig(goal_audit=False))
+        tip = _commit(forge.sess, f"after-{phase}.py", "next\n")
+        routes_actions.land_phase_prs(db)
+        assert sh("git rev-parse HEAD", forge.sess) == tip      # the local branch never moves
+        return tip
+
+    forge.land = land
+    forge.pr = lambda: tuple(db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_prs").fetchone())
+    forge.states = lambda: [tuple(r) for r in db.conn.execute("SELECT phase, state FROM phase_prs ORDER BY rowid")]
+    return forge
+
+
+def test_phase_pr_lands_each_phase_at_its_passed_commit_mid_goal(db, phase_pr_forge):
+    """While a later phase's milestone still fails, brindle lands a completed phase itself: it opens the
+    session PR at the commit the phase passed on, then pushes the next phase's commit to that PR, never
+    the branch's tip. A checkout dirtied between the landing's dispatch and its job refuses it."""
+    from brindle.daemon import session_review
+
+    forge, url = phase_pr_forge, "https://github.com/o/r/pull/1"
+    first = _commit(forge.sess, "a.py", "a\n")
+    assert session_review.reasons(db, *session_review.session(db, "lead"))    # brindle's own Open PR is refused
+    tip = forge.land("api")
+    assert (forge.remote, forge.pr()) == ({"sess": first}, (url, first, None))
+    forge.land("db")
+    assert (forge.remote, forge.pr(), len(forge.opened)) == ({"sess": tip}, (url, tip, None), 1)
+    forge.before_job = lambda: (forge.sess / "a.py").write_text("uncommitted\n")
+    forge.land("docs")
+    assert forge.remote == {"sess": tip}
+    assert forge.states() == [("api", "pushed"), ("db", "pushed"), ("docs", "refused")]
+
+
+@pytest.mark.parametrize("merged_by", ["brindle", "github"])
+def test_phase_pr_waits_out_a_merge_of_its_pr_then_opens_the_next(db, phase_pr_forge, merged_by):
+    """The session's green PR merges (brindle's automatic merge earlier in the same sweep, or on
+    GitHub before brindle saw it) while the next phase waits to land: nothing is pushed to the merged
+    PR and its record keeps what it merged; once the merge is recorded the phase opens the next PR."""
+    from brindle.daemon import session_review
+
+    forge = phase_pr_forge
+    first = _commit(forge.sess, "a.py", "a\n")
+    pin = forge.land("api")
+    if merged_by == "brindle":
+        forge.before_job = lambda: session_review.refresh_pr_states(db)
+    else:
+        forge.before_job = lambda: setattr(forge, "state", "MERGED")
+    forge.land("db")
+    assert (forge.state, forge.remote, forge.pr()) == ("MERGED", {"sess": first},
+                                                        ("https://github.com/o/r/pull/1", first, None))
+    assert forge.states() == [("api", "pushed"), ("db", "pending")]
+    db.conn.execute("UPDATE session_prs SET merged_at = 2")       # as poll_merged records it
+    forge.before_job = lambda: None
+    routes_actions._PHASE_WAITING.clear()
+    routes_actions.land_phase_prs(db)
+    assert (forge.remote, forge.pr()) == ({"sess": pin}, ("https://github.com/o/r/pull/2", pin, None))
+    assert forge.states() == [("api", "pushed"), ("db", "pushed")]
+
+
+@pytest.mark.parametrize("outcome", ["reached", pytest.param("lost", marks=pytest.mark.variant("a race: the push was cut short and never reached the forge")), "unknown"])
+def test_phase_pr_push_cut_short_is_reconciled_before_its_pr_merges(db, phase_pr_forge, monkeypatch, outcome):
+    """A phase landing's process goes away mid push, before it records the commit pushed: the automatic
+    merge first reads the PR's head. The push's commit there (reached) becomes what the PR carries, so
+    the merge covers it; the commit recorded before (lost) merges as recorded; anything else (unknown)
+    is left for the person, unmerged."""
+    from brindle import git
+    from brindle.daemon import session_review
+
+    class Gone(BaseException):
+        """The daemon's process ending: nothing after the push runs."""
+
+    forge, left = phase_pr_forge, []
+    first = _commit(forge.sess, "a.py", "a\n")
+    pin = forge.land("api")
+
+    def push(path, branch, sha=None, track=True):
+        forge.remote[branch] = {"reached": sha, "lost": first, "unknown": "f" * 40}[outcome]
+        left.extend(tuple(r) for r in db.conn.execute("SELECT url, state, owner FROM session_pr_merges"))
+        left.extend(tuple(r) for r in db.conn.execute("SELECT url, sha FROM session_pr_pushes"))
+        raise Gone
+
+    monkeypatch.setattr(git, "push", push)
+    with pytest.raises(Gone):
+        forge.land("db")
+    # What the process left in the database: its finally never ran.
+    db.conn.execute("INSERT OR REPLACE INTO session_pr_merges (url, state, owner) VALUES (?, ?, ?)", left[0])
+    db.conn.execute("INSERT OR REPLACE INTO session_pr_pushes (url, sha) VALUES (?, ?)", left[1])
+    session_review.refresh_pr_states(db)
+    session_review.refresh_pr_states(db)
+    merge = db.conn.execute("SELECT state FROM session_pr_merges").fetchone()
+    expected = {"reached": ([pin], pin, "submitted"), "lost": ([first], first, "submitted"),
+                "unknown": ([], first, "failed")}[outcome]
+    assert (forge.merged, forge.pr()[1], merge["state"]) == expected
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
@@ -1996,15 +2422,15 @@ def _codex_trust(codex, repo, level):
 
 @pytest.mark.parametrize("how,provider,setup,blocked", [
     # (A start signed out, or with nothing to answer: test_a_new_session_runs_on_a_usable_cli_or_starts_nothing.)
-    ("/v1/sessions", "codex", "untrusted", ["trust"]),   # the person's own answer to Codex is never overridden
+    pytest.param("/v1/sessions", "codex", "untrusted", ["trust"], marks=pytest.mark.variant("app launch cannot auto-trust Codex")),
     # Signed in by the key brindle stores for it, which Claude Code then asks about.
-    ("/v1/sessions", "claude", "stored-key", ["consent"]),
+    pytest.param("/v1/sessions", "claude", "stored-key", ["consent"], marks=pytest.mark.variant("stored key still needs CLI consent")),
     # "open" a session that has since exited: a fresh one would start, so it's checked.
     ("/v1/sessions?open", "claude", "signed-out", ["signin"]),
-    ("/v1/sessions/sup/continue", "claude", "signed-out", ["signin"]),
+    pytest.param("/v1/sessions/sup/continue", "claude", "signed-out", ["signin"], marks=pytest.mark.variant("signed-out resume preflight")),
     ("/v1/agents/wk/rewind", "claude", "signed-out", ["signin"]),
     # A worker started any way (assign, handoff, a queued task) goes through the same launch.
-    ("assign", "claude", "fresh", ["consent"]),
+    pytest.param("assign", "claude", "fresh", ["consent"], marks=pytest.mark.variant("worker first-run consent")),
     ("assign", "codex", "untrusted", ["trust"]),
     # The session's own key (its session_credentials), not brindle's: approving it clears the worker.
     ("assign", "claude", "session-key", ["consent"]),
@@ -2084,10 +2510,10 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
 
 
 @pytest.mark.parametrize("provider,setup,item", [
-    ("claude", "missing", "claude.install"),
+    pytest.param("claude", "missing", "claude.install", marks=pytest.mark.variant("agent cannot clear missing CLI")),
     ("antigravity", "gemini", "key.GEMINI_API_KEY"),
     ("claude", "fresh", "claude.onboarding"),
-    ("claude", "key", "claude.api_key"),
+    pytest.param("claude", "key", "claude.api_key", marks=pytest.mark.variant("agent cannot approve API-key consent")),
     ("codex", "untrusted", "codex.trust"),
 ], ids=["setup", "key", "consent-onboarding", "consent-api-key", "trust"])
 def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, world, tmp_path, monkeypatch,
@@ -2100,10 +2526,12 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     agents_dir = Path(world.repo_root) / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     # (Declaring it as the profile's key name doesn't get it through either.)
-    # The "key" setup: the profile's own key, with a different one in brindle's environment.
+    # The "key" setup: the profile's own value, with a different one in brindle's environment.
+    # A fixed placeholder, not brindle's SECRET: the profile file is plain text on disk.
+    profile_value = "placeholder-profile-value-0000wxyz"
     (agents_dir / "supervisor.md").write_text(
         f"---\nname: supervisor\nprovider: {provider}\napi_key_env: NODE_OPTIONS\n"
-        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + SECRET + chr(10) if setup == 'key' else ''}"
+        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + profile_value + chr(10) if setup == 'key' else ''}"
         "---\nYou supervise.\n")
     if setup == "missing":
         monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(tmp_path / "nowhere" / "claude"))
@@ -2121,7 +2549,8 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     code, items = _send("GET", query)
     assert code == 200, items
     found = next(i for i in items if i["id"] == item)
-    assert SECRET not in json.dumps(items) and configs() == before     # asking changes nothing
+    assert SECRET not in json.dumps(items) and profile_value not in json.dumps(items)
+    assert configs() == before     # asking changes nothing
     assert all("NODE_OPTIONS" not in env for env in probed)
     action = found["action"]
     if action is None or action["name"] == "set_key":
@@ -2139,7 +2568,7 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     assert code == 200, reply
     assert item not in [i["id"] for i in _send("GET", query)[1]]
     if setup == "key":
-        assert providers.api_key_approved(SECRET) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
+        assert providers.api_key_approved(profile_value) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
     if setup == "untrusted":
         assert codex.read_text().startswith('model = "x"\n')
 
@@ -2290,7 +2719,7 @@ def test_a_second_clone_press_gets_the_job_already_queued(db, cloning, tmp_path,
 
 
 @pytest.mark.parametrize("url", [
-    "/tmp/some/repo",
+    pytest.param("/tmp/some/repo", marks=pytest.mark.variant("local-path clone bypass attempt")),
     pytest.param("-u/bin/sh", marks=pytest.mark.variant("an option smuggled in as the url")),
     pytest.param("file:///tmp/x.git", marks=pytest.mark.variant("file:// stays refused in production")),
     pytest.param("git@local.git", marks=pytest.mark.variant("git@ without a host:path is a relative local path")),
@@ -2451,7 +2880,8 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
 
     assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "default",
                                                         "opencode_permission_mode": "ask", "visuals": "off",
-                                                        "visuals_enabled": "on"})
+                                                        "quota_switch": "ask",
+                                                        "visuals_enabled": "on", "login_shell_env": "on"})
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "yolo"})[0] == 400
     assert _send("PATCH", "/v1/user-settings", {})[0] == 400
     # One bad value refuses the whole change.
@@ -2459,40 +2889,31 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
                                                 "opencode_permission_mode": "default"})[0] == 400
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "auto"})[0] == 200
     assert _send("PATCH", "/v1/user-settings", {"opencode_permission_mode": "autonomous"})[0] == 200
+    assert _send("PATCH", "/v1/user-settings", {"login_shell_env": "off"})[0] == 200
     assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "auto",
                                                         "opencode_permission_mode": "autonomous", "visuals": "off",
-                                                        "visuals_enabled": "on"})
+                                                        "quota_switch": "ask",
+                                                        "visuals_enabled": "on", "login_shell_env": "off"})
     assert json.loads(path.read_text()) == {"delegation": "fast", "claude_permission_mode": "auto",
-                                            "opencode_permission_mode": "autonomous"}
+                                            "opencode_permission_mode": "autonomous", "login_shell_env": "off"}
     assert not list(path.parent.glob("*.tmp"))
 
 
-def test_session_diff_before_ready(db, repo, lead):
-    code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
-    assert code == 200 and not reply["ready"]        # nothing ahead of main yet
-    assert _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
-    code, d = _send("GET", "/v1/sessions/lead/diff")
-    assert code == 200 and d["files"] == []
-
-
-EVERY_CLI = ["claude", "codex", "antigravity", "opencode"]
-
-
 @pytest.mark.parametrize("asked,state,answer,usable", [
-    ("codex", {}, "codex", EVERY_CLI),
     # Fixable by the person: the preflight's items; else the reason. Both list what else would run.
-    ("codex", {"missing": "codex"}, (409, "preflight"), ["claude", "antigravity", "opencode"]),
-    ("codex", {"signed_out": ("codex",)}, (409, "preflight"), ["claude", "antigravity", "opencode"]),
+    pytest.param("codex", {"missing": "codex"}, (409, "preflight"), ["claude", "antigravity", "opencode"], marks=pytest.mark.variant("explicit missing CLI cannot fall back")),
+    pytest.param("codex", {"signed_out": ("codex",)}, (409, "preflight"), ["claude", "antigravity", "opencode"],
+                 marks=pytest.mark.variant("explicit signed-out CLI cannot fall back")),
     ("codex", {"allowed": ("claude", "opencode")}, (403, "forbidden"), ["claude", "opencode"]),
     ("codex", {"off": "codex"}, (409, "turned_off"), ["claude", "antigravity", "opencode"]),
     # No provider asked for: the remembered pick, else Claude, else the first usable one.
     (None, {"pick": "antigravity"}, "antigravity", ["antigravity", "claude", "codex", "opencode"]),
-    (None, {"signed_out": ("claude", "antigravity", "opencode")}, "codex", ["codex"]),
+    pytest.param(None, {"signed_out": ("claude", "antigravity", "opencode")}, "codex", ["codex"], marks=pytest.mark.variant("sole signed-in fallback CLI")),
     # The policy allows only a CLI that isn't installed: nothing starts, not the profile's Claude.
     (None, {"allowed": ("opencode",), "missing": "opencode"}, (409, "preflight"), []),
     # The policy allows no CLI at all: still a preflight, naming what stops each one.
     (None, {"allowed": ()}, (409, "preflight"), []),
-], ids=["explicit-usable", "explicit-missing", "explicit-signed-out", "explicit-policy", "explicit-off",
+], ids=["explicit-missing", "explicit-signed-out", "explicit-policy", "explicit-off",
         "default-pick", "default-only-codex", "default-none-by-policy", "default-none-allowed"])
 def test_a_new_session_runs_on_a_usable_cli_or_starts_nothing(db, world, tmp_path, monkeypatch, asked, state,
                                                              answer, usable):

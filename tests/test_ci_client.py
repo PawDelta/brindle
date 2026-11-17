@@ -9,6 +9,7 @@ import re
 import subprocess
 import time
 import uuid
+from urllib.parse import urlparse
 
 import pytest
 
@@ -622,6 +623,7 @@ def test_plan_verification_failures(plan, signing_key):  # noqa: F811
 
 
 @pytest.mark.brindle_ci_guard
+@pytest.mark.variant("CI plan validation errors cannot expose the signed plan token")
 def test_plan_errors_never_quote_the_token(plan):
     bad = plan(repo="other/repo")
     with pytest.raises(CIError) as e:
@@ -671,6 +673,7 @@ def test_an_escalation_plan_cannot_drop_the_orgs_limits(plan, ci_repo, tmp_path)
 
 
 @pytest.mark.brindle_ci_guard
+@pytest.mark.variant("a run exhausting the organization budget must stop before dispatching another task")
 def test_a_run_stops_at_the_orgs_dollar_budget(plan, ci_repo, tmp_path, monkeypatch):
     from brindle import pricing
 
@@ -1305,7 +1308,10 @@ def test_init_federation_sets_the_variables(init_run):
     secrets = [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]]
     assert secrets == ["BRINDLE_PRO_TOKEN"], "no ANTHROPIC_API_KEY secret with federation"
     text = "\n".join(said)
-    assert f"subject prefix repo:{REPO}:*" in text and "https://api.anthropic.com" in text and "600 s" in text
+    # Compare the parsed scheme and host of each URL the output names, not a substring of the text.
+    origins = {(urlparse(u).scheme, urlparse(u).hostname) for u in re.findall(r"https?://[^\s/]+", text)}
+    assert ("https", "api.anthropic.com") in origins
+    assert f"subject prefix repo:{REPO}:*" in text and "600 s" in text
     assert (f'condition claims.repository == "{REPO}" && '
             f'claims.workflow_ref.startsWith("{REPO}/.github/workflows/brindle-ci-")') in text
     assert "forks never get a token" in text

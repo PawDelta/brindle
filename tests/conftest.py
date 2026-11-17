@@ -88,6 +88,8 @@ def _reap_run_leftovers(known: set[str]) -> list[str]:
             listening = tmux.server_homes(name) is not None
         except tmux.TmuxError:
             continue  # not answering: nothing to be done with it from here
+        if not listening and not tmux.abandoned(name):
+            continue  # running, but this process can't reach it (a sandbox): not dead
         if listening and not name.startswith(("brindle-test-", "brindle-e2e-")):
             continue
         try:
@@ -148,6 +150,22 @@ def ambient_brindle_env(monkeypatch):
     settings) are set after the cleanup, not wiped by it."""
     for name in AMBIENT_BRINDLE_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_login_shell(monkeypatch):
+    """No test runs the person's login shell (brindle.login_shell_env, at a
+    daemon's start), and none sees what another read: a test that needs a
+    shell gives ``read`` or ``load`` its own runner."""
+    from brindle import login_shell_env
+
+    def no_shell(argv, **kw):
+        raise OSError("no login shell in tests")
+
+    monkeypatch.setattr(login_shell_env, "_run", no_shell)
+    monkeypatch.setattr(login_shell_env, "_values", {})
+    monkeypatch.setattr(login_shell_env, "_loading", None)
+    monkeypatch.setattr(login_shell_env, "_reader", False)
 
 
 @pytest.fixture
@@ -499,11 +517,12 @@ def no_signed_in_providers(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_claude_usage_command(monkeypatch):
-    """The sidebar never runs the real `claude -p /usage`: it reads as just
-    asked (a test calls refresh_claude_usage(force=True) and fakes the run)."""
+    """The sidebar's Claude and agy /usage readers look freshly queried.
+    Tests that need a refresh reset its clock or force it and fake the CLI."""
     from brindle import quota
 
     monkeypatch.setattr(quota, "_claude_usage_at", float("inf"))
+    monkeypatch.setattr(quota, "_antigravity_usage_at", float("inf"), raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -586,6 +605,8 @@ def brindle_home(tmp_path, monkeypatch, ambient_brindle_env):
     # brindle's own Pro plugins are always installed: keep them off the real
     # keychain and network (a file store under the temporary home, no login).
     monkeypatch.setenv("BRINDLE_PRO_CREDENTIAL_STORE", "file")
+    # A test that forces the keychain backend takes the per-user refresh lock: in the test's dir.
+    monkeypatch.setattr("brindle.pro.auth._user_home", lambda: tmp_path / "user-home")
     monkeypatch.delenv("BRINDLE_PRO_DEV", raising=False)
     # No machine-wide Claude Code managed settings, and no ambient Claude credential.
     monkeypatch.setenv("BRINDLE_CLAUDE_MANAGED_SETTINGS", "")
@@ -662,6 +683,25 @@ def gh_sign_in_unknown(monkeypatch):
 
     monkeypatch.setattr(git, "gh_credential_helper", lambda: None)
     monkeypatch.setattr(git, "gh_token_in_file", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def daemon_read_caches_fresh(monkeypatch):
+    """The daemon's read caches start empty in every test, a GET /sessions
+    always asks tmux (tests/test_load_speed_new_session.py turns the shared
+    look back on), GET /providers/usable's background re-check runs before
+    the request returns, under the test's own fakes and home, and GET /repos
+    treats no folder as the system's temp one."""
+    from brindle.daemon import routes_read
+
+    if not hasattr(routes_read, "_PaneView"):     # an engine without them (brindle baseline)
+        return
+    monkeypatch.setattr(routes_read, "_pane_view", routes_read._PaneView())
+    monkeypatch.setattr(routes_read, "PANE_VIEW_MAX_AGE", 0.0)
+    monkeypatch.setattr(routes_read, "_usable_cache", routes_read._UsableCache())
+    monkeypatch.setattr(routes_read, "_repo_seen", {})
+    monkeypatch.setattr(routes_read, "TEMP_ROOTS", ())     # every test's repos are in a temp folder
+    monkeypatch.setattr(routes_read, "_start_usable_refresh", routes_read._run_usable_refresh)
 
 
 @pytest.fixture(autouse=True)

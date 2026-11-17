@@ -49,6 +49,7 @@ def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, ex
         notification_db.conn.execute("SELECT 1")
 
 
+@pytest.mark.variant("an in-place upgrade cannot corrupt a running MCP server's lazily imported profiles and rules")
 def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_started_with(monkeypatch, tmp_path):
     install = tmp_path / "site-packages" / "brindle"    # the built-ins, where an upgrade can replace them
     for package in profiles._BUILTIN_PACKAGES:
@@ -83,6 +84,7 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
     assert exits == []
 
 
+@pytest.mark.variant("an upgraded sidebar must exec the current brindle invocation with its original arguments")
 def test_an_upgraded_sidebar_runs_again_in_its_pane(monkeypatch):
     monkeypatch.setattr(watch, "_log_to_file", lambda: None)
     monkeypatch.setattr("brindle.spawn.exit_on_hangup", lambda: None)

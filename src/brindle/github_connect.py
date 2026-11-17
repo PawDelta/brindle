@@ -32,7 +32,8 @@ a sandbox. What a taken credential is worth is set by its kind: a fine-grained
 token reaches the repositories and permissions it was made for until it expires;
 a copy of gh's sign-in reaches everything gh does and doesn't expire.
 
-Nothing here logs, prints or raises a token.
+Nothing here logs or raises a token. The credential helper writes the token to
+stdout only as Git's credential-protocol reply, which Git consumes to sign in.
 """
 
 from __future__ import annotations
@@ -691,5 +692,8 @@ def main(argv: list[str]) -> int:
         said = answer(action, sys.stdin.read())
     except Exception:  # noqa: BLE001 - whatever broke, git must not fall through to a prompt
         said = QUIT if action == "get" else ""
+    # CodeQL py/clear-text-logging-sensitive-data (alert #19): this is Git's
+    # credential-protocol channel, not a log. Git consumes the password field
+    # from stdout to authenticate; redacting it would break the helper.
     sys.stdout.write(said)
     return 0

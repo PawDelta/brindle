@@ -432,7 +432,11 @@ def config(ctx, launch: Launch) -> dict:
                             "timeout": 120000}},
         "plugin": [Path(write_plugin()).as_uri()],
         "instructions": [write_instructions(ctx.agent_id, instructions)],
-        "permission": permission_config(ctx.profile, launch),
+        "permission": ({"*": "deny", "brindle_reply_doc_question": "allow"} if ctx.mode == "doc_question"
+                       else {**permission_config(ctx.profile, launch),
+                             # A short-lived agent's unused brindle tools (agents.short_lived_tools):
+                             # a tool denied outright is left out of its context.
+                             **{f"brindle_{t}": "deny" for t in ctx.profile.hidden_brindle_tools or []}}),
         # brindle's panes are one agent each: an update prompt nobody answers helps no one.
         "autoupdate": False,
     }

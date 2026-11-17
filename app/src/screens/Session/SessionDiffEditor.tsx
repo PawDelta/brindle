@@ -191,8 +191,8 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
               {note}
             </p>
           )}
-          <div className="flex min-h-0 flex-1 overflow-hidden border-t border-line">
-            <nav className="flex w-40 shrink-0 flex-col overflow-auto border-r border-line py-1 md:w-64" aria-label="Changed files">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-line md:flex-row">
+            <nav className="flex max-h-40 w-full shrink-0 flex-col overflow-auto border-b border-line py-1 md:max-h-none md:w-64 md:border-b-0 md:border-r" aria-label="Changed files">
               <button type="button" className="mx-1 mb-1 flex items-center gap-1 border-b border-line px-s1 py-1 text-left text-xs text-ink-2 hover:bg-surface-2 hover:text-ink disabled:opacity-50" disabled={!editable && !newDraft} onClick={createFile} data-testid="new-file">
                 + New file…
               </button>
@@ -226,14 +226,14 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
                       <span className="w-3 text-ink-3">{gone.includes(f.path) ? "·" : STATUS_MARK[f.status]}</span>
                       <span className="flex min-w-0 flex-1" title={f.path}>
                         {f.path.includes("/") && <span className="sr-only">{f.path.slice(0, f.path.lastIndexOf("/") + 1)}</span>}
-                        <span className="shrink-0">{f.path.slice(f.path.lastIndexOf("/") + 1)}</span>
+                        <span className="min-w-0 truncate">{f.path.slice(f.path.lastIndexOf("/") + 1)}</span>
                       </span>
                       {gone.includes(f.path) ? (
                         <span className="shrink-0 font-sans text-xs text-ink-3">{GONE}</span>
                       ) : (
                         <>
-                          <span className={f.added ? "text-pass" : "text-ink-3"}>+{f.added}</span>
-                          <span className={f.removed ? "text-sap" : "text-ink-3"}>−{f.removed}</span>
+                          <span className={`shrink-0 ${f.added ? "text-pass" : "text-ink-3"}`}>+{f.added}</span>
+                          <span className={`shrink-0 ${f.removed ? "text-sap" : "text-ink-3"}`}>−{f.removed}</span>
                         </>
                       )}
                     </button>
@@ -273,6 +273,22 @@ export function FileTree<F extends { path: string }>({ files, renderFile, prefix
     const key = directory || rest;
     groups.set(key, [...(groups.get(key) ?? []), file]);
   }
+  // A folder whose only content is one folder joins it on the same row (src/brindle/daemon/), as an editor
+  // compacts them: every level of nesting costs the file names below it their room.
+  for (const [name, children] of [...groups]) {
+    if (!name.endsWith("/")) continue;
+    let joined = name;
+    for (;;) {
+      const rests = children.map((f) => f.path.slice(prefix.length + joined.length));
+      const first = rests[0].slice(0, rests[0].indexOf("/") + 1);
+      if (!first || !rests.every((r) => r.startsWith(first))) break;
+      joined += first;
+    }
+    if (joined !== name) {
+      groups.delete(name);
+      groups.set(joined, children);
+    }
+  }
   // As an editor lists them: folders first, then files, each by name.
   const sorted = [...groups].sort(([a], [b]) => Number(!a.endsWith("/")) - Number(!b.endsWith("/")) || a.localeCompare(b));
   return sorted.map(([name, children]) => !name.endsWith("/") ? renderFile(children[0]) : (
@@ -283,7 +299,7 @@ export function FileTree<F extends { path: string }>({ files, renderFile, prefix
           if (next.has(name)) next.delete(name); else next.add(name);
           return next;
         })}>
-        <span aria-hidden>{closed.has(name) ? "▸" : "▾"}</span>{name}
+        <span aria-hidden className="shrink-0">{closed.has(name) ? "▸" : "▾"}</span><span className="min-w-0 truncate" title={prefix + name}>{name}</span>
       </button>
       {!closed.has(name) && <ul className="ml-2 border-l border-line"><FileTree files={children} renderFile={renderFile} prefix={prefix + name} folded={folded} /></ul>}
     </li>
@@ -293,7 +309,8 @@ export function FileTree<F extends { path: string }>({ files, renderFile, prefix
 /* Pair adjacent removed/added runs so context stays aligned in split view. */
 function HunkLines({ file, hunk, split }: { file: FileDiff; hunk: Hunk; split: boolean }) {
   const lines = file.lines.slice(hunk.start + 1, hunk.end);
-  if (!split) return <pre className={`${mono} leading-5`}>{lines.map((line, i) => <div key={i} className={`px-s2 whitespace-pre ${lineClass(line)}`}>{line || " "}</div>)}</pre>;
+  // w-max min-w-full: a line wider than the pane carries its colour to its end when scrolled across.
+  if (!split) return <pre className={`${mono} w-max min-w-full leading-5`}>{lines.map((line, i) => <div key={i} className={`px-s2 whitespace-pre ${lineClass(line)}`}>{line || " "}</div>)}</pre>;
   const rows: [string | null, string | null][] = [];
   let removed: string[] = [];
   let added: string[] = [];
@@ -380,7 +397,13 @@ function FileView({ file, split, gone, pin, editable, why, client, root, drafts,
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-auto outline-none" data-testid="file-diff" tabIndex={0} onKeyDown={keys}>
       <div className={`sticky top-0 z-10 flex items-center gap-s1 border-b border-line bg-canvas-2 px-s2 py-1 ${mono}`}>
-        <span className="min-w-0 flex-1 truncate">{file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}</span>
+        {/* The folder gives way first: the file's own name always stays whole. */}
+        <span className="flex min-w-0 flex-1" data-testid="file-title">
+          {file.oldPath ? <span className="min-w-0 truncate" title={`${file.oldPath} → ${file.path}`}>{`${file.oldPath} → ${file.path}`}</span> : <>
+            {file.path.includes("/") && <span className="min-w-0 shrink-[100] truncate text-ink-3">{file.path.slice(0, file.path.lastIndexOf("/") + 1)}</span>}
+            <span className="min-w-0 truncate">{file.path.slice(file.path.lastIndexOf("/") + 1)}</span>
+          </>}
+        </span>
         {gone && (
           <span className="shrink-0 font-sans text-xs text-ink-3" data-testid="file-gone">
             {GONE} · your edit is kept until you save or discard it

@@ -175,7 +175,12 @@ def test_a_failed_fetch_is_not_retried_on_every_lookup(backend, lib, repo):
     assert len(fetches(backend)) == 1
 
 
-@pytest.mark.parametrize("what", ["digest", "version", "org", "typ", "key", "name"])
+@pytest.mark.parametrize("what", [
+    pytest.param("digest", marks=pytest.mark.variant("tampering: organization profile content must match its signed digest")),
+    "version", "org",
+    pytest.param("typ", marks=pytest.mark.variant("bypass: an entitlement token cannot stand in for a signed organization library")),
+    "key", "name",
+])
 def test_an_answer_that_does_not_verify_is_refused(backend, lib, repo, what):
     def bad(answer):
         if what == "digest":
@@ -202,6 +207,7 @@ def test_an_answer_that_does_not_verify_is_refused(backend, lib, repo, what):
         load_profile("org-reviewer", str(repo))
 
 
+@pytest.mark.variant("tampering: editing a cached organization profile cannot weaken rules during an offline fetch")
 def test_an_edited_cache_file_is_not_trusted(backend, lib, repo):
     org_profiles.library()
     f = org_profiles.cache_dir(ORG) / org_profiles.CACHE_FILE

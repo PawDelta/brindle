@@ -20,7 +20,8 @@ def _open_readiness_prs(db, count):
                         (key, key, f"https://github.com/o/r/pull/{n}"))
 
 
-def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
+def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, outcome="none"):
+    import time
     from types import SimpleNamespace
     from brindle import git, spawn
     from brindle.daemon import routes_actions, session_review as review
@@ -44,6 +45,8 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
         files = f"{mode} {'d' * 40} 0\t{name}\0" if "--stage" in args else f"{name}\0"
         return SimpleNamespace(stdout=files if args[0] == "ls-files" else "s", returncode=0)
     monkeypatch.setattr(spawn, "room", lambda: 1)
+    monkeypatch.setattr(review.session_sync, "refresh_drift_flags", lambda db: None)
+    monkeypatch.setattr(review.session_sync, "refresh_idle_sessions", lambda db, fetched_at: None)
     monkeypatch.setattr(git, "run", git_read)
     monkeypatch.setattr(git, "dirty_files", lambda *a, **kw: reads.append("dirty") or (
         [] if tracked.read_text() == "original" else ["src/file.py"]))
@@ -60,7 +63,27 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
     watch.sweep(db)
     assert watch.ready == {"s": False}
     tracked.write_text("original")
+    # GitHub's look is held: first pending, then failed (unknown, not "none"), and only then "none open".
+    monkeypatch.setattr(review._pr_pool, "submit", lambda *a: SimpleNamespace(done=lambda: False))
+    review._head_cache.clear()
+    key = ("a" * 40, str(tmp_path))
     assert watch.sweep(db) == ["s"]
+    assert bus.tail(db, kinds=("session.pr_ready",)) == []     # not announced on a guess
+    review._head_cache[key] = (time.monotonic(), None)
+    watch.sweep(db)
+    assert bus.tail(db, kinds=("session.pr_ready",)) == []
+    if outcome == "open":
+        # The lookup finishes between the helper starting it and reading the answer: a supervisor's PR is there.
+        def finishes_meanwhile(sha, cwd, root_id=None):
+            review._head_cache[key] = (time.monotonic(), {"url": "https://github.com/o/r/pull/8", "number": 8})
+        monkeypatch.setattr(review, "open_pr_for_head", finishes_meanwhile)
+    else:
+        if outcome == "none":
+            db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('s', 's', 'https://github.com/o/r/pull/7', 0)")
+        review._head_cache[key] = (time.monotonic(), {})
+    watch.sweep(db)
+    said = [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))]
+    assert said == ([] if outcome == "open" else ["s"])   # said once the look answered "none", never for an open PR
     reads.clear()
     monkeypatch.setattr(spawn, "room", lambda: 0)
     monkeypatch.setattr(review, "_merge_polled", 0)
@@ -68,14 +91,32 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
     assert reads == [] and watch.ready == {"s": True} and review._merge_polled == 0
 
 
-def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
+@pytest.mark.parametrize("recorded, expected", [
+    pytest.param(False, None, marks=pytest.mark.variant("review finding: a missing gh read as confirmed absence, so no PR")),
+    pytest.param(True, True, marks=pytest.mark.variant("review finding: a missing gh dropped the PR already recorded")),
+])
+def test_missing_gh_is_not_confirmed_absence(db, monkeypatch, recorded, expected):
+    from types import SimpleNamespace
+    from brindle import status_cache, workspaces
+    from brindle.daemon import session_review as review
+    monkeypatch.setattr(review, "session", lambda db, root: (None, SimpleNamespace(path="/p")))
+    monkeypatch.setattr(status_cache, "read_head", lambda path: "h")
+    monkeypatch.setattr(workspaces.shutil, "which", lambda *a: None)
+    monkeypatch.setattr(review._pr_pool, "submit", lambda fn, *a: fn(*a) or SimpleNamespace(done=lambda: True))
+    review._head_cache.clear()
+    if recorded:
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('s', 'b', 'https://x/pull/1', 0)")
+    assert review._pr_open_state(db, "s") is expected    # not "none open": nothing was asked of GitHub
+
+
+def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch, caplog):
     from concurrent.futures import Future
     from contextvars import Context
     from types import SimpleNamespace
     from brindle import spawn, workspaces
     from brindle.daemon import session_review as review
     _open_readiness_prs(db, 2)
-    started, scheduled = [], []
+    started, scheduled, results = [], [], []
     def submit(check, *args):
         future = Future()
         future.set_running_or_notify_cancel()
@@ -88,13 +129,18 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
         if not started:
             for _, check, args in scheduled:
                 # Executor threads start without the caller's deadline context.
-                Context().run(check, *args)
+                results.append(Context().run(check, *args))
     # Only the merged-PR polling is under test: the checks refresh has its own pool.
     monkeypatch.setattr(review, "refresh_pr_states", lambda db: None)
     monkeypatch.setattr(review, "_merge_pool", SimpleNamespace(submit=submit))
     monkeypatch.setattr(review, "_merge_checks", {})
     monkeypatch.setattr(review, "_merge_order", {})
     monkeypatch.setattr(review, "wait", end_round)
+    # Other sweep steps touch the fake /repo outside the merge-check deadline.
+    # In particular, fetch notices resolve its git directory through spawn.read.
+    monkeypatch.setattr(review.session_sync, "refresh_drift_flags", lambda *a, **kw: None)
+    monkeypatch.setattr(review.session_sync, "refresh_idle_sessions", lambda *a, **kw: None)
+    monkeypatch.setattr(review.session_sync, "tell_refused_fetches", lambda db: None)
     def slow(*args, **kwargs):
         assert spawn.current() is not None
         started.append(args)
@@ -108,6 +154,12 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     monkeypatch.setattr(review, "_merge_polled", 0)
     review.ReadinessWatch().sweep(db)
     assert len(scheduled) == len(started) == 2
+    # Finish every controlled read before patches and log capture end.
+    for (future, _, _), result in zip(scheduled, results, strict=True):
+        future.set_result(result)
+    for future in review._merge_checks.values():
+        assert future.result() is False
+    assert not any(record.exc_info for record in caplog.records)
 
 
 @pytest.mark.variant("a race from a real incident: the pool thread read gh with no slot (main CI run 42855607818)")
@@ -235,8 +287,10 @@ def _status_fingerprint(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("scenario, params", [
-    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": False}, id="readiness-reuses",
+    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": False, "outcome": "none"}, id="readiness-reuses",
                  marks=pytest.mark.variant("an unchanged tracked file is not re-read: a sweep runs no git at all")),
+    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": False, "outcome": "open"}, id="readiness-pr-open",
+                 marks=pytest.mark.variant("a lookup completing mid-check with a supervisor's PR must not announce the PR as ready")),
     pytest.param(_readiness_slow_gh_is_parallel_and_bounded, {}, id="readiness-slow-gh"),
     pytest.param(_readiness_deferred_prs_get_a_turn, {"queued": "expired"}, id="readiness-deferred-expired",
                  marks=pytest.mark.variant("a queued check starts after deadline expiry before the sweep can cancel it")),

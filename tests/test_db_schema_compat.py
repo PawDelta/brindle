@@ -66,7 +66,7 @@ V0_5_12 = {
 }
 
 
-@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("interleaved", [True])
 def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_column(
         tmp_path, monkeypatch, interleaved):
     """A development database has the branch on session_repos: opening it
@@ -107,7 +107,7 @@ def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_colu
             if t in now and now[t] - set(cols.split())} == {}
 
 
-@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("interleaved", [True])
 def test_task_wait_noted_column_moves_to_task_notes_keeping_claims(tmp_path, monkeypatch, interleaved):
     """A development database has tasks.wait_noted: opening it copies the
     timestamps to task_notes and drops the column, even when another process

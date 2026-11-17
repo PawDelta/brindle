@@ -196,6 +196,13 @@ def _say(notes) -> None:
 # -- workspaces --------------------------------------------------------------
 
 
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def baseline(ctx: typer.Context, base: Optional[str] = typer.Option(None, "--base")) -> None:
+    """Check that a test fails on base source: brindle baseline [--base REF] -- COMMAND."""
+    from brindle.baseline import main
+    raise typer.Exit(main(list(ctx.args), base))
+
+
 @app.command()
 def init(
     yes: bool = typer.Option(False, "--yes", "-y", help="Write the config without asking."),
@@ -275,11 +282,16 @@ def demo(
     files and a two-milestone goal, then starts the supervisor there to
     verify the goal. Takes a few minutes; nothing is created where you run it."""
     from brindle import demo as demo_mod
+    from brindle.service import sessions as svc
 
-    root = demo_mod.create(local=local)
+    # Pick before writing the worker/reviewer profiles: a Codex-only first
+    # run must not inherit demo.create's Claude workers. --local still wins
+    # for workers and reviewers inside the demo config.
+    provider = _group_supervisor or svc.default_provider(None)
+    root = demo_mod.create(local=local, provider=provider)
     typer.echo(f"demo repo: {root}")
     os.chdir(root)
-    start(prompt=None, provider=None, attach=attach, watch=True,
+    start(prompt=None, provider=provider, attach=attach, watch=True,
           autopilot=None, branch=None, worktree=None, demo=True)
 
 
@@ -2248,7 +2260,7 @@ def learning_seed() -> None:
 
 
 docs_app = typer.Typer(no_args_is_help=True,
-                       help="Your personal library of analysis deliverables (brindle Pro).")
+                       help="Your personal library of deliverables (brindle Pro).")
 app.add_typer(docs_app, name="docs")
 
 
@@ -2269,7 +2281,7 @@ def _docs_call(method: str, path: str, body: dict | None = None) -> dict:
     try:
         return analysis_docs.api(method, path, body)
     except (auth.AuthError, RuntimeError) as e:
-        _fail(f"analysis docs: {e}")
+        _fail(f"library: {e}")
         raise
 
 
@@ -2290,7 +2302,7 @@ def docs_list() -> None:
     try:
         sub = analysis_docs.require_entitlement().sub
     except RuntimeError as e:
-        _fail(f"analysis docs: {e}")
+        _fail(f"library: {e}")
     resp = _docs_call("GET", f"/analysis-docs?scope_kind=user&scope_id={sub}")
     for d in resp.get("docs") or []:
         typer.echo(f"{d.get('doc_id')}  v{d.get('version', 1)}  {d.get('title', '')}")
@@ -2342,9 +2354,9 @@ def docs_export(doc_id: str = typer.Argument(..., help="Document id."),
     d = _docs_call("GET", f"/analysis-docs/{doc_id}/export?format={fmt}&destination=download")
     data = d.get(auth.BINARY_KEY)
     if not isinstance(data, bytes):
-        _fail("analysis docs: the export response was not binary")
+        _fail("library: the export response was not binary")
     if not data:
-        _fail("analysis docs: the export came back empty")
+        _fail("library: the export came back empty")
     name = f"{doc_id}.{fmt}"
     Path(out).mkdir(parents=True, exist_ok=True)
     (Path(out) / name).write_bytes(data)
@@ -2358,9 +2370,9 @@ def _docs_switch(on: bool, name: str) -> None:
     try:
         analysis_docs.set_switch(on, name=name)
     except (auth.AuthError, RuntimeError) as e:
-        _fail(f"analysis docs: {e}")
+        _fail(f"library: {e}")
     state = "on" if on else "off"
-    typer.echo(f"storing analysis deliverables is {state}" if name == "store" else f"analysis docs: {name} is {state}")
+    typer.echo(f"storing library items is {state}" if name == "store" else f"library: {name} is {state}")
 
 
 _SWITCH_HELP = ("Which of your own switches: store (the default), share, assist, prompt_analysis "
@@ -2369,13 +2381,13 @@ _SWITCH_HELP = ("Which of your own switches: store (the default), share, assist,
 
 @docs_app.command("on")
 def docs_on(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
-    """Turn one of your switches on; without --switch, store your analysis deliverables after they merge."""
+    """Turn one of your switches on; without --switch, store approved plans in the Library after they merge."""
     _docs_switch(True, switch)
 
 
 @docs_app.command("off")
 def docs_off(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
-    """Turn one of your switches off; without --switch, stop storing your analysis deliverables."""
+    """Turn one of your switches off; without --switch, stop storing approved plans in the Library."""
     _docs_switch(False, switch)
 
 
@@ -3357,6 +3369,19 @@ def drain_ready_cmd(repo_root: str, base: Annotated[Optional[str], typer.Option(
     from brindle import pipeline
 
     pipeline.drain(_helper_db(), repo_root, base)
+
+
+@app.command("_restart-supervisor", hidden=True)
+def restart_supervisor_cmd(root_id: str, token: str,
+                           transcript: Annotated[Optional[str], typer.Argument()] = None) -> None:
+    """Carry out a supervisor's restart claim ``token``: a fresh session seeded
+    from its goal state (detached by its Stop hook)."""
+    import signal
+
+    from brindle import supervisor_state
+
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    supervisor_state.restart(_helper_db(), root_id, token, Path(transcript) if transcript else None)
 
 
 @app.command("_start-when-room", hidden=True)

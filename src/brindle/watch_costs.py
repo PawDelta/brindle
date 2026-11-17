@@ -202,6 +202,10 @@ def collect(repo_root: str | None) -> Remote:
         quota.refresh_claude_usage()     # throttled; slow, so only ever on this thread
     except Exception:  # noqa: BLE001
         log.debug("brindle watch: no claude /usage", exc_info=True)
+    try:
+        quota.refresh_antigravity_usage()
+    except Exception:  # noqa: BLE001
+        log.debug("brindle watch: no agy /usage", exc_info=True)
     if repo_root:
         try:
             from brindle.config import load_repo_config

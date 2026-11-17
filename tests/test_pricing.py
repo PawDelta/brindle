@@ -210,6 +210,7 @@ def root(repo, monkeypatch):
     return git.main_repo_root(str(repo))
 
 
+@pytest.mark.variant("failure path: both a failed entitlement lookup and a denied entitlement refuse cost reports")
 def test_cost_report_fails_closed_without_the_feature(db, root, monkeypatch):
     from brindle.pro import license
 

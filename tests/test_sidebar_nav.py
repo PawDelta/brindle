@@ -8,6 +8,8 @@ import curses
 import time
 import types
 
+import pytest
+
 from brindle import autopilot, view, watch, workspaces
 from brindle.db import Agent
 
@@ -151,16 +153,12 @@ def test_nothing_is_wider_than_the_pane_or_split_mid_word():
     assert all(not w.endswith("-") for w in words)
 
 
-# -- the review verdict the markers rely on -----------------------------------
-
-
+@pytest.mark.variant("a real snapshot must expose the supervisor's open question while retaining autopilot")
 def test_snapshot_carries_the_sessions_autopilot_and_open_question(db, repo):
     w = workspaces.create(db, str(repo), "auto").workspace
     now = time.time()
-    db.add_agent(Agent("root01", w.id, "supervisor", "claude", None, "interactive", "idle",
-                       "%991", None, now))
-    db.add_agent(Agent("work01", w.id, "developer", "claude", "root01", "assign", "idle",
-                       "%992", "done", now))
+    db.add_agent(Agent("root01", w.id, "supervisor", "claude", None, "interactive", "idle", "%991", None, now))
+    db.add_agent(Agent("work01", w.id, "developer", "claude", "root01", "assign", "idle", "%992", "done", now))
     entry = lambda: next(e for e in view.snapshot(db, str(repo)) if e["id"] == w.id)  # noqa: E731
     assert (entry()["autopilot"], entry()["asking"]) == (True, None)
     autopilot.need_user(db, "root01", "Which database?")

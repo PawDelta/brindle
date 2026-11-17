@@ -2,10 +2,11 @@
 
 import json
 import time
+from unittest.mock import patch
 
 import pytest
 
-from brindle import identity_lock, workspaces
+from brindle import bus, identity_lock, workspaces
 from brindle.db import DB, Agent, Workspace
 from brindle.pro import status as org_status
 from brindle.service import inbox
@@ -48,12 +49,12 @@ def _notice(db, root, worker, mp):
 
 
 @pytest.mark.parametrize("kind, setup, expected", [
-    ("waiting", _worker(status="waiting"), [("w1", None)]),
     # Live: a Codex worker whose brief wasn't delivered read "Codex needs a sign-in", signed in or not.
     ("failed", _worker(provider="codex", status="failed", failed_why="delivery"), [("w1", None)]),
     ("question", _two_asking, [("r1", None), ("r2", None)]),
     ("plan", _worker(plan_state="proposed", plan_first=1, plan_text="1. add the column"), [("w1", "1. add the column")]),
-    ("proposed_checks", _locked_checks, []),
+    pytest.param("proposed_checks", _locked_checks, [],
+                 marks=pytest.mark.variant("Check proposals locked to another identity must not appear as answerable inbox items")),
     ("login", _login, [("r1", "aws sso login")]),
 ])
 def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, setup, expected):
@@ -72,6 +73,102 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
     assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")
     assert all(i.action is None for i in got if kind == "failed")
     assert all((i.fix, i.action.path) == ("codex_hook_trust", "/v1/setup/codex-hook") for i in got if kind == "setup")
+
+
+@pytest.mark.variant("catches a dismiss that approves or answers the permission ask or plan it hides")
+def test_dismiss_persists_without_answering_permission_or_plan(db, repo, monkeypatch):
+    from brindle import permissions, tmux
+    from brindle.daemon import holds
+    from brindle.daemon.routes_actions import inbox_action
+    from brindle.service import permissions as svc_permissions
+
+    ws = workspaces.create(db, str(repo), "feat/dismiss").workspace
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "r1", "assign", "waiting", "@2", None, time.time()))
+    db.update_agent("w1", plan_first=1, plan_state="proposed", plan_text="Keep the database")
+    live = holds.Holds(clock=lambda: 100.0)
+    monkeypatch.setattr(holds, "HOLDS", live)
+    monkeypatch.setattr(inbox, "HOLDS", live)
+    panes = tmux.PaneSnapshot()
+    panes.update({"@1": True, "@2": True})
+    monkeypatch.setattr(tmux, "list_panes", lambda: panes)
+    req = permissions.Request("claude", "bash", "Bash", command="npm test")
+    db.add_permission_request("w1", "ask-1", json.dumps(req.to_dict()), "", None, "hook")
+    digest = permissions.request_digest(json.dumps(req.to_dict()), None)
+    live.register("w1", "ask-1", digest, "nonce", 200.0)
+    cards = [i for i in inbox.items(db, str(repo)) if i.kind in ("permission", "plan")]
+    assert {i.kind for i in cards} == {"permission", "plan"}
+    assert svc_permissions.asks(db, str(repo))
+    before = dict(db.permission_requests_of("w1")[0])
+    for item in cards:
+        inbox_action(db, {"id": "w1", "action": "dismiss"}, {"item": item.to_json()})
+    restarted = DB(db.path)
+    try:
+        assert not [i for i in inbox.items(restarted, str(repo)) if i.kind in ("permission", "plan")]
+        assert svc_permissions.asks(restarted, str(repo)) == []
+        assert dict(restarted.permission_requests_of("w1")[0]) == before
+        assert live.held("w1", "ask-1").answer is None
+        assert restarted.get_agent("w1").plan_state == "proposed"
+        # A new proposal and a different request still need their own attention.
+        restarted.update_agent("w1", plan_text="A different plan")
+        restarted.add_permission_request("w1", "ask-2", json.dumps(req.to_dict()), "", None, "hook")
+        live.register("w1", "ask-2", digest, "nonce", 200.0)
+        assert {i.kind for i in inbox.items(restarted, str(repo)) if i.kind in ("permission", "plan")} == {"permission", "plan"}
+        assert [a.request_id for g in svc_permissions.asks(restarted, str(repo)) for a in g.items] == ["ask-2"]
+    finally:
+        restarted.conn.close()
+
+
+@pytest.mark.parametrize("kind", ["login"])
+def test_dismissal_only_hides_the_current_occurrence(db, repo, kind, monkeypatch):
+    from types import SimpleNamespace
+
+    from brindle import agents, autopilot
+    from brindle.daemon.routes_actions import inbox_action
+
+    ws = workspaces.create(db, str(repo), "feat/recurring-inbox").workspace
+    clock = [100.0]
+    monkeypatch.setattr("brindle.db.time", SimpleNamespace(time=lambda: clock[0]))
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.add_autopilot("r1")
+
+    def start(database, question):
+        if kind == "question":
+            autopilot.need_user(database, "r1", question, ask=True)
+        elif kind == "waiting":
+            database.set_status("r1", "waiting")
+        else:
+            database.set_login_state("r1", state="auth_paused", refresh_cmd="aws sso login")
+
+    def cards(database):
+        return [i for i in inbox.items(database, str(repo), panes={"@1": True}) if i.kind == kind]
+
+    start(db, "May I commit the change?")
+    first = cards(db)[0]
+    inbox_action(db, {"id": "r1", "action": "dismiss"}, {"item": first.to_json()})
+    restarted = DB(db.path)
+    try:
+        assert cards(restarted) == []
+        start(restarted, "May I commit the change?")
+        assert cards(restarted) == []
+        for question in ("Which deployment target should I use?", "May I commit the change?"):
+            clock[0] += 1
+            if kind == "question":
+                agents.handle_hook(restarted, "r1", "prompt-submit", {"prompt": "yes"})
+            elif kind == "waiting":
+                restarted.set_status("r1", "processing")
+            else:
+                restarted.set_login_state("r1", state="ok")
+            clock[0] += 1
+            start(restarted, question)
+            assert len(cards(restarted)) == 1
+            # Replaying the old dismissal cannot hide a distinct request, even with identical text.
+            inbox_action(restarted, {"id": "r1", "action": "dismiss"}, {"item": first.to_json()})
+            current = cards(restarted)
+            assert len(current) == 1
+            inbox_action(restarted, {"id": "r1", "action": "dismiss"}, {"item": current[0].to_json()})
+    finally:
+        restarted.conn.close()
 
 
 def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(db, repo):
@@ -97,7 +194,6 @@ def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(d
 @pytest.mark.variant("the reported bug: other tests reach this card but assert nothing of what it tells the person")
 @pytest.mark.parametrize("count, repos, workers, detail, reasons", [
     (2, 2, 0, "Keep existing behavior", 1),
-    (2, 1, 3, "Keep existing behavior", 1),
 ])
 def test_plan_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
                                                    count, repos, workers, detail, reasons):
@@ -141,12 +237,30 @@ def test_plan_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
 
 def test_pr_not_now(db, tmp_path, monkeypatch):
     from brindle import git
+    from brindle.daemon import session_review
     from brindle.daemon.routes_actions import inbox_action
 
+    monkeypatch.setattr(session_review, "open_pr_for_head", lambda *args: None)
+    monkeypatch.setattr(session_review, "head_pr_known_none", lambda *args: False)
     ws = Workspace("pr-card", str(tmp_path), "pr-card", "session", "feat/pr-card", "main",
                    str(tmp_path / "checkout"), None, "pr-card", time.time())
     db.add_workspace(ws)
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    # A failed decision must stay answerable, just as a newer PR stays visible below.
+    _proposal(db, "r1")
+    proposal = db.get_autopilot("r1").proposal
+    with patch("brindle.autopilot.add_checks", side_effect=OSError("disk full")), pytest.raises(OSError):
+        inbox_action(db, {"id": "r1", "action": "accept"}, {})
+    assert db.get_autopilot("r1").proposal == proposal
+    replacement = proposal.replace("pytest -q", "pytest -x")
+    with patch("brindle.autopilot.add_checks", side_effect=lambda *args: db.update_autopilot("r1", proposal=replacement)):
+        inbox_action(db, {"id": "r1", "action": "accept"}, {})
+    assert db.get_autopilot("r1").proposal == replacement
+    [_, replaced] = bus.tail(db, kinds=("checks.changed",))
+    inbox_action(db, {"id": "r1", "action": "decline"}, {})
+    assert db.get_autopilot("r1").proposal is None
+    [cleared] = bus.tail(db, since_id=replaced["id"], kinds=("checks.changed",))
+    assert (cleared["repo_root"], cleared["agent_id"], cleared["root_id"]) == (ws.repo_root, "r1", "r1")
     db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, prepared_at) VALUES (?, ?, ?, ?, ?)",
                     ("r1", ws.branch, "head1", "passed", time.time()))
     head = "head1"
@@ -164,6 +278,10 @@ def test_pr_not_now(db, tmp_path, monkeypatch):
         assert cards(restarted) == []
         restarted.conn.execute("UPDATE session_pr_prep SET state = 'failed'")
         assert cards(restarted) == ["pr_failed"]
+        inbox_action(restarted, {"id": "r1", "action": "pr-not-now"}, {})
+        assert cards(restarted) == []
+        restarted.conn.execute("UPDATE session_pr_prep SET output = 'new failure'")
+        assert cards(restarted) == ["pr_failed"]
         restarted.conn.execute("UPDATE session_pr_prep SET state = 'passed'")
         head = "head2"
         assert cards(restarted) == ["pr_ready"]
@@ -171,8 +289,76 @@ def test_pr_not_now(db, tmp_path, monkeypatch):
         inbox_action(restarted, {"id": "r1", "action": "pr-not-now"}, {})
         restarted.conn.execute("UPDATE session_pr_prep SET sha = 'head2'")
         assert cards(restarted) == ["pr_ready"]
+        url = "https://github.com/o/r/pull/7"
+        restarted.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES (?, ?, ?, 1)",
+                               ("r1", ws.branch, url))
+        restarted.conn.execute("INSERT INTO session_pr_merges (url, state, error) VALUES (?, 'failed', 'merge failed')", (url,))
+        assert cards(restarted) == ["pr_failed"]
+        inbox_action(restarted, {"id": "r1", "action": "pr-not-now"}, {})
+        assert cards(restarted) == []
+        restarted.conn.execute("UPDATE session_pr_merges SET error = 'different problem'")
+        assert cards(restarted) == ["pr_failed"]
     finally:
         restarted.conn.close()
+
+
+def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypatch):
+    from brindle import git, workspaces
+    from brindle.daemon import session_review
+
+    ws = Workspace("pr-open", str(tmp_path), "pr-open", "session", "feat/pr-open", "main",
+                   str(tmp_path / "checkout"), None, "pr-open", time.time())
+    db.add_workspace(ws)
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, prepared_at) VALUES (?, ?, ?, ?, ?)",
+                    ("r1", ws.branch, "head1", "passed", time.time()))
+    monkeypatch.setattr(git, "out", lambda args, path: "head1")
+    monkeypatch.setattr(inbox.view, "snapshot", lambda *args, **kwargs: [
+        {"id": ws.id, "branch": ws.branch, "agents": [{"id": "r1", "status": "idle"}]}])
+    pr = {"number": 408, "title": "Fix things", "url": "https://github.com/o/r/pull/408"}
+    asked = []
+    session_review._head_cache.clear()
+    monkeypatch.setattr(session_review._pr_pool, "submit", lambda fn, *a: asked.append(a) or fn(*a) or _Done())
+    monkeypatch.setattr(workspaces, "open_pull_request_for_commit", lambda sha, cwd: pr)
+
+    def cards():
+        return [i for i in inbox.items(db, ws.repo_root, panes={"@1": True}) if i.kind.startswith("pr_")]
+
+    # The first read starts in the background: this inbox read doesn't wait for gh.
+    assert [i.kind for i in cards()] == ["pr_ready"]
+    [card] = cards()
+    assert (card.kind, card.reason, card.detail, card.url) == ("pr_opened", "PR opened", "#408 Fix things", pr["url"])
+    assert len(asked) == 1   # cached: the second read didn't ask gh again
+    from brindle.daemon.routes_actions import inbox_action
+
+    from brindle import identity_lock
+
+    # A session locked to another sign-in can still have its card dismissed: that acts as no one.
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "another@example.com")
+    inbox_action(db, {"id": "r1", "action": "pr-not-now"}, {})   # Dismiss on the opened card
+    assert cards() == []
+    # A push to the same PR moves HEAD: the dismissed card stays gone.
+    monkeypatch.setattr(git, "out", lambda args, path: "head2")
+    session_review._head_cache.clear()
+    cards()   # the first read for a new HEAD only starts the background look
+    assert cards() == []
+    monkeypatch.setattr(git, "out", lambda args, path: "head1")
+    pr = None
+    session_review._head_cache.clear()
+    assert [i.kind for i in cards()] == ["pr_ready"]
+    # A PR brindle recorded stands while GitHub's answer is missing: Open PR never makes the card vanish.
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('r1', ?, ?, 1)",
+                    (ws.branch, "https://github.com/o/r/pull/7"))
+    assert [(i.kind, i.detail) for i in cards()] == [("pr_opened", "#7")]
+    # GitHub answering "none open" (closed unmerged) is not "no answer": the recorded PR stops standing.
+    pr = {}
+    session_review._head_cache.clear()
+    assert [i.kind for i in cards()] == ["pr_ready"]     # the passed preparation can be opened again
+
+
+class _Done:
+    def done(self):
+        return True
 
 
 

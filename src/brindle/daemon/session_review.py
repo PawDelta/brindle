@@ -20,14 +20,20 @@ The diff is polled, so its git work is kept: a commit's diff and a merge's
 commits never change, and a session's last result is reused while its
 fingerprint (HEAD, the base refs, the index's mtime, read from git's files
 without starting git) holds. When new commits land only their diffs run, and
-only the files they touched are blamed again. One computation runs per
+only the files they touched are blamed again. Each file's blame is also kept
+on disk as soon as it is found, so a restart, or a computation stopped part
+way, blames only the files it hasn't yet. One computation runs per
 session at a time; who asks meanwhile shares it. Who wrote what is read from
 the db on every ask, so a worker's id is never stale."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import re
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -36,9 +42,10 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from brindle import agents, autopilot, bus, git, knowledge, pipeline, session_sync, spawn, tasks, workspaces
-from brindle.config import load_repo_config
+from brindle import agents, autopilot, bus, gates, git, knowledge, pipeline, session_sync, spawn, status_cache, tasks, workspaces
+from brindle.config import brindle_home, load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
 
@@ -84,15 +91,21 @@ def session(db: DB, root_id: str) -> tuple[Agent, Workspace]:
 def _only_review_edits_since(db: DB, ws: Workspace, sha: str) -> bool:
     """Every commit after ``sha`` (an ancestor of HEAD) is one the daemon
     recorded as a review edit (never judged by a commit's own message)."""
-    if not git.ok(["merge-base", "--is-ancestor", sha, "HEAD"], ws.path):
+    if not git.is_ancestor(ws.path, sha, "HEAD"):
         return False
     recorded = {r["sha"] for r in db.conn.execute(
         "SELECT sha FROM review_edits WHERE workspace_id = ?", (ws.id,))}
-    return set(git.out(["rev-list", f"{sha}..HEAD"], ws.path).split()) <= recorded
+    head = git.resolve(ws.path, "HEAD")      # by commit: the same two commits are listed once
+    listed = (git.out_once(["rev-list", f"{sha}..{head[0]}"], ws.path) if head
+              else git.out(["rev-list", f"{sha}..HEAD"], ws.path))
+    return set(listed.split()) <= recorded
 
 
 def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
-    """What keeps the session from being ready for a PR; none when it is."""
+    """What keeps the session from being ready for a PR; none when it is.
+    Its checkout's uncommitted files come from ``status_cache.tracked_dirty``
+    (git only when the checkout moved): a sweep judges a session again
+    whenever one of its workers' rows changes."""
     out: list[str] = []
     ap = db.get_autopilot(root.id)
     ms = db.milestones(root.id)
@@ -102,7 +115,7 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
         out += [f"milestone {m.position} ({m.title}) hasn't passed its check"
                 for m in ms if m.status != "passed"]
         if not out:
-            head = None if git.dirty_files(ws.path, tracked_only=True) else git.out(["rev-parse", "HEAD"], ws.path)
+            head = None if status_cache.tracked_dirty(ws.path) else git.head(ws.path)
             if head and ap.audit_sha and _only_review_edits_since(db, ws, ap.audit_sha):
                 head = ap.audit_sha     # the person's own edits don't un-audit the work
             if due := autopilot.audit_due(ap, load_repo_config(ws.repo_root), head):
@@ -119,12 +132,34 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
     out += needs_you(db, root, ap)
     if not ws.base_branch or ws.branch in ("", "HEAD"):
         out.append("the session isn't on a branch with a base to open a PR against")
-    elif git.dirty_files(ws.path, tracked_only=True):
+    elif status_cache.tracked_dirty(ws.path):
         out.append("the session's checkout has uncommitted changes")
     elif not git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1]:
         out.append(f"the session's branch has no commits ahead of {ws.base_branch}")
+    elif (pr := current_pr(db, root.id, ws)) is not None and pr["merged_at"]:
+        out.append(f"the session's PR merged and {ws.branch} has no new commits since")
     elif behind := session_sync.pr_block(ws):
         out.append(behind)
+    return out
+
+
+def phase_reasons(db: DB, root: Agent, ws: Workspace, phase: str, sha: str) -> list[str]:
+    """What keeps brindle from landing goal phase ``phase`` at ``sha``, the
+    commit its milestone checks passed on (autopilot.phase_landing); none when
+    it can. Unlike ``reasons``, later phases' milestones, running workers and
+    queued tasks don't count: the PR carries ``sha``, not the branch's tip."""
+    ms = [m for m in db.milestones(root.id) if m.phase_name == phase]
+    out = [f"milestone {m.position} ({m.title}) hasn't passed its check" for m in ms if m.status != "passed"]
+    if not ms:
+        out.append(f"the goal has no phase {phase!r} any more")
+    if not ws.base_branch or ws.branch in ("", "HEAD"):
+        out.append("the session isn't on a branch with a base to open a PR against")
+    elif status_cache.tracked_dirty(ws.path):
+        out.append("the session's checkout has uncommitted changes")
+    elif not git.is_ancestor(ws.path, sha, "HEAD"):
+        out.append(f"{sha[:12]}, the commit phase {phase!r} passed on, isn't on {ws.branch} any more")
+    elif not int(git.out(["rev-list", "--count", f"{git.base_ref(ws.path, ws.base_branch)}..{sha}"], ws.path)):
+        out.append(f"{sha[:12]} has no commits ahead of {ws.base_branch}")
     return out
 
 
@@ -165,6 +200,107 @@ def has_pr_target(ws: Workspace) -> bool:
         git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1])
 
 
+def new_since_merge(db: DB, ws: Workspace, pushed_sha: str | None) -> bool:
+    """Whether the session's branch has commits of its own beyond
+    ``pushed_sha``, its merged PR's: its next PR's. What a sync brings in
+    from the base (a squash of that PR included) doesn't count, nor does a
+    merge that only joins its parents: git's own clean merge of them, the
+    incoming side taken whole over a conflict, or the sync's ``-s ours``
+    record of a squash (``session_squashes``, its tree the branch's own). A merge whose resolution adds
+    anything else does. An unknown or vanished ``pushed_sha`` counts as nothing new."""
+    if not pushed_sha:
+        return False
+    try:
+        bases = [pushed_sha]
+        if ws.base_branch:
+            bases.append(git.base_ref(ws.path, ws.base_branch))
+        if (default := session_sync.upstream(ws)) and git.remote_branch_exists(ws.path, default):
+            bases.append(f"origin/{default}")
+        # By commit where the git files say which each name is: what git lists for the same
+        # commits never changes, so a session judged on every sweep is counted once.
+        shas = git.resolve(ws.path, "HEAD", *bases)
+        tip, *bases = shas or ["HEAD", *bases]
+        ask = git.out_once if shas else git.out
+        excluded = [f"^{base}" for base in dict.fromkeys(bases)]
+        if int(ask(["rev-list", "--count", "--no-merges", tip, *excluded], ws.path)) > 0:
+            return True
+        squashes = {r["squash_sha"] for r in db.conn.execute(
+            "SELECT squash_sha FROM session_squashes WHERE repo_root = ? AND branch = ?", (ws.repo_root, ws.branch))}
+        return any(_merge_adds(ws, line.split(), squashes)
+                   for line in ask(["rev-list", "--merges", "--parents", tip, *excluded], ws.path).splitlines())
+    except (git.GitError, ValueError):
+        return False
+
+
+def _merge_adds(ws: Workspace, shas: list[str], squashes: set[str]) -> bool:
+    """Whether the merge ``shas[0]`` (parents ``shas[1:]``) carries content of
+    its own: worked out once per merge commit, which never changes (``git.once``)."""
+    merge, parents = shas[0], shas[1:]
+    if len(parents) != 2:
+        return True
+    squash = parents[1] in squashes
+    return git.once(ws.path, ["merge adds", merge, str(squash)], lambda: _merge_content(ws, merge, parents, squash))
+
+
+def _merge_content(ws: Workspace, merge: str, parents: list[str], squash: bool) -> bool:
+    tree = git.out(["rev-parse", f"{merge}^{{tree}}"], ws.path)
+    # The sync's `-s ours` record of a squash keeps the branch's tree; a squash with forge-side
+    # edits is merged the plain way instead, and its resolution is judged like any other.
+    if squash and tree == git.out(["rev-parse", f"{parents[0]}^{{tree}}"], ws.path):
+        return False
+    joined = git.run(["merge-tree", "--write-tree", *parents], ws.path, check=False)
+    if joined.returncode == 0:
+        return joined.stdout.split("\n", 1)[0].strip() != tree
+    return tree != git.out(["rev-parse", f"{parents[1]}^{{tree}}"], ws.path)
+
+
+def current_pr(db: DB, root_id: str, ws: Workspace):
+    """The PR the session's branch is on (``url``, ``pushed_sha``,
+    ``merged_at``): its open PR, or the one that merged until the branch has
+    commits beyond it (``new_since_merge``); then None: its next PR is to be
+    opened, and replaces the merged one's row when it is."""
+    row = db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_prs WHERE root_id = ? AND branch = ?"
+                          " AND url IS NOT NULL", (root_id, ws.branch)).fetchone()
+    if row is not None and row["merged_at"] and new_since_merge(db, ws, row["pushed_sha"]):
+        return None
+    return row
+
+
+def adopt_head_pr(db: DB, root_id: str) -> None:
+    """Record, as brindle's own Open PR does (``session_prs``), the open PR a
+    supervisor made with ``gh`` when it holds the session's HEAD, so the
+    sidebar's PR line, its checks and its merge are followed too. Never waits
+    on ``gh`` (``open_pr_for_head``); a session that has a PR already keeps it
+    (a merged one only until the branch has commits beyond it)."""
+    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL AND merged_at IS NULL",
+                       (root_id,)).fetchone():
+        return
+    try:
+        root, ws = session(db, root_id)
+        if current_pr(db, root_id, ws) is not None:
+            return
+        head = status_cache.read_head(ws.path)    # a file read: this runs on every goal read
+    except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
+        return
+    if not head:
+        return
+    found = open_pr_for_head(head, ws.path, root_id)
+    with _pr_lock:
+        if found and found.get("url") in _pr_closed:
+            return  # An older in-flight HEAD lookup may still report the retired PR.
+    if found and found.get("url"):
+        # head_ref: where the PR really lives, when that isn't the session's branch: a Push must not go to ws.branch.
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
+                        " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
+                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at,"
+                        " merged_at = CASE WHEN url = excluded.url THEN merged_at END",
+                        (root_id, ws.branch, found["url"], found.get("headRefOid") or head, time.time()))
+        db.conn.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?", (root_id, ws.branch))
+        # Every adopted PR is managed outside brindle (its head may be another branch or a fork): Push is refused.
+        db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) VALUES (?, ?, ?)",
+                        (root_id, ws.branch, found.get("headRefName") or ws.branch))
+
+
 def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     """The session goal's one path: (``in_progress`` | ``in_review`` |
     ``ready_for_pr`` | ``pr_open`` | ``done``, the PR's URL or None).
@@ -176,8 +312,16 @@ def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     done on that decision alone; any other reached goal awaits its PR, however
     temporarily it isn't ready (dirty checkout, workers running)."""
     ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
-    pr = db.conn.execute("SELECT url, merged_at FROM session_prs WHERE root_id = ? AND url IS NOT NULL"
-                         " ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
+    adopt_head_pr(db, root_id)
+    pr = db.conn.execute("SELECT url, branch, pushed_sha, merged_at FROM session_prs WHERE root_id = ?"
+                         " AND url IS NOT NULL ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
+    if pr and pr["merged_at"] and pr["pushed_sha"]:
+        try:     # a merged PR the branch has moved on from: its next one is on its way
+            _, ws = session(db, root_id)
+            if ws.branch == pr["branch"] and current_pr(db, root_id, ws) is None:
+                pr = None
+        except (ServiceError, git.GitError, workspaces.WorkspaceError):
+            pass
     # Brindle's own decision that the goal is reached (the audit approved it, or
     # goal_audit is off): passing milestones alone aren't it.
     reached = ap is not None and ap.state == "done"
@@ -202,6 +346,7 @@ _PR_PASSED = ("SUCCESS", "NEUTRAL", "SKIPPED")
 _pr_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pr-checks")
 _pr_lock = threading.RLock()
 _pr_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_pr_closed: set[str] = set()        # confirmed CLOSED, distinct from MERGED and an unavailable read
 _pr_flights: dict[str, Future] = {}
 _pr_changed: set[str] = set()      # PRs whose line changed, until refresh_pr_states announces them
 
@@ -212,7 +357,8 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
     total}`` with state ``ci`` (checks still running; ``done`` of ``total``
     finished), ``failed``, ``ready`` (every check passed, no conflicts) or
     ``unknown`` (no payload, no checks yet, conflicts: never a guess at
-    ready). None when the PR is no longer open."""
+    ready). ``conflicting`` flags a known conflict for the Inbox.
+    None when the PR is no longer open."""
     found = re.search(r"/pull/(\d+)", url)
     if not found:
         return None
@@ -221,6 +367,8 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
         return out
     if payload.get("state") not in (None, "OPEN"):
         return None
+    if payload.get("mergeable") == "CONFLICTING":
+        out["conflicting"] = True
     marks = []      # per check: "pass", "fail" or "wait" (a check run not completed, a status still pending)
     for check in payload.get("statusCheckRollup") or []:
         if "status" in check and check["status"] != "COMPLETED":
@@ -228,6 +376,8 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
             continue
         verdict = str(check.get("conclusion") or check.get("state") or "").upper()
         marks.append("fail" if verdict in _PR_FAILED else "pass" if verdict in _PR_PASSED else "wait")
+        if marks[-1] == "fail" and (name := check.get("name") or check.get("context")):
+            out.setdefault("failed_checks", []).append(name)
     out["total"] = len(marks)
     out["done"] = marks.count("pass") + marks.count("fail")
     if "fail" in marks:
@@ -240,14 +390,24 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
 
 
 def _read_pr_state(url: str, cwd: str) -> None:
+    payload = None
     try:
         # The pool's threads copy no context: bound the read with its own slot.
         with spawn.deadline(workspaces.PR_CHECKS_SECONDS):
-            state = pr_state_of(url, workspaces.pull_request_checks(url, cwd))
+            payload = workspaces.pull_request_checks(url, cwd)
+            state = pr_state_of(url, payload)
     except Exception:  # noqa: BLE001 - an unreadable PR is just unknown
         log.exception("brindle: couldn't read a session PR's checks")
         state = pr_state_of(url, None)
+    _set_pr_state(url, state, closed=bool(payload and payload.get("state") == "CLOSED"))
+
+
+def _set_pr_state(url: str, state: dict[str, Any] | None, *, closed: bool = False) -> None:
     with _pr_lock:
+        if closed:
+            _pr_closed.add(url)
+        else:
+            _pr_closed.discard(url)
         before = _pr_cache[url][1] if url in _pr_cache else pr_state_of(url, None)
         _pr_cache[url] = (time.monotonic(), state)
         _pr_flights.pop(url, None)
@@ -285,19 +445,279 @@ def session_pr_state(db: DB, root_id: str, url: str | None) -> dict[str, Any] | 
             _ask_pr_state(url, ws.repo_root)
             with _pr_lock:
                 cached = _pr_cache.get(url)
-    return cached[1] if cached else pr_state_of(url, None)
+    state = cached[1] if cached else pr_state_of(url, None)
+    if state and state["state"] == "failed":
+        root = db.get_agent(root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        local = open_pr(db, root, ws) if root and ws else None
+        if local and local["url"] == url:
+            return {**state, "unpushed": local["unpushed"]}
+    return state
+
+
+_head_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
+_head_flights: set[tuple[str, str]] = set()
+_head_roots: dict[tuple[str, str], str] = {}     # the session each lookup is for
+_head_changed: set[tuple[str, str]] = set()      # lookups whose answer changed, until refresh_pr_states announces
+
+
+def _read_head_pr(key: tuple[str, str]) -> None:
+    sha, cwd = key
+    started = time.monotonic()
+    try:
+        with spawn.deadline(workspaces.PR_CHECKS_SECONDS):
+            found = workspaces.open_pull_request_for_commit(sha, cwd)
+    except Exception:  # noqa: BLE001 - an unreadable answer is just no PR
+        log.exception("brindle: couldn't look up the PR holding a session's HEAD")
+        found = None
+    with _pr_lock:
+        url = (found or {}).get("url")
+        if url in _pr_closed:
+            closed_at = _pr_cache.get(url, (0, None))[0]
+            if closed_at > started:
+                found = None  # This lookup predates the confirmed closure.
+            else:
+                # A fresh open-only search confirmed the PR was reopened.
+                _pr_closed.discard(url)
+                _pr_cache.pop(url, None)
+        before = _head_cache[key][1] if key in _head_cache else None
+        _head_cache[key] = (time.monotonic(), found)
+        _head_flights.discard(key)
+        if (found or {}).get("url") != (before or {}).get("url") and key in _head_roots:
+            _head_changed.add(key)    # refresh_pr_states tells the Inbox
+
+
+def note_head_pr(sha: str, cwd: str, pr: dict[str, Any]) -> None:
+    """A PR brindle itself just opened on ``sha``: known at once, so the Inbox
+    doesn't wait on (or trust an older "none" from) a read of GitHub."""
+    with _pr_lock:
+        _head_cache[(sha, cwd)] = (time.monotonic(), pr)
+
+
+def open_pr_for_head(sha: str, cwd: str, root_id: str | None = None) -> dict[str, Any] | None:
+    """The open PR (``{number, title, url, headRefName}``) containing ``sha``,
+    whatever branch it was pushed under, as last read: never waits on ``gh``.
+    A read is started in the background when the answer is missing or older
+    than ``PR_STATE_TTL``; until the first lands: None. ``root_id``: the
+    session to announce a change to (``refresh_pr_states``)."""
+    key = (sha, cwd)
+    with _pr_lock:
+        if root_id:
+            _head_roots[key] = root_id
+        cached = _head_cache.get(key)
+        if key not in _head_flights and (cached is None or time.monotonic() - cached[0] >= PR_STATE_TTL):
+            flight = _pr_pool.submit(_read_head_pr, key)
+            if not flight.done():
+                _head_flights.add(key)
+    return (cached[1] or None) if cached else None
+
+
+def head_pr_known_none(sha: str, cwd: str) -> bool:
+    """GitHub answered that no PR is open on ``sha`` (not merely: no answer yet)."""
+    with _pr_lock:
+        cached = _head_cache.get((sha, cwd))
+    return cached is not None and cached[1] == {}
+
+
+def _pr_open_state(db: DB, root_id: str) -> bool | None:
+    """Whether the session has an open PR: True (GitHub found one on its HEAD, or brindle recorded
+    one and GitHub hasn't said otherwise), False (GitHub says none is open), or None while that
+    isn't known (the first look is on its way, or GitHub couldn't be asked and nothing recorded says).
+    One snapshot of the lookup decides, so a read finishing meanwhile can't split the answer."""
+    try:
+        _, ws = session(db, root_id)
+        head = status_cache.read_head(ws.path)
+    except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
+        return False
+    if not head:
+        return False
+    open_pr_for_head(head, ws.path, root_id)     # starts a read when none is fresh
+    with _pr_lock:
+        cached = _head_cache.get((head, ws.path))
+    if cached is None:
+        return None
+    if cached[1]:
+        return True
+    if cached[1] == {}:
+        return False
+    recorded = db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL AND merged_at IS NULL",
+                               (root_id,)).fetchone()
+    return True if recorded else None
+
+
+def _reconcile_pr_merge(db: DB, row, ws: Workspace) -> bool:
+    """An existing attempt excludes another submission. Reconcile a departed owner.
+
+    A unique marker token identifies ownership without PID reuse or a time limit.
+    The OS releases the marker when the owner exits. An interrupted submission's
+    outcome is uncertain, so check the forge and otherwise ask the person.
+    """
+    url = row["url"]
+    attempt = db.conn.execute("SELECT state, owner FROM session_pr_merges WHERE url = ?", (url,)).fetchone()
+    if attempt is None:
+        return False
+    if attempt["state"] == "pushing":     # a phase landing's push (routes_actions._land_phase)
+        if not (attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"])):
+            _reconcile_push(db, row, ws, attempt["owner"])
+        return True
+    if attempt["state"] != "merging" or (attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"])):
+        return True
+    owner = uuid4().hex
+    with gates.marker("session-pr-merge", owner):
+        if not db.conn.execute("UPDATE session_pr_merges SET owner = ? WHERE url = ?"
+                               " AND state = 'merging' AND owner IS ?", (owner, url, attempt["owner"])).rowcount:
+            return True
+        payload = workspaces.pull_request_checks(url, ws.repo_root)
+        _set_pr_state(url, pr_state_of(url, payload))
+        finished = payload and payload.get("state") in ("MERGED", "CLOSED")
+        error = None if finished else "The automatic PR merge was interrupted. Check the PR on GitHub before merging it."
+        db.conn.execute("UPDATE session_pr_merges SET state = ?, error = ? WHERE url = ? AND owner = ?",
+                        ("submitted" if finished else "failed", error, url, owner))
+        bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
+    return True
+
+
+INTERRUPTED_PUSH = ("A push to the PR was interrupted and its head isn't a commit brindle recorded."
+                    " Check the PR on GitHub before merging it.")
+
+
+def _reconcile_push(db: DB, row, ws: Workspace, departed: str | None) -> None:
+    """A phase landing's push to the PR ``row`` whose owner went away: the
+    merge stays blocked until the PR's head says how the push ended. Its
+    intended commit (``session_pr_pushes``) on the PR: that is what the PR
+    carries now (``pushed_sha``, which its merge's landing is judged by). The
+    commit recorded before: it never got there. Anything else, or no head:
+    the person checks the PR (a failed attempt, in the Inbox); no answer from
+    GitHub: asked again next round."""
+    url = row["url"]
+    owner = uuid4().hex
+    with gates.marker("session-pr-merge", owner):
+        if not db.conn.execute("UPDATE session_pr_merges SET owner = ? WHERE url = ? AND state = 'pushing'"
+                               " AND owner IS ?", (owner, url, departed)).rowcount:
+            return
+        intent = db.conn.execute("SELECT sha FROM session_pr_pushes WHERE url = ?", (url,)).fetchone()
+        payload = workspaces.pull_request_checks(url, ws.repo_root)
+        if payload is None:
+            db.conn.execute("UPDATE session_pr_merges SET owner = NULL WHERE url = ? AND owner = ?", (url, owner))
+            return
+        head = payload.get("headRefOid")
+        with db.tx() as c:
+            if head and intent and head == intent["sha"]:
+                c.execute("UPDATE session_prs SET pushed_sha = ? WHERE url = ? AND merged_at IS NULL", (head, url))
+            if head and (intent and head == intent["sha"] or head == row["pushed_sha"]):
+                c.execute("DELETE FROM session_pr_merges WHERE url = ? AND owner = ?", (url, owner))
+            else:
+                c.execute("UPDATE session_pr_merges SET state = 'failed', error = ? WHERE url = ? AND owner = ?",
+                          (INTERRUPTED_PUSH, url, owner))
+            c.execute("DELETE FROM session_pr_pushes WHERE url = ?", (url,))
+    bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
+
+
+def _auto_merge_session_pr(db: DB, row, ws: Workspace) -> None:
+    """Claim once across daemons; recheck both the forge and our record before acting."""
+    url = row["url"]
+    if _reconcile_pr_merge(db, row, ws):
+        return
+    with _pr_lock:
+        cached = _pr_cache.get(url)
+    if not cached or not cached[1] or cached[1]["state"] != "ready":
+        return
+    if not load_repo_config(ws.repo_root).auto_merge_session_prs:
+        return
+    current = ("SELECT 1 FROM session_prs WHERE root_id = ? AND branch = ? AND url = ?"
+               " AND pushed_sha IS ? AND merged_at IS NULL")
+    identity = (row["root_id"], row["branch"], url, row["pushed_sha"])
+    owner = uuid4().hex
+    with gates.marker("session-pr-merge", owner):
+        if not db.conn.execute(
+            f"INSERT OR IGNORE INTO session_pr_merges (url, state, owner) SELECT ?, 'merging', ? WHERE EXISTS ({current})",
+            (url, owner, *identity),
+        ).rowcount:
+            return
+        acting = False
+        try:
+            payload = workspaces.pull_request_checks(url, ws.repo_root)
+            fresh = pr_state_of(url, payload)
+            _set_pr_state(url, fresh)
+            if not payload or payload.get("state") != "OPEN" or not fresh or fresh["state"] != "ready":
+                return
+            head = payload.get("headRefOid")
+            root = db.get_agent(row["root_id"])
+            if (not head or not root or db.get_workspace(root.workspace_id) != ws
+                    or not load_repo_config(ws.repo_root).auto_merge_session_prs
+                    or not db.conn.execute(current, identity).fetchone()):
+                return
+            acting = True
+            workspaces.merge_pull_request(url, ws.repo_root, head)
+            db.conn.execute("UPDATE session_pr_merges SET state = 'submitted' WHERE url = ?", (url,))
+        except workspaces.WorkspaceError as exc:
+            db.conn.execute("UPDATE session_pr_merges SET state = 'failed', error = ? WHERE url = ?", (str(exc), url))
+            bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
+        finally:
+            if not acting:
+                db.conn.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'merging'", (url,))
+
+
+def pr_problem(db: DB, root_id: str, url: str) -> str | None:
+    """A failed merge, or failed/conflicting PR nobody in the session is working on."""
+    with _pr_lock:
+        cached = _pr_cache.get(url)
+    if cached is not None and cached[1] is None:  # the forge knows the PR closed or merged
+        return None
+    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url = ? AND merged_at IS NOT NULL",
+                       (root_id, url)).fetchone():
+        return None
+    attempt = db.conn.execute("SELECT error FROM session_pr_merges WHERE url = ? AND state = 'failed'", (url,)).fetchone()
+    if attempt:
+        return attempt["error"]
+    state = cached[1] if cached else None
+    if not state or any(a.status in ("processing", "starting") and a.dismissed_at is None
+                        for a in agents.tree(db, root_id)):
+        return None
+    if state.get("conflicting"):
+        return "The PR conflicts with its base branch."
+    if state["state"] == "failed":
+        return "The PR's CI checks failed."
+    return None
 
 
 def refresh_pr_states(db: DB) -> None:
     """Daemon thread, every sweep: keep each open session PR's checks fresh
-    and announce (``session.pr_checks``, which the app's goal reloads on) the
-    ones whose line changed since it was last shown."""
-    for row in db.conn.execute("SELECT root_id, url FROM session_prs WHERE url IS NOT NULL"
+    and merge ready ones when enabled. Announce (``session.pr_checks``, which
+    the app's goal reloads on) the ones whose line changed since it was shown."""
+    for row in db.conn.execute("SELECT root_id, branch, url, pushed_sha FROM session_prs WHERE url IS NOT NULL"
                                " AND merged_at IS NULL").fetchall():
         root = db.get_agent(row["root_id"])
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is not None:
             _ask_pr_state(row["url"], ws.repo_root)
+            with _pr_lock:
+                closed = row["url"] in _pr_closed
+            if closed:
+                # A closed, unmerged PR cannot accept the session's next work.
+                # A HEAD search alone cannot prove this: an open PR may merely
+                # be behind the local branch. Only its own CLOSED result retires
+                # the record that would otherwise suppress preparation forever.
+                with db.tx() as c:
+                    retired = c.execute("UPDATE session_prs SET url = NULL WHERE root_id = ? AND branch = ?"
+                                        " AND url = ? AND merged_at IS NULL",
+                                        (row["root_id"], row["branch"], row["url"])).rowcount
+                    if retired:
+                        c.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?",
+                                  (row["root_id"], row["branch"]))
+                if retired:
+                    with _pr_lock:
+                        for key, cached in list(_head_cache.items()):
+                            if (cached[1] or {}).get("url") == row["url"]:
+                                del _head_cache[key]
+                    bus.publish_agent(db, "session.pr_checks", row["root_id"], url=row["url"], closed=True)
+                continue
+            _auto_merge_session_pr(db, row, ws)
+    with _pr_lock:
+        found = {_head_roots[k] for k in _head_changed if k in _head_roots}
+        _head_changed.clear()
+    for root_id in found:
+        bus.publish_agent(db, "session.pr_opened", root_id)    # the Inbox and goal read again
     with _pr_lock:
         changed = set(_pr_changed)
         _pr_changed.clear()
@@ -376,6 +796,10 @@ def poll_merged(db: DB) -> None:
             ).rowcount:
                 bus.publish_agent(db, "session.pr_merged", root_id, url=url)
                 _sync_after_merge(db, root_id, branch, url)
+                try:   # tasks queued behind this session's work start now it has landed
+                    tasks.sweep(db)
+                except Exception:  # noqa: BLE001 - a queue sweep never stops the round
+                    log.exception("brindle: couldn't start tasks waiting on %s", branch)
     finally:
         _merge_lock.release()
 
@@ -409,11 +833,13 @@ def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
 
 
 def open_pr(db: DB, root: Agent, ws: Workspace) -> dict[str, Any] | None:
-    """The PR the person opened for the session's branch: its ``url`` and
-    ``unpushed``, how many session commits aren't on it yet (brindle never
-    pushes them on its own: the person's Push does, POST .../pr/push)."""
+    """The open PR the person opened for the session's branch: its ``url`` and
+    ``unpushed``, how many session commits aren't on it yet (the person's
+    Push sends them, POST .../pr/push; brindle pushes on its own only a
+    completed phase's commit, routes_actions.land_phase_prs). A
+    merged PR is none: nothing more goes onto it (the branch's next PR does)."""
     row = db.conn.execute("SELECT url, pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?"
-                          " AND url IS NOT NULL", (root.id, ws.branch)).fetchone()
+                          " AND url IS NOT NULL AND merged_at IS NULL", (root.id, ws.branch)).fetchone()
     if row is None:
         return None
     try:
@@ -678,23 +1104,143 @@ def _deleters(ws: Workspace, chain: list[tuple[str, str]], wanted: dict[str, lis
     return found
 
 
+def _untouched_since(shas: list[str], touches: dict[str, frozenset[str]], since: str) -> set[str] | None:
+    """The paths the first-parent commits after ``since`` (in ``shas``,
+    oldest first) touch; None when ``since`` isn't among them or a commit's
+    touches aren't known, so nothing found at ``since`` can be trusted."""
+    if since not in shas:
+        return None
+    after = shas[shas.index(since) + 1:]
+    if not all(sha in touches for sha in after):
+        return None
+    return set().union(*(touches[sha] for sha in after))
+
+
 def _blames(ws: Workspace, mb: str, head: str, chain: list[tuple[str, str]], touches: dict[str, frozenset[str]],
             added: dict[str, tuple[int, ...]], prev: _Facts | None) -> dict[str, tuple[tuple[int, ...], dict[int, str]]]:
     """``_Facts.blamed`` for the files with ``added`` lines. A file that no
     first-parent commit since ``prev``'s HEAD ``touches`` keeps ``prev``'s blame:
     blame hands a file its first parent has unchanged wholly to that parent,
-    so it walks down to ``prev``'s HEAD and finds what it found then."""
+    so it walks down to ``prev``'s HEAD and finds what it found then. What
+    ``prev`` doesn't hold comes from the blames kept on disk (the same rule,
+    from the HEAD each was found at), and each file blamed anew is kept there
+    as soon as it is done: a restart, or a run stopped part way, blames only
+    what it hasn't yet."""
     shas = [sha for sha, _ in chain]
     kept: dict[str, tuple[tuple[int, ...], dict[int, str]]] = {}
-    if (prev is not None and prev.path == ws.path and prev.base_sha == mb and prev.head in shas
-            and all(sha in touches for sha in shas)):
-        touched = set().union(*(touches[sha] for sha in shas[shas.index(prev.head) + 1:]))
-        kept = {path: found for path, found in prev.blamed.items() if path not in touched}
+    if prev is not None and prev.path == ws.path and prev.base_sha == mb:
+        touched = _untouched_since(shas, touches, prev.head)
+        if touched is not None:
+            kept = {path: found for path, found in prev.blamed.items() if path not in touched}
     out = {}
+    need = [path for path, lines in added.items() if (hit := kept.get(path)) is None or hit[0] != lines]
+    blobs = _blobs(ws, mb, head) if need else {}
     for path, lines in added.items():
-        hit = kept.get(path)
-        out[path] = hit if hit is not None and hit[0] == lines else (lines, _blame(ws, mb, head, path, list(lines)))
+        if path not in need:
+            out[path] = kept[path]
+            continue
+        blob = blobs.get(path)
+        hit = _stored_blame(ws, path, blob, mb, lines, shas, touches) if blob else None
+        if hit is None:
+            hit = (lines, _blame(ws, mb, head, path, list(lines)))
+            if blob:
+                _store_blame(ws, path, blob, mb, head, hit)
+        out[path] = hit
     return out
+
+
+# -- blames kept on disk ---------------------------------------------------------
+#
+# A blame is kept per file, keyed by its repo, path, blob at HEAD and the
+# session's merge base, with the HEAD it was found at. It holds at a later
+# HEAD whose first-parent history since then never touched the file: the
+# same rule as reusing the session's last facts, so a revert to an earlier
+# blob, or history rewritten under the same blob, is blamed again.
+
+BLAME_KEEP_SECONDS = 30 * 86400     # a kept blame not written for this long is dropped
+_pruned = False
+
+
+def _blame_dir() -> Path:
+    return brindle_home() / "session-blame"
+
+
+def _blame_file(ws: Workspace, path: str, blob: str, mb: str) -> Path:
+    key = hashlib.sha256("\0".join((ws.repo_root, path, blob, mb)).encode()).hexdigest()
+    return _blame_dir() / key[:2] / f"{key}.json"
+
+
+def _blobs(ws: Workspace, mb: str, head: str) -> dict[str, str]:
+    """Each path ``mb``..``head`` adds or changes -> its blob at ``head``."""
+    tokens = git.run(["-c", "core.quotePath=false", "diff", "--raw", "--no-abbrev", "--no-renames", "-z", mb, head],
+                     ws.path).stdout.split("\0")
+    out = {}
+    for meta, path in zip(tokens[::2], tokens[1::2]):
+        fields = meta.split()
+        if meta.startswith(":") and len(fields) >= 5 and fields[4] != "D":
+            out[path] = fields[3]
+    return out
+
+
+def _stored_blame(ws: Workspace, path: str, blob: str, mb: str, lines: tuple[int, ...], shas: list[str],
+                  touches: dict[str, frozenset[str]]) -> tuple[tuple[int, ...], dict[int, str]] | None:
+    """``path``'s kept blame for ``lines``, when it holds at the HEAD ``shas`` end at."""
+    try:
+        record = json.loads(_blame_file(ws, path, blob, mb).read_text(encoding="utf-8"))
+        if tuple(record["lines"]) != lines:
+            return None
+        touched = _untouched_since(shas, touches, record["head"])
+        if touched is None or path in touched:
+            return None
+        commits = record["commits"]
+        return lines, {n: commits[i] for n, i in zip(lines, record["by"], strict=True) if i >= 0}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
+        log.debug("brindle: ignoring the kept blame of %s: %s", path, e)
+        return None
+
+
+def _store_blame(ws: Workspace, path: str, blob: str, mb: str, head: str,
+                 found: tuple[tuple[int, ...], dict[int, str]]) -> None:
+    """Keep ``found`` (``path``'s blame at ``head``) on disk, replaced into
+    place whole. A blame that can't be kept is only blamed again."""
+    lines, commits = found
+    order = list(dict.fromkeys(commits.values()))
+    index = {sha: i for i, sha in enumerate(order)}
+    record = {"head": head, "lines": list(lines), "commits": order,
+              "by": [index[commits[n]] if n in commits else -1 for n in lines]}
+    target = _blame_file(ws, path, blob, mb)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(record, f, separators=(",", ":"))
+            os.replace(tmp, target)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    except OSError as e:
+        log.debug("brindle: couldn't keep the blame of %s: %s", path, e)
+        return
+    _prune_blames()
+
+
+def _prune_blames() -> None:
+    """Once per process: drop the kept blames not written for
+    ``BLAME_KEEP_SECONDS`` (files since changed, sessions long gone)."""
+    global _pruned
+    if _pruned:
+        return
+    _pruned = True
+    oldest = time.time() - BLAME_KEEP_SECONDS
+    for kept in _blame_dir().glob("*/*.json"):
+        try:
+            if kept.stat().st_mtime < oldest:
+                kept.unlink()
+        except OSError:
+            pass
 
 
 def _compute(ws: Workspace, base: str, fp: _Fingerprint | None, prev: _Facts | None) -> _Facts:
@@ -931,13 +1477,18 @@ class ReadinessWatch:
     """Remembers which sessions are ready for a PR and publishes
     ``session.pr_ready`` when one becomes ready; prepares a ready session's
     PR for the person's approval (routes_actions.prepare_pr: its checks, no
-    push), and forgets what it prepared for one no longer ready. brindle
-    never opens or pushes a PR itself. The first sweep only looks."""
+    push), and forgets what it prepared for one no longer ready. The only PR
+    brindle opens or pushes itself is a completed goal phase's, pinned to the
+    commit its checks passed on (routes_actions.land_phase_prs, every sweep).
+    The first sweep only looks."""
 
     def __init__(self) -> None:
         self.ready: dict[str, bool] | None = None
         self.fingerprints: dict[str, tuple] = {}
+        self.idle_fetched_at: dict[str, float] = {}
+        self.sync_seen = session_sync.Seen()   # idle sync and drift: sessions whose refs haven't moved
         self._tracked: dict[str, tuple[tuple[str, int], list[str] | None]] = {}
+        self.announce: set[str] = set()    # became ready while GitHub's first look at its PR was pending
 
     def _working_tree(self, ws: Workspace, fp: _Fingerprint) -> tuple | None:
         """Stat only tracked paths, including files below nested directories.
@@ -995,10 +1546,21 @@ class ReadinessWatch:
         return (fp, working, repr(ws), repr(ap), repr(ms), repr(tree),
                 repr([db.get_workspace(a.workspace_id) for a in tree]),
                 repr(tasks.queued(db)), repr(db.get_login_state(root_id)),
-                repr(load_repo_config(ws.repo_root)))
+                repr(load_repo_config(ws.repo_root)),
+                # its PR merging (or the next one opening) changes readiness without a new commit
+                repr([tuple(r) for r in db.conn.execute("SELECT branch, url, merged_at FROM session_prs"
+                                                        " WHERE root_id = ?", (root_id,))]))
 
     def sweep(self, db: DB) -> list[str]:
         """The sessions that just became ready (each announced on the bus)."""
+        try:
+            session_sync.refresh_idle_sessions(db, self.idle_fetched_at, self.sync_seen)
+        except Exception:  # noqa: BLE001 - one missed sync never stops the sweep
+            log.exception("brindle: couldn't sync idle sessions")
+        try:
+            session_sync.refresh_drift_flags(db, self.sync_seen)
+        except Exception:  # noqa: BLE001 - one missed measurement never stops the sweep
+            log.exception("brindle: couldn't refresh session drift flags")
         if spawn.room() < 1:
             return []
         poll_merged(db)
@@ -1010,12 +1572,25 @@ class ReadinessWatch:
             session_sync.tell_refused_fetches(db)
         except Exception:  # noqa: BLE001 - a missed notice never stops the sweep
             log.exception("brindle: couldn't tell a supervisor about a refused fetch")
+        from brindle.daemon import routes_actions
+
+        try:
+            routes_actions.land_phase_prs(db)
+        except Exception:  # noqa: BLE001 - a missed landing is tried again next sweep
+            log.exception("brindle: couldn't land a goal phase's PR")
         now: dict[str, bool] = {}
         fingerprints: dict[str, tuple] = {}
         for (root_id,) in db.conn.execute("SELECT root_id FROM autopilot").fetchall():
             ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
             # Only a reached goal (or one whose every milestone passes) can be ready: skip the git work otherwise.
             if ap is None or not (ap.state == "done" or (ms and all(m.status == "passed" for m in ms))):
+                now[root_id] = False
+                continue
+            # Nor can a session with no branch and base to open a PR from (one on the repo's own
+            # checkout): ``reasons`` would run its git checks every sweep only to say so again.
+            root = db.get_agent(root_id)
+            ws = db.get_workspace(root.workspace_id) if root else None
+            if ws is None or not ws.base_branch or ws.branch in ("", "HEAD"):
                 now[root_id] = False
                 continue
             try:
@@ -1034,10 +1609,14 @@ class ReadinessWatch:
         if was is None:
             return []
         flipped = [r for r, ok in now.items() if ok and not was.get(r)]
-        for r in flipped:
-            bus.publish_agent(db, "session.pr_ready", r)
-        from brindle.daemon import routes_actions
-
+        self.announce = {r for r in self.announce | set(flipped) if now.get(r)}
+        for r in sorted(self.announce):
+            opened = _pr_open_state(db, r)
+            if opened is None:
+                continue        # asked again next sweep: "open the PR" would be stale advice if one exists
+            self.announce.discard(r)
+            if not opened:
+                bus.publish_agent(db, "session.pr_ready", r)
         for r, ok in now.items():
             if not ok:      # its Inbox item goes: what was checked may no longer be what a PR would carry
                 db.conn.execute("DELETE FROM session_pr_prep WHERE root_id = ?", (r,))

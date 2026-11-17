@@ -78,8 +78,10 @@ def test_malformed_role_overrides_fail_closed(team, roles):
 @pytest.mark.parametrize("base_grants,block,ok", [
     (True, None, True),
     pytest.param(False, None, True, marks=pytest.mark.variant("role-only grant policy")),
-    (None, GRANT_POLICY, True),
-    (None, {**GRANT_POLICY, "expires": 1}, False),
+    pytest.param(None, GRANT_POLICY, True,
+                 marks=pytest.mark.variant("offline grant validation must preserve this role-policy boundary")),
+    pytest.param(None, {**GRANT_POLICY, "expires": 1}, False,
+                 marks=pytest.mark.variant("offline grant validation must preserve this role-policy boundary")),
     pytest.param(None, {k: v for k, v in GRANT_POLICY.items() if k != "max_uses"}, False,
                  marks=pytest.mark.variant("a block an older server sends, missing a cap: never unbounded")),
     (None, {**GRANT_POLICY, "kinds": ["shell"]}, False),
@@ -87,9 +89,11 @@ def test_malformed_role_overrides_fail_closed(team, roles):
     (None, {**GRANT_POLICY, "deny": ["bash regex x"]}, False),
     (None, {**GRANT_POLICY, "allow": "yes"}, False),
     (None, {**GRANT_POLICY, "allow_persistent": "yes"}, False),
-    (None, {**GRANT_POLICY, "scopes": ["remote"], "lifetimes": ["session"]}, True),
+    pytest.param(None, {**GRANT_POLICY, "scopes": ["remote"], "lifetimes": ["session"]}, True,
+                 marks=pytest.mark.variant("offline grant validation must preserve this role-policy boundary")),
     (None, {**GRANT_POLICY, "scopes": ["unknown"]}, False),
-    (None, {**GRANT_POLICY, "destinations": ["https://example.com/*"]}, False),
+    pytest.param(None, {**GRANT_POLICY, "destinations": ["https://example.com/*"]}, False,
+                 marks=pytest.mark.variant("offline grant validation must preserve this role-policy boundary")),
     pytest.param(None, {**GRANT_POLICY, "destinations": "https://example.com/o/r.git"}, False,
                  marks=pytest.mark.variant("a destination filter must not be interpreted as characters or a substring")),
 ])
@@ -190,6 +194,7 @@ def test_bad_policy_roles_and_members_are_rejected_before_any_call(team):
     assert not [c for c in team.paths() if "policy-role" in c]
 
 
+@pytest.mark.variant("member IDs containing slash and query characters cannot alter the API path")
 def test_a_member_id_is_escaped_in_the_path(team):
     team.routes[f"PUT /orgs/{ORG}/members/a%2Fb%3Fc/policy-role"] = lambda f, h: (
         200, {"org_id": ORG, "sub": "a/b?c", "policy_role": "ops"})

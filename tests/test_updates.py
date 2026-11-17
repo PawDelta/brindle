@@ -8,9 +8,9 @@ from brindle import cli, updates
 
 
 @pytest.mark.parametrize("cached, age, reply, local, disabled, expected, requests", [
-    ("0.4.0", 10, None, False, False, "0.4.0", 0),
+    pytest.param("0.4.0", 10, None, False, False, "0.4.0", 0, marks=pytest.mark.variant("fresh cache suppresses network checks")),
     ("0.3.8", 86400, "0.4.0", False, False, "0.4.0", 1),
-    ("0.4.0", 10, None, True, False, None, 0),
+    pytest.param("0.4.0", 10, None, True, False, None, 0, marks=pytest.mark.variant("editable installs ignore newer cached releases")),
     ("0.4.0", 10, None, False, True, None, 0),
     ("0.4.0", 86400, "locked", False, False, "0.4.0", 0),
     pytest.param(None, 0, "bad#(shell)", False, False, None, 1,
@@ -52,8 +52,8 @@ def test_daily_check(brindle_home, monkeypatch, cached, age, reply, local, disab
 
 
 @pytest.mark.parametrize("opt_in, available, fails, launched", [
-    (False, True, False, False),
-    (True, False, False, False),
+    pytest.param(False, True, False, False, marks=pytest.mark.variant("an available upgrade cannot bypass auto-update opt-out")),
+    pytest.param(True, False, False, False, marks=pytest.mark.variant("auto-update opt-in cannot launch without an available release")),
     (True, True, False, True),
     (True, True, True, False),
 ])

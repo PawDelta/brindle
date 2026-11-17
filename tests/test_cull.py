@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import run_scenario
 
-from brindle import agents, cull, procs, tmux, view, workspaces
+from brindle import agents, cull, procs, status_cache, tmux, view, workspaces
 from brindle.db import Agent, Workspace
 
 SLEEPER = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
@@ -213,6 +213,7 @@ def test_idle_unreported_worker_noticed_without_goal(db, ws, tmp_path, monkeypat
     monkeypatch.setattr(agents, "send_message", original_send)
     monkeypatch.setattr(git, "ok", lambda *a: True)
     monkeypatch.setattr(git, "run", lambda argv, *a: SimpleNamespace(stdout="a b" if argv[0] == "rev-list" else ""))
+    monkeypatch.setattr(status_cache, "cached_any_status", lambda path, base: git.Status(None, base, 0, 0, [], None))
     monkeypatch.setattr(agents, "command_running", lambda db_, a: a.id == "command")
     activity = now
     locked = [True]
@@ -291,7 +292,7 @@ def test_reported_branch_problems_reach_the_supervisor(db, ws, monkeypatch, prob
 
 @pytest.mark.parametrize("elapsed,status,expected", [
     ("12m 4s", "processing", 0),   # under the limit: nothing yet
-    ("41m 9s", "processing", 1),   # long: told once, however many sweeps read it
+    pytest.param("41m 9s", "processing", 1, marks=pytest.mark.variant("Stale sweeps alert once and redact the command's secret")),
     ("41m 9s", "waiting", 1),      # a prompt answered in the terminal leaves it 'waiting' meanwhile
 ])
 def test_long_running_command_reaches_the_supervisor_once(db, ws, monkeypatch, elapsed, status, expected):
@@ -317,9 +318,9 @@ def test_long_running_command_reaches_the_supervisor_once(db, ws, monkeypatch, e
 
 
 @pytest.mark.parametrize("case,exit_,cause", [
-    ("sweep", (143, None), "status 143 (SIGTERM)"),     # the CLI's wrapper shell exited 128 + 15
+    pytest.param("sweep", (143, None), "status 143 (SIGTERM)", marks=pytest.mark.variant("Sweep records wrapper exit 143 as failed and notifies")),
     ("leftover", (None, 15), "signal 15 (SIGTERM)"),    # the CLI itself was the pane's program
-    ("overlap", (143, None), "status 143 (SIGTERM)"),   # two sweeps read it 'processing'
+    pytest.param("overlap", (143, None), "status 143 (SIGTERM)", marks=pytest.mark.variant("Two stale dead-pane reads must notify only once")),
     ("report", (143, None), None),                      # its report lands after the read
 ])
 def test_dead_pane_marks_agent_stopped(db, ws, monkeypatch, case, exit_, cause):
@@ -427,6 +428,7 @@ def test_a_paused_reviewer_does_not_keep_a_merged_worktree(db, repo, tmp_path, m
     assert merged == [ws.id]
 
 
+@pytest.mark.variant("Pane ID collisions across tmux servers must not retire a live reviewer's worktree")
 def test_a_running_reviewer_on_another_server_keeps_its_worktree(db, repo, tmp_path, merged,
                                                                 monkeypatch):
     """The same pane id, live on both servers: this server's owner of it is
@@ -472,23 +474,35 @@ def live_pane(ws, agent_id):
                            tag=(agents.AGENT_TAG, agent_id))
 
 
-def test_sweep_on_another_server_leaves_a_live_agent_alone(db, ws, proc_cleanup, other_server,
-                                                           monkeypatch):
+@pytest.mark.variant("Demo-server incident: a sweep on another server must not pause or terminate the person's real agents")
+def test_sweep_on_another_server_leaves_a_live_agent_alone(db, ws, monkeypatch):
     here = tmux.current_server()
-    pane = live_pane(ws, "abc12345")
-    add(db, ws, "abc12345", status="processing", tmux_window=pane)
+    pane = "%1"
+    add(db, ws, "abc12345", status="processing", tmux_window=pane, tmux_server=here)
+    config = json.dumps({"BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]})
+    table = {1: procs.Proc(1, 0, "init"), 11: procs.Proc(11, 1, f"claude --mcp-config {config}")}
+    stopped = []
+    monkeypatch.setattr(procs, "table", lambda: table)
+    monkeypatch.setattr(procs, "terminate", lambda pids, **k: stopped.append(set(pids)) or len(pids))
+
+    def panes(server=None):
+        snapshot = tmux.PaneSnapshot(server or tmux.current_server())
+        if snapshot.server == here:
+            snapshot[pane] = True
+        return snapshot
+
+    monkeypatch.setattr(tmux, "list_panes", panes)
+    monkeypatch.setattr(tmux, "window_alive", lambda target, server=None:
+                        target == pane and (server or tmux.current_server()) == here)
     a = db.get_agent("abc12345")
     assert a.tmux_server == here and agents.is_alive(a)
-    p = launch_as("abc12345")
-    proc_cleanup.append(p)
 
-    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", "brindle-test-other")
     assert not tmux.list_panes()  # that server knows nothing of the agent's pane
     notes = cull.sweep(db)
-    time.sleep(0.5)
 
     assert notes == []
-    assert alive(p.pid), "its process was stopped"
+    assert stopped == [], "its process was stopped"
     a = db.get_agent("abc12345")
     assert a.status == "processing" and a.dismissed_at is None
     # Asked from the other server, it is still known to be running: the
@@ -621,6 +635,7 @@ def test_lock_cleanup(request, scenario):
     run_scenario(request, scenario)
 
 
+@pytest.mark.variant("Cleanup must retain a paused session's workers while dismissing detached stopped workers")
 def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     add(db, ws, "boss", mode="interactive", status="paused", profile="supervisor")
     add(db, ws, "w1", parent_id="boss", status="paused")
@@ -688,6 +703,7 @@ def test_idle_sweep_honors_the_unreported_alert_cooldown(db, ws, monkeypatch):
     assert sent == ["boss"]
 
 
+@pytest.mark.variant("Disabling stale cleanup must preserve a live reported worker rather than treating zero as immediate expiry")
 def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
     (repo / ".brindle").mkdir()
     (repo / ".brindle" / "config.json").write_text('{"stale_after": 0}')
@@ -697,6 +713,7 @@ def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
     assert db.get_agent("w1").dismissed_at is None
 
 
+@pytest.mark.variant("A shared credential-bearing command string must not cause the Claude daemon to be killed with its worker")
 def test_the_daemon_is_never_included():
     config = json.dumps({"BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]})
     t = {1: procs.Proc(1, 0, "init"),

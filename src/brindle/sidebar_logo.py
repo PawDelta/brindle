@@ -33,9 +33,11 @@ class Braid:
         self.bg, self.cell = bg, cell   # as the terminal answered before curses, if it did
         self._ready, self._checked = False, -RECHECK_SECONDS
 
-    def image(self, fd: int = 1) -> tuple[str, int] | None:
-        """The sixel and its width in cells; None while the terminal can't show it."""
-        if not self._ready and time.monotonic() - self._checked >= RECHECK_SECONDS:
+    def image(self, fd: int = 1, ask: bool = True) -> tuple[str, int] | None:
+        """The sixel and its width in cells; None while the terminal can't show it.
+        ``ask`` False: don't ask tmux again on this call (an idle sidebar asks
+        only when it looks at tmux anyway)."""
+        if not self._ready and ask and time.monotonic() - self._checked >= RECHECK_SECONDS:
             self._checked = time.monotonic()
             # No answer to OSC 11 (tmux gives none for a window no client shows):
             # the pane's own background, which a brindle session sets.

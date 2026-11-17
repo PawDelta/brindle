@@ -196,7 +196,8 @@ def test_server_failure_preserves_write_and_reaps_process(tmp_path, server, fail
     assert client.proc.poll() is not None and not client.reader.is_alive()
 
 
-@pytest.mark.parametrize("stop", ["idle", "error", "signal"])
+@pytest.mark.parametrize("stop", [pytest.param("idle", marks=pytest.mark.variant(
+    "normal idle exit must shut down the LSP server reused across two turns")), "error", "signal"])
 def test_runner_owns_servers_across_turns(tmp_path, server, monkeypatch, stop):
     (tmp_path / "a.py").write_text("good")
     worker = SimpleNamespace(workspace_id="w", mode="chat", profile="developer")

@@ -31,12 +31,12 @@
    .../pr/push, through the same checks). */
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import type { DaemonClient } from "../../api/client";
+import { DaemonError, type DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
 import { LoadingButton } from "../../components/LoadingButton";
 import { Sheet } from "../../components/Sheet";
 import { button, field, label, main, mono, quiet } from "../../components/ui";
-import { useAppState } from "../../store/useStore";
+import { useAppState, useStore } from "../../store/useStore";
 import { BUSY } from "../Branch/DiffView";
 import { useJob } from "../Branch/useJob";
 import type { SessionDiffState, Readiness } from "./review";
@@ -160,7 +160,7 @@ export function ReviewSheet({ client, root, readiness, state, onClose, openUrl =
         step === "pr" && <button type="button" className={`${main} self-start`} onClick={() => void openUrl(opened.url)}>Open the PR ↗</button>
       ) : (
         <div hidden={step !== "pr"} className={step === "pr" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-          <PrStep client={client} root={root} diff={diff} ready={readiness.state === "ready"} openUrl={openUrl} onClose={onClose} />
+          <PrStep client={client} root={root} diff={diff} openUrl={openUrl} onClose={onClose} />
         </div>
       )}
       <div hidden={step !== "diff"} className={step === "pr" ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
@@ -182,7 +182,8 @@ function DiffFooter({ onOpen }: { onOpen(): void }) {
   );
 }
 
-function PrStep({ client, root, diff, ready, openUrl, onClose }: { client: DaemonClient; root: string; diff: { branch: string; base: string } | null; ready: boolean; openUrl: OpenUrl; onClose(): void }) {
+function PrStep({ client, root, diff, openUrl, onClose }: { client: DaemonClient; root: string; diff: { branch: string; base: string } | null; openUrl: OpenUrl; onClose(): void }) {
+  const store = useStore();
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [asDraft, setAsDraft] = useState(false);
@@ -190,26 +191,50 @@ function PrStep({ client, root, diff, ready, openUrl, onClose }: { client: Daemo
   const [loadError, setLoadError] = useState<string | null>(null);
   const job = useJob();
   const [url, setUrl] = useState<string | null>(null);
-  // The draft, read once; a draft the engine refused (not ready at the time) is asked for again once it is.
+  // Busy reads remain pending until a later sync snapshot; settled fields belong to the person.
   useEffect(() => {
-    if (loaded && !loadError) return;
-    if (!ready && loaded) return;
     let live = true;
-    client.prDraft(root).then(
-      (d) => {
-        if (!live) return;
-        setTitle(d.title);
-        setBody(d.body);
-        setLoadError(null);
-        setLoaded(true);
-      },
-      (e: unknown) => live && (setLoadError(message(e)), setLoaded(true)),
-    );
+    let inFlight = false;
+    let settled = false;
+    let version = store.getState().snapshotVersion;
+    setTitle("");
+    setBody("");
+    setLoaded(false);
+    setLoadError(null);
+    const read = () => {
+      if (inFlight || settled) return;
+      inFlight = true;
+      void client.prDraft(root).then(
+        (d) => {
+          if (!live) return;
+          inFlight = false;
+          settled = true;
+          setTitle(d.title);
+          setBody(d.body);
+          setLoaded(true);
+        },
+        (e: unknown) => {
+          if (!live) return;
+          inFlight = false;
+          if (e instanceof DaemonError && e.code === "busy") return;
+          settled = true;
+          setLoadError(message(e));
+          setLoaded(true);
+        },
+      );
+    };
+    const unsubscribe = store.subscribe(() => {
+      const next = store.getState().snapshotVersion;
+      if (next === version) return;
+      version = next;
+      read();
+    });
+    read();
     return () => {
       live = false;
+      unsubscribe();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, root, ready]);
+  }, [client, root, store]);
   const open = () => {
     if (job.busy || url) return;
     void job.start("Opening the PR", () => client.openSessionPr(root, { title, body, draft: asDraft }), (result) => {
@@ -226,7 +251,7 @@ function PrStep({ client, root, diff, ready, openUrl, onClose }: { client: Daemo
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-s2" data-testid="pr-step" onKeyDown={keys}>
       <p className="text-sm text-ink-2">One pull request for the whole session{diff ? `, from ${diff.branch} onto ${diff.base}` : ""}. The title and description come from the goal and its milestones; change anything.</p>
-      {loadError && <p className="text-sm text-sap">Couldn't draft it: {loadError}{ready ? "" : " (asked for again once brindle judges the session ready)"}</p>}
+      {loadError && <p className="text-xs text-ink-3" data-testid="pr-draft-error">Couldn't draft it: {loadError}</p>}
       <label className="flex flex-col gap-1 text-sm">
         <span className={label}>Title</span>
         <input className={field} aria-label="PR title" value={title} disabled={!loaded || !!url} onChange={(e) => setTitle(e.target.value)} />

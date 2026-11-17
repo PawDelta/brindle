@@ -1,16 +1,15 @@
+import { connectDaemon, renderApp, trackedSync as startSync } from "../../test/harness";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
 import { createAppStore } from "../../store/store";
-import { startSync, type Sync } from "../../store/sync";
 import { DaemonClient } from "../../api/client";
-import { PtyViewsProvider } from "../../api/ptyView";
 import { BASE_URL, FakeDaemon, TOKEN, flush, freshProviders } from "../../test/fakeDaemon";
 import { ONBOARDED_KEY } from "../../api/providers";
 import { DaemonContext } from "../../api/context";
 import { SessionsProvider } from "../../store/sessions";
 import { StoreContext } from "../../store/useStore";
-import { WatchDemo } from "./Demo";
+import { PracticeRow } from "./Demo";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
@@ -18,27 +17,17 @@ const PROJECT = "/home/u/Projects/proj";
 const SIGNED_IN = { signed_in: true, name: "sam@example.com", plan: "pro" };
 const SIGNED_OUT = { signed_in: false };
 
-let syncs: Sync[] = [];
 beforeEach(() => localStorage.clear());
 afterEach(() => {
-  for (const s of syncs) s.stop();
-  syncs = [];
   cleanup();
 });
 
 function launch(daemon: FakeDaemon, extra: { pickFolder?: (title: string) => Promise<string | null> } = {}) {
-  const store = createAppStore();
-  const client = daemon.client();
-  const sync = startSync({ client, store, connect: daemon.connect });
-  syncs.push(sync);
+  const { client, store, sync } = connectDaemon(daemon);
   const openUrl = vi.fn(() => Promise.resolve());
   const pickFolder = extra.pickFolder ?? vi.fn(() => Promise.resolve(PROJECT));
   // The panes (a sign-in's CLI) through the fake daemon's pty views, as the shell's show them.
-  render(
-    <PtyViewsProvider value={daemon.ptyViews()}>
-      <App store={store} client={client} refresh={sync.refresh} openUrl={openUrl} pickFolder={pickFolder} />
-    </PtyViewsProvider>,
-  );
+  renderApp(<App store={store} client={client} refresh={sync.refresh} openUrl={openUrl} pickFolder={pickFolder} />, daemon.ptyViews());
   return { openUrl, pickFolder };
 }
 
@@ -116,7 +105,7 @@ describe("Onboarding", () => {
     // The composer, in the project just opened (the app's repo list has it, though no event said so).
     const composer = await screen.findByRole("form", { name: "Start a session" });
     expect(within(composer).getByLabelText("What should brindle work on?")).toBeTruthy();
-    expect(composer.textContent).toContain("in proj");
+    expect(within(composer).getByRole("button", { name: "Project: proj" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Welcome" })).toBeNull();
     expect(daemon.installs).toEqual(["claude"]);
     // The one thing over it: the first-time walkthrough, offered once now that setup is done.
@@ -345,12 +334,7 @@ describe("Onboarding", () => {
       },
     });
     const sync = startSync({ client, store, connect: daemon.connect });
-    syncs.push(sync);
-    render(
-      <PtyViewsProvider value={daemon.ptyViews()}>
-        <App store={store} client={client} refresh={sync.refresh} />
-      </PtyViewsProvider>,
-    );
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />, daemon.ptyViews());
   }
   const refusal = (status: number, code: string, message: string) => new Response(JSON.stringify({ error: { code, message } }), { status, headers: { "Content-Type": "application/json" } });
 
@@ -390,7 +374,8 @@ describe("Onboarding", () => {
     expect(screen.queryByTestId("onboarding")).toBeNull();
     // The gate asked nothing; provider status stays out of the sidebar.
     expect(screen.queryByTestId("provider-problem")).toBeNull();
-    expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBe(asked + 1);
+    // The feed's own ask comes from an effect, which may run after the sidebar has painted.
+    await waitFor(() => expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBe(asked + 1));
   });
 
   /* The way out of a sign-in step: Try again, and on a provider's, Skip for now. */
@@ -407,12 +392,7 @@ describe("Onboarding", () => {
       fetch: (input, init) => (refuse && String(input).includes("/v1/account/login") ? Promise.resolve(refusal(502, "upstream", "pawdelta.com didn't answer")) : daemon.fetch(input, init)),
     });
     const sync = startSync({ client, store, connect: daemon.connect });
-    syncs.push(sync);
-    render(
-      <PtyViewsProvider value={daemon.ptyViews()}>
-        <App store={store} client={client} refresh={sync.refresh} openUrl={vi.fn(() => Promise.resolve())} />
-      </PtyViewsProvider>,
-    );
+    renderApp(<App store={store} client={client} refresh={sync.refresh} openUrl={vi.fn(() => Promise.resolve())} />, daemon.ptyViews());
     await step("signin");
     const logins = () => posts(daemon).filter((p) => p === "/account/login").length;
     // An account is required: no way past the step but signing in, and the screen says it's free.
@@ -459,12 +439,7 @@ describe("Onboarding", () => {
       fetch: (input, init) => (holding(String(input)) ? new Promise((ok) => held.push(() => ok(daemon.fetch(input, init)))) : daemon.fetch(input, init)),
     });
     const sync = startSync({ client, store, connect: daemon.connect });
-    syncs.push(sync);
-    render(
-      <PtyViewsProvider value={daemon.ptyViews()}>
-        <App store={store} client={client} refresh={sync.refresh} openUrl={vi.fn(() => Promise.resolve())} />
-      </PtyViewsProvider>,
-    );
+    renderApp(<App store={store} client={client} refresh={sync.refresh} openUrl={vi.fn(() => Promise.resolve())} />, daemon.ptyViews());
     await step("connect");
     fireEvent.click(screen.getByRole("button", { name: "Continue with Claude Code" }));
     fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
@@ -527,12 +502,12 @@ describe("Onboarding", () => {
       <DaemonContext.Provider value={client}>
         <StoreContext.Provider value={createAppStore()}>
           <SessionsProvider client={client}>
-            <WatchDemo client={client} onStarted={onStarted} />
+            <PracticeRow client={client} onStarted={onStarted} />
           </SessionsProvider>
         </StoreContext.Provider>
       </DaemonContext.Provider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Watch brindle work on a practice repo" }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Practice run" })).getByRole("button"));
     const card = await screen.findByTestId("preflight");
     const box = within(card).getByRole("checkbox", { name: /Claude Code's security notes/ }) as HTMLInputElement;
     fireEvent.click(box);

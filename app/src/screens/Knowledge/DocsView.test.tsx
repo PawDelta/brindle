@@ -1,7 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { useReaderDoc } from "../../store/libraryReader";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonClient, type DocResults } from "../../api/client";
 import { DocsView } from "./DocsView";
+import { docQueue } from "../Library/libraryStages";
 
 afterEach(cleanup);
 
@@ -57,60 +59,172 @@ const view = (d: (typeof DOCS)[number], extra: object = {}) => {
 };
 
 describe("docs view", () => {
-  it("lists one session's docs as cards, narrows them by category and search, and opens one in the reader", async () => {
-    const docs = DOCS.map((d) => ({ ...d, category: d.doc_id === "d2" ? "Fees" : "Checkout" }));
-    render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!), RESULTS, docs)} repo="/r" session="root1" />);
-    await waitFor(() => expect(shown()).toEqual(["d1", "d4", "d2"]));
-    const first = screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!;
-    for (const text of ["Checkout drop after pricing change", "Investigation", "Mine", "v3", "2 findings · 1 open question", "used in 6 briefs"]) expect(first.textContent).toContain(text);
-    // A team's doc carries the team's name; a team with no docs still gets its chip.
-    await waitFor(() => expect(screen.getByTestId("docs").querySelector('li[data-doc="d4"]')!.textContent).toContain("Payments team"));
-    await waitFor(() => expect(within(screen.getByRole("group", { name: "Scope" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["All", "Mine", "Payments team", "Platform"]));
-    const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
-    expect(within(rail).getByRole("button", { name: /checkout/ }).textContent).toBe("checkout3");
-    fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
+  it("library search", async () => {
+    const docs = [
+      listed("d1", "Recovery", "Design", "root1", { created_by: "person", updated_at: Date.now() / 1000, used_in_briefs: 3 }),
+      listed("d2", "Hosting", "Design", "root2", { created_by: "supervisor" }),
+    ];
+    const record = {
+      revisions: [{ rev: 2, author: "person", source: "edit", changed: ["s1"], at: 1760000000 }],
+      threads: [{ id: 1, author: "person", text: "Reconnect credentials first.", replies: [{ text: "Keep the token encrypted." }] }],
+      decisions: [{ id: "storage", title: "Journal format", options: [{ id: "a", label: "Transactional database" }] }],
+      verdict: { approved: true, picks: { storage: "a" } },
+    };
+    const details = docs.map((d, i) => view(d, {
+      files: [{ name: "design.md", md: i ? "Use hosted machines." : "Store the journal in SQLite." }],
+      source: i ? d.source : { kind: "goal", ref: "v_recovery", session: "root1" },
+      ...(i ? { ...record, design: { rev: 1, reviewers: [{ sub: "sam", required: true }], sign_offs: [] } } : {}),
+    }));
+    let finishOld: ((r: Response) => void) | undefined;
+    const api = new DaemonClient({ baseUrl: "http://daemon.test", token: "t", fetch: async (input) => {
+      const url = new URL(String(input));
+      const path = url.pathname.replace(/^\/v1/, "");
+      if (path === "/kb/search" && url.searchParams.get("q") === "old") return new Promise<Response>((resolve) => { finishOld = resolve; });
+      if (path === "/analysis-docs/results") return new Response("{}", { status: 404 });
+      const body = path === "/analysis-docs" ? { docs }
+        : path === "/analysis-docs/topics" ? { topics: [] }
+        : path === "/analysis-docs/scopes" ? { scopes: SCOPES }
+        : path === "/decisions" ? [{ id: "dec", topic: "SQLite", body: "Use SQLite", rationale: "Atomic journal", created_at: 1760000000 }]
+        : path === "/kb/search" ? [
+          { chunk_id: "c1", external_id: "README.md", url: "file:///docs/a/README.md", title: "SQLite runbook", text: "SQLite recovery procedure", updated_at: 1760000000 },
+          { chunk_id: "c1b", external_id: "README.md", url: "file:///docs/a/README.md", title: "SQLite runbook", text: "Another SQLite passage", updated_at: 1760000000 },
+          { chunk_id: "c2", external_id: "README.md", url: "file:///docs/b/README.md", title: "SQLite operations", text: "SQLite maintenance", updated_at: 1760000000 },
+          { chunk_id: "c3", external_id: "README.md", url: null, title: "SQLite notes", text: "SQLite notes without a URL", updated_at: 1760000000 },
+          { chunk_id: "c4", external_id: "README.md", url: null, title: "SQLite checklist", text: "SQLite checklist without a URL", updated_at: 1760000000 },
+        ]
+        : path === "/kept-visuals" ? [
+          { id: "k1", title: "SQLite layout", repo: "/r", from_session_name: "Recovery", kept_at: 1760000000 },
+          { id: "k2", title: "SQLite private layout", repo: "/other", from_session_name: "Other", kept_at: 1760000000 },
+        ]
+        : path === "/plans/v_recovery" ? { ...record, state: "approved", session: "root1", markdown: "Store the journal in SQLite." }
+        : details[docs.findIndex((d) => path.endsWith(d.doc_id))];
+      return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+    } });
+    render(<DocsView client={api} repo="/r" />);
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
+    // The Sources are listed only for a search; a reviewer narrows the designs, and clearing it restores them.
+    const hits = () => [...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"));
+    expect(hits()).toEqual([]);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Reviewer" }), { target: { value: "sam" } });
     expect(shown()).toEqual(["d2"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Reviewer" }), { target: { value: "" } });
+    expect(shown()).toEqual(["d1", "d2"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Author" }), { target: { value: "person" } });
+    expect(shown()).toEqual(["d1"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Changed" }), { target: { value: "7" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Author" }), { target: { value: "" } });
+    expect(shown()).toEqual(["d1"]);
+    const box = screen.getByRole("searchbox", { name: "Search the library" });
+    fireEvent.change(box, { target: { value: "sqlite" } });
+    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(0));
+    await waitFor(() => expect(shown()).toEqual(["d1"]));
+    await waitFor(() => expect(screen.getByTestId("docs").querySelector('[data-doc="d1"]')?.textContent).toContain("Store the journal in SQLite."));
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    fireEvent.change(box, { target: { value: "sqlite" } });
+    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(6));
+    expect([...screen.getByTestId("docs").querySelectorAll('[data-library-hit^="imported:"]')].map((li) => li.getAttribute("data-library-hit"))).toEqual(["imported:c1", "imported:c2", "imported:c3", "imported:c4"]);
+    expect(screen.getByTestId("docs").querySelector('[data-library-hit="kept:k2"]')).toBeNull();
+    // A scope narrows the search to designs (the Sources can't say whose they are); Everyone's brings them back.
+    const scope = screen.getByRole("group", { name: "Scope" });
+    fireEvent.click(within(scope).getByRole("button", { name: "Mine" }));
+    expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(0);
+    fireEvent.click(within(scope).getByRole("button", { name: "Everyone's" }));
+    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(6));
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('[data-library-hit="imported:c1"]')!).getByRole("button"));
+    expect((await screen.findByTestId("doc-body")).textContent).toContain("SQLite recovery procedure");
+    fireEvent.click(screen.getByRole("button", { name: "← Library" }));
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('[data-library-hit="decision:dec"]')!).getByRole("button"));
+    expect((await screen.findByTestId("doc-body")).textContent).toContain("Atomic journal");
+    fireEvent.click(screen.getByRole("button", { name: "← Library" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "encrypted" } });
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "transactional" } });
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
+    await screen.findByTestId("doc-body");
+    const recordElement = screen.getByRole("complementary", { name: "Design record" });
+    expect(recordElement.querySelector("[data-revision='2']")).toBeTruthy();
+    expect(recordElement.querySelector("[data-decision='storage']")).toBeTruthy();
+    expect(within(recordElement).getByRole("region", { name: "Comments" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "← Library" }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "old" } });
+    await waitFor(() => expect(finishOld).toBeTruthy());
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "missing" } });
+    await waitFor(() => expect(shown()).toEqual([]));
+    await act(async () => { finishOld!(new Response(JSON.stringify([{ chunk_id: "stale", external_id: "stale", title: "Stale", text: "Old result" }]))); });
+    expect(screen.queryByText("Stale")).toBeNull();
+    cleanup();
+    render(<DocsView client={client(() => ({}), RESULTS, [])} repo="/r" />);
+    expect(await screen.findByTestId("library-empty")).toBeTruthy();
+  });
+
+  it("library search stage and reviewer: stages come from each shared design's review state, Reviewer selects and clears, and the record lists every signer", async () => {
+    const designs: Record<string, object> = {
+      d1: { rev: 2, ready: false, reviewers: [{ sub: "sam", required: true }, { sub: "dana", required: false }], sign_offs: [{ sub: "sam", rev: 2 }, { sub: "dana", rev: 1 }, { sub: "ops", rev: 1 }, { sub: "ops", rev: 2 }] },
+      d2: { rev: 1, ready: true, reviewers: [{ sub: "dana", required: true }], sign_offs: [{ sub: "dana", rev: 1 }] },
+      d3: { rev: 1, ready: false, reviewers: [{ sub: "sam", required: true }], sign_offs: [] },
+    };
+    // d3 is in the person's queue; d1 and d2 have no Inbox card at all. d4 is a personal design.
+    const queue = docQueue([{ kind: "review_requested", reason: "r", doc: "d3" }]);
+    const api = client((id) => view(DOCS.find((d) => d.doc_id === id)!, designs[id] ? { design: designs[id] } : {}));
+    const { rerender } = render(<DocsView client={api} stage="in-review" queue={queue} />);
+    // Waiting on the person doesn't take a design out of its stage: d3 is in review too.
+    await waitFor(() => expect(shown()).toEqual(["d3", "d1"]));
+    rerender(<DocsView client={api} stage="approved" queue={queue} />);
+    expect(shown()).toEqual(["d2"]);
+    rerender(<DocsView client={api} stage="needs-you" queue={queue} />);
+    expect(shown()).toEqual(["d3"]);
+    rerender(<DocsView client={api} queue={queue} />);
+    expect(shown()).toHaveLength(4);
+    const pick = (name: string, value: string) => fireEvent.change(screen.getByRole("combobox", { name }), { target: { value } });
+    pick("Reviewer", "sam");
+    expect(shown().sort()).toEqual(["d1", "d3"]);
+    pick("Reviewer", "");
+    expect(shown()).toHaveLength(4);
+    fireEvent.click(screen.getByTestId("docs").querySelector("li[data-doc='d1'] button")!);
+    const record = await screen.findByRole("complementary", { name: "Design record" });
+    const rows = [...record.querySelectorAll("[data-signoff]")].map((r) => `${r.getAttribute("data-signoff")}@${r.getAttribute("data-rev") || "waiting"}:${r.getAttribute("data-signed")}`);
+    // Every recorded signature keeps its revision (ops, outside the roster, signed two); dana signed rev 1 only, so she is also waiting.
+    expect(rows).toEqual(["sam@2:yes", "dana@1:no", "ops@1:no", "ops@2:yes", "dana@waiting:no"]);
+  });
+
+  it("lists one session's docs, narrows them by search, and opens one in the reader", async () => {
+    render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!))} repo="/r" session="root1" />);
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d4"]));
+    // Scopes without documents still remain available.
+    await within(screen.getByRole("group", { name: "Scope" })).findByRole("button", { name: "Platform" });
+    expect(screen.getByTestId("docs").querySelector('li[data-doc="d4"]')!.textContent).toContain(SCOPES[1].name);
     fireEvent.change(screen.getByRole("searchbox", { name: "Search the library" }), { target: { value: "pricing" } });
-    expect(screen.getByText("No doc matches.")).toBeTruthy();
-    fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
+    await waitFor(() => expect(shown()).toEqual(["d1"]));
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
     const body = await screen.findByTestId("doc-body");
     expect(body.textContent).toContain("Body.");
+    const readerDoc = () => renderHook(() => useReaderDoc()).result.current;
+    expect(readerDoc()).toBe("d1");
     // A connected doc is named by its title and opens in turn.
     fireEvent.click(screen.getByRole("button", { name: "Stripe vs Adyen fees" }));
     await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toContain("Stripe vs Adyen fees"));
+    // The Library rail moves whichever doc is open here: the row's, then the connected one, then none.
+    expect(readerDoc()).toBe("d2");
+    fireEvent.click(screen.getByRole("button", { name: /Library/ }));
+    await waitFor(() => expect(readerDoc()).toBeNull());
   });
 
-  it("groups docs under their categories, largest first and uncategorised last, and remembers a collapsed one", async () => {
-    const docs = [
-      { ...DOCS[0], category: "Security" }, { ...DOCS[1], category: " " }, { ...DOCS[2], category: "Security" }, { ...DOCS[3], category: "Desktop updates" },
-    ];
-    const at = (repo: string, listed: object[] = docs) => <DocsView client={client(() => ({}), RESULTS, listed)} repo={repo} />;
-    const open = () => render(at("/r"));
-    open();
-    await waitFor(() => expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label")).slice(2)).toEqual(["Security", "Desktop updates", "Uncategorised"]));
-    expect([...screen.getByRole("region", { name: "Security" }).querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"))).toEqual(["d1", "d3"]);
-    fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
-    expect(shown()).toEqual(["d4", "d2"]);
-    cleanup();
-    const { rerender } = open();
-    await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
-    // The rail lists the categories with their counts; picking a collapsed one opens and filters to it, and its header still collapses.
-    const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
-    expect(within(rail).getAllByRole("button").slice(0, 3).map((b) => b.textContent)).toEqual(["Security2", "Desktop updates1", "Uncategorised1"]);
-    fireEvent.click(within(rail).getByRole("button", { name: /^Security/ }));
-    expect(shown()).toEqual(["d1", "d3"]);
-    fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
-    expect(shown()).toEqual([]);
-    // A repo without that category drops the filter, so its docs stay reachable.
-    rerender(at("/other", DOCS));
-    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d3", "d4"]));
-    // Collapsed headers are each repo's own.
-    rerender(at("/third"));
-    await waitFor(() => expect(shown()).toEqual(["d1", "d3", "d4", "d2"]));
-    rerender(at("/r"));
-    await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
-    localStorage.clear();
+  it("opens a design in the design reader here in the Library, and Back comes to the list as it was", async () => {
+    const docs = [...DOCS, listed("d5", "Cloud workers", "design", "root1")];
+    const designReader = (id: string, title: string | undefined, back: () => void) => (
+      <div data-testid="design-reader" data-doc={id}>{title}<button type="button" onClick={back}>Back to list</button></div>
+    );
+    render(<DocsView client={client((id) => view(docs.find((d) => d.doc_id === id)!), RESULTS, docs)} repo="/r" designReader={designReader} />);
+    await waitFor(() => expect(shown()).toContain("d5"));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search the library" }), { target: { value: "cloud" } });
+    await waitFor(() => expect(shown()).toEqual(["d5"]));
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d5"]')!).getByRole("button"));
+    expect(screen.getByTestId("design-reader").dataset.doc).toBe("d5");
+    fireEvent.click(screen.getByRole("button", { name: "Back to list" }));
+    expect((screen.getByRole("searchbox", { name: "Search the library" }) as HTMLInputElement).value).toBe("cloud");
+    expect(shown()).toEqual(["d5"]);
   });
 
   it("reads a real doc: raw HTML and images stay text, mentions are listed, and Share offers every team of the person's", async () => {
@@ -123,7 +237,7 @@ describe("docs view", () => {
     expect(body.textContent).toContain("[image: chart]");
     expect(container.querySelector("script, img, iframe, [onerror]")).toBeNull();
     expect(body.querySelector("strong")?.textContent).toBe("bold");
-    expect(screen.getByRole("complementary").textContent).toContain("Mentions: src/pay.py · charge() · stripe");
+    for (const mention of Object.values(detail.mentions).flat()) expect(screen.getByRole("complementary").textContent).toContain(mention);
     fireEvent.click(screen.getByRole("button", { name: "Share" }));
     // Shared with one team already, never shared with the other, which has no docs at all.
     await waitFor(() =>

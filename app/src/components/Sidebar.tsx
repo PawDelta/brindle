@@ -20,9 +20,10 @@
    session stays listed under it). Clicking a session opens its
    provider session on the supervisor; clicking an agent opens the session
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
-   jump to a session, ⌘N starts one. At the foot, the profile pill combines
-   initials and usage and opens Account › Usage; the terminal switch sits
-   beside it. Updates live in the Inbox and Settings › About. There is no right-hand panel: this is
+   jump to a session, ⌘N starts one, ⌘L opens the Library. At the foot, the profile pill combines
+   initials and usage and opens Account › Usage; the Library button and the terminal switch sit
+   beside it. Open, the Library takes this column for its own navigation (LibraryRail), as
+   Settings does (SettingsRail), each with "← Sessions". Updates live in the Inbox and Settings › About. There is no right-hand panel: this is
    where brindle's layer lives. The site's surfaces, purple (branch) only
    as the accent (styles.css .side-*). */
 
@@ -30,8 +31,14 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState, type Key
 import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import { openExternal, type OpenUrl } from "../api/open";
-import type { GoalDTO, SessionDTO } from "../api/schema";
-import { inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
+import type { AgentDTO, GoalDTO, SessionDTO } from "../api/schema";
+import { inLibrary, inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
+import { GearIcon, InboxIcon, LibraryIcon } from "./icons";
+import { LibraryRail, type LibraryCounts } from "./LibraryRail";
+import { useLibraryFolders } from "./useLibraryFolders";
+import { useLibraryDocs } from "./useLibraryDocs";
+import { useLibraryChanges } from "../store/libraryReader";
+import { docQueue, stageCounts } from "../screens/Library/libraryStages";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
@@ -39,7 +46,7 @@ import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
 import { waitingCount } from "../store/appUpdates";
-import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
+import { cliStatus, formatAge, isPastWorker, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
 import { useUsage } from "../store/usage";
@@ -47,10 +54,15 @@ import { useAppState, useStore } from "../store/useStore";
 import Logo from "./Logo";
 import { Preflight } from "./Preflight";
 import { SessionContext } from "./SessionContext";
-import { TerminalToggle } from "./TerminalPanel";
+import { TerminalToggle, useTerminals } from "./TerminalPanel";
 
 export interface SidebarProps {
   onBackFromSettings?(): void;
+  /* The foot's Library button and ⌘L: opens the Library, or from it, goes back (the app's own;
+     without one the button opens the Library and goes back as "← Sessions" does). */
+  onToggleLibrary?(): void;
+  /* What the open Library holds, for its navigation's counts. */
+  libraryCounts?: LibraryCounts;
   route: Route;
   navigate(route: Route): void;
   /* Fetch the snapshot and inbox again (Sync.refresh), after a decision made here. */
@@ -74,13 +86,13 @@ function UsageReading({ provider, warning, failed }: { provider?: ProviderUsage;
     <span
       className={`min-w-0 truncate font-mono text-[11.5px] ${warning ? "text-sap" : "text-ink-3"}`}
       data-testid="profile-usage"
-      data-provider={provider?.provider}
-      data-state={provider ? "reading" : failed ? "failed" : "none"}
+      data-provider={window ? provider?.provider : undefined}
+      data-state={window ? "reading" : failed ? "failed" : "none"}
     >
-      {provider ? (
+      {provider && window ? (
         <>
           <span>{providerName(provider.provider)}</span>
-          {" "}{window ? `${Math.round(window.used)}%` : "—"}
+          {" "}{Math.round(window.used)}%
           {window?.resets_at != null && window.used >= RESET_SHOWN_FROM && <> · {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</>}
         </>
       ) : failed ? "Usage unavailable" : "Usage"}
@@ -126,6 +138,71 @@ function AccountButton({ route, navigate, provider, warning, failed }: Pick<Side
     </button>
   );
 }
+
+/* The foot's Library button (icon only): beside the terminal
+   switch on every screen, a dot while designs wait on the person, and on (green) while the
+   Library is open. Pressed again, or ⌘L, it goes back to where the person was. */
+function LibraryButton({ open, waiting, onToggle }: { open: boolean; waiting: number; onToggle(): void }) {
+  const needs = waiting > 0 ? `${waiting} need${waiting === 1 ? "s" : ""} you` : null;
+  return (
+    <button
+      type="button"
+      className={`relative inline-flex h-5 w-[26px] flex-none items-center justify-center rounded-md border ${open ? "border-pass/45 bg-pass-soft text-pass" : "border-line text-ink-3 hover:border-ink-3 hover:text-ink"}`}
+      aria-label={needs ? `Library, ${needs}` : "Library"}
+      aria-pressed={open}
+      title={`Library${needs ? ` · ${needs}` : ""} (⌘L)`}
+      data-testid="library-button"
+      onClick={onToggle}
+    >
+      <LibraryIcon size={14} />
+      {needs && <span className="absolute right-0.5 top-0.5 size-[7px] rounded-full bg-branch ring-2 ring-canvas-2" data-testid="library-dot" aria-hidden />}
+    </button>
+  );
+}
+
+/* The first run's slim rail (no project yet, on New session): nothing to list,
+   so the column narrows to the mark, the Inbox and Settings, and at its foot
+   the terminal switch and the profile. The full sidebar comes back with the
+   first project or practice run. */
+const RAIL_BUTTON = "relative flex size-9 items-center justify-center rounded-md text-ink-3 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-branch";
+
+function SlimRail({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
+  const total = useAppState(waitingCount);
+  const terminals = useTerminals();
+  return (
+    <aside className="side flex w-16 shrink-0 flex-col items-center gap-[10px] border-r border-line bg-canvas-2 pb-3.5 pt-[18px]" aria-label="Sidebar" data-testid="slim-rail">
+      <Logo mark className="mb-3 text-[18px]" onHome={() => navigate({ screen: "new" })} />
+      <button type="button" className={RAIL_BUTTON} aria-label={total > 0 ? `Inbox, ${total} needing you` : "Inbox"} title="Inbox" data-testid="inbox-link" data-walkthrough="inbox" onClick={() => navigate({ screen: "inbox" })}>
+        <InboxIcon size={18} />
+        {total > 0 && <span className="side-nb absolute -right-1 -top-1 scale-75">{total}</span>}
+      </button>
+      <button type="button" className={RAIL_BUTTON} aria-label="Settings" title="Settings" onClick={() => navigate({ screen: "settings" })}>
+        <GearIcon size={18} />
+      </button>
+      <span className="flex-1" />
+      {terminals && (
+        <button
+          type="button"
+          className={`inline-flex h-[22px] items-center rounded-[var(--r)] border px-2 font-mono text-[11.5px] disabled:opacity-50 ${terminals.open ? "border-branch text-branch" : "border-line text-ink-2 hover:text-ink"}`}
+          aria-label="Terminal"
+          aria-pressed={terminals.open}
+          disabled={!terminals.here}
+          title="Show or hide the Terminal (⌃`)"
+          onClick={terminals.toggle}
+        >
+          &gt;_
+        </button>
+      )}
+      <button type="button" className="rounded-full focus-visible:outline-2 focus-visible:outline-branch" aria-label="Open Account › Usage" aria-current={settingsTab(route) ? "page" : undefined} data-testid="profile-pill" data-walkthrough="profile" onClick={() => navigate({ screen: "account", section: "usage", ask: ++usageAsks })}>
+        <AccountAvatar />
+      </button>
+    </aside>
+  );
+}
+
+/* Whether a key press came from a terminal, where Ctrl+L clears the screen. */
+const inTerminal = (target: EventTarget | null) => target instanceof Element && target.closest(".xterm") !== null;
+const onMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
 /* The mockup's rows: the keyboard's cursor (a tone, not a box; the branch
    ring comes back while the list has keyboard focus), the repo heading, the
@@ -244,14 +321,14 @@ function modelOf(a: { model?: string | null; profile: string; provider: string }
 }
 
 /* The stage word and colour a row shares with the milestones view; none when at rest. */
-type RowStage = "code" | "review" | "done";
-const STAGE_CLASS: Record<RowStage, string> = { code: "working", review: "review", done: "done" };
+type RowStage = "code" | "checks" | "review" | "done";
+const STAGE_CLASS: Record<RowStage, string> = { code: "working", checks: "checks", review: "review", done: "done" };
 
 function stageOf(tone: DotTone, a: { mode: string }, reviewState?: string | null): RowStage | null {
   if (tone === "done") return "done";
   if (a.mode === "review") return tone === "work" ? "review" : null;
   if (reviewState?.startsWith("reviewer")) return "review";
-  if (reviewState?.startsWith("checks") || reviewState?.startsWith("waiting for checks")) return "code";
+  if (reviewState?.startsWith("checks") || reviewState?.startsWith("waiting for checks")) return "checks";
   return tone === "work" ? "code" : null;
 }
 
@@ -290,7 +367,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
         <span className="min-w-0 flex-1 truncate text-xs text-ink">
           <span className="text-ink-3" data-testid="agent-role">{[role, modelOf(a)].filter(Boolean).join(" · ")}</span>
         </span>
-        <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status">
+        <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status" data-state={stage ?? undefined}>
           {stage ?? plainLabel(status, a.status)}
         </span>
       </SessionGoal>
@@ -338,6 +415,12 @@ function RowClose({ root, done, onClose, list }: { root: string; done: boolean; 
 /* What an agent at rest is: through with its turn, stopped, or gone. */
 const AT_REST = new Set(["idle", "done", "paused", "exited"]);
 
+function sessionWorking(session: SessionDTO, agents: AgentDTO[], alive: Record<string, boolean>) {
+  const busy = (status: string) => status === "processing" || status === "starting";
+  return (alive[session.id] !== false && busy(session.status))
+    || agents.some((a) => alive[a.id] !== false && busy(a.status));
+}
+
 /* A row's session's goal (GET /goal): undefined while unknown, null when it has none. */
 function useRowGoal(repo: string, root: string) {
   return useGoal(useContext(DaemonContext), repo, root, useStore());
@@ -349,12 +432,13 @@ const goalDone = (goal: GoalDTO | null | undefined) => !!goal && goalPhase(goal,
 /* The supervisor's live activity, even when its workers are folded away.
    A finished goal wins; a paused process cannot still be doing its last stage. */
 function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined) {
+  if (session.status === "resuming") return "Resuming";
   if (goalDone(goal)) return "Done";
   if (session.status === "failed") return "Failed";
   if (isPaused(session)) return "Paused";
   switch (goal?.stage) {
-    case "working":
-    case "checks": return "Working";
+    case "working": return "Working";
+    case "checks": return "Checking";
     case "review": return "Reviewing";
     case "merging": return "Merging";
   }
@@ -363,7 +447,9 @@ function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined
 
 function sessionStageClass(word: string) {
   switch (word) {
+    case "Resuming": return "st-resuming";
     case "Working": return "st-working";
+    case "Checking": return "st-checks";
     case "Reviewing": return "st-review";
     case "Merging": return "st-merging";
     case "Done": return "st-done";
@@ -374,7 +460,7 @@ function sessionStageClass(word: string) {
 function SessionStatus({ word }: { word: string }) {
   const stageClass = sessionStageClass(word);
   return (
-    <span className={`max-w-[50%] shrink truncate text-[11px] ${stageClass}${stageClass === "text-ink-3" ? "" : " stage-word"}`} data-testid="session-status">
+    <span className={`max-w-[50%] shrink truncate text-[11px] ${stageClass}${stageClass === "text-ink-3" ? "" : " stage-word"}`} data-testid="session-status" data-state={word.toLowerCase()}>
       {word}
     </span>
   );
@@ -384,25 +470,29 @@ const PR_LINE: Record<string, { word: string; tone: string }> = {
   ci: { word: "In CI", tone: "text-sap" },
   ready: { word: "Ready to merge", tone: "text-pass" },
   failed: { word: "CI failed", tone: "text-fail" },
+  fixing: { word: "Fixing CI", tone: "text-sap" },
+  pushing: { word: "Fix ready, pushing", tone: "text-sap" },
 };
 
 /* A session with an open PR: a small line under its goal, "PR #391 · In CI, 14 of 18". Unknown
    (or unread) state is just "PR #391", never a guess. Its own button: it opens the PR, not the session. */
-function PrLine({ goal, openUrl }: { goal: GoalDTO | null | undefined; openUrl: OpenUrl }) {
+function PrLine({ goal, working = false, openUrl }: { goal: GoalDTO | null | undefined; working?: boolean; openUrl: OpenUrl }) {
   const pr = goal?.pr_state;
   if (!pr || !goal?.pr_url) return null;
   const url = goal.pr_url;
-  const known = PR_LINE[pr.state];
+  const state = pr.state === "failed" ? ((pr.unpushed ?? 0) > 0 ? "pushing" : working ? "fixing" : "failed") : pr.state;
+  const known = PR_LINE[state];
   const text = known ? `PR #${pr.number} · ${known.word}${pr.state === "ci" && pr.total ? `, ${pr.done} of ${pr.total}` : ""}` : `PR #${pr.number}`;
   return (
     <button
       type="button"
       className={`block max-w-full truncate py-px pb-[5px] pl-[34px] pr-s1 text-left text-[11.5px] hover:underline ${known?.tone ?? "text-ink-3"}`}
       data-testid="session-pr"
-      title={`Open ${url}`}
+      data-state={state}
+      title={`${pr.state === "failed" && pr.failed_checks?.length ? `Failed: ${pr.failed_checks.join(", ")} · ` : ""}Open ${url}`}
       onClick={() => void openUrl(url).catch(() => undefined)}
     >
-      {text}
+      {state === "fixing" && <span aria-hidden="true" data-pr-pulse className="mr-1 inline-block size-1.5 rounded-full bg-current motion-safe:animate-pulse" />}{text}
     </button>
   );
 }
@@ -415,6 +505,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   const { hidden } = useSessions();
   const goal = useRowGoal(repo, root);
   const word = sessionStatusWord(session, goal);
+  const resuming = session.status === "resuming";
   const tree = useMemo(() => sessionTree(workspaces, root, hidden), [workspaces, root, hidden]);
   const members = useMemo(() => agentIds(tree), [tree]);
   const open = route.screen === "session" && route.root === root;
@@ -422,13 +513,15 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   // Through: its goal Done, or no goal and every agent in it at rest (the supervisor among them).
   const mine = workspaces.flatMap((ws) => ws.agents ?? []).filter((a) => members.has(a.id));
   const idle = mine.some((a) => a.id === root) && mine.every((a) => AT_REST.has(a.status) || alive[a.id] === false);
+  const working = sessionWorking(session, mine, alive);
   const done = goalDone(goal) || (goal === null && idle);
   return (
     <li className="flex flex-col gap-px" data-testid={`tree-session-${root}`} data-session={root}>
       <div className={`session-root-row group flex items-center rounded-md ${open ? "bg-branch-soft" : "hover:bg-surface/60"}`} data-connected={!folded && !!tree?.children.length}>
         <button
           type="button"
-          className={`session-root-dot ${sessionStageClass(word)}`}
+          className={`session-root-dot ${sessionStageClass(word)}${resuming ? " motion-safe:animate-pulse" : ""}`}
+          data-tone={resuming ? "work" : undefined}
           aria-label={folded ? `Show ${root}'s agents` : `Hide ${root}'s agents`}
           aria-expanded={!folded}
           onClick={toggle}
@@ -446,13 +539,13 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
             navigate({ screen: "session", root, repo, agent: root });
           }}
         >
-          <span data-testid="session-title" className="min-w-0 flex-1 truncate text-[13px] font-medium leading-[1.35] text-ink">{session.name || goal?.summary || session.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}</span>
+          <span data-testid="session-title" title={session.name || goal?.goal || session.goal || undefined} className="min-w-0 flex-1 truncate text-[13px] font-medium leading-[1.35] text-ink">{session.name || goal?.summary || session.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}</span>
           <span className="shrink-0 text-[11px] text-ink-3" data-testid="session-model">{tree ? modelOf(tree.agent) : modelOf({ profile: session.profile, provider: "", model: null })}</span>
           <SessionStatus word={word} />
         </SessionGoal>
-        <RowClose root={root} done={done} onClose={onClose} list={list} />
+        {!resuming && <RowClose root={root} done={done} onClose={onClose} list={list} />}
       </div>
-      <PrLine goal={goal} openUrl={openUrl} />
+      <PrLine goal={goal} working={working} openUrl={openUrl} />
       {folded ? null : tree ? (
         <ul className="session-tree mb-1">
           {tree.children.map((child) => <AgentRow key={child.agent.id} node={child} route={route} navigate={navigate} repo={repo} root={root} cursor={cursor} setCursor={setCursor} />)}
@@ -485,6 +578,7 @@ function ResumeButton({ client, root, repo, navigate, refresh }: { client: Daemo
         className="mt-[4px] shrink-0 whitespace-nowrap rounded-sm border border-line-strong px-1.5 py-px text-[10.5px] font-medium text-ink-2 hover:text-ink disabled:opacity-50"
         title="Continue the session and open its chat"
         data-testid={`session-resume-${root}`}
+        data-session-start={root}
         disabled={recovery.busy}
         onClick={() => void recovery.resume()}
       >
@@ -507,6 +601,11 @@ function ResumeButton({ client, root, repo, navigate, refresh }: { client: Daemo
 /* A paused or failed session, dimmed at the foot of its repo's group: its goal, and how long ago it stopped; Resume; a close on hover or focus, "Done · Close" once its goal is Done. */
 function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor, onClose, list, openUrl }: { session: SessionDTO; repo: string; refresh: () => Promise<void>; cursor: string | null; setCursor(key: string): void; onClose: CloseRow; list: RefObject<HTMLElement | null>; openUrl: OpenUrl } & Pick<SidebarProps, "route" | "navigate">) {
   const root = session.id;
+  const workspaces = useAppState((s) => s.workspaces);
+  const alive = useAppState((s) => s.alive);
+  const { hidden } = useSessions();
+  const members = agentIds(sessionTree(workspaces, root, hidden));
+  const mine = workspaces.flatMap((ws) => ws.agents ?? []).filter((a) => members.has(a.id));
   const client = useContext(DaemonContext);
   const open = route.screen === "session" && route.root === root;
   const key = `session:${root}`;
@@ -529,7 +628,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
       >
         <Dot tone="paused" className={`mt-[6px] ${sessionStageClass(word)}`} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.name || session.goal || <span className="italic">No goal set</span>}</span>
+          <span title={session.name || session.goal || undefined} className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.name || session.goal || <span className="italic">No goal set</span>}</span>
           <span className="block truncate text-[11.5px] text-ink-3">
             <span className="font-mono text-[11px]">{root}</span> · {session.status}
             {age !== "just now" && ` ${age}`}
@@ -539,7 +638,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
       </button>
       {client && <ResumeButton client={client} root={root} repo={repo} navigate={navigate} refresh={refresh} />}
       <RowClose root={root} done={done} onClose={onClose} list={list} />
-      <div className="basis-full"><PrLine goal={goal} openUrl={openUrl} /></div>
+      <div className="basis-full"><PrLine goal={goal} working={sessionWorking(session, mine, alive)} openUrl={openUrl} /></div>
     </li>
   );
 }
@@ -639,9 +738,26 @@ function Handle({ height, onChange }: { height: number; onChange(next: number): 
 const sheetOnly = (a: Extract<Route, { screen: "session" }>, b: Extract<Route, { screen: "session" }>) =>
   a.root === b.root && a.repo === b.repo && (a.agent ?? a.root) === (b.agent ?? b.root) && JSON.stringify(a.sheet ?? null) !== JSON.stringify(b.sheet ?? null);
 
-export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings }: SidebarProps) {
+export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings, onToggleLibrary, libraryCounts }: SidebarProps) {
   const tab = settingsTab(route);
   const railOpen = inProfileRail(route);
+  const libraryOpen = inLibrary(route);
+  const back = useCallback(() => (onBackFromSettings ? onBackFromSettings() : navigate({ screen: "new" })), [onBackFromSettings, navigate]);
+  const toggleLibrary = useCallback(() => {
+    if (onToggleLibrary) onToggleLibrary();
+    else if (libraryOpen) back();
+    else navigate({ screen: "knowledge" });
+  }, [onToggleLibrary, libraryOpen, back, navigate]);
+  // The Library's folders (see useLibraryFolders); a daemon that can't say shows none.
+  const folderClient = useContext(DaemonContext);
+  const { folders, create: createFolder, move: moveDoc } = useLibraryFolders(folderClient, libraryOpen);
+  // Designs waiting on the person: the plans in the Inbox.
+  const plansWaiting = useAppState((s) => s.inbox.filter((item) => item.kind === "plan").length);
+  // The designs, with what each one's detail says: the stage counts (with what the Inbox says waits on
+  // the person) and the folders' counts. A move reads them again, the design's folder having changed.
+  const libraryDocs = useLibraryDocs(folderClient, libraryOpen, useLibraryChanges());
+  const inbox = useAppState((s) => s.inbox);
+  const docStageCounts = useMemo(() => stageCounts(libraryDocs.docs, docQueue(inbox), libraryDocs.records), [inbox, libraryDocs]);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
   const [folded, setFolded] = useState<Set<string>>(new Set());
@@ -653,24 +769,30 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
   const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
 
   // The live sessions in reading order (⌘1-9), and the paused ones after them.
-  const live = useMemo(() => (repos ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter((s) => !isPaused(s)).map((session) => ({ session, repo: repo.repo_root }))), [repos, sessions]);
-  const paused = useMemo(() => (repos ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter(isPaused).map((session) => ({ session, repo: repo.repo_root }))), [repos, sessions]);
+  // The practice repos last, each grouped as "Practice run" rather than by their folder's name.
+  const ordered = useMemo(() => (repos ? [...repos.filter((r) => !r.demo), ...repos.filter((r) => r.demo)] : null), [repos]);
+  const live = useMemo(() => (ordered ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter((s) => !isPaused(s)).map((session) => ({ session, repo: repo.repo_root }))), [ordered, sessions]);
+  const paused = useMemo(() => (ordered ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter(isPaused).map((session) => ({ session, repo: repo.repo_root }))), [ordered, sessions]);
   const all = useMemo(() => [...live, ...paused], [live, paused]);
 
   // The context pane's session: the one on screen, else the one kept from last time, while it is listed.
   const selected = useMemo<SessionRef | null>(() => {
     const here = routeSession(route);
     const listed = (ref: SessionRef | null) => (ref && all.some((r) => r.session.id === ref.root && r.repo === ref.repo) ? ref : null);
-    return listed(here) ?? listed(readLastSession()) ?? (all[0] ? { root: all[0].session.id, repo: all[0].repo } : null);
+    // A session route must never show another session's goal or actions when its row leaves the feed.
+    if (here) return listed(here);
+    return listed(readLastSession()) ?? (all[0] ? { root: all[0].session.id, repo: all[0].repo } : null);
   }, [route, all]);
 
   // The model the selected session's own agent last ran on, from the agents the snapshot already lists.
   const workspaces = useAppState((s) => s.workspaces);
+  const alive = useAppState((s) => s.alive);
+  const runningAgents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).filter((a) =>
+    !isPastWorker(a) && !["paused", "done", "failed"].includes(a.status) && alive[a.id] !== false,
+  ).length, [workspaces, alive]);
   const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
-  // Follow the selected session's provider when it has a model; otherwise show the fullest week.
-  const model = agent?.model;
-  const own = agent && model ? (usage?.providers.find((p) => p.provider === agent.provider) ?? { provider: agent.provider, known: false, limited: false, limited_until: null, updated_at: null, windows: [] }) : undefined;
-  const shown = own ?? mostUsed;
+  // An open session follows its supervisor's provider, even before its model is known.
+  const shown = route.screen === "session" ? usage?.providers.find((p) => p.provider === agent?.provider) : mostUsed;
   const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
 
   // An open session's agents show, on each navigation to it; a sheet opening or closing over the
@@ -731,14 +853,20 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
     const rowsNow = rows();
     if (rowsNow.length === 0) return;
     const at = rowsNow.findIndex((r) => r.key === cursor);
+    const move = (row: RowRef) => {
+      setCursor(row.key);
+      // The cursor is kept on the list rather than focusing each button: bring its row into view explicitly.
+      const button = [...(list.current?.querySelectorAll<HTMLButtonElement>("button[data-row]") ?? [])].find((el) => el.dataset.row === row.key);
+      button?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    };
     switch (e.key) {
       case "ArrowDown":
       case "j":
-        setCursor(rowsNow[Math.min(at + 1, rowsNow.length - 1)].key);
+        move(rowsNow[Math.min(at + 1, rowsNow.length - 1)]);
         break;
       case "ArrowUp":
       case "k":
-        setCursor(rowsNow[Math.max(at - 1, 0)].key);
+        move(rowsNow[Math.max(at - 1, 0)]);
         break;
       case "Enter": {
         const row = rowsNow[at] ?? rowsNow[0];
@@ -751,10 +879,17 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
     e.preventDefault();
   };
 
-  // ⌘1-9 (Ctrl on Linux and Windows) jump to a live session; ⌘N starts one.
+  // ⌘1-9 (Ctrl on Linux and Windows) jump to a live session; ⌘N starts one; ⌘L opens the Library and,
+  // from it, goes back (Ctrl+L off a Mac, but never from a terminal, where it clears the screen).
   useEffect(() => {
     const jump = (e: globalThis.KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() === "l") {
+        if (e.metaKey ? e.ctrlKey : onMac() || inTerminal(e.target)) return;
+        e.preventDefault();
+        toggleLibrary();
+        return;
+      }
       if (e.key === "n") {
         e.preventDefault();
         navigate({ screen: "new" });
@@ -769,7 +904,10 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
     };
     window.addEventListener("keydown", jump);
     return () => window.removeEventListener("keydown", jump);
-  }, [live, navigate]);
+  }, [live, navigate, toggleLibrary]);
+
+  // No project at all yet, on New session: the first run's slim rail, not an empty sidebar.
+  if (repos !== null && repos.length === 0 && route.screen === "new") return <SlimRail route={route} navigate={navigate} />;
 
   let index = 0;
   return (
@@ -791,13 +929,26 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
           New session
         </button>
       </div>
-      {railOpen && <SettingsRail tab={tab} page={railPage(route)} onBack={onBackFromSettings ?? (() => navigate({ screen: "new" }))} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} onPage={(page) => navigate({ screen: page })} />}
-      <div hidden={railOpen} className={railOpen ? "hidden" : "contents"}>
+      {railOpen && <SettingsRail tab={tab} page={railPage(route)} onBack={back} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} onPage={(page) => navigate({ screen: page })} />}
+      {route.screen === "knowledge" && <LibraryRail route={route} counts={{ ...libraryCounts, all: libraryDocs.docs.length, stages: docStageCounts }} folders={folders} docs={libraryDocs.docs} records={libraryDocs.records} repos={repos} onCreateFolder={folderClient ? createFolder : undefined} onMoveDoc={folderClient ? moveDoc : undefined} navigate={navigate} onBack={back} />}
+      <div hidden={railOpen || libraryOpen} className={railOpen || libraryOpen ? "hidden" : "contents"}>
       <InboxEntry route={route} navigate={navigate} />
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
       <Handle height={split} onChange={resize} />
-      <div className="side-h shrink-0">Sessions</div>
+      <div className="side-h shrink-0">
+        Sessions
+        {runningAgents > 0 && (
+          <span
+            className="ml-auto inline-flex h-[18px] items-center gap-1 rounded-full bg-pass-soft px-1.5 font-mono text-[11px] font-bold leading-none text-pass"
+            title={`${runningAgents} agent${runningAgents === 1 ? "" : "s"} running`}
+            aria-label={`${runningAgents} agent${runningAgents === 1 ? "" : "s"} running`}
+          >
+            <span className="size-1.5 rounded-full bg-pass" aria-hidden="true" />
+            {runningAgents}
+          </span>
+        )}
+      </div>
       <nav ref={list} aria-label="Sessions" className="side-sessions flex min-h-0 flex-1 flex-col gap-[14px] overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-branch" tabIndex={0} onKeyDown={keys}>
         {/* A close the engine refused: the session is back in its place, and this says why. */}
         {closeError && (
@@ -810,21 +961,27 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
         ) : repos.length === 0 ? (
           <p className="px-s1 text-xs text-ink-3">No project yet. Open a folder or clone a repository to start.</p>
         ) : (
-          repos.map((repo) => {
+          (ordered ?? repos).map((repo) => {
             const here = live.filter((r) => r.repo === repo.repo_root);
             const rested = paused.filter((r) => r.repo === repo.repo_root);
             if (here.length === 0 && rested.length === 0) return null;
             return (
-              <div key={repo.repo_root} className="flex flex-col" data-testid={`repo-${repo.name}`}>
-                <button
-                  type="button"
-                  className={`${REPO_HEADING} truncate text-left hover:text-ink`}
-                  title={`${repo.repo_root}: project settings`}
-                  aria-label={`Project settings for ${repo.name}`}
-                  onClick={() => navigate({ screen: "project-settings", repo: repo.repo_root })}
-                >
-                  {repo.name}
-                </button>
+              <div key={repo.repo_root} className="flex flex-col" data-testid={`repo-${repo.name}`} data-demo={repo.demo || undefined}>
+                {repo.demo ? (
+                  <div className={REPO_HEADING} title={repo.repo_root}>
+                    Practice run
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className={`${REPO_HEADING} truncate text-left hover:text-ink`}
+                    title={`${repo.repo_root}: project settings`}
+                    aria-label={`Project settings for ${repo.name}`}
+                    onClick={() => navigate({ screen: "project-settings", repo: repo.repo_root })}
+                  >
+                    {repo.name}
+                  </button>
+                )}
                 <ul className="flex flex-col gap-px">
                   {here.map(({ session }) => (
                     <SessionRows
@@ -877,6 +1034,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
         <div className="flex h-10 min-w-0 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap" role="group" aria-label="Sidebar foot" data-testid="sidebar-foot-row">
           <AccountButton route={route} navigate={navigate} provider={shown} warning={warning} failed={usageError != null} />
           <span className="flex-1" />
+          <LibraryButton open={libraryOpen} waiting={plansWaiting} onToggle={toggleLibrary} />
           <TerminalToggle />
         </div>
       </div>

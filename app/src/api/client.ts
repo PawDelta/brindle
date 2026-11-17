@@ -4,6 +4,7 @@
    {"error": {"code", "message"}} (brindle/service/errors.py) and is thrown as a
    DaemonError with that code. */
 
+import type { WebSocketFactory, WebSocketLike } from "./events";
 import { startupStep } from "./startup";
 import type {
   AccountDTO,
@@ -13,8 +14,10 @@ import type {
   AskGroupDTO,
   CloudOptionsDTO,
   DecisionDTO,
+  DesignTaskDTO,
   GoalDTO,
   InboxItemDTO,
+  LibraryFolderDTO,
   OrgApprovalPolicyDTO,
   OrgAssignmentDTO,
   OrgAssignmentRequestDTO,
@@ -29,12 +32,25 @@ import type {
   ProfileDTO,
   ProviderConnectionDTO,
   RepoDTO,
+  SharedDesignDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
   WorkspaceDTO,
 } from "./schema";
 import { engineAttachment, type Attachment } from "./attachments";
+
+export interface TranscriptMessage {
+  role: "user" | "assistant" | "restart";
+  text: string;
+  history?: boolean;
+}
+
+export interface Transcript {
+  messages: TranscriptMessage[];
+  cursor: string;
+  reset: boolean;
+}
 
 /* PUT /routing (routes_actions.put_routing): what to write and where. The
    tiers given replace their lists in that scope's file; the others, and a
@@ -92,6 +108,81 @@ export interface ProfileNew {
 export interface ProfileCreated {
   name: string;
   path: string;
+}
+
+/* GET / PUT /routing/goal (engine branch feat/routing-goal-api): what routing
+   aims for, a point in the Cheaper / Faster / First try triangle. Each weight
+   is 0–1 and the three sum to 1; the names match POST /learning/suggest's. */
+export interface RoutingWeights {
+  cost: number;
+  speed: number;
+  first_try: number;
+}
+
+/* One benchmark task's numbers for a setup, ready to print ("$14.54–19.65",
+   "36–51", "1 of 3 runs", "—" where not measured). */
+export interface RoutingGoalFigures {
+  task: string;
+  /* The task toggle's label ("Large feature"). */
+  label: string;
+  usd: string;
+  minutes: string;
+  first_try: string;
+  /* How the figures were got ("measured, 3 runs", "estimated"). */
+  basis: string;
+}
+
+/* A setup to compare against: "you" (this point's routing), or one model
+   doing everything. Measured ones are solid on the triangle; estimated ones
+   hollow and dashed. `point` is where it sits on the triangle (null: not placed). */
+export interface RoutingGoalReference {
+  key: string;
+  name: string;
+  measured: boolean;
+  point: RoutingWeights | null;
+  tasks: RoutingGoalFigures[];
+}
+
+/* A role (a size, the reviewer, the supervisor) or a setting (at once,
+   review) and what it runs at this point. `was` is today's when it changes. */
+export interface RoutingGoalRole {
+  key: string;
+  label: string;
+  value: string;
+  provider?: string | null;
+  was?: string | null;
+  note?: string | null;
+}
+
+export interface RoutingGoalPreview {
+  /* The aim after org policy's clamp. */
+  aim: RoutingWeights;
+  /* Where what routing delivered lands ("Your routing"); null before any. */
+  landed: RoutingWeights | null;
+  /* The person's recent work at this point, and today's. */
+  you: { usd: number; minutes: number; first_try: number; today?: { usd: number; minutes: number; first_try: number } | null } | null;
+  references: RoutingGoalReference[];
+  roles: RoutingGoalRole[];
+  /* Lines under the comparison table and the basis of the estimates. */
+  notes?: string[];
+  basis?: string | null;
+}
+
+export interface RoutingGoalDTO {
+  weights: RoutingWeights;
+  scope: RoutingScope;
+  /* The org locks it: nothing here can change. */
+  locked: boolean;
+  lock_reason?: string | null;
+  /* What "Reset to Balanced" sets (the built-in default when missing). */
+  balanced?: RoutingWeights | null;
+  preview: RoutingGoalPreview;
+}
+
+export interface RoutingGoalPut {
+  repo: string;
+  weights: RoutingWeights;
+  scope: RoutingScope;
 }
 
 /* What was written (routing, reviewer, exclude_providers) and the file it went to. */
@@ -391,14 +482,62 @@ export interface KeptVisualDTO {
 /* A planning doc (brindle/plans.py): markdown the app renders itself, by section. */
 export type Plan = PlanDTO;
 export type PlanComment = PlanCommentDTO;
+export type SharedDesign = SharedDesignDTO;
 
 /* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
 export interface PlanVerdict {
   rev: number;
+  /* The frozen live version being built, when this is a live doc. */
+  version?: number;
   approved: boolean;
   picks: Record<string, string>;
   comments: PlanComment[];
   note: string;
+  /* Paths of the files attached to the note. */
+  attachments?: string[];
+}
+
+/* Where a new comment on the design doc is anchored (brindle/plan_docs.py): a text range of a
+   section (`start` is a hint, `quote` the section's own text there), a diagram, a decision, or a
+   whole part of the doc (a section, "ask", "lede", "split"). */
+export type PlanAnchor =
+  | { kind: "text"; section: string; start: number; quote: string }
+  | { kind: "diagram"; section: string }
+  | { kind: "decision"; decision: string; option?: string }
+  | { kind: "section"; section: string };
+
+/* A change to a section's text: `before` at `start` becomes `after` (an empty `before` inserts). */
+export interface PlanChange {
+  section: string;
+  start: number;
+  before: string;
+  after: string;
+}
+
+export interface DocHistoryEntry {
+  id: string;
+  kind: "revision" | "freeze" | "reopen" | "sign_off" | "changes";
+  actor: string;
+  at: number;
+  rev: number | null;
+  version: number | null;
+  source?: string;
+  changed?: string[];
+  observed?: boolean;
+}
+
+export type DocRevision = Pick<Plan, "rev" | "lede" | "sections" | "markdown" | "decisions" | "split" | "ask">;
+export interface DocRevisionComparison {
+  revision: DocRevision;
+  previous: DocRevision | null;
+  baseline_available?: boolean;
+  document?: { id: string; title: string; markdown: string }[];
+  changes: {
+    section: string;
+    before: { title: string; markdown: string; kind?: string; caption?: string } | null;
+    after: { title: string; markdown: string; kind?: string; caption?: string } | null;
+    spans: { kind: string; before_start: number; before_end: number; start: number; end: number; before: string; after: string }[];
+  }[];
 }
 
 export type Repo = RepoDTO;
@@ -481,16 +620,99 @@ export interface KbHit {
   updated: string | null;
 }
 
-/* brindle Pro's analysis-doc library, proxied by the daemon (routes_read.analysis_docs).
+/* brindle Pro's Library of approved plans, proxied by the daemon (routes_read.analysis_docs).
    The Wire* types are the server's own shapes (pawdelta-web pro_api.analysis_docs: _listed,
    _view, topics); the client methods turn them into the AnalysisDoc* below. A scope is
    {kind: user | group | org, id}; the daemon's filter spells it `user`, `team:<id>` or `org:<id>`. */
+export interface PlanReviewerChoice {
+  sub: string;
+  required: boolean;
+}
+
+export interface LibraryPerson {
+  sub: string;
+  email: string;
+}
+
+/* An org admin's waiver of a review rule for one revision, or a stand-in for it until `until` (Unix seconds). */
+export interface PlanPolicyOverride {
+  rev: number;
+  org_id: string;
+  policy: string;
+  action: "waive" | "stand_in";
+  reason: string;
+  stand_in?: string;
+  until?: number;
+}
+
+/* An org review rule (docs/shared-designs-api.md "Review policies"). `needs.name`, `eligible`, `set_by`
+   and `set_at` come back to an admin on a read; the daemon leaves them out of a save. */
+export interface ReviewPolicyRule {
+  id: string;
+  name: string;
+  when: { kind: "paths" | "label" | "any"; paths?: string[]; label?: string };
+  needs: { kind: "team" | "role" | "person"; id: string; name?: string };
+  approvals: number;
+  note?: string | null;
+  eligible?: number;
+  set_by?: string;
+  set_at?: number;
+  reviewer_editors?: { kind: string; id?: string }[];
+}
+
+export interface ReviewPoliciesState {
+  org_id: string;
+  version: number;
+  policies: ReviewPolicyRule[];
+  directory: {
+    teams: { id: string; name: string; path?: string; members?: number }[];
+    roles: { id: string; name: string; builtin?: boolean; members?: number }[];
+  };
+  in_review: { truncated?: boolean; policies: { policy: string; count: number; designs: { doc_id: string; title: string }[] }[] };
+}
+
+/* What saving a draft list would do to the designs in review (`truncated`: count is a lower bound). */
+export interface DraftImpact {
+  org_id: string;
+  truncated: boolean;
+  count: number;
+  designs: { doc_id: string; title: string }[];
+  reopens_gates: boolean;
+  reopened: number;
+}
+
+/* A rule that would cover a design, before it is shared. */
+export interface PolicyPreviewRow {
+  org_id: string;
+  policy: string;
+  name: string;
+  note: string | null;
+  when: string | null;
+  label: string | null;
+  paths: string[];
+  matched: string[];
+  needs_kind: string | null;
+  needs_name: string | null;
+  approvals: number;
+  eligible: number | null;
+}
+
 export interface DocScope {
   kind: string;
   id: string;
   /* From GET /analysis-docs/scopes only: the team's or org's name, and whether the person may share into it. */
   name?: string;
   can_share?: boolean;
+}
+
+/* A Library folder as the server lists it: private (its creator only) or shared (the scope's
+   members), with `repo`, the repo it was made for (null when this machine doesn't know). */
+export type FolderVisibility = "private" | "shared";
+export type LibraryFolder = LibraryFolderDTO & { visibility: FolderVisibility };
+/* One scope's folders (GET /library/folders). */
+export interface FolderGroup {
+  scope: DocScope;
+  folders: LibraryFolder[];
 }
 
 export interface DocSource {
@@ -576,6 +798,9 @@ export interface AnalysisDoc {
   category?: string;
   version?: number;
   created_at?: number;
+  updated_at?: number;
+  created_by?: string;
+  source?: DocSource;
   used_in_briefs?: number;
   findings?: string[];
   open_questions?: string[];
@@ -584,6 +809,88 @@ export interface AnalysisDoc {
   related?: string[];
   supersedes?: string[];
   superseded_by?: string | null;
+  /* The tracker item (Azure Boards, Jira) the design is linked to, with its state as last read:
+     absent until a link is made. */
+  work_item?: WorkItemLink | null;
+}
+
+/* A linked work item: its key ("AB#4810", "BRN-88"), the tracker's own word for its state, and
+   whether that state is active or done (for its dot). */
+export interface WorkItemLink {
+  key: string;
+  state?: string | null;
+  tone?: "active" | "done" | null;
+  title?: string | null;
+}
+
+export type TrackerName = "jira" | "azure_devops";
+
+/* One item linked to a design (GET /library/designs/{id}/work-items): what the tracker said when it
+   was last read. `target` is what it is linked to; `done` is the org's own list of done states. */
+export interface TrackerLink {
+  link_id: string;
+  tracker: TrackerName;
+  key: string;
+  /* "AB#4810" or "BRN-88": what people say. */
+  display: string;
+  type?: string | null;
+  target: { kind: "design" | "section" | "task" | "passage"; id?: string | null };
+  url?: string | null;
+  state?: string | null;
+  done?: boolean;
+  /* Not read just now: the last known state. */
+  stale?: boolean;
+  created?: boolean;
+  linked_by?: string;
+  linked_at?: number;
+  read_at?: number | null;
+}
+
+export interface DesignWorkItems {
+  items: TrackerLink[];
+  connected: Partial<Record<TrackerName, boolean>>;
+  read_at?: number | null;
+  /* The design's own item, and how many of the others are done. */
+  epic: TrackerLink | null;
+  done: number;
+  total: number;
+  /* The tracker or the Library couldn't be reached: this is the last read. */
+  unreachable?: boolean;
+}
+
+export interface TrackerConnection {
+  tracker: TrackerName;
+  label: string;
+  configured: boolean;
+  connected: boolean;
+  site?: string | null;
+  connected_by?: string | null;
+  connected_at?: number | null;
+  last_error?: { at: number; error: string } | null;
+}
+
+export interface TrackerSettings {
+  repos: { repo_key: string; repo: string; tracker: TrackerName; project: string; area?: string | null }[];
+  types: Partial<Record<TrackerName, { design: string; task: string; passage: string }>>;
+  done_states: Partial<Record<TrackerName, string[]>>;
+  allow: { create_items: boolean; link_back: boolean; close_on_merge: boolean; include_text: boolean };
+  who_can_create: "authors_and_reviewers" | "editors" | "members" | "admins";
+}
+
+export interface TrackerIntegrations {
+  org_id: string;
+  settings: Partial<TrackerSettings>;
+  trackers: Record<TrackerName, TrackerConnection>;
+  /* Where an admin signs in to a tracker: a page on the Library's site. */
+  connect_url: string;
+  /* The repos on this machine, by the key the Library knows a design's repo by. */
+  repos: { repo: string; repo_key: string; repo_root: string }[];
+}
+
+/* A design's folder, as its review state names it: the scope and the folder's id. */
+export interface DesignFolderRef {
+  scope: DocScope;
+  id: string;
 }
 
 /* GET /analysis-docs/{id}: the files as written and what the server read from them. */
@@ -593,6 +900,18 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   mentions: string[];
   /* The scopes it is shared into besides its owner's. */
   shared_with: DocScope[];
+  /* Optional plan record fields, using the plan engine's DTO names. */
+  revisions?: { rev: number; author: string; source: string; changed: string[]; at: number }[];
+  threads?: { id: number; author: string; text: string; replies: { text: string }[]; status?: string }[];
+  decisions?: { id: string; title: string; mine?: string | null; confirmed?: string | null; options: { id: string; label: string }[] }[];
+  verdict?: { approved: boolean; picks?: Record<string, string> } | null;
+  /* A shared design's review state (shared-designs-api.md: GET /analysis-docs/{id} `design`):
+     the revision on screen, who is asked to review (`required` or optional) and who has signed it. */
+  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean; folder?: DesignFolderRef | null; threads?: { status?: string }[];
+    /* The design's decisions as the server keeps them; `confirmed` is the option this reader chose. */
+    decisions?: { id: string; title?: string; confirmed?: string | null }[] } | null;
+  /* The plan's tasks when the design is a plan on this machine, in their board state (GET /analysis-docs/{id} `tasks`). */
+  tasks?: DesignTaskDTO[];
 }
 
 export interface DocTopic {
@@ -668,6 +987,48 @@ export interface DocSwitch {
   choice: "on" | "off" | null;
   locked: boolean;
   org: "enforced_on" | "enforced_off" | null;
+}
+
+/* Settings › Doc format (brindle.doc_templates): a template's sections in
+   order, each with its kind, whether it is required, and the line the
+   supervisor is told; naming; and what an empty required section stops. */
+export type DocSectionKind = "text" | "diagram" | "table";
+export type DocFormatBlock = "sign_off" | "share";
+
+export interface DocTemplateSection {
+  title: string;
+  kind: DocSectionKind;
+  required: boolean;
+  hint: string | null;
+}
+
+export interface DocTemplate {
+  id: string;
+  name: string;
+  default: boolean;
+  sections: DocTemplateSection[];
+}
+
+export interface DocFormat {
+  templates: DocTemplate[];
+  naming: { title_hint: string | null; reference: string | null };
+  blocks: DocFormatBlock[];
+}
+
+/* GET /doc-format: what `level` sets (only its own keys), the format in
+   force there, the reference the next new doc gets, and how many docs each
+   template wrote. */
+export interface DocFormatView {
+  level: string;
+  format: Partial<DocFormat>;
+  /* The version a save names back: the Library refuses one saved over a change made since. */
+  version: number;
+  resolved: DocFormat;
+  /* Where it is kept: the person's own config, or their org's in the Library (its admins save it). */
+  source: "local" | "org";
+  editable: boolean;
+  next_reference: string | null;
+  used: Record<string, number>;
 }
 
 /* GET /analysis-docs/export-config */
@@ -840,7 +1201,6 @@ export interface VisualOffer {
   kind: string;
   counts: Record<string, number>;
   expires_at: number;
-  confirmation?: "visual" | "plan";
 }
 
 export interface UserSettings {
@@ -850,6 +1210,9 @@ export interface UserSettings {
   claude_permission_mode: ClaudePermissionMode;
   /* Absent from an engine older than this setting. */
   opencode_permission_mode?: OpenCodePermissionMode;
+  /* Whether launched CLIs get the login shell's proxy and certificate settings
+     (on unless turned off). Absent from an engine older than this setting. */
+  login_shell_env?: "on" | "off";
 }
 
 /* GET and PUT /debug (staff-only debug logging, owner decision): whether
@@ -1184,6 +1547,19 @@ export interface StorageReport {
   free_bytes: number | null;
   low_disk: string | null;
   dead_branches: { repo_root: string; name: string; sha: string; last_commit: number; merged: boolean }[];
+  /* Epoch seconds the report shown was measured; null: none yet (the fields
+     above are then empty). Older engines leave both fields out. */
+  measured_at?: number | null;
+  /* A measurement is under way or queued (on its own thread): read again for its result. */
+  refreshing?: boolean;
+  /* Why the last measurement failed (the report shown, if any, is the last good one);
+     the engine tries again only when asked (`fresh`) or a while later. */
+  error?: string | null;
+}
+
+/* A report about to be replaced, or with nothing measured and no failure: read again shortly. */
+export function storagePending(r: StorageReport): boolean {
+  return r.refreshing === true || (r.measured_at === null && !r.error);
 }
 
 /* POST /storage/clean (disk.clean): what went, and what was kept and why
@@ -1199,6 +1575,71 @@ export interface DaemonConfig {
   /* The per-start token from ~/.brindle/daemon.json. */
   token: string;
   fetch?: typeof fetch;
+  /* Opens the client's own sockets (visualLive); a DOM WebSocket when absent. */
+  connect?: WebSocketFactory;
+}
+
+export interface LiveDocState {
+  author: string;
+  lock: "sign_off" | "author_offline" | null;
+  version: { id: number; writers: string[]; signOffs: string[]; snapshot: string } | null;
+  /* The gate for this live version, including any org policy checks. */
+  gate?: Plan["gate"];
+}
+
+/* A Freeze or Reopen the daemon couldn't do, sent to the window that asked. */
+export interface LiveRefusal {
+  action: "freeze" | "reopen";
+  reason: string;
+}
+
+/* What a shared design doc's live channel delivers (DaemonClient.visualLive). */
+export interface LiveHandlers {
+  /* Loro update bytes to import: the doc as it is first (a snapshot), then each other writer's change. */
+  onUpdate(bytes: Uint8Array): void;
+  /* Another writer's presence in one section's text: Loro EphemeralStore bytes to apply. */
+  onAwareness(section: string, bytes: Uint8Array): void;
+  onState?(state: LiveDocState): void;
+  /* The number this window writes under, a decimal string (relay numbers pass 2**53): set it with
+     LoroDoc.setPeerId once the snapshot is in and before the first edit. null: none is free yet,
+     so the text stays read only until one arrives. Never sent: write under the doc's own number. */
+  onPeer?(peer: `${number}` | null): void;
+  /* This window's Freeze or Reopen didn't happen (refused, or its edits couldn't reach the relay
+     first): the lock and the text stay as they were, and `reason` says why. */
+  onRefused?(refused: LiveRefusal): void;
+  /* The channel closed: 4401 a wrong token, 4404 no live text for this visual,
+     1006 the connection dropped, LIVE_RELOAD the daemon replaced the text (open the channel
+     again for the new one). Locks arrive as state and keep the channel open. */
+  onClose?(code: number): void;
+}
+
+/* The live channel's close code when the daemon replaced the doc's text with the server relay's:
+   whatever was loaded is gone, so open the channel again (pro/live_docs.py RELOAD). */
+export const LIVE_RELOAD = 4205;
+
+export interface LiveChannel {
+  /* A local change, as LoroDoc.subscribeLocalUpdates hands it over. */
+  sendUpdate(bytes: Uint8Array): void;
+  /* This writer's caret and name in `section`, as EphemeralStore.subscribeLocalUpdates hands them over. */
+  sendAwareness(section: string, bytes: Uint8Array): void;
+  freeze(): void;
+  reopen(): void;
+  /* This window's person changed the review (signed off): every window is told the frozen version again. */
+  refresh(): void;
+  close(): void;
+}
+
+/* Bytes as base64 and back: the live channel's frames are text, as the shell's stream sends them. */
+export function toBase64(bytes: Uint8Array): string {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
+export function fromBase64(data: string): Uint8Array {
+  const text = atob(data);
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+  return bytes;
 }
 
 /* GET/POST/DELETE /github/connection. `expires_at` is an ISO date or unix seconds (the contract doesn't say), or null. */
@@ -1247,6 +1688,7 @@ export class DaemonClient {
   readonly baseUrl: string;
   readonly token: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly connect?: WebSocketFactory;
   private inboxAcknowledgements = 0;
 
   /* Sync reads begun before an action settled cannot restore its old card.
@@ -1259,6 +1701,7 @@ export class DaemonClient {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.token = config.token;
     this.fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
+    this.connect = config.connect;
   }
 
   meta() {
@@ -1434,7 +1877,7 @@ export class DaemonClient {
   }
 
   resolvePlanOffer(root: string, offer: string, accept: boolean) {
-    return this.post<{ accepted: boolean }>("/goal/plan-offer", { root, offer, accept });
+    return this.postInbox<{ accepted: boolean }>("/goal/plan-offer", { root, offer, accept });
   }
 
   inbox(repo?: string) {
@@ -1444,16 +1887,18 @@ export class DaemonClient {
   /* `id` is the item's agent_id (an org notice's notice_id for "read"). A long
      action (merge) answers with a job, whose end arrives on the bus. */
   inboxAction(id: string, action: InboxAction, body: Record<string, unknown> = {}) {
-    return this.post<InboxActionResult>(
+    return this.postInbox<InboxActionResult>(
       `/inbox/${encodeURIComponent(id)}/${encodeURIComponent(action)}`,
       body,
-    ).finally(() => {
-      this.inboxAcknowledgements++;
-    });
+    );
   }
 
   agent(id: string) {
     return this.get<AgentDTO>(`/agents/${encodeURIComponent(id)}`);
+  }
+
+  transcript(id: string, after = "0") {
+    return this.get<Transcript>(`/agents/${encodeURIComponent(id)}/transcript?after=${encodeURIComponent(after)}`);
   }
 
   /* The person's message, queued until the agent is idle. */
@@ -1624,10 +2069,11 @@ export class DaemonClient {
     });
   }
 
-  visualTypedWords(root: string, text: string, expiresAt: number, submittedAt: number, signal?: AbortSignal) {
+  /* `text` null: an Enter whose words the app didn't see; `typed` false: one that sent a paste. */
+  visualTypedWords(root: string, text: string | null, expiresAt: number, submittedAt: number, signal?: AbortSignal, typed = true) {
     return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ typed_words: text, expires_at: expiresAt, submitted_at: submittedAt }), signal,
+      body: JSON.stringify({ typed_words: text, typed, expires_at: expiresAt, submitted_at: submittedAt }), signal,
     });
   }
 
@@ -1644,12 +2090,12 @@ export class DaemonClient {
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
   answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
-    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
+    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
   }
 
   /* The person won't answer the revision on screen; the agent is told, the Inbox card clears. */
   dismissVisual(id: string, rev: number) {
-    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/dismiss`, { rev });
+    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/dismiss`, { rev });
   }
 
   exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
@@ -1665,7 +2111,109 @@ export class DaemonClient {
   }
 
   markVisualRead(id: string, rev: number) {
-    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, { rev });
+    return this.postInbox<unknown>(`/visuals/${encodeURIComponent(id)}/read`, { rev });
+  }
+
+  /* WS /v1/visuals/{id}/live: a shared design doc's text, edited live by everyone writing in it
+     (DocEditor.tsx). The daemon implements this later; test/fakeDaemon.ts serves it now.
+
+     The text is one Loro document per visual (loro-crdt). Each text section is the root LoroText
+     named by the section's id ("lede" for the overview), positions in UTF-16 units as Loro's JS
+     API and CodeMirror count them. The daemon owns the document: it seeds it from the doc's
+     current revision, keeps every update, and is the only one that turns the live text into a
+     revision. A client never seeds a section itself (two would each insert the same text).
+
+     Frames, all text (the shell's stream carries text: src-tauri/src/daemon.rs):
+     - client → daemon: the token first, as on /v1/events (a wrong one closes with 4401). Then
+       {"update": base64} for each local Loro change (LoroDoc.subscribeLocalUpdates), and
+       {"awareness": base64, "section": id} for this writer's caret and name in a section
+       (an EphemeralStore per section, keyed `<peer>-cm-cursor` / `<peer>-cm-user` by
+       loro-codemirror).
+     - daemon → client: first, when the doc is co-edited through the server's relay, {"peer": "n"}:
+       the relay-issued number this window writes under (a decimal string; numbers pass 2**53).
+       The relay refuses a change under any number it did not issue, so the client sets it with
+       LoroDoc.setPeerId after importing the snapshot and before its first edit. {"peer": null}:
+       none is free yet; the text stays read only until a later {"peer": "n"}. No peer frame: the
+       doc is only on this machine, and the client writes under its own number.
+     - daemon → client: then state, then {"update": base64}, the whole document (a snapshot); then every
+       other client's frames as they were sent, update or awareness, and on joining each
+       section's last-known awareness. A visual with no live text closes with 4404. Closing with
+       LIVE_RELOAD (4205) means the daemon replaced the text (it took the relay's draft): open the
+       channel again and load the new snapshot.
+     - daemon → client: {"state": LiveDocState} on joining and whenever the lock or version
+       changes. `author` is the author's display name. `lock` is null, "sign_off" (read only
+       for everyone), or "author_offline" (read only for others; comments and suggestions
+       remain available). Locked channels stay open for reading, awareness and state changes.
+       A version contains an increasing id, credited writers, signOffs (account subjects) and
+       a base64 snapshot. `gate` is the associated review gate; reopening invalidates its
+       sign-offs too. Sign-off and build HTTP requests include `version`, so an old request
+       cannot sign or build a withdrawn version. No version means sign-off/build are disabled.
+       Readers publish their user awareness in section "__document__", refresh it while open,
+       and delete it on departure. Section editors continue to own their own caret awareness.
+       An initial 4404 means the document has no live text: keep its HTTP review controls.
+       Other connection failures, and any loss after live text/state was received, keep live
+       review controls blocked until the channel is available again.
+     - author → daemon: {"freeze": true} snapshots the text and credits its writers, then
+       locks it for sign-off; {"reopen": true} withdraws that version and its sign-offs.
+       The daemon authorizes these commands and rejects text updates while locked. One it can't
+       do (refused, or this machine's edits couldn't reach the relay first) is answered to the
+       window that sent it with {"refused": {"action": "freeze" | "reopen", "reason": text}}.
+     Importing is idempotent, so a frame relayed twice (or echoed back) changes nothing. */
+  visualLive(id: string, handlers: LiveHandlers): LiveChannel {
+    const url = new URL(this.url(`/visuals/${encodeURIComponent(id)}/live`));
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const socket: WebSocketLike = this.connect ? this.connect(url.toString()) : (new WebSocket(url) as unknown as WebSocketLike);
+    let open = false;
+    let closed = false;
+    const queued: string[] = [];
+    const send = (frame: object) => {
+      if (closed) return;
+      const text = JSON.stringify(frame);
+      if (open) socket.send(text);
+      else queued.push(text);
+    };
+    socket.onopen = () => {
+      socket.send(this.token);
+      open = true;
+      for (const text of queued.splice(0)) socket.send(text);
+    };
+    socket.onmessage = (ev) => {
+      if (closed || typeof ev.data !== "string") return;
+      let said: { update?: string; awareness?: string; section?: string; state?: LiveDocState; peer?: string | null; refused?: LiveRefusal };
+      try {
+        said = JSON.parse(ev.data) as typeof said;
+      } catch {
+        return;
+      }
+      if ("peer" in said) {
+        const peer = said.peer;
+        if (peer === null) handlers.onPeer?.(null);
+        else if (typeof peer === "string" && /^\d+$/.test(peer)) handlers.onPeer?.(peer as `${number}`);
+      } else if (typeof said.update === "string") handlers.onUpdate(fromBase64(said.update));
+      else if (typeof said.awareness === "string" && typeof said.section === "string") handlers.onAwareness(said.section, fromBase64(said.awareness));
+      else if (said.state) handlers.onState?.(said.state);
+      else if (said.refused && (said.refused.action === "freeze" || said.refused.action === "reopen")) {
+        handlers.onRefused?.({ action: said.refused.action, reason: typeof said.refused.reason === "string" ? said.refused.reason : "" });
+      }
+    };
+    socket.onclose = (ev) => {
+      if (closed) return;
+      closed = true;
+      handlers.onClose?.(ev.code);
+    };
+    socket.onerror = () => {};
+    return {
+      sendUpdate: (bytes) => send({ update: toBase64(bytes) }),
+      sendAwareness: (section, bytes) => send({ awareness: toBase64(bytes), section }),
+      freeze: () => send({ freeze: true }),
+      reopen: () => send({ reopen: true }),
+      refresh: () => send({ refresh: true }),
+      close() {
+        if (closed) return;
+        closed = true;
+        socket.close(1000);
+      },
+    };
   }
 
   /* A planning doc: the visual of kind "plan" with the same id. */
@@ -1673,9 +2221,183 @@ export class DaemonClient {
     return this.get<Plan>(`/plans/${encodeURIComponent(id)}`);
   }
 
+  planHistory(id: string) {
+    return this.get<{ events: DocHistoryEntry[] }>(`/plans/${encodeURIComponent(id)}/history`);
+  }
+
+  planRevisionChanges(id: string, rev: number) {
+    return this.get<DocRevisionComparison>(`/plans/${encodeURIComponent(id)}/revisions/${rev}/changes`);
+  }
+
   /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
   decidePlan(id: string, verdict: PlanVerdict) {
-    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
+    return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
+  }
+
+  /* The design doc's writes (brindle/plan_docs.py). Each names the revision on screen where the
+     engine checks it (a newer one is a 409) and answers with the plan as it is now. */
+  commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string, question = false) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { rev, anchor, text, ...(question ? { question } : {}) });
+  }
+
+  replyPlan(id: string, thread: number, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { parent: thread, text });
+  }
+
+  /* Resolve a comment thread, or (resolved false) reopen it. */
+  resolvePlanThread(id: string, thread: number, resolved = true) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/resolve`, { resolved });
+  }
+
+  suggestPlan(id: string, rev: number, change: PlanChange, text = "") {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/suggestions`, { rev, ...change, text });
+  }
+
+  /* Accepting a suggestion makes its change: a new revision. */
+  acceptPlanSuggestion(id: string, thread: number, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/accept`, { rev });
+  }
+
+  rejectPlanSuggestion(id: string, thread: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/reject`, {});
+  }
+
+  /* The person's direct edit: a new revision. */
+  editPlan(id: string, rev: number, change: PlanChange) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/edit`, { rev, ...change });
+  }
+
+  /* The person's pick on one decision (Confirm A); the verdict starts from these. */
+  confirmPlan(id: string, rev: number, decision: string, option: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
+  }
+
+  /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */
+  sharePlan(id: string, scope: { kind: string; id: string }, reviewers: PlanReviewerChoice[]) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/share`, { scope, reviewers });
+  }
+
+  setPlanReviewers(id: string, reviewers: PlanReviewerChoice[]) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/reviewers`, { reviewers });
+  }
+
+  /* Bring back what teammates wrote; what changed reaches the reader as an event. */
+  syncPlan(id: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sync`, {});
+  }
+
+  /* Make a plan the Library can't confirm a personal doc. The engine says when it may be offered. */
+  stopSharingPlan(id: string, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/stop-sharing`, { rev });
+  }
+
+  /* The person's own sign-off, as one of the plan's reviewers, on the revision on screen. */
+  signOffPlan(id: string, rev: number, version?: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sign-off`, { rev, ...(version === undefined ? {} : { version }) });
+  }
+
+  /* An org admin's waiver of a review rule, or a stand-in for it. The Library checks they are an admin. */
+  overridePlanPolicy(id: string, override: PlanPolicyOverride) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/policy-override`, override);
+  }
+
+  /* An org admin asks the people a waiting rule counts again, on revision `rev`. */
+  askPlanPolicyAgain(id: string, ask: { rev: number; org_id: string; policy: string }) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/policy-ask`, ask);
+  }
+
+  /* The org rules that would cover the plan once it is shared. */
+  previewPlanPolicies(id: string) {
+    return this.post<{ policies: PolicyPreviewRow[] }>(`/plans/${encodeURIComponent(id)}/policy-preview`, {});
+  }
+
+  /* A design someone else shared (brindle/pro/shared_reader.py), by its Library doc id: read from the
+     Library each time and held only in memory. A write answers with the design as it is now. */
+  sharedDesign(doc: string, repo?: string) {
+    return this.get<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}`, { repo });
+  }
+
+  sharedDesignHistory(doc: string, repo?: string) {
+    return this.get<{ events: DocHistoryEntry[] }>(`/shared-designs/${encodeURIComponent(doc)}/history`, { repo });
+  }
+
+  sharedDesignRevisionChanges(doc: string, rev: number, repo?: string) {
+    return this.get<DocRevisionComparison>(`/shared-designs/${encodeURIComponent(doc)}/revisions/${rev}/changes`, { repo });
+  }
+
+  /* The plan a Library design was shared from, when it was shared from this machine (its visual):
+     the author's own design, opened in the author's reader. A 404 for anyone else's. */
+  libraryDesignPlan(doc: string) {
+    return this.get<VisualDTO>(`/library/designs/${encodeURIComponent(doc)}/plan`);
+  }
+
+  /* Work items (Jira, Azure DevOps) on a design. Reads answer the last read with `unreachable` when the
+     tracker or Library can't be reached; writes raise (the Library's refusal keeps its own status). */
+  designWorkItems(doc: string, repo?: string) {
+    return this.get<DesignWorkItems>(`/library/designs/${encodeURIComponent(doc)}/work-items`, { repo });
+  }
+
+  createWorkItems(doc: string, body: { kind: "design" | "task" | "passage"; task?: string; section?: string; quote?: string; title?: string }, repo?: string) {
+    return this.post<{ created: TrackerLink[]; remaining?: number }>(`/library/designs/${encodeURIComponent(doc)}/work-items`, { ...body, ...(repo ? { repo } : {}) });
+  }
+
+  linkWorkItem(doc: string, item: string, target: TrackerLink["target"] = { kind: "design" }, repo?: string) {
+    return this.post<TrackerLink>(`/library/designs/${encodeURIComponent(doc)}/work-items/links`, { item, target, ...(repo ? { repo } : {}) });
+  }
+
+  unlinkWorkItem(doc: string, linkId: string, repo?: string) {
+    return this.delete<{ unlinked: boolean }>(`/library/designs/${encodeURIComponent(doc)}/work-items/links/${encodeURIComponent(linkId)}${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
+  /* For the Library list and board: each design's own item with how many others are done, from what was
+     read before, reading some never-read or old ones now (at most 50 ids). `remaining` are due a read this
+     answer didn't make: ask again with them. */
+  libraryWorkItems(ids: string[], repo?: string) {
+    return this.get<{ items: Record<string, { epic: TrackerLink | null; done: number; total: number }>; remaining?: string[] }>("/library/work-items", { ids: ids.join(","), repo });
+  }
+
+  /* Settings › Integrations (org admins). */
+  trackerIntegrations(repo?: string) {
+    return this.get<TrackerIntegrations>("/integrations/trackers", { repo });
+  }
+
+  /* `org` is the organization the page was loaded for: the daemon refuses (409) when the active one has
+     changed since, so a draft for one org never lands on another. */
+  saveTrackerSettings(settings: Partial<TrackerSettings>, org: string) {
+    return this.put<TrackerIntegrations>("/integrations/trackers/settings", { ...settings, org_id: org });
+  }
+
+  testTracker(tracker: TrackerName, org: string) {
+    return this.post<{ tracker: TrackerName; ok: boolean }>(`/integrations/trackers/${tracker}/test`, { org_id: org });
+  }
+
+  disconnectTracker(tracker: TrackerName, org: string) {
+    return this.delete<{ provider_grant?: string }>(`/integrations/trackers/${tracker}`, { org_id: org });
+  }
+
+  writeSharedDesign(doc: string, tail: string, body: Record<string, unknown>) {
+    return this.post<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}/${tail}`, body);
+  }
+
+  /* An org admin's review rules, with the teams and roles they can name and the designs each covers now. */
+  reviewPolicies() {
+    return this.get<ReviewPoliciesState>("/review-policies");
+  }
+
+  /* What saving `policies` as `org_id`'s list would do to the designs in review; writes nothing. */
+  reviewPolicyImpact(org_id: string, policies: ReviewPolicyRule[]) {
+    return this.post<DraftImpact>("/review-policies/draft-impact", { org_id, policies });
+  }
+
+  /* Replaces the rules of `org_id`, the org they were read for (another active org is a 409, nothing written);
+     `version` is the one last read (a stale one is a 409). */
+  saveReviewPolicies(org_id: string, version: number, policies: ReviewPolicyRule[]) {
+    return this.put<{ version: number; policies: ReviewPolicyRule[] }>("/review-policies", { org_id, version, policies });
+  }
+
+  /* The people of the person's org, to pick reviewers from, without the person (me); admin_org, the org whose rules they can override. */
+  libraryPeople() {
+    return this.get<{ people: LibraryPerson[]; me?: string; admin_org?: string | null }>("/library/people");
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {
@@ -1687,7 +2409,7 @@ export class DaemonClient {
     return this.get<KeptVisualDTO>(`/kept-visuals/${encodeURIComponent(id)}`);
   }
 
-  /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.
+  /* The Library of approved plans (brindle Pro), through the daemon; nothing is kept on disk.
      A plan without it throws DaemonError "not_entitled". */
   async docs(query: DocsQuery = {}): Promise<{ docs: AnalysisDoc[] }> {
     const got = await this.get<{ docs?: WireListedDoc[] }>("/analysis-docs", { ...query });
@@ -1708,13 +2430,37 @@ export class DaemonClient {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
   }
 
+  /* The folders the person can see, per scope they read (GET /library/folders). */
+  libraryFolders() {
+    return this.get<{ scopes: FolderGroup[] }>("/library/folders", {});
+  }
+
+  /* `scope` is the daemon's spelling: user, team:<id> or org:<id>. */
+  createLibraryFolder(scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members" = "owner", repo?: string) {
+    return this.post<LibraryFolder>("/library/folders", { scope, name, visibility, can_add: canAdd, ...(repo ? { repo } : {}) });
+  }
+
+  moveDocToFolder(id: string, scope: string, folder: string) {
+    return this.put<unknown>(`/analysis-docs/${encodeURIComponent(id)}/folder`, { scope, folder });
+  }
+
   async knowledgeMap(repo: string, scope: DocScope, paths: string[] = []): Promise<KnowledgeMap> {
     const got = await this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
     return { ...got, nodes: got.nodes.map(({ category, ...node }) => ({ ...node, ...categoryOf(category) })) };
   }
 
   async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {
-    return docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
+    const doc = docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
+    // Approved plans already link their local record through source.ref. The
+    // saved text stays readable when that session is no longer on this device.
+    if (doc.source?.kind === "goal" && doc.source.ref?.startsWith("v_")) {
+      const plan = await this.plan(doc.source.ref).catch(() => null);
+      if (plan?.state === "approved" && plan.session === doc.source.session && plan.markdown && doc.files.some((f) => f.md === plan.markdown || f.md.startsWith(`${plan.markdown.trimEnd()}\n\n## What the person approved (r${plan.rev})`))) {
+        const record = plan as Plan & Pick<AnalysisDocDetail, "revisions" | "threads">;
+        return { ...doc, revisions: record.revisions, threads: record.threads, decisions: plan.decisions, verdict: plan.verdict };
+      }
+    }
+    return doc;
   }
 
   /* Computed on this machine from its own records; needs no plan. */
@@ -1754,9 +2500,20 @@ export class DaemonClient {
     return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
   }
 
-  /* brindle's disk use (slow: the daemon measures every worktree). */
-  storage(repo?: string) {
-    return this.get<StorageReport>("/storage", { repo });
+  /* Settings › Doc format for one level (org, or team:<id>). */
+  docFormat(level = "org") {
+    return this.get<DocFormatView>("/doc-format", { level });
+  }
+
+  /* Replaces what one level of the doc format sets. */
+  setDocFormat(format: Partial<DocFormat>, version: number, level = "org") {
+    return this.put<DocFormatView>("/doc-format", { level, format, version });
+  }
+
+  /* brindle's disk use as last measured, at once; `fresh` measures again
+     (the daemon measures every worktree on a thread of its own). */
+  storage(repo?: string, opts: { fresh?: boolean } = {}) {
+    return this.get<StorageReport>("/storage", { repo, fresh: opts.fresh ? 1 : undefined });
   }
 
   /* Removes one worktree (merged or abandoned; the engine checks it again),
@@ -1958,6 +2715,16 @@ export class DaemonClient {
     return this.put<RoutingUpdated>("/routing", body);
   }
 
+  /* What routing aims for in the repo, with the preview at that point. */
+  routingGoal(repo: string) {
+    return this.get<RoutingGoalDTO>("/routing/goal", { repo });
+  }
+
+  /* Sets the aim; the reply is the goal as stored (org policy may clamp it) with its preview. */
+  putRoutingGoal(body: RoutingGoalPut) {
+    return this.put<RoutingGoalDTO>("/routing/goal", body);
+  }
+
   doctor(repo?: string) {
     return this.get<DoctorCheck[]>("/doctor", { repo });
   }
@@ -2151,6 +2918,14 @@ export class DaemonClient {
 
   private get<T>(path: string, query?: Query): Promise<T> {
     return this.request<T>(this.url(path, query), {});
+  }
+
+  /* All decisions that can remove an Inbox card invalidate older reads,
+     including refusals that say the request has already moved on. */
+  private postInbox<T>(path: string, body: unknown): Promise<T> {
+    return this.post<T>(path, body).finally(() => {
+      this.inboxAcknowledgements++;
+    });
   }
 
   private post<T>(path: string, body: unknown = {}): Promise<T> {

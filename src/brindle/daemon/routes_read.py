@@ -7,8 +7,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
 import posixpath
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +36,7 @@ from brindle import (
     knowledge,
     profiles,
     quota,
+    session_sync,
     sessions,
     spawn,
     tmux,
@@ -150,22 +153,126 @@ def _last4(value: str) -> str:
     return value[-4:] if len(value) > 8 else ""
 
 
+# The system's temporary folders: a repo there (a benchmark's, a test's) is
+# listed only while a session runs in it.
+TEMP_ROOTS = ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/")
+# How long a repo's "still a git repo on disk" answer is kept.
+REPO_SEEN_TTL = 60.0
+_repo_seen: dict[str, float] = {}
+
+
+def _still_a_repo(root: str, now: float) -> bool:
+    """Whether ``root`` is still a git checkout on disk (a stat, no git). A
+    yes is kept a while; a no is asked again (a repo cloned back shows at once)."""
+    seen = _repo_seen.get(root)
+    if seen is not None and now - seen <= REPO_SEEN_TTL:
+        return True
+    there = os.path.exists(os.path.join(root, ".git"))
+    if there:
+        _repo_seen[root] = now
+    return there
+
+
 @_json
 def repos(db: DB, request: Request) -> Any:
-    roots = sorted({ws.repo_root for ws in db.find_workspaces(None)})
+    """The person's projects, most recently used first: each repo brindle has
+    worked in that is still a git repo on disk. A repo in a system temp folder
+    and a scratch session are listed only while a session runs there: its
+    chat's pane is up and still its own, as sessions.live judges it, from the
+    tmux look GET /sessions shares (no git on this path, and tmux only when
+    such a repo has a chat that may be running). brindle's own repos
+    (practice runs) are listed as before, flagged ``demo``."""
+    from brindle import scratch
+    from brindle.config import brindle_home
     from brindle.demo import is_demo_repo
 
+    now = time.monotonic()
+    home = str(brindle_home()).rstrip("/") + "/"
+    scratch_root = str(scratch.scratch_dir()).rstrip("/") + "/"
+    look: list = []
+
+    def running(chats: list[str]) -> bool:
+        if not chats:
+            return False
+        if not look:
+            look.extend(_shared_panes(db))
+        panes, owners = look
+        return any(a is not None and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)
+                   for a in map(db.get_agent, chats))
+
+    listed = []
+    for root, (used, chats) in db.repo_activity().items():
+        mine = root.startswith(home)      # brindle's own (practice runs, scratch), wherever its home is
+        if root.startswith(scratch_root):
+            keep = running(chats)
+        elif not _still_a_repo(root, now):
+            keep = False
+        else:
+            keep = mine or not root.startswith(TEMP_ROOTS) or running(chats)
+        if keep:
+            listed.append((used, root))
+    listed.sort(key=lambda u: (-u[0], u[1]))
     return [RepoDTO(repo_root=r, name=r.rstrip("/").rsplit("/", 1)[-1], demo=is_demo_repo(r)).to_json()
-            for r in roots]
+            for _, r in listed]
+
+
+# The app reads every repo's sessions at once (GET /sessions per repo, after
+# every bus event): one tmux snapshot and its pane owners answer the whole
+# burst, not one each. Kept while no new event is written and for at most
+# PANE_VIEW_MAX_AGE (a pane dying writes no event).
+PANE_VIEW_MAX_AGE = 2.0
+
+
+@dataclasses.dataclass
+class _PaneView:
+    lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    event: int = -1
+    at: float = -math.inf
+    panes: Any = None
+    owners: dict[str, str] | None = None
+
+
+_pane_view = _PaneView()
+
+
+def _shared_panes(db: DB) -> tuple[Any, dict[str, str]]:
+    """The tmux snapshot and pane owners for this read: the one a read just
+    before took, while still current, else a fresh one. Concurrent reads wait
+    for the one taking it rather than each asking tmux."""
+    newest = db.conn.execute("SELECT MAX(id) FROM events").fetchone()[0] or 0
+    view = _pane_view
+    with view.lock:
+        now = time.monotonic()
+        if view.owners is None or view.event != newest or now - view.at >= PANE_VIEW_MAX_AGE:
+            panes = tmux.list_panes()
+            view.owners = agents.pane_owners(db, panes)
+            view.panes, view.event, view.at = panes, newest, now
+        return view.panes, view.owners
 
 
 @_json
 def list_sessions(db: DB, request: Request) -> Any:
     repo = _need_repo(request)
-    live = [SessionDTO.from_agent(s.root, s.goal).to_json() for s in sessions.live(db, repo)]
+    panes, owners = _shared_panes(db)
+    live = [SessionDTO.from_agent(s.root, s.goal).to_json() for s in sessions.live(db, repo, panes, owners)]
     paused = [SessionDTO.from_agent(s.root, sessions.goal_line(db, s.root)).to_json()
-              for s in sessions.paused(db, repo) if s.root.dismissed_at is None]
-    return live + paused
+              for s in sessions.paused(db, repo, panes, owners) if s.root.dismissed_at is None]
+    listed = {row["id"]: row for row in live + paused}
+    live_ids = {row["id"] for row in live}
+    recovery = getattr(request.app.state, "recovery", None)
+    for root_id in recovery.resuming() if recovery else ():
+        root = db.get_agent(root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if not root or not ws or ws.repo_root != repo or root.dismissed_at is not None or root.status == "done":
+            continue
+        # A launch's starting root may not have a live pane yet, so neither list includes it.
+        row = listed.setdefault(root_id, SessionDTO.from_agent(root, sessions.goal_line(db, root)).to_json())
+        row["status"] = "resuming"
+        live_ids.add(root_id)
+    # Recovering roots keep the normal live-session order even without a pane.
+    current = sorted((row for root_id, row in listed.items() if root_id in live_ids),
+                     key=lambda row: row["created_at"], reverse=True)
+    return current + [row for row in paused if row["id"] not in live_ids]
 
 
 @_json
@@ -175,9 +282,10 @@ def snapshot(db: DB, request: Request) -> Any:
 
 @_json
 def goal(db: DB, request: Request) -> Any:
-    entry = view.autopilot_entry(db, _need_repo(request), panes=tmux.list_panes(),
-                                 root_id=request.query_params.get("root"))
-    ap = entry and db.get_autopilot(entry["root_id"])
+    root_id = request.query_params.get("root")
+    root = view.autopilot_root(db, _need_repo(request),
+                              panes=None if root_id else tmux.list_panes(), root_id=root_id)
+    ap = root and db.get_autopilot(root.id)
     if not ap:
         return None
     from brindle.autopilot import goal_activity, milestone_phases
@@ -187,7 +295,8 @@ def goal(db: DB, request: Request) -> Any:
                                   milestone_phases(db, ap.root_id), phase,
                                   goal_activity(db, ap.root_id),
                                   session_review.session_pr_state(
-                                      db, ap.root_id, phase[1] if phase[0] == "pr_open" else None)).to_json()
+                                      db, ap.root_id, phase[1] if phase[0] == "pr_open" else None),
+                                  drifting=session_sync.drifting(db, ap.root_id)).to_json()
 
 
 @_json
@@ -202,6 +311,22 @@ def agent(db: DB, request: Request) -> Any:
     except agents.AgentError as e:
         raise ServiceError("not_found", str(e), 404) from e
     return AgentDTO.model_validate(view.agent_entry(db, a, detail=True, panes=tmux.list_panes())).to_json()
+
+
+@_json
+def agent_transcript(db: DB, request: Request) -> Any:
+    from brindle import identity_lock
+    from brindle.web.chat import transcript
+
+    a = db.get_agent(request.path_params["id"])
+    if a is None:
+        raise ServiceError("not_found", "no such agent", 404)
+    if identity_lock.locked_by(a.id):
+        raise ServiceError("forbidden", "session belongs to another identity", 403)
+    try:
+        return transcript(a, request.query_params.get("after") or 0, db=db)
+    except ValueError as e:
+        raise ServiceError("invalid", "bad cursor", 400) from e
 
 
 @_json
@@ -257,10 +382,10 @@ def session_tree(db: DB, request: Request) -> Any:
             "files": [p for p in git.run(["ls-files", "-z"], ws.path).stdout.split("\0") if p]}
 
 
-@_heavy_json
+@_json
 def session_pr_draft(db: DB, request: Request) -> Any:
+    """Draft text from the goal; readiness is enforced when opening the PR."""
     root, ws = session_review.session(db, request.path_params["root"])
-    session_review.require_ready(db, root, ws)
     return session_review.draft(db, root, ws)
 
 
@@ -429,9 +554,13 @@ def _key_rows(repo: str | None) -> list[dict]:
 
 @_json
 def get_user_settings(db: DB, request: Request) -> Any:
+    from brindle.provider_switch import quota_switch
+
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
+            "quota_switch": quota_switch(),
             "opencode_permission_mode": config.opencode_permission_mode(),
-            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off"}
+            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off",
+            "login_shell_env": "on" if config.login_shell_env_setting() else "off"}
 
 
 @_json
@@ -615,14 +744,16 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True
     return kinds
 
 
-@_heavy_json
+@_json
 def get_storage(db: DB, request: Request) -> Any:
     """brindle's disk use: every worktree classified merged / abandoned / active
-    with its size and why it must stay (``disk.storage_report``). On the heavy
-    lane: measuring walks every worktree."""
-    from brindle import disk
+    with its size and why it must stay (``disk.storage_report``), as last
+    measured, at once: measuring walks every worktree, so it runs on a thread
+    of its own (``storage_reports``), plus ``measured_at`` and ``refreshing``.
+    ``fresh=1`` measures again now (unless a measurement is under way)."""
+    from brindle.daemon.storage_reports import REPORTS
 
-    return disk.storage_report(db, _repo(request))
+    return REPORTS.get(_repo(request), fresh=request.query_params.get("fresh") in ("1", "true"))
 
 
 @_json
@@ -663,18 +794,106 @@ def providers_installed(db: DB, request: Request) -> Any:
     return providers_install.statuses()
 
 
+# GET /providers/usable answers from the last full answer for the repo: telling
+# whether each CLI is signed in runs the CLI (a second or more for them all),
+# which the New session page must not wait on. Each ask has the answer worked
+# out again on a thread of its own (the first answer is told without running
+# any CLI); one that changes is published as a "providers.usable" event, and
+# the page asks again.
+
+
+@dataclasses.dataclass
+class _UsableCache:
+    lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    answers: dict[str, dict] = dataclasses.field(default_factory=dict)   # repo → its last answer
+    refreshing: set[str] = dataclasses.field(default_factory=set)
+    again: set[str] = dataclasses.field(default_factory=set)       # asked for while one ran
+
+
+_usable_cache = _UsableCache()
+
+
+def _usable_answer(db: DB, repo: str) -> dict:
+    from brindle.service import sessions as svc
+
+    known = db.conn.execute("SELECT 1 FROM workspaces WHERE repo_root=? LIMIT 1", (repo,)).fetchone()
+    root = repo if known else git.main_repo_root(repo)   # a repo brindle knows needs no git to name it
+    usable = svc.usable_providers(root)
+    return {"usable": usable, "default": usable[0] if usable else None}
+
+
+def _refresh_usable(repo: str) -> None:
+    """Work ``repo``'s answer out again in the background. While one already
+    runs (it may have begun before a sign-in this ask is about), one more
+    follows it: never more than one running and one waiting."""
+    with _usable_cache.lock:
+        if repo in _usable_cache.refreshing:
+            _usable_cache.again.add(repo)
+            return
+        _usable_cache.refreshing.add(repo)
+    _start_usable_refresh(repo)
+
+
+def _start_usable_refresh(repo: str) -> None:
+    # A plain thread: a fresh context, so no request's deadline cuts the CLIs' checks short.
+    threading.Thread(target=_run_usable_refresh, args=(repo,), name="brindle-usable-refresh",
+                     daemon=True).start()
+
+
+def _run_usable_refresh(repo: str) -> None:
+    from brindle import bus
+
+    try:
+        db = DB()
+        try:
+            answer = _usable_answer(db, repo)
+            with _usable_cache.lock:
+                before = _usable_cache.answers.get(repo)
+                _usable_cache.answers[repo] = answer
+            if before != answer:
+                bus.publish(db, "providers.usable", repo_root=repo, **answer)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - the last answer stands; the next read tries again
+        log.debug("brindle: refreshing the usable CLIs for %s failed", repo, exc_info=True)
+    finally:
+        with _usable_cache.lock:
+            follow = repo in _usable_cache.again
+            _usable_cache.again.discard(repo)
+            if not follow:
+                _usable_cache.refreshing.discard(repo)
+        if follow:      # still marked running: the waiting one goes now
+            _start_usable_refresh(repo)
+
+
 @_json
 def providers_usable(db: DB, request: Request) -> Any:
     """What a new supervisor session in ``repo`` can run on, by the rule POST
     /sessions starts by (service.sessions.supervisor_provider): ``usable``,
     each CLI that is installed, signed in, turned on and allowed by the org's
     policy, in preference order, and ``default``, the one a start with no
-    provider runs on (null when none is usable: such a start is refused)."""
-    from brindle.service import sessions as svc
+    provider runs on (null when none is usable: such a start is refused).
+    Answered at once from the last answer, re-checked behind the reply: no CLI runs here."""
+    from brindle import providers
 
-    root = git.main_repo_root(_need_repo(request))
-    usable = svc.usable_providers(root)
-    return {"usable": usable, "default": usable[0] if usable else None}
+    repo = _need_repo(request)
+    with _usable_cache.lock:
+        got = _usable_cache.answers.get(repo)
+    if got is None:
+        # The first ask: each sign-in as last told (a CLI not yet asked counts as signed in,
+        # which a start's preflight still checks), while the full answer is worked out.
+        with providers.no_sign_in_probes():
+            answer = _usable_answer(db, repo)
+        with _usable_cache.lock:
+            _usable_cache.answers.setdefault(repo, answer)
+        _refresh_usable(repo)
+        return answer
+    # Every ask has it worked out again behind the reply (one at a time per repo): a sign-in,
+    # an install or a CLI turned on since tells nothing brindle watches, and the page asks only
+    # when it opens or hears the answer changed. A CLI signed in stays told (providers.SIGNED_IN_TTL),
+    # so the check behind a page that opens again and again is mostly free.
+    _refresh_usable(repo)
+    return got
 
 
 @_json
@@ -902,9 +1121,33 @@ def analysis_doc_scopes(db: DB, request: Request) -> Any:
 
 
 @_json
+def library_folders(db: DB, request: Request) -> Any:
+    """``{"scopes": [{scope: {kind, id, name}, folders: [...]}]}``: the folders
+    the person can see in each scope they read (see pro/library_folders), each
+    with the ``repo`` it was made for (None when this machine doesn't know)."""
+    from brindle.pro import library_folders as folders
+
+    repo = _repo(request)
+    return {"scopes": folders.with_repos(db, folders.list_all(
+        docs_scopes(repo), api=lambda m, p, b=None: docs_api(m, p, b, repo=repo), refusals=(ServiceError,)))}
+
+
+@_json
 def analysis_doc_switches(db: DB, request: Request) -> Any:
     """The person's own switches, and which their org has locked (see routes_actions.doc_switches)."""
     return doc_switches(_repo(request))
+
+
+@_json
+def doc_format(db: DB, request: Request) -> Any:
+    """Settings › Doc format (brindle.doc_templates): what ``level`` (org, the
+    default, team:<id>, or a level of the org's structure) sets and its
+    version, the format in force there, where it is kept, the reference this
+    machine's next new doc gets, and how many docs each template wrote."""
+    from brindle import doc_templates
+
+    level = request.query_params.get("level") or doc_templates.ORG
+    return doc_templates.view(db, level)
 
 
 @_json
@@ -937,11 +1180,16 @@ def analysis_doc_results(db: DB, request: Request) -> Any:
 
 @_json
 def analysis_doc(db: DB, request: Request) -> Any:
-    """One doc: its files, what the server read from it and how often briefs used it."""
+    """One doc: its files, what the server read from it and how often briefs used it,
+    and ``tasks`` when it is a plan on this machine (plans.doc_tasks: its split, in board state)."""
     from urllib.parse import quote
 
-    return docs_api("GET", f"/analysis-docs/{quote(request.path_params['id'], safe='')}",
-                    repo=_repo(request))
+    from brindle import plans
+
+    doc_id = request.path_params["id"]
+    got = docs_api("GET", f"/analysis-docs/{quote(doc_id, safe='')}", repo=_repo(request))
+    tasks = plans.doc_tasks(db, doc_id)
+    return dict(got, tasks=tasks) if isinstance(got, dict) and tasks is not None else got
 
 
 USAGE_NEAR_PERCENT = 80.0
@@ -993,6 +1241,7 @@ ROUTES = [
     Route("/v1/goal", goal),
     Route("/v1/inbox", inbox_),
     Route("/v1/agents/{id}", agent),
+    Route("/v1/agents/{id}/transcript", agent_transcript),
     Route("/v1/workspaces/{id:path}/diff", diff),
     # PUT on the same path is the edit (routes_actions); agent callers are refused by the guard.
     Route("/v1/workspaces/{id:path}/file", workspace_file),
@@ -1018,10 +1267,12 @@ ROUTES = [
     Route("/v1/analysis-docs/export-config", analysis_doc_export_config),
     Route("/v1/analysis-docs/destination", analysis_doc_destination),
     Route("/v1/analysis-docs/{id}", analysis_doc),
+    Route("/v1/library/folders", library_folders),
     Route("/v1/profiles", list_profiles),
     Route("/v1/profiles/{name}", get_profile),
     Route("/v1/rules", list_rules),
     Route("/v1/config", get_config),
+    Route("/v1/doc-format", doc_format),
     Route("/v1/user-settings", get_user_settings),
     Route("/v1/permissions", get_permissions),
     Route("/v1/permissions/asks", get_permission_asks),

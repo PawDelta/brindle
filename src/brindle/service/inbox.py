@@ -11,6 +11,7 @@ screen can't show reliably which request it is."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -18,10 +19,10 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import agents, autopilot, bus, git, identity_lock, permissions, prompt_answer, session_sync, tmux, view
+from brindle import agents, autopilot, bus, git, identity_lock, permissions, prompt_answer, provider_switch, session_sync, tmux, view
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
-from brindle.db import DB, Agent, request_subagent
+from brindle.db import DB, Agent, Workspace, request_subagent
 from brindle.providers import get_provider
 from brindle.service.dto import (
     InboxActionDTO,
@@ -174,18 +175,98 @@ def _sign_in(provider: str) -> InboxActionDTO | None:
     return InboxActionDTO(method="POST", path=f"/v1/providers/{provider}/login") if provider in CLI_NAMES else None
 
 
-def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[InboxItemDTO]:
+def _opened_pr(db: DB, root_id: str, branch: str, path: str) -> tuple[str, dict | None]:
+    """HEAD and the open PR holding it (``{number, title, url}``): GitHub's last
+    answer, else the one brindle recorded (Open PR, or adopted earlier), which
+    stands while that answer is stale or missing."""
+    from brindle.daemon import session_review
+
+    try:
+        head = git.head(path)       # from the git files: every Inbox read asks, for every session
+        opened = session_review.open_pr_for_head(head, path, root_id)
+    except (git.GitError, OSError):
+        head, opened = "", None  # An unavailable checkout must not break the rest of the inbox.
+    if not (opened and opened.get("url")) and not session_review.head_pr_known_none(head, path):
+        mine = db.conn.execute("SELECT url FROM session_prs WHERE root_id = ? AND branch = ? AND url IS NOT NULL"
+                               " AND merged_at IS NULL", (root_id, branch)).fetchone()
+        number = re.search(r"/pull/(\d+)$", mine["url"]) if mine else None
+        prep = db.conn.execute("SELECT title FROM session_pr_prep WHERE root_id = ? AND branch = ?",
+                               (root_id, branch)).fetchone()
+        opened = {"url": mine["url"], "number": number.group(1), "title": (prep["title"] if prep else "") or ""} if number else None
+    return head, opened
+
+
+def _failure_marker(*parts: str | None) -> str:
+    return json.dumps(["failed", *parts])
+
+
+def _pr_problem(db: DB, root_id: str, branch: str, opened: dict | None) -> tuple[str, str] | None:
+    from brindle.daemon import session_review
+
+    recorded = db.conn.execute("SELECT url FROM session_prs WHERE root_id = ? AND branch = ?"
+                               " AND url IS NOT NULL AND merged_at IS NULL", (root_id, branch)).fetchone()
+    # A local fix can move HEAD beyond the PR: its failure still needs attention.
+    urls = dict.fromkeys([r["url"] for r in (recorded, opened) if r])
+    for url in urls:
+        if problem := session_review.pr_problem(db, root_id, url):
+            return url, problem
+    return None
+
+
+def dismiss_marker(db: DB, root_id: str, branch: str, path: str) -> str | None:
+    """Identify the PR card's commit and, for a failure, the current problem.
+
+    Ready/opened markers keep their existing format so saved dismissals stand.
+    """
+    head, opened = _opened_pr(db, root_id, branch, path)
+    if problem := _pr_problem(db, root_id, branch, opened):
+        return _failure_marker(head, *problem)
+    if opened:
+        return f"{head}|{opened['url']}"
+    prep = db.conn.execute("SELECT sha, state, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
+                           " AND state IN ('passed', 'failed')", (root_id, branch)).fetchone()
+    if prep:
+        return prep["sha"] if prep["state"] == "passed" else _failure_marker(prep["sha"], prep["check_cmd"], prep["output"])
+    return None
+
+
+def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) -> list[InboxItemDTO]:
     """The session's PR as brindle prepared it (routes_actions.prepare_pr),
-    until the person opens it: ready for their approval, or its checks failed."""
-    rows = db.conn.execute(
-        "SELECT state, title, check_cmd, output FROM session_pr_prep p WHERE root_id = ? AND branch = ?"
-        " AND state IN ('passed', 'failed') AND NOT EXISTS (SELECT 1 FROM session_prs s WHERE"
-        " s.root_id = p.root_id AND s.branch = p.branch AND s.url IS NOT NULL)", (root_id, branch)).fetchall()
+    until the person opens it: ready for their approval, or its checks failed.
+    An open PR already holding the session's HEAD (a supervisor's own
+    ``gh pr create``, from any branch name) is a ``pr_opened`` item instead.
+    Nothing while its PR has merged, until the branch has commits for its next."""
+    from brindle.daemon import session_review
+
+    path = home.path
+    head, opened = _opened_pr(db, root_id, branch, path)
     declined = db.conn.execute("SELECT sha FROM session_pr_declined WHERE root_id = ? AND branch = ?",
                                (root_id, branch)).fetchone()
+    if problem := _pr_problem(db, root_id, branch, opened):
+        if declined and declined["sha"] == _failure_marker(head, *problem):
+            return []
+        url, detail = problem
+        return [InboxItemDTO(kind="pr_failed", reason="PR needs attention", detail=detail,
+                             url=url, **link)]
+    if opened:
+        # Dismissed for this PR at any commit: a push to it doesn't bring the card back.
+        if declined and declined["sha"].endswith(f"|{opened['url']}"):
+            return []
+        return [InboxItemDTO(kind="pr_opened", reason="PR opened", detail=f"#{opened.get('number')} {opened.get('title') or ''}".strip(),
+                             url=opened["url"], **link)]
+    rows = db.conn.execute(
+        "SELECT sha, state, title, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
+        " AND state IN ('passed', 'failed')", (root_id, branch)).fetchall()
+    merged = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ? AND url IS NOT NULL"
+                             " AND merged_at IS NOT NULL", (root_id, branch)).fetchone()
+    if rows and merged and not session_review.new_since_merge(db, home,merged["pushed_sha"]):
+        return []
+    if declined:
+        rows = [r for r in rows if r["state"] != "failed"
+                or declined["sha"] != _failure_marker(r["sha"], r["check_cmd"], r["output"])]
     if declined and any(r["state"] == "passed" for r in rows):
         try:
-            if git.out(["rev-parse", "HEAD"], path) == declined["sha"]:
+            if git.head(path) == declined["sha"]:
                 rows = [r for r in rows if r["state"] != "passed"]
         except (git.GitError, OSError):
             pass  # An unavailable checkout must not break the rest of the inbox.
@@ -195,12 +276,46 @@ def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[
             for r in rows]
 
 
+def permission_dismiss_key(agent_id: str, request_id: str) -> str:
+    return json.dumps(["permission", agent_id, request_id])
+
+
+def _dismiss_key(item: InboxItemDTO) -> str:
+    if item.kind == "permission" and item.agent_id and item.permission and item.permission.request_id:
+        return permission_dismiss_key(item.agent_id, item.permission.request_id)
+    return hashlib.sha256(json.dumps(item.to_json(), sort_keys=True).encode()).hexdigest()
+
+
+def dismissed_keys(db: DB) -> set[str]:
+    return {r["key"] for r in db.conn.execute("SELECT key FROM inbox_dismissed")}
+
+
+def dismiss_item(db: DB, value: dict) -> dict:
+    """Hide this notification only; never answer its underlying request.
+
+    Bind the marker to the snapshot shown, so a newer proposal still appears.
+    Hook requests use their own identity across grouped and individual cards.
+    """
+    try:
+        item = InboxItemDTO.model_validate(value)
+    except ValueError as e:
+        raise ServiceError("invalid", "invalid inbox item", 400) from e
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO inbox_dismissed (key) VALUES (?)", (_dismiss_key(item),))
+    if item.agent_id:
+        bus.publish_agent(db, "inbox.dismissed", item.agent_id)
+    else:
+        bus.publish(db, "inbox.dismissed")
+    return {"dismissed": True}
+
+
 def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[InboxItemDTO]:
     """Everything waiting on a person in ``repo_root``'s sessions (every
     session when None), then the org's unread notices. Each agent's item
     names its session (``root_id``), so the app can link into it."""
     out: list[InboxItemDTO] = []
     shown: set[str] = set()
+    occurrences = {r["source"]: r["generation"] for r in db.conn.execute("SELECT source, generation FROM inbox_occurrences")}
     for ws in view.snapshot(db, repo_root, panes=panes):
         shown.update(a["id"] for a in ws["agents"])
         for a in ws["agents"]:
@@ -224,6 +339,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             if reason and not asking:
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
+                                        request_id=str(occurrences.get(f"question:{a['id']}", 0)) if kind == "question"
+                                        else str(row.status_since) if kind in ("waiting", "credentials", "failed") else None,
                                         detail=row.failed_why.removeprefix("review: ")
                                         if (row.failed_why or "").startswith("review: ") else None,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
@@ -237,30 +354,34 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             # The workspace holds one asking id; each root's own state is the truth.
             if ap and ap.state == "blocked" and not any(
                     i.kind == "question" and i.agent_id == a["id"] for i in out):
-                out.append(InboxItemDTO(kind="question", reason="has a question", **link))
+                out.append(InboxItemDTO(kind="question", reason="has a question", **link,
+                                        request_id=str(occurrences.get(f"question:{a['id']}", 0))))
             if ap and autopilot.proposing(ap):
                 checks = json.loads(ap.proposal).get("checks") or []
                 out.append(InboxItemDTO(kind="proposed_checks", reason="checks proposed", **link,
                                         detail="\n".join(checks)))
             home = db.get_workspace(row.workspace_id)
             if home:
-                out += _pr_items(db, row.id, ws["branch"], home.path, link)
+                out += _pr_items(db, row.id, ws["branch"], home, link)
             if home and (stuck := session_sync.needs_you(db, home)):
                 out.append(InboxItemDTO(kind="sync_conflict", reason="session branch conflicts with origin",
                                         detail=stuck, **link))
             login = db.get_login_state(row.id)
             if login and login.state == "auth_paused":
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
+                                        request_id=str(occurrences.get(f"login:{a['id']}", 0)),
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _visual_items(db, repo_root)
+    all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _review_items(db, repo_root)
+                 + _visual_items(db, repo_root) + provider_switch.inbox_items(db, repo_root)
                  + _plan_offer_items(db, repo_root) + _setup_items()
                  + _org_blocks(db, repo_root) + _org_notices())
     # Requests can outlive the live snapshot (notably document requests).
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask
     # for attention again just because a historical request is still stored.
-    return [i for i in all_items if not i.agent_id
-            or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a)]
+    hidden = dismissed_keys(db)
+    return [i for i in all_items if _dismiss_key(i) not in hidden and (not i.agent_id
+            or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a))]
 
 
 def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
@@ -283,11 +404,19 @@ def _visual_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
     from brindle import visuals
 
     out = []
-    for v in visuals.inbox_pending(db, repo_root):
+    # An Approve held for the Library that couldn't be applied: the person was told nowhere else.
+    refused = {r["plan_id"]: r["approve_refused"] for r in db.conn.execute(
+        "SELECT s.plan_id, s.approve_refused FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
+        " WHERE s.approve_refused IS NOT NULL AND p.state='open'")} if visuals.enabled() else {}
+    pending = visuals.inbox_pending(db, repo_root)
+    listed = {v["id"] for v in pending}
+    pending += [v for v in (visuals.get(db, pid) for pid in refused.keys() - listed)
+                if not repo_root or v["repo_root"] == repo_root]
+    for v in pending:
         root = db.get_agent(v["root_id"])
         if root is None or identity_lock.locked_by(root.id):
             continue
-        reason = "asks you to choose" if v["options"] else "visual is ready"
+        reason = refused.get(v["id"]) or ("asks you to choose" if v["options"] else "visual is ready")
         out.append(InboxItemDTO(kind="visual", reason=reason, detail=v["title"],
                                 visual_id=v["id"], agent_id=root.id, workspace_id=root.workspace_id,
                                 root_id=root.id))
@@ -340,6 +469,63 @@ def _doc_items(db: DB, repo_root: str | None, shown: set[str]) -> list[InboxItem
                                     request_id=r["id"], doc=r["doc_id"], section=r["section"],
                                     agent_id=r["agent_id"], workspace_id=ws.id,
                                     root_id=autopilot.root_of(db, r["agent_id"])))
+    return out
+
+
+def _my_sub() -> str | None:
+    """The signed-in account, or None offline, logged out or air-gapped: no review cards, never an error."""
+    from brindle.pro import license
+
+    try:
+        return license.current(refresh=False).sub
+    except Exception:  # noqa: BLE001 - the inbox must still load without Pro
+        return None
+
+
+def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
+    """Cards for shared design docs, derived from the stored review state so
+    they clear on their own once acted on: "review_requested" while the
+    Library's queue asks this account (pro/review_queue);
+    "changes_requested" / "signed_off" for the author, until the plan is
+    revised or approved. Each opens the doc (``doc`` = the Library's id)."""
+    from brindle import plans
+
+    me = _my_sub()
+    if me is None:
+        return []
+    out = []
+    links: dict[str, dict] = {}     # a doc this machine has a live plan for: what enriches its queue card
+    for r in db.conn.execute("SELECT plan_id, doc_id, owner FROM plan_shares WHERE doc_id IS NOT NULL"):
+        try:
+            p = plans._row(db, r["plan_id"])
+        except Exception:  # noqa: BLE001 - a plan that went away or a bad row is skipped, not shown raw
+            continue
+        root = db.get_agent(p["root_id"])
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if root and identity_lock.locked_by(root.id):
+            continue        # another identity's session: no local link or feedback (the queue is the person's own)
+        if p["state"] not in plans.HOLDING or (repo_root and ws and ws.repo_root != repo_root):
+            continue
+        link = {"doc": r["doc_id"], "request_id": p["id"], "agent_id": root.id if root else None,
+                "workspace_id": ws.id if ws else None, "root_id": root.id if root else None}
+        links[r["doc_id"]] = {**link, "title": plans._title(p["markdown"])}
+        if r["owner"] == me:
+            found = plans.gate(db, p)
+            state = found and found["state"]
+            if state == plans.CHANGES:
+                out.append(InboxItemDTO(kind="changes_requested", reason="Changes requested",
+                                        detail=links[r["doc_id"]]["title"], **link))
+            elif state == "ready":
+                out.append(InboxItemDTO(kind="signed_off", reason="Signed off",
+                                        detail=links[r["doc_id"]]["title"], **link))
+    # Who is asked to review is the Library's per-person queue, for every doc
+    # (a plan here only adds the session link): it clears when the item leaves.
+    from brindle.pro import review_queue
+
+    for q in review_queue.waiting(me):
+        link = links.get(q["doc_id"]) or {"doc": q["doc_id"]}
+        out.append(InboxItemDTO(kind="review_requested", reason="Review requested",
+                                detail=link.get("title") or q["title"], **{k: v for k, v in link.items() if k != "title"}))
     return out
 
 

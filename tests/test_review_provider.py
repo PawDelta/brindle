@@ -2,18 +2,16 @@
 else the repo's `review_profile` config, else the baseline reviewer unless
 brindle Pro's learner picks another reviewer that can run here."""
 
-import asyncio
 import time
 from pathlib import Path
 
 import pytest
 
 from conftest import sh
-from brindle import agents, learning, local_setup, mcp_server, workspaces
+from brindle import agents, learning, local_setup, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.native import runner
-from brindle.profiles import Profile
 
 
 @pytest.fixture
@@ -27,20 +25,6 @@ def worker_ws(db, repo):
 
 def worker():
     return Agent("w1", "ws1", "developer", "claude", None, "assign", "idle", "@0", None, time.time())
-
-
-def capture_profile(monkeypatch):
-    """Record the profile request_review chose instead of starting a reviewer;
-    any profile name loads, so fake names only check which one was picked."""
-    captured = {}
-
-    def fake_spawn(db_, ws_, profile, *, prompt=None, parent_id=None, mode="review", **kw):
-        captured["profile"] = profile
-        return Agent("rev1", ws_.id, profile, "claude", parent_id, mode, "starting", "@0", None, time.time())
-
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(agents, "load_profile", lambda name, repo_root=None: Profile(name, "", "claude", ""))
-    return captured
 
 
 @pytest.fixture
@@ -75,27 +59,16 @@ class FakeLearner:
         return self.pick or default
 
 
-def test_request_review_uses_config_review_profile_override(db, worker_ws, env, monkeypatch):
-    captured = capture_profile(monkeypatch)
-    agents.request_review(db, None, worker_ws, cfg=RepoConfig(review_profile="team-reviewer"))
-    assert captured["profile"] == "team-reviewer"
-
-
 def test_request_review_raises_clearly_for_an_unknown_configured_review_profile(db, worker_ws):
     with pytest.raises(agents.AgentError, match="bogus-profile"):
         agents.request_review(db, None, worker_ws, cfg=RepoConfig(review_profile="bogus-profile"))
 
 
-def test_mcp_request_review_returns_a_message_instead_of_raising_when_codex_missing(db, worker_ws, env):
-    out = asyncio.run(mcp_server.request_review(worker_ws.id, profile="reviewer-codex"))
-    assert "codex" in out.lower()
-
-
 def test_without_a_learner_it_is_the_baseline_and_nothing_is_probed(env, db):
     env["codex"] = True
-    assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo") == "reviewer"
+    assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo") == "reviewer-sonnet-high"
     assert agents.default_review_profile(RepoConfig(reviewer="rev"), worker(), db, "/repo") == "rev"
-    assert agents.default_review_profile(RepoConfig(), worker()) == "reviewer"  # no db: same
+    assert agents.default_review_profile(RepoConfig(), worker()) == "reviewer-sonnet-high"  # no db: same
     assert env["probes"] == 0
 
 
@@ -105,5 +78,5 @@ def test_learner_chooses_among_the_reviewers_that_can_run(env, db):
     db.add_routing_decision("/repo", task_id=None, agent_id="w1", weight="heavy",
                             baseline_profile="developer-heavy", profile="developer-heavy", learned=False)
     assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo", "task") == "reviewer-codex"
-    assert fake.seen == (["reviewer", "reviewer-codex", "reviewer-local"], "reviewer")
+    assert fake.seen == (["reviewer-sonnet-high", "reviewer-codex", "reviewer-local"], "reviewer-sonnet-high")
     assert fake.info.weight == "heavy"

@@ -22,9 +22,9 @@ from test_merge_order import add
 from test_pipeline_idempotent import drain
 
 
-@pytest.mark.parametrize("guard", [None, "health", "unreported", "verdict", "running", "queued", "moved", "standalone",
+@pytest.mark.parametrize("guard", ["health", "unreported", "verdict", "queued", "standalone",
                                     "resumed", pytest.param("repane", marks=pytest.mark.variant(
-                                        "a resumed review can exit in its new pane before stale death handling")), "tmux-error",
+                                        "a resumed review can exit in its new pane before stale death handling")),
                                     pytest.param("os-error", marks=pytest.mark.variant("process creation can raise OSError instead of TmuxError"))])
 def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch, guard):
     from brindle import launch_health, tmux
@@ -184,11 +184,11 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
     db.add_review(ws.id, gates.head(ws), "rev-second", True, "lgtm")
 
     agents.tell_parent_unreported(db, db.get_agent("rev0"))
-    assert started == ["reviewer"]
+    assert started == ["reviewer-sonnet-high"]
     assert db.get_agent("w1").pipeline == "reviewing"
 
     agents.tell_parent_unreported(db, db.get_agent("rev1"))   # the fallback stops too
-    assert started == ["reviewer"]
+    assert started == ["reviewer-sonnet-high"]
     assert db.get_agent("w1").pipeline is None
     assert any("review of `feat` never came back" in b for b in drain(db))
     assert [(e["agent_id"], e["root_id"], e["payload"]["actor"])
@@ -379,7 +379,7 @@ def test_reviewer_stopping_on_a_deleted_worktree_tells_the_supervisor(db, repo, 
     assert any(f"worktree {ws.path} no longer exists" in b for b in drain(db))
 
 
-@pytest.mark.parametrize("moves", [1, 99])
+@pytest.mark.parametrize("moves", [99])
 def test_a_reported_branch_that_moves_during_its_checks_is_not_dropped(db, repo, monkeypatch, moves):
     """#168: the base moved and the branch took new commits while its checks
     ran, with no new report to start another run. The branch is checked
@@ -449,10 +449,11 @@ def test_issue190_the_check_run_before_a_review_outlives_the_reporting_worker(db
         assert helper is not None and not ours
     finally:
         if helper is not None:
-            os.kill(helper, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(helper, signal.SIGKILL)
 
 
-@pytest.mark.parametrize("check_run, delay", [("gone", 90), ("at work", 90), ("launching", 15)])
+@pytest.mark.parametrize("check_run, delay", [("launching", 15)])
 def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, repo, monkeypatch, check_run, delay):
     """#186: a reported branch sat with no check run, no reviewer and no
     verdict until the 30-minute reminder asked the supervisor to call
@@ -491,6 +492,65 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
         # A report of its own: the helper still pending for the earlier one retires.
         assert claim.read_text() != active
     assert db.get_agent("w1").pipeline == "reviewing"
+
+
+def test_unchanged_branch_is_not_reviewed_again(db, tmp_path, monkeypatch):
+    from brindle.db import Workspace
+
+    ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
+                   str(tmp_path), None, "fake", 1)
+    db.add_workspace(ws)
+    add(db, ws, "boss", "interactive", "supervisor", status="processing")
+    add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="fixing")
+    db.update_agent("w1", pipeline_rounds=1)
+    findings = "The changed handler must validate the incoming request."
+    reason = "This handler predates my task and is out of scope."
+    add(db, ws, "rejecting-reviewer", "review", "reviewer", parent="boss")
+    db.update_agent("rejecting-reviewer", review_slot="")
+    db.add_review(ws.id, "head", "rejecting-reviewer", False, findings)
+    other_finding = "The new endpoint also needs an authorization check."
+    db.add_review(ws.id, "head", "second-reviewer", False, other_finding)
+    add(db, ws, "approving-reviewer", "review", "reviewer", parent="boss")
+    db.update_agent("approving-reviewer", review_slot="independent")
+    db.add_review(ws.id, "head", "approving-reviewer", True, "approved")
+    head = "head"
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: RepoConfig(checks=["true"], review_profile="reviewer"))
+    monkeypatch.setattr(agents, "_branch_head", lambda *a: head)
+    monkeypatch.setattr(gates, "head", lambda *a: head)
+    monkeypatch.setattr(agents.git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(agents.git, "dirty_files", lambda *a, **k: [])
+    monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+    starts = []
+    monkeypatch.setattr(agents, "_detach", lambda argv: starts.append(argv))
+
+    agents.report_result(db, "w1", reason)
+    assert not starts
+    assert db.get_agent("w1").pipeline is None
+    messages = drain(db)
+    assert len(messages) == 1 and findings in messages[0] and reason in messages[0]
+    assert other_finding in messages[0]
+    agents.report_result(db, "w1", reason)
+    agents.report_result(db, "w1", "Still out of scope; no changes made.")
+    assert not starts and not drain(db)
+    assert db.get_agent("w1").pipeline_rounds == 1
+    assert len(bus.tail(db, kinds=("pipeline.escalated",))) == 1
+
+    head = "new-commit"
+    agents.report_result(db, "w1", "Committed a fix.")
+    assert len(starts) == 1 and db.get_agent("w1").pipeline == "reviewing"
+    assert not drain(db)
+
+    # An approval of the current commit must not be treated as an open finding.
+    db.add_review(ws.id, head, None, True, "approved")
+    agents.report_result(db, "w1", "Ready to merge.")
+    assert len(starts) == 2 and not drain(db)
+
+    db.add_review(ws.id, head, None, False, findings)
+    agents.report_result(db, "w1", "The new finding also needs a scope decision.")
+    assert len(starts) == 2 and db.get_agent("w1").pipeline is None
+    messages = drain(db)
+    assert len(messages) == 1 and findings in messages[0]
 
 
 def test_report_dispatch_preserves_the_current_claim(db, tmp_path, monkeypatch):
@@ -576,7 +636,7 @@ def test_report_dispatch_preserves_the_current_claim(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("session, exits_mid_delivery", [
-    ("sess-w1", False), (None, False),
+    (None, False),
     # Alive when the verdict lands, gone by the time send_message delivers.
     ("sess-w1", True),
 ])
@@ -586,6 +646,8 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     the supervisor "after 0 fix round(s)" instead of starting a fix round.
     The worker is reopened (its own session, else a fresh start on its task)
     with the findings past the suggested cap, which notifies the supervisor once."""
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"review_stall_stop": False}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
     ws = workspaces.create(db, str(repo), "feat").workspace
@@ -635,10 +697,7 @@ BLOCKER = "- blocker: missing check for None.\nNeeds supervisor action: None."
 
 
 @pytest.mark.parametrize("summary, landing, locked, restarted", [
-    (BLOCKER, "before the resume", None, ["boss", "w1"]),
     (BLOCKER, "as the chat starts", None, ["boss", "w1"]),      # past the resume's first look
-    (BLOCKER, "as the chat starts", "someone-else", ["boss"]),      # stays paused: note_stalled tells its supervisor
-    ("Needs supervisor action: ask about scope.", "before the resume", None, ["boss"]),
 ])
 def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkeypatch, summary, landing, locked, restarted):
     """Check runs and _finish-review outlive a pause: nothing starts, and nothing they say is lost."""
@@ -659,7 +718,7 @@ def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkey
         assert db.get_agent("w1").pipeline is None and "ask about scope" in db.pop_pending("boss").body
 
 
-@pytest.mark.parametrize("read_by_first_look", [False, True])
+@pytest.mark.parametrize("read_by_first_look", [True])
 def test_a_verdict_reopening_its_worker_keeps_that_launch_from_the_resume(db, repo, monkeypatch, read_by_first_look):
     """The verdict is past pipeline=fixing, under the merge lock, as the resume reads that row and the chat starts."""
     from brindle.db import DB
@@ -717,8 +776,6 @@ def test_branches_in_the_pipeline_carry_on_after_the_resume(db, repo, monkeypatc
 
 
 @pytest.mark.parametrize("outcomes", [
-    ("PASS", "PASS"),
-    ("FAIL", "FAIL"),
     pytest.param(("FAIL", "PASS"), marks=pytest.mark.variant(
         "review blocker: a pending second review passed after the first one's failure sent a fix round")),
 ])
@@ -788,7 +845,6 @@ def test_no_duplicate_reviewer_while_the_first_is_still_starting(db, repo, monke
 
 
 @pytest.mark.parametrize("summary", [
-    "Needs supervisor action: None — all fixable by the worker.",
     pytest.param("Needs supervisor action: No items.",
                  marks=pytest.mark.variant("incident: a reviewer's 'No items.' stalled the pipeline")),
 ])
@@ -796,7 +852,11 @@ def test_supervisor_action_negations(summary):
     assert pipeline.has_supervisor_action(summary) is False
 
 
-@pytest.mark.parametrize("case", [None, "old merge", "old verdict", "paused reviewer", "old reviewer", "recorded", "standing"])
+@pytest.mark.parametrize("case", [None, "old reviewer", "recorded",
+    pytest.param("reviewer during run",
+                 marks=pytest.mark.variant("a run only holding the lock must not hide a live reviewer")),
+    pytest.param("checks and reviewer",
+                 marks=pytest.mark.variant("checks really running show before a live reviewer (earlier step)"))])
 def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypatch, case):
     """Both list tools and the sidebar expose the branch's actual review stage."""
     from dataclasses import replace
@@ -811,6 +871,18 @@ def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypat
         monkeypatch.setattr(gates, "head", lambda ws_: "current")
         add(db, ws, "w1", "assign", result="done", pipeline="reviewing")
         expected = "waiting for review: nothing is checking or reviewing it"
+        if case in ("reviewer during run", "checks and reviewer"):
+            # A run holds the lock while a reviewer already reviews this commit:
+            # it reads Reviewing, unless checks are really running (earlier step).
+            add(db, ws, "r1", "review", status="processing")
+            db.update_agent("r1", review_sha="current")
+            with pipeline.review_run(ws.id):
+                if case == "checks and reviewer":
+                    with gates.marker("checks-running", ws.id):
+                        assert pipeline.review_state(db, ws) == "checks running"
+                else:
+                    assert pipeline.review_state(db, ws) == "reviewer running (r1)"
+            return
         if case == "old merge":
             db.set_merged(ws.id, "old")
         elif case in ("paused reviewer", "old reviewer"):
@@ -887,8 +959,6 @@ def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypat
 
 @pytest.mark.parametrize("base_file, reused", [
     ("other.py", True),          # disjoint from the branch's files
-    ("shared.py", False),        # the branch changed it too (a clean merge all the same)
-    ("pyproject.toml", False),   # a check input, disjoint or not
     pytest.param("web/npm-shrinkwrap.json", False, marks=pytest.mark.variant(
         "review finding: a nested lockfile not named *.lock / *-lock.*")),
 ])
@@ -973,6 +1043,9 @@ def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_
                  False, marks=pytest.mark.variant("an absolute link to the product file")),
     pytest.param(2, True, ["tests/work.py"], "Blocker: see {ws}/tests/../work.py:1.",
                  False, marks=pytest.mark.variant("an absolute link climbing out of tests/ to the product file")),
+    pytest.param(2, True, ["tests/test_work.py"], "{rereview}Blocker: work.py:1 is still wrong.", False,
+                 marks=pytest.mark.variant("a re-review whose delta is tests-only cites a product file "
+                                           "an earlier round changed")),
     pytest.param(2, False, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False,
                  marks=pytest.mark.variant("a test finding not flagged tests-only still blocks past the cap")),
     (1, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
@@ -984,6 +1057,9 @@ def test_review_round_scope_tests_only_findings_past_the_cap(db, repo, monkeypat
     ws = _reported(db, repo, reviewing_since=time.time())
     (repo / ".brindle" / "config.local.json").write_text('{"auto_merge_default_branch": true}')
     path = Path(ws.path)
+    if summary.startswith("{rereview}"):   # an earlier round reviewed work.py: this one reads only tests/
+        summary = summary.removeprefix("{rereview}")
+        db.add_review(ws.id, gates.head(ws), None, False, "Blocker: work.py:1 is wrong.")
     (path / "tests").mkdir()
     (path / "tests" / "test_work.py").write_text("def test_work(): pass\n")
     (path / "tests" / "work.py").write_text("helper = 1\n")

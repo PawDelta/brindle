@@ -81,6 +81,7 @@ def branch(db, repo, profiles):
     return ws
 
 
+@pytest.mark.variant("renames and mode-only changes cannot evade write-scope checks")
 def test_a_rename_out_of_scope_and_a_mode_change_count(db, branch, entitled):
     root = Path(branch.path)
     sh("git mv src/api/h.py moved.py && git commit -qm mv", root)
@@ -102,6 +103,7 @@ def test_the_merge_gate_refuses_a_branch_outside_its_scope(db, branch, repo, ent
 # -- 2. best effort: Claude Code's hook and the native tools ---------------------------------------
 
 
+@pytest.mark.variant("decoy path fields and climbing glob patterns cannot conceal an out-of-scope read")
 def test_an_in_scope_decoy_path_does_not_hide_the_real_one(repo, profiles, entitled, tmp_path):
     p = guardrails.effective(load_profile("scoped", str(repo)))
     root = str(tmp_path)
@@ -119,6 +121,7 @@ def test_an_in_scope_decoy_path_does_not_hide_the_real_one(repo, profiles, entit
     assert guardrails.tool_denial(p, "Grep", {"pattern": "../x", "path": src}, root) is None   # a regex
 
 
+@pytest.mark.variant("a directory containing some allowed files must not expose its out-of-scope siblings")
 def test_a_search_of_a_directory_partly_in_scope_is_denied(tmp_path):
     """Claude Code's Grep reads the whole directory it is given: one that only
     holds something in scope would expose the rest of it."""

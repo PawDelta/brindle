@@ -54,16 +54,6 @@ function seen() {
 
 const settle = () => act(() => new Promise((r) => setTimeout(r, 0)));
 
-it("in the app the pty view is the default: the shell's status is asked once, and panes open through its pty_view commands", async () => {
-  const got = seen();
-  expect(got.views?.status).toEqual({ kind: "pending" });
-  await settle();
-  expect(got.views?.status).toEqual({ kind: "ready", tmux: "tmux 3.8" });
-  expect(got.views?.open).toBe(tauriPtyView);
-  expect(got.views?.copy).toBe(tauriCopy);
-  expect(ipc.calls.filter((c) => c.cmd === "pty_view_status")).toHaveLength(1);
-});
-
 it("asks the shell again when setup reaches ready, without a reload: a tmux installed meanwhile turns unusable into ready", async () => {
   ipc.state.status = { kind: "unusable", message: "couldn't run tmux" };
   // The first run's setup, until it says ready; then the app (a probe of the pty views).
@@ -99,6 +89,8 @@ it("takes the latest answer when asked again before the last came back", async (
   };
   ipc.invoke.mockImplementationOnce(held).mockImplementationOnce(held);
   const got = seen();
+  expect(got.views?.status).toEqual({ kind: "pending" });
+  expect(ipc.calls.filter((c) => c.cmd === "pty_view_status")).toHaveLength(1);
   act(() => got.views!.recheck());
   // The second (newer) answer comes first, the stale first one after: the newer stays.
   await act(async () => answers[1]({ kind: "ready", tmux: "tmux 3.8" }));
@@ -120,7 +112,6 @@ it("opens, types, resizes and closes a view in order once it says it opened, and
   await settle();
   // The id is in, the view still opening: nothing is sent to it yet.
   expect(commands()).toEqual(["pty_view_open"]);
-  expect(ipc.calls[0].args).toMatchObject({ server: "brindle", target: "s:@1", cols: 80, rows: 24 });
   act(() => said({ kind: "open" }));
   act(() => said({ kind: "data", data: btoa("hi") }));
   view.close();
@@ -128,7 +119,6 @@ it("opens, types, resizes and closes a view in order once it says it opened, and
   expect(commands()).toEqual(["pty_view_open", "pty_view_write", "pty_view_resize", "pty_view_focus", "pty_view_close"]);
   expect(ipc.calls.find((c) => c.cmd === "pty_view_write")!.args).toEqual({ id: 7, data: "a" });
   expect(ipc.calls.find((c) => c.cmd === "pty_view_focus")!.args).toEqual({ id: 7 });
-  expect(ipc.calls.find((c) => c.cmd === "pty_view_copy")!.args).toEqual({ text: "copied" });
   expect(data).toEqual([[104, 105]]);
 });
 

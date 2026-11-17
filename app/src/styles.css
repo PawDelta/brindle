@@ -38,6 +38,8 @@
   --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-cursor: #a4aba7; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* A design doc's own text (screens/Session/Visuals/PlanReader.tsx) reads as a document. */
+  --serif: "Iowan Old Style", "Charter", "Georgia", serif;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --s-1: 8px; --s-2: 16px; --s-3: 24px; --s-4: 32px; --s-5: 40px; --s-6: 48px; --s-8: 64px; --s-10: 80px; --s-12: 96px;
   --r-sm: 2px; --r: 4px; --r-lg: 4px;
@@ -114,6 +116,7 @@
   /* Type */
   --font-sans: var(--sans);
   --font-mono: var(--mono);
+  --font-serif: var(--serif);
   /* 8px scale: p-s3, gap-s2, mt-s6 ... */
   --spacing-s1: var(--s-1);
   --spacing-s2: var(--s-2);
@@ -270,6 +273,27 @@ body {
   .onb-bar i { animation: none; width: 100%; opacity: 0.5; }
 }
 
+/* The first run's replay of a practice run (screens/New/FirstRun.tsx): the
+   four steps light one after another as the scrubber crosses them. Still
+   (reduced motion), the first step stays lit. */
+@keyframes replay-step {
+  0%, 22% { border-color: var(--branch); background: color-mix(in srgb, var(--branch) 8%, transparent); }
+  25%, 100% { border-color: var(--line); background: transparent; }
+}
+@keyframes replay-scrub {
+  from { width: 0; }
+  to { width: 100%; }
+}
+.replay-step { animation: replay-step 8s infinite; }
+.replay-step:nth-child(2) { animation-delay: 2s; }
+.replay-step:nth-child(3) { animation-delay: 4s; }
+.replay-step:nth-child(4) { animation-delay: 6s; }
+.replay-scrub i { animation: replay-scrub 8s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .replay-step, .replay-scrub i { animation: none; }
+  .replay-step:first-child { border-color: var(--branch); }
+}
+
 /* A pane is drawn at its own size, never reflowed to the view's
    (components/Terminal.tsx): xterm fills its host at the least, and a pane
    bigger than the view scrolls in it instead of being cut off. */
@@ -341,6 +365,7 @@ body {
 }
 /* The sidebar's goal summary: the active step's stage colour (GoalPanel's st-<stage>), a thin bar, the activity line, short steps. */
 .st-working { --st: var(--group-1); }
+.st-resuming { --st: var(--branch); }
 .st-checks { --st: var(--group-6); }
 .st-review { --st: var(--group-7); }
 .st-merging, .st-done { --st: var(--pass); }
@@ -394,3 +419,5 @@ body {
 /* A pill is its tone in the text and a dot in that tone, no box; a pill
    with its own dot (a .rounded-full inside) or in mono (a path) has none. */
 .pill:not(:has(.rounded-full)):not(.font-mono)::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+/* A stage not yet reached for good (Drafting, In review): the dot as a ring. */
+.pill.pill-hollow::before { background: transparent; border: 1.5px solid currentColor; width: 5px; height: 5px; }

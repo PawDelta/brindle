@@ -223,25 +223,42 @@ def status_lines(session: str) -> int:
     return 0 if status == "off" else int(status) if status.isdigit() else 1
 
 
-def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
+def _default_size(session: str, size: tuple[int, int]) -> None:
+    """New windows of ``session`` start ``size`` (columns, rows) while no client
+    says otherwise. On its own and best effort: a tmux that refuses the option
+    refuses only this."""
+    _tmux("set-option", "-t", session, "default-size", f"{size[0]}x{size[1]}", check=False)
+
+
+def ensure_session(session: str, cwd: str, env: dict[str, str], size: tuple[int, int] | None = None) -> None:
     """Create a detached session whose first window is a plain shell, sized
     for the terminal that will attach to it (see terminal_size): its new
     windows start at the size that terminal shows them at, its rows less
     the session's status line, so a chat draws once at the size it's seen
     at. Detached sessions are otherwise 80x24, and attaching resized a chat
-    that had already drawn: Claude Code resuming a conversation went blank."""
+    that had already drawn: Claude Code resuming a conversation went blank.
+
+    ``size``: the window size to start them at instead, for a caller with no
+    terminal that knows it (a daemon's recovery: agent_window_size, as the
+    last daemon left it). It applies to a session that already exists too."""
     if has_session(session):
         for k, v in env.items():
             _tmux("set-environment", "-t", f"={session}", k, v, check=False)
+        if size:
+            _default_size(session, size)
+        for key in [k for k in _SESSION_HOMES if k[1] == session]:
+            del _SESSION_HOMES[key]     # session_infos reads its BRINDLE_HOME again
         return
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
-    size = terminal_size()
-    size_args = ["-x", str(size[0]), "-y", str(size[1])] if size else []
+    terminal = None if size else terminal_size()
+    first = size or terminal
+    size_args = ["-x", str(first[0]), "-y", str(first[1])] if first else []
     _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *size_args, *env_args)
-    if size:
+    if terminal:
         # Known only now: the server (and the person's config) may have just started.
-        rows = max(size[1] - status_lines(session), 1)
-        _tmux("set-option", "-t", session, "default-size", f"{size[0]}x{rows}", check=False)
+        size = (terminal[0], max(terminal[1] - status_lines(session), 1))
+    if size:
+        _default_size(session, size)
 
 
 # tmux refuses a command over its message size (about 16 KB) with "command
@@ -328,6 +345,9 @@ def scrubbed(command: list[str], unset: list[str]) -> list[str]:
 # The pane tag of the daemon's action terminals (sign-ins, upgrades, the
 # app's shell tabs): the person's own terminals, not agents' (see new_window).
 TERMINAL_TAG = "@brindle_terminal"
+# The sessions the app's terminal views make (daemon.pty_view): each links one
+# window it shows, so that window's panes are listed under it too.
+VIEW_PREFIX = "brindle-view-"
 
 
 def in_dir(cwd: str, command: list[str]) -> list[str]:
@@ -586,12 +606,40 @@ def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
         "-t", target, "-c", cwd, *env_args, "--", *in_dir(cwd, command),
     )
     pane = proc.stdout.strip()
-    # tmux grows every pane proportionally when a client attaches at a bigger
-    # size; keep the sidebar at its size whenever the window is resized.
     size = min(columns, SIDEBAR_BOTTOM_LINES) if position == "bottom" else columns
-    _tmux("set-hook", "-w", "-t", target, "window-resized",
-          f"resize-pane -t {pane} {axis} {size}", check=False)
+    _pin_sidebar(target, pane, axis, size)
     return pane
+
+
+# The window hooks that can hold the sidebar at its size, best first, each with
+# the command that wraps the resize. ``window-resized`` is the one made for it,
+# but tmux 3.2 (Ubuntu 22.04's) doesn't have it and rejects it as an invalid
+# option. There a window's resize fires ``window-layout-changed`` instead. So
+# does zooming a pane, and resize-pane unzooms the window, so under that hook
+# the sidebar is left alone while the window is zoomed (toggle_sidebar hides it
+# that way) and pinned again by the unzoom.
+SIDEBAR_PIN_HOOKS = (
+    ("window-resized", "{resize}"),
+    ("window-layout-changed", "if-shell -F '#{{?window_zoomed_flag,0,1}}' '{resize}'"),
+)
+
+
+def _pin_sidebar(target: str, pane: str, axis: str, size: int) -> None:
+    """tmux grows every pane proportionally when a client attaches at a bigger
+    size; keep the sidebar ``pane`` at its size whenever ``target``'s window
+    is resized, with the first hook this tmux server accepts."""
+    resize = f"resize-pane -t {pane} {axis} {size}"
+    for hook, command in SIDEBAR_PIN_HOOKS:
+        if _tmux("set-hook", "-w", "-t", target, hook, command.format(resize=resize),
+                 check=False).returncode == 0:
+            return
+
+
+def _unpin_sidebar(window: str) -> None:
+    """Clear the pin from ``window``: the hook _pin_sidebar set there."""
+    for hook, _ in SIDEBAR_PIN_HOOKS:
+        if _tmux("set-hook", "-w", "-t", window, "-u", hook, check=False).returncode == 0:
+            return
 
 
 # Pane options counting a sidebar's crash restarts (see keep_sidebar_alive).
@@ -610,7 +658,8 @@ def sidebar_respawn_script(pane: str, cwd: str, env: dict[str, str], log: Path) 
     so both are given again) and logs that to ``log``, unless the pane has
     already been restarted SIDEBAR_MAX_RESTARTS times within
     SIDEBAR_RESTART_WINDOW seconds: then it logs that it gives up and leaves
-    the dead pane showing its error. Plain sh and tmux, so it still works
+    the dead pane showing its error. It prints nothing and always exits 0,
+    whatever fails (the pane already gone, say). Plain sh and tmux, so it still works
     when the engine itself is what fails to start."""
     t = shlex.join([shutil.which(_bin()) or _bin(), *_base()[1:]])
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
@@ -618,7 +667,11 @@ def sidebar_respawn_script(pane: str, cwd: str, env: dict[str, str], log: Path) 
     show = f"{t} show-options -p -q -v -t {shlex.quote(pane)}"
     log_q = shlex.quote(str(log))
     stamp = "$(date '+%Y-%m-%d %H:%M:%S') sidebar exited with status $1"
-    return f"""now=$(date +%s)
+    # The hook's output and a nonzero exit are shown by tmux in view mode
+    # over whatever pane the person is looking at (another session's agent,
+    # say), so everything goes to the log and the script always exits 0.
+    return f"""exec >>{log_q} 2>&1
+now=$(date +%s)
 n=$({show} {SIDEBAR_RESTARTS}); since=$({show} {SIDEBAR_RESTARTS_SINCE})
 if [ -z "$since" ] || [ $((now - since)) -ge {SIDEBAR_RESTART_WINDOW} ]; then n=0; since=$now; fi
 n=${{n:-0}}
@@ -630,7 +683,8 @@ fi
 {t} set-option -p -t {shlex.quote(pane)} {SIDEBAR_RESTARTS} $((n + 1))
 {t} set-option -p -t {shlex.quote(pane)} {SIDEBAR_RESTARTS_SINCE} "$since"
 echo "{stamp}; restarting it ($((n + 1))/{SIDEBAR_MAX_RESTARTS})" >> {log_q}
-{t} {respawn}
+{t} {respawn} || echo "{stamp}; restarting it failed"
+exit 0
 """
 
 
@@ -683,17 +737,22 @@ class PaneSnapshot(dict):
     current_server): it says nothing about panes on any other server.
     ``exits``: dead pane id -> (exit status, signal), each None when tmux
     doesn't give it: a status for a program that exited, a signal (its
-    number; see _signal_number) for one a signal killed."""
+    number; see _signal_number) for one a signal killed. ``activity``: pane
+    id -> its window's last output (#{window_activity}, epoch seconds), for
+    a reader that skips a screen nothing has printed to since its last look;
+    a pane missing from it is unknown."""
 
     tags: dict[str, dict[str, str]]
     server: str | None
     exits: dict[str, tuple[int | None, int | str | None]]
+    activity: dict[str, float]
 
     def __init__(self, server: str | None = None) -> None:
         super().__init__()
         self.tags = {}
         self.server = server
         self.exits = {}
+        self.activity = {}
 
 
 def _signal_number(text: str) -> int | str | None:
@@ -724,7 +783,7 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
     server running, or tmux isn't installed at all."""
     result = PaneSnapshot(current_server() if server is _THIS_SERVER else server)  # type: ignore[arg-type]
     fmt = "\t".join(["#{window_id}", "#{pane_id}", "#{pane_dead}", "#{pane_dead_status}",
-                     "#{pane_dead_signal}", *(f"#{{{k}}}" for k in PANE_TAGS)])
+                     "#{pane_dead_signal}", *(f"#{{{k}}}" for k in PANE_TAGS), "#{window_activity}"])
     try:
         proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
     except TmuxTimeout:
@@ -744,13 +803,40 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
         tags = {k: v for k, v in zip(PANE_TAGS, values) if v}
         if tags:
             result.tags[pane_id] = tags
+        if len(values) > len(PANE_TAGS) and values[len(PANE_TAGS)].strip().isdigit():
+            result.activity[pane_id] = float(values[len(PANE_TAGS)])
     return result
+
+
+def agent_window_size() -> tuple[int, int] | None:
+    """The largest window holding an agent's pane on this server, (columns,
+    rows): the size the app or a person's terminal last showed one at, as
+    tmux keeps a window at its last client's size. None without one."""
+    fmt = "\t".join(["#{window_width}", "#{window_height}", f"#{{{AGENT_TAG}}}"])
+    sizes = []
+    for line in _tmux("list-panes", "-a", "-F", fmt, check=False).stdout.splitlines():
+        width, height, tag = (line.split("\t") + ["", ""])[:3]
+        if tag and width.isdigit() and height.isdigit():
+            sizes.append((int(width), int(height)))
+    return max(sizes, key=lambda s: s[0] * s[1], default=None)
 
 
 def window_pids(target: str, server: object = _THIS_SERVER) -> list[int]:
     """The process ids of the programs in ``target``'s panes."""
     out = _tmux("list-panes", "-t", target, "-F", "#{pane_pid}", check=False, server=server).stdout
     return [int(p) for p in out.split() if p.isdigit()]
+
+
+def pane_pids() -> dict[str, int]:
+    """The process id of the program in every pane on this server, by pane
+    id, in one call (empty when no server runs)."""
+    out = _tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}", check=False).stdout
+    pids: dict[str, int] = {}
+    for line in out.splitlines():
+        pane, _, pid = line.partition("\t")
+        if pid.isdigit():
+            pids[pane] = int(pid)
+    return pids
 
 
 def window_activity(target: str, server: object = _THIS_SERVER) -> float | None:
@@ -926,10 +1012,9 @@ def move_pane(pane: str, target: str, columns: int = 30, position: str = "left")
     geometry, axis = _sidebar_geometry(position, columns)
     _tmux("join-pane", "-d", *geometry, "-s", pane, "-t", target, check=False)
     if old_window and old_window != pane_window(pane):
-        _tmux("set-hook", "-w", "-t", old_window, "-u", "window-resized", check=False)
+        _unpin_sidebar(old_window)
     size = min(columns, SIDEBAR_BOTTOM_LINES) if position == "bottom" else columns
-    _tmux("set-hook", "-w", "-t", target, "window-resized",
-          f"resize-pane -t {pane} {axis} {size}", check=False)
+    _pin_sidebar(target, pane, axis, size)
 
 
 def window_zoomed(window: str) -> bool:
@@ -1106,6 +1191,33 @@ def socket_dir() -> Path:
     return Path(os.environ.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}"
 
 
+def abandoned(name: str) -> bool:
+    """Whether nothing serves the named server's socket: it is gone, no
+    socket, or a connection to it is refused. Anything else is no proof: a
+    failed tmux command, or a process that may not look (a sandbox:
+    "Operation not permitted", on the connection or the file's metadata),
+    can't tell, and deleting a live server's socket leaves the server
+    running unreachable, while the next tmux call starts a second one."""
+    import errno
+    import socket
+    import stat
+
+    path = socket_dir() / name
+    try:
+        if not stat.S_ISSOCK(os.stat(path).st_mode):
+            return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    with socket.socket(socket.AF_UNIX) as s:
+        try:
+            s.connect(str(path))
+        except OSError as e:
+            return e.errno == errno.ECONNREFUSED
+    return False
+
+
 def remove_socket(name: str) -> None:
     """Remove a private server's socket file (never the default server's)."""
     if not name or name == DEFAULT_SOCKET:
@@ -1256,9 +1368,11 @@ _INFO_FORMAT = "\t".join([
     "#{pane_current_path}", "#{pane_start_command}"])
 
 
-def session_infos(prefix: str = "brindle_") -> list[SessionInfo]:
+def session_infos(prefix: str = "brindle_", fresh: bool = False) -> list[SessionInfo]:
     """Every session on brindle's server whose name starts with ``prefix``,
-    with its panes, in one listing (plus one environment read each). Empty
+    with its panes, in one listing (plus one environment read each, then
+    remembered: ``fresh`` reads them again, for a check just before a session
+    is stopped, as another process may have given it to another home). Empty
     with no server; a hung one raises TmuxTimeout."""
     try:
         proc = _tmux("list-panes", "-a", "-F", _INFO_FORMAT, check=False)
@@ -1285,10 +1399,23 @@ def session_infos(prefix: str = "brindle_") -> list[SessionInfo]:
         if pid.isdigit():
             s.panes.append(PaneInfo(pane, int(pid), path.strip(), cmd.strip(), dead == "1",
                                     start, num(wact)))
+    server = current_server()
     for s in found.values():
+        key = (server, s.name, s.created)
+        if key in _SESSION_HOMES and not fresh:
+            s.home = _SESSION_HOMES[key]
+            continue
         env = _tmux("show-environment", "-t", f"={s.name}", "BRINDLE_HOME", check=False).stdout.strip()
         s.home = (env.partition("=")[2] if env.startswith("BRINDLE_HOME=") else "") or None
+        _SESSION_HOMES[key] = s.home
+    for key in [k for k in _SESSION_HOMES if k[0] == server and k[1] not in found]:
+        del _SESSION_HOMES[key]
     return list(found.values())
+
+
+# Each session's BRINDLE_HOME as session_infos read it, by (server, name, created):
+# set when brindle creates the session, so read once (the cull lists sessions every minute).
+_SESSION_HOMES: dict[tuple[str | None, str, float], str | None] = {}
 
 
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"}

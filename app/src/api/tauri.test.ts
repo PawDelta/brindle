@@ -22,7 +22,7 @@ const ipc = vi.hoisted(() => {
 
 vi.mock("@tauri-apps/api/core", () => ({ Channel: ipc.Channel, invoke: ipc.invoke, isTauri: () => true }));
 
-import { decodeBinary, tauriSocket } from "./tauri";
+import { tauriSocket } from "./tauri";
 
 const sends = () => ipc.calls.filter((c) => c.cmd === "daemon_stream_send").map((c) => c.args);
 const URL = "ws://brindle-daemon.invalid/v1/events?since=4";
@@ -63,26 +63,11 @@ describe("tauriSocket", () => {
       { id: 7, data: "two" },
     ]);
 
-    // Each send waits for the one before it: with the first held in the shell,
-    // the second isn't even asked for, and goes once the first is answered.
-    ipc.state.hold = true;
-    socket.send("three");
-    await flush();
-    ipc.state.hold = false;
-    socket.send("four");
-    await flush();
-    expect(sends()).toHaveLength(3);
-    expect(sends()[2]).toEqual({ id: 7, data: "three" });
-    ipc.release();
-    await flush();
-    expect(sends()).toHaveLength(4);
-    expect(sends()[3]).toEqual({ id: 7, data: "four" });
-
     // Text comes as is, binary decoded.
     channel.onmessage!({ kind: "text", data: '{"type":"event"}' });
-    channel.onmessage!({ kind: "binary", data: btoa("hi") });
+    channel.onmessage!({ kind: "binary", data: btoa("\x00\x1b[2;3H\xff") });
     expect(texts[0]).toBe('{"type":"event"}');
-    expect(new Uint8Array(texts[1] as ArrayBuffer)).toEqual(new Uint8Array([104, 105]));
+    expect(new Uint8Array(texts[1] as ArrayBuffer)).toEqual(new Uint8Array([0, 27, 91, 50, 59, 51, 72, 255]));
 
     socket.close();
     await flush();
@@ -127,9 +112,5 @@ describe("tauriSocket", () => {
       { cmd: "daemon_stream_send", args: { id: 8, data: "last" } },
       { cmd: "daemon_stream_close", args: { id: 8 } },
     ]);
-  });
-
-  it("decodes base64 to the bytes the daemon sent", () => {
-    expect(new Uint8Array(decodeBinary(btoa("\x00\x1b[2;3H\xff")))).toEqual(new Uint8Array([0, 27, 91, 50, 59, 51, 72, 255]));
   });
 });

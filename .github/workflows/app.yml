@@ -61,7 +61,7 @@ jobs:
   e2e:
     # The flows in Chromium over the fake daemon (app/e2e/flows.e2e.ts). pty, scroll and
     # terminal e2e need a real Claude Code, tmux or the Rust bridge, so they aren't run here.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: ubuntu-latest (26.04) runners could not resolve the Ubuntu archive on 2026-11-11
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -129,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        os: [macos-latest, windows-latest, ubuntu-24.04]   # 24.04: see e2e
     runs-on: ${{ matrix.os }}
     # The suite runs in under a minute; the harness's own watchdog fails a
     # hung probe by name after 60s, so this only guards the build.

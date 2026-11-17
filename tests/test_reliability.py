@@ -105,6 +105,7 @@ def commit(repo, msg="change"):
     subprocess.run(f"git add -A && git commit -qm {msg}", shell=True, cwd=repo, check=True)
 
 
+@pytest.mark.variant("regression: milestone cache follows tree")
 def test_passed_milestone_is_not_rerun_while_head_is_unchanged(db, root, repo, monkeypatch):
     _, ws = root
     with_goal(db)
@@ -131,6 +132,7 @@ def test_passed_milestone_is_not_rerun_while_head_is_unchanged(db, root, repo, m
     assert ran == []   # HEAD moved but the tree didn't: the passes are cached by tree
 
 
+@pytest.mark.variant("regression is not progress")
 def test_regression_is_not_progress(db, root, repo):
     _, ws = root
     with_goal(db)
@@ -156,7 +158,7 @@ def test_regression_is_not_progress(db, root, repo):
 @pytest.mark.parametrize("cause, status", [
     ("settings", "starting"),   # disableAllHooks at launch
     ("grace", "starting"),      # no settings explain it; no hook ever reported
-    ("settings", "idle"),       # turned off later, through /hooks
+    pytest.param("settings", "idle", marks=pytest.mark.variant("hooks disabled after startup release mail")),
 ])
 def test_sidebar_leaves_starting_and_says_so_when_claude_runs_no_hooks(db, root, monkeypatch, cause, status):
     # Claude Code with disableAllHooks never runs SessionStart, the only thing

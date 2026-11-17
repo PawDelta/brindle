@@ -153,6 +153,8 @@ def _endpoint(fn: Action):
             return JSONResponse(got.to_json(), 409)
         if isinstance(got, Job):
             return JSONResponse(got.to_json(), 202)
+        if isinstance(got, JSONResponse):
+            return got
         return JSONResponse(got)
 
     endpoint.__name__ = fn.__name__
@@ -272,23 +274,31 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
     nothing, so only that isn't checked."""
     repo, choice, session_id = _get(body, "repo", required=True), _get(body, "choice"), _get(body, "session_id")
     name = _session_name(_get(body, "name"))     # checked with the rest, before anything launches
-    repo_root = workspaces.adopt_root(db, repo).repo_root
-    opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
-               and any(s.root.id == session_id for s in sessions_mod.live(db, repo_root)))
-    provider = _get(body, "provider")
-    if not opening:
-        if git.missing_user_identity(repo_root):
-            raise ServiceError("git_identity_missing", git.IDENTITY_MESSAGE, 409)
-        provider = svc.supervisor_provider(repo_root, provider)
-        blocked = session_blockers(db, repo, provider)
-        if blocked:
-            usable = svc.usable_providers(repo_root) if provider else []
-            return SessionBlocked(blocked.items, [p for p in usable if p != provider])
-    got = svc.start(db, repo, provider=provider,
-                    prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
-                    autopilot=_get(body, "autopilot", bool), branch=_get(body, "branch"),
-                    worktree=_get(body, "worktree"), choice=_get(body, "choice"),
-                    session_id=_get(body, "session_id"))
+    branch, worktree = _get(body, "branch"), _get(body, "worktree")
+    fetched = None
+    with svc.create_timing():
+        with svc.create_step("checks_s"):
+            repo_root = workspaces.adopt_root(db, repo).repo_root
+            if choice == "n" and not branch and not worktree:
+                # A new worktree starts from origin's tip as just fetched: fetched while
+                # these checks run, not after them (svc.prefetch).
+                fetched = svc.prefetch(repo_root)
+            opening = (choice == "o" and not branch and not worktree
+                       and any(s.root.id == session_id for s in sessions_mod.live(db, repo_root)))
+            provider = _get(body, "provider")
+            if not opening:
+                if git.missing_user_identity(repo_root):
+                    raise ServiceError("git_identity_missing", git.IDENTITY_MESSAGE, 409)
+                provider = svc.supervisor_provider(repo_root, provider)
+                blocked = session_blockers(db, repo, provider)
+                if blocked:
+                    usable = svc.usable_providers(repo_root) if provider else []
+                    return SessionBlocked(blocked.items, [p for p in usable if p != provider])
+        got = svc.start(db, repo, provider=provider,
+                        prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
+                        autopilot=_get(body, "autopilot", bool), branch=branch,
+                        worktree=worktree, choice=_get(body, "choice"),
+                        session_id=_get(body, "session_id"), fetched=fetched)
     if isinstance(got, svc.Opened):
         return {"opened": SessionDTO.from_agent(got.root).to_json()}
     if isinstance(got, svc.Started):
@@ -332,21 +342,22 @@ def start_demo(db: DB, params: dict, body: Body) -> Any:
 
 
 def cancel_demo(db: DB, params: dict, body: Body) -> Any:
-    """The person didn't go on with a demo its preflight held: its practice repo goes."""
+    """End running or held practice runs and remove their repos."""
     from brindle import demo as demo_mod
 
     with _DEMO_LOCK:
-        roots = demo_mod.unused(db)
-        for root in roots:
-            demo_mod.discard(db, root)
+        roots = demo_mod.end(db)
     return {"removed": [str(r) for r in roots]}
 
 
 def demo_provider() -> str | None:
     """The CLI the demo runs on: the person's last supervisor pick, else the
     first the demo has profiles for, that this Mac is signed in to and the org
-    allows. None when none is (the supervisor profile's own: its preflight
-    then asks for the sign-in)."""
+    allows; else the first such a supervisor could start on (the one a start
+    with none asked for would pick), so the workers and reviewer run on the
+    supervisor's CLI even when no sign-in probe is cached (a fresh account,
+    or one answered over providers.SIGNED_IN_TTL ago). None when none is (the
+    supervisor profile's own: its preflight then asks for the sign-in)."""
     from brindle import demo as demo_mod
     from brindle import doctor
     from brindle.config import supervisor_pick
@@ -357,7 +368,7 @@ def demo_provider() -> str | None:
     for p in (supervisor_pick(), *demo_mod.PROFILES):
         if p in demo_mod.PROFILES and p in signed and acc.allows(p):
             return p
-    return None
+    return next((p for p in svc.usable_providers(None) if p in demo_mod.PROFILES), None)
 
 
 @dataclass
@@ -451,6 +462,39 @@ _TRANSFER_LOCK = threading.Lock()
 _TRANSFERRING: dict[str, tuple[Job, tuple[str, str | None]]] = {}     # scratch workspace -> its transfer
 
 
+def provider_switch(db: DB, params: dict, body: Body) -> Any:
+    """The person's Switch / Not now on a provider-switch Inbox card (kind
+    provider_switch or provider_switch_back): ``{"offer": id, "accept": bool}``.
+    Accept runs brindle.provider_switch.switch for either kind and answers
+    the session now driving; a second press answers the same session.
+    ``always: true`` saves quota_switch="auto" before switching."""
+    from brindle import config, provider_switch as ps
+
+    root, _ = _root(db, params["root"])
+    offer = ps.get(db, _get(body, "offer", required=True))
+    notice = offer is not None and offer.kind == "switch" and offer.state == "done" and offer.new_root_id == root.id
+    if offer is None or (offer.root_id != root.id and not notice):
+        raise ServiceError("not_found", "no such provider switch offer for this session", 404)
+    now = time.time()
+    if not _get(body, "accept", bool, required=True):
+        if notice:
+            ps.dismiss_notice(db, offer.id)
+        else:
+            ps.dismiss(db, offer.id, now)
+        return {"accepted": False}
+    if _get(body, "always", bool, default=False):
+        config.set_user("quota_switch", "auto")
+    if notice:
+        original = offer
+        ps.maybe_offer_back(db, now, switch_id=original.id)
+        row = db.conn.execute("SELECT id FROM provider_switches WHERE back_of=?", (original.id,)).fetchone()
+        if row is None:
+            raise ServiceError("unavailable", "the original provider is unavailable", 409)
+        offer = ps.get(db, row["id"])
+    new = ps.switch(db, offer.id, now)
+    return SessionDTO.from_agent(new).to_json()
+
+
 # -- inbox -----------------------------------------------------------------------
 
 
@@ -458,6 +502,8 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
     """``id`` is the item's agent (an org notice's ``notice_id`` for "read")."""
     item, action = params["id"], params["action"]
     if action == "dismiss":
+        if "item" in body:
+            return inbox.dismiss_item(db, _get(body, "item", dict, required=True))
         return inbox.dismiss_doc_read(db, item)
     if action == "read":
         from brindle.pro import status
@@ -465,16 +511,15 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         return {"read": status.mark_read([item])}
     a = _agent(db, item)
     if action == "pr-not-now":
-        identity_lock.ensure(a)
+        # Dismissing is the person's own Inbox marker, not acting as the session's sign-in.
         ws = _workspace(db, a.workspace_id)
-        ready = db.conn.execute("SELECT sha FROM session_pr_prep WHERE root_id = ? AND branch = ?"
-                                " AND state = 'passed'", (a.id, ws.branch)).fetchone()
-        if not ready:
-            raise ServiceError("conflict", "no longer a PR ready for approval", 409)
+        sha = inbox.dismiss_marker(db, a.id, ws.branch, ws.path)
+        if not sha:
+            raise ServiceError("conflict", "no longer a PR waiting for attention", 409)
         # The commit the card is about: a newer one's result still gets its own card.
         db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES (?, ?, ?)"
                         " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha",
-                        (a.id, ws.branch, ready["sha"]))
+                        (a.id, ws.branch, sha))
         bus.publish_agent(db, "session.pr_declined", a.id)
         return {"dismissed": a.id}
     if action in ("approve", "reject"):
@@ -487,11 +532,20 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         if ap is None or not autopilot.proposing(ap):
             raise ServiceError("conflict", f"{a.id} has no checks waiting on an answer", 409)
         checks = json.loads(ap.proposal).get("checks") or []
-        db.update_autopilot(a.id, proposal=None)
-        if action == "decline":
-            return {"message": "nothing was written"}
-        return {"message": autopilot.add_checks(_workspace(db, a.workspace_id).repo_root, checks,
-                                                _get(body, "allow_commands", bool, False))}
+        # Keep the request answerable if writing the accepted checks fails.
+        # A proposal published during the write belongs to a new decision.
+        message = ("nothing was written" if action == "decline" else
+                   autopilot.add_checks(_workspace(db, a.workspace_id).repo_root, checks,
+                                        _get(body, "allow_commands", bool, False)))
+        with db.tx() as c:
+            cleared = c.execute("UPDATE autopilot SET proposal = NULL WHERE root_id = ? AND proposal = ?",
+                                (a.id, ap.proposal)).rowcount
+
+        # Other connected views need the same notification as update_autopilot.
+        # A replacement's publisher already announces its new decision.
+        if cleared:
+            bus.publish_agent(db, "checks.changed", a.id)
+        return {"message": message}
     if action == "answer":
         return {"status": svc.send(db, a.id, _get(body, "text", required=True))}
     if action == "permission":
@@ -642,11 +696,15 @@ def clean_storage(db: DB, params: dict, body: Body) -> Any:
     one (``abandoned``: true), each with its branch, tip archived first
     (``disk.clean``). The app asks the person before it calls this."""
     from brindle import disk
+    from brindle.daemon.storage_reports import REPORTS
 
     path, abandoned = _get(body, "path"), _get(body, "abandoned", bool, False)
     if not path and not abandoned:
         raise ServiceError("invalid", "path or abandoned is required")
-    return disk.clean(db, path=path, abandoned=not path)
+    try:
+        return disk.clean(db, path=path, abandoned=not path)
+    finally:
+        REPORTS.forget()     # the kept report still lists what went
 
 
 # An agent mid-turn (or stopped at a prompt mid-turn) may be writing the same file.
@@ -945,6 +1003,13 @@ def open_session_pr(db: DB, params: dict, body: Body) -> Any:
             url = workspaces.compare_url(ws)
         else:
             _record_pr(db, key, url, head)
+            # The person opened it themselves: no "PR opened" card to tell them so.
+            db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES (?, ?, ?)"
+                            " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha", (*key, f"{head}|{url}"))
+            # The Inbox's next read already knows it (its look at GitHub may be older than the PR).
+            number = re.search(r"/pull/(\d+)", url)
+            review.note_head_pr(head, ws.path, {"number": int(number.group(1)) if number else None,
+                                                "title": title or "", "url": url, "headRefName": ws.branch})
         return {"url": url, "keeps_merged_branches": workspaces.keeps_merged_branches(ws.repo_root)}
 
     return start_job("session.pr", work, root_id=root.id, repo_root=ws.repo_root)
@@ -961,6 +1026,10 @@ def push_session_pr(db: DB, params: dict, body: Body) -> Any:
     if (pr := review.open_pr(db, root, ws)) is None:
         raise ServiceError("conflict", f"{ws.branch} has no PR to push to; open it first", 409)
     key = (root.id, ws.branch)
+    elsewhere = db.conn.execute(f"SELECT head_ref FROM session_pr_heads WHERE {_SESSION_PR}", key).fetchone()
+    if elsewhere and elsewhere["head_ref"]:
+        # A PR opened with gh from another branch name: pushing the session branch would not update it.
+        raise ServiceError("conflict", f"its PR is on {elsewhere['head_ref']}: push the session's commits there yourself", 409)
 
     def work(db: DB, job: Job) -> Any:
         identity_lock.ensure(root)
@@ -1004,6 +1073,7 @@ def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> No
                     " merged_at = CASE WHEN url = excluded.url THEN merged_at END,"
                     " opened_at = CASE WHEN url = excluded.url THEN opened_at ELSE excluded.opened_at END",
                     (*key, url, pushed, time.time()))
+    db.conn.execute(f"DELETE FROM session_pr_heads WHERE {_SESSION_PR}", key)    # brindle's own PR is on the session branch
     bus.publish_agent(db, "session.pr_opened", key[0], url=url)
 
 
@@ -1030,7 +1100,9 @@ def _preparation_pending(db: DB, root_id: str) -> bool:
             return False
     if identity_lock.locked_by(root_id):
         return False
-    if db.conn.execute(f"SELECT 1 FROM session_prs WHERE {_SESSION_PR} AND url IS NOT NULL", key).fetchone():
+    # A merged PR doesn't settle it: readiness says whether the branch has moved on to its next one.
+    if db.conn.execute(f"SELECT 1 FROM session_prs WHERE {_SESSION_PR} AND url IS NOT NULL AND merged_at IS NULL",
+                       key).fetchone():
         return False
     fp = review._fingerprint(ws, ws.base_branch) if ws.base_branch else None
     if fp is None:
@@ -1112,6 +1184,165 @@ def _prepare_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str]) -> Job
         return {"passed": True, "commit": sha}
 
     return start_job("session.pr_prepare", work, root_id=root.id, repo_root=ws.repo_root)
+
+
+def land_phase_prs(db: DB) -> list[Job]:
+    """Land each completed goal phase autopilot queued (``phase_prs``):
+    brindle opens the session PR, or pushes to the open one, at the commit the
+    phase's milestone checks passed on. One landing per session at a time, the
+    earliest phase first, so a later phase's commit never goes before an
+    earlier one's."""
+    started = []
+    seen: set[str] = set()
+    for row in db.conn.execute("SELECT root_id, phase, sha FROM phase_prs WHERE state = 'pending'"
+                               " ORDER BY rowid").fetchall():
+        if row["root_id"] in seen:
+            continue
+        seen.add(row["root_id"])
+        try:
+            if job := land_phase_pr(db, row["root_id"], row["phase"], row["sha"]):
+                started.append(job)
+        except Exception:  # noqa: BLE001 - one session's landing never stops the others'
+            log.exception("brindle: couldn't land %s's phase %r", row["root_id"], row["phase"])
+    return started
+
+
+def _settle_phase_pr(db: DB, root_id: str, phase: str, state: str, why: str | None = None) -> None:
+    db.conn.execute("UPDATE phase_prs SET state = ?, why = ? WHERE root_id = ? AND phase = ? AND state = 'pending'",
+                    (state, why, root_id, phase))
+    if why:
+        gates.tell(db, root_id, f"[brindle PR] brindle couldn't land phase {phase!r}'s PR: {why}.\n"
+                   "Open or push the session PR yourself once that's resolved.")
+
+
+# The session branches whose phase landing waits (its PR merging or closing on the forge, or
+# the checkout busy) and since when: looked at again after PREPARE_AGAIN_SECONDS, not every sweep.
+_PHASE_WAITING: dict[tuple[str, str], tuple[str, float]] = {}
+
+
+def land_phase_pr(db: DB, root_id: str, phase: str, sha: str) -> Job | None:
+    """Land phase ``phase`` at ``sha`` (see land_phase_prs). Nothing yet while
+    the session belongs to another identity, its PR work is under way, or the
+    landing waits (``_PHASE_WAITING``): it is tried again on a later sweep.
+    Everything the landing depends on is judged in the job, just before the
+    push (``_land_phase_now``)."""
+    root, ws = review.session(db, root_id)
+    key = (root.id, ws.branch)
+    if identity_lock.locked_by(root.id):
+        return None
+    waited, since = _PHASE_WAITING.get(key, (None, 0.0))
+    if waited == sha and time.monotonic() - since < PREPARE_AGAIN_SECONDS:
+        return None
+    if not _start_pr_work(key):
+        return None
+
+    def work(db: DB, job: Job) -> Any:
+        try:
+            return _land_phase_now(db, root_id, key, phase, sha)
+        finally:
+            _end_pr_work(key)
+
+    try:
+        return start_job("session.phase_pr", work, root_id=root.id, repo_root=ws.repo_root)
+    except BaseException:
+        _end_pr_work(key)
+        raise
+
+
+def _land_phase_now(db: DB, root_id: str, key: tuple[str, str], phase: str, sha: str) -> dict[str, Any]:
+    """The landing job: the session, its pending phase and the phase's guards
+    (session_review.phase_reasons) read again now, then the push, all while
+    holding the branch (the locks a merge into it or an edit of it takes):
+    refused, and the supervisor told why, for what phase_reasons names."""
+    root, ws = review.session(db, root_id)
+    identity_lock.ensure(root)
+    if ws.branch != key[1] or not db.conn.execute(
+            "SELECT 1 FROM phase_prs WHERE root_id = ? AND phase = ? AND sha = ? AND state = 'pending'",
+            (root.id, phase, sha)).fetchone():
+        return {"landed": False}     # the session moved on (another branch, or a new goal) meanwhile
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
+            held.enter_context(git.checkout_lock(ws.path, timeout=gates.LOCK_WAIT_S))
+        except (BlockingIOError, git.GitError):
+            _PHASE_WAITING[key] = (sha, time.monotonic())
+            return {"landed": False, "waiting": "the session's branch is busy"}
+        if why := review.phase_reasons(db, root, ws, phase, sha):
+            _settle_phase_pr(db, root.id, phase, "refused", "; ".join(why))
+            return {"landed": False, "refused": why}
+        try:
+            url = _land_phase(db, root, ws, key, phase, sha)
+        except (agents.AgentError, workspaces.WorkspaceError, git.GitError) as e:
+            _settle_phase_pr(db, root.id, phase, "failed", str(e).strip() or type(e).__name__)
+            return {"landed": False, "error": str(e)}
+    if url is None:
+        _PHASE_WAITING[key] = (sha, time.monotonic())
+        return {"landed": False, "waiting": "the session's PR is merging or closed"}
+    _PHASE_WAITING.pop(key, None)
+    _settle_phase_pr(db, root.id, phase, "pushed")
+    return {"landed": True, "url": url, "commit": sha}
+
+
+def _land_phase(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], phase: str, sha: str) -> str | None:
+    """Push ``sha`` (never the branch's tip, never moving the local branch) to
+    the session's open PR's head branch, or open the session PR on it. None
+    when the open PR can't take it now: a merge of it is under way, or the
+    forge doesn't say it is open (merged or closed before brindle saw it):
+    once that merge is recorded the phase opens the branch's next PR."""
+    if (pr := review.open_pr(db, root, ws)) is not None:
+        url = pr["url"]
+        row = db.conn.execute(f"SELECT pushed_sha FROM session_prs WHERE {_SESSION_PR}", key).fetchone()
+        if row["pushed_sha"] and git.ok(["merge-base", "--is-ancestor", sha, row["pushed_sha"]], ws.path):
+            return url    # the PR already carries it
+        elsewhere = db.conn.execute(f"SELECT head_ref FROM session_pr_heads WHERE {_SESSION_PR}", key).fetchone()
+        head = elsewhere["head_ref"] if elsewhere and elsewhere["head_ref"] else ws.branch
+        if head != ws.branch and not git.remote_branch_exists(ws.path, head):
+            raise workspaces.WorkspaceError(f"its PR is on {head}, which isn't a branch on origin")
+        # A claim on the PR's merge slot (session_pr_merges, as the automatic merge takes it): no merge
+        # is submitted while the push is under way, and none under way is pushed over.
+        # The commit it pushes is kept with the claim: should this process go before the record below is
+        # written, the merge reconciles the PR's head with it first (session_review._reconcile_push).
+        owner = secrets.token_hex(16)
+        with gates.marker("session-pr-merge", owner):
+            with db.tx() as c:
+                claimed = c.execute("INSERT OR IGNORE INTO session_pr_merges (url, state, owner)"
+                                    " VALUES (?, 'pushing', ?)", (url, owner)).rowcount
+                if claimed:
+                    c.execute("INSERT OR REPLACE INTO session_pr_pushes (url, sha) VALUES (?, ?)", (url, sha))
+            # A failed merge's row keeps the automatic merge away too: the PR is still open.
+            attempt = None if claimed else db.conn.execute(
+                "SELECT state FROM session_pr_merges WHERE url = ?", (url,)).fetchone()
+            if attempt is not None and attempt["state"] != "failed":
+                return None
+            try:
+                payload = workspaces.pull_request_checks(url, ws.repo_root)
+                if not payload or payload.get("state") != "OPEN":
+                    return None
+                git.push(ws.path, head, sha=sha, track=head == ws.branch)
+                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR} AND url = ?",
+                                (sha, *key, url))
+            finally:
+                if claimed:
+                    with db.tx() as c:
+                        c.execute("DELETE FROM session_pr_pushes WHERE url = ?", (url,))
+                        c.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'pushing' AND owner = ?",
+                                  (url, owner))
+        bus.publish_agent(db, "session.pr_pushed", root.id, url=url, commit=sha)
+        return url
+    ap = db.get_autopilot(root.id)
+    goal = (ap.summary or (ap.goal or "").split("\n", 1)[0]) if ap else ""
+    done = [m for m in db.milestones(root.id) if m.phase_name == phase]
+    body = "\n".join([f"Phase {phase!r} of the session's goal, at {sha[:12]}, the commit its checks passed on.",
+                      "", *(f"- [x] {m.title}" for m in done)])
+    title = f"{goal}: {phase}" if goal else f"Phase {phase}"
+    url = workspaces.open_pull_request(ws, title, body=body, sha=sha)
+    if url is None:
+        raise workspaces.WorkspaceError(f"pushed {sha[:12]}, but gh couldn't open the PR: {workspaces.compare_url(ws)}")
+    _record_pr(db, key, url, sha)
+    number = re.search(r"/pull/(\d+)", url)
+    review.note_head_pr(sha, ws.path, {"number": int(number.group(1)) if number else None,
+                                       "title": title, "url": url, "headRefName": ws.branch})
+    return url
 
 
 # -- goal ------------------------------------------------------------------------
@@ -1350,12 +1581,17 @@ PERMISSION_MODES = ("default", "auto")
 
 
 def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
-    """``visuals`` ("on" or "off", offers only), ``claude_permission_mode`` ("default" or "auto") and/or
-    ``opencode_permission_mode`` ("ask", "auto" or "autonomous") into
+    """``visuals`` ("on" or "off", offers only), ``claude_permission_mode`` ("default" or "auto"),
+    ``opencode_permission_mode`` ("ask", "auto" or "autonomous"), ``quota_switch``
+    ("ask" or "auto") and/or ``login_shell_env``
+    ("on" or "off": the login shell's proxy and certificate settings for launched CLIs;
+    "off" applies to the next launch, "on" from the next daemon start) into
     ~/.brindle/config.json; its other keys are kept."""
     from brindle import config
+    from brindle.provider_switch import quota_switch
 
-    allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"),
+    allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"), "login_shell_env": ("on", "off"),
+               "quota_switch": ("ask", "auto"),
                "claude_permission_mode": PERMISSION_MODES,
                "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES}
     changes = {key: _get(body, key) for key in allowed if body.get(key) is not None}
@@ -1372,8 +1608,10 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
         for row in db.conn.execute("SELECT DISTINCT repo_root FROM workspaces"):
             bus.publish(db, "visual.offers_setting", repo_root=row["repo_root"])
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
+            "quota_switch": quota_switch(),
             "opencode_permission_mode": config.opencode_permission_mode(),
-            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off"}
+            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off",
+            "login_shell_env": "on" if config.login_shell_env_setting() else "off"}
 
 
 def put_debug(db: DB, params: dict, body: Body) -> Any:
@@ -1846,19 +2084,110 @@ def _said(account) -> list[str]:
     return [line for line in account.out.getvalue().splitlines() if line.strip()]
 
 
+class _SignIn:
+    """The brindle Pro sign-in in flight (an ``auth.SignInWatch``). There is
+    one at a time: each flow has its own loopback listener and PKCE pair (or
+    device code), and each one approved would mint a token set, so a second
+    POST must not start another. It keeps what its current phase told the
+    person to do (the authorize URL, or the device code's lines), so a request
+    that joins it later can be told again. Telling (publishing those lines),
+    replaying them and replacing the flow all hold _SIGN_IN_LOCK, so a flow
+    replaced tells nothing more: no URL to approve, no code to type."""
+
+    def __init__(self, job: Job, device: bool) -> None:
+        self.job, self.by_device = job, device
+        self.told: list[dict[str, str]] = []   # the current phase's job.progress payloads
+        self.server = None          # its loopback.CallbackServer, once listening
+        self.ended = False          # its job finished
+        self.replaced = False       # a newer sign-in took its place
+
+    def live(self) -> bool:
+        return not (self.ended or self.replaced)
+
+    def tell(self, db: DB, payload: dict[str, str], *, phase: bool = False) -> bool:
+        """Publish ``payload`` as this job's progress and keep it for a joining
+        request (``phase``: it starts a new phase, replacing what was kept).
+        False, and nothing published, once the flow was replaced."""
+        with _SIGN_IN_LOCK:
+            if self.replaced:
+                return False
+            self.told = [payload] if phase else [*self.told, payload]
+            bus.publish(db, "job.progress", job=self.job.id, **payload)
+            return True
+
+    def listening(self, server) -> None:
+        with _SIGN_IN_LOCK:
+            self.server = server
+
+    def device(self) -> None:
+        with _SIGN_IN_LOCK:
+            self.told = []          # the browser's URL no longer applies
+
+    def cancelled(self) -> bool:
+        with _SIGN_IN_LOCK:
+            return self.replaced
+
+    def end(self) -> None:
+        """Replaced by a new sign-in: its listener stops waiting, and it stops at its
+        next step (auth.login checks ``cancelled``), its job failing as restarted."""
+        with _SIGN_IN_LOCK:
+            self.replaced = True
+            server = self.server
+        if server is not None:
+            self._stop(server)
+
+    @staticmethod
+    def _stop(server) -> None:
+        from brindle.pro import auth, loopback
+
+        server.finish(loopback.CallbackResult(error=auth.RESTARTED))
+
+
+_SIGN_IN_LOCK = threading.RLock()  # reentrant: a bus subscriber may answer a publication made under it
+_SIGN_IN: list[_SignIn] = []        # the one in flight, if any
+
+
 def account_login(db: DB, params: dict, body: Body) -> Any:
+    """Start a sign-in, or answer the one already waiting on the browser: a
+    second click, a remounted sign-in screen or another screen's button gets
+    its job (and what it said to do, again), not a second flow. ``restart``
+    (Try again) ends the one waiting and starts a fresh one."""
     device = _get(body, "device", bool, False)
+    restart = _get(body, "restart", bool, False)
+    with _SIGN_IN_LOCK:
+        cur = _SIGN_IN[0] if _SIGN_IN and _SIGN_IN[0].live() else None
+        if cur is not None and not restart and cur.by_device == device:
+            for payload in cur.told:   # the caller follows events from its request on: say it again
+                bus.publish(db, "job.progress", job=cur.job.id, **payload)
+            return cur.job
+        flow = _SignIn(Job(secrets.token_hex(8), "account.login"), device)
+        _SIGN_IN[:] = [flow]
+        if cur is not None:
+            cur.end()
+
+    class Told(_Progress):
+        def write(self, s: str) -> int:
+            for line in s.splitlines():
+                if line.strip():
+                    flow.tell(self.db, {"text": line})
+            return len(s)
 
     def work(db: DB, job: Job) -> Any:
         def open_url(url: str) -> bool:
             # The app opens it in the system browser; the daemon waits for the callback.
-            bus.publish(db, "job.progress", job=job.id, url=url)
-            return True
+            # A flow replaced meanwhile says nothing: login then stops as restarted.
+            return flow.tell(db, {"url": url}, phase=True)
 
-        _pro_account(_Progress(db, job)).cmd_login(None, device=device, open_url=open_url)
+        try:
+            _pro_account(Told(db, job)).cmd_login(None, device=device, open_url=open_url, watch=flow)
+        finally:
+            with _SIGN_IN_LOCK:
+                flow.ended = True
+                if _SIGN_IN and _SIGN_IN[0] is flow:
+                    _SIGN_IN.clear()
         return {"signed_in": True}
 
-    return start_job("account.login", work)
+    return start_job("account.login", work, job=flow.job)
 
 
 def account_logout(db: DB, params: dict, body: Body) -> Any:
@@ -1873,7 +2202,7 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
     return {"messages": _said(account)}
 
 
-# -- analysis docs: brindle Pro's library, proxied (the reads are in routes_read) ----
+# -- library: brindle Pro, proxied (the reads are in routes_read) ----
 # Answers pass through as the server gave them, held in memory only; a file
 # reaches disk only on an export to a folder the person picked.
 
@@ -1882,14 +2211,14 @@ EXPORT_FORMATS = ("md", "docx", "zip")
 EXPORT_DESTINATIONS = ("download", "google_docs", "sharepoint")
 
 
-def _docs_entitlement(repo: str | None):
+def _docs_entitlement(repo: str | None, store=None):
     from brindle import config
     from brindle.pro import analysis_docs
 
     if repo:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
-        return analysis_docs.require_entitlement()
+        return analysis_docs.require_entitlement(store)
     except RuntimeError as e:
         raise ServiceError("not_entitled", str(e), 402) from e
 
@@ -1911,16 +2240,33 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
     try:
         return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
     except (RuntimeError, auth.TransportError) as e:    # unreachable, or an answer it can't read: not signed out
-        raise ServiceError("upstream", str(e), 502) from e
+        raise upstream_error(e) from e
+
+
+def upstream_error(e: Exception) -> ServiceError:
+    """The Library's refusal as the daemon's answer: its own 4xx (a stale
+    version stays a 409, a missing permission a 403) so the app can act on it;
+    anything else, unreachable or unreadable, is a 502. A 401 is never passed
+    on: it would read as the daemon's own token being refused."""
+    from brindle.pro.analysis_docs import Refused
+
+    if isinstance(e, Refused) and 400 <= e.status < 500 and e.status != 401:
+        return ServiceError(e.code if e.code and e.code.isidentifier() else "upstream", str(e), e.status)
+    return ServiceError("upstream", str(e), 502)
 
 
 def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str | None = None,
-                 admin: bool = False) -> dict:
+                 admin: bool = False, org_id: str | None = None) -> dict:
     """``/orgs/<org>/analysis-docs/<tail>`` for the verified entitlement's org;
-    ``admin`` refuses (403, nothing sent) unless its role is owner or admin."""
+    ``admin`` refuses (403, nothing sent) unless its role is owner or admin.
+    ``org_id``: the org the caller read, refused (409, nothing sent) if the
+    active one is another, so a form loaded for one org never writes to a second.
+    Permissions beyond that are the Library's to check."""
     from urllib.parse import quote
 
     ent = _docs_entitlement(repo)
+    if org_id is not None and org_id != ent.org_id:
+        raise ServiceError("org_changed", "your active organization changed since this was loaded; reload it", 409)
     if admin and ent.role not in ("owner", "admin"):
         raise ServiceError("forbidden", "only an organisation owner or admin can do this", 403)
     return docs_api(method, f"/orgs/{quote(ent.org_id, safe='')}/analysis-docs/{tail}", body, repo=repo)
@@ -1968,6 +2314,18 @@ def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
     return doc_switches(repo)
 
 
+def put_doc_format(db: DB, params: dict, body: Body) -> Any:
+    """Replace what one level (``level``: org, team:<id> or a level of the
+    org's structure) of Settings › Doc format sets with ``format``
+    (brindle.doc_templates); ``version``: the one the GET gave, so an org's
+    format changed meanwhile is refused. Returns the GET's view."""
+    from brindle import doc_templates
+
+    level = _get(body, "level", default=doc_templates.ORG)
+    doc_templates.save(level, _get(body, "format", dict, required=True), version=_get(body, "version", int))
+    return doc_templates.view(db, level)
+
+
 def docs_scopes(repo: str | None = None) -> list[dict]:
     """Every scope the person reads, as the server lists them
     (``{kind, id, name, can_share}``; their teams too, docs or not)."""
@@ -1985,12 +2343,20 @@ def docs_everywhere(path: str, repo: str | None, query: dict[str, str]) -> list[
     """GET ``path`` (a list the server answers per scope) in each scope of
     :func:`docs_scopes`: the answers that came back. A scope that refuses
     is skipped unless every one does."""
-    got, refused = [], None
-    for spec in dict.fromkeys(scope_spec(s) for s in docs_scopes(repo)):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def ask(spec: str) -> tuple[Any, ServiceError | None]:
         try:
-            got.append(docs_api("GET", path, repo=repo, query=query, scope=spec))
+            return docs_api("GET", path, repo=repo, query=query, scope=spec), None
         except ServiceError as e:
-            refused = refused or e
+            return None, e
+
+    specs = list(dict.fromkeys(scope_spec(s) for s in docs_scopes(repo)))
+    # One server round trip per scope: all at once, not one after another (answers kept in scope order).
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(specs)))) as pool:
+        answers = list(pool.map(spawn.carry(ask), specs))
+    got = [a for a, e in answers if e is None]
+    refused = next((e for _, e in answers if e is not None), None)
     if refused and not got:
         raise refused
     return got
@@ -2023,6 +2389,137 @@ def unshare_doc(db: DB, params: dict, body: Body) -> Any:
     """Stop sharing a doc with ``scope`` (team:<id> or org:<id>)."""
     kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
     return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=params.get("repo"))
+
+
+def _folder_call(body: Body, run: Callable) -> Any:
+    """Run a pro/library_folders write on the scope named by the body's ``scope``
+    (user, team:<id> or org:<id>), through docs_api; bad input is a 400."""
+    repo = _get(body, "repo")
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), _docs_entitlement(repo).sub)
+    try:
+        return run(kind, scope_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo))
+    except ValueError as e:
+        raise ServiceError("invalid", str(e)) from e
+
+
+def create_library_folder(db: DB, params: dict, body: Body) -> Any:
+    """Make a folder in ``scope`` with ``name``, ``visibility`` (private or shared) and ``can_add``,
+    for ``repo`` (the repo it belongs to, kept on this machine: see library_folders.remember_repo)."""
+    from brindle.pro import library_folders as folders
+
+    def make(kind: str, scope_id: str, api: Callable) -> Any:
+        made = folders.create(kind, scope_id, _get(body, "name", required=True), _get(body, "visibility", default="private"),
+                              _get(body, "can_add", default="owner"), api=api)
+        repo = _get(body, "repo")
+        if isinstance(made, dict) and isinstance(made.get("id"), str):
+            folders.remember_repo(db, kind, scope_id, made["id"], repo)
+            made = dict(made, repo=repo)
+        return made
+
+    return _folder_call(body, make)
+
+
+def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
+    """Place the design in the ``folder`` (an id) of ``scope``."""
+    from brindle.pro import library_folders as folders
+
+    return _folder_call(body, lambda kind, scope_id, api: folders.move_doc(
+        params["id"], kind, scope_id, _get(body, "folder", required=True), api=api))
+
+
+def _work_call(params: dict, body: Body, run: Callable) -> Any:
+    """Run a pro/work_items function for the signed-in org: ``run(org_id, api, who)``, ``who`` naming the account
+    (server and subject) whose cache it may use. A caller that says which org it loaded (``org_id``) is refused
+    with 409, before anything is sent, when the active one is another. Bad input is a 400; the Library's or
+    tracker's refusal keeps its own 4xx (see upstream_error), anything unreachable a 502."""
+    from brindle.pro import auth, credentials
+
+    repo = params.get("repo") or _get(body, "repo")
+    ent = _docs_entitlement(repo)
+    loaded = params.get("org_id") or _get(body, "org_id")
+    if loaded and loaded != ent.org_id:
+        raise ServiceError("org_changed", "your active organization changed since this was loaded; reload it", 409)
+    who = f"{auth.base_url((credentials.default_store().load() or {}).get('base_url'))}|{ent.sub}"
+    try:
+        return run(ent.org_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo), who)
+    except ValueError as e:
+        raise ServiceError("invalid", str(e)) from e
+
+
+def design_work_items(db: DB, params: dict, body: Body) -> Any:
+    """A design's linked items and their states. Fail-soft: the tracker or server unreachable answers the last
+    read with ``unreachable`` true (see pro/work_items.items)."""
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.items(org, params["id"], api=api, who=who))
+
+
+def create_design_work_items(db: DB, params: dict, body: Body) -> Any:
+    """Make items from the design (``kind`` design), one task or every task without one (task), or a passage
+    (``section`` and ``quote``)."""
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.create(
+        org, params["id"], _get(body, "kind", required=True), api=api, who=who, task=_get(body, "task"),
+        section=_get(body, "section"), quote_text=_get(body, "quote"), title=_get(body, "title")))
+
+
+def link_design_work_item(db: DB, params: dict, body: Body) -> Any:
+    """Link an existing ``item`` (key or pasted link) to the design, or to a ``target`` section or task."""
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.link(
+        org, params["id"], _get(body, "item", required=True), api=api, who=who, tracker=_get(body, "tracker"),
+        target=_get(body, "target", dict)))
+
+
+def unlink_design_work_item(db: DB, params: dict, body: Body) -> Any:
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.unlink(org, params["id"], params["link_id"], api=api, who=who))
+
+
+def library_work_items(db: DB, params: dict, body: Body) -> Any:
+    """``{"items": {doc_id: {epic, done, total, read_at, stale?}}, "remaining": [doc_id]}`` for the designs in
+    ``ids`` (comma separated, at most 50), for the Library list and board: from the cache, reading up to 10 never
+    read or out-of-date designs now. ``remaining`` are due a read this call didn't make: ask again with them."""
+    from brindle.pro import work_items as wi
+
+    ids = [i for i in (params.get("ids") or "").split(",") if i]
+    if len(ids) > 50:
+        raise ServiceError("invalid", "ask for at most 50 designs at a time")
+    return _work_call(params, body, lambda org, api, who: wi.summaries(org, ids, api=api, who=who, fetch=10))
+
+
+def tracker_integrations(db: DB, params: dict, body: Body) -> Any:
+    """Settings › Integrations: connections and settings (an org admin; the Library checks), and the page
+    where an admin signs in to a tracker."""
+    from brindle.pro import auth, credentials, work_items as wi
+
+    got = _work_call(params, body, lambda org, api, who: dict(wi.integrations(org, api=api)))
+    base = ((credentials.default_store().load() or {}).get("base_url"))
+    org = _docs_entitlement(params.get("repo")).org_id
+    roots = sorted({ws.repo_root for ws in db.find_workspaces(None)})
+    return dict(got, connect_url=wi.connect_url(auth.base_url(base), org), repos=wi.local_repos(roots, org))
+
+
+def put_tracker_settings(db: DB, params: dict, body: Body) -> Any:
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.save_settings(
+        org, {k: v for k, v in body.items() if k not in ("repo", "org_id")}, api=api))
+
+
+def check_tracker(db: DB, params: dict, body: Body) -> Any:
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.check_connection(org, params["tracker"], api=api))
+
+
+def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
+    from brindle.pro import work_items as wi
+
+    return _work_call(params, body, lambda org, api, who: wi.disconnect(org, params["tracker"], api=api))
 
 
 def delete_doc(db: DB, params: dict, body: Body) -> Any:
@@ -2680,6 +3177,7 @@ ROUTES = [
     _post("/sessions/{root}/rename", rename_session),
     _post("/sessions/{root}/handover", handover_session),
     _post("/sessions/{root}/transfer", transfer_session),
+    _post("/sessions/{root}/provider-switch", provider_switch),
     # GET on the file path reads (routes_read); agent callers are refused by the guard.
     Route("/v1/sessions/{root:path}/file", _endpoint(put_session_file), methods=["PUT"]),
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
@@ -2712,6 +3210,7 @@ ROUTES = [
     _post("/kb/sources/{id}/library", kb_library),
     Route("/v1/kb/sources/{id}/library", _endpoint(unlibrary_kb_source), methods=["DELETE"]),
     Route("/v1/config", _endpoint(patch_config), methods=["PATCH"]),
+    Route("/v1/doc-format", _endpoint(put_doc_format), methods=["PUT"]),
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
     Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),
     Route("/v1/routing", _endpoint(put_routing), methods=["PUT"]),
@@ -2741,6 +3240,18 @@ ROUTES = [
     Route("/v1/analysis-docs/destination", _endpoint(put_doc_destination), methods=["PUT"]),
     Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
     Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
+    _post("/library/folders", create_library_folder),
+    Route("/v1/library/designs/{id}/work-items", _endpoint(design_work_items), methods=["GET"]),
+    Route("/v1/library/designs/{id}/work-items", _endpoint(create_design_work_items), methods=["POST"]),
+    Route("/v1/library/designs/{id}/work-items/links", _endpoint(link_design_work_item), methods=["POST"]),
+    Route("/v1/library/designs/{id}/work-items/links/{link_id}", _endpoint(unlink_design_work_item),
+          methods=["DELETE"]),
+    Route("/v1/library/work-items", _endpoint(library_work_items), methods=["GET"]),
+    Route("/v1/integrations/trackers", _endpoint(tracker_integrations), methods=["GET"]),
+    Route("/v1/integrations/trackers/settings", _endpoint(put_tracker_settings), methods=["PUT"]),
+    _post("/integrations/trackers/{tracker}/test", check_tracker),
+    Route("/v1/integrations/trackers/{tracker}", _endpoint(disconnect_tracker), methods=["DELETE"]),
+    Route("/v1/analysis-docs/{id}/folder", _endpoint(move_doc_to_folder), methods=["PUT"]),
     _post("/analysis-docs/{id}/share", share_doc),
     Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),
     _post("/analysis-docs/{id}/export", export_doc),

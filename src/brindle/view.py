@@ -96,10 +96,12 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
                     now: float | None = None,
                     panes: dict[str, bool] | None = None,
                     agent_list: list[Agent] | None = None,
-                    alive: set[str] | None = None) -> dict:
+                    alive: set[str] | None = None,
+                    read_screens: bool = True) -> dict:
     """``agent_list`` limits the agents shown (default: all of ``ws``'s);
     ``alive`` is the ids of the ones known to be running, when the caller
-    has already worked that out (see ``snapshot``)."""
+    has already worked that out (see ``snapshot``). ``read_screens``: as
+    for ``agent_entry``."""
     ahead = behind = dirty = None
     if ws.base_branch and os.path.isdir(ws.path):
         try:
@@ -119,7 +121,8 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
         "agents": [
             agent_entry(db, a, detail=detail,
                        native_subagents=None if native_subagents is None else native_subagents.get(a.id, []),
-                       now=now, panes=panes, alive=None if alive is None else a.id in alive)
+                       now=now, panes=panes, alive=None if alive is None else a.id in alive,
+                       read_screen=read_screens)
             for a in (db.list_agents(ws.id) if agent_list is None else agent_list)
         ],
     }
@@ -142,7 +145,9 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
                 native_subagents: list[NativeSubagent] | None = None,
                 now: float | None = None,
                 panes: dict[str, bool] | None = None,
-                alive: bool | None = None) -> dict:
+                alive: bool | None = None, read_screen: bool = True) -> dict:
+    """``read_screen``: correct a running agent's status from its screen
+    (agents.reconcile, a tmux capture); False takes the status as recorded."""
     who = identity_lock.locked_by(a.id)
     if who:
         # Another identity's session: structure only, nothing read from its
@@ -165,7 +170,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     elif a.status == "failed":
         status = "failed"
     elif agents.is_alive(a, panes) if alive is None else alive:
-        a = agents.reconcile(db, a, samples=1)
+        if read_screen:
+            a = agents.reconcile(db, a, samples=1)
         status = a.status
     else:
         status = "exited"
@@ -249,7 +255,13 @@ def _stopped_root(db: DB, a: Agent, alive: set[str], now: float,
     if any(m.id in alive for m in members[1:]):
         return False  # its workers still show, so it does too
     superseded = newest_live_root > a.created_at
-    if not superseded and now - max(a.status_since or 0, a.created_at) <= STOPPED_ROOT_LINGER:
+    recent = now - max(a.status_since or 0, a.created_at) <= STOPPED_ROOT_LINGER
+    # A superseded session leaves at once only once it is paused or done. One
+    # whose status says it runs may be launching: a launch (a resume's after a
+    # restart) records its status before its window opens, and ``alive`` was
+    # listed before that, so it isn't gone, and pausing it here would get its
+    # new chat stopped (cull) right after its resume reported it back.
+    if recent and not (superseded and a.status in ("paused", "done")):
         return False
     if a.status not in ("paused", "done"):
         # It ended without pausing its session (agents.ended runs from inside
@@ -326,11 +338,13 @@ def session_workspaces(db: DB, repo_root: str | None) -> list[Workspace]:
     return rows
 
 
-def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[dict]:
+def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+             read_screens: bool = True) -> list[dict]:
     """What the sidebar shows: agents closed with `brindle close`, and stopped
     sessions with nothing left running, are left out, as is a worktree
     whose agents are all left out that way, and a finished worktree whose
-    branch is already merged (see ``retired``)."""
+    branch is already merged (see ``retired``). ``read_screens`` False
+    reads no agent's screen (see ``agent_entry``)."""
     now = time.time()
     by_parent = db.all_native_subagents()
     if panes is None:
@@ -373,7 +387,7 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
     out = []
     for ws, shown in listed:
         entry = workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
-                                panes=panes, agent_list=shown, alive=alive)
+                                panes=panes, agent_list=shown, alive=alive, read_screens=read_screens)
         review = db.last_review(ws.id)
         # The latest reviewer verdict, so the sidebar can flag rows that need you.
         entry["review"] = None if review is None else ("approved" if review.approved else "changes")
@@ -396,16 +410,9 @@ def _autopilot_flags(db: DB, shown: list[Agent]) -> tuple[bool, str | None]:
     return on, asking
 
 
-def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
-                    root_id: str | None = None) -> dict | None:
-    """The goal and milestones for the sidebar: session ``root_id``'s (a
-    sidebar shows only its own session's goal), else the newest running
-    autopilot session's in ``repo_root`` that has a goal (any, if none does).
-    ``panes`` should be the same ``tmux.list_panes()`` result passed to
-    ``snapshot`` for this refresh, so liveness isn't checked with a second
-    tmux subprocess."""
-    from brindle import autopilot, quota
-
+def autopilot_root(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+                   root_id: str | None = None) -> Agent | None:
+    """Select a goal's session without collecting the legacy dashboard's details."""
     if not repo_root:
         return None
     if root_id:
@@ -421,10 +428,24 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
         # A session with no goal yet mustn't hide another's recorded milestones.
         with_goal = [a for a in roots if db.get_autopilot(a.id).goal]
         root = max(with_goal or roots, key=lambda a: a.created_at)
+    return root
+
+
+def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+                    root_id: str | None = None) -> dict | None:
+    """Legacy dashboard summary for the selected session or newest live goal.
+
+    Pass the snapshot's panes to share its liveness check.
+    """
+    from brindle import autopilot, quota
+
+    root = autopilot_root(db, repo_root, panes, root_id)
+    if root is None:
+        return None
     ap = db.get_autopilot(root.id)
     assert ap is not None
     ms = db.milestones(root.id)
-    w = autopilot.work_state(db, root.id) if any(m.status == "failed" for m in ms) else None
+    w = autopilot.work_state(db, root.id, panes) if any(m.status == "failed" for m in ms) else None
     return {
         "root_id": root.id,
         "enabled": bool(ap.enabled),
@@ -439,5 +460,5 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
                         "check": m.check_cmd} for m in ms],
         "usage": autopilot.usage(),
         "quota": quota.notes(repo_root, native=False),
-        "workers": len(autopilot.working_workers(db, root.id)),
+        "workers": len(autopilot.working_workers(db, root.id, panes)),
     }

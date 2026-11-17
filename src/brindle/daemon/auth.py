@@ -15,10 +15,22 @@ the daemon's own TCP address may. Clients that aren't browsers send none.
 
 Agents run as the same user, so they could read the token too: on the Unix
 socket the guard also refuses a caller that is one of a brindle agent's
-processes (see :mod:`brindle.daemon.peer`). The one exception is the
-permission hold routes (:mod:`brindle.daemon.holds`): a hook waiting on the
-person's answer is an agent's child, so they take no token and no agent
-check, only the Unix socket and the hold's own nonce."""
+processes (see :mod:`brindle.daemon.peer`). The exceptions are the routes an
+agent's own process must reach (``_hold_route``). They take no token and no
+agent check, only the Unix socket with no browser Origin, and each checks its
+caller itself:
+
+- the permission hold routes (:mod:`brindle.daemon.holds`): a hook waiting on
+  the person's answer is an agent's child. Checked by the hold's own nonce,
+  and a hold is registered only for an agent the calling process runs under.
+- git's credential helper (:mod:`brindle.github_connect`), which git in an
+  agent's pane uses like any other.
+- ``POST /v1/launch-env`` (:mod:`brindle.daemon.launch_env`): an agent's pane
+  asking, as it starts, for the proxy and certificate settings the daemon
+  would have given it. Answered only to a process of the pane brindle recorded
+  for the agent it names (the peer pid's ancestry, ``peer.caller_agents``, as
+  for a hold), and only with that agent's own allowlisted settings. Nothing
+  else is readable through it, and it changes nothing."""
 
 from __future__ import annotations
 
@@ -47,12 +59,14 @@ _CALLER_UNCHECKED = "the caller can't be checked"
 
 def _hold_route(path: str) -> bool:
     """A route an agent's own child may call, on the Unix socket alone: the permission
-    holds, and git's credential helper asking for brindle's GitHub sign-in
-    (brindle.github_connect), which git in an agent's pane uses like any other."""
+    holds, git's credential helper asking for brindle's GitHub sign-in
+    (brindle.github_connect), which git in an agent's pane uses like any other, and an
+    agent's pane asking for its own launch settings (brindle.daemon.launch_env)."""
     from brindle.daemon.holds import PREFIX
     from brindle.github_connect import CREDENTIAL_PATH
+    from brindle.login_shell_env import FETCH_PATH
 
-    return path == PREFIX or path.startswith(PREFIX + "/") or path == CREDENTIAL_PATH
+    return path == PREFIX or path.startswith(PREFIX + "/") or path in (CREDENTIAL_PATH, FETCH_PATH)
 
 
 def new_token() -> str:
@@ -86,7 +100,8 @@ class Guard:
         if scope["type"] == "http" and _hold_route(scope["path"]):
             # A permission hook (an agent's own child) waiting on the person's
             # answer: over the Unix socket only, with no browser Origin, and
-            # checked by its own nonce instead (brindle.daemon.holds).
+            # checked by its own nonce instead (brindle.daemon.holds). So for the
+            # others of _hold_route, each of which checks its caller itself.
             if peer.PEER_PID in scope and "origin" not in headers:
                 await self.app(scope, receive, send)
             else:

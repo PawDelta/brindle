@@ -4,7 +4,7 @@
    themes as full-page PNGs with Playwright's CLI (fetched by npx; it is not
    a dependency of the app).
 
-     node shots/shots.mjs [--step <name>] [--out <dir>] [--scene <a,b>] [--theme light,dark] [--browser chromium|webkit]
+     node shots/shots.mjs [--step <name>] [--out <dir>] [--scene <a,b>] [--theme light,dark] [--browser chromium|webkit] [--channel chrome]
 
    PNGs land in <out>/<step>/<scene>-<theme>.png; <out> defaults to
    shots/out. The first run downloads the browser (Chromium unless
@@ -18,11 +18,12 @@ import { createServer } from "vite";
 
 const PLAYWRIGHT = "playwright@1.49.1";
 const SCENES = [
-  "new", "new-first", "new-composer", "new-codex-only", "session", "session-waiting", "session-paused", "session-failed", "session-done", "inbox", "agent-supervisor", "agent-working", "agent-waiting", "agent-done", "agent-reviewer", "agent-failed", "agents", "agents-make",
-  "knowledge", "knowledge-record", "knowledge-search", "knowledge-empty", "knowledge-add", "settings", "settings-edit", "settings-key", "settings-signin", "settings-health", "account", "account-team", "account-enterprise", "account-free", "account-signed-out",
+  "new-conflict",
+  "new", "new-first", "new-first-clone", "new-projects", "new-cli", "new-composer", "practice", "practice-done", "new-codex-only", "session", "session-waiting", "session-paused", "session-failed", "session-done", "inbox", "agent-supervisor", "agent-working", "agent-waiting", "agent-done", "agent-reviewer", "agent-failed", "agents", "agents-make",
+  "library", "library-board", "library-decisions", "knowledge", "knowledge-record", "knowledge-search", "knowledge-empty", "knowledge-add", "settings", "settings-edit", "settings-key", "settings-signin", "settings-health", "account", "account-team", "account-enterprise", "account-free", "account-signed-out",
 ];
 const THEMES = ["dark", "light"];
-const VIEWPORT = "1440,960";
+const VIEWPORT = (args0 => { const i = args0.indexOf("--viewport"); return i >= 0 && args0[i + 1] ? args0[i + 1] : "1440,960"; })(process.argv.slice(2));
 /* How long the page gets to fetch its snapshot, draw the terminal and play
    its scene's presses before the shot (preview.tsx: ~1.5s after the first
    snapshot, longer on a busy machine). */
@@ -39,6 +40,8 @@ const out = resolve(opt("out", resolve(here, "out")), step);
 const scenes = opt("scene", SCENES.join(",")).split(",");
 const themes = opt("theme", THEMES.join(",")).split(",");
 const browser = opt("browser", "chromium");
+/* --channel chrome: the Chrome already installed, where Playwright's own isn't downloaded. */
+const channel = opt("channel", "");
 
 /* Runs a command to its end without blocking this process: the Vite server
    below serves the page from this same event loop. */
@@ -50,7 +53,7 @@ const run = (cmd, cmdArgs) =>
   });
 
 mkdirSync(out, { recursive: true });
-await run("npx", ["-y", PLAYWRIGHT, "install", browser]);
+if (!channel) await run("npx", ["-y", PLAYWRIGHT, "install", browser]);
 
 const server = await createServer({
   root: resolve(here, ".."),
@@ -69,6 +72,7 @@ try {
       await run("npx", [
         "-y", PLAYWRIGHT, "screenshot",
         "--browser", browser,
+        ...(channel ? ["--channel", channel] : []),
         "--viewport-size", VIEWPORT,
         "--color-scheme", theme,
         "--full-page",

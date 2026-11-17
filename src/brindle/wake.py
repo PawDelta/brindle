@@ -1,10 +1,11 @@
-"""Waking a Claude Code supervisor with brindle's messages, through its own hook.
+"""Waking a Claude Code agent with brindle's messages, through its own hook.
 
 Claude Code's inbox socket (brindle.inbox) wakes an idle session, but shows
 every message as "Another Claude session sent a message:" plus a paragraph
 of peer-safety text: two or three worker reports fill the person's chat.
-For an interactive Claude Code agent (a supervisor, the person's own chat)
-brindle uses a hook instead:
+Typed into a worker's pane, a message reads as if the person had typed it.
+For a Claude Code agent in a tmux window (a supervisor, the person's own
+chat, or a worker: see applies) brindle uses a hook instead:
 
 - At SessionStart and at every Stop, Claude Code also runs
   ``brindle _hook await-mail`` as an ``asyncRewake`` hook: in the background,
@@ -54,10 +55,17 @@ ENDED = ("paused", "done", "failed")
 CLAIM_EXPIRES = 120.0  # a hand-over takes milliseconds: mail held longer is abandoned, whatever its pid says
 
 
+# Modes launched with the waiter: a person's chat and the workers it starts,
+# whose chats the app shows too. A worker keeps its Stop hook (the reminder
+# to call report_result still blocks its stop); only its mail moves here.
+MODES = ("interactive", "handoff", "handoff_detached", "assign")
+
+
 def applies(provider: str, mode: str | None, headless: bool = False) -> bool:
-    """Whether an agent is launched with the waiter: an interactive Claude
-    Code chat. Workers keep their Stop hook (a blocked stop nobody watches)."""
-    return provider == "claude" and mode == "interactive" and not headless
+    """Whether an agent is launched with the waiter: a Claude Code chat in a
+    tmux window, a supervisor's or a worker's. A headless agent's runner
+    takes its mail itself."""
+    return provider == "claude" and mode in MODES and not headless
 
 
 def hook_entry(command: str) -> dict:

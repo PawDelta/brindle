@@ -32,6 +32,7 @@ def test_nothing_is_polled_in_air_gap_mode(org, monkeypatch):
 
 
 
+@pytest.mark.variant("fail closed: network errors and HTTP failures cannot clear a cached organization pause")
 def test_a_failed_poll_keeps_the_last_known_pause(org):
     org.body = {"policy_version": 1, "paused": True, "paused_reason": "x"}
     p = poller()

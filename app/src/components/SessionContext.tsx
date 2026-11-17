@@ -81,6 +81,7 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
   };
 
   const here = route.screen === "session" && route.root === root;
+  const heading = row?.name || goal?.summary || row?.goal || goal?.goal;
   return (
     <section className="side-context flex min-h-0 min-w-0 flex-col overflow-hidden" aria-label="Session context" data-testid="session-context" style={style}>
       <GoalPanel
@@ -113,8 +114,8 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
               />
             ) : (
               <>
-                <SessionGoal key={`${repo}:${root}:${row?.request}`} text={row?.request || goal?.goal || row?.goal} className={`block w-full truncate text-left text-[13px] font-medium ${here ? "text-ink" : "text-ink/90 hover:text-ink"}`} onOpen={onOpen}>
-                  {row?.name || goal?.summary || row?.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}
+                <SessionGoal key={`${repo}:${root}:${row?.request}`} text={row?.request || goal?.goal || row?.goal} title={row?.name || goal?.goal || row?.goal || undefined} className={`w-full ${row?.name ? "block truncate" : "line-clamp-2 break-words"} text-left text-[13px] font-medium ${here ? "text-ink" : "text-ink/90 hover:text-ink"}`} onOpen={onOpen}>
+                  {heading || <span className="italic text-ink-3">No goal set</span>}
                 </SessionGoal>
                 <button type="button" className="shrink-0 text-[11px] text-ink-3 hover:text-ink" aria-label="Rename session" title="Rename session" onClick={() => setRenaming(true)}>
                   ✎

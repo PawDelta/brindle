@@ -33,7 +33,7 @@ from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
 
 MAX_BYTES = 2 * 1024 * 1024     # one revision's page
-MAX_REVISIONS = 20
+KEEP_REVISIONS = 50            # newest pages kept per visual; older ones are pruned
 MAX_OPTIONS = 12
 MAX_TITLE = 120
 MAX_QUESTION = 500
@@ -169,7 +169,8 @@ def _options(raw: Any) -> list[dict] | None:
                                "_ or -", 400)
         seen.add(oid)
         out.append({"id": oid, "label": _text(o.get("label"), "an option's label", MAX_LABEL, True),
-                    "detail": _text(o.get("detail"), "an option's detail", MAX_DETAIL)})
+                    "detail": _text(o.get("detail"), "an option's detail", MAX_DETAIL),
+                    **({"approves": True} if o.get("approves") is True else {})})
     return out
 
 
@@ -261,6 +262,12 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
                      *((f"option {o['id']}", f"{o['label']}\n{o['detail'] or ''}") for o in options or [])])
 
     _private_dir(store_root(ws.repo_root))
+    if any(o.get("approves") for o in options or []):
+        # An approving option belongs to the work in progress when it is shown
+        # (None: the session's next goal claims it, see claim_approvals).
+        ap = db.get_autopilot(root.id)
+        options = [{**o, "goal": ap.goal if ap and ap.goal else None} if o.get("approves") else o
+                   for o in options]
     opts = json.dumps(options) if options else None
     # The revision is allocated, its page installed and its row written under
     # one write transaction (BEGIN IMMEDIATE serializes writers across
@@ -270,39 +277,48 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
         now = time.time()
         from brindle import visual_offers
 
-        row = c.execute("SELECT root_id, rev, kind, answer FROM visuals WHERE id=?", (visual_id,)).fetchone() \
+        row = c.execute("SELECT root_id, rev, kind, answer, consented_by FROM visuals WHERE id=?",
+                        (visual_id,)).fetchone() \
             if isinstance(visual_id, str) and ID.fullmatch(visual_id) else None
-        visual_offers.authorize(c, root.id, kind, supervisor=caller.id == root.id, asked=asked,
-                                answered=row["answer"] if row and row["root_id"] == root.id
-                                and row["kind"] == kind else None)
+        supervisor = caller.id == root.id
+        same = row is not None and row["root_id"] == root.id and row["kind"] == kind
+        consented = visual_offers.authorize(
+            c, root.id, kind, supervisor=supervisor, asked=asked,
+            decision=bool(question and options), visual_id=visual_id if same else None,
+            answered=row["answer"] if same else None,
+            consented=same and supervisor and row["consented_by"] == caller.id)
+        # Only the session's supervisor earns a visual it may keep updating.
+        consented_by = caller.id if consented and supervisor and kind == "visual" else None
         if visual_id is None:
             vid, rev = "v_" + secrets.token_hex(6), 1
         else:
             if row is None or row["root_id"] != root.id or row["kind"] != kind:
                 raise ServiceError("not_found", "no such visual in this session", 404)
             vid, rev = visual_id, row["rev"] + 1
-            if rev > MAX_REVISIONS:
-                raise ServiceError("too_many_revisions", f"a visual may have at most {MAX_REVISIONS} "
-                                   "revisions; publish a new one", 400)
         path = page_path(ws.repo_root, root.id, vid, rev)
         _write_atomic(path, data)
         try:
             if rev == 1:
                 c.execute("INSERT INTO visuals (id, root_id, repo_root, by_agent, kind, title, rev, question,"
-                          " options, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                          (vid, root.id, ws.repo_root, caller.id, kind, title, rev, question, opts, now, now))
+                          " options, consented_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (vid, root.id, ws.repo_root, caller.id, kind, title, rev, question, opts,
+                           consented_by, now, now))
             else:
                 c.execute("UPDATE visuals SET title=?, rev=?, question=?, options=?, answer=NULL,"
-                          " by_agent=?, updated_at=? WHERE id=?",
-                          (title, rev, question, opts, caller.id, now, vid))
+                          " by_agent=?, consented_by=COALESCE(consented_by, ?), updated_at=? WHERE id=?",
+                          (title, rev, question, opts, caller.id, consented_by, now, vid))
             if extra is not None:
                 extra(c, vid, rev)
         except BaseException:
             path.unlink(missing_ok=True)
             raise
+        # Revisions are unlimited, but only the latest KEEP_REVISIONS pages stay
+        # on disk; numbering carries on, and a pruned revision's page 404s.
+        old = rev - KEEP_REVISIONS
+        if old >= 1:
+            page_path(ws.repo_root, root.id, vid, old).unlink(missing_ok=True)
     bus.publish(db, "visual.published", repo_root=ws.repo_root, root_id=root.id, agent_id=caller.id,
                 visual=vid, rev=rev)
-    bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)   # a quote may have spent a confirmation card
     return get(db, vid)
 
 
@@ -316,9 +332,14 @@ def mark_read(db: DB, visual_id: str, rev: int | None = None) -> dict:
     with db.tx() as c:
         c.execute("UPDATE visuals SET read_rev=MAX(read_rev, MIN(rev, COALESCE(?, rev))) WHERE id=?", (rev, v["id"]))
     # Both entry points use this state: the Inbox card and the session's list.
-    # Tell connected clients to refresh their Inbox after either opens the reader.
-    bus.publish(db, "visual.read", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"])
-    return get(db, v["id"])
+    # Tell connected clients to refresh their Inbox after either opens the reader;
+    # ``pending``: whether it still waits there (a question until answered, a
+    # revision published since), so a client can drop the card at once when not.
+    read = get(db, v["id"])
+    pending = (read["answer"] is None and read["dismissed_rev"] < read["rev"]) if read["options"] \
+        else read["read_rev"] < read["rev"]
+    bus.publish(db, "visual.read", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], pending=pending)
+    return read
 
 
 def page(db: DB, visual_id: str, rev: Any) -> Path:
@@ -424,14 +445,72 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     except BaseException:
         with db.tx() as c:
             c.execute("UPDATE visuals SET answer=NULL WHERE id=? AND answer=?", (v["id"], record))
+            # Keep may have copied the claim while delivery was in flight.
+            c.execute("UPDATE kept_visuals SET answer=NULL WHERE id=? AND rev=? AND answer=?",
+                      (v["id"], rev, record))
         raise
     with db.tx() as c:
+        # Delivered: only now can the answer exempt a goal from planning (until then it may still roll back).
+        c.execute("UPDATE visuals SET answer=json_set(answer, '$.delivered', 1) WHERE id=? AND answer=?",
+                  (v["id"], record))
         # Only a kept copy of this same revision takes the answer: a copy of
         # an earlier revision keeps what it was saved with until Keep again.
         c.execute("UPDATE kept_visuals SET answer=? WHERE id=? AND rev=?", (record, v["id"], rev))
+    settle_offer_for_approval(db, v["root_id"])
     bus.publish(db, "visual.answered", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"],
                 rev=rev, option=option)
     return get(db, v["id"])
+
+
+def settle_offer_for_approval(db: DB, root_id: str) -> None:
+    """A goal's planning offer opened while its approving answer was still
+    being delivered is settled now and its queued tasks released. Only an
+    unanswered offer: an accepted one, a plan or a review hold stays. Run
+    after an answer is delivered and after an offer is opened, so whichever
+    comes second settles it."""
+    from brindle import plans, tasks
+
+    ap = db.get_autopilot(root_id)
+    if ap is None or not ap.goal or not ap.plan_offer or not ap.plan_offer.startswith(plans.OFFER_OPEN) \
+            or not has_approved_design(db, root_id, ap.goal):
+        return
+    with db.tx() as c:
+        settled = c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer=?",
+                            (plans.OFFER_PLANNED, root_id, ap.plan_offer)).rowcount == 1
+    if settled:
+        bus.publish_agent(db, "autopilot.goal", root_id)
+        tasks.on_resumed(db, root_id, why="the person's approval of the design")
+
+
+def claim_approvals(db: DB, root_id: str, goal: str) -> None:
+    """Bind the approving options published before the session had a goal
+    (``publish`` leaves their goal unset) to ``goal``, the work that follows
+    them. The goal lives on the option, never in the answer, so a claim can't
+    disturb an answer being delivered or rolled back. An option already
+    bound to another goal stays there."""
+    with db.tx() as c:
+        for row in c.execute("SELECT id, options FROM visuals WHERE root_id=? AND kind='visual' "
+                             "AND options LIKE '%\"approves\"%'", (root_id,)).fetchall():
+            options = json.loads(row["options"])
+            if any(o.get("approves") and o.get("goal") is None for o in options):
+                bound = [{**o, "goal": goal} if o.get("approves") and o.get("goal") is None else o
+                         for o in options]
+                c.execute("UPDATE visuals SET options=? WHERE id=?", (json.dumps(bound), row["id"]))
+
+
+def has_approved_design(db: DB, root_id: str, goal: str) -> bool:
+    """Whether the person approved a design for ``goal``: chose, on one of
+    session ``root_id``'s visuals, an option its publisher marked ``approves``
+    while that goal was the work in progress, with no note. A viewed visual,
+    a redirect, any other choice, an option bound to another goal, and an
+    answer still being delivered (it may roll back) aren't."""
+    for row in db.conn.execute("SELECT options, answer FROM visuals WHERE root_id=? AND kind='visual' "
+                               "AND answer IS NOT NULL AND options IS NOT NULL", (root_id,)):
+        answer = json.loads(row["answer"])
+        if answer.get("delivered") and not answer.get("note") and any(o["id"] == answer.get("option") and o.get("approves")
+                                          and o.get("goal") == goal for o in json.loads(row["options"])):
+            return True
+    return False
 
 
 def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
@@ -507,19 +586,21 @@ def _session_name(db: DB, root_id: str) -> str:
 def keep(db: DB, visual_id: str) -> dict:
     """Copy the visual's current revision to the kept store. Keeping a kept
     visual again keeps the revision now on screen."""
-    v = get(db, visual_id)
-    _unlocked(v["root_id"])
-    html = page(db, v["id"], str(v["rev"])).read_text(encoding="utf-8")
-    # Everything the kept copy stores, scanned again before anything is written.
-    # The session's name is resolved once, scanned, and that same value stored.
-    name = _session_name(db, v["root_id"])
-    _refuse_secrets([("the page", html), ("the title", v["title"]),
-                     ("the answer's note", (v["answer"] or {}).get("note")), ("the session's name", name)])
-    _private_dir(kept_root(v["repo_root"]).parent)
-    _write_atomic(kept_path(v["repo_root"], v["id"]), html.encode("utf-8"))
-    now = time.time()
-    answer = json.dumps(v["answer"]) if v["answer"] else None
+    # Read and copy under the same writer lock as answers, revisions and
+    # Unkeep, so the page and row always describe the same saved state.
     with db.tx() as c:
+        v = get(db, visual_id)
+        _unlocked(v["root_id"])
+        html = page(db, v["id"], str(v["rev"])).read_text(encoding="utf-8")
+        # Everything the kept copy stores, scanned again before anything is written.
+        # The session's name is resolved once, scanned, and that same value stored.
+        name = _session_name(db, v["root_id"])
+        _refuse_secrets([("the page", html), ("the title", v["title"]),
+                         ("the answer's note", (v["answer"] or {}).get("note")), ("the session's name", name)])
+        _private_dir(kept_root(v["repo_root"]).parent)
+        _write_atomic(kept_path(v["repo_root"], v["id"]), html.encode("utf-8"))
+        now = time.time()
+        answer = json.dumps(v["answer"]) if v["answer"] else None
         c.execute("INSERT INTO kept_visuals (id, title, from_session, from_session_name, repo, rev, answer,"
                   " kept_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,"
                   " rev=excluded.rev, answer=excluded.answer",
@@ -536,7 +617,7 @@ def unkeep(db: DB, visual_id: str) -> dict:
     with db.tx() as c:
         c.execute("DELETE FROM kept_visuals WHERE id=?", (v["id"],))
         c.execute("UPDATE visuals SET kept_at=NULL WHERE id=?", (v["id"],))
-    kept_path(v["repo_root"], v["id"]).unlink(missing_ok=True)
+        kept_path(v["repo_root"], v["id"]).unlink(missing_ok=True)
     bus.publish(db, "visual.kept", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], kept=False)
     return get(db, v["id"])
 

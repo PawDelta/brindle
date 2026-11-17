@@ -475,6 +475,56 @@ const terminals: Record<string, Pane> = {
   ]),
 };
 
+/* GET /routing/goal on the large benchmark feature (design/routing-goals §6a):
+   this person aims at cost 50 · speed 20 · first try 30. Each setup sits where
+   its strengths point against Fable alone, the centre: (Fable ÷ it)² per goal,
+   normalised. Argon and Astra are Fable's tokens at their list price, placed
+   with Fable's time and first try. */
+const odds = (f: number) => f / (1 - f);
+const FABLE = { usd: 16.96, min: 41.9, first: 5 / 7 };
+const placed = (usd: number, min: number, first: number) => {
+  const c = (FABLE.usd / usd) ** 2, s = (FABLE.min / min) ** 2, f = (odds(first) / odds(FABLE.first)) ** 2;
+  const sum = c + s + f;
+  return { cost: c / sum, speed: s / sum, first_try: f / sum };
+};
+const large = (basis: string, [usd, minutes, first_try]: string[], backlog: string[]) => [
+  { task: "large", label: "Large feature", usd, minutes, first_try, basis },
+  { task: "backlog", label: "Backlog, 5 tickets", usd: backlog[0], minutes: backlog[1], first_try: backlog[2], basis },
+];
+const routingGoal: NonNullable<DaemonData["routingGoal"]> = {
+  weights: { cost: 0.5, speed: 0.2, first_try: 0.3 },
+  scope: "repo",
+  locked: false,
+  lock_reason: "Your org keeps review on every branch",
+  preview: {
+    aim: { cost: 0.5, speed: 0.2, first_try: 0.3 },
+    landed: placed(11.11, 62, 7 / 9),
+    you: { usd: 1.4, minutes: 30, first_try: 0.54, today: { usd: 3.1, minutes: 31, first_try: 0.46 } },
+    references: [
+      { key: "you", name: "You", measured: true, point: placed(11.11, 62, 7 / 9), tasks: large("measured once", ["$11.11", "62", "7 of 9 branches"], ["$5.24", "86", "4 of 5 branches"]) },
+      { key: "fable", name: "Fable 5.2", measured: true, point: placed(FABLE.usd, FABLE.min, FABLE.first), tasks: large("measured, 3 runs", ["$14.54–19.65", "36–51", "1 of 3 runs"], ["$5.83–6.18", "13–16", "4 of 4 runs"]) },
+      { key: "argon", name: "Gemini 4 Argon", measured: false, point: placed(FABLE.usd * 0.5, FABLE.min, FABLE.first), tasks: large("estimated", ["~$8.50", "—", "—"], ["~$3.00", "—", "—"]) },
+      { key: "astra", name: "GPT-6 Astra", measured: false, point: placed(FABLE.usd * 1.25, FABLE.min, FABLE.first), tasks: large("estimated", ["~$21.20", "—", "—"], ["~$7.50", "—", "—"]) },
+    ],
+    notes: [
+      "You is Stage 3's finalist B, which runs exactly this mix (Opus supervises, Codex Sol works, Sonnet high reviews). One valid run; two more didn't finish.",
+      "Argon and Astra alone have never been benchmarked. Their $ is Fable's measured tokens at their list price (Argon $4/$20 per M from Dec 1, $2/$10 until then, so ~$4.25 now; Astra $10/$50). Time and first try aren't measured; on the triangle they're placed with Fable's.",
+      "brindle counts branches merged on their first review; one model alone counts runs with no fix round after review.",
+    ],
+    roles: [
+      { key: "light", label: "Light", value: "Haiku", provider: "claude" },
+      { key: "medium", label: "Medium", value: "Codex Sol", provider: "codex", was: "Sonnet", note: "$0.57 vs $1.58 a task here, fewer rounds" },
+      { key: "heavy", label: "Heavy", value: "Codex Sol", provider: "codex", was: "Opus", note: "cheapest per success on large work" },
+      { key: "advanced", label: "Advanced", value: "Fable", provider: "claude" },
+      { key: "reviewer", label: "Reviewer", value: "Sonnet · high", provider: "claude", was: "Sonnet", note: "caught what Fable did, at ¼ the cost" },
+      { key: "supervisor", label: "Supervisor", value: "Opus", provider: "claude" },
+      { key: "parallel", label: "At once", value: "4 workers" },
+      { key: "review", label: "Review", value: "Every branch" },
+    ],
+    basis: "Estimates for your last 30 tasks here (8 Light, 15 Medium, 5 Heavy, 2 Advanced), from 214 of your tasks and brindle's shared results. Supervisor and review costs included.",
+  },
+};
+
 /* The built-in profiles as GET /routing describes them on a Mac with Claude
    Code and Codex installed and signed in, Antigravity installed but signed
    out, no OpenCode, and Ollama (native) there. */
@@ -665,6 +715,7 @@ export const data: Partial<DaemonData> = {
   },
   terminals,
   routingProfiles,
+  routingGoal,
   // The team keeps Gemini out and reviews with Codex; this person put Opus first for heavy work.
   routingConfig: {
     user: {},

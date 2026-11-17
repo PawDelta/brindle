@@ -19,7 +19,9 @@
    longer trusts brindle's permission hook; the card goes when the job is
    done, or shows the job's error). Everything else (an agent waiting at
    its own prompt, a failure, a branch to review or merge again) says so in
-   one quiet line and only goes to the session. Requests brindle's hook
+   one quiet line and goes to the session. Every card also offers Dismiss,
+   which hides its notification without answering the underlying request.
+   Requests brindle's hook
    holds come grouped, above the rest: one item per kind and general form,
    decided at once for every request in it, under the stall banner.
 
@@ -48,10 +50,11 @@ import type { Route } from "../../routes";
 import { useJob } from "../Branch/useJob";
 import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
-import { ItemActions } from "./ItemActions";
+import { PROVIDER_SWITCH_KINDS, ProviderSwitchCard, answerProviderSwitch, isNotice, offerOf } from "../../components/ProviderSwitch/ProviderSwitch";
+import { DismissAction, ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { StorageNudge } from "./StorageNudge";
-import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, opensVisual, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
+import { FIXES, KIND_SHORT, REVIEW_KINDS, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, opensVisual, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -93,6 +96,7 @@ const TONE: Record<string, { bar: string; ink: string }> = {
   review: { bar: "before:bg-branch", ink: "text-branch" },
   pr_ready: { bar: "before:bg-branch", ink: "text-branch" },
   pr_failed: { bar: "before:bg-fail", ink: "text-fail" },
+  pr_opened: { bar: "before:bg-branch", ink: "text-branch" },
   org_notice: { bar: "before:bg-line-strong", ink: "text-ink-3" },
   org_blocked: { bar: "before:bg-line-strong", ink: "text-ink-3" },
   setup: { bar: "before:bg-fail", ink: "text-fail" },
@@ -265,7 +269,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
               item.kind === "permission" ? (
                 <PermissionItemCard key={itemKey(item)} item={item} isNew={fresh.has(seenKey(item))} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} onNavigate={onNavigate} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} onNavigate={onNavigate} openUrl={openUrl} />
               ),
             )}
           </section>
@@ -276,8 +280,9 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
 }
 
 /* One banner card. */
-function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview, onNavigate }: {
+function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview, onNavigate, openUrl }: {
   item: InboxItemDTO;
+  openUrl?: OpenUrl;
   actions: ReturnType<typeof useInboxActions>;
   who: string | null;
   branch: string | null;
@@ -326,7 +331,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     // What the button does, in a line; a fix this app doesn't know: the engine's detail, if any.
     const fix = item.fix ? FIXES[item.fix] : undefined;
     body = fix ? <span>{fix.help}</span> : item.detail ? <span className="line-clamp-3">{item.detail}</span> : null;
-  } else if (item.detail && item.kind !== "credentials" && item.kind !== "login") {
+  } else if (item.detail && item.kind !== "credentials" && item.kind !== "login" && !PROVIDER_SWITCH_KINDS.includes(item.kind)) {
     body = <span className="line-clamp-3">{item.detail}</span>;
   } else if (item.reason && item.reason !== describeItem(item)) {
     body = <span>{item.reason}</span>;
@@ -354,7 +359,9 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       </>
     );
   } else if (item.kind === "plan_offer") {
-    acts = <PlanOfferActions item={item} actions={actions} onDone={onDone} />;
+    acts = <PlanOfferActions item={item} actions={actions} onDone={onDone} onGo={onGo} />;
+  } else if (PROVIDER_SWITCH_KINDS.includes(item.kind)) {
+    acts = <ProviderSwitchActions item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "org_notice") {
     acts = act("Mark read", "read", {}, PLAIN);
   } else if (item.kind === "org_blocked") {
@@ -363,16 +370,29 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     acts = <SetupFix item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "setup") {
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
-  } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc") {
+  } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc" || REVIEW_KINDS.includes(item.kind)) {
     acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} onGo={item.kind === "doc" ? onGo : undefined} onNavigate={onNavigate} compact />;
-  } else if ((item.kind === "pr_ready" || item.kind === "pr_failed") && onReview) {
-    // Nothing is pushed until the person's Open PR in the sheet.
+  } else if (item.kind === "pr_opened" || item.kind === "pr_failed") {
+    const url = item.url;
     acts = (
       <>
-        <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
+        {url ? openUrl && <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => { void openUrl(url); actions.run(item, "pr-not-now", {}); }}>
+          Open on GitHub
+        </button> : item.kind === "pr_failed" && onReview && <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
           Review &amp; open PR
-        </button>
-        {item.kind === "pr_ready" && act("Not now", "pr-not-now", {}, GHOST)}
+        </button>}
+        {act("Dismiss", "pr-not-now", {}, GHOST)}
+      </>
+    );
+  } else if (item.kind === "pr_ready") {
+    // Review stays available before opening the PR; only Open PR pushes.
+    acts = (
+      <>
+        <OpenPr item={item} actions={actions} onDone={onDone} openUrl={openUrl} />
+        {onReview && <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
+          Review &amp; open PR
+        </button>}
+        {act("Dismiss", "pr-not-now", {}, GHOST)}
       </>
     );
   } else if (opensVisual(item)) {
@@ -411,8 +431,9 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       )}
       <div className="col-span-2 mt-1 flex flex-wrap items-center gap-1.5">
         {acts}
+        {!["credentials", "login", "doc", ...REVIEW_KINDS, "pr_ready", "pr_opened", "pr_failed"].includes(item.kind) && <DismissAction item={item} actions={actions} compact />}
         <span className="flex-1" />
-        {onGo && item.kind !== "doc" && !opensVisual(item) && (
+        {onGo && item.kind !== "doc" && !REVIEW_KINDS.includes(item.kind) && !opensVisual(item) && (
           <button type="button" className={`${button} text-xs whitespace-nowrap`} onClick={onGo}>
             Go to session ›
           </button>
@@ -425,16 +446,40 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
 /* brindle's one-time offer to plan a big goal first: Yes / Not now, answered through the goal
    route with the offer id the item carries (request_id). A refusal (the offer was replaced
    meanwhile) is the one line on the card; either way the inbox is read again. */
-function PlanOfferActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+/* Switch / Not now on a provider-switch offer, through the item's own route; the card leaves once the engine took the answer. */
+function ProviderSwitchActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+  const client = useDaemon();
+  return (
+    <ProviderSwitchCard
+      showLine={false}
+      variant={isNotice(item) ? "notice" : "offer"}
+      offer={offerOf(item)}
+      onAnswer={(accept, always) => answerProviderSwitch(client, item, accept, undefined, always).then(
+        () => { actions.settle(item); onDone(); },
+        (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e)),
+      )}
+    />
+  );
+}
+
+function PlanOfferActions({ item, actions, onDone, onGo }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void; onGo?(): void }) {
   const client = useDaemon();
   const [saving, setSaving] = useState(false);
+  const pending = useRef(false);
   const answer = (accept: boolean) => {
+    // Guard synchronously: both choices can fire before React disables them.
+    if (pending.current) return;
+    pending.current = true;
     setSaving(true);
     actions.dismiss(itemKey(item));
     void client
       .resolvePlanOffer(item.root_id ?? "", item.request_id ?? "", accept)
-      .then(() => actions.settle(item), (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e), true))
+      .then(() => {
+        actions.settle(item);
+        onGo?.();
+      }, (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e), true))
       .finally(() => {
+        pending.current = false;
         setSaving(false);
         onDone();
       });
@@ -476,6 +521,57 @@ function SetupFix({ item, actions, onDone }: { item: InboxItemDTO; actions: Retu
     <button type="button" className={`${ACT} ${PLAIN}`} disabled={job.busy} onClick={start} data-testid="setup-fix">
       {fix.label}
     </button>
+  );
+}
+
+/* Open PR on a prepared PR's card: the review sheet's own call (POST /sessions/{root}/pr, a job) with the
+   draft's title and description, without its diffs. The button waits while the job runs; a refusal shows on the card. */
+function OpenPr({ item, actions, onDone, openUrl }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void; openUrl?: OpenUrl }) {
+  const client = useDaemon();
+  const job = useJob();
+  const [drafting, setDrafting] = useState(false);
+  /* gh couldn't open it: the compare page, where the person finishes by hand (no PR exists yet). */
+  const [compare, setCompare] = useState<string | null>(null);
+  const status = job.job?.status;
+  const error = job.job?.error;
+  useEffect(() => {
+    if (status === "failed") actions.report(item, error ?? "couldn't open the PR", true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, error]);
+  const root = item.root_id ?? item.agent_id ?? "";
+  const open = async () => {
+    setDrafting(true);
+    try {
+      const draft = await client.prDraft(root);
+      await job.start("Opening the PR", () => client.openSessionPr(root, { title: item.detail?.trim() || draft.title, body: draft.body }), (result) => {
+        const url = (result as { url?: string } | undefined)?.url;
+        if (url && !/\/pull\/\d+/.test(url)) {
+          // No PR was created: nothing settles; the compare page is the way on.
+          setCompare(url);
+          actions.report(item, "GitHub's CLI couldn't open the PR; open it from the compare page.", true);
+          return;
+        }
+        actions.settle(item);
+        onDone();
+      });
+    } catch (e) {
+      actions.report(item, e instanceof Error ? e.message : String(e), true);
+    } finally {
+      setDrafting(false);
+    }
+  };
+  const busy = drafting || job.busy;
+  return (
+    <>
+      <button type="button" className={`${ACT} ${PLAIN}`} disabled={busy} onClick={() => void open()}>
+        {busy ? "Opening…" : "Open PR"}
+      </button>
+      {compare && openUrl && (
+        <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(compare)}>
+          Open on GitHub
+        </button>
+      )}
+    </>
   );
 }
 

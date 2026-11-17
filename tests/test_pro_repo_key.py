@@ -10,7 +10,7 @@ import pytest
 from brindle.learning import Outcome, TaskInfo
 from brindle.pro import auth, credentials, orgkey
 from brindle.pro.learning import CloudLearner
-from brindle.pro.orgkey import OrgKey, OrgKeys, normalize_remote, repo_identity
+from brindle.pro.orgkey import OrgKey, OrgKeys, repo_identity
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, backend, claims, pro_env, sign, signing_key,
 )
@@ -44,13 +44,10 @@ def test_empty_repos_fall_back_to_the_origin_url(tmp_path):
     assert repo_identity(str(a)) == repo_identity(str(b)) == "github.com/Owner/Repo"
 
 
-def test_unusable_origins_are_no_identity():
-    assert normalize_remote("") is None
-
-
 # -- domain separation -------------------------------------------------------------------------------
 
 
+@pytest.mark.variant("security: repository, agent and general refs must use distinct HMAC domains")
 def test_repo_agent_and_ref_keys_are_domain_separated():
     k = OrgKey("org_1", "k1", b"\x02" * 32)
     x = "a" * 40

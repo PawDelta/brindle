@@ -19,8 +19,10 @@ from brindle.daemon import routes_read
 from brindle.daemon.auth import Guard
 from brindle.daemon.events import events
 from brindle.daemon.holds import ROUTES as HOLD_ROUTES
+from brindle.daemon.launch_env import ROUTES as LAUNCH_ENV_ROUTES
 from brindle.daemon.pty_view import pty_view
 from brindle.daemon.routes_actions import ROUTES as ACTIONS
+from brindle.daemon.routes_goal import ROUTES as GOAL_ROUTES
 from brindle.daemon.routes_org_permissions import ROUTES as ORG_PERMISSION_ROUTES
 from brindle.daemon.routes_visuals import ROUTES as VISUAL_ROUTES
 
@@ -72,7 +74,7 @@ ROUTES = [Route("/v1/meta", meta), Route("/v1/recovery/prioritize", prioritize_r
           Route("/v1/recovery/viewed", viewed_session, methods=["POST"]),
           *routes_read.ROUTES,
           WebSocketRoute("/v1/events", events), WebSocketRoute("/v1/pty_view", pty_view),
-          *ACTIONS, *HOLD_ROUTES, *ORG_PERMISSION_ROUTES, *VISUAL_ROUTES]
+          *GOAL_ROUTES, *ACTIONS, *HOLD_ROUTES, *LAUNCH_ENV_ROUTES, *ORG_PERMISSION_ROUTES, *VISUAL_ROUTES]
 
 
 class Deadlines:

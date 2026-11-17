@@ -2,14 +2,16 @@
 
 Everything here comes from what the CLIs themselves report: the status line
 data Claude Code hands brindle and its ``/usage`` command, Codex's session
-rollouts, and the limit errors Antigravity reports. brindle never reads a
-CLI's OAuth token or auth files and never calls a provider's backend.
+rollouts, and Antigravity's ``/usage`` command and limit errors. brindle never
+reads a CLI's OAuth token or auth files and never calls a provider's backend.
 
-State lives in ``~/.brindle/quota.json``, one entry per provider.
+State lives in ``~/.brindle/quota.json``, scoped to Claude's subscription
+identity and otherwise one entry per provider.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -19,6 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from brindle import subscription_usage
 from brindle.config import RepoConfig, brindle_home
 
 CLAUDE_FRESH_SECONDS = 15 * 60   # the status line only reports while a session runs
@@ -78,12 +81,17 @@ def _number(v) -> float | None:
 
 
 def record(provider: str, windows: list[Window] | None = None, *,
-           limited_until: float | None = None, source: str = "", keep_limit: bool = False) -> None:
+           limited_until: float | None = None, source: str = "", keep_limit: bool = False,
+           identity_key: str | None = None) -> None:
     """Replace what's known about ``provider``. ``windows=None`` keeps the
     windows it has (for recording only a limit); ``keep_limit`` keeps a
-    ``limited_until`` still in the future."""
+    ``limited_until`` still in the future. ``identity_key`` binds an answer
+    to the subscription that was queried, even if the login changes."""
+    key = identity_key or subscription_usage.cache_key(provider)
+    if key is None:
+        return
     data = _load()
-    old = data.get(provider) if isinstance(data.get(provider), dict) else {}
+    old = data.get(key) if isinstance(data.get(key), dict) else {}
     entry = {
         "windows": old.get("windows", []) if windows is None else
                    [{"used": w.used, "resets_at": w.resets_at, "minutes": w.minutes, "name": w.name}
@@ -94,7 +102,7 @@ def record(provider: str, windows: list[Window] | None = None, *,
     }
     if limited_until is None and keep_limit and (_number(old.get("limited_until")) or 0) > time.time():
         entry["limited_until"] = old["limited_until"]
-    data[provider] = entry
+    data[key] = entry
     _save(data)
 
 
@@ -116,12 +124,14 @@ def _from_entry(provider: str, e: dict) -> Quota:
                  _number(e.get("updated_at")) or 0.0, str(e.get("source") or ""))
 
 
-def get(provider: str) -> Quota | None:
+def get(provider: str, *, identity_key: str | None = None) -> Quota | None:
     """What's known about ``provider`` now: windows past their reset dropped,
-    an expired limit cleared. None when nothing current is known."""
+    an expired limit cleared. None when nothing current is known.
+    ``identity_key`` keeps a read/modify/write on its captured subscription."""
     if provider == "codex":
         _refresh_codex_lazily()
-    entry = _load().get(provider)
+    key = identity_key if identity_key is not None else subscription_usage.cache_key(provider)
+    entry = _load().get(key) if key else None
     if not isinstance(entry, dict):
         return None
     q = _from_entry(provider, entry)
@@ -239,6 +249,11 @@ def notes(repo_root: str | None = None, *, native: bool = True) -> list[str]:
 def record_claude(status: dict) -> bool:
     """Keep the plan usage Claude Code gives its status line (Claude.ai
     subscriptions only). True when it carried any."""
+    who = subscription_usage.identity()
+    bound = os.environ.get(subscription_usage.STATUS_IDENTITY)
+    if who is None or (bound and bound != who):
+        return False
+    key = subscription_usage.cache_key("claude", who=who)
     limits = status.get("rate_limits")
     if not isinstance(limits, dict):
         return False
@@ -250,9 +265,9 @@ def record_claude(status: dict) -> bool:
     if not windows:
         return False
     # The status line has no one-model caps; keep the ones ``claude /usage`` gave.
-    old = get("claude")
+    old = get("claude", identity_key=key)
     windows += [w for w in (old.windows if old else []) if w.name]
-    record("claude", windows, source="status line", keep_limit=True)
+    record("claude", windows, source="status line", keep_limit=True, identity_key=key)
     return True
 
 
@@ -263,6 +278,10 @@ CLAUDE_USAGE_TIMEOUT = 30
 _USAGE_LINE = re.compile(r"^\s*Current (session|week)(?: \(([^)]+)\))?:\s*(\d+(?:\.\d+)?)% used"
                          r"(?:\s*·\s*resets (.+?))?\s*(?:\(([^)]+)\))?\s*$")
 _claude_usage_at = 0.0
+_claude_usage_identity: str | None = None
+# Every sidebar asks; this file's mtime is when any process of this brindle
+# home last did, so N sidebars start one claude CLI per refresh, not N.
+CLAUDE_USAGE_STAMP = "claude-usage.stamp"
 
 
 def _reset_time(text: str, zone: str | None, now: float) -> float | None:
@@ -310,30 +329,149 @@ def parse_claude_usage(text: str, now: float | None = None) -> list[Window]:
     return windows
 
 
+def _claim_usage_refresh(force: bool, key: str, *, stamp_name: str = CLAUDE_USAGE_STAMP) -> float | None:
+    """Claim this refresh for this process: under a lock that every process
+    of this brindle home takes, the shared stamp is read and, when a refresh
+    is due (or ``force``), set to now before the lock is let go, so two
+    sidebars looking at once can't both find it due. None when this process
+    asks; otherwise when the other one did. A stamp that can't be used at
+    all (an unwritable home) claims nothing: this process asks."""
+    stamp = brindle_home() / (stamp_name + "." + key.split(":", 1)[1])
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        with open(stamp.with_name(stamp.name + ".lock"), "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                asked = stamp.stat().st_mtime
+            except FileNotFoundError:
+                asked = 0.0
+            if not force and time.time() - asked < CLAUDE_USAGE_REFRESH_SECONDS:
+                return asked
+            stamp.touch()
+            os.utime(stamp)
+    except OSError:
+        pass
+    return None
+
+
 def refresh_claude_usage(*, force: bool = False) -> bool:
     """Ask ``claude -p /usage`` (Claude Code reads the plan's usage itself;
     brindle never touches its credentials) at most every
     ``CLAUDE_USAGE_REFRESH_SECONDS``. True when it recorded windows."""
-    global _claude_usage_at
+    global _claude_usage_at, _claude_usage_identity
     import subprocess
 
-    from brindle import spawn
+    from brindle import provider_homes, spawn
     from brindle.providers import claude_binary
 
-    if not force and time.time() - _claude_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
+    key = subscription_usage.cache_key("claude")
+    if key is None:
+        return False
+    if not force and key == _claude_usage_identity and time.time() - _claude_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
+        return False
+    asked = _claim_usage_refresh(force, key)
+    _claude_usage_identity = key
+    if asked is not None:
+        _claude_usage_at = asked     # another process asked: its answer is in the shared record
         return False
     _claude_usage_at = time.time()
     if _key_billed("claude"):
         return False
     try:
-        proc = spawn.read([claude_binary(), "-p", "/usage"], timeout=CLAUDE_USAGE_TIMEOUT,
-                          cwd=str(brindle_home()))
+        # No MCP servers: the answer needs none, and each would be one more
+        # process started (and inspected) every few minutes. ``reap``: nothing
+        # the CLI leaves in its process group outlives the answer.
+        proc = spawn.read([claude_binary(), "-p", "--strict-mcp-config", "/usage"],
+                          env={**os.environ, **provider_homes.launch_env("claude")},
+                          timeout=CLAUDE_USAGE_TIMEOUT, cwd=str(brindle_home()), reap=True)
     except (OSError, subprocess.TimeoutExpired):
         return False
     windows = parse_claude_usage(proc.stdout) if proc.returncode == 0 else []
+    if not windows or subscription_usage.cache_key("claude") != key:
+        return False
+    record("claude", windows, source="claude /usage", keep_limit=True, identity_key=key)
+    return True
+
+
+# -- Antigravity: ``agy -p /usage --output-format json`` ----------------------------------
+
+ANTIGRAVITY_USAGE_STAMP = "antigravity-usage.stamp"
+_antigravity_usage_at = 0.0
+
+
+def parse_antigravity_usage(text: str) -> list[Window]:
+    """Print-mode /usage returns command.data.groups[].buckets[].
+
+    Each model group has its own caps, so retain the group and window in
+    the name rather than presenting any one group's limit as plan-wide.
+    """
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return []
+    if not isinstance(body, dict) or body.get("status") != "SUCCESS":
+        return []
+    command = body.get("command")
+    if not isinstance(command, dict) or command.get("name") != "usage":
+        return []
+    data = command.get("data")
+    groups = data.get("groups") if isinstance(data, dict) else None
+    if not isinstance(groups, list):
+        return []
+    windows = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("name"), str):
+            continue
+        buckets = group.get("buckets")
+        if not isinstance(buckets, list):
+            continue
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            remaining = _number(bucket.get("remaining_fraction"))
+            span = bucket.get("window")
+            minutes = {"5h": 300, "weekly": 10080}.get(span) if isinstance(span, str) else None
+            if remaining is None or not 0 <= remaining <= 1 or minutes is None:
+                continue
+            resets = None
+            if isinstance(bucket.get("reset_time"), str):
+                try:
+                    reset = datetime.fromisoformat(bucket["reset_time"].replace("Z", "+00:00"))
+                    if reset.tzinfo is not None:
+                        resets = reset.timestamp()
+                except (ValueError, OverflowError, OSError):
+                    pass
+            windows.append(Window((1 - remaining) * 100, resets, minutes,
+                                  f"{group['name']} {window_short(minutes)}"))
+    return windows
+
+
+def refresh_antigravity_usage(*, force: bool = False) -> bool:
+    """Ask agy's read-only slash command on the same cadence as Claude's.
+
+    agy handles its own login; no auth files or backend calls belong here.
+    spawn.read bounds the run and reaps its language server process group.
+    """
+    global _antigravity_usage_at
+    import subprocess
+
+    from brindle import antigravity, spawn
+
+    if not force and time.time() - _antigravity_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
+        return False
+    asked = _claim_usage_refresh(force, "antigravity:default", stamp_name=ANTIGRAVITY_USAGE_STAMP)
+    _antigravity_usage_at = asked if asked is not None else time.time()
+    if asked is not None:
+        return False
+    try:
+        proc = spawn.read([antigravity.binary(), "-p", "/usage", "--output-format", "json"],
+                          timeout=CLAUDE_USAGE_TIMEOUT, cwd=str(brindle_home()), reap=True)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    windows = parse_antigravity_usage(proc.stdout) if proc.returncode == 0 else []
     if not windows:
         return False
-    record("claude", windows, source="claude /usage", keep_limit=True)
+    record("antigravity", windows, source="agy /usage", keep_limit=True)
     return True
 
 
