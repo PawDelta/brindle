@@ -6,6 +6,7 @@ commits still stand, and the rest counted afterwards and published."""
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -84,6 +85,76 @@ def _route_snapshot(monkeypatch=None):
 
 def _counts(row):
     return row and {k: row[k] for k in ("ahead", "behind", "dirty")}
+
+
+@pytest.mark.variant("SQL fanout regression: adding workspaces must not add per-row queries")
+def test_snapshot_query_count_is_independent_of_workspace_count(db, tmp_path, fake_git):
+    queries = []
+    counts = []
+    previous = 0
+    for total in (1, 8):
+        for i in range(previous, total):
+            ws = _worktree(tmp_path, db, str(i), OLD)
+            db.update_agent(f"ag-{i}", parent_id="ag-0" if i else None)
+            db.add_review(ws.id, OLD, None, approved=True, summary="")
+        if total == 1:
+            db.add_autopilot("ag-0")
+            db.update_autopilot("ag-0", state="blocked")
+        db.conn.set_trace_callback(queries.append)
+        try:
+            rows = view.snapshot(db, str(tmp_path), read_screens=False, known_git=view.KnownGit(db))
+        finally:
+            db.conn.set_trace_callback(None)
+        counts.append(len(queries))
+        queries.clear()
+        assert len(rows) == total
+        assert all(row["autopilot"] and row["review"] == "approved" for row in rows)
+        assert rows[0]["asking"] == "ag-0"
+        assert all(row["asking"] is None for row in rows[1:])
+        previous = total
+    assert counts[1] <= counts[0] <= 25, counts
+
+
+def test_inbox_reuses_snapshot_and_refreshes_after_an_event(db, tmp_path, monkeypatch, fake_git):
+    ws = _worktree(tmp_path, db, "one", OLD)
+    calls = []
+    render = view.snapshot
+
+    def snapshot(*args, **kwargs):
+        rows = render(*args, **kwargs)
+        calls.append(rows)
+        return rows
+
+    monkeypatch.setattr(view, "snapshot", snapshot)
+    monkeypatch.setattr(view, "warm_later", lambda pending: None)
+    clock = [100.0]
+    monkeypatch.setattr(routes_read, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    state = SimpleNamespace()
+    if hasattr(routes_read, "SnapshotView"):
+        state.snapshot_view = routes_read.SnapshotView()
+    request = SimpleNamespace(query_params={}, app=SimpleNamespace(state=state))
+    ready = threading.Barrier(2)
+
+    def read(route):
+        ready.wait()
+        return route(request)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        snapshot_response, first = list(pool.map(read, (routes_read.snapshot, routes_read.inbox_)))
+    assert snapshot_response.status_code == 200
+    assert first.status_code == 200
+    assert any(row["agent_id"] == "ag-one" for row in json.loads(first.body))
+    assert len(calls) == 1
+    db.update_agent("ag-one", dismissed_at=time.time())
+    bus.publish_ws(db, "agent.closed", ws, agent_id="ag-one")
+    assert not any(row.get("agent_id") == "ag-one" for row in json.loads(routes_read.inbox_(request).body))
+    assert len(calls) == 2
+    clock[0] += 1
+    routes_read.snapshot(request)
+    assert len(calls) == 3
+    request.query_params = {"repo": "another-repo"}
+    assert json.loads(routes_read.snapshot(request).body) == []
+    assert len(calls) == 4
 
 
 @pytest.mark.parametrize("stored_head, shown", [

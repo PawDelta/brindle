@@ -14,6 +14,7 @@ from typing import NamedTuple
 from brindle import agents, bus, git, identity_lock, pipeline, providers, status_cache, tmux
 from brindle import usage as usage_mod
 from brindle.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
+from brindle.view_reads import ViewReads
 
 log = logging.getLogger(__name__)
 
@@ -470,6 +471,7 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
     reads no agent's screen (see ``agent_entry``). ``known_git``: take git
     counts only from it (no git for a workspace this process hasn't counted
     yet; see ``KnownGit``) instead of counting every workspace first."""
+    db = ViewReads(db)
     now = time.time()
     by_parent = db.all_native_subagents()
     if panes is None:
@@ -510,6 +512,7 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
         listed.append((ws, shown))
     if known_git is None:
         status_cache.warm([(ws.path, ws.base_branch) for ws, _ in listed if os.path.isdir(ws.path)], now=now)
+    db.prepare_autopilots({agents.root_of(db, a.id) for _, shown in listed for a in shown})
     out = []
     for ws, shown in listed:
         entry = workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
