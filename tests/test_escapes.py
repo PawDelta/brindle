@@ -165,7 +165,7 @@ def test_second_review_needs_both_approvals_before_it_merges(db, repo, piped):
     setup, started = piped
     ws = setup(second={"heavy": "reviewer-codex"})
     agents.report_result(db, "w1", "added new.py")
-    assert started == ["reviewer", "reviewer-codex"]   # both carry a concrete profile
+    assert started == ["reviewer-sonnet-high", "reviewer-codex"]   # both carry a concrete profile
     agents.submit_review(db, "rev0", True, "lgtm")
     assert not merged(repo) and db.get_agent("w1").pipeline == "reviewing"
     agents.submit_review(db, "rev1", True, "also lgtm")

@@ -66,9 +66,9 @@ def test_request_review_raises_clearly_for_an_unknown_configured_review_profile(
 
 def test_without_a_learner_it_is_the_baseline_and_nothing_is_probed(env, db):
     env["codex"] = True
-    assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo") == "reviewer"
+    assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo") == "reviewer-sonnet-high"
     assert agents.default_review_profile(RepoConfig(reviewer="rev"), worker(), db, "/repo") == "rev"
-    assert agents.default_review_profile(RepoConfig(), worker()) == "reviewer"  # no db: same
+    assert agents.default_review_profile(RepoConfig(), worker()) == "reviewer-sonnet-high"  # no db: same
     assert env["probes"] == 0
 
 
@@ -78,5 +78,5 @@ def test_learner_chooses_among_the_reviewers_that_can_run(env, db):
     db.add_routing_decision("/repo", task_id=None, agent_id="w1", weight="heavy",
                             baseline_profile="developer-heavy", profile="developer-heavy", learned=False)
     assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo", "task") == "reviewer-codex"
-    assert fake.seen == (["reviewer", "reviewer-codex", "reviewer-local"], "reviewer")
+    assert fake.seen == (["reviewer-sonnet-high", "reviewer-codex", "reviewer-local"], "reviewer-sonnet-high")
     assert fake.info.weight == "heavy"

@@ -184,11 +184,11 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
     db.add_review(ws.id, gates.head(ws), "rev-second", True, "lgtm")
 
     agents.tell_parent_unreported(db, db.get_agent("rev0"))
-    assert started == ["reviewer"]
+    assert started == ["reviewer-sonnet-high"]
     assert db.get_agent("w1").pipeline == "reviewing"
 
     agents.tell_parent_unreported(db, db.get_agent("rev1"))   # the fallback stops too
-    assert started == ["reviewer"]
+    assert started == ["reviewer-sonnet-high"]
     assert db.get_agent("w1").pipeline is None
     assert any("review of `feat` never came back" in b for b in drain(db))
     assert [(e["agent_id"], e["root_id"], e["payload"]["actor"])

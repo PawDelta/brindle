@@ -13715,6 +13715,14 @@
     },
     {
       "method": "GET",
+      "path": "/v1/routing/goal"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/routing/goal"
+    },
+    {
+      "method": "GET",
       "path": "/v1/rules"
     },
     {
