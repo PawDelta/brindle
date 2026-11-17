@@ -1,33 +1,46 @@
 """brindle.provider_health: one answer to "can this provider and model take
 work now", on a fixed clock (NOW), never the wall clock.
 
-provider_health is imported inside the tests, so the reviewer test runs (and
-fails on its assertion) against a tree without the module."""
+provider_health is imported inside the tests, so the caller tests run (and
+fail on their assertions) against a tree without the module."""
 
 import time
 
 import pytest
 
-from brindle import agents, policy, providers, quota, workspaces
+from brindle import agents, autopilot, policy, providers, quota, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 
 NOW = 1_800_000_000.0
 HOUR = 3600.0
+DAY = 24 * HOUR
 
 
-def test_review_choice_passes_over_a_limited_providers_reviewer(db, repo, monkeypatch):
-    (repo / ".brindle" / "agents").mkdir(parents=True, exist_ok=True)
-    (repo / ".brindle" / "agents" / "reviewer-sonnet-high.md").write_text(
-        "---\nextends: reviewer\nprovider: codex\n---\n")
-    ws = workspaces.adopt_root(db, str(repo))
-    db.add_agent(Agent("writer", ws.id, "developer-sonnet", "claude", None,
-                       "assign", "done", "@0", "done", NOW))
+@pytest.fixture
+def clock(monkeypatch):
+    """The fake clock quota, provider_health and the hooks all read."""
+    monkeypatch.setattr(time, "time", lambda: NOW)
+
+
+@pytest.fixture
+def available(monkeypatch):
     monkeypatch.setattr("brindle.local_setup.memory_problem", lambda profile: None)
     monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
     monkeypatch.setattr(providers, "signed_out", lambda provider, env=None: None)
     monkeypatch.setattr(policy, "check_assign", lambda *a, **k: policy.Decision(allowed=True))
-    monkeypatch.setattr(time, "time", lambda: NOW)   # the fake clock quota and provider_health read
+
+
+def _profile(repo, name, text):
+    (repo / ".brindle" / "agents").mkdir(parents=True, exist_ok=True)
+    (repo / ".brindle" / "agents" / f"{name}.md").write_text(text)
+
+
+def test_review_choice_passes_over_a_limited_providers_reviewer(db, repo, clock, available):
+    _profile(repo, "reviewer-sonnet-high", "---\nextends: reviewer\nprovider: codex\n---\n")
+    ws = workspaces.adopt_root(db, str(repo))
+    db.add_agent(Agent("writer", ws.id, "developer-sonnet", "claude", None,
+                       "assign", "done", "@0", "done", NOW))
     quota.record_limit("codex", now=NOW)
 
     chosen, note = agents._review_choice(db, ws, None, RepoConfig(review_sizing=False))
@@ -36,12 +49,41 @@ def test_review_choice_passes_over_a_limited_providers_reviewer(db, repo, monkey
     assert note is not None and "reviewer-sonnet-high" in note
 
 
+def test_routing_checks_the_cap_on_the_effective_model(repo, brindle_home, clock, available, monkeypatch):
+    # No model field: the model comes from the profile's GEMINI_MODEL.
+    for name, model in (("gemini-pro", "gemini-3-pro"), ("gemini-flash", "gemini-3-flash")):
+        _profile(repo, name, f"---\nextends: developer-gemini\nenv.GEMINI_MODEL: {model}\n---\n")
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    quota.record("antigravity", [quota.Window(100, NOW + HOUR, 300, "Gemini Pro 5h")])
+
+    assert "limit reached" in autopilot._unavailable("gemini-pro", RepoConfig(), str(repo))
+    assert autopilot._unavailable("gemini-flash", RepoConfig(), str(repo)) is None
+
+
 @pytest.fixture
-def health(brindle_home, monkeypatch):
+def health(brindle_home, clock):
     from brindle import provider_health
 
-    monkeypatch.setattr(provider_health, "_clock", lambda: NOW)
     return provider_health
+
+
+@pytest.mark.parametrize("events,expected", [
+    pytest.param([("stop-failure", {"error": "rate_limit_error: 429"})], "rate_limited", id="429"),
+    pytest.param([("stop-failure", {"error": "api_error 500"})] * 3, "erroring",
+                 id="three failed turns"),
+    pytest.param([("stop-failure", {"error": "api_error 500"})] * 2 + [("stop", {})]
+                 + [("stop-failure", {"error": "api_error 500"})], "ok", id="a finished turn breaks the run"),
+    pytest.param([("notification", {"message": "Approaching usage limit"})], "closing",
+                 id="the CLI's approaching-limit notice"),
+])
+def test_hooks_record_provider_health(db, repo, health, events, expected):
+    quota.record("antigravity", [quota.Window(50, NOW + DAY, 10080)])
+    ws = workspaces.adopt_root(db, str(repo))
+    db.add_agent(Agent("w", ws.id, "developer-gemini", "antigravity", None,
+                       "interactive", "processing", "@1", None, NOW))
+    for event, payload in events:
+        agents.handle_hook(db, "w", event, payload)
+    assert health.limit("antigravity").state == expected
 
 
 def _windows(*windows):
@@ -72,6 +114,10 @@ def _readings(ph):
                  "closing", id="97 percent with the reset far off"),
     pytest.param(_windows(quota.Window(98, NOW + 600, 300)), None,
                  "ok", id="reset within 20 minutes is waited for"),
+    pytest.param(_windows(quota.Window(99, NOW + 600, 300), quota.Window(98, NOW + DAY, 10080)), None,
+                 "closing", id="a near reset does not hide another closing window"),
+    pytest.param(_windows(quota.Window(97, None, 300)), None,
+                 "ok", id="an unknown reset is not closing"),
     pytest.param(_readings, None, "closing", id="readings project 100 percent"),
     pytest.param(lambda ph: ph.record_rate_limited("antigravity", now=NOW - 60), None,
                  "rate_limited", id="429"),

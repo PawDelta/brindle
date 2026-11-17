@@ -195,6 +195,16 @@ def record_reading(provider: str, used: float, resets_at: float | None, *,
 # -- reading -----------------------------------------------------------------------
 
 
+_NOTICE = re.compile(r"approaching (?:your |the )?(?:usage |rate )?limit"
+                     r"|close to (?:your |the )?(?:usage |rate |session |weekly )?limit"
+                     r"|\b(?:9\d)% of your (?:\w+ )?(?:usage )?limit", re.I)
+
+
+def is_notice(text: str | None) -> bool:
+    """Whether ``text`` is a CLI's approaching-limit notice."""
+    return bool(text and _NOTICE.search(text))
+
+
 def _cap_applies(name: str, model: str | None) -> bool:
     """Whether the one-model cap ``name`` ("Fable", "Gemini Pro 5h") is ``model``'s."""
     if not model:
@@ -234,12 +244,17 @@ def _quota_state(provider: str, model: str | None, now: float, entry: dict) -> H
         w = max(full, key=lambda w: w.resets_at)
         return Health(LIMITED, w.resets_at, f"{label} {w.name} limit reached" if w.name
                       else f"{label} limit reached")
-    w = max(windows, key=lambda w: w.used, default=None)
-    if w is None or (w.resets_at is not None and w.resets_at - now <= CLOSING_MIN_RESET_SECONDS):
-        return None    # it lifts soon enough to wait for
     notice = (_num(entry.get("notice_at")) or 0) > now - NOTICE_SECONDS
-    if notice or w.used >= CLOSING_PERCENT or (w.name is None and _projected_full(entry.get("readings", []), now)):
-        return Health(CLOSING, w.resets_at, f"{label} close to its limit ({w.used:.0f}%)")
+    readings = [r for r in entry.get("readings", []) if isinstance(r, list) and len(r) == 3]
+    projected = _projected_full(readings, now)
+    # Each window on its own: one that lifts within CLOSING_MIN_RESET_SECONDS
+    # (or whose reset is unknown) is waited for, and never hides another.
+    for w in sorted(windows, key=lambda w: -w.used):
+        if w.resets_at is None or w.resets_at - now <= CLOSING_MIN_RESET_SECONDS:
+            continue
+        tracked = w.name is None and projected and readings[-1][2] == w.resets_at
+        if notice or w.used >= CLOSING_PERCENT or tracked:
+            return Health(CLOSING, w.resets_at, f"{label} close to its limit ({w.used:.0f}%)")
     return None
 
 

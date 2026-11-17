@@ -4751,7 +4751,10 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
         )
     from brindle import provider_health
 
-    health = provider_health.check(chosen.provider, model=chosen.model or None, profile=name,
+    from brindle.autopilot import effective_profile_model
+
+    health = provider_health.check(chosen.provider, model=effective_profile_model(chosen, ws.repo_root) or None,
+                                   profile=name,
                                    repo_root=ws.repo_root, env=chosen.env, installed=False)
     if not health.ok:
         raise AgentError(f"reviewer profile {name!r} can't run now: {health.reason}")
@@ -6402,6 +6405,16 @@ def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
         log.exception("brindle: couldn't read the messages absorbed into %s's turn", agent.id)
 
 
+def _note_health(record, provider: str | None) -> None:
+    """Record a provider-health event from a hook; never fails the hook."""
+    if not provider:
+        return
+    try:
+        record(provider)
+    except OSError:
+        log.exception("brindle: couldn't record provider health")
+
+
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``brindle _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
@@ -6531,6 +6544,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:
             db.set_status(agent_id, "waiting")
+        from brindle import provider_health
+
+        if provider_health.is_notice(text):
+            _note_health(provider_health.record_notice, agent.provider)
     elif event == "pre-tool":
         # A tool call means a turn is running. The hooks can miss its start:
         # a turn that a finished background task or a queued message begins
@@ -6550,8 +6567,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         except Exception:  # noqa: BLE001
             log.exception("brindle: couldn't check the brindle MCP server's start")
     elif event == "stop":
-        from brindle import inbox, tasks
+        from brindle import inbox, provider_health, tasks
 
+        # A turn that ended well breaks a run of provider errors.
+        _note_health(provider_health.record_success, agent.provider)
         # A request left to the person with no PostToolUse by the end of the
         # turn wasn't approved (or we can't tell): drop it, learn nothing.
         # Terminal approval commands must remain usable after this reply.
@@ -6683,6 +6702,14 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
         is_model = not is_rate_limit and not is_auth and bool(
             re.search(launch_health.SELECTED_MODEL, err_fields))
+        from brindle import provider_health
+
+        # An overloaded API (529) is the provider's capacity, not this account's usage.
+        overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
+        if is_rate_limit and not overloaded:
+            _note_health(provider_health.record_rate_limited, agent.provider)
+        elif not is_auth and not is_model:
+            _note_health(provider_health.record_error, agent.provider)
         if is_auth or is_model:
             db.update_agent(agent_id, failed_why="auth" if is_auth else "model")
             db.set_status(agent_id, "failed")
@@ -6720,9 +6747,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)
-            # An overloaded API (529) is the provider's capacity, not this
-            # account's usage: it pauses nothing, and its worker is reported.
-            overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
+            # Overloaded (529): it pauses nothing, and its worker is reported.
             if is_rate_limit and not overloaded:
                 from brindle import autopilot as pilot
 

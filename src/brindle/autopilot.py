@@ -865,7 +865,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     cli = CLI_FOR_PROVIDER.get(p.provider)
     # One definition of "can take work now" (refused, installed, signed in,
     # limited, rate limited, erroring, closing); the headroom margin below is routing's own.
-    health = provider_health.check(p.provider, model=p.model or None, profile=name, repo_root=repo_root, env=p.env, installed=bool(cli))
+    health = provider_health.check(p.provider, model=effective_profile_model(p, repo_root) or None,
+                                   profile=name, repo_root=repo_root, env=p.env, installed=bool(cli))
     if health.state == provider_health.SIGNED_OUT:
         return f"{cli} isn't signed in, skipped {name}"
     if health.state == provider_health.NOT_INSTALLED:
