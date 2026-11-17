@@ -52,6 +52,8 @@ class FakeGit:
         self.asked.append(str(path))
         if self.hold:
             self.release.wait()
+        if not (path / ".git" / "refs" / "heads" / ref).exists():
+            raise git.GitError(f"fatal: bad revision '{ref}'")
         status_cache._reported[str(path)] = (None, [])
         return self.status
 
@@ -114,6 +116,22 @@ def test_a_count_gone_stale_before_the_first_snapshot_is_shown_and_recounted_lat
     assert fake_git.asked == []
     assert _counts(rows[ws.id]) == {"ahead": 2, "behind": 0, "dirty": 0}
     assert [w.id for w, _ in later[0]] == [ws.id]
+
+
+def test_a_deleted_base_shows_unknown_once_counted_and_stops_recounting(db, tmp_path, fake_git):
+    ws = _worktree(tmp_path, db, "one", OLD)
+    fake_git.status = git.Status("feat", "main", 2, 0, [], None)
+    status_cache.cached_status(ws.path, "main")                  # counted while main existed
+    (tmp_path / "one" / ".git" / "refs" / "heads" / "main").unlink()   # then the base branch went
+
+    first = view.KnownGit(db)
+    assert first(ws) == view.GitCounts(2, 0, 0) and first.pending   # the last count, recounted later
+    view.warm_later(first.pending).join()
+    events = len(bus.tail(db, repo_root=ws.repo_root))
+
+    again = view.KnownGit(db)
+    assert again(ws) == view.GitCounts() and again.pending == []    # the failure stands: nothing to redo
+    assert view.warm_later(again.pending) is None and len(bus.tail(db, repo_root=ws.repo_root)) == events
 
 
 @pytest.mark.parametrize("ahead, told", [

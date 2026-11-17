@@ -785,9 +785,11 @@ def known(path: str | Path, base: str | None, now: float | None = None) -> tuple
             refs = _refs_key(wt_gitdir, common, base_ref[1], hit.upstream if hit is not None else None)
     except OSError:
         fp = refs = None
+    if failed is not None and fp is not None and failed[:2] == (fp, refs):
+        return None, True       # it failed since its last count, and would again (cached_status checks it first too)
     if hit is not None:
         return hit.status, fp is not None and hit.fp == fp and hit.refs == refs and now - hit.checked_at < TTL
-    return None, fp is not None and failed[:2] == (fp, refs)
+    return None, False
 
 
 def commits(path: str | Path, base: str) -> tuple[str, str | None, str | None] | None:
