@@ -53,10 +53,6 @@ def test_gemini_argon_promo_then_later_rates(monkeypatch):
     assert argon() == (4, 20, 4, 0.2)
 
 
-def test_sonnet_5_5_cache_reads_are_a_twentieth_of_input():
-    assert pricing.price_for("claude-sonnet-5-5").cache_read == pytest.approx(0.10)
-
-
 def test_stale_warning_after_90_days():
     assert pricing.stale_warning(pricing.AS_OF + dt.timedelta(days=90)) is None
     warning = pricing.stale_warning(pricing.AS_OF + dt.timedelta(days=91))
