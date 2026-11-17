@@ -207,7 +207,11 @@ def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, f
 
 
 
-@pytest.mark.parametrize("body", ["Fixes a bug.", "Fixes a bug.\n\nBuilt with [brindle](https://pawdelta.com/brindle)", ""])
+@pytest.mark.parametrize("body", [
+    pytest.param("Fixes a bug.", marks=pytest.mark.variant("the plain body gets the footer appended")),
+    "Fixes a bug.\n\nBuilt with [brindle](https://pawdelta.com/brindle)",
+    pytest.param("", marks=pytest.mark.variant("an empty body becomes just the footer")),
+])
 def test_pr_body_ends_with_the_footer_exactly_once(feature, monkeypatch, body):
     seen = []
     monkeypatch.setattr(workspaces.git, "push", lambda *a, **k: None)
