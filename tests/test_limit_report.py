@@ -68,3 +68,40 @@ def test_a_429_short_of_the_limit_pauses_nothing_and_runs_the_turn_again(db, ses
     later = time.time() + provider_health.RATE_LIMIT_SECONDS + 1
     assert limit_report.rerun_due(db, now=later) and sent == ["w1"]
     assert limit_report.rerun_due(db, now=later) == [] and sent == ["w1"]   # once
+
+
+def rate_limited_then(db, monkeypatch, percent_later):
+    """w1's turn stops on a 429 at 40% use; the usage reads ``percent_later``
+    by the time the rate limit lifts. Returns what was sent to whom."""
+    from brindle import limit_report
+
+    use(40)
+    agents.handle_hook(db, "w1", "stop-failure", {"error": "rate_limit", "error_type": "rate_limit"})
+    use(percent_later)
+    sent = []
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **kw: sent.append((to, body)))
+    return limit_report, sent, time.time() + provider_health.RATE_LIMIT_SECONDS + 1
+
+
+def test_a_turn_run_since_the_429_drops_its_rerun(db, session, monkeypatch):
+    limit_report, sent, later = rate_limited_then(db, monkeypatch, 40)
+    stop = db.get_agent("w1").status_since
+    db.set_status("w1", "processing")                 # its supervisor sent it a new turn,
+    db.update_agent("w1", status="idle", status_since=stop + 1)   # which finished before the sweep
+    assert limit_report.rerun_due(db, now=later) == [] and sent == []
+
+
+def test_a_window_filled_since_the_429_is_reported_not_run_again(db, session, monkeypatch):
+    _, stopped = session
+    limit_report, sent, later = rate_limited_then(db, monkeypatch, 100)
+    assert limit_report.rerun_due(db, now=later)
+    assert stopped == ["w1"] and [to for to, _ in sent] == ["boss"] and "notes.txt" in sent[0][1]
+
+
+def test_repeated_overloads_report_the_worker_in_full(db, session):
+    ws, stopped = session
+    for i in range(provider_health.ERROR_COUNT):
+        db.update_agent("w1", status="processing", status_since=NOW + i)
+        agents.handle_hook(db, "w1", "stop-failure", {"error": "overloaded_error (529)"})
+    assert stopped == [] and db.get_autopilot("boss").state == "running"
+    assert any("notes.txt" in body and ws.branch in body for body in inbox(db, "boss"))

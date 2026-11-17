@@ -6765,10 +6765,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             db.clear_permission_requests(agent_id)
             from brindle import limit_report
 
-            # Overloaded (529): it pauses nothing, and its worker is reported.
+            # Overloaded (529): it pauses nothing, and its worker is reported
+            # (in full once the provider is erroring).
             stopped = db.get_agent(agent_id)
-            if stopped is not None and not overloaded:
-                limit_report.on_stop_failure(db, stopped, rate_limited=is_rate_limit)
+            if stopped is not None:
+                limit_report.on_stop_failure(db, stopped, rate_limited=is_rate_limit and not overloaded,
+                                             overloaded=overloaded)
             current = db.get_agent(agent_id)
             # Not paused for a usage limit, reported at its limit or running its
             # turn again; agy's own stop tells its parent itself.

@@ -27,8 +27,8 @@ from brindle.db import DB, Agent, Workspace
 
 log = logging.getLogger(__name__)
 
-RERUN_MARK = "limit-rerun"      # agent_marks: when its rate-limited turn runs again
-RERUNNING = "sending"           # the mark while one sweep types the rerun in
+RERUN_MARK = "limit-rerun"      # agent_marks: "<when> <stop>", the rate-limited turn to run again
+RERUNNING = "sending"           # the mark's first word while one sweep acts on it
 LISTED = 8                      # commits and files named; the rest are counted
 REPORTED = (provider_health.LIMITED, provider_health.SIGNED_OUT, provider_health.ERRORING)
 
@@ -157,83 +157,128 @@ def told(db: DB, agent: Agent) -> bool:
     return db.mark(agent.id, agents.API_ERROR_MARK) == agents.api_error_stop(agent)
 
 
-def on_stop_failure(db: DB, agent: Agent, *, rate_limited: bool, now: float | None = None) -> None:
-    """``agent``'s turn just ended on a provider error (``rate_limited``: a
-    429), its health already recorded. At the limit (a full window) or with
-    the provider ``erroring``: autopilot pauses or blocks as it must and the
-    supervisor is told now. A 429 short of the limit pauses nothing: the
-    turn runs again in place once the rate limit lifts."""
-    from brindle import autopilot as pilot
-
+def health_of(db: DB, agent: Agent, now: float | None = None) -> provider_health.Health | None:
+    """``agent``'s provider (and model) health, or None when it can't be read."""
     ws = db.get_workspace(agent.workspace_id)
     try:
-        health = provider_health.limit(agent.provider, model_of(agent, ws) or None, now=now)
+        return provider_health.limit(agent.provider, model_of(agent, ws) or None, now=now)
     except OSError:
         log.exception("brindle: couldn't read %s's provider health", agent.id)
-        return
+        return None
+
+
+def at_limit(db: DB, agent: Agent, health: provider_health.Health) -> bool:
+    """At the limit (a full window) or with the provider ``erroring``:
+    autopilot pauses or blocks as it must and the supervisor is told now.
+    Returns whether ``health`` was either."""
+    from brindle import autopilot as pilot
+
     if health.state == provider_health.LIMITED:
         nxt = pilot.limit_reached(db, agent, health.until)
         tell(db, agent, health, nxt or (
             "nothing on its own outside autopilot: the worker stays idle at its prompt. "
             "send_message it once the limit lifts, assign the task to another profile, "
             "or remove_workspace if the work is abandoned"))
-    elif health.state == provider_health.ERRORING:
+        return True
+    if health.state == provider_health.ERRORING:
         tell(db, agent, health, (
             f"brindle routes new work away from {agent.provider} until {when(health.until)}; "
             "the worker stays idle at its prompt and won't go on by itself: send_message it then, "
             "assign the task to another profile, or remove_workspace if the work is abandoned"))
-    elif rate_limited:
-        # Its own supervisor (or the person) sends a supervisor its next turn
-        # outside autopilot; a worker, or an autopilot supervisor, goes on by itself.
-        if agent.mode != "interactive" or db.get_autopilot(pilot.root_of(db, agent.id)):
-            at = health.until if health.state == provider_health.RATE_LIMITED and health.until else (
-                (time.time() if now is None else now) + provider_health.RATE_LIMIT_SECONDS)
-            schedule_rerun(db, agent, at)
+        return True
+    return False
+
+
+def on_stop_failure(db: DB, agent: Agent, *, rate_limited: bool, overloaded: bool = False,
+                    now: float | None = None) -> None:
+    """``agent``'s turn just ended on a provider error (``rate_limited``: a
+    429; ``overloaded``: a 529), its health already recorded. At the limit or
+    with the provider erroring, ``at_limit``. An overload is never the
+    account's limit: it is reported in full only once the provider is
+    ``erroring``. A 429 short of the limit pauses nothing: the turn runs
+    again in place once the rate limit lifts."""
+    from brindle import autopilot as pilot
+
+    health = health_of(db, agent, now)
+    if health is None:
+        return
+    if overloaded:
+        if health.state == provider_health.ERRORING:
+            at_limit(db, agent, health)
+        return
+    if at_limit(db, agent, health) or not rate_limited:
+        return
+    # Its own supervisor (or the person) sends a supervisor its next turn
+    # outside autopilot; a worker, or an autopilot supervisor, goes on by itself.
+    if agent.mode != "interactive" or db.get_autopilot(pilot.root_of(db, agent.id)):
+        at = health.until if health.state == provider_health.RATE_LIMITED and health.until else (
+            (time.time() if now is None else now) + provider_health.RATE_LIMIT_SECONDS)
+        schedule_rerun(db, agent, at)
 
 
 # -- a 429 that isn't the limit: the turn runs again in place ----------------------
 
 
 def schedule_rerun(db: DB, agent: Agent, at: float) -> None:
-    """Run ``agent``'s turn again once its rate limit lifts at ``at``. Its
-    stop needs no API-error notice: it goes on by itself."""
+    """Run the turn ``agent`` stopped on (as read at that stop) again once
+    its rate limit lifts at ``at``. Its stop needs no API-error notice: it
+    goes on by itself."""
     from brindle import agents
 
-    db.set_mark(agent.id, agents.API_ERROR_MARK, agents.api_error_stop(agent))
-    db.set_mark(agent.id, RERUN_MARK, repr(float(at)))
+    stop = agents.api_error_stop(agent)
+    db.set_mark(agent.id, agents.API_ERROR_MARK, stop)
+    db.set_mark(agent.id, RERUN_MARK, f"{float(at)!r} {stop}")
+
+
+def _drop(db: DB, agent_id: str, value: str) -> None:
+    if db.mark(agent_id, RERUN_MARK) == value:
+        db.set_mark(agent_id, RERUN_MARK, None)
 
 
 def rerun_due(db: DB, now: float | None = None) -> list[str]:
-    """Type the turn back into every agent whose rate limit has lifted.
-    One that started working again meanwhile (its supervisor or the person
-    sent it something) keeps that work: its rerun is dropped."""
+    """Type the turn back into every agent whose rate limit has lifted, if
+    it is still at the stop that turn ended on. One that ran another turn
+    meanwhile (its supervisor or the person sent it something) keeps that
+    work: its rerun is dropped. One whose provider reached its limit or
+    began erroring meanwhile is reported (``at_limit``) instead."""
     from brindle import agents, tmux
 
     now = time.time() if now is None else now
     done = []
     for row in db.marks_of_kind(RERUN_MARK):
         agent_id, value = row["agent_id"], row["value"]
+        first, _, stop = value.partition(" ")
+        if first == RERUNNING:
+            continue    # another sweep is acting on it
         try:
-            at = float(value)
+            at = float(first)
         except ValueError:
-            continue    # another sweep is typing it in
+            _drop(db, agent_id, value)
+            continue
         agent = db.get_agent(agent_id)
         if (agent is None or agent.status != "idle" or agent.dismissed_at is not None
-                or agent.result is not None):
-            if db.mark(agent_id, RERUN_MARK) == value:
-                db.set_mark(agent_id, RERUN_MARK, None)
+                or agent.result is not None or agents.api_error_stop(agent) != stop):
+            _drop(db, agent_id, value)
             continue
         if now < at:
             continue
-        health = provider_health.limit(agent.provider, now=now)
-        if health.state == provider_health.RATE_LIMITED:
+        health = health_of(db, agent, now)
+        if health is None or health.state == provider_health.RATE_LIMITED:
             continue    # another 429 since: wait for that one too
-        if not db.replace_mark(agent_id, RERUN_MARK, value, RERUNNING):
+        claimed = f"{RERUNNING} {stop}"
+        if not db.replace_mark(agent_id, RERUN_MARK, value, claimed):
+            continue
+        if health.state in (provider_health.LIMITED, provider_health.ERRORING):
+            db.set_mark(agent_id, RERUN_MARK, None)
+            if db.mark(agent_id, agents.API_ERROR_MARK) == stop:
+                db.set_mark(agent_id, agents.API_ERROR_MARK, None)   # its notice is owed after all
+            at_limit(db, agent, health)
+            done.append(f"{agent_id}'s rate-limited turn met {health.state}: reported, not run again")
             continue
         try:
             agents.send_message(db, agent_id, RERUN_PROMPT)
         except (agents.AgentError, tmux.TmuxError):
-            db.replace_mark(agent_id, RERUN_MARK, RERUNNING, value)   # the next sweep tries again
+            db.replace_mark(agent_id, RERUN_MARK, claimed, value)   # the next sweep tries again
             continue
         db.set_mark(agent_id, RERUN_MARK, None)
         done.append(f"ran {agent_id}'s rate-limited turn again")
