@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.requests import Request
 
+from brindle import git as git_mod
 from brindle import org_permissions
 from brindle.daemon import routes_actions as actions
 from brindle.daemon import routes_visuals
@@ -109,13 +110,21 @@ def test_library_pages_ask_the_server_at_once(read, expected, monkeypatch):
     assert read(monkeypatch, api) == expected
 
 
+def _checkout(path, head):
+    """A checkout's git files on ``head`` (what brindle reads without git)."""
+    (path / ".git" / "refs" / "heads").mkdir(parents=True)
+    (path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (path / ".git" / "refs" / "heads" / "main").write_text(head + "\n")
+
+
 def test_integrations_page_reads_each_repos_identity_once(tmp_path, monkeypatch):
     """Settings › Integrations maps every repo brindle knows: its root commit
-    (a whole-history git walk) is asked once, and again only when the repo at
-    that path is a new one (a new .git)."""
+    (a whole-history git walk) is asked once per HEAD, and again when the
+    history it is asked of changes: a new commit, a deepened clone, another
+    repo at that path."""
     roots = []
     for name in ("alpha", "beta"):
-        (tmp_path / name / ".git").mkdir(parents=True)
+        _checkout(tmp_path / name, "1" * 40)
         roots.append(str(tmp_path / name))
     asked = []
 
@@ -124,7 +133,7 @@ def test_integrations_page_reads_each_repos_identity_once(tmp_path, monkeypatch)
         return SHA + "\n"
 
     monkeypatch.setattr(orgkey, "_git", git)
-    monkeypatch.setattr(orgkey, "_ROOT_COMMITS", {}, raising=False)
+    monkeypatch.setattr(git_mod, "_ONCE", {})
     monkeypatch.setattr(orgkey.OrgKeys, "get", lambda self, org: orgkey.OrgKey(org, "k1", b"\x01" * 32))
 
     first = wi.local_repos(roots, "org_1")
@@ -133,7 +142,16 @@ def test_integrations_page_reads_each_repos_identity_once(tmp_path, monkeypatch)
     assert wi.local_repos(roots, "org_1") == first
     assert asked == []
 
-    (tmp_path / "beta" / ".git").rename(tmp_path / "beta" / "old-git")
-    (tmp_path / "beta" / ".git").mkdir()
+    beta = tmp_path / "beta"
+    (beta / ".git" / "refs" / "heads" / "main").write_text("2" * 40 + "\n")   # a new commit (an amended root, a merge)
+    wi.local_repos(roots, "org_1")
+    assert asked == [roots[1]]
+    asked.clear()
+    (beta / ".git" / "shallow").write_text("3" * 40 + "\n")                   # the clone deepened or made shallow
+    wi.local_repos(roots, "org_1")
+    assert asked == [roots[1]]
+    asked.clear()
+    (beta / ".git").rename(tmp_path / "old-git")                              # another repo at the same path
+    _checkout(beta, "4" * 40)
     wi.local_repos(roots, "org_1")
     assert asked == [roots[1]]
