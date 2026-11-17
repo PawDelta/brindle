@@ -178,7 +178,10 @@ def test_cross_session_clash_queues_and_notifies(db, repo, two_sessions):
     assert [t.agent_id for t in db.list_tasks(str(repo), state="started")] == [b]
 
 
-def test_queued_task_starts_from_holder_merge(db, repo, two_sessions, monkeypatch):
+def test_queued_task_waits_for_holder_session_not_its_merge(db, repo, two_sessions, monkeypatch):
+    """Once B's worker merges into B's session branch, A's task never starts
+    from that merge (it would carry B's session's commits): it waits on B's
+    session branch, which still holds the file."""
     b = two_sessions
     asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["src/x.py"]))
     ws_b = db.get_workspace(db.get_agent(b).workspace_id)
@@ -195,11 +198,10 @@ def test_queued_task_starts_from_holder_merge(db, repo, two_sessions, monkeypatc
     monkeypatch.setenv("BRINDLE_AGENT_ID", "rootB")
     out = asyncio.run(mcp_server.merge_workspace(ws_b.id))
     assert out.startswith("Merged"), out
-    assert starts == [db.merged_sha(ws_b.id)]
+    assert starts == []
     [a_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-a"]
-    assert a_task.state == "started"
-    assert [e["kind"] for e in bus.tail(db, kinds=("task.queued", "task.started"))
-            if e["task_id"] == a_task.id] == ["task.queued", "task.started"]
+    assert a_task.state == "pending"
+    assert f"workspace:{db.get_agent('rootB').workspace_id}" in tasks._loads(a_task.depends_on)
 
 
 # -- dependencies: queue until merge, then auto-start --------------------------

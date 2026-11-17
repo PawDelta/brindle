@@ -378,9 +378,10 @@ def _session_overlaps(db: DB, ws: Workspace, files: list[str], own: set[str],
                       task_id: str | None = None, caller_id: str | None = None) -> Iterator[Clash]:
     pending = db.get_task(task_id) if task_id else None
     isolate = bool(pending.isolate) if pending else True
-    # A satisfied cross-session dependency can supply the new branch's
-    # starting commit. Its inherited changes must not hold the task again.
-    start = _holder_start(db, ws, _loads(pending.depends_on)) if pending and isolate else None
+    # A satisfied dependency of the task's own session can supply the new
+    # branch's starting commit. Its inherited changes must not hold the task again.
+    start = (_holder_start(db, ws, _loads(pending.depends_on), pending.caller_id)
+             if pending and isolate else None)
     caller = db.get_agent(caller_id) if caller_id else None
     for root, holder, branch, changed in _session_changes(db, ws, own, start, caller, isolate):
         shared = _overlap_files(files, [], list(changed))
@@ -934,7 +935,7 @@ def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: flo
     files = _loads(t.files)
     deps = _loads(t.depends_on)
     isolate = bool(t.isolate)
-    start = _holder_start(db, caller_ws, deps) if isolate else None
+    start = _holder_start(db, caller_ws, deps, t.caller_id) if isolate else None
     caller = db.get_agent(t.caller_id) if t.caller_id else None
     own = _own_roots(db, caller_ws, t.caller_id)
     for _root, holder, _branch, changed in _session_changes(db, caller_ws, own, start, caller, isolate):
@@ -1740,12 +1741,32 @@ def pending_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: 
                  if t.caller_id == caller_id and t.task_text == task_text), None)
 
 
-def _holder_start(db: DB, caller_ws: Workspace, depends_on: list[str]) -> str | None:
+def _dep_session_roots(db: DB, task: Task | None, agent: Agent | None, dep_ws: Workspace) -> set[str]:
+    """The sessions a dependency (its task, its worker, or just its worktree
+    ``dep_ws``) belongs to; empty when that can't be told."""
+    from brindle import autopilot
+
+    if task is not None and task.caller_id:
+        return {autopilot.root_of(db, task.caller_id)}
+    if agent is not None:
+        return {autopilot.root_of(db, agent.id)}
+    return {autopilot.root_of(db, a.id) for a in db.list_agents(dep_ws.id)}
+
+
+def _holder_start(db: DB, caller_ws: Workspace, depends_on: list[str],
+                  caller_id: str | None = None) -> str | None:
     """The commit a queued task's branch must start from: a dependency's
-    merge commit that ``caller_ws``'s branch lacks, as when the holder merged
-    into another session. Dependencies may name tasks, workers or workspaces
-    directly; None means start from the caller's branch."""
+    merge commit that ``caller_ws``'s branch lacks, only for a dependency of
+    the task's own session (``caller_id``'s, else ``caller_ws``'s). Another
+    session's work never supplies it, whatever the task waited on: that
+    work reaches this session through its own route to main. Dependencies
+    may name tasks, workers or workspaces directly; None means start from
+    the caller's branch."""
+    own = _own_roots(db, caller_ws, caller_id)
+    if not own:
+        return None
     for dep in depends_on:
+        task = agent = None
         if dep.startswith("workspace:"):
             dep_ws = db.get_workspace(dep.removeprefix("workspace:"))
         else:
@@ -1754,6 +1775,9 @@ def _holder_start(db: DB, caller_ws: Workspace, depends_on: list[str]) -> str | 
             dep_ws = db.get_workspace(agent.workspace_id) if agent else None
         if dep_ws is None or dep_ws.repo_root != caller_ws.repo_root:
             continue
+        roots = _dep_session_roots(db, task, agent, dep_ws)
+        if not roots or not roots <= own:
+            continue   # another session's work, or nobody's that can be told
         sha = db.merged_sha(dep_ws.id)
         if not sha or not git.ok(["cat-file", "-e", f"{sha}^{{commit}}"], caller_ws.path):
             continue   # no merge record, or its commit is gone
@@ -1765,7 +1789,8 @@ def _holder_start(db: DB, caller_ws: Workspace, depends_on: list[str]) -> str | 
 def start_queued(db: DB, task: Task) -> Agent:
     """Start a queued task now that its dependencies are met, cutting its
     branch from the caller workspace's current (updated) base, or from a
-    dependency's merge commit that base lacks (``_holder_start``)."""
+    merge commit of its own session's dependency that base lacks
+    (``_holder_start``); never from another session's branch."""
     from brindle.config import load_repo_config
 
     caller_ws = db.get_workspace(task.caller_ws_id)
@@ -1800,7 +1825,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         db, caller, caller_ws, profile, task.task_text, task.mode,
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
-        start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
+        start=_holder_start(db, caller_ws, _loads(task.depends_on), task.caller_id), files=_loads(task.files),
         weight=launch_weight, milestone=db.task_milestone(task.id),
         admit=False,   # every caller has just looked for room (_start_if_ready, requeue)
         # Nobody waits on a queued handoff (its reply said "queued" long ago):
