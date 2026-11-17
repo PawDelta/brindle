@@ -66,6 +66,7 @@ describe("account screen", () => {
     const claudeRow = within(claudeCard).getAllByRole("meter")[0].parentElement!;
     const meters = within(agyCard).getAllByRole("meter");
     expect(meters).toHaveLength(2);
+    expect(meters.map((meter) => meter.getAttribute("aria-label"))).toEqual(["Gemini Pro, 5-hour", "Gemini Flash, weekly"]);
     meters.forEach((meter, i) => {
       const row = meter.parentElement!;
       expect(row.className).toBe(claudeRow.className);
