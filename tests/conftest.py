@@ -686,6 +686,25 @@ def gh_sign_in_unknown(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def daemon_read_caches_fresh(monkeypatch):
+    """The daemon's read caches start empty in every test, a GET /sessions
+    always asks tmux (tests/test_load_speed_new_session.py turns the shared
+    look back on), GET /providers/usable's background re-check runs before
+    the request returns, under the test's own fakes and home, and GET /repos
+    treats no folder as the system's temp one."""
+    from brindle.daemon import routes_read
+
+    if not hasattr(routes_read, "_PaneView"):     # an engine without them (brindle baseline)
+        return
+    monkeypatch.setattr(routes_read, "_pane_view", routes_read._PaneView())
+    monkeypatch.setattr(routes_read, "PANE_VIEW_MAX_AGE", 0.0)
+    monkeypatch.setattr(routes_read, "_usable_cache", routes_read._UsableCache())
+    monkeypatch.setattr(routes_read, "_repo_seen", {})
+    monkeypatch.setattr(routes_read, "TEMP_ROOTS", ())     # every test's repos are in a temp folder
+    monkeypatch.setattr(routes_read, "_start_usable_refresh", routes_read._run_usable_refresh)
+
+
+@pytest.fixture(autouse=True)
 def cli_sign_in_unknown(monkeypatch):
     """No test asks the real claude or codex whether they're signed in (the
     temporary CLAUDE_CONFIG_DIR would say no); tests/test_signin.py fakes it."""

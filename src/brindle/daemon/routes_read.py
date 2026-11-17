@@ -7,8 +7,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
 import posixpath
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -151,21 +153,110 @@ def _last4(value: str) -> str:
     return value[-4:] if len(value) > 8 else ""
 
 
+# The system's temporary folders: a repo there (a benchmark's, a test's) is
+# listed only while a session runs in it.
+TEMP_ROOTS = ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/")
+# How long a repo's "still a git repo on disk" answer is kept.
+REPO_SEEN_TTL = 60.0
+_repo_seen: dict[str, float] = {}
+
+
+def _still_a_repo(root: str, now: float) -> bool:
+    """Whether ``root`` is still a git checkout on disk (a stat, no git). A
+    yes is kept a while; a no is asked again (a repo cloned back shows at once)."""
+    seen = _repo_seen.get(root)
+    if seen is not None and now - seen <= REPO_SEEN_TTL:
+        return True
+    there = os.path.exists(os.path.join(root, ".git"))
+    if there:
+        _repo_seen[root] = now
+    return there
+
+
 @_json
 def repos(db: DB, request: Request) -> Any:
-    roots = sorted({ws.repo_root for ws in db.find_workspaces(None)})
+    """The person's projects, most recently used first: each repo brindle has
+    worked in that is still a git repo on disk. A repo in a system temp folder
+    and a scratch session are listed only while a session runs there: its
+    chat's pane is up and still its own, as sessions.live judges it, from the
+    tmux look GET /sessions shares (no git on this path, and tmux only when
+    such a repo has a chat that may be running). brindle's own repos
+    (practice runs) are listed as before, flagged ``demo``."""
+    from brindle import scratch
+    from brindle.config import brindle_home
     from brindle.demo import is_demo_repo
 
+    now = time.monotonic()
+    home = str(brindle_home()).rstrip("/") + "/"
+    scratch_root = str(scratch.scratch_dir()).rstrip("/") + "/"
+    look: list = []
+
+    def running(chats: list[str]) -> bool:
+        if not chats:
+            return False
+        if not look:
+            look.extend(_shared_panes(db))
+        panes, owners = look
+        return any(a is not None and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)
+                   for a in map(db.get_agent, chats))
+
+    listed = []
+    for root, (used, chats) in db.repo_activity().items():
+        mine = root.startswith(home)      # brindle's own (practice runs, scratch), wherever its home is
+        if root.startswith(scratch_root):
+            keep = running(chats)
+        elif not _still_a_repo(root, now):
+            keep = False
+        else:
+            keep = mine or not root.startswith(TEMP_ROOTS) or running(chats)
+        if keep:
+            listed.append((used, root))
+    listed.sort(key=lambda u: (-u[0], u[1]))
     return [RepoDTO(repo_root=r, name=r.rstrip("/").rsplit("/", 1)[-1], demo=is_demo_repo(r)).to_json()
-            for r in roots]
+            for _, r in listed]
+
+
+# The app reads every repo's sessions at once (GET /sessions per repo, after
+# every bus event): one tmux snapshot and its pane owners answer the whole
+# burst, not one each. Kept while no new event is written and for at most
+# PANE_VIEW_MAX_AGE (a pane dying writes no event).
+PANE_VIEW_MAX_AGE = 2.0
+
+
+@dataclasses.dataclass
+class _PaneView:
+    lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    event: int = -1
+    at: float = -math.inf
+    panes: Any = None
+    owners: dict[str, str] | None = None
+
+
+_pane_view = _PaneView()
+
+
+def _shared_panes(db: DB) -> tuple[Any, dict[str, str]]:
+    """The tmux snapshot and pane owners for this read: the one a read just
+    before took, while still current, else a fresh one. Concurrent reads wait
+    for the one taking it rather than each asking tmux."""
+    newest = db.conn.execute("SELECT MAX(id) FROM events").fetchone()[0] or 0
+    view = _pane_view
+    with view.lock:
+        now = time.monotonic()
+        if view.owners is None or view.event != newest or now - view.at >= PANE_VIEW_MAX_AGE:
+            panes = tmux.list_panes()
+            view.owners = agents.pane_owners(db, panes)
+            view.panes, view.event, view.at = panes, newest, now
+        return view.panes, view.owners
 
 
 @_json
 def list_sessions(db: DB, request: Request) -> Any:
     repo = _need_repo(request)
-    live = [SessionDTO.from_agent(s.root, s.goal).to_json() for s in sessions.live(db, repo)]
+    panes, owners = _shared_panes(db)
+    live = [SessionDTO.from_agent(s.root, s.goal).to_json() for s in sessions.live(db, repo, panes, owners)]
     paused = [SessionDTO.from_agent(s.root, sessions.goal_line(db, s.root)).to_json()
-              for s in sessions.paused(db, repo) if s.root.dismissed_at is None]
+              for s in sessions.paused(db, repo, panes, owners) if s.root.dismissed_at is None]
     listed = {row["id"]: row for row in live + paused}
     live_ids = {row["id"] for row in live}
     recovery = getattr(request.app.state, "recovery", None)
@@ -703,18 +794,106 @@ def providers_installed(db: DB, request: Request) -> Any:
     return providers_install.statuses()
 
 
+# GET /providers/usable answers from the last full answer for the repo: telling
+# whether each CLI is signed in runs the CLI (a second or more for them all),
+# which the New session page must not wait on. Each ask has the answer worked
+# out again on a thread of its own (the first answer is told without running
+# any CLI); one that changes is published as a "providers.usable" event, and
+# the page asks again.
+
+
+@dataclasses.dataclass
+class _UsableCache:
+    lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    answers: dict[str, dict] = dataclasses.field(default_factory=dict)   # repo → its last answer
+    refreshing: set[str] = dataclasses.field(default_factory=set)
+    again: set[str] = dataclasses.field(default_factory=set)       # asked for while one ran
+
+
+_usable_cache = _UsableCache()
+
+
+def _usable_answer(db: DB, repo: str) -> dict:
+    from brindle.service import sessions as svc
+
+    known = db.conn.execute("SELECT 1 FROM workspaces WHERE repo_root=? LIMIT 1", (repo,)).fetchone()
+    root = repo if known else git.main_repo_root(repo)   # a repo brindle knows needs no git to name it
+    usable = svc.usable_providers(root)
+    return {"usable": usable, "default": usable[0] if usable else None}
+
+
+def _refresh_usable(repo: str) -> None:
+    """Work ``repo``'s answer out again in the background. While one already
+    runs (it may have begun before a sign-in this ask is about), one more
+    follows it: never more than one running and one waiting."""
+    with _usable_cache.lock:
+        if repo in _usable_cache.refreshing:
+            _usable_cache.again.add(repo)
+            return
+        _usable_cache.refreshing.add(repo)
+    _start_usable_refresh(repo)
+
+
+def _start_usable_refresh(repo: str) -> None:
+    # A plain thread: a fresh context, so no request's deadline cuts the CLIs' checks short.
+    threading.Thread(target=_run_usable_refresh, args=(repo,), name="brindle-usable-refresh",
+                     daemon=True).start()
+
+
+def _run_usable_refresh(repo: str) -> None:
+    from brindle import bus
+
+    try:
+        db = DB()
+        try:
+            answer = _usable_answer(db, repo)
+            with _usable_cache.lock:
+                before = _usable_cache.answers.get(repo)
+                _usable_cache.answers[repo] = answer
+            if before != answer:
+                bus.publish(db, "providers.usable", repo_root=repo, **answer)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - the last answer stands; the next read tries again
+        log.debug("brindle: refreshing the usable CLIs for %s failed", repo, exc_info=True)
+    finally:
+        with _usable_cache.lock:
+            follow = repo in _usable_cache.again
+            _usable_cache.again.discard(repo)
+            if not follow:
+                _usable_cache.refreshing.discard(repo)
+        if follow:      # still marked running: the waiting one goes now
+            _start_usable_refresh(repo)
+
+
 @_json
 def providers_usable(db: DB, request: Request) -> Any:
     """What a new supervisor session in ``repo`` can run on, by the rule POST
     /sessions starts by (service.sessions.supervisor_provider): ``usable``,
     each CLI that is installed, signed in, turned on and allowed by the org's
     policy, in preference order, and ``default``, the one a start with no
-    provider runs on (null when none is usable: such a start is refused)."""
-    from brindle.service import sessions as svc
+    provider runs on (null when none is usable: such a start is refused).
+    Answered at once from the last answer, re-checked behind the reply: no CLI runs here."""
+    from brindle import providers
 
-    root = git.main_repo_root(_need_repo(request))
-    usable = svc.usable_providers(root)
-    return {"usable": usable, "default": usable[0] if usable else None}
+    repo = _need_repo(request)
+    with _usable_cache.lock:
+        got = _usable_cache.answers.get(repo)
+    if got is None:
+        # The first ask: each sign-in as last told (a CLI not yet asked counts as signed in,
+        # which a start's preflight still checks), while the full answer is worked out.
+        with providers.no_sign_in_probes():
+            answer = _usable_answer(db, repo)
+        with _usable_cache.lock:
+            _usable_cache.answers.setdefault(repo, answer)
+        _refresh_usable(repo)
+        return answer
+    # Every ask has it worked out again behind the reply (one at a time per repo): a sign-in,
+    # an install or a CLI turned on since tells nothing brindle watches, and the page asks only
+    # when it opens or hears the answer changed. A CLI signed in stays told (providers.SIGNED_IN_TTL),
+    # so the check behind a page that opens again and again is mostly free.
+    _refresh_usable(repo)
+    return got
 
 
 @_json

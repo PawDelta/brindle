@@ -39,13 +39,17 @@ class Session:
         return self.root.status_since or self.root.created_at
 
 
-def paused(db: DB, repo_root: str) -> list[Session]:
+def paused(db: DB, repo_root: str, panes: tmux.PaneSnapshot | None = None,
+           owners: dict[str, str] | None = None) -> list[Session]:
     """Paused sessions whose chat ran in ``repo_root``, newest first. A
     "failed" chat whose pane is still running isn't one: that status also
     marks a live chat (a brief whose delivery wasn't confirmed, an auth error
-    on one turn), and dropping it (see enforce) would close it mid-session."""
+    on one turn), and dropping it (see enforce) would close it mid-session.
+    ``panes`` and ``owners``: a snapshot and its pane_owners to read instead
+    of asking tmux (both or neither)."""
     out = []
-    panes = owners = None
+    if panes is None or owners is None:
+        panes = owners = None
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
             if a.mode == "interactive" and a.status == "failed":
@@ -91,16 +95,20 @@ def goal_line(db: DB, root: Agent) -> str:
     return line if len(line) <= 60 else line[:59] + "…"
 
 
-def live(db: DB, repo_root: str) -> list[LiveSession]:
+def live(db: DB, repo_root: str, panes: tmux.PaneSnapshot | None = None,
+         owners: dict[str, str] | None = None) -> list[LiveSession]:
     """Live interactive sessions in every workspace of ``repo_root`` (the
     checkout and its ``brindle/session-N`` worktrees), newest first. An agent
     whose recorded pane id a newer agent has since taken (tmux reuses ids)
     isn't live: that pane is the newer agent's. One tmux call answers for
-    every agent, not one per agent (the app's first load waited on those)."""
+    every agent, not one per agent (the app's first load waited on those).
+    ``panes`` and ``owners``: a snapshot and its pane_owners to read instead
+    (both or neither), shared by a burst of reads over many repos."""
     from brindle.view import past_worker
 
-    panes = tmux.list_panes()
-    owners = agents.pane_owners(db, panes)
+    if panes is None or owners is None:
+        panes = tmux.list_panes()
+        owners = agents.pane_owners(db, panes)
     out = []
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
