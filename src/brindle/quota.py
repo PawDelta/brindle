@@ -104,6 +104,16 @@ def record(provider: str, windows: list[Window] | None = None, *,
         entry["limited_until"] = old["limited_until"]
     data[key] = entry
     _save(data)
+    plan = [w for w in windows or [] if w.name is None]
+    if plan:
+        # The readings the provider-health projection of a closing window runs on.
+        w = max(plan, key=lambda w: w.used)
+        from brindle import provider_health
+
+        try:
+            provider_health.record_reading(provider, w.used, w.resets_at, key=key)
+        except OSError:
+            pass
 
 
 def record_limit(provider: str, cfg: RepoConfig | None = None, *, now: float | None = None) -> float:
@@ -124,10 +134,11 @@ def _from_entry(provider: str, e: dict) -> Quota:
                  _number(e.get("updated_at")) or 0.0, str(e.get("source") or ""))
 
 
-def get(provider: str, *, identity_key: str | None = None) -> Quota | None:
-    """What's known about ``provider`` now: windows past their reset dropped,
-    an expired limit cleared. None when nothing current is known.
-    ``identity_key`` keeps a read/modify/write on its captured subscription."""
+def get(provider: str, *, identity_key: str | None = None, now: float | None = None) -> Quota | None:
+    """What's known about ``provider`` at ``now`` (default the clock):
+    windows past their reset dropped, an expired limit cleared. None when
+    nothing current is known. ``identity_key`` keeps a read/modify/write on
+    its captured subscription."""
     if provider == "codex":
         _refresh_codex_lazily()
     key = identity_key if identity_key is not None else subscription_usage.cache_key(provider)
@@ -135,7 +146,7 @@ def get(provider: str, *, identity_key: str | None = None) -> Quota | None:
     if not isinstance(entry, dict):
         return None
     q = _from_entry(provider, entry)
-    now = time.time()
+    now = time.time() if now is None else now
     live = []
     for w in q.windows:
         if w.resets_at:  # 0 or missing: unknown, so only its age counts

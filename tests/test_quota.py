@@ -146,4 +146,5 @@ def test_auth_and_token_files_are_never_read(tmp_path, monkeypatch):
     quota.refresh_codex()
     assert opened
     assert not [p for p in opened if "auth" in os.path.basename(p) or "token" in os.path.basename(p)]
-    assert all(p.endswith(".jsonl") or os.path.basename(p).startswith("quota.json") for p in opened)
+    assert all(p.endswith(".jsonl") or os.path.basename(p).startswith(("quota.json", "provider_health.json"))
+               for p in opened)

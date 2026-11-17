@@ -53,9 +53,6 @@ KIND_BACK = "provider_switch_back"
 RECENT_MESSAGES = 10         # inbox rows to or from the old supervisor
 TRANSCRIPT_TAIL_ENTRIES = 40  # text turns from the old supervisor's transcript (agents.transcript_file)
 
-# A plan window this full counts as out of quota even before the CLI refuses.
-FULL_PERCENT = 100.0
-
 
 @dataclass
 class Offer:
@@ -100,22 +97,15 @@ def _key_billed(profile) -> bool:
 
 
 def limited_until(provider: str, now: float) -> float | None:
-    """When ``provider``'s limit lifts, or None while it is in quota.
-    ``quota.get(provider).limited_until`` after ``now``; else the fullest
-    plan window (``quota.fullest``) at FULL_PERCENT, until its ``resets_at``.
-    An API-key Claude (``quota._key_billed``) is never limited."""
-    if provider not in SUPERVISOR_PROVIDERS or quota._key_billed(provider):
+    """When ``provider``'s limit lifts, or None while it is in quota:
+    ``provider_health.limited_until``, the definition routing and the
+    reviewer check use too (a recorded limit, or a plan window full until its
+    reset). An API-key Claude (``quota._key_billed``) is never limited."""
+    if provider not in SUPERVISOR_PROVIDERS:
         return None
-    q = quota.get(provider)
-    if q is None:
-        return None
-    if q.limited_until is not None and q.limited_until > now:
-        return q.limited_until
-    window = quota.fullest(replace(q, windows=[w for w in q.windows
-                                              if w.resets_at is None or w.resets_at > now]))
-    if window and window.used >= FULL_PERCENT and window.resets_at is not None:
-        return window.resets_at
-    return None
+    from brindle import provider_health
+
+    return provider_health.limited_until(provider, now=now)
 
 
 def usable(provider: str, repo_root: str | None) -> bool:

@@ -838,7 +838,6 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     signed in, its provider is out of headroom, it would break a budget
     (``gate``: a ``brindle.budget.Gate``), it doesn't exist), or None if it's usable."""
     from brindle import quota
-    from brindle.providers import signed_out, unusable
 
     try:
         p = load_profile(name, repo_root)
@@ -861,15 +860,18 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
         problem = str(e)
     if problem:
         return f"{problem}, skipped {name}"
-    from brindle import model_access
+    from brindle import provider_health
 
-    denied = model_access.refused(name, repo_root)
-    if denied:
-        return f"model refused for this account ({denied.cause}; {denied.fix}), skipped {name}"
     cli = CLI_FOR_PROVIDER.get(p.provider)
-    if cli and unusable(p.provider, p.env):
-        return (f"{cli} isn't signed in, skipped {name}" if signed_out(p.provider, p.env)
-                else f"{cli} isn't installed, skipped {name}")
+    # One definition of "can take work now" (refused, installed, signed in,
+    # limited, rate limited, erroring, closing); the headroom margin below is routing's own.
+    health = provider_health.check(p.provider, model=p.model or None, profile=name, repo_root=repo_root, env=p.env, installed=bool(cli))
+    if health.state == provider_health.SIGNED_OUT:
+        return f"{cli} isn't signed in, skipped {name}"
+    if health.state == provider_health.NOT_INSTALLED:
+        return f"{cli} isn't installed, skipped {name}"
+    if not health.ok:
+        return f"{health.reason}, skipped {name}"
     if p.provider in quota.PROVIDERS:
         room = quota.headroom(p.provider, cfg, repo_root)
         # Reserve enough allowance to finish the expected size of task. Unknown

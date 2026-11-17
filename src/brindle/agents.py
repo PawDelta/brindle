@@ -4732,7 +4732,8 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
 
 def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
     """Raises ``AgentError`` if reviewer profile ``name`` doesn't exist, its
-    provider can't run an agent here (with the profile's own environment) or
+    provider can't run an agent here (with the profile's own environment),
+    can't take work now (``provider_health``: limited, refused, ...) or
     policy refuses it."""
     try:
         chosen = load_profile(name, ws.repo_root)
@@ -4748,6 +4749,12 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
             f"reviewer profile {name!r} can't run: {why}. "
             "Fix that, or set review_profile (or pass profile) to a different reviewer"
         )
+    from brindle import provider_health
+
+    health = provider_health.check(chosen.provider, model=chosen.model or None, profile=name,
+                                   repo_root=ws.repo_root, env=chosen.env, installed=False)
+    if not health.ok:
+        raise AgentError(f"reviewer profile {name!r} can't run now: {health.reason}")
     try:
         from brindle import policy as pol
         d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review")
