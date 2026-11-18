@@ -231,3 +231,31 @@ describe("a design opened in the Library", () => {
 const settle = async () => {
   for (let i = 0; i < 10; i++) await act(async () => {});
 };
+
+describe("library kept visuals", () => {
+  it("opens a kept visual in the page's whole content area, the Library header giving its space back", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
+    const client = daemon.client();
+    vi.spyOn(client, "keptVisuals").mockResolvedValue([{ id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: null, kept_at: Date.now() / 1000 }]);
+    const store = createAppStore();
+    render(
+      <StoreContext.Provider value={store}>
+        <SessionsProvider client={client}>
+          <div className="flex h-[600px] flex-col">
+            <KnowledgeScreen client={client} view="kept" />
+          </div>
+        </SessionsProvider>
+      </StoreContext.Provider>,
+    );
+    const page = await screen.findByRole("region", { name: "Library" });
+    expect(screen.getByRole("heading", { name: "Library" })).toBeTruthy();
+    fireEvent.click(await screen.findByTestId("kept-k_1"));
+    // The section and the reader both stretch (flex-1, min-h-0) down the bounded layout; nothing sits above them.
+    expect(screen.queryByRole("heading", { name: "Library" })).toBeNull();
+    expect(page.className).toContain("flex-1");
+    expect(page.firstElementChild).toBe(screen.getByTestId("kept-reader"));
+    expect(screen.getByTestId("kept-reader").className).toContain("flex-1");
+    fireEvent.click(screen.getByTestId("visual-back"));
+    expect(await screen.findByRole("heading", { name: "Library" })).toBeTruthy();
+  });
+});

@@ -68,19 +68,20 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
     element.addEventListener("wheel", wheel, { passive: false });
     return () => element.removeEventListener("wheel", wheel);
   }, [step]);
-  // ⌘+ ⌘− ⌘0 while the reader is up (the page's own keys come as brindle.zoom).
+  // ⌘+ ⌘− ⌘0 only while focus is in this reader (the page's own keys come as brindle.zoom). The reader
+  // takes focus when it opens with nothing focused, so the keys work at once; a hidden one never has it.
+  const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const keydown = (event: KeyboardEvent) => {
-      const dir = zoomKey(event);
-      if (!dir) return;
-      event.preventDefault();
-      step(dir);
-    };
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  }, [step]);
+    if (!document.activeElement || document.activeElement === document.body) root.current?.focus({ preventScroll: true });
+  }, []);
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="visual-reader">
+    <div ref={root} tabIndex={-1} className="flex min-h-0 min-w-0 flex-1 flex-col outline-none" data-testid="visual-reader"
+      onKeyDown={(event) => {
+        const dir = zoomKey(event.nativeEvent);
+        if (!dir) return;
+        event.preventDefault();
+        step(dir);
+      }}>
       {/* One toolbar: Back (Esc) and the title on the left, the visual's own actions on the right. */}
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1 px-s2 pt-2.5">
         <BackButton onBack={onBack} label={backLabel} asking={asking} />
