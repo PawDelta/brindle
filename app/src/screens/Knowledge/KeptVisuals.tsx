@@ -43,6 +43,7 @@ export function KeptVisuals({ client, onOpenChange }: { client: KeptVisualsClien
           title={open.title}
           source={{ kind: "kept", id: open.id }}
           meta={`kept ${ago(open.kept_at)} ago · from ${open.from_session_name}`}
+          bleed
           onBack={() => setOpen(null)}
           backLabel="Kept visuals"
           footer={
