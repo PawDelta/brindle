@@ -198,6 +198,27 @@ def test_a_background_pr_lookup_never_outlives_its_test(tmp_path, monkeypatch):
     assert not asked.exists() and spawn.running() == 0
 
 
+def test_a_stale_no_pr_answer_is_asked_again_soon_so_a_new_pr_is_announced(monkeypatch):
+    """A supervisor's `gh pr create` right after a read of "no PR on this HEAD":
+    the old 90 s belief in that none kept the PR's Inbox card (and its
+    notification) back for up to 90 s. A found PR is still believed that long."""
+    import time
+    from brindle.daemon import session_review as review
+    asked = []
+    from concurrent.futures import Future
+    monkeypatch.setattr(review._pr_pool, "submit", lambda fn, key: asked.append(key) or Future())
+    review._head_cache.clear()
+    review._head_flights.clear()
+    none_key, found_key = ("a" * 40, "/none"), ("b" * 40, "/found")
+    now = time.monotonic()
+    review._head_cache[none_key] = (now - review.PR_NONE_TTL - 1, {})
+    review._head_cache[found_key] = (now - review.PR_NONE_TTL - 1, {"url": "https://github.com/o/r/pull/1"})
+    review.open_pr_for_head(*none_key)
+    review.open_pr_for_head(*found_key)
+    assert asked == [none_key]
+    review._head_flights.clear()
+
+
 def _readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
     from concurrent.futures import Future
     from brindle import spawn, workspaces
