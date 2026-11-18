@@ -10,11 +10,68 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 from conftest import sh
-from brindle import agents, autopilot, cull, session_sync, tmux, workspaces
+from brindle import agents, autopilot, cull, git, session_sync, tmux, workspaces
 from brindle.daemon import events, session_review
-from brindle.db import Agent
-from test_merge_order import _repo_template, quiet_removal, repo, worktree  # noqa: F401 - fixture
+from brindle.db import Agent, Workspace
+from test_merge_order import _repo_template, quiet_removal  # noqa: F401 - fixture
+
+_BRANCHES = {"live": "main", "parked": "main", "finished": "main", "messy": "main", "clash": "main",
+             "feat": "live", "still": "live", "quiet": "live"}
+
+
+@pytest.fixture(scope="session")
+def _sessions_template(tmp_path_factory, _repo_template):
+    """The repo with every session's worktree already made (committed work, the
+    unsaved file, the conflicting change), built with git once per test process."""
+    base = tmp_path_factory.mktemp("sessions-template")
+    for name in ("origin.git", "proj"):
+        shutil.copytree(_repo_template / name, base / name, symlinks=True)
+    proj = base / "proj"
+    cfg = proj / ".git" / "config"
+    cfg.write_text(cfg.read_text().replace(str(_repo_template), str(base)))
+    work = proj / ".brindle" / "worktrees"
+    for branch, from_ in _BRANCHES.items():
+        sh(f"git worktree add -q --no-track -b {branch} {work / branch} {from_}"
+           f" && git config branch.{branch}.{git.BASE_CONFIG_KEY} {from_}", proj)
+    for branch, files in (("live", {"live.txt": "live"}), ("parked", {"parked.txt": "parked"}),
+                          ("finished", {"finished.txt": "finished"}), ("messy", {"messy.txt": "messy"}),
+                          ("clash", {"app.py": "session\n"}), ("feat", {"feat.txt": "feat"})):
+        for f, text in files.items():
+            (work / branch / f).write_text(text)
+        # A session-scoped fixture gets no per-test git identity; CI has no global one.
+        sh("git add -A && git -c user.name=brindle-test -c user.email=test@brindle.invalid commit -qm work",
+           work / branch)
+    (work / "messy" / "unsaved.txt").write_text("unsaved\n")
+    with open(proj / ".git" / "info" / "exclude", "a") as fh:
+        fh.write("/.brindle/worktrees/\n")
+    return base
+
+
+def _session_repo(tmp_path, template):
+    """The template copied, with the absolute paths git keeps in it pointed at the copy."""
+    for name in ("origin.git", "proj"):
+        shutil.copytree(template / name, tmp_path / name, symlinks=True)
+    proj = tmp_path / "proj"
+    old = str(template)
+    files = [proj / ".git" / "config", *(proj / ".git" / "worktrees").glob("*/gitdir"),
+             *(proj / ".brindle" / "worktrees").glob("*/.git")]
+    for f in files:
+        f.write_text(f.read_text().replace(old, str(tmp_path)))
+    return proj
+
+
+def _adopt(db, repo, branch: str) -> Workspace:
+    """The row ``workspaces.create`` leaves for a worktree the template already made."""
+    root = str(repo)
+    slug = workspaces._db_slug(db, root)
+    ws = Workspace(f"{slug}/{branch}", root, branch, "worktree", branch, _BRANCHES[branch],
+                   str(repo / ".brindle" / "worktrees" / branch), workspaces._next_port_base(db),
+                   workspaces._session_name(root, branch, slug), time.time())
+    db.add_workspace(ws)
+    return ws
 
 
 def _root(db, ws, root_id: str, status: str, mode: str = "interactive") -> None:
@@ -29,7 +86,9 @@ def _done_goal(db, root_id: str, audit_sha: str | None = None) -> None:
     db.conn.execute("UPDATE autopilot SET state = 'done', audit_sha = ? WHERE root_id = ?", (audit_sha, root_id))
 
 
-def test_an_unchanged_sweep_starts_no_process(db, repo, tmp_path, _repo_template, monkeypatch):
+@pytest.mark.slow("builds ten real worktrees and settles two real sweeps (~130 git processes, 15s on the macOS CI "
+                  "runner) so the third sweep can prove it starts none; faking git would defeat what it asserts")
+def test_an_unchanged_sweep_starts_no_process(db, tmp_path, _repo_template, _sessions_template, monkeypatch):
     """Sessions in every state the owner's machine had: a paused session on the
     repo's own checkout with its goal reached (readiness asked git every sweep),
     a session whose merge of origin/main conflicts (tried again every sweep) and
@@ -37,6 +96,7 @@ def test_an_unchanged_sweep_starts_no_process(db, repo, tmp_path, _repo_template
     the app's feed on a checkout with no base branch (git.status every 5 s), and
     a worker the cull already told about (counted again every minute)."""
     quiet_removal(monkeypatch)
+    repo = _session_repo(tmp_path, _sessions_template)
     clock = [1000.0]
     monkeypatch.setattr(session_sync.time, "monotonic", lambda: clock[0])
     home = workspaces.adopt_root(db, str(repo))
@@ -46,22 +106,20 @@ def test_an_unchanged_sweep_starts_no_process(db, repo, tmp_path, _repo_template
     _done_goal(db, "home-lead", audit_sha=sh("git rev-parse HEAD", repo))
     for branch, root, status in (("live", "lead", "idle"), ("parked", "parked-lead", "paused"),
                                  ("finished", "done-lead", "done"), ("messy", "messy-lead", "idle")):
-        _root(db, worktree(db, repo, branch, files={f"{branch}.txt": branch}), root, status)
+        _root(db, _adopt(db, repo, branch), root, status)
     _done_goal(db, "lead")
-    (repo / ".brindle" / "worktrees" / "messy" / "unsaved.txt").write_text("unsaved\n")
-    clash = worktree(db, repo, "clash", files={"app.py": "session\n"})
-    _root(db, clash, "clash-lead", "idle")
+    _root(db, _adopt(db, repo, "clash"), "clash-lead", "idle")
     other = tmp_path / "other"
     shutil.copytree(_repo_template / "proj", other, symlinks=True)
     cfg = other / ".git" / "config"
     cfg.write_text(cfg.read_text().replace(str(_repo_template), str(tmp_path)))
     (other / "app.py").write_text("main\n")
     sh("git commit -qam main && git push -q origin HEAD:main", other)
-    feat = worktree(db, repo, "feat", base="live", files={"feat.txt": "feat"})
+    feat = _adopt(db, repo, "feat")
     db.add_agent(Agent("worker", feat.id, "developer", "claude", "lead", "assign", "idle", "%worker", None, 1.0))
-    still = worktree(db, repo, "still", base="live")        # idle, nothing committed: nothing to tell
+    still = _adopt(db, repo, "still")       # idle, nothing committed: nothing to tell
     db.add_agent(Agent("idler", still.id, "developer", "claude", "lead", "assign", "idle", "%idler", None, 1.0))
-    quiet = worktree(db, repo, "quiet", base="live")         # Codex: idle is judged by its pane's last output
+    quiet = _adopt(db, repo, "quiet")       # Codex: idle is judged by its pane's last output
     db.add_agent(Agent("codex", quiet.id, "developer", "codex", "lead", "assign", "idle", "%codex", None, 1.0))
     panes = tmux.PaneSnapshot(tmux.current_server())
     panes.update({"%lead": True, "%clash-lead": True, "%messy-lead": True, "%worker": True, "%idler": True,

@@ -24,8 +24,12 @@ export interface PanesReady {
      are ready, as those panes' views stay open (only another daemon's start empties it). */
   back?: string[];
   /* Those of `back` whose sessions-feed row hasn't been read since their release: a paused row there is
-     still the last daemon's (it paused them on its way out), not a pause. */
+     still the last daemon's (it paused them on its way out), not a pause. Kept past the end of recovery
+     (every session it brought back is marked so then) until a feed read begun after it has answered. */
   stale?: string[];
+  /* The engine hasn't answered the gate since the app (re)connected: rows read meanwhile may be a
+     recovering engine's, so none of them can say a session is paused. */
+  unsure?: boolean;
 }
 
 /* Whether this session's panes may show: all of them are ready, or this one is back. */

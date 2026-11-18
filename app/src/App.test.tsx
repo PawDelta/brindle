@@ -456,6 +456,57 @@ describe("App", () => {
     expect(bar().getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 
+  it.each([false, true])("after an update: recovery ending while the feed's row still says paused (read before the return) never shows the paused screen; the fresh row shows it live (recovery outlasts the startup deadline: %s)", async (late) => {
+    vi.useFakeTimers();
+    // The last daemon paused sup2 on its way out: its row says paused and its root is in no snapshot.
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2", status: "paused" }],
+      workspaces: [root, { ...root, id: "proj2", agents: [] }],
+    });
+    const { client, store, sync } = connectDaemon(daemon);
+    let resuming = true;
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming, recovered_at: resuming ? null : Date.now() / 1000,
+      recovery: resuming ? { done: 0, total: 1, pending: ["sup2"] } : null, recovery_sessions: ["sup2"] }));
+    // The paused screen in any form: the surface's paused card, the bar's paused state or its Continue, Reopen.
+    const bar = () => within(screen.getByTestId("session-bar"));
+    const pausedShown = () => screen.queryByTestId("state-card")?.dataset.kind === "ended"
+      || bar().getByTestId("session-status").dataset.state === "paused"
+      || !!bar().queryByRole("button", { name: "Continue" })
+      || !!screen.queryByRole("button", { name: "Reopen" });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(bar().getByTestId("session-status").dataset.state).toBe("restarting");
+    // Still coming back past the gate's startup deadline, the feed's reads answering (paused, as the engine lists it meanwhile).
+    for (let t = 0; late && t < 32; t++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(pausedShown()).toBe(false);
+    }
+    // The feed's reads stall from here: the row the app holds is the one read before sup2 came back (paused).
+    const sessions = client.sessions.bind(client);
+    let failing = true;
+    vi.spyOn(client, "sessions").mockImplementation(async (repo) => {
+      if (failing) throw new Error("engine busy");
+      return sessions(repo);
+    });
+    // sup2 is back and recovery is over: pending cleared, the snapshot has its chat.
+    daemon.data.sessions = [session, { ...session, id: "sup2" }];
+    daemon.data.workspaces = [root, { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: windowOf("sup2") })) }];
+    resuming = false;
+    for (let t = 0; t < 30; t++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(pausedShown()).toBe(false);
+    }
+    // The fresh row answers: live, and never paused on the way.
+    failing = false;
+    for (let t = 0; t < 20; t++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(pausedShown()).toBe(false);
+    }
+    expect(screen.getByTestId("terminal").textContent).toBe("sup2");
+  });
+
   it.each([false, true])("after an update: a session back before any read the app has shows its pane stays restarting, not stopped or paused, through the end of recovery (back before the app first asks: %s)", async (early) => {
     vi.useFakeTimers();
     const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });

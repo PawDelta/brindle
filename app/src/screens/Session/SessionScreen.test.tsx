@@ -59,7 +59,9 @@ const fake = vi.hoisted(() => {
     private typed: Listener<string>[] = [];
     /* xterm.js's cell size, as PtyTerminal reads it to place its masks. */
     _core = { _renderService: { dimensions: { css: { cell: { width: 8, height: 16 } } } } };
-    constructor() {
+    options: { theme?: { background?: string } } = {};
+    constructor(options: { theme?: { background?: string } } = {}) {
+      this.options = options;
       Xterm.all.push(this);
     }
     resize(cols: number, rows: number) {
@@ -156,6 +158,7 @@ afterEach(() => {
   clearChatDrafts();
   vi.useRealTimers();
   sidebarChanges.shown = false;
+  delete document.documentElement.dataset.theme;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -859,6 +862,17 @@ describe("SessionScreen", () => {
 
 /* The app's pane view: a real tmux client on a pty, opened through PtyViews (the shell's in the app). */
 describe("SessionScreen, the pty view", () => {
+  it("draws the live pane on the app theme's ground, light palette in light, switching live, dark as before", async () => {
+    document.documentElement.dataset.theme = "light";
+    const { term } = mount({ sup1: live, w1: live });
+    await waitFor(() => expect(surface().dataset.card).toBe("live"));
+    expect(term().options.theme?.background).toBe("#ffffff");
+    expect(screen.getByTestId("terminal-surface").style.background).toBe("rgb(255, 255, 255)");
+    act(() => { document.documentElement.dataset.theme = "dark"; });
+    await waitFor(() => expect(term().options.theme?.background).not.toBe("#ffffff"));
+    expect(screen.getByTestId("terminal-surface").style.background).toBe("");
+  });
+
   it("replaces a missing pane at launch and follows recovery without applying an old pane check", async () => {
     const v = views({ kind: "ready", tmux: "tmux 3.8" });
     let pane = "%96";

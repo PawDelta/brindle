@@ -28,11 +28,13 @@ import type { Attachment } from "../../api/attachments";
 import { LoadingButton } from "../../components/LoadingButton";
 import { Preflight } from "../../components/Preflight";
 import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
+import { useAppTheme } from "../../components/useAppTheme";
 import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
 import { PanesReadyContext, panesReadyFor } from "../../store/panes";
 import type { Recovery } from "./useContinue";
 import { RestartHistory } from "./RestartHistory";
+import { chatTheme } from "./Chat/ChatPane";
 import { claudePromptRegion, promptClipRows, type PromptRegion } from "./Chat/ChatPane";
 import { visualsGate, withTypedWords, withVisualInput } from "./Visuals/terminalInput";
 
@@ -115,6 +117,9 @@ interface PaneCheck {
 
 export function ProviderSurface({ repo, root, agent: listedAgent, alive, sessionStatus, restarting = false, sessionName, credentials, recovery, hidePrompt = false, onComposeText }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
+  // Light: the light palette and ground; dark keeps the shell block's own colours (PtyTerminal's default).
+  const appTheme = useAppTheme();
+  const paneTheme = useMemo(() => appTheme === "light" ? chatTheme("light") : undefined, [appTheme]);
   // The pane's foot as last read, for the agent it was read from: another agent's view starts with nothing cropped.
   const [prompt, setPrompt] = useState<{ agent: string; region: PromptRegion } | null>(null);
   const client = useContext(DaemonContext);
@@ -240,7 +245,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
   const cropFrom = cropRows ? prompt?.region.top : undefined;
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"}>
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"} style={paneTheme && !card ? { background: paneTheme.background } : undefined}>
       {historyId && (
         <RestartHistory key={historyId} id={historyId} revision={agent ?? sessionStatus} />
       )}
@@ -248,7 +253,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
       {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
           that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}
       {agent && (live || card?.kind === "starting") && ready && target && (
-        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} attachments={attachments} onView={setView} cropRows={cropRows} cropFrom={cropFrom} onRows={readPrompt} typeElsewhere={cropRows ? onComposeText : undefined} />
+        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} attachments={attachments} theme={paneTheme} onView={setView} cropRows={cropRows} cropFrom={cropFrom} onRows={readPrompt} typeElsewhere={cropRows ? onComposeText : undefined} />
       )}
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
           worker's pane (the supervisor's chat is what the continue brings back) as a strip, else as the surface. */}
@@ -332,7 +337,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
             </p>
           )}
           {leftView?.kind !== "error" && leftView?.kind !== "closed" && (
-            <PtyTerminal key={`${agent.id}:left:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} onView={setLeftView} />
+            <PtyTerminal key={`${agent.id}:left:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} theme={paneTheme} onView={setLeftView} />
           )}
         </>
       )}
