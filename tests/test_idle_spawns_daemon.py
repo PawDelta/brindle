@@ -41,7 +41,9 @@ def _sessions_template(tmp_path_factory, _repo_template):
                           ("clash", {"app.py": "session\n"}), ("feat", {"feat.txt": "feat"})):
         for f, text in files.items():
             (work / branch / f).write_text(text)
-        sh("git add -A && git commit -qm work", work / branch)
+        # A session-scoped fixture gets no per-test git identity; CI has no global one.
+        sh("git add -A && git -c user.name=brindle-test -c user.email=test@brindle.invalid commit -qm work",
+           work / branch)
     (work / "messy" / "unsaved.txt").write_text("unsaved\n")
     with open(proj / ".git" / "info" / "exclude", "a") as fh:
         fh.write("/.brindle/worktrees/\n")
