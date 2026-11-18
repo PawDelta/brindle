@@ -7199,7 +7199,9 @@
           "enum": [
             "open",
             "redirected",
-            "approved"
+            "approved",
+            "writing",
+            "superseded"
           ],
           "title": "State",
           "type": "string"
@@ -12545,7 +12547,9 @@
           "enum": [
             "open",
             "redirected",
-            "approved"
+            "approved",
+            "writing",
+            "superseded"
           ],
           "title": "State",
           "type": "string"
