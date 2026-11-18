@@ -12,7 +12,8 @@ states only this module records:
 - ``closing``: the cutoff is imminent. The window resets more than
   CLOSING_MIN_RESET_SECONDS away, and the CLI showed its approaching-limit
   notice, or a live window reads CLOSING_PERCENT or more, or the readings
-  of the last PROJECTION_SPAN_SECONDS project 100% within
+  of the last PROJECTION_SPAN_SECONDS (at least PROJECTION_MIN_SPAN_SECONDS
+  apart) project 100% within
   PROJECTION_AHEAD_SECONDS, or a 429 came within NOTICE_SECONDS while the
   window reads RATE_LIMIT_CLOSING_PERCENT or more. ``closing`` reads this
   alone, unmasked by a rate limit, for brindle.checkpoint.
@@ -54,6 +55,10 @@ ERROR_OUT_SECONDS = 10 * 60
 CLOSING_PERCENT = 97.0
 CLOSING_MIN_RESET_SECONDS = 20 * 60
 PROJECTION_SPAN_SECONDS = 10 * 60
+# Readings closer together than this project nothing: two panes' status lines
+# can disagree by a point (one stale), and 47% then 49% half a second apart
+# "projects" 100% within seconds.
+PROJECTION_MIN_SPAN_SECONDS = 2 * 60
 PROJECTION_AHEAD_SECONDS = 3 * 60
 NOTICE_SECONDS = 10 * 60      # how long a CLI's approaching-limit notice (or a 429) stands
 RATE_LIMIT_CLOSING_PERCENT = 90.0
@@ -245,7 +250,7 @@ def _projected_full(readings: list, now: float) -> bool:
     if len(live) < 2:
         return False
     (t0, u0, _), (t1, u1, _) = live[0], live[-1]
-    if t1 <= t0 or u1 <= u0:
+    if t1 - t0 < PROJECTION_MIN_SPAN_SECONDS or u1 <= u0:
         return False
     rate = (u1 - u0) / (t1 - t0)
     return u1 + rate * (now - t1 + PROJECTION_AHEAD_SECONDS) >= FULL_PERCENT

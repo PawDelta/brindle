@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS provider_switches (
     kind TEXT NOT NULL,          -- switch | back
     from_provider TEXT NOT NULL, -- the root's provider when offered
     to_provider TEXT NOT NULL,   -- where Switch moves it
-    state TEXT NOT NULL,         -- open | switching | done | dismissed | failed
+    state TEXT NOT NULL,         -- open | switching | done | dismissed | failed | withdrawn
     limited_until REAL,          -- when from_provider's limit lifts (switch); when it lifted (back)
     new_root_id TEXT,            -- the supervisor started on to_provider (state done)
     back_of TEXT,                -- a back offer: the switch it undoes

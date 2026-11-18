@@ -150,6 +150,7 @@ export interface AgentDTO {
   accepts_files?: boolean;
   chat_queue?: QueuedChatMessageDTO[];
   dismissed_at?: number | null;
+  failed_why?: string | null;
   headless?: boolean | null;
   hooks_off?: string | null;
   id: string;

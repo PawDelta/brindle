@@ -4,6 +4,7 @@ sessions: four came back at a time, and a session's workers launched one
 after another, so the session with three workers took 26 s by itself.
 Launches that can overlap must overlap: recovery takes about one launch,
 however many sessions or workers there are."""
+import contextvars
 import subprocess
 import threading
 import time
@@ -85,6 +86,210 @@ def test_recovery_time_does_not_grow_with_sessions_or_workers(db, tmp_path, monk
     assert sorted(lifecycle.resume_after_start()) == roots
     assert len(launches.launched) == sessions * (1 + workers)
     assert launches.peak == launches.width
+
+
+def test_a_session_is_back_once_its_pane_runs_before_claude_draws_its_prompt(db, tmp_path, monkeypatch):
+    """Recovery waited, per session, for Claude to load its conversation and
+    draw its input box (6-7 s of a 17 s restart, more for a long transcript)
+    before releasing it to the app, and behind all its workers' launches. A
+    session is back once its chat's pane runs, its workers still coming; what
+    needs the prompt (its queued mail) waits for it on the side."""
+    here = tmux.current_server()
+    _add(db, tmp_path, "s", None, here)
+    _add(db, tmp_path, "w", "s", here)
+    db.enqueue("s", "mail from a worker", None)
+    lifecycle._record_resume([{"id": "s", "server": here}])
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
+    monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "settle_panes", lambda db_, candidates, **kw: set())
+    monkeypatch.setattr(agents, "panes_match", lambda *a, **kw: True)
+    monkeypatch.setattr(agents, "_fresh_start_prompt", lambda *a, **kw: None)
+    monkeypatch.setattr(pipeline, "on_resumed", lambda *a, **kw: None)
+    monkeypatch.setattr(tasks, "on_resumed", lambda *a, **kw: None)
+
+    drawn, flushed, worker_up, worker_go = (threading.Event() for _ in range(4))
+
+    def launch(db_, agent, ws, **kw):      # the pane runs; Claude is still loading in it
+        if agent.parent_id:
+            worker_up.set()
+            worker_go.wait(5)       # a worker slow to launch, held until the chat is seen back
+        db_.update_agent(agent.id, tmux_window=f"%{agent.id}")
+        db_.set_status(agent.id, "starting")
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **kw: "❯ \n? for shortcuts" if drawn.is_set() else "Resuming…")
+    monkeypatch.setattr(agents, "flush", lambda db_, aid: flushed.set())
+
+    recovery, back = lifecycle.Recovery(), []
+    runner = threading.Thread(target=lambda: back.extend(lifecycle.resume_after_start(recovery)), daemon=True)
+    runner.start()
+    try:
+        assert worker_up.wait(5)
+        # The chat runs and its worker is still launching: shown back, though kept on the record.
+        assert not recovery.resuming() and recovery.progress()["pending"] == []
+        assert lifecycle._read_resume() == [{"id": "s", "server": here, "tries": 1}]
+        assert not flushed.is_set()     # nothing typed before the prompt is up
+        drawn.set()
+        assert flushed.wait(5)      # its prompt is followed already, the worker not yet up
+        assert not back
+        worker_go.set()
+        runner.join(5)
+        assert back == ["s"] and lifecycle._read_resume() is None
+    finally:
+        worker_go.set()
+        recovery.stopping.set()
+        runner.join(5)
+
+
+@pytest.mark.variant("the session the person last had open must be recovered before any other")
+def test_the_session_the_person_had_open_comes_back_before_any_other_starts(db, tmp_path, monkeypatch):
+    """Five sessions came back side by side, the one on screen among them:
+    its launch shared the machine with four others. It now launches alone
+    and is released before any other launch begins, however long it takes:
+    the others wait for it, not for a time."""
+    here = tmux.current_server()
+    roots = [f"s{n}" for n in range(5)]
+    for root in roots:
+        _add(db, tmp_path, root, None, here)
+    lifecycle._record_resume([{"id": root, "server": here} for root in roots])
+    lifecycle.record_viewed("s3")
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
+    monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "settle_panes", lambda db_, candidates, **kw: set())
+    monkeypatch.setattr(agents, "panes_match", lambda *a, **kw: True)
+    monkeypatch.setattr(agents, "_fresh_start_prompt", lambda *a, **kw: None)
+    monkeypatch.setattr(pipeline, "on_resumed", lambda *a, **kw: None)
+    monkeypatch.setattr(tasks, "on_resumed", lambda *a, **kw: None)
+    events, parked = [], threading.Condition()
+    recovery = lifecycle.Recovery()
+
+    class Head(threading.Event):
+        """The head start, noting each session thread that waits on it."""
+        waiting = 0
+
+        def wait(self, *a):
+            with parked:
+                Head.waiting += 1
+                parked.notify_all()
+            return super().wait(*a)
+
+    recovery.head = Head()
+    held_with = []
+
+    def launch(db_, agent, ws, **kw):
+        if agent.id == "s3":
+            # Held until every other session's thread is parked behind it, as a launch on a
+            # loaded machine might be held for any time (the bound only ends a broken run).
+            with parked:
+                parked.wait_for(lambda: Head.waiting >= 4, 5)
+            held_with.append(len(events))
+        events.append(("launch", agent.id))
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    release = getattr(recovery, "release", lambda root_id: True)
+
+    def noted(root_id):
+        if released := release(root_id):
+            events.append(("back", root_id))
+        return released
+
+    monkeypatch.setattr(recovery, "release", noted, raising=False)
+
+    assert sorted(lifecycle.resume_after_start(recovery)) == roots
+    assert held_with == [0] and Head.waiting == 4      # nothing else launched while it was held
+    assert events[:2] == [("launch", "s3"), ("back", "s3")]
+    assert sorted(events[2:]) == sorted([*(("launch", r) for r in roots if r != "s3"),
+                                         *(("back", r) for r in roots if r != "s3")])
+
+
+@pytest.mark.variant("chats recovering together must share one supervisor-choice computation, not one each")
+def test_chats_coming_back_together_work_out_the_supervisor_choice_once(monkeypatch):
+    """Each chat's launch worked out the owner's supervisor choice on its own
+    (profiles, policy, provider health probes): 2.3-2.7 s of a 4.4 s launch
+    with five chats coming back at once. Within a recovery it is shared per repo."""
+    calls, go = [], threading.Event()
+
+    def choice(repo_root):
+        calls.append(repo_root)
+        go.wait(5)
+        return None
+
+    monkeypatch.setattr(agents, "supervisor_choice", choice)
+    with agents.shared_launch_checks():
+        threads = [threading.Thread(target=contextvars.copy_context().run,
+                                    args=(agents._with_supervisor_choice, "profile", "claude", "/repo"))
+                   for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        go.set()
+        for thread in threads:
+            thread.join(5)
+    assert calls == ["/repo"]
+
+
+@pytest.mark.variant("the managed-models read must happen during warm-up, not inside the first launch")
+def test_a_recovery_reads_managed_models_beside_key_loads_not_in_its_first_launch(db, tmp_path, monkeypatch):
+    """The first launch per repo of a recovery read the org's managed models
+    (and the supervisor choice) itself: ~2 s cold inside its profile step.
+    Recovery now starts that read per repo as it begins, beside the sessions'
+    key loads; the launch takes its result rather than read it again."""
+    from types import SimpleNamespace
+
+    from brindle import codemap, preflight, provider_homes, upgrade
+
+    here = tmux.current_server()
+    _add(db, tmp_path, "s", None, here)
+    lifecycle._record_resume([{"id": "s", "server": here}])
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
+    monkeypatch.setattr(spawn, "wait_for_room", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "panes_match", lambda *a, **kw: True)
+    monkeypatch.setattr(agents, "_fresh_start_prompt", lambda *a, **kw: None)
+    monkeypatch.setattr(pipeline, "on_resumed", lambda *a, **kw: None)
+    monkeypatch.setattr(tasks, "on_resumed", lambda *a, **kw: None)
+    # The real launch up to its profile, on a provider that starts no process.
+    monkeypatch.setattr(upgrade, "check_launch", lambda: None)
+    monkeypatch.setattr(preflight, "turned_off", lambda provider: None)
+    monkeypatch.setattr(provider_homes, "decide", lambda provider: None)
+    monkeypatch.setattr(agents, "supervisor_choice", lambda repo_root: None)
+    monkeypatch.setattr(agents, "_airgap_check", lambda profile, repo_root: None)
+    monkeypatch.setattr(agents, "get_provider", lambda name: SimpleNamespace(name=name, launches_process=False))
+    monkeypatch.setattr(agents, "_model_check_key", lambda *a: ("model",))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+
+    reads, reading, read_go, overlapped = [], threading.Event(), threading.Event(), []
+
+    def managed(repo_root):      # slow: held until the session's own work before its launch is done
+        reads.append(repo_root)
+        reading.set()
+        read_go.wait(5)
+
+    def settle(db_, candidates, **kw):      # the session's pre-launch work, after its key loads
+        overlapped.append(reading.wait(2))
+        read_go.set()
+        return set()
+
+    # The chat's repo map: a cold render, held until the launch is inside its own profile.
+    maps, in_profile = [], threading.Event()
+    kind_overrides = agents._with_kind_overrides
+
+    def profile_begins(*a):
+        in_profile.set()
+        return kind_overrides(*a)
+
+    def supervisor_map(ws):
+        maps.append(threading.current_thread().name)
+        in_profile.wait(5)
+        return "Repo map"
+
+    monkeypatch.setattr(agents, "managed", managed)
+    monkeypatch.setattr(agents, "settle_panes", settle)
+    monkeypatch.setattr(agents, "_with_kind_overrides", profile_begins)
+    monkeypatch.setattr(codemap, "supervisor_map", supervisor_map)
+
+    assert lifecycle.resume_after_start() == ["s"]
+    assert overlapped == [True]          # under way while the session loaded its keys
+    assert reads == [str(tmp_path)]      # and read once: the launch took the warm-up's result
+    assert len(maps) == 1                # one render, the launch waiting for the one under way
 
 
 class FakeTmux:

@@ -143,11 +143,17 @@ export interface PtyTerminalProps {
   theme?: ITheme;
   /* Rows under the view's foot the client draws and the view clips (the module's comment): none unless given. */
   cropRows?: number;
+  /* While rows are cropped, the client's row their mask starts at where that is above the view's foot (a provider's
+     prompt box drawn under a short transcript, blank rows under it): those rows hide too. The view's foot unless given. */
+  cropFrom?: number;
   /* While given, what the person types or pastes in the view goes here, not to the pane (its input cropped away,
      another field standing in for it): text keys and pastes as their text, keys that would edit or submit the
      pane's hidden input taken, IME composition handed over as "". Escape, Ctrl and ⌘ keys, the mouse and the
      terminal's own replies still reach the pane. */
   typeElsewhere?(text: string): void;
+  /* The agent's pane as the view's client draws it, its rows' text top to bottom (the crop's columns shown, the
+     cropped rows under the foot too), after each write once tmux has the terminal: for reading what its foot is. */
+  onRows?(rows: string[]): void;
 }
 
 /* Keys that would move in, edit or submit a program's input line: taken, not sent, while typing goes elsewhere. */
@@ -235,9 +241,13 @@ export function linkOpener(openUrl: () => OpenUrl, mac: boolean, openVisual?: ()
   };
 }
 
-export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, cropRows = 0, typeElsewhere }: PtyTerminalProps) {
+export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, cropRows = 0, cropFrom, typeElsewhere, onRows }: PtyTerminalProps) {
+  const footFrom = useRef(cropFrom);
+  footFrom.current = cropFrom;
   const elsewhere = useRef(typeElsewhere);
   elsewhere.current = typeElsewhere;
+  const rowsRead = useRef(onRows);
+  rowsRead.current = onRows;
   const host = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const mask = useRef<HTMLDivElement>(null);
@@ -348,12 +358,15 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
         mask.current.hidden = !crop.cols;
         mask.current.style.left = crop.cols ? `${shownCols() * cellWidth(term)}px` : "";
       }
+      // The mask's first row: the view's foot, or the crop's own start above it.
+      const from = Math.min(term.rows - cropped, Math.max(0, footFrom.current ?? Infinity));
       if (foot.current) {
         foot.current.hidden = !cropped;
-        foot.current.style.top = cropped ? `${(term.rows - cropped) * cell(term).height}px` : "";
+        foot.current.style.top = cropped ? `${from * cell(term).height}px` : "";
       }
       el.dataset.crop = `${crop.cols},${crop.left}`;
       el.dataset.cropRows = String(cropped);
+      el.dataset.cropFrom = cropped ? String(from) : "";
       el.dataset.shown = String(shownCols());
     };
     layout();
@@ -371,6 +384,16 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       startupStep("terminal_attached");
       wake();
     };
+    const readRows = () => {
+      const read = rowsRead.current;
+      const buffer = term.buffer.active;
+      // Only tmux's screen (the alternate one) is the pane's; the client's own lines before it aren't.
+      if (gone || !read || buffer.type !== "alternate") return;
+      const rows: string[] = [];
+      for (let y = 0; y < term.rows; y++) rows.push(buffer.getLine(buffer.viewportY + y)?.translateToString(true, crop.left, crop.left + shownCols()) ?? "");
+      read(rows);
+    };
+    const parsed = term.onWriteParsed(readRows);
     const pty = open({ server, target }, { cols: term.cols, rows: term.rows }, {
       onData: (bytes) => {
         if (gone) return;
@@ -785,6 +808,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       el.removeEventListener("mousedown", pressing, true);
       window.removeEventListener("mouseup", letGo);
       observer?.disconnect();
+      parsed.dispose();
       typed.dispose();
       completedKey.dispose();
       binary.dispose();
@@ -803,7 +827,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
   }, [theme]);
   useEffect(() => {
     live.current?.layout();
-  }, [cropRows]);
+  }, [cropRows, cropFrom]);
 
   // The view's ground: the theme's background where one is given, the shell block's otherwise.
   const ground = theme?.background ? { background: theme.background } : undefined;

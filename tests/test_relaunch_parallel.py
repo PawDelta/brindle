@@ -28,9 +28,9 @@ class _Launched(Exception):
 @pytest.mark.variant("catches sessions recovered one after another and per-agent duplicate checks: timing and call counts, not lines")
 def test_recovery_overlaps_sessions_and_checks_each_identity_once(db, repo, tmp_path, monkeypatch):
     """Reported: a relaunch with 3 sessions took the sum of their resumes
-    (10s), the one on screen coming back alone first, and every agent ran its
-    own model check and preflight. All sessions must be under way at once,
-    the viewed one included; launches signed in alike share one check, a
+    (10s), and every agent ran its own model check and preflight. The one on
+    screen comes back first, alone (the founder's call), and the others must
+    then all be under way at once; launches signed in alike share one check, a
     returning worker of another profile its session's preflight; and an
     identity that differs only in its tmux session's environment, refused,
     is never let through on another's answer."""
@@ -59,7 +59,7 @@ def test_recovery_overlaps_sessions_and_checks_each_identity_once(db, repo, tmp_
     monkeypatch.setattr(company_identity, "launch_check", lambda *a, **kw: (None, None, None))
 
     lock, checks, consents = threading.Lock(), Counter(), {}
-    together = threading.Barrier(len(homes))
+    together = threading.Barrier(len(homes) - 1)    # all but the viewed one, which comes back first
 
     def model_problem(name, ws, *, agent, **kw):
         with lock:
@@ -88,7 +88,8 @@ def test_recovery_overlaps_sessions_and_checks_each_identity_once(db, repo, tmp_
     monkeypatch.setattr(agents, "_gate_commit", gate_commit)
 
     def resume(db_, root_id, **kw):
-        together.wait(5)        # every session's resume under way at once, the viewed one's too
+        if root_id != "viewed":
+            together.wait(5)    # every other session's resume under way at once
         for a in agents.tree(db_, root_id):
             # The worker's consent stops it; the chat answers its own at its input box.
             with pytest.raises(agents.PreflightBlocked if a.parent_id else _Launched):

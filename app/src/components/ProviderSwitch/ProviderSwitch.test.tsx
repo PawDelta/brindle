@@ -137,6 +137,18 @@ describe("ProviderSwitchCard", () => {
     expect(screen.queryByTestId("provider-switch")).toBeNull();
   });
 
+  it("one card for every session on a limit: one Switch is one request, and its sessions are read", async () => {
+    const { fetchImpl, finish } = setup(item("provider_switch", "claude → codex · 3 sessions: a, b, c"));
+    const card = screen.getByTestId("provider-switch");
+    expect(card.dataset.sessions).toBe("3");
+    fireEvent.click(within(card).getByRole("button", { name: "Switch" }));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).offer).toBe("offer-1");
+    await finish();
+    const notice = offerOf(item("provider_switch_back", "notice: claude → codex · 03:00 · 2 sessions: x, y"));
+    expect([notice.fromProvider, notice.toProvider, notice.resetAt, notice.sessions]).toEqual(["claude", "codex", "03:00", ["x", "y"]]);
+  });
+
   it("Not now declines, and the switch-back offer names the provider with quota again", async () => {
     const { fetchImpl, finish } = setup(item("provider_switch_back", "codex → claude"));
     expect(screen.getByTestId("provider-switch").dataset.kind).toBe("back");

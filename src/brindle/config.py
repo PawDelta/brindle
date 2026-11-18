@@ -105,7 +105,7 @@ class RepoConfig:
     autopilot: bool = True             # deprecated; the goal driver is always on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
     scoped_checks: str | None = None   # "off", "infer" or "coverage"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
-    scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (0: no cap)
+    scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (with a coverage map: up to this many, most specific first) (0: no cap)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer-sonnet-high"  # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips automatic selection)

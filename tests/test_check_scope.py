@@ -325,3 +325,38 @@ def test_a_script_changed_since_the_map_runs_the_tests_that_run_it(repo, monkeyp
 
     run = check_scope.command(ws, PYTEST, check_scope.CheckScope(coverage=True), (base, ["pkg/mod.py"]))
     assert run == f"{PYTEST} tests/test_driver.py tests/test_runs_build.py"
+
+
+def test_a_hub_change_runs_only_the_tests_most_specific_to_it(repo, monkeypatch):
+    """A change to a function nearly every test passes through runs at most
+    ``max_files`` tests: the branch's own and namesake ones, then those whose
+    coverage is mostly the changed code, not the 100 the map credits."""
+    from brindle import coverage_map
+
+    hub = "def hub():\n    return 1\n"
+    own = "def test_o():\n    assert 1\n"
+    specific = [f"tests/test_s{i}.py" for i in range(10)]
+    generic = [f"tests/test_g{i:02}.py" for i in range(88)]
+    names = ["tests/test_hub.py", "tests/test_own.py", *specific, *generic]
+    files = {"pkg/__init__.py": "", "pkg/hub.py": hub, **{t: "def test_x(): pass\n" for t in names},
+             "tests/test_own.py": own}
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    sh("git add -A && git commit -qm base", repo)
+    everyone = list(range(len(names)))
+    broad = [i for i, t in enumerate(names) if t not in specific]   # these run much else too
+    known = {"pkg/hub.py": {"": everyone, "hub": everyone},
+             "pkg/big.py": {f"f{i}": broad for i in range(10)},
+             "tests/test_own.py": {q: [1] for q in coverage_map.line_scopes(own)}}
+    base = sh("git rev-parse HEAD", repo)
+    monkeypatch.setattr(coverage_map, "load", lambda root, check: {"commit": base, "tests": names, "files": known})
+    (repo / "pkg/hub.py").write_text(hub.replace("1", "2"))
+    (repo / "tests/test_own.py").write_text(own.replace("1", "2"))
+    ws = SimpleNamespace(path=str(repo), repo_root=str(repo))
+
+    run = check_scope.command(ws, PYTEST, check_scope.CheckScope(coverage=True),
+                              (base, ["pkg/hub.py", "tests/test_own.py"]), 40)
+    ran = shlex.split(run.rsplit(f"; {PYTEST}", 1)[-1])
+    assert run.startswith("printf") and len(ran) == 40
+    assert {"tests/test_hub.py", "tests/test_own.py", *specific} <= set(ran)

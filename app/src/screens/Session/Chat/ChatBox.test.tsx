@@ -5,9 +5,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonError } from "../../../api/client";
 import type { ChatMessageDTO, ChatResultDTO, QueuedChatMessageDTO } from "../../../api/schema";
-import { ChatBox } from "./ChatBox";
+import { ChatBox, clearChatDrafts } from "./ChatBox";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  clearChatDrafts();
+});
 
 class ChatServer {
   delivered: ChatMessageDTO[] = [];
@@ -211,6 +214,77 @@ describe("ChatBox paste/drop owner", () => {
     fireEvent.click(within(screen.getByTestId("paste-chip")).getByRole("button", { name: /remove/i }));
     expect(screen.queryByTestId("paste-chip")).toBeNull();
     expect(editor().value).toBe("Keep this");
+  });
+
+  it.each(["paste", "picker", "drop"])("attaching an image by %s keeps the typed draft", async (how) => {
+    const server = new ChatServer();
+    const image = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    const props = (droppedFiles?: File[]) => ({ client: server, agentId: "a", busy: false, queue: [], droppedFiles });
+    const view = render(<ChatBox {...props()} />);
+    type("Look at this");
+    if (how === "paste") fireEvent.paste(editor(), { clipboardData: { getData: () => "", files: [image] } });
+    else if (how === "picker") fireEvent.change(screen.getByTestId("chat-file-picker"), { target: { files: [image] } });
+    else view.rerender(<ChatBox {...props([image])} />);
+    await screen.findByTestId("attachment-chip");
+    expect(editor().value).toBe("Look at this");
+  });
+
+  it("a box unmounted and mounted again for the same agent keeps its text and chips, another agent's stays apart, and a send empties them", async () => {
+    const server = new ChatServer();
+    const image = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    const box = (agentId: string) => <ChatBox client={server} agentId={agentId} busy={false} queue={[]} />;
+    const first = render(box("a"));
+    type("Keep me");
+    fireEvent.change(screen.getByTestId("chat-file-picker"), { target: { files: [image] } });
+    await screen.findByTestId("attachment-chip");
+    first.unmount();
+    const second = render(box("b"));
+    expect(editor().value).toBe("");
+    second.unmount();
+    render(box("a"));
+    expect(editor().value).toBe("Keep me");
+    expect(screen.getAllByTestId("attachment-chip")).toHaveLength(1);
+    send();
+    await waitFor(() => expect(server.delivered).toHaveLength(1));
+    cleanup();
+    render(box("a"));
+    expect(editor().value).toBe("");
+    expect(screen.queryByTestId("attachment-chip")).toBeNull();
+  });
+
+  it("a send that ends after the box remounted empties the new box, blocks a second send meanwhile", async () => {
+    const sent: ChatMessageDTO[] = [];
+    let deliver!: () => void;
+    const client = {
+      chatSend: (_agent: string, message: ChatMessageDTO) => {
+        sent.push(message);
+        return new Promise<ChatResultDTO>((done) => { deliver = () => done({ status: "delivered" }); });
+      },
+      chatEnqueue: async (): Promise<ChatResultDTO> => ({ status: "delivered" }),
+      chatRemove: async (_a: string, id: string) => ({ removed: id }),
+      chatSendNow: async (): Promise<ChatResultDTO> => ({ status: "delivered" }),
+    };
+    const box = <ChatBox client={client} agentId="a" busy={false} queue={[]} />;
+    const image = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    const first = render(box);
+    type("Sent text");
+    fireEvent.change(screen.getByTestId("chat-file-picker"), { target: { files: [image] } });
+    await screen.findByTestId("attachment-chip");
+    send();
+    expect(sent).toHaveLength(1);
+    first.unmount();
+    render(box);
+    expect(editor().value).toBe("Sent text");
+    expect((screen.getByRole("button", { name: /^send$/i }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(editor(), { key: "Enter" });
+    expect(sent).toHaveLength(1);
+    await act(async () => deliver());
+    await waitFor(() => expect(editor().value).toBe(""));
+    expect(screen.queryByTestId("attachment-chip")).toBeNull();
+    cleanup();
+    render(box);
+    expect(editor().value).toBe("");
+    expect(screen.queryByTestId("attachment-chip")).toBeNull();
   });
 
   it("drop screenshot bytes without a path waits for Send", async () => {

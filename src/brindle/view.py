@@ -535,12 +535,16 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
 def _autopilot_flags(db: DB, shown: list[Agent]) -> tuple[bool, str | None]:
     """Whether these agents' session runs on autopilot (it reviews its own
     workers, so their reports don't wait on the person), and the id of the one
-    among them that is a session root with an open need_user question."""
+    among them that is a session root with an open need_user question. A
+    root that handed its session to another (a provider switch, which keeps
+    the workspace) asks nothing."""
+    from brindle import sessions
+
     on, asking = False, None
     for a in shown:
         ap = db.get_autopilot(agents.root_of(db, a.id))
         on = on or bool(ap and ap.enabled)
-        if ap and a.parent_id is None and ap.state == "blocked":
+        if ap and a.parent_id is None and ap.state == "blocked" and not sessions.handed_away(ap):
             asking = a.id
     return on, asking
 

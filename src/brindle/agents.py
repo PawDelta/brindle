@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
@@ -593,8 +594,13 @@ def spawn(
     weight: str | None = None,
     detached: bool = False,
     milestone: str | None = None,
+    defer_launch: bool = False,
+    launched: Callable[[], None] | None = None,
 ) -> Agent:
-    """Start an agent in ``ws``. ``milestone``: the title of the goal milestone a
+    """Start an agent in ``ws``. ``defer_launch``: return once the agent's row
+    exists and start its CLI on a thread of its own (a launch that fails marks
+    the agent failed and says why, see _launch_deferred, instead of raising: the
+    caller has answered by then). ``milestone``: the title of the goal milestone a
     worker works on (None: the session's first unfinished one without a live worker,
     falling back to the first unfinished). ``detached``: a handoff nobody waits on (a
     queued one) is recorded as 'handoff_detached' from the start, so a
@@ -719,6 +725,10 @@ def spawn(
     if mode == "interactive":
         from brindle import codemap
         codemap.seed_session(ws.path, ws.repo_root)
+    if defer_launch and db.path != ":memory:":
+        threading.Thread(target=copy_context().run, name=f"brindle-launch-{agent_id[:4]}", daemon=True, args=(
+            _launch_deferred, db.path, agent, ws, prompt, watch_pane, background_setup, launched)).start()
+        return agent
     try:
         _launch(db, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane,
                 background_setup=background_setup, model_checked=True)
@@ -727,6 +737,27 @@ def spawn(
         forget_files(agent)
         raise
     return agent
+
+
+def _launch_deferred(path: str, agent: Agent, ws: Workspace, prompt: str | None, watch_pane: bool,
+                     background_setup: bool, launched: Callable[[], None] | None = None) -> None:
+    """Launch ``agent``'s CLI after its start has answered, on this thread's
+    own connection; ``launched`` runs once its window exists. A failure leaves
+    the session in view, failed, with ``failed_why`` "launch: <why>" (the session view shows it)."""
+    own = DB(path)
+    try:
+        try:
+            _launch(own, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane,
+                    background_setup=background_setup, model_checked=True)
+            if launched:
+                launched()
+        except Exception as e:  # noqa: BLE001 - reported on the session, nobody is waiting to catch it
+            log.warning("brindle: session %s's launch failed", agent.id, exc_info=True)
+            why = (str(e).strip() if isinstance(e, AgentError) else "") or "its CLI couldn't be started"
+            own.update_agent(agent.id, failed_why="launch: " + mask(why))   # before the status, as launch_health does
+            own.set_status(agent.id, "failed")
+    finally:
+        own.conn.close()
 
 
 def milestone_claim_lock(root_id: str, *, wait: bool = True):
@@ -818,7 +849,9 @@ def _with_supervisor_choice(profile, provider: str, repo_root: str):
     (a provider asked for by name keeps the profile's own)."""
     from dataclasses import replace
 
-    choice = supervisor_choice(repo_root)
+    # Within a recovery, worked out once per repo (its profiles, policy and provider
+    # health) and shared by the chats coming back side by side: each cold took ~0.6 s.
+    choice = _shared(lambda: ("supervisor_choice", repo_root), lambda: supervisor_choice(repo_root))
     if choice is None or choice.provider != provider:
         return profile
     return replace(profile, provider=choice.provider, model=choice.model, effort=choice.effort)
@@ -947,7 +980,7 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if agent.mode == "interactive":
         from brindle import codemap, repos
 
-        repo_map = codemap.supervisor_map(ws) if autopilot_on or agent.profile == "supervisor" else None
+        repo_map = _shared_supervisor_map(ws) if autopilot_on or agent.profile == "supervisor" else None
         extra = assemble([Block(TASK_AND_RULES, (text or "").rstrip()) for text in (
             codemap.guidance(ws), repo_map, repos.guidance(db, agent.id))]   # attached repos: a session root's
             + [Block(OTHER_SESSIONS, knowledge.other_sessions_block(db, knowledge.repo_key(ws.repo_root), agent.id))])
@@ -1512,6 +1545,64 @@ def _shared(key, check):
     return shared.get(k, check)
 
 
+def _shared_managed(repo_root: str):
+    """``managed(repo_root)``, shared within shared_launch_checks per repo: it
+    depends on the repo and brindle's own sign-in, never on an agent's. One
+    that raised is left unrecorded (_SharedChecks), so each launch still fails
+    closed on its own read."""
+    return _shared(lambda: ("managed", repo_root), lambda: managed(repo_root))
+
+
+def _shared_supervisor_map(ws: Workspace) -> str | None:
+    """``codemap.supervisor_map(ws)``, one render at a time within
+    shared_launch_checks per workspace (what decides which graph it reads):
+    codemap caches a finished render only, so a launch reaching it while
+    the warm-up renders waits for that render rather than start another."""
+    from brindle import codemap
+
+    return _shared(lambda: ("supervisor_map", ws.repo_root, ws.base_branch, ws.path),
+                   lambda: codemap.supervisor_map(ws))
+
+
+def warm_launch_profiles(db: DB, root_ids) -> list[threading.Thread]:
+    """Start working out, within shared_launch_checks, what the launches of
+    sessions ``root_ids`` and their workers read per repo before anything
+    else (the org's managed models, a supervisor chat's supervisor_choice
+    and repo map): cold, ~2 s for a repo's first launch. One thread per
+    repo, in a copy of this context, so it runs beside the sessions' key
+    loads; a launch that gets there first waits for it rather than run it
+    again (_SharedChecks). Nothing it can't work out is kept: the launch
+    tries again. Its threads, unjoined."""
+    repos: dict[str, list[Workspace]] = {}      # repo -> its supervisor chats' workspaces
+    for root_id in root_ids:
+        for a in tree(db, root_id):
+            ws = db.get_workspace(a.workspace_id)
+            if ws is None:
+                continue
+            chats = repos.setdefault(ws.repo_root, [])
+            if a.profile == SUPERVISOR and a.mode == "interactive":
+                chats.append(ws)
+
+    def warm(repo_root: str, chats: list[Workspace]) -> None:
+        steps = [lambda: _shared_managed(repo_root)]
+        if chats:
+            steps.append(lambda: _shared(lambda: ("supervisor_choice", repo_root),
+                                         lambda: supervisor_choice(repo_root)))
+            steps += [lambda ws=ws: _shared_supervisor_map(ws) for ws in chats]
+        for step in steps:
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - only a head start: the launch reads it again
+                log.debug("brindle: couldn't warm %s's launch checks", repo_root, exc_info=True)
+
+    threads = [threading.Thread(target=copy_context().run, args=(warm, repo_root, chats),
+                                name=f"brindle-warm-{n}", daemon=True)
+               for n, (repo_root, chats) in enumerate(repos.items())]
+    for thread in threads:
+        thread.start()
+    return threads
+
+
 def _model_check_key(agent: Agent, ws: Workspace, profile, m) -> tuple:
     """What model_problem's answer for ``agent`` depends on: the profile and
     repo a refusal is recorded for, and the identity it checks with, which is
@@ -1587,9 +1678,10 @@ def _launch_checked(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
 def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                      resume: str | None, watch_pane: bool, background_setup: bool = False,
                      model_checked: bool = False, hold: ExitStack | None = None) -> None:
-    m = managed(ws.repo_root)   # read once for this launch
-    profile = _profile_for(db, agent, ws, m)
-    _airgap_check(profile, ws.repo_root)
+    with _launch_step("profile_s"):
+        m = _shared_managed(ws.repo_root)   # read once for this launch (per repo in a recovery)
+        profile = _profile_for(db, agent, ws, m)
+        _airgap_check(profile, ws.repo_root)
     provider = get_provider(agent.provider)
     if not model_checked:
         with _launch_step("model_check_s"):
@@ -1686,8 +1778,9 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         (ws.id, agent.review_sha)).fetchone())
     # The pane's own config folder: a profile's env line may move it, except
     # under an enforced company identity (agent_env).
-    chrome_chosen = (providers.claude_chrome_chosen(_window_environment(agent, ws, m)[0])
-                     if provider.name == "claude" else None)
+    with _launch_step("window_env_s"):
+        chrome_chosen = (providers.claude_chrome_chosen(_window_environment(agent, ws, m)[0])
+                         if provider.name == "claude" else None)
     try:
         with _launch_step("command_s"):
             argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
@@ -1699,7 +1792,8 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
 
     if wake.applies_poke(provider.name, agent.mode, bool(agent.headless)):
         try:
-            wake.arm_poke(agent.id)   # this session runs the FileChanged waiter (wake.poke)
+            with _launch_step("arm_poke_s"):
+                wake.arm_poke(agent.id)   # this session runs the FileChanged waiter (wake.poke)
         except OSError:
             pass   # unpokeable: its mail waits for its next Stop or SessionStart
     if provider.name == "codex":
@@ -1720,8 +1814,9 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         # classify the previous turn's error as a current launch failure.
         db.conn.execute("DELETE FROM launch_health WHERE agent_id=?", (agent.id,))
     opening = time.monotonic()
-    target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
-                          **({"m": m} if m is not None else {}))
+    with _launch_step("window_s"):
+        target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
+                              **({"m": m} if m is not None else {}))
     if (spent := _window_seconds.get()) is not None:
         spent.append(time.monotonic() - opening)
     from brindle import launch_health
@@ -2197,7 +2292,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
            only: set[str] | list[str] | None = None,
            recovery_env: dict[str, str] | None = None, gate=None, settle: bool = False,
            unstarted: set[str] | None = None, window_size: tuple[int, int] | None = None,
-           prompts: dict[str, str] | None = None) -> list[Agent]:
+           prompts: dict[str, str] | None = None, on_chat_up=None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task. A
@@ -2224,6 +2319,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     chat runs, left as they were for the caller to try again; without it they
     are marked failed and the chat is told.
 
+    ``on_chat_up``: called, with no arguments, as soon as the session's chat
+    runs (launched now, or its pane kept), before its workers come back.
+
     ``window_size``: (columns, rows) the windows this resume opens start at
     when no client is there to size them (a daemon's recovery), so a resumed
     chat draws once, at the size it will be seen at.
@@ -2237,7 +2335,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     try:
         with resume_lock(root_id), debuglog.recovery_timings(_launch_gate.get() is not None):
             return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env,
-                           settle=settle, unstarted=unstarted, prompts=prompts)
+                           settle=settle, unstarted=unstarted, prompts=prompts, on_chat_up=on_chat_up)
     finally:
         _resume_window_size.reset(size)
         if token is not None:
@@ -2393,7 +2491,7 @@ def _launch_step(name: str):
 
 
 def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settle=False, unstarted=None,
-            prompts: dict[str, str] | None = None) -> list[Agent]:
+            prompts: dict[str, str] | None = None, on_chat_up=None) -> list[Agent]:
     from brindle import identity_lock, providers
 
     _gate_check()
@@ -2460,15 +2558,16 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         timing.call("identity_s", identity_lock.ensure, a)
     _gate_check()
-    running = settle_panes(db, candidates)
+    running = timing.call("settle_panes_s", settle_panes, db, candidates)
     candidates = [a for a in candidates if a.id not in running]
     if settle:
         # What a cull that may never have run left, of all that isn't running: once
         # these run again it would leave the old processes be.
         from brindle import procs
 
-        procs.stop([a.id for a in tree(db, root_id) if a.id not in running and (only is None or a.id in only)],
-                   grace=2.0)
+        timing.call("procs_stop_s", procs.stop,
+                    [a.id for a in tree(db, root_id) if a.id not in running and (only is None or a.id in only)],
+                    grace=2.0)
     if any(a.id == root_id for a in candidates):
         from brindle import autopilot as pilot
 
@@ -2532,6 +2631,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         before = "paused" if a.status == "done" else a.status    # a launch records its status before its window opens
         steps: dict[str, float] = {}
         step_token = _launch_steps.set(steps if timing.enabled else None)
+        launching = time.monotonic()
         try:
             with timing.part("launch_s", exclude_windows=True):
                 _launch(db, a, ws, prompt=prompt, resume=ref,
@@ -2555,8 +2655,11 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         finally:
             _launch_steps.reset(step_token)
             if steps:
+                # What no step names, so the launch's parts add up to its time.
+                untimed = time.monotonic() - launching - sum(steps.values())
                 with guard:
-                    launch_steps[a.id] = {"provider": a.provider, **{k: round(v, 3) for k, v in steps.items()}}
+                    launch_steps[a.id] = {"provider": a.provider, **{k: round(v, 3) for k, v in steps.items()},
+                                          "untimed_s": round(untimed, 3)}
         with guard:
             resumed.append(a)
         if a.id == root_id:
@@ -2576,6 +2679,8 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
     # whoever waits for the session waits for it. Its workers then come back side by side.
     if candidates and candidates[0].id == root_id:
         bring_back(db, candidates[0])
+    if on_chat_up is not None and (root_id in running or any(a.id == root_id for a in resumed)):
+        on_chat_up()    # its workers below may take a while: the chat isn't held behind them
     _side_by_side(db, [a for a in candidates if a.id != root_id], bring_back)
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
@@ -2602,11 +2707,19 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
     if timing.enabled:      # authorized after recovery, without holding any resume on the account lookup
         windows = sum(_window_seconds.get() or ())
-        debuglog.recovery_timing(log, "brindle: session %s resume: keys %.2fs, windows %.2fs, checks and the rest %.2fs",
-                    root_id, keys_took, windows, time.monotonic() - began - keys_took - windows)
+        rest = time.monotonic() - began - keys_took - windows
+        # "The rest" by its parts (launch without its windows; workers' launches overlap, so
+        # their parts can add up to more than the rest), and what none of them covers.
+        parts = {name: timing.seconds.get(name, 0.0) for name in (
+            "identity_s", "settle_panes_s", "procs_stop_s", "goals_s", "provider_prep_s", "launch_s",
+            "pipeline_s", "tasks_s")}
+        debuglog.recovery_timing(
+            log, "brindle: session %s resume: keys %.2fs, windows %.2fs, checks and the rest %.2fs (%s, untimed %.2fs)",
+            root_id, keys_took, windows, rest, ", ".join(f"{k[:-2]} {v:.2f}s" for k, v in parts.items() if v >= 0.005),
+            rest - sum(parts.values()))
         detail = {name: round(timing.seconds.get(name, 0.0), 3) for name in (
             "invalidate_s", "known_names_s", "key_loads_s", "credential_writes_s", "identity_s",
-            "goals_s", "provider_prep_s", "launch_s", "pipeline_s", "tasks_s")}
+            "settle_panes_s", "procs_stop_s", "goals_s", "provider_prep_s", "launch_s", "pipeline_s", "tasks_s")}
         detail.update(key_reads=reads.backend_reads, key_cached=reads.cached_reads,
                       key_lock_s=round(reads.lock_seconds, 3), security_s=round(reads.process_seconds, 3))
         if launch_steps:

@@ -762,6 +762,7 @@ _NESTED = ["x=$({c})", 'echo "$({c})"', "echo `{c}`", "if {c}; then :; fi", "if 
 
 @pytest.mark.parametrize("preset", [pytest.param("autonomous",
                  marks=pytest.mark.variant("nested scripts must retain Autonomous deny decisions")), "standard"])
+@pytest.mark.slow("342 real permission decisions (18 commands x 19 nestings): ~2.5s alone, past 10s under coverage on a loaded machine")
 def test_a_command_answers_at_any_depth_as_it_does_alone(tmp_path, monkeypatch, preset):
     """A compound gets no more power than its parts run one by one, and no special stricter
     standard. A command allowed alone may ask only where standard asks for its neighbours' reads."""

@@ -1371,7 +1371,7 @@ export interface ProviderUsage {
   windows: UsageWindow[];
 }
 
-/* A provider near its limit: refusing work, past 80% of its fullest window,
+/* A provider near its limit: refusing work, at 97% of its fullest window (provider_health.CLOSING_PERCENT),
    or resetting a window within the hour; `resets_at` is when that ends. */
 export interface UsageNear {
   provider: string;

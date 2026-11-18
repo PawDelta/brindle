@@ -265,16 +265,23 @@ def changed_since(root: str | Path, data: dict) -> list[str]:
     return git.paths(["diff", "--name-only", "--no-renames", commit], root)
 
 
-def targets(root: str | Path, data: dict, files: list[str]) -> set[str]:
+def targets(root: str | Path, data: dict, files: list[str], hits: dict[str, int] | None = None) -> set[str]:
     """The test files ``data`` (a ``load``ed map) says executed what changed
     in ``files`` (see ``changed_since``) between the map's commit and the
     checkout at ``root``. Raises ``Stale`` when a change reaches code the map
-    doesn't know."""
+    doesn't know. ``hits``, when given, counts for each selected test how
+    many of the changed scopes selected it (for ``rank``)."""
     root = Path(root)
     commit = str(data["commit"])
     tests = data.get("tests") or []
     known = data.get("files") or {}
     found: set[str] = set()
+
+    def add(selected: set[str]) -> None:
+        found.update(selected)
+        if hits is not None:
+            for t in selected:
+                hits[t] = hits.get(t, 0) + 1
 
     def reach(path: str, qual: str) -> set[str]:
         entry = known.get(path) or {}
@@ -295,9 +302,9 @@ def targets(root: str | Path, data: dict, files: list[str]) -> set[str]:
             if qual and change.at_base and not any(k == qual or k.startswith(qual + ".") for k in entry):
                 raise Stale(f"{qual}() in {f} is newer than the coverage map")
             if change.tables:
-                found |= tests_of_tables(root, set(change.tables))
+                add(tests_of_tables(root, set(change.tables)))
             if qual or change.whole:
-                found |= reach(f, qual)   # a function, or a module-level statement of unknown reach
+                add(reach(f, qual))   # a function, or a module-level statement of unknown reach
             shared, local, members = bindings.setdefault(f, (set(), set(), set()))
             shared |= change.names
             local |= change.new
@@ -323,14 +330,38 @@ def targets(root: str | Path, data: dict, files: list[str]) -> set[str]:
             quals, whole = readers.of(f, shared, local, members)
             for path, qs in quals.items():
                 for q in qs:
-                    found |= reach(path, q)
+                    add(reach(path, q))
                 if PurePosixPath(path).name == "conftest.py":
                     conftest_names.setdefault(path, set()).update(q.split(".")[0] for q in qs)
             for path in whole:
-                found |= reach(path, "")
+                add(reach(path, ""))
     for path, names in sorted(conftest_names.items()):
-        found |= conftest_tests(root, path, names, commit)
+        add(conftest_tests(root, path, names, commit))
     return found
+
+
+def rank(data: dict, tests: set[str], hits: dict[str, int]) -> list[str]:
+    """``tests`` (``targets``'s, with its ``hits``), most specific to the
+    change first: by the share of the scopes (functions, classes, module
+    level) each test executed in ``data`` that the change selected it
+    through, so a test that runs only the changed code ranks above one that
+    passes through it on the way to everything else. A test the map has no
+    scopes for (selected by a table or fixture name) counts as fully
+    specific. Ties keep more hits first, then name order."""
+    names = data.get("tests") or []
+    covered = [0] * len(names)
+    for entry in (data.get("files") or {}).values():
+        for ids in entry.values():
+            for i in ids:
+                if 0 <= i < len(names):
+                    covered[i] += 1
+    scopes = dict(zip(names, covered))
+
+    def key(t: str):
+        n = hits.get(t, 0)
+        return -n / max(scopes.get(t, 0), n, 1), -n, t
+
+    return sorted(tests, key=key)
 
 
 def conftest_tests(root: Path, path: str, names: set[str], commit: str) -> set[str]:
