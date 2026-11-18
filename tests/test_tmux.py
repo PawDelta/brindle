@@ -67,6 +67,24 @@ def test_theme_leaves_the_pane_background_to_the_terminal(tmp_path):
         assert "bg=default" in out and "#0d0d0f" not in out
 
 
+def test_daemon_start_rethemes_running_brindle_sessions_only(tmp_path):
+    """An update leaves running panes with the old dark window-style: the
+    daemon's start re-themes brindle's sessions, and not the person's own."""
+    from brindle.daemon import lifecycle
+
+    old = "bg=#0d0d0f"
+    for name in ("brindle_retheme", "persons_plain"):
+        tmux.ensure_session(name, str(tmp_path), {})
+        tmux._tmux("set-option", "-w", "-t", f"{name}:", "window-style", old)
+    lifecycle._retheme_sessions()
+
+    def style(name):
+        return tmux._tmux("show-options", "-wv", "-t", f"{name}:", "window-style").stdout.strip()
+
+    assert style("brindle_retheme") == "bg=default"
+    assert style("persons_plain") == old
+
+
 def test_sidebar_stays_pinned_on_a_tmux_without_window_resized(monkeypatch):
     """tmux 3.2 (Ubuntu 22.04's) has no window-resized hook and rejects it, so
     the sidebar grew with every window resize. There the pin goes on
