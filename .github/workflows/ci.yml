@@ -118,7 +118,8 @@ jobs:
       issues: read          # ...and who added it
     env:
       CODE: ${{ needs.changes.outputs.code }}
-      PYTEST_ADDOPTS: ${{ matrix.os == 'macos-latest' && format('-p scripts.pytest_shard --test-shard={0}/2', matrix.shard) || '' }}
+      # Only the two pytest steps get it: check_test_quality.py runs pytest in-process, where scripts/ is not importable.
+      SHARD_ARGS: ${{ matrix.os == 'macos-latest' && format('-p scripts.pytest_shard --test-shard={0}/2', matrix.shard) || '' }}
       # On pull requests the Linux leg records per-test coverage, which
       # scripts/check_new_tests.py uses to hold the tests the change adds.
       GATE: ${{ github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' }}
@@ -143,9 +144,9 @@ jobs:
         if: env.CODE == 'true'
       - run: uv run python scripts/check_test_quality.py
         if: env.CODE == 'true'
-      - run: uv run python -m pytest -q -n auto -m 'not serial'
+      - run: uv run python -m pytest -q -n auto -m 'not serial' $SHARD_ARGS
         if: env.CODE == 'true' && env.GATE != 'true'
-      - run: uv run python -m pytest -q -m serial
+      - run: uv run python -m pytest -q -m serial $SHARD_ARGS
         if: env.CODE == 'true' && env.GATE != 'true'
       - run: uv run pytest -q -n auto -m 'not serial' --cov=brindle --cov=scripts --cov-branch --cov-context=test --cov-report=
         if: env.CODE == 'true' && env.GATE == 'true'
