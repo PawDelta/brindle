@@ -588,7 +588,9 @@ A signed build of a commit on `main` gives brindle staff an installable,
 updating app without a tag or version bump. Each push to `main` that touches
 the app runs `app-release.yml`:
 
-1. `staff-gate` (`scripts/release_publish.mjs ci-gate`) refuses unless the
+1. `staff-gate` (`scripts/release_publish.mjs ci-gate`), which runs beside
+   the build (`staff-identity` gives the build its version at once) and must
+   pass before anything is published, refuses unless the
    commit is on `origin/main` and the newest `App` (`app.yml`) run for exactly
    that commit, pushed or dispatched on `main`, completed with success. The
    `CI` (`ci.yml`) run must also pass when one exists; CI skips app-only
