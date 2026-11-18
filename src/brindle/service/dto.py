@@ -167,6 +167,8 @@ class AgentDTO(_DTO):
     milestone: str | None = None
     unread: int | None = None
     hooks_off: str | None = None
+    # "launch: <why>" for a session whose CLI couldn't be started, after its start had answered.
+    failed_why: str | None = None
     parent_id: str | None = None
     status_since: float | None = None
     pending: int | None = None

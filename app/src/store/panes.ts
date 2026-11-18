@@ -19,6 +19,9 @@ export interface PanesReady {
   /* Session roots back and read after it, whose panes may show before the rest are; kept once all
      are ready, as those panes' views stay open (only another daemon's start empties it). */
   back?: string[];
+  /* Those of `back` whose sessions-feed row hasn't been read since their release: a paused row there is
+     still the last daemon's (it paused them on its way out), not a pause. */
+  stale?: string[];
 }
 
 /* Whether this session's panes may show: all of them are ready, or this one is back. */

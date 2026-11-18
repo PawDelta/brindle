@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
 import { scopesFor } from "../../api/permissions";
+import { providerLabel } from "../../api/providers";
 import type { AskDTO, AskDecisionDTO, AskGroupDTO, GoalDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import type { AppUpdateStatus, AppUpdates } from "../../api/tauri";
 import { AppUpdateBanner, AppUpdateProvider } from "../../components/AppUpdateBanner";
@@ -81,7 +82,8 @@ describe("inbox", () => {
 
   it("renders a provider-switch notice with Switch back now and Dismiss, and the offer without them", async () => {
     const route = { method: "POST", path: "/v1/sessions/sup1/provider-switch" };
-    const switchNotice: InboxItemDTO = { kind: "provider_switch_back", reason: "Switched to codex · claude was out of quota, back at 09:30", detail: "notice: claude → codex · 09:30", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", request_id: "sw1", action: route };
+    /* Two sessions on one limit, switched to different providers: one notice names both. */
+    const switchNotice: InboxItemDTO = { kind: "provider_switch_back", reason: "Switched 2 sessions to codex and antigravity · claude was out of quota, back at 09:30", detail: "notice: claude → codex+antigravity · 09:30 · 2 sessions: sup1 → codex, sup2 → antigravity", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", request_id: "sw1", action: route };
     const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [switchNotice] });
     const answers: unknown[] = [];
     const realFetch = globalThis.fetch;
@@ -92,12 +94,44 @@ describe("inbox", () => {
     const { sync } = mount(daemon);
     const row = await waitFor(() => { expect(card("provider_switch_back")).toBeTruthy(); return card("provider_switch_back"); });
     expect(within(row).getByTestId("provider-switch").dataset.variant).toBe("notice");
-    expect(row.textContent).toContain("Switched to Codex · Claude was out of quota, back at 09:30");
+    expect(row.textContent).toContain(`Switched 2 sessions to ${providerLabel("codex")} and ${providerLabel("antigravity")}, each to its own · Claude was out of quota, back at 09:30`);
+    const switched = within(row).getByTestId("provider-switch-sessions").textContent;
+    expect(switched).toContain(`sup1 → ${providerLabel("codex")}`);
+    expect(switched).toContain(`sup2 → ${providerLabel("antigravity")}`);
     expect(row.textContent).not.toContain("has quota again");
     expect(within(row).queryByRole("button", { name: "Switch" })).toBeNull();
     fireEvent.click(within(row).getByRole("button", { name: "Switch back now" }));
     await waitFor(() => expect(answers).toEqual([{ offer: "sw1", accept: true }]));
     expect(within(within(row).getByTestId("provider-switch")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    sync.stop();
+    vi.restoreAllMocks();
+  });
+
+  it("shows one limit's card with every session and waiting worker it answers, and sends the workers' answer to all", async () => {
+    const route = { method: "POST", path: "/v1/sessions/sup1/provider-switch" };
+    const alert: InboxItemDTO = { kind: "provider_switch", reason: "Switch provider or choose Not now for 3 sessions",
+      detail: "claude → codex+antigravity · 3 sessions: sup1 → codex, sup2 → codex, sup3 → antigravity · 2 workers: w1 → developer-codex (billed per token), w2 → developer-codex (billed per token)",
+      agent_id: "sup1", workspace_id: "proj", root_id: "sup1", request_id: "sw1", action: route,
+      choices: [{ id: "continue", label: "Continue on developer-codex (billed per token)" }, { id: "wait", label: "Wait for its provider" }, { id: "stop", label: "Stop" }] };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [alert] });
+    const answers: unknown[] = [];
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/provider-switch")) { answers.push(JSON.parse(String(init?.body))); return new Response("{}", { status: 200 }); }
+      return realFetch(input, init);
+    });
+    const { sync } = mount(daemon);
+    const row = await waitFor(() => { expect(card("provider_switch")).toBeTruthy(); return card("provider_switch"); });
+    const members = within(row).getByTestId("provider-switch-members");
+    for (const id of ["sup1", "sup2", "sup3", "w1", "w2"]) expect(members.textContent).toContain(id);
+    /* Each session with its own destination; each worker with what continuing costs, before Continue. */
+    expect(row.textContent).toContain(`switch 3 sessions to ${providerLabel("codex")} and ${providerLabel("antigravity")}, each to its own`);
+    const sessions = within(row).getByTestId("provider-switch-sessions").textContent;
+    expect(sessions).toContain(`sup2 → ${providerLabel("codex")}`);
+    expect(sessions).toContain(`sup3 → ${providerLabel("antigravity")}`);
+    expect(within(row).getByTestId("provider-switch-workers").textContent).toContain("w2 → developer-codex (billed per token)");
+    fireEvent.click(within(row).getByRole("button", { name: "Workers: Wait for its provider" }));
+    await waitFor(() => expect(answers).toEqual([{ offer: "sw1", workers: "wait" }]));
     sync.stop();
     vi.restoreAllMocks();
   });

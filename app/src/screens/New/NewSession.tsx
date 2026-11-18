@@ -145,7 +145,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   onSignIn(): void;
   repos: Repo[];
   sessions: Record<string, SessionDTO[]>;
-  reload(): Promise<void>;
+  reload(): Promise<unknown>;
   refresh?: () => Promise<void>;
   onOpen(root: string, repo: string): void;
   chosen?: string;
@@ -267,14 +267,14 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       if (!(e instanceof DaemonError && e.preflight)) setError(message(e));
     } finally {
       setBusy(false);
-      // Started, the snapshot too: one read on the new chat's status event can predate its window
-      // ("exited", no window), and nothing on the bus says when the window lands.
-      await Promise.all([reload().catch((e: unknown) => setError(message(e))), opened ? refresh?.() : undefined]);
       // Only this start's own end: a newer one still under way keeps its line.
       if (attempt === attempts.current) setStarting(false);
     }
-    // Opened once the list and the snapshot have it: a root neither knows yet reads as paused.
+    // Opened as soon as the engine returns the id; the session view shows its own starting state.
     if (opened) onOpen(opened, repo);
+    // Started, the list and the snapshot too, behind the navigation: one read on the new chat's
+    // status event can predate its window ("exited", no window), and nothing on the bus says when it lands.
+    void Promise.all([reload().catch((e: unknown) => attempt === attempts.current && setError(message(e))), opened ? refresh?.() : undefined]);
     return opened !== null;
   };
 

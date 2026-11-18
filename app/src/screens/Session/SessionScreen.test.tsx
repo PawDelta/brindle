@@ -1,6 +1,7 @@
 import { connectDaemon, inTestContext } from "../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
+import { PanesReadyContext, type PanesReady } from "../../store/panes";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppStore } from "../../store/store";
 import { DaemonClient } from "../../api/client";
@@ -12,6 +13,7 @@ import { REPO, permission, permissionInTerminal, root, windowOf, windowed, worke
 import { NO_SHELL, NO_WINDOW } from "./ProviderSurface";
 import { SessionScreen } from "./SessionScreen";
 import { agentIds, sessionTree, sessionWork } from "./tree";
+import { clearChatDrafts } from "./Chat/ChatBox";
 import { liveWorkers } from "../../store/overview";
 import { SessionContext, sidebarChanges } from "../../components/SessionContext";
 
@@ -55,8 +57,14 @@ const fake = vi.hoisted(() => {
     written = "";
     disposed = false;
     private typed: Listener<string>[] = [];
+    /* xterm.js's cell size, as PtyTerminal reads it to place its masks. */
+    _core = { _renderService: { dimensions: { css: { cell: { width: 8, height: 16 } } } } };
     constructor() {
       Xterm.all.push(this);
+    }
+    resize(cols: number, rows: number) {
+      this.cols = cols;
+      this.rows = rows;
     }
     open() {}
     loadAddon(addon: { activate(term: unknown): void }) {
@@ -64,6 +72,25 @@ const fake = vi.hoisted(() => {
     }
     write(data: string | Uint8Array) {
       this.written += typeof data === "string" ? data : new TextDecoder().decode(data);
+    }
+    /* The screen it shows, as rows of text: nothing parses what is written; draw() sets it. */
+    private shown: string[] = [];
+    private parsed: Listener<void>[] = [];
+    private keys: ((e: KeyboardEvent) => boolean) | undefined;
+    buffer = { active: { type: "normal", viewportY: 0, getLine: (y: number) => ({ translateToString: () => this.shown[y] ?? "" }) } };
+    onWriteParsed(fn: Listener<void>) {
+      this.parsed.push(fn);
+      return { dispose: () => (this.parsed = this.parsed.filter((f) => f !== fn)) };
+    }
+    /* tmux has the terminal (its alternate screen) and a write drew these rows. */
+    draw(rows: string[]) {
+      this.buffer.active.type = "alternate";
+      this.shown = rows;
+      for (const fn of this.parsed) fn();
+    }
+    /* A key pressed in the view: whether xterm.js would go on to send it to the pane. */
+    press(key: string) {
+      return this.keys?.(new KeyboardEvent("keydown", { key, cancelable: true })) ?? true;
     }
     /* The recorder parses nothing: hooks into its parser (the clipboard addon's OSC 52) never fire. */
     parser = {
@@ -84,7 +111,9 @@ const fake = vi.hoisted(() => {
     onResize(_fn: Listener<{ cols: number; rows: number }>) {
       return { dispose() {} };
     }
-    attachCustomKeyEventHandler() {}
+    attachCustomKeyEventHandler(fn: (e: KeyboardEvent) => boolean) {
+      this.keys = fn;
+    }
     /* What xterm.js says the person typed: a key, a paste, a mouse report. */
     type(data: string) {
       for (const fn of this.typed) fn(data);
@@ -93,13 +122,14 @@ const fake = vi.hoisted(() => {
       this.disposed = true;
     }
   }
-  /* FitAddon: the recorder keeps its size. */
+  /* FitAddon: the recorder keeps its size, unless a test says what the view fits. */
   class Addon {
+    static fits: { cols: number; rows: number } | undefined;
     activate() {}
     dispose() {}
     fit() {}
     proposeDimensions() {
-      return undefined;
+      return Addon.fits;
     }
   }
   /* jsdom has no ResizeObserver. */
@@ -117,11 +147,13 @@ vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { constructor() { throw
 
 beforeEach(() => {
   fake.Xterm.all = [];
+  fake.Addon.fits = undefined;
   vi.stubGlobal("ResizeObserver", fake.Observer);
   localStorage.clear();
 });
 afterEach(() => {
   cleanup();
+  clearChatDrafts();
   vi.useRealTimers();
   sidebarChanges.shown = false;
   vi.unstubAllGlobals();
@@ -165,14 +197,14 @@ function Harness({ client, root, repo, refresh, store, agents, onOpen }: {
 
 /* The session over the fake daemon, its panes shown through its PtyViews
    (`views` in their place; null: none, a browser tab's). */
-function mount(terminals: Record<string, Pane>, data: Partial<DaemonData> = {}, fetch?: (daemon: FakeDaemon) => typeof globalThis.fetch, sessionRoot = "sup1", agents = ["sup1", "w1"], repo = REPO, views?: PtyViews | null) {
+function mount(terminals: Record<string, Pane>, data: Partial<DaemonData> = {}, fetch?: (daemon: FakeDaemon) => typeof globalThis.fetch, sessionRoot = "sup1", agents = ["sup1", "w1"], repo = REPO, views?: PtyViews | null, wrap = (node: ReactNode) => node) {
   const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], terminals, ...data, workspaces: windowed(data.workspaces ?? [root, worker]) });
   const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: fetch?.(daemon) ?? daemon.fetch });
   const { store, sync } = connectDaemon(daemon, client);
   // The sessions the view asked the app to open (a handover's).
   const opened: [string, string][] = [];
   render(
-    inTestContext(<><Harness client={client} root={sessionRoot} repo={repo} refresh={sync.refresh} store={store} agents={agents} onOpen={(r, repo) => opened.push([r, repo])} /></>, { client, store }, { daemon: true, sessions: true, views: views === undefined ? daemon.ptyViews() : views }),
+    inTestContext(wrap(<Harness client={client} root={sessionRoot} repo={repo} refresh={sync.refresh} store={store} agents={agents} onOpen={(r, repo) => opened.push([r, repo])} />), { client, store }, { daemon: true, sessions: true, views: views === undefined ? daemon.ptyViews() : views }),
   );
   const term = () => fake.Xterm.all.at(-1)!;
   return { daemon, sync, term, opened };
@@ -432,6 +464,8 @@ describe("SessionScreen", () => {
     await waitFor(() => expect(surface().dataset.card).toBe("live"));
     await flush();
     expect(screen.queryByTestId("chat-box")).toBeNull();
+    // The live session sits in its card (ChatPane's TerminalFrame) with or without the box.
+    expect(getComputedStyle(screen.getByTestId("terminal-surface")).borderRadius).toBe("10px");
     cleanup();
     const meta = { ...new FakeDaemon().data.meta, chat: true };
     const { daemon } = mount({ sup1: live, w1: live, c1: live }, { workspaces, meta }, undefined, "sup1", ["sup1", "w1", "c1"]);
@@ -447,6 +481,55 @@ describe("SessionScreen", () => {
     pick("c1");
     await waitFor(() => expect(shownAgent()).toBe("c1"));
     expect(screen.queryByTestId("chat-box")).toBeNull();
+  });
+
+  it("crops Claude Code's prompt box from the pane while the message box stands in for it, typing going to the box, and shows a picker with the keyboard back", async () => {
+    fake.Addon.fits = { cols: 80, rows: 20 };
+    const meta = { ...new FakeDaemon().data.meta, chat: true };
+    mount({ sup1: live }, { meta });
+    const box = await screen.findByTestId("chat-box");
+    const term = fake.Xterm.all.at(-1)!;
+    const view = () => screen.getByTestId("terminal").dataset;
+    // Claude Code 2.1.327's box as it draws it (tmux capture-pane, colours dropped), a numbered message typed in it,
+    // drawn under a short transcript with blank rows below: hidden from its first rule down.
+    const rule = "─".repeat(80);
+    act(() => term.draw(["╭ Claude Code", rule, "❯ 1. Fix the bug", rule, "  ⏵⏵ auto mode on (shift+tab to cycle)", ...Array(15).fill("")]));
+    await waitFor(() => expect(view().cropRows).toBe("4"));
+    expect(view().cropFrom).toBe("1");
+    // More transcript: the same box two rows lower, the mask with it, the client the same size.
+    act(() => term.draw(["╭ Claude Code", "● Done.", "", rule, "❯ 1. Fix the bug", rule, "  ⏵⏵ auto mode on (shift+tab to cycle)", ...Array(17).fill("")]));
+    await waitFor(() => expect(view().cropFrom).toBe("3"));
+    expect([view().cropRows, term.rows]).toEqual(["4", 24]);
+    expect(term.press("h")).toBe(false);
+    const draft = within(box).getByRole<HTMLTextAreaElement>("textbox");
+    await waitFor(() => expect(draft.value).toBe("h"));
+    expect(document.activeElement).toBe(draft);
+    // /model's picker in the box's place: every row shown, keys to the pane.
+    act(() => term.draw([...Array(14).fill(""), "▔".repeat(80), "  Select model", "", "    1.  Default (recommended)", "  ❯ 2.  Opus 5.5 ✔", "    3.  Fable 5.2", "", "  Enter to save · Esc to cancel", "", ""]));
+    await waitFor(() => expect(view().cropRows).toBe("0"));
+    expect(term.press("1")).toBe(true);
+    expect(draft.value).toBe("h");
+  });
+
+  it("keeps the draft typed in the message box when a screenshot is dropped, pasted or picked after it", async () => {
+    const meta = { ...new FakeDaemon().data.meta, chat: true };
+    mount({ sup1: live }, { meta });
+    const box = await screen.findByTestId("chat-box");
+    const draft = within(box).getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(draft, { target: { value: "Look at this" } });
+    const shot = (n: string) => new File([new Uint8Array([137, 80, 78, 71])], n, { type: "image/png" });
+    const types = ["Files"];
+    const area = screen.getByTestId("terminal-surface");
+    fireEvent.dragEnter(area, { dataTransfer: { types, files: [shot("a.png")], items: [{ kind: "file", type: "image/png" }] } });
+    fireEvent.drop(area, { dataTransfer: { types, files: [shot("a.png")], items: [] } });
+    await waitFor(() => expect(within(box).getAllByTestId("attachment-chip")).toHaveLength(1));
+    expect(draft.value).toBe("Look at this");
+    fireEvent.paste(draft, { clipboardData: { getData: () => "", files: [shot("b.png")] } });
+    await waitFor(() => expect(within(box).getAllByTestId("attachment-chip")).toHaveLength(2));
+    expect(draft.value).toBe("Look at this");
+    fireEvent.change(within(box).getByTestId("chat-file-picker"), { target: { files: [shot("c.png")] } });
+    await waitFor(() => expect(within(box).getAllByTestId("attachment-chip")).toHaveLength(3));
+    expect((within(box).getByRole("textbox") as HTMLTextAreaElement).value).toBe("Look at this");
   });
 
   it("shows a native card, never a shell, for an agent whose process isn't running, with what it left behind a disclosure", async () => {
@@ -736,6 +819,41 @@ describe("SessionScreen", () => {
     await waitFor(() => expect(daemon.requests.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/sessions/sup0/continue", "/providers/claude/preflight/trust", "/sessions/sup0/continue"]));
     await waitFor(() => expect(screen.getByTestId("session-status").textContent).toContain("idle"));
     expect(screen.queryByTestId("preflight")).toBeNull();
+  });
+
+  it("keeps a session the restarted engine is bringing back restarting, not paused with Continue or Reopen, until it is live; paused after that, it is paused", async () => {
+    // The app's gate as /v1/meta reads after an update: resuming, with this session still to come back.
+    const gate: { set?: (p: PanesReady) => void } = {};
+    function Gate({ children }: { children: ReactNode }) {
+      const [panes, set] = useState<PanesReady>({ ready: false, epoch: 0, recovery: { done: 0, total: 1 }, pending: ["sup1"] });
+      gate.set = set;
+      return <PanesReadyContext.Provider value={panes}>{children}</PanesReadyContext.Provider>;
+    }
+    // The last daemon paused it on its way out: its row says paused and its root is in no snapshot.
+    const { daemon, sync } = mount({ sup1: live }, { sessions: [{ ...session, status: "paused" }], workspaces: [{ ...root, agents: [] }] }, undefined, "sup1", ["sup1"], REPO, undefined, (node) => <Gate>{node}</Gate>);
+    await waitFor(() => expect(screen.getByTestId("session-status").dataset.state).toBe("restarting"));
+    expect(screen.getByTestId("state-card").dataset.kind).toBe("returning");
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reopen" })).toBeNull();
+
+    // Released ahead of another session still to come back, before its row is read again: still restarting.
+    act(() => gate.set!({ ready: false, epoch: 0, recovery: { done: 1, total: 2 }, pending: ["other"], back: ["sup1"], stale: ["sup1"] }));
+    expect(screen.getByTestId("session-status").dataset.state).toBe("restarting");
+    // Back: the engine lists it live with its pane, and the feed's row has been read again.
+    daemon.data.sessions = [session];
+    daemon.data.workspaces = windowed([root]);
+    act(() => daemon.publish("session.changed", { root_id: "sup1" }));
+    await act(() => sync.refresh());
+    act(() => gate.set!({ ready: false, epoch: 0, recovery: { done: 1, total: 2 }, pending: ["other"], back: ["sup1"], stale: [] }));
+    await waitFor(() => expect(surface().dataset.card).toBe("live"));
+    expect(screen.getByTestId("session-status").dataset.state).not.toBe("restarting");
+    expect(screen.queryByRole("button", { name: "Reopen" })).toBeNull();
+
+    // Paused by the person while the other is still coming back: paused, with Continue and Reopen.
+    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reopen" })).toBeTruthy());
+    expect(screen.getByTestId("session-status").dataset.state).not.toBe("restarting");
+    expect(within(screen.getByTestId("session-bar")).getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 });
 

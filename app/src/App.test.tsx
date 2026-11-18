@@ -365,6 +365,58 @@ describe("App", () => {
     expect(screen.getByTestId("terminal")).toBe(pane);
   });
 
+  it("after an update: a session coming back is restarting, not paused; once back, the person's pause is a pause, there and after going elsewhere and back", async () => {
+    vi.useFakeTimers();
+    const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    // The last daemon paused sup2 on its way out: its row says paused and its root is in no snapshot.
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2", status: "paused" }, { ...session, id: "sup3", status: "paused" }],
+      workspaces: [root, { ...root, id: "proj2", agents: [] }, { ...root, id: "proj3", agents: [] }],
+    });
+    const { client, store, sync } = connectDaemon(daemon);
+    let pending = ["sup2", "sup3"];
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 3 - pending.length, total: 3, pending } }));
+    const bar = () => within(screen.getByTestId("session-bar"));
+    const state = () => bar().getByTestId("session-status").dataset.state;
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(state()).toBe("restarting");
+    expect(bar().queryByRole("button", { name: "Continue" })).toBeNull();
+    // sup2 is back, sup3 still coming; the sessions feed's reads fail for now, so its row still says paused.
+    const sessions = client.sessions.bind(client);
+    let failing = true;
+    vi.spyOn(client, "sessions").mockImplementation(async (repo) => {
+      if (failing) throw new Error("engine busy");
+      return sessions(repo);
+    });
+    daemon.data.sessions = [session, { ...session, id: "sup2" }, { ...session, id: "sup3", status: "paused" }];
+    daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), { ...root, id: "proj3", agents: [] }];
+    pending = ["sup3"];
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(state()).toBe("restarting");
+    expect(bar().queryByRole("button", { name: "Continue" })).toBeNull();
+    // A read that answers: live.
+    failing = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(screen.getByTestId("terminal").textContent).toBe("sup2");
+    // The person pauses it while sup3 is still coming back: paused, with Continue.
+    fireEvent.click(bar().getByRole("button", { name: "Pause" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(state()).not.toBe("restarting");
+    expect(bar().getByRole("button", { name: "Continue" })).toBeTruthy();
+    // Elsewhere and back (the session's view is a new one): still paused, still Continue.
+    fireEvent.click(treeSession("sup1"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    if (!treeSession("sup2")) fireEvent.click(within(nav()).getByRole("button", { name: /Paused · / }));
+    fireEvent.click(treeSession("sup2"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(bar().getByTestId(/^(agent|session)-id$/).textContent).toBe("sup2");
+    expect(state()).not.toBe("restarting");
+    expect(bar().getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
+
   it("test_update_relaunch: a session's pane shown during recovery is not reopened when the recovery ends", async () => {
     vi.useFakeTimers();
     const sup2 = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: windowOf("sup2") })) };

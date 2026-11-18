@@ -46,8 +46,9 @@ describe("NewSession", () => {
     fireEvent.click(within(form).getByRole("button", { name: "Cancel" }));
     expect(onOpen).not.toHaveBeenCalled();
     expect(daemon.data.sessions).toHaveLength(0);
+    expect(screen.queryByRole("status")).toBeNull();
     fireEvent.click(await startButton());
-    form = await screen.findByRole("region", { name: "Git identity" });
+    form =await screen.findByRole("region", { name: "Git identity" });
     fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "A Person" } });
     fireEvent.change(within(form).getByLabelText("Email"), { target: { value: "person@example.com" } });
     fireEvent.click(within(form).getByRole("button", { name: "Save and start" }));
@@ -297,20 +298,24 @@ describe("NewSession", () => {
     expect(within(form).queryByRole("status")).toBeNull();
   });
 
-  it("opens a session it started once the sessions list has it, so it arrives not paused (#216)", async () => {
-    // A first launch: nothing has ever run in the project. Opened before the list is read again, the
-    // session view finds the root in neither the list nor the snapshot, and takes it for paused.
+  it("opens the new session on the id the start returns, without waiting for the sessions list to reload", async () => {
+    // The window used to wait for the list and the snapshot to be read again before it moved.
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [{ ...root, agents: [] }] });
+    const fetch = daemon.fetch;
+    let started = false;
+    daemon.fetch = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const res = await fetch(input, init);
+      if (path.endsWith("/sessions") && init?.method === "POST") started = true;
+      // Once the engine has answered the start, reading the lists again never finishes.
+      else if (started && path.endsWith("/sessions")) await new Promise(() => undefined);
+      return res;
+    };
     const { onOpen } = setup(daemon);
-    const listed: boolean[] = [];
-    onOpen.mockImplementation(() => {
-      const start = daemon.requests.findIndex((r) => r.method === "POST" && r.path === "/sessions");
-      listed.push(daemon.requests.some((r, i) => i > start && r.method === "GET" && r.path === "/sessions"));
-    });
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
     fireEvent.click(await startButton());
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
-    expect(listed).toEqual([true]);
+    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
   it("shows the engine's preflight as native UI when the CLI needs setting up, and starts once it is settled", async () => {

@@ -49,7 +49,7 @@ import type { Route } from "../../routes";
 import { useJob } from "../Branch/useJob";
 import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
-import { PROVIDER_SWITCH_KINDS, ProviderSwitchCard, answerProviderSwitch, isNotice, offerOf } from "../../components/ProviderSwitch/ProviderSwitch";
+import { PROVIDER_SWITCH_KINDS, ProviderSwitchCard, answerProviderSwitch, answerSwitchWorkers, isNotice, offerOf } from "../../components/ProviderSwitch/ProviderSwitch";
 import { DismissAction, ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { StorageNudge } from "./StorageNudge";
@@ -448,6 +448,12 @@ function ProviderSwitchActions({ item, actions, onDone }: { item: InboxItemDTO; 
       variant={isNotice(item) ? "notice" : "offer"}
       offer={offerOf(item)}
       onAnswer={(accept, always) => answerProviderSwitch(client, item, accept, undefined, always).then(
+        () => { actions.settle(item); onDone(); },
+        (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e)),
+      )}
+      /* Workers paused on the same limit: their answer goes to each; the card comes back without them. */
+      workerChoices={item.choices ?? undefined}
+      onWorkers={(choice) => answerSwitchWorkers(client, item, choice).then(
         () => { actions.settle(item); onDone(); },
         (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e)),
       )}

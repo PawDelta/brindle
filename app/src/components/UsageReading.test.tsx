@@ -116,7 +116,8 @@ describe("the sidebar's weekly usage reading", () => {
     const usage = await screen.findByTestId("usage");
     expect(screen.getByRole("tab", { name: "Usage" }).getAttribute("aria-selected")).toBe("true");
     await waitFor(() => expect(scrolled.mock.contexts).toContain(usage));
-    expect(within(usage).getByRole("article", { name: "Claude" }).getAttribute("data-state")).toBe("warn");
+    // Near now means 97% (provider_health.CLOSING_PERCENT), past brindle's 90% stop line.
+    expect(within(usage).getByRole("article", { name: "Claude" }).getAttribute("data-state")).toBe("stop");
   });
 
   it("keeps the selected session provider reading in the pill without repeating its model", async () => {

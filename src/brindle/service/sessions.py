@@ -394,10 +394,14 @@ def no_usable_provider() -> ServiceError:
 
 
 def launch(db: DB, ws: Workspace, *, provider: str | None = None, prompt: str | None = None,
-           watch: bool = True, autopilot: bool | None = None) -> Started:
-    """Start the supervisor chat in ``ws`` with the goal driver always on."""
+           watch: bool = True, autopilot: bool | None = None,
+           defer: Callable[[], None] | None = None) -> Started:
+    """Start the supervisor chat in ``ws`` with the goal driver always on.
+    ``defer``: answer once its row exists and start the CLI behind that; the
+    callable runs when its window is up (agents.spawn's defer_launch)."""
     a = agents.spawn(db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
-                     watch_pane=watch, background_setup=True, autopilot=True, person_prompt=True)
+                     watch_pane=watch, background_setup=True, autopilot=True, person_prompt=True,
+                     **({"defer_launch": True, "launched": defer} if defer else {}))
     return Started(a, ws, True)
 
 
@@ -481,7 +485,8 @@ def _finish_start(root_id: str, refreshes: list[tuple[str, str | None]],
 def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | None = None,
           watch: bool = True, autopilot: bool | None = None, branch: str | None = None,
           worktree: str | None = None, choice: str | None = None,
-          session_id: str | None = None, fetched: Future[str] | None = None) -> Started | Opened | Conflict:
+          session_id: str | None = None, fetched: Future[str] | None = None,
+          defer: bool = False) -> Started | Opened | Conflict:
     """A fresh supervisor session in ``repo_root``'s checkout, or (with
     ``branch``/``worktree``) in that worktree. With a session already running
     in the repo, a Conflict until ``choice`` and ``session_id`` say what to do
@@ -490,7 +495,10 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
     Only what the supervisor needs runs before it starts: a new worktree's
     setup commands and its code map's rebuild (graphify, which takes every
     core) run after, on their own thread (after_launch). ``fetched``: a new
-    worktree's start point already being fetched (prefetch)."""
+    worktree's start point already being fetched (prefetch). ``defer``: the
+    answer comes once the session's row exists and its CLI starts behind it
+    (a failed launch marks the session failed and says why on the bus, see
+    agents._launch_deferred); a caller that prints errors (the CLI) leaves it off."""
     with create_timing() as steps, codemap.refreshes_held() as refreshes:
         notes: list[Note] = []
         finish, fresh = None, False
@@ -526,16 +534,18 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
         token = agents._launch_steps.set(launch_steps)
         try:
             with create_step("launch_s"):
-                started = launch(db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot)
+                # After the chat's window exists and is recorded: the cull's session
+                # retention closes dropped sessions' windows by their stored pane ids,
+                # which a freshly started tmux server hands out again from %0.
+                started = launch(db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot,
+                                 defer=(lambda: cull_detached(ws.repo_root)) if defer else None)
         finally:
             agents._launch_steps.reset(token)
         steps["root"] = started.agent.id
         if launch_steps:
             steps["launch_steps"] = {k: round(v, 3) for k, v in launch_steps.items()}
-        # After the chat's window exists and is recorded: the cull's session
-        # retention closes dropped sessions' windows by their stored pane ids,
-        # which a freshly started tmux server hands out again from %0.
-        cull_detached(ws.repo_root)
+        if not defer:
+            cull_detached(ws.repo_root)
     if refreshes or finish is not None:
         held = list(refreshes)
         after_launch(lambda: _finish_start(started.agent.id, held, finish))

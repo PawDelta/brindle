@@ -2,14 +2,15 @@
    engine's quota.py): each provider's name and the CLI that reports for it,
    a reset time as quota._when writes it ("5:10pm" today, "Thu 9:00am"
    later) or "in N min" under the hour, how old a reading is, and the two
-   thresholds brindle acts on: 80% is `brindle watch`'s alert line, 90% is
+   thresholds brindle acts on: 97% is the near-limit warning (`brindle watch`'s alert line too), 90% is
    RepoConfig.usage_limit, where brindle pauses new work by stopping new starts. The
    sidebar's status-line reading (design/usage/A4) is `nearReading`. Every
    function takes `now` (epoch seconds) so the words can be checked. */
 
 import type { ProviderUsage, UsageNear, UsageWindow } from "../../api/client";
 
-export const WARN = 80;
+/* The engine's one "close to the limit" line, every provider alike: provider_health.CLOSING_PERCENT. */
+export const WARN = 97;
 export const STOP = 90;
 
 const NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", antigravity: "Antigravity", native: "Local model", opencode: "OpenCode" };

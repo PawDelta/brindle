@@ -33,6 +33,7 @@ import { providerName } from "../../store/overview";
 import { PanesReadyContext, panesReadyFor } from "../../store/panes";
 import type { Recovery } from "./useContinue";
 import { RestartHistory } from "./RestartHistory";
+import { claudePromptRegion, promptClipRows, type PromptRegion } from "./Chat/ChatPane";
 import { visualsGate, withTypedWords, withVisualInput } from "./Visuals/terminalInput";
 
 export interface ProviderSurfaceProps {
@@ -46,12 +47,21 @@ export interface ProviderSurfaceProps {
   alive?: boolean;
   /* The root's listed state; only resuming also applies while showing a worker. */
   sessionStatus?: string | null;
+  /* Paused by the last daemon on its way out and coming back with this one (a restart): its card says so. */
+  restarting?: boolean;
   /* The session's name or goal: with no agent to show, what tells one stopped session's card from another's. */
   sessionName?: string | null;
   /* A credentials item for this agent: its card says what lapsed. */
   credentials?: InboxItemDTO | null;
   /* The session's Continue / Restart: shared with the bar (useContinue). */
   recovery: Recovery;
+  /* brindle's message box stands in for the agent's own prompt (a Claude Code agent's, under its pane): its
+     prompt box and the mode line under it are cropped from the view while they are the prompt, and shown
+     again for a permission question or a picker (Chat/ChatPane.tsx claudePromptRegion). */
+  hidePrompt?: boolean;
+  /* Where what's typed or pasted in the pane goes while its prompt is cropped (the message box): a permission
+     question or picker has the keyboard back. */
+  onComposeText?(text: string): void;
 }
 
 const STOPPED = new Set(["paused", "done", "failed", "exited"]);
@@ -76,6 +86,7 @@ export function surfaceCard(agent: AgentDTO | null, alive: boolean | undefined, 
   }
   const lockedBy = agent.locked;
   if (lockedBy) return { kind: "ended", title: `Locked by ${lockedBy}`, why: "Another identity holds this session; its conversation isn't shown here.", locked: true };
+  if (agent.status === "failed" && agent.failed_why?.startsWith("launch: ")) return { kind: "failed", title: `${name} couldn't start`, why: agent.failed_why.slice("launch: ".length) };
   if (agent.status === "failed") return { kind: "failed", title: `${name} stopped`, why: credentials?.detail ? `Its credentials need attention: ${credentials.detail}` : "Its credentials need attention." };
   if (agent.status === "starting" && (!view || view.kind === "connecting")) return { kind: "starting" };
   if (STOPPED.has(agent.status) || alive === false) {
@@ -102,8 +113,10 @@ interface PaneCheck {
   found: AgentDTO;
 }
 
-export function ProviderSurface({ repo, root, agent: listedAgent, alive, sessionStatus, sessionName, credentials, recovery }: ProviderSurfaceProps) {
+export function ProviderSurface({ repo, root, agent: listedAgent, alive, sessionStatus, restarting = false, sessionName, credentials, recovery, hidePrompt = false, onComposeText }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
+  // The pane's foot as last read, for the agent it was read from: another agent's view starts with nothing cropped.
+  const [prompt, setPrompt] = useState<{ agent: string; region: PromptRegion } | null>(null);
   const client = useContext(DaemonContext);
   const visualsGateRef = useRef<ReturnType<typeof visualsGate> | null>(null);
   useEffect(() => {
@@ -214,6 +227,14 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
   // Paused roots may be absent from the snapshot; their saved chat is still
   // available by root id. The endpoint checks the session's identity lock.
   const historyId = !agent ? root : !agent.locked && agent.provider === "claude" && (!root || root === agent.id) ? agent.id : undefined;
+  // The agent's own prompt rows, cropped while the message box stands in for them; read only while it does.
+  const shownId = agent?.id;
+  const readPrompt = useMemo(() => hidePrompt && shownId ? (rows: string[]) => {
+    const region = claudePromptRegion(rows);
+    setPrompt((was) => was?.agent === shownId && was.region.kind === region.kind && was.region.rows === region.rows && was.region.top === region.top ? was : { agent: shownId, region });
+  } : undefined, [hidePrompt, shownId]);
+  const cropRows = hidePrompt && agent && prompt?.agent === agent.id ? promptClipRows(agent.provider, prompt.region) : 0;
+  const cropFrom = cropRows ? prompt?.region.top : undefined;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"}>
@@ -224,7 +245,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
       {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
           that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}
       {agent && (live || card?.kind === "starting") && ready && target && (
-        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} attachments={attachments} onView={setView} />
+        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} attachments={attachments} onView={setView} cropRows={cropRows} cropFrom={cropFrom} onRows={readPrompt} typeElsewhere={cropRows ? onComposeText : undefined} />
       )}
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
           worker's pane (the supervisor's chat is what the continue brings back) as a strip, else as the surface. */}
@@ -246,7 +267,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
                 <>
                   <div className="flex items-center gap-s1">
                     <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />
-                    <h2 className="text-base font-semibold">Bringing {name} back…</h2>
+                    <h2 className="text-base font-semibold">{restarting ? "Restarting…" : `Bringing ${name} back…`}</h2>
                   </div>
                   {panes.recovery && <p className="text-xs text-ink-3" data-testid="recovery-progress">Reopening sessions, {panes.recovery.done} of {panes.recovery.total}</p>}
                   <p className="text-sm text-ink-2">brindle is reopening your sessions. The conversation shows here in a moment; everything else already works.</p>

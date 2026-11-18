@@ -4,7 +4,7 @@ import type { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
 import { PtyViewsProvider, type PtyViewHandlers, type PtyViews } from "../../api/ptyView";
 import type { AgentDTO } from "../../api/schema";
-import { ProviderSurface } from "./ProviderSurface";
+import { ProviderSurface, surfaceCard } from "./ProviderSurface";
 const xterms = vi.hoisted(() => [] as import("@xterm/xterm").Terminal[]);
 vi.mock("@xterm/xterm", async (original) => {
   const real = await original<typeof import("@xterm/xterm")>();
@@ -44,4 +44,11 @@ it("typed_words_reach_the_engine", async () => {
   // The gate is no wider: what's pasted is still not the person's typing (reported as not typed, no words).
   act(() => { term.paste("render it now"); term.input("\r", true); });
   await waitFor(() => expect(vouched).toEqual([["test it now", true], [null, false]]));
+});
+
+it("says why a session's CLI couldn't start, not that its credentials need attention", () => {
+  const agent = { id: "sup1", provider: "claude", status: "failed", failed_why: "launch: claude isn't installed" } as AgentDTO;
+  const card = surfaceCard(agent, undefined, "failed", null, null);
+  expect(card).toMatchObject({ kind: "failed", why: "claude isn't installed" });
+  expect(surfaceCard({ ...agent, failed_why: null }, undefined, "failed", null, null)).toMatchObject({ kind: "failed", why: expect.stringContaining("credentials") });
 });

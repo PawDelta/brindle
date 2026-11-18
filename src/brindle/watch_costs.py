@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from brindle import budget, pricing
+from brindle import budget, pricing, provider_health
 from brindle.db import DB
 
 log = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ GROUP = "@costs"                  # the section's id, for folding (a workspace i
 ADMIN_ROLES = ("owner", "admin")
 BAR_WIDTH = 10
 TOP_MODELS = 3
-USAGE_WARN_USED = 80              # a provider row turns "alert" past this percent of a window used
+USAGE_WARN_USED = provider_health.CLOSING_PERCENT   # a provider row turns "alert" from this percent of a window used
 RUNNING = ("processing", "starting", "waiting", "idle")
 
 
@@ -318,7 +318,7 @@ def provider_rows(providers: list[tuple[str, int]], width: int,
     for name, p in providers:
         wins = windows.get(name, []) or ([("", p)] if p else [])
         lowest = min([pct for _, pct in wins] or [p])
-        style = "alert" if 100 - lowest > USAGE_WARN_USED else "normal"
+        style = "alert" if 100 - lowest >= USAGE_WARN_USED else "normal"
         out.append((_fit_row(name, name_w, wins, width), style))
     return out
 

@@ -16,7 +16,11 @@ them with `--runxfail`.
 1. **Out of quota** means `quota.get(p).limited_until` is later than `now`, or the
    fullest plan window (`quota.fullest`) is at 100%, until its `resets_at`. A
    one-model cap (a named window) doesn't count. Claude on an API key is never out
-   of quota. Native (local model) is never a source or a target.
+   of quota. Native (local model) is never a source or a target. Only a confirmed
+   limit counts (`provider_switch.confirmed_until`): a forecast (`closing`), a 429
+   (`rate_limited`) or an error run (`erroring`) never offers a switch, and the sweep
+   withdraws (state `withdrawn`) any open offer whose limit is no longer confirmed.
+   A withdrawn offer doesn't consume the limit.
 2. **Target**: a provider other than the current one that `preflight.check` finds
    installed, turned on and signed in, and that is in quota. The one with the most
    headroom wins; a tie goes in the order claude, codex, antigravity, opencode. If no
@@ -53,6 +57,17 @@ them with `--runxfail`.
 9. **Inbox cards use the existing `InboxItemDTO` fields.** `request_id` holds the
    offer id, `detail` reads "from → to", and `action` is the route above. The app
    card's props (`ProviderSwitchOffer`) are already shaped for a structured DTO.
+   **One card per limit** (`provider_switch._alerts`, keyed by provider and reset):
+   every session out of quota on it, whatever target each would take, the switches
+   already made on it, and the workers whose handover waits on the person
+   (brindle.handover: a replacement billed per token, or a task out of handovers)
+   share one card. `detail` then ends "· <n> sessions: <ids>" and "· <n> workers:
+   <ids>", and the app lists both. One answer (Switch, Not now, Always switch) goes
+   to every session (`group_of`); the workers' answer (the card's `choices`, posted
+   as `{"offer", "workers"}`) to every worker (`workers_of`). A later session or
+   worker on the limit joins the card. Every repo's Inbox that has a member shows
+   the whole card, so what it shows is what an answer reaches. Offers back once it
+   resets share a card of their own; a failed switch keeps its own.
 10. **Only the supervisor switches.** Workers keep their providers, and routing
    already moves new work away from a provider that's out of quota.
 11. **Not wired in yet.** `inbox_items` isn't added to `service.inbox.items` and

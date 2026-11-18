@@ -60,6 +60,24 @@ def test_routing_checks_the_cap_on_the_effective_model(repo, brindle_home, clock
     assert autopilot._unavailable("gemini-flash", RepoConfig(), str(repo)) is None
 
 
+@pytest.mark.variant("regression 2026-11-17: status-line jitter made routing refuse Claude workers at 50%")
+def test_routing_staffs_claude_at_half_its_week_despite_status_line_jitter(repo, brindle_home, clock, available,
+                                                                          monkeypatch):
+    """Regression 2026-11-17: "Claude close to its limit (50%), skipped
+    developer-heavy". Two panes' status lines a second apart (49%, then 50%)
+    projected 100% within minutes, and routing stopped staffing Claude."""
+    from brindle import provider_health, subscription_usage
+
+    _profile(repo, "dev-claude", "---\nextends: developer\nprovider: claude\n---\n")
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    monkeypatch.setattr(subscription_usage, "identity", lambda: "someone")
+    monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
+    provider_health.record_reading("claude", 49, NOW + 4 * DAY, now=NOW - 1)
+    quota.record("claude", [quota.Window(50, NOW + 4 * DAY, 10080)])   # read at NOW
+
+    assert autopilot._unavailable("dev-claude", RepoConfig(), str(repo), weight="heavy") is None
+
+
 @pytest.fixture
 def health(brindle_home, clock):
     from brindle import provider_health
@@ -131,6 +149,13 @@ def _readings(ph):
     ph.record_reading("antigravity", 92, NOW + HOUR, now=NOW - 60)
 
 
+def _status_line_jitter(ph):
+    # Two panes' status lines at a restart: one a point behind, half a second apart.
+    quota.record("antigravity", [quota.Window(49, NOW + DAY, 10080)])
+    ph.record_reading("antigravity", 47, NOW + DAY, now=NOW - 1)
+    ph.record_reading("antigravity", 49, NOW + DAY, now=NOW - 0.5)
+
+
 @pytest.mark.parametrize("setup,model,expected", [
     pytest.param(_windows(quota.Window(100, NOW + HOUR, 300, "Gemini Pro 5h")), "gemini-3-pro",
                  "limited", id="one-model cap limits its model",
@@ -151,6 +176,9 @@ def _readings(ph):
                  "ok", id="an unknown reset is not closing",
                  marks=pytest.mark.variant("a window with no reset time is not treated as closing")),
     pytest.param(_readings, None, "closing", id="readings project 100 percent"),
+    pytest.param(_status_line_jitter, None, "ok", id="readings a second apart project nothing",
+                 marks=pytest.mark.variant("regression 2026-11-17: 47% then 49% half a second apart read "
+                                           "as closing at 49% and offered every supervisor a switch")),
     pytest.param(lambda ph: ph.record_rate_limited("antigravity", now=NOW - 60), None,
                  "rate_limited", id="429",
                  marks=pytest.mark.variant("a recorded 429 makes the provider rate_limited")),
