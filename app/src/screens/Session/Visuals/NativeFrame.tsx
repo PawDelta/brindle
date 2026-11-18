@@ -146,7 +146,7 @@ function themeMessage() {
   return { type: "brindle.theme", vars };
 }
 
-export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, covered: menuOver = false }: VisualFrameProps) {
+export function NativeFrame({ source, title, onMessage, zoom = 1, zoomAnchor = null, snapshotRequest = 0, covered: menuOver = false }: VisualFrameProps) {
   // Covered by a menu of the reader's, or the whole app by the reconnect overlay: the native page
   // sits above the page's DOM, so it takes no room rather than show (and take input) over them.
   const appCovered = useContext(AppCovered);
@@ -156,6 +156,10 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
   posted.current = onMessage;
   const snapshot = useRef<(() => void) | null>(null);
   const relayout = useRef<(() => void) | null>(null);
+  // The webview's own zoom: its content scales and scrolls inside it, so nothing is clipped.
+  const zoomed = useRef<((level: number, anchor?: { x: number; y: number; ratio: number } | null) => void) | null>(null);
+  const zoomNow = useRef(zoom);
+  zoomNow.current = zoom;
   const coveredNow = useRef(covered);
   coveredNow.current = covered;
   const [error, setError] = useState<string | null>(null);
@@ -171,6 +175,9 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     let disposed = false;
     let failed = false;
     let closing: Promise<unknown> | undefined;
+    // The zoom the page was last given: a page opens at 1, and goes back to 1 when parked (the
+    // next reader starts at 1 too).
+    let sentZoom = 1;
     setError(null);
     // The native surface covers this DOM, including errors. Remove it before reporting failure.
     // A blocker can fail while visual_open is still returning, so share its eventual close
@@ -182,6 +189,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
           if (!label) return;
           if (failed) return invoke("visual_close", { label });
           // Out of sight, kept for the next open of this revision.
+          if (sentZoom !== 1) await invoke("visual_set_zoom", { label, zoom: 1 }).catch(() => undefined);
           const { x, y } = element.getBoundingClientRect();
           await invoke("visual_set_bounds", { label, bounds: { x, y, width: 0, height: 0 } });
           park(label);
@@ -243,7 +251,14 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
     relayout.current = layout;
     function theme() { send("visual_post", { message: themeMessage() }); }
     snapshot.current = () => send("visual_snapshot");
-    void opened.then(() => { if (!disposed) { layout(); theme(); } }, fail);
+    zoomed.current = (level, anchor) => {
+      if (level === sentZoom) return;
+      sentZoom = level;
+      send("visual_set_zoom", { zoom: level });
+      // The page moves its scroll so the point the person zoomed around stays under the pointer.
+      if (anchor) send("visual_post", { message: { type: "brindle.zoom.anchor", x: anchor.x, y: anchor.y, ratio: anchor.ratio } });
+    };
+    void opened.then(() => { if (!disposed) { layout(); theme(); zoomed.current?.(zoomNow.current); } }, fail);
     // Sidebar/Focus and answer-bar changes alter the content rect without a window resize.
     const resize = new ResizeObserver(layout);
     for (let parent: HTMLElement | null = element; parent; parent = parent.parentElement) resize.observe(parent);
@@ -258,6 +273,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
       shown.delete(expected);
       snapshot.current = null;
       relayout.current = null;
+      zoomed.current = null;
       resize.disconnect();
       observer.disconnect();
       system.removeEventListener("change", theme);
@@ -269,6 +285,9 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, cov
   }, [kind, id, rev]);
   useEffect(() => { if (snapshotRequest > 0) snapshot.current?.(); }, [snapshotRequest]);
   useEffect(() => { relayout.current?.(); }, [covered]);
+  const anchorNow = useRef(zoomAnchor);
+  anchorNow.current = zoomAnchor;
+  useEffect(() => { zoomed.current?.(zoom, anchorNow.current); }, [zoom]);
   return <div ref={host} className="min-h-0 flex-1" data-testid="visual-frame" aria-label={title}>
     {error && <p role="alert" className="p-s3 text-sm text-sap">Couldn't show this visual: {error}</p>}
   </div>;

@@ -36,7 +36,11 @@ def _format(blocks=("sign_off",), reference="DES-{number}"):
 
 
 def _propose(db, boss, markdown="# Presets\n\n## Summary\n\nPresets per org.", plan_id=None):
-    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    if plan_id:
+        with db.tx() as c:
+            visual_offers._grant(c, boss.id, "plan")     # the revision a redirect asks for
+    else:
+        visual_offers.person_spoke(db, boss, "Make a planning doc.")
     reply = mcp_server.propose_plan(markdown, plan_id=plan_id)
     return reply.split()[2], reply
 

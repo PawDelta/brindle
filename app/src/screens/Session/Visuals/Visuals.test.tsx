@@ -15,6 +15,7 @@ import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type Vis
 import { PARKED, closeParkedVisuals } from "./NativeFrame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
+import { KeptVisuals } from "../../Knowledge/KeptVisuals";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
 import { VisualsSetting } from "../../Settings/VisualsSetting";
@@ -713,6 +714,26 @@ describe("visuals", () => {
     await act(async () => { reads.slice(1).forEach((resolve, i) => resolve(i === 0 ? [prompt] : daemon.data.inbox)); });
     await act(async () => sync.idle());
     expect([cards(), badge()]).toEqual([[], null]);
+  });
+
+  it("opens the plan the person asked for in the planning view, and not one asked before the screen showed", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
+    const plan: VisualDTO = { ...visual, id: "v_plan", kind: "plan", title: "Plan", question: undefined, options: undefined, rev: 1 };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    vi.spyOn(client, "visuals").mockImplementation(async () => [plan]);
+    vi.spyOn(client, "markVisualRead").mockImplementation(async () => plan);
+    const draft: Plan = { id: "v_plan", session: "sup1", title: "Plan", rev: 0, state: "writing", markdown: "", lede: "", queued: 0, created_at: now, split: [], sections: [], decisions: [], threads: [] };
+    vi.spyOn(client, "plan").mockImplementation(async () => draft);
+    const store = createAppStore();
+    const asked = (id: number) => act(() => store.dispatch({ type: "stream", message: { type: "event", id, ts: now, kind: "plan.requested", repo_root: REPO, root_id: "sup1", agent_id: "sup1", workspace_id: "proj", task_id: null, payload: { visual: "v_plan" } } }));
+    await asked(5000);                                   // before the screen opens: not replayed
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await screen.findByTestId("terminal", {}, { timeout: 4000 });
+    expect(screen.queryByTestId("plan-decided")).toBeNull();
+    await asked(5001);
+    expect((await screen.findByTestId("plan-decided")).dataset.state).toBe("writing");
   });
 
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
@@ -1481,4 +1502,62 @@ describe("export snapshot", () => {
     expect(got[1]).toEqual([{ type: "brindle.snapshot", html: "<p>two</p>" }, second]);
     expect(document.querySelectorAll("iframe")).toHaveLength(0);
   });
+
+  const keptRow = { id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: null, kept_at: now };
+  const zoomOf = () => Number(screen.getByTestId("visual-frame").dataset.zoom);
+  const mountView = async (view: string) => {
+    if (view === "session") render(<VisualReader client={new FakeDaemon().client()} visual={{ ...visual, unread: false }} onBack={() => {}} onAnswered={() => {}} />);
+    else {
+      const client = new FakeDaemon().client();
+      vi.spyOn(client, "keptVisuals").mockResolvedValue([keptRow]);
+      render(<KeptVisuals client={client} />);
+      fireEvent.click(await screen.findByTestId("kept-k_1"));
+    }
+  };
+
+  it.each(["session", "library"])("zooms the %s view by buttons, keys while it has focus, and the host's wheel and pinch", async (view) => {
+    await mountView(view);
+    const reader = screen.getByTestId("visual-reader");
+    expect(zoomOf()).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(zoomOf()).toBe(1.25);
+    fireEvent.keyDown(reader, { key: "-", metaKey: true });
+    expect(zoomOf()).toBe(1);
+    // Keys with focus elsewhere (another screen, a hidden reader) are not this reader's.
+    fireEvent.keyDown(document.body, { key: "=", metaKey: true });
+    fireEvent.keyDown(window, { key: "=", metaKey: true });
+    expect(zoomOf()).toBe(1);
+    fireEvent.keyDown(reader, { key: "=", metaKey: true });
+    expect(zoomOf()).toBe(1.25);
+    fireEvent.keyDown(reader, { key: "0", metaKey: true });
+    expect(zoomOf()).toBe(1);
+    const sandbox = screen.getByTestId("visual-sandbox");
+    fireEvent.wheel(sandbox, { deltaY: -20, metaKey: true });
+    expect(zoomOf()).toBeGreaterThan(1);
+    fireEvent.click(screen.getByTestId("visual-zoom-reset"));
+    fireEvent.wheel(sandbox, { deltaY: 20, ctrlKey: true });
+    expect(zoomOf()).toBeLessThan(1);
+    fireEvent.click(screen.getByTestId("visual-zoom-reset"));
+    fireEvent.wheel(sandbox, { deltaY: -20 });
+    expect(zoomOf()).toBe(1);
+  });
+
+  it.each([["session", "visual:v_8f2c:r2", { kind: "revision", id: "v_8f2c", rev: 2 }], ["library", "visual:kept:k_1", { kind: "kept", id: "k_1" }]])(
+    "scales the %s page's own webview, around the pointer, for zoom the page itself asks for", async (view, label, ref) => {
+      native.enabled = true;
+      vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+      vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+      native.invoke.mockReset().mockImplementation(async (command) => command === "visual_open" ? label : undefined);
+      await mountView(view);
+      await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", expect.anything()));
+      await waitFor(() => expect(native.events.has("visual:message")).toBe(true));
+      await act(async () => {});
+      // A pinch inside the page reaches the host as the page's message, with where it was made.
+      act(() => native.events.get("visual:message")!({ payload: { label, visual: ref, message: { type: "brindle.zoom", dir: "in", factor: 1.25, x: 120, y: 80 } } }));
+      await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_zoom", { label, zoom: 1.25 }));
+      expect(native.invoke).toHaveBeenCalledWith("visual_post", { label, message: { type: "brindle.zoom.anchor", x: 120, y: 80, ratio: 0.8 } });
+      // The buttons zoom the same webview.
+      fireEvent.click(screen.getByTestId("visual-zoom-reset"));
+      await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_zoom", { label, zoom: 1 }));
+    });
 });

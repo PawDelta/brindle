@@ -8,13 +8,27 @@ import asyncio
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import mcp_server, plans, visual_offers
+from brindle import bus, mcp_server, plans, visual_offers
 from brindle.daemon.app import build_app
 from brindle.service.errors import ServiceError
 from test_plans import AUTH, DECISIONS, PLAN, TOKEN, messages, session  # noqa: F401 - fixture
 
 SUMMARY = "Workers run on a machine the customer controls. Code never passes through PawDelta."
 QUOTE = "a machine the customer controls"
+
+
+@pytest.mark.variant("regression: a revision must publish an event to the open plan reader; failed on base")
+def test_supervisor_revision_notifies_the_open_plan_reader(db, session):
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    cursor = db.conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+
+    plans.decide(db, pid, 1, False, note="Please revise.", person=True)
+    mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
+
+    events = bus.tail(db, cursor, kinds=("visual.plan_changed",), root_id="boss")
+    assert [(event["payload"]["visual"], event["payload"]["rev"]) for event in events] == [(pid, 2)]
 
 
 def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_path):

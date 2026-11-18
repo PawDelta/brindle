@@ -7,7 +7,7 @@
    The host, not the page, says which visual a message came from (the child webview's label), and
    the reader drops one from any other: a page can't speak for another visual or an older revision. */
 
-import type { ComponentType } from "react";
+import { useCallback, useState, type ComponentType } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { NativeFrame } from "./NativeFrame";
 
@@ -23,11 +23,15 @@ export const sameSource = (a: VisualSource, b: VisualSource): boolean =>
   a.kind === b.kind && a.id === b.id && (a.kind === "kept" || (b.kind === "session" && a.rev === b.rev));
 
 /* What a page may post to the host (the wave-1 contract's frame → host). A snapshot is worker 5's (export). */
-export type FrameMessage = { type: "choice"; option: string } | { type: "brindle.esc" } | { type: "brindle.snapshot"; html: string };
+export type FrameMessage = { type: "choice"; option: string } | { type: "brindle.esc" } | { type: "brindle.snapshot"; html: string } | ({ type: "brindle.zoom" } & ZoomAsk);
 
 export function frameMessage(data: unknown): FrameMessage | null {
   if (!data || typeof data !== "object") return null;
-  const m = data as { type?: unknown; option?: unknown; html?: unknown };
+  const m = data as { type?: unknown; option?: unknown; html?: unknown; dir?: unknown; factor?: unknown; x?: unknown; y?: unknown };
+  if (m.type === "brindle.zoom" && (m.dir === "in" || m.dir === "out" || m.dir === "reset")) {
+    const num = (v: unknown) => typeof v === "number" && Number.isFinite(v) ? v : undefined;
+    return { type: "brindle.zoom", dir: m.dir, factor: num(m.factor), x: num(m.x), y: num(m.y) };
+  }
   if (m.type === "brindle.snapshot" && typeof m.html === "string") return { type: "brindle.snapshot", html: m.html };
   if (m.type === "brindle.esc") return { type: "brindle.esc" };
   if (m.type === "choice" && typeof m.option === "string") return { type: "choice", option: m.option };
@@ -463,9 +467,69 @@ export async function computedSnapshot(html: string, size: { width: number; heig
   }
 }
 
+/* Zoom, one implementation for every visual view (the session's reader and the Library's). The page
+   runs in its own webview, so the zoom is the webview's: its content scales and scrolls there, never
+   clipped. The reader owns the level and hands it to the frame; keys and pinch inside the page reach
+   it as the page's brindle.zoom message (see the prelude in visual_scheme.rs). */
+export const ZOOM_MIN = 0.5;
+export const ZOOM_MAX = 3;
+const ZOOM_STEP = 1.25;
+export type ZoomDir = "in" | "out" | "reset";
+const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
+
+/* A request to zoom: a step, or a continuous `factor` (a pinch), around a point of the page (`x`, `y`
+   in its own window's pixels) so the content under the pointer stays under it. */
+export type ZoomAsk = { dir: ZoomDir; factor?: number; x?: number; y?: number };
+/* Where the page's scroll must move after a zoom so the point at (x, y) stays under the pointer. */
+export type ZoomAnchor = { x: number; y: number; ratio: number; n: number };
+
+export function useZoom() {
+  const [state, setState] = useState<{ zoom: number; anchor: ZoomAnchor | null }>({ zoom: 1, anchor: null });
+  const step = useCallback((ask: ZoomDir | ZoomAsk) => setState((s) => {
+    const { dir, factor, x, y } = typeof ask === "string" ? { dir: ask } as ZoomAsk : ask;
+    const by = factor ?? (dir === "in" ? ZOOM_STEP : 1 / ZOOM_STEP);
+    const zoom = dir === "reset" ? 1 : clampZoom(s.zoom * by);
+    if (zoom === s.zoom) return s;
+    const anchor = x === undefined || y === undefined ? null : { x, y, ratio: s.zoom / zoom, n: (s.anchor?.n ?? 0) + 1 };
+    return { zoom, anchor };
+  }), []);
+  return { zoom: state.zoom, anchor: state.anchor, step };
+}
+
+/* ⌘+ ⌘= ⌘− ⌘0 (Ctrl on other platforms): the direction a key event asks for, if any. */
+export function zoomKey(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey">): ZoomDir | null {
+  if (!(event.metaKey || event.ctrlKey) || event.altKey) return null;
+  if (event.key === "+" || event.key === "=") return "in";
+  if (event.key === "-" || event.key === "_") return "out";
+  if (event.key === "0") return "reset";
+  return null;
+}
+
+/* Pinch and ⌘-scroll arrive as wheel events with ctrlKey (or metaKey) set. */
+export function zoomWheel(event: Pick<WheelEvent, "deltaY" | "ctrlKey" | "metaKey">): ZoomAsk | null {
+  if (!(event.ctrlKey || event.metaKey) || !event.deltaY) return null;
+  // Proportional to the gesture, bounded so one notch of a mouse wheel is about a step.
+  const factor = Math.min(ZOOM_STEP, Math.max(1 / ZOOM_STEP, Math.exp(-event.deltaY * 0.01)));
+  return { dir: event.deltaY < 0 ? "in" : "out", factor };
+}
+
+export function ZoomControls({ zoom, onZoom }: { zoom: number; onZoom(dir: ZoomDir): void }) {
+  const cls = "rounded px-1.5 leading-4 hover:bg-surface-2 disabled:opacity-40";
+  return (
+    <span className="flex items-center gap-0.5" role="group" aria-label="Zoom" data-testid="visual-zoom">
+      <button type="button" className={cls} aria-label="Zoom out" disabled={zoom <= ZOOM_MIN} onClick={() => onZoom("out")}>−</button>
+      <button type="button" className={cls} aria-label="Reset zoom" title="Reset zoom (⌘0)" data-testid="visual-zoom-reset" onClick={() => onZoom("reset")}>{Math.round(zoom * 100)}%</button>
+      <button type="button" className={cls} aria-label="Zoom in" disabled={zoom >= ZOOM_MAX} onClick={() => onZoom("in")}>+</button>
+    </span>
+  );
+}
+
 export interface VisualFrameProps {
   source: VisualSource;
   title: string;
+  /* The page's zoom level (1 = actual size), and the point the last change was made around. */
+  zoom?: number;
+  zoomAnchor?: ZoomAnchor | null;
   /* An increment asks the shell to post the current rendered outerHTML. */
   snapshotRequest?: number;
   /* A menu is open over the page: the native page steps aside (no room) so the menu shows. */
@@ -475,9 +539,9 @@ export interface VisualFrameProps {
 }
 
 /* Browser development: the frame's place. It loads nothing. */
-export function PlaceholderFrame({ source, title }: VisualFrameProps) {
+export function PlaceholderFrame({ source, title, zoom = 1 }: VisualFrameProps) {
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center p-s3 text-center text-sm text-ink-3" data-testid="visual-frame" data-src={visualSrc(source)} aria-label={title}>
+    <div className="flex min-h-0 flex-1 items-center justify-center p-s3 text-center text-sm text-ink-3" data-testid="visual-frame" data-src={visualSrc(source)} data-zoom={zoom} aria-label={title}>
       This visual shows here once the sandboxed view is in this build.
     </div>
   );

@@ -174,3 +174,51 @@ test("session terminal: a paste reaches the pty, and a printed URL opens in the 
   await page.keyboard.up(modifier);
   await expect.poll(opened).toEqual(["https://example.com/pr/7"]);
 });
+
+test("a kept Library visual opens large, and zooms by the host's wheel and pinch", async ({ page }) => {
+  await open(page, "library-kept");
+  await page.evaluate(() => {
+    const w = window as unknown as { seen: number[] };
+    w.seen = [];
+    new MutationObserver(() => {
+      const r = document.querySelector('[data-testid="kept-reader"]');
+      if (r) w.seen.push(r.getBoundingClientRect().height);
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  await page.getByTestId("kept-k_1").click();
+  // Never a frame of the reader squeezed into the list's old layout: the page around it has to
+  // give the room back in the same commit the reader opens (a slow CI run measured the gap).
+  const seen = await page.evaluate(() => (window as unknown as { seen: number[] }).seen);
+  expect(seen.length).toBeGreaterThan(0);
+  expect(Math.min(...seen)).toBeGreaterThan(page.viewportSize()!.height * 0.8);
+  const reader = page.getByTestId("kept-reader");
+  const frame = page.getByTestId("visual-frame");
+  const viewport = page.viewportSize()!;
+  // Measured in the engine: the reader runs down the content area (the old one was a fixed 70vh) and
+  // its frame takes what the toolbar and border leave.
+  const box = (await reader.boundingBox())!;
+  // Edge to edge: from the sidebar's right edge to the viewport's right and bottom, no gutter.
+  const side = (await page.getByRole("complementary", { name: "Sidebar" }).boundingBox())!;
+  expect(Math.abs(box.x - (side.x + side.width))).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.x + box.width - viewport.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.y + box.height - viewport.height)).toBeLessThanOrEqual(1);
+  expect((await frame.boundingBox())!.height).toBeGreaterThan(viewport.height * 0.6);
+
+  const zoom = async () => Number(await frame.getAttribute("data-zoom"));
+  const sandbox = page.getByTestId("visual-sandbox");
+  await sandbox.hover();
+  await page.keyboard.down("Meta");
+  await page.mouse.wheel(0, -20);
+  await page.keyboard.up("Meta");
+  expect(await zoom()).toBeGreaterThan(1);
+  await page.getByTestId("visual-zoom-reset").click();
+  await page.mouse.wheel(0, 20);
+  expect(await zoom()).toBe(1);
+  await reader.focus();
+  await page.keyboard.press("Control+=");
+  expect(await zoom()).toBe(1.25);
+  // Back returns to the Kept visuals list.
+  await page.getByTestId("visual-back").click();
+  await expect(page.getByTestId("kept-k_1")).toBeVisible();
+  await expect(reader).toHaveCount(0);
+});
