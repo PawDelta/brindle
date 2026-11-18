@@ -606,8 +606,10 @@ def apply_theme(session: str) -> None:
         "pane-border-style": f"fg={t['line']}",
         "pane-active-border-style": f"fg={t['accent_light']}",
         "pane-border-lines": "single",
-        "window-style": f"bg={t['bg']}",
-        "window-active-style": f"bg={t['bg']}",
+        # No fixed pane colour: the attached terminal's own background (light or
+        # dark) shows, so light-mode text isn't painted onto a black pane.
+        "window-style": "bg=default",
+        "window-active-style": "bg=default",
         "message-style": f"bg={t['accent']},fg={t['text']}",
         "mode-style": f"bg={t['accent']},fg={t['text']}",
         # Wheel scrolling and click-to-focus between the sidebar and the chat.
