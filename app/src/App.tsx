@@ -558,7 +558,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     if (root) showOpen.current?.(root);
   }, []);
   const { reload } = useSessions();
-  const [panes, setPanes] = useState<PanesReady>({ ready: !client, epoch: 0 });
+  const [panes, setPanes] = useState<PanesReady>({ ready: !client, epoch: 0, unsure: !!client });
   // Rounds of asking: one at the start, one more each time the stream reopens after a drop.
   const connection = useAppState((s) => s.connection);
   const [round, setRound] = useState(0);
@@ -589,8 +589,18 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
   useEffect(() => {
     if (!client) return;
     let current = true;
+    // Until this effect's cleanup: the feed's stale rows are read again after the gate has settled, too.
+    let mounted = true;
     let first = true;
     let next: ReturnType<typeof setTimeout>;
+    let staleAgain: ReturnType<typeof setTimeout> | undefined;
+    // Reconnected: until the engine answers, rows read meanwhile may be a recovering engine's.
+    if (round > 0) setPanes((p) => (p.unsure ? p : { ...p, unsure: true }));
+    // Whether the engine has answered this round, and whether the startup deadline has shown the panes
+    // while its recovery may still be under way (the gate then keeps watching, panes shown).
+    let heard = false;
+    let released = false;
+    // The engine has said recovery is over (or there was none): the gate's work is done.
     const settle = (pid: number | null) => {
       startupStep("panes_ready");
       current = false;
@@ -598,8 +608,26 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       clearTimeout(poll);
       clearTimeout(deadline);
       if (pid !== null) shownFrom.current = pid;
-      // `back` stays: a session released ahead of the rest already has its fresh view.
-      setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null, back: p.back }));
+      // Every session this recovery brought back and not released on its own: its feed row may still be the
+      // last daemon's (paused), read before it came back. Stale, like a released one's, until read again.
+      for (const id of returningNow.current) {
+        if (!backNow.current.has(id)) staleNow.current.add(id);
+      }
+      returningNow.current = new Set();
+      const stale = [...staleNow.current];
+      // `back` stays: a session released ahead of the rest already has its fresh view. So does `stale`: those
+      // rows can't say paused until a feed read begun after their return answers (readStale). The epoch moves
+      // only when the panes weren't shown yet (the deadline may have shown them).
+      setPanes((p) => ({ ready: true, epoch: p.ready ? p.epoch : p.epoch + 1, recovery: null, back: p.back, stale }));
+      void readStale().catch(() => {});
+    };
+    // The startup deadline while the engine is (or may be) still bringing sessions back: the panes show, but
+    // nothing of what says recovery is under way goes (pending, returning, stale, unsure), and the gate keeps
+    // watching until the engine says it is over (settle). A session's paused row stays a row from before till then.
+    const release = () => {
+      startupStep("panes_ready");
+      released = true;
+      setPanes((p) => (p.ready ? p : { ...p, ready: true, epoch: p.epoch + 1 }));
     };
     // Per session (an engine that names the sessions still to come back): each one whose chat has its
     // window in rows read after it came back is released at once, whatever the others are doing. Its
@@ -636,19 +664,31 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       void Promise.all([readStale(), refresh?.()]).catch(() => {});
     };
     // The sessions feed's rows for released sessions are read again: until a read begun after their release
-    // answers, they say what the last daemon left (paused). One that fails keeps them so, and the next
-    // round of `check` asks again.
+    // answers, they say what the last daemon left (paused). Those marked while a read is out get one of their
+    // own after it. One that fails keeps them so, and they are asked for again shortly (recovery over or not).
     let readingStale = false;
+    let markedSince = false;
     const readStale = async () => {
-      const marked = staleNow.current;
-      if (readingStale || marked.size === 0) return;
+      if (readingStale) {
+        markedSince = true;
+        return;
+      }
       readingStale = true;
-      const ids = [...marked];
       try {
-        if (!(await reload())) return;
-        for (const id of ids) marked.delete(id);
-        // Unless another daemon has answered since: its own marks are its own.
-        if (marked === staleNow.current) setPanes((p) => ({ ...p, stale: [...marked] }));
+        do {
+          markedSince = false;
+          const marked = staleNow.current;
+          if (marked.size === 0) return;
+          const ids = [...marked];
+          if (!(await reload())) {
+            clearTimeout(staleAgain);
+            if (mounted) staleAgain = setTimeout(() => void readStale().catch(() => {}), STARTUP_CHECK);
+            return;
+          }
+          for (const id of ids) marked.delete(id);
+          // Unless another daemon has answered since: its own marks are its own.
+          if (marked === staleNow.current) setPanes((p) => ({ ...p, stale: [...marked] }));
+        } while (markedSince && mounted);
       } finally {
         readingStale = false;
       }
@@ -738,8 +778,11 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       lookOnEvent();
       fromRows();
     });
-    const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
-    const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
+    const hide = () => {
+      if (!released) setPanes((p) => (p.ready ? { ...p, ready: false } : p));
+    };
+    // Past it, the panes show whatever the engine is doing; the gate stops only once it is known no recovery is under way.
+    const deadline = setTimeout(() => (heard && !recovering.current ? settle(null) : release()), STARTUP_WAIT);
     // Whether a session the engine named pending at `then` is back by `now` (or `now` is another daemon):
     // a read begun at `then` cannot show it. One that ends recovery with none newly back changes nothing.
     const cameBack = (then: Meta, now: Meta) => now.pid !== then.pid
@@ -801,6 +844,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         if (meta.resuming || (meta.recovered_at ?? 0) >= client.createdAt
           || (round > 0 && meta.pid !== shownFrom.current)) recovering.current = true;
         first = false;
+        heard = true;
         hide();
         const recovery = meta.resuming ? meta.recovery ?? null : null;
         const pending = meta.resuming ? recovery?.pending : undefined;
@@ -820,8 +864,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         const back = [...backNow.current];
         const stale = [...staleNow.current];
         const returning = [...returningNow.current];
-        setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join() && (p.stale ?? []).join() === stale.join() && (p.returning ?? []).join() === returning.join()
-          ? p : { ...p, recovery, pending: pending ?? null, back, stale, returning }));
+        setPanes((p) => (!p.unsure && p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join() && (p.stale ?? []).join() === stale.join() && (p.returning ?? []).join() === returning.join()
+          ? p : { ...p, recovery, pending: pending ?? null, back, stale, returning, unsure: false }));
         if (pending) {
           // A released session whose feed row a failed read left stale: ask again.
           void readStale();
@@ -832,7 +876,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         if (!meta.resuming) {
           const { seq, workspaces } = await readAfter(meta);
           if (!unchanged()) return;
-          if (!waitingForPanes(workspaces)) {
+          // Past the deadline the panes show already: the engine's word that recovery is over is enough.
+          if (released || !waitingForPanes(workspaces)) {
             if (recovering.current) {
               // These rows were read after recovery ended. Validate their daemon
               // before applying them, independently of sync's inbox and queued reads.
@@ -842,7 +887,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
             // Applying this read also supersedes sync's in-flight pre-recovery rows.
             apply(seq, workspaces);
             // Unless a read begun after it has landed first: the store kept those rows, and they decide.
-            if (waitingForPanes(store.getState().workspaces)) return;
+            if (!released && waitingForPanes(store.getState().workspaces)) return;
             recovering.current = false;
             settle(meta.pid);
             void Promise.all([reload(), refresh?.()]).catch(() => {});
@@ -859,6 +904,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     void check();
     return () => {
       current = false;
+      mounted = false;
+      clearTimeout(staleAgain);
       if (showOpen.current === showChat) showOpen.current = null;
       unsubscribe();
       clearTimeout(next);
