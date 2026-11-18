@@ -1925,3 +1925,17 @@ def test_resumed_codex_turns_report_deltas_of_cumulative_totals():
     second = turn({"input_tokens": 150, "cached_input_tokens": 60, "output_tokens": 25}, session="t1")
     assert (first["inputTokens"], first["cacheReadInputTokens"], first["outputTokens"]) == (60, 40, 10)
     assert (second["inputTokens"], second["cacheReadInputTokens"], second["outputTokens"]) == (30, 20, 15)
+
+
+def test_antigravity_print_usage_is_tracked_per_conversation():
+    """get_provider shares one instance: resuming A after B ran counts A's growth, not B's totals."""
+    from brindle.providers import Antigravity
+    agy = Antigravity()
+
+    def turn(conversation, tokens, session=None):
+        event = {"event": "result", "result": {"conversation_id": conversation, "status": "SUCCESS",
+                                               "usage": {"input_tokens": tokens}}}
+        return agy.print_events([event], "m", session)[-1]["modelUsage"]["m"]["inputTokens"]
+    assert turn("A", 100) == 100
+    assert turn("B", 1000) == 1000
+    assert turn("A", 150, session="A") == 50

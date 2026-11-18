@@ -2398,11 +2398,13 @@ class Antigravity(Provider):
                 continue
             result = event.get("result", {})
             usage = result.get("usage", {})
-            previous = getattr(self, "_print_usage", {}) if session else {}
+            conversation = result.get("conversation_id") or session
+            totals = self.__dict__.setdefault("_print_usage", {})   # per conversation: the instance is shared
+            previous = totals.get(conversation, {}) if session else {}
             delta = {key: max(0, value - previous.get(key, 0))
                      for key, value in usage.items() if isinstance(value, (int, float))}
-            self._print_usage = usage
-            output.append({"type": "result", "session_id": result.get("conversation_id") or session,
+            totals[conversation] = usage
+            output.append({"type": "result", "session_id": conversation,
                            "result": result.get("response"),
                            "is_error": result.get("status") != "SUCCESS" or bool(result.get("finished_reason")),
                            "modelUsage": {model: {"inputTokens": delta.get("input_tokens", 0),
