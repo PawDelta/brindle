@@ -27,6 +27,10 @@ def test_concurrent_process_tables_share_reads(monkeypatch):
         return {n: (1, "")}
 
     monkeypatch.setattr(procs, "_ps", ps)
+    wakeups = []
+    if hasattr(procs, "_cond"):
+        notify = procs._cond.notify_all
+        monkeypatch.setattr(procs._cond, "notify_all", lambda: (wakeups.append(1), notify())[1], raising=False)
     seen = {}
 
     def ask(name):
@@ -38,9 +42,11 @@ def test_concurrent_process_tables_share_reads(monkeypatch):
     others = [threading.Thread(target=ask, args=(f"other{i}",)) for i in range(4)]
     for t in others:
         t.start()
-    if hasattr(procs, "_cond"):         # each is waiting for the read after the one under way
-        with procs._cond:
-            procs._cond.wait_for(lambda: procs._waiting == 4)
+    if hasattr(procs, "_arrived"):      # each is waiting for the read after the one under way
+        with procs._arrived:
+            procs._arrived.wait_for(lambda: procs._waiting == 4)
+        # Waiters never wake one another: nothing is notified till a read ends.
+        assert wakeups == []
     else:                               # every one reads for itself, none waits
         for t in others:
             t.join()

@@ -69,6 +69,7 @@ def _ps(flags: str) -> dict[int, tuple[int, str]]:
 
 
 _cond = threading.Condition()
+_arrived = threading.Condition()
 _begun = 0          # reads of the table started
 _done = 0           # the newest read finished
 _reading = False
@@ -92,7 +93,8 @@ def table() -> dict[int, Proc]:
         while _done < need:
             if _reading:
                 _waiting += 1
-                _cond.notify_all()
+                with _arrived:      # for whoever counts the waiting (never the waiters themselves)
+                    _arrived.notify_all()
                 try:
                     _cond.wait()
                 finally:
