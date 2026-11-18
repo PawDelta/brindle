@@ -61,9 +61,11 @@
 # .deb names. Only a final app-v<X.Y.Z> tag updates those.
 #
 # Staff builds: a push to main that touches the app (the
-# paths app.yml runs for) builds the Macs only, at that commit, once
-# `staff-gate` has found it on main with the newest matching App run passed,
-# and the newest matching CI run passed when one exists. The build carries
+# paths app.yml runs for) builds the Macs only, at that commit, as soon as
+# `staff-identity` has its version, while `staff-gate` waits beside it until
+# it finds the commit on main with the newest matching App run passed, and
+# the newest matching CI run passed when one exists; nothing is published
+# unless it does. The build carries
 # the version <package.json version>+release.<run>.<sha12>, its updater
 # bundle signed with the staff key (app/src-tauri/staff-updater.pub), and
 # `release-publish` publishes it under brindle/downloads/desktop/release/
@@ -164,12 +166,38 @@ jobs:
             --jq '[.[] | select(.state == "approved") | .user.login] | join(", ")' || echo "unknown")"
           echo "Release gate: $GITHUB_REF_NAME at $GITHUB_SHA is on main; approved by ${approvers:-nobody recorded}" >> "$GITHUB_STEP_SUMMARY"
 
-  # A main push builds staff only once the newest App run, and CI's run when
-  # ci.yml ran, for exactly that commit passed. They start on the same push,
-  # so this waits for them, up to the CI_GATE_DEADLINE_MINUTES variable
-  # (default 45; keep it under this job's 60-minute limit). A failure, or
-  # still running at the deadline, fails this job and nothing builds: re-run
-  # it once those checks have passed.
+  # A main push's staff build identity (version, file stem, directory), at
+  # once, so the `macos` build starts without waiting for CI.
+  staff-identity:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      name: ${{ steps.identity.outputs.name }}
+      path: ${{ steps.identity.outputs.path }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Identity
+        id: identity
+        run: node app/scripts/release_publish.mjs identity
+
+  # A main push publishes staff only once the newest App run, and CI's run
+  # when ci.yml ran, for exactly that commit passed. They start on the same
+  # push, so this waits for them, up to the CI_GATE_DEADLINE_MINUTES variable
+  # (default 45; keep it under this job's 60-minute limit), while `macos`
+  # builds beside it. Every job that publishes staff (`release-publish`)
+  # needs this one and its go; `macos` does not, so the wait and the build
+  # overlap. A failure, or still running at the deadline, fails this job and
+  # nothing is published: re-run the failed jobs once those checks have
+  # passed (the build is kept; release-publish then publishes it).
   staff-gate:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -179,9 +207,6 @@ jobs:
       actions: read   # the CI and App workflow runs for this commit
     outputs:
       go: ${{ steps.gate.outputs.go }}
-      version: ${{ steps.identity.outputs.version }}
-      name: ${{ steps.identity.outputs.name }}
-      path: ${{ steps.identity.outputs.path }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -190,9 +215,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Identity
-        id: identity
-        run: node app/scripts/release_publish.mjs identity
       - name: On main, CI and App passed
         id: gate
         env:
@@ -205,19 +227,20 @@ jobs:
   # `macos-publish` job does that once both have passed (`release-publish`
   # for a release-branch build).
   macos:
-    needs: [staff-gate, release-gate]
+    # A staff build starts once its identity is known, beside staff-gate's
+    # wait; only release-publish, which needs staff-gate's go, publishes it.
+    needs: [staff-identity, release-gate]
     if: >-
       !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release-gate.result == 'success')
       || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
-      || needs.staff-gate.outputs.go == 'true')
+      || needs.staff-identity.result == 'success')
     name: macos (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(needs.staff-gate.outputs.go == 'true' && '["aarch64"]' || '["aarch64","x86_64"]') }}
+        arch: ${{ fromJSON(needs.staff-identity.result == 'success' && '["aarch64"]' || '["aarch64","x86_64"]') }}
     runs-on: macos-latest
-    # Pushed tags use production signing; a release-branch push (past
-    # staff-gate) uses the separately protected staff environment.
+    # Pushed tags use production signing; a release-branch push (main) uses the separately protected staff environment.
     environment: ${{ github.event_name == 'push' && (github.ref_type == 'tag' && 'desktop-release' || 'desktop-staff-release') || '' }}
     timeout-minutes: 90
     permissions:
@@ -226,7 +249,7 @@ jobs:
       ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.arch }}-apple-darwin
       # Set for a release-branch build only: the version it is built with.
-      RELEASE_VERSION: ${{ needs.staff-gate.outputs.version }}
+      RELEASE_VERSION: ${{ needs.staff-identity.outputs.version }}
       # build_engine.sh packs brindle from this checkout, at its HEAD (the tag).
       BRINDLE_SRC: ${{ github.workspace }}
       BRINDLE_REF: HEAD
@@ -238,7 +261,7 @@ jobs:
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-          RELEASE_NAME: ${{ needs.staff-gate.outputs.name }}
+          RELEASE_NAME: ${{ needs.staff-identity.outputs.name }}
         run: |
           version="$(node -p "require('./app/package.json').version")"
           if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "app-v$version" ]; then
@@ -248,7 +271,7 @@ jobs:
           # A release candidate (app-v*-rc*) publishes under rc/<version>/ only.
           case "$version" in *-rc*) rc=true path="rc/$version" ;; *) rc=false path="$version" ;; esac
           # The files' names: the version, or for a release-branch build its
-          # identity without the '+' (staff-gate's name).
+          # identity without the '+' (staff-identity's name).
           name="$version"
           if [ -n "$RELEASE_VERSION" ]; then version="$RELEASE_VERSION" name="$RELEASE_NAME" rc=false path=""; fi
           { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; echo "name=$name"; } >> "$GITHUB_OUTPUT"
@@ -623,11 +646,13 @@ jobs:
   # (and their Gatekeeper checks) have passed.
   macos-publish:
     # Never for a release-branch build (release-publish is its publish).
-    # needs.macos.result: macos's own needs (staff-gate) is skipped here.
+    # needs.macos.result: macos's own needs (staff-identity) is skipped here.
+    # It needs staff-gate too, so nothing that publishes runs before the CI
+    # gate has decided; skipped (tags, dispatch) it holds nothing up.
     if: >-
       !cancelled() && needs.macos.result == 'success'
       && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
-    needs: [release-gate, macos]
+    needs: [release-gate, staff-gate, macos]
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
     timeout-minutes: 20
@@ -823,7 +848,7 @@ jobs:
   # descendant of the commit it names, written with an S3 conditional put so
   # an older or concurrent run can never put it back.
   release-publish:
-    needs: [staff-gate, macos]
+    needs: [staff-identity, staff-gate, macos]
     if: >-
       !cancelled() && needs.macos.result == 'success' && needs.staff-gate.outputs.go == 'true'
       && github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -834,8 +859,8 @@ jobs:
       contents: read
       id-token: write   # the release-branch role, through GitHub's OIDC
     env:
-      VERSION: ${{ needs.staff-gate.outputs.version }}
-      NAME: ${{ needs.staff-gate.outputs.name }}
+      VERSION: ${{ needs.staff-identity.outputs.version }}
+      NAME: ${{ needs.staff-identity.outputs.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -845,15 +870,15 @@ jobs:
         with:
           node-version: 22
 
-      # This attempt's own directory, not staff-gate's: re-running this job
-      # alone keeps the gate's outputs from the attempt it first ran in.
+      # This attempt's own directory, not staff-identity's: re-running this
+      # job keeps that job's outputs from the attempt it first ran in.
       - name: Identity
         id: identity
         run: node app/scripts/release_publish.mjs identity
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: brindle-desktop-macos-*-${{ needs.staff-gate.outputs.name }}
+          pattern: brindle-desktop-macos-*-${{ needs.staff-identity.outputs.name }}
           path: ${{ runner.temp }}/desktop
           merge-multiple: true
 
@@ -865,7 +890,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: brindle-desktop-release-${{ needs.staff-gate.outputs.name }}-attempt-${{ github.run_attempt }}
+          name: brindle-desktop-release-${{ needs.staff-identity.outputs.name }}-attempt-${{ github.run_attempt }}
           path: ${{ steps.collect.outputs.dir }}
           if-no-files-found: error
 
