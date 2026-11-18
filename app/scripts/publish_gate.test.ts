@@ -118,12 +118,12 @@ describe("app-release publish gate", () => {
   it("builds both Mac architectures on Apple Silicon and publishes only after both, with one bundle each in latest.json", () => {
     const text = readFileSync(workflow, "utf8");
     expect(text).not.toContain("universal-apple-darwin");
-    // Releases build both Macs; a staff build (staff-gate's go) builds Apple Silicon only.
-    expect(text).toContain(`arch: \${{ fromJSON(needs.staff-gate.outputs.go == 'true' && '["aarch64"]' || '["aarch64","x86_64"]') }}`);
+    // Releases build both Macs; a staff build (staff-identity ran) builds Apple Silicon only.
+    expect(text).toContain(`arch: \${{ fromJSON(needs.staff-identity.result == 'success' && '["aarch64"]' || '["aarch64","x86_64"]') }}`);
     expect(text).toContain("TARGET: ${{ matrix.arch }}-apple-darwin");
     expect(text).toMatch(/name: macos \(\$\{\{ matrix\.arch \}\}\)\n[\s\S]*?runs-on: macos-latest\n/);
     const publish = text.slice(text.indexOf("\n  macos-publish:\n"), text.indexOf("\n  linux:\n"));
-    expect(publish).toContain("    needs: [release-gate, macos]\n");
+    expect(publish).toContain("    needs: [release-gate, staff-gate, macos]\n");
     expect(publish).toContain('"darwin-aarch64": {signature: $arm_sig, url: $arm_url}');
     expect(publish).toContain('"darwin-x86_64": {signature: $x64_sig, url: $x64_url}');
     const build = text.slice(text.indexOf("\n  macos:\n"), text.indexOf("\n  macos-publish:\n"));
@@ -171,7 +171,7 @@ describe("app-release publish gate", () => {
     ];
     for (const [env, staffFile, key] of keys) expect(updaterKey(env, staffFile), JSON.stringify(env)).toBe(key);
     // A scheduled run builds no release (and so signs and publishes nothing): only the nightly smoke runs.
-    // A release-branch push builds the Macs only, once staff-gate says so, and publishes them only from release-publish.
+    // A release-branch push builds the Macs only, beside staff-gate's wait, and publishes them only from release-publish, past staff-gate's go.
     // A pushed tag builds only past release-gate: its commit on main, approved in the secret-free release-gate environment.
     const release = "(github.event_name == 'push' && github.ref_type == 'tag' && needs.release-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
     for (const name of ["macos", "macos-publish", "linux", "windows"]) {
@@ -182,8 +182,12 @@ describe("app-release publish gate", () => {
     expect(job("release-gate")).toContain("environment: release-gate\n");
     expect(jobOf(text, "release-gate")).toContain('git merge-base --is-ancestor "$GITHUB_SHA" origin/main');
     for (const name of ["macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release);
-    expect(job("macos")).toContain("|| needs.staff-gate.outputs.go == 'true')");
-    expect(job("staff-gate")).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect(job("macos")).toContain("|| needs.staff-identity.result == 'success')");
+    expect(job("macos")).toContain("    needs: [staff-identity, release-gate]\n");
+    expect(job("release-publish")).toContain("needs.staff-gate.outputs.go == 'true'");
+    for (const name of ["staff-identity", "staff-gate"]) {
+      expect(job(name), name).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    }
     expect(job("nightly")).toContain("if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly)");
     expect(text).toContain('[ "$REF_NAME" != "app-v$version" ]');
     const channel = text.match(/^\s+(case "\$version" in .*esac)$/m)?.[1] ?? "";
