@@ -2,7 +2,7 @@
    the same reader opened read-only. A kept copy lives on its own (.brindle/kept/visuals/), so it
    reads after its session is gone. Not per repo: the list says which repo each came from. */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeptVisualDTO } from "../../api/client";
 import { plain } from "../../api/wording";
 import { alert, button, card } from "../../components/ui";
@@ -19,7 +19,9 @@ export function KeptVisuals({ client, onOpenChange }: { client: KeptVisualsClien
   const [open, setOpen] = useState<KeptVisualDTO | null>(null);
   // The page around the list gives the room back to an open reader (it fills the content area).
   const isOpen = open !== null;
-  useEffect(() => {
+  // A layout effect, so the page re-renders before paint: with a passive one the reader could be
+  // painted (and measured) for a frame inside the list's old layout.
+  useLayoutEffect(() => {
     onOpenChange?.(isOpen);
     return () => onOpenChange?.(false);
   }, [isOpen, onOpenChange]);
