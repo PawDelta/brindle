@@ -13,7 +13,7 @@ import pytest
 
 from brindle import bus, git, status_cache, tmux, view
 from brindle.daemon import routes_read
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
 
 MAIN, OLD, NEW = "a" * 40, "b" * 40, "c" * 40
 UNKNOWN = {"ahead": None, "behind": None, "dirty": None}
@@ -156,6 +156,132 @@ def test_inbox_reuses_snapshot_and_refreshes_after_an_event(db, tmp_path, monkey
     request.query_params = {"repo": "another-repo"}
     assert json.loads(routes_read.snapshot(request).body) == []
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize("recovering, screens_read", [
+    pytest.param(True, [], marks=pytest.mark.variant(
+        "a snapshot during recovery must not capture any pane's screen (it made renders slow while sessions came back)")),
+    pytest.param(False, ["ag-live"], marks=pytest.mark.variant(
+        "outside recovery the live pane's screen is still read, so the skip is limited to recovery")),
+])
+def test_a_read_while_sessions_come_back_reads_no_screen(db, tmp_path, monkeypatch, fake_git, recovering,
+                                                        screens_read):
+    """A capture per running pane, each slow on a machine busy launching the
+    sessions coming back, made every snapshot a second or two; the app shows
+    a session that's back only from a read begun after it was."""
+    from brindle import agents
+
+    ws = _worktree(tmp_path, db, "one", OLD)
+    db.add_agent(Agent(id="ag-live", workspace_id=ws.id, profile="developer", provider="claude", parent_id=None,
+                       mode="assign", status="processing", tmux_window="%9", result=None, created_at=time.time(),
+                       tmux_server=tmux.current_server()))
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    panes["%9"] = True
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
+    monkeypatch.setattr(agents, "pane_owners", lambda db_, panes_: {"%9": "ag-live"})
+    read = []
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: read.append(a.id) or a)
+    monkeypatch.setattr(view, "warm_later", lambda pending: None)
+    progress = {"done": 0, "total": 1, "pending": ["x"]} if recovering else None
+    state = SimpleNamespace(recovery=SimpleNamespace(progress=lambda: progress), snapshot_view=routes_read.SnapshotView())
+    rows = json.loads(routes_read.snapshot(SimpleNamespace(query_params={}, app=SimpleNamespace(state=state))).body)
+    assert any(a["id"] == "ag-live" for w in rows for a in w["agents"])
+    assert read == screens_read
+
+
+def test_readers_waiting_behind_a_render_share_the_next_one(db, tmp_path, monkeypatch):
+    """While sessions come back, events never stop: readers piled up behind a
+    slow rendering each rendered again in turn, the pane gate's read last. One
+    that waited takes a rendering begun after it arrived as its own."""
+    view_ = routes_read.SnapshotView()
+    rendering, held, renders = threading.Event(), threading.Event(), []
+
+    def rows(db_, repo, read_screens=True):
+        renders.append(repo)
+        if len(renders) == 1:
+            rendering.set()
+            held.wait(5)        # the first rendering, slow, while two more readers arrive
+        db_.conn.execute("INSERT INTO events (ts, kind) VALUES (?, 'session.changed')", (time.time(),))
+        return [{"render": len(renders)}]
+
+    monkeypatch.setattr(routes_read, "_snapshot_rows", rows)
+    waiting = threading.Condition()
+
+    class Lock:
+        """view_'s lock, counting the readers waiting on it."""
+        def __init__(self):
+            self.lock, self.waiters = threading.Lock(), 0
+
+        def __enter__(self):
+            with waiting:
+                self.waiters += 1
+                waiting.notify_all()
+            self.lock.acquire()
+
+        def __exit__(self, *exc):
+            self.lock.release()
+
+    view_.lock = Lock()
+    got: list = []
+
+    def read():     # on a connection of its own, as each request has
+        got.append(view_.read(DB(db.path), None))
+
+    first = threading.Thread(target=read)
+    first.start()
+    assert rendering.wait(5)
+    later = [threading.Thread(target=read) for _ in range(2)]
+    for thread in later:
+        thread.start()
+    with waiting:
+        assert waiting.wait_for(lambda: view_.lock.waiters == 3, 5)
+    held.set()
+    for thread in (first, *later):
+        thread.join(5)
+    assert len(renders) == 2 and got[1:] == [[{"render": 2}]] * 2
+
+
+def test_the_open_sessions_chat_is_read_while_a_snapshot_renders(db, tmp_path, monkeypatch, fake_git):
+    """After a restart the app shows the session on screen from its chat's own
+    row the moment it is back: snapshots render one at a time, seconds each
+    while the rest come back, and its terminal waited 12 s behind them."""
+    from brindle import agents
+
+    ws = _worktree(tmp_path, db, "one", OLD)
+    db.add_agent(Agent(id="ag-chat", workspace_id=ws.id, profile="supervisor", provider="claude", parent_id=None,
+                       mode="interactive", status="processing", tmux_window="%9", result=None,
+                       created_at=time.time(), tmux_server=tmux.current_server()))
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    panes["%9"] = True
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
+    monkeypatch.setattr(agents, "pane_owners", lambda db_, panes_: {"%9": "ag-chat"})
+    monkeypatch.setattr(routes_read, "_pane_view", routes_read._PaneView())
+    rendering, held = threading.Event(), threading.Event()
+
+    def rows(db_, repo, read_screens=True):     # a snapshot's rendering, slow
+        rendering.set()
+        held.wait(5)
+        return []
+
+    monkeypatch.setattr(routes_read, "_snapshot_rows", rows)
+    state = SimpleNamespace(snapshot_view=routes_read.SnapshotView())
+
+    def request(**params):
+        return SimpleNamespace(query_params={}, path_params=params, app=SimpleNamespace(state=state))
+
+    slow = threading.Thread(target=routes_read.snapshot, args=(request(),))
+    slow.start()
+    try:
+        assert rendering.wait(5)
+        route = next(r for r in routes_read.ROUTES if r.path == "/v1/sessions/{root:path}/view")
+        got = json.loads(route.endpoint(request(root="ag-chat")).body)
+        rendered_meanwhile = slow.is_alive()
+    finally:
+        held.set()
+        slow.join(5)
+    assert rendered_meanwhile       # answered without queueing behind the rendering
+    assert got["id"] == ws.id
+    assert [(a["id"], a["window"], a["status"]) for a in got["agents"]] == [("ag-chat", "%9", "processing")]
 
 
 @pytest.mark.parametrize("stored_head, shown", [

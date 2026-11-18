@@ -5,11 +5,20 @@
 
      ?scene=chat-pane              idle at its prompt box: those rows cropped
      ?scene=chat-pane-permission   a permission question: every row shown
+     ?scene=chat-pane-idle         a live Claude Code pane's captured rows (Chat/fixtures), idle,
+     ?scene=chat-pane-working      at work and streaming its answer with a message queued: each read as
+     ?scene=chat-pane-streaming    ProviderSurface reads it (claudePromptRegion), the box cropped in all three
 
    The composer is a stand-in for ChatBox (its own owner's), only for the layout. */
 
+import { useCallback, useMemo, useState } from "react";
 import type { PtyViewOpener } from "../src/api/ptyView";
-import { ChatPane, type ChatTheme, type PromptRegion } from "../src/screens/Session/Chat/ChatPane";
+import { ChatPane, claudePromptRegion, type ChatTheme, type PromptRegion } from "../src/screens/Session/Chat/ChatPane";
+import idle from "../src/screens/Session/Chat/fixtures/claude-turn-1-idle.txt?raw";
+import working from "../src/screens/Session/Chat/fixtures/claude-turn-2-working.txt?raw";
+import streaming from "../src/screens/Session/Chat/fixtures/claude-turn-3-streaming.txt?raw";
+
+const CAPTURED: Record<string, string> = { "chat-pane-idle": idle, "chat-pane-working": working, "chat-pane-streaming": streaming };
 
 const ESC = "\x1b[";
 const dim = (s: string) => `${ESC}90m${s}${ESC}0m`;
@@ -88,8 +97,30 @@ function opener(kind: PromptRegion["kind"]): PtyViewOpener {
   };
 }
 
+/* A captured pane (24 rows, tmux capture-pane -e): redrawn at each size with its last row on the client's last row,
+   as Claude Code redraws its bottom block there. */
+function capturedOpener(frame: string): PtyViewOpener {
+  const lines = frame.replace(/\n$/, "").split("\n");
+  return (_at, size, handlers) => {
+    const draw = (_cols: number, rows: number) => {
+      const shown = lines.slice(Math.max(0, lines.length - rows));
+      const text = `${ESC}2J${ESC}H${ESC}${rows - shown.length + 1};1H${shown.join("\r\n")}`;
+      queueMicrotask(() => handlers.onData(new TextEncoder().encode(text)));
+    };
+    draw(size.cols, size.rows);
+    return { write() {}, resize: draw, focus() {}, close() {} };
+  };
+}
+
 export function ChatPaneScene({ scene, theme }: { scene: string; theme: ChatTheme }) {
-  const prompt: PromptRegion = scene === "chat-pane-permission" ? { kind: "permission", rows: 10 } : { kind: "prompt", rows: 4 };
+  const captured = CAPTURED[scene];
+  const [read, setRead] = useState<PromptRegion>({ kind: "unknown", rows: 0 });
+  const openCaptured = useMemo(() => captured ? capturedOpener(captured) : null, [captured]);
+  const onRows = useCallback((rows: string[]) => {
+    const region = claudePromptRegion(rows);
+    setRead((was) => was.kind === region.kind && was.rows === region.rows && was.top === region.top ? was : region);
+  }, []);
+  const prompt: PromptRegion = captured ? read : scene === "chat-pane-permission" ? { kind: "permission", rows: 10 } : { kind: "prompt", rows: 4 };
   const composer = (
     <div className="flex flex-col gap-s1 border border-line-strong px-s2 py-s2" style={{ borderRadius: "10px", background: theme === "dark" ? "#070b09" : "#ffffff" }}>
       <textarea aria-label="Draft" rows={1} readOnly placeholder="Message the supervisor" className="resize-none bg-transparent text-sm text-ink outline-none placeholder:text-ink-3" />
@@ -98,7 +129,10 @@ export function ChatPaneScene({ scene, theme }: { scene: string; theme: ChatThem
   );
   return (
     <main className="flex h-screen min-h-0 flex-col bg-canvas text-ink">
-      <ChatPane provider="claude" theme={theme} prompt={prompt} terminal={{ at: { server: null, target: "chat:1" }, open: opener(prompt.kind) }}
+      <ChatPane provider="claude" theme={theme} prompt={prompt}
+        terminal={openCaptured
+          ? { at: { server: null, target: "chat:1" }, open: openCaptured, onRows }
+          : { at: { server: null, target: "chat:1" }, open: opener(prompt.kind) }}
         composer={composer} onDropFiles={() => {}} onComposeText={() => {}} />
     </main>
   );

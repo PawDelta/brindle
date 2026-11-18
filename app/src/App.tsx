@@ -66,8 +66,7 @@ import { SessionScreen } from "./screens/Session";
 import { SettingsScreen } from "./screens/Settings";
 import { isPaused } from "./store/overview";
 import { SessionsProvider, useCloseSession, useSessions } from "./store/sessions";
-import { PanesReadyContext, type PanesReady } from "./store/panes";
-import { agentIds, sessionTree } from "./screens/Session/tree";
+import { OpenSessionContext, PanesReadyContext, type PanesReady } from "./store/panes";
 import { ProvidersProvider } from "./store/providers";
 import { UsageProvider } from "./store/usage";
 import { snapshotTicket, type AppState, type AppStore } from "./store/store";
@@ -535,8 +534,10 @@ const STARTUP_CHECK = 500;
 function waitingForPanes(workspaces: WorkspaceDTO[], only?: Set<string>): boolean {
   return workspaces.flatMap((ws) => ws.agents ?? []).some((a) =>
     (!only || only.has(a.id)) && a.provider !== "subagent" && !a.headless && !a.locked
-    && !["paused", "done", "failed", "closed", "rewound", "exited"].includes(a.status) && !a.window);
+    && !NOT_RUNNING.includes(a.status) && !a.window);
 }
+
+const NOT_RUNNING = ["paused", "done", "failed", "closed", "rewound", "exited"];
 
 /* Whether agents' panes may be shown yet (store/panes.ts): not until the
    engine's recovery has settled and the store holds rows read after it.
@@ -547,8 +548,15 @@ function waitingForPanes(workspaces: WorkspaceDTO[], only?: Set<string>): boolea
    new daemon (another pid, or one resuming) hides the panes until it has
    settled in turn; a blip of the same one leaves them be. The deadline
    bounds a hung read. */
-function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void>): PanesReady {
+function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void>): { panes: PanesReady; opened: (root: string | null) => void } {
   const store = useStore();
+  // The session on screen (OpenSessionContext), and the gate's way to show it at once once it is back.
+  const openNow = useRef<string | null>(null);
+  const showOpen = useRef<((id: string) => void) | null>(null);
+  const opened = useCallback((root: string | null) => {
+    openNow.current = root;
+    if (root) showOpen.current?.(root);
+  }, []);
   const { reload } = useSessions();
   const [panes, setPanes] = useState<PanesReady>({ ready: !client, epoch: 0 });
   // Rounds of asking: one at the start, one more each time the stream reopens after a drop.
@@ -569,6 +577,12 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
   const backPid = useRef<number | null>(null);
   // Those of them whose sessions-feed row hasn't been read since their release (still the last daemon's paused).
   const staleNow = useRef<Set<string>>(new Set());
+  // Every session that daemon's recovery has named pending: restarting until its pane may show (store/panes.ts).
+  const returningNow = useRef<Set<string>>(new Set());
+  // Those the engine has said are back, each with the snapshot ticket (and stream) at that moment: rows of any
+  // read begun after it are the session's own, whoever asked (sync's, on the events of its return, land well
+  // before the gate's own read, queued behind the slow renders of a recovery under way).
+  const backSince = useRef<Map<string, { ticket: number; generation: number; lifecycle: number }>>(new Map());
   // Sticky across probes and stream drops: a later calm meta response alone
   // cannot make sync's pre-recovery rows safe. Clear only after the barrier.
   const recovering = useRef(false);
@@ -587,11 +601,13 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       // `back` stays: a session released ahead of the rest already has its fresh view.
       setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null, back: p.back }));
     };
-    // Per session (an engine that names the sessions still to come back): each one whose own agents have
-    // windows in rows read after it came back is released at once, whatever the others are doing.
+    // Per session (an engine that names the sessions still to come back): each one whose chat has its
+    // window in rows read after it came back is released at once, whatever the others are doing. Its
+    // workers relaunch after it (a worker's launch took 8 s of a 15.7 s return): each pane shows them
+    // starting until its own window is up, rather than hold the chat back.
     const releaseBack = async (meta: Meta, pending: string[], seq: number, workspaces: WorkspaceDTO[], unchanged: () => boolean) => {
       const fresh = (rows: WorkspaceDTO[], not: string[]) => rows.flatMap((w) => w.agents ?? []).filter((a) => !a.parent_id).map((a) => a.id)
-        .filter((id) => !not.includes(id) && !backNow.current.has(id) && !waitingForPanes(rows, agentIds(sessionTree(rows, id))));
+        .filter((id) => !not.includes(id) && !backNow.current.has(id) && !waitingForPanes(rows, new Set([id])));
       // Only those back when these rows were read: one that came back since needs a read of its own.
       const eligible = fresh(workspaces, pending);
       if (!eligible.length) return;
@@ -637,6 +653,91 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         readingStale = false;
       }
     };
+    // Each back session whose chat has its window in the store's rows, read after it was back, is released.
+    const fromRows = () => {
+      if (!current || backSince.current.size === 0) return;
+      const state = store.getState();
+      if (state.error) return;
+      const roots = new Set(state.workspaces.flatMap((w) => w.agents ?? []).filter((a) => !a.parent_id).map((a) => a.id));
+      const ready = [...backSince.current].filter(([id, at]) => state.snapshotBegan > at.ticket
+        && state.connectionGeneration === at.generation && state.lifecycleVersion === at.lifecycle
+        && roots.has(id) && !waitingForPanes(state.workspaces, new Set([id]))).map(([id]) => id);
+      if (!ready.length) return;
+      for (const id of ready) {
+        backSince.current.delete(id);
+        backNow.current.add(id);
+        staleNow.current.add(id);
+      }
+      setPanes((p) => ({ ...p, back: [...backNow.current], stale: [...staleNow.current] }));
+      void Promise.all([readStale(), refresh?.()]).catch(() => {});
+    };
+    // The session on screen, once back: its chat read alone (GET /sessions/{root}/view, which never
+    // queues behind the snapshot's rendering) and its pane shown from that row, rather than from the
+    // first whole snapshot begun after it was back: those render one at a time, seconds each while the
+    // rest come back (its terminal showed 12.5 s after it was back). Read after `meta` said it was back,
+    // the row is its own, whatever the last snapshot showed (paused, as the last daemon left it, or not
+    // at all). The whole snapshot fills in the rest when it lands; a chat not up in it leaves it to that.
+    const reading = new Set<string>();
+    const showChat = (id: string) => {
+      const at = backSince.current.get(id);
+      const pid = backPid.current;
+      if (!current || !at || pid === null || reading.has(id)) return;
+      reading.add(id);
+      void client.sessionView(id).then((workspace) => {
+        const state = store.getState();
+        if (!current || backPid.current !== pid || backSince.current.get(id) !== at
+          || state.connectionGeneration !== at.generation || state.lifecycleVersion !== at.lifecycle) return;
+        const chat = workspace.agents?.find((a) => a.id === id);
+        if (!chat?.window || chat.locked || NOT_RUNNING.includes(chat.status)) return;
+        backSince.current.delete(id);
+        backNow.current.add(id);
+        staleNow.current.add(id);
+        store.dispatch({ type: "session_view", root: id, workspace, began: at.ticket });
+        setPanes((p) => ({ ...p, back: [...backNow.current], stale: [...staleNow.current] }));
+        void readStale().catch(() => {});
+      }).catch(() => {}).finally(() => reading.delete(id));
+    };
+    showOpen.current = showChat;
+    // Those of the sessions coming back that `meta` says are back: no longer pending, or every one once
+    // recovery has ended (seen first then, too). Reads begun from here on are theirs (fromRows).
+    const markBack = (meta: Meta) => {
+      const pending = meta.resuming ? meta.recovery?.pending : undefined;
+      // Under way, only an engine that names those still to come: it says which are back.
+      if (meta.resuming ? !pending : (meta.recovered_at ?? 0) < client.createdAt) return;
+      const { connectionGeneration: generation, lifecycleVersion: lifecycle } = store.getState();
+      let marked = false;
+      for (const id of returningNow.current) {
+        if (!pending?.includes(id) && !backNow.current.has(id) && !backSince.current.has(id)) {
+          backSince.current.set(id, { ticket: snapshotTicket(), generation, lifecycle });
+          marked = true;
+        }
+      }
+      if (!marked) return;
+      // The session on screen at once, from its chat alone.
+      if (openNow.current && backSince.current.has(openNow.current)) showChat(openNow.current);
+      // A read begun after the mark, at once: sync's read on the same event began before this meta came
+      // back, so its rows can't count. Sync queues it behind one already out.
+      void refresh?.().catch(() => {});
+    };
+    // Each event while sessions come back (each one's return publishes one) has a look at how recovery stands,
+    // no read: the reads that follow, sync's on the same events, then count for those it finds back, where the
+    // gate's own look comes every STARTUP_CHECK.
+    let looking = false;
+    let looked = store.getState().lastEventId;
+    const lookOnEvent = () => {
+      const { lastEventId } = store.getState();
+      if (!current || looking || lastEventId === looked || backPid.current === null) return;
+      if (![...returningNow.current].some((id) => !backNow.current.has(id) && !backSince.current.has(id))) return;
+      looked = lastEventId;
+      looking = true;
+      void client.meta().then((meta) => {
+        if (current && meta.pid === backPid.current) markBack(meta);
+      }).catch(() => {}).finally(() => { looking = false; });
+    };
+    const unsubscribe = store.subscribe(() => {
+      lookOnEvent();
+      fromRows();
+    });
     const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
     const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
     // Whether a session the engine named pending at `then` is back by `now` (or `now` is another daemon):
@@ -708,11 +809,19 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
           backPid.current = meta.pid;
           backNow.current = new Set();
           staleNow.current = new Set();
+          returningNow.current = new Set();
+          backSince.current = new Map();
         }
+        // Those this recovery brings back, or brought while this app was starting (back before its first meta,
+        // rows it read meanwhile can be from before), are restarting until their panes may show.
+        const recent = meta.resuming || (meta.recovered_at ?? 0) >= client.createdAt;
+        for (const id of [...(pending ?? []), ...(recent ? meta.recovery_sessions ?? [] : [])]) returningNow.current.add(id);
+        markBack(meta);
         const back = [...backNow.current];
         const stale = [...staleNow.current];
-        setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join() && (p.stale ?? []).join() === stale.join()
-          ? p : { ...p, recovery, pending: pending ?? null, back, stale }));
+        const returning = [...returningNow.current];
+        setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join() && (p.stale ?? []).join() === stale.join() && (p.returning ?? []).join() === returning.join()
+          ? p : { ...p, recovery, pending: pending ?? null, back, stale, returning }));
         if (pending) {
           // A released session whose feed row a failed read left stale: ask again.
           void readStale();
@@ -750,17 +859,23 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     void check();
     return () => {
       current = false;
+      if (showOpen.current === showChat) showOpen.current = null;
+      unsubscribe();
       clearTimeout(next);
       clearTimeout(poll);
       clearTimeout(deadline);
     };
   }, [client, round, reload, refresh, store]);
-  return panes;
+  return { panes, opened };
 }
 
 function PanesGate({ client, refresh, children }: { client: DaemonClient | null; refresh?: () => Promise<void>; children: ReactNode }) {
-  const panes = usePanesReady(client, refresh);
-  return <PanesReadyContext.Provider value={panes}>{children}</PanesReadyContext.Provider>;
+  const { panes, opened } = usePanesReady(client, refresh);
+  return (
+    <OpenSessionContext.Provider value={opened}>
+      <PanesReadyContext.Provider value={panes}>{children}</PanesReadyContext.Provider>
+    </OpenSessionContext.Provider>
+  );
 }
 
 /* The sign-in gate: the app needs a brindle account. Once the engine

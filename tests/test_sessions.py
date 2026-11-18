@@ -521,11 +521,12 @@ def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db
         raise agents.AgentError("launch failed")
 
     monkeypatch.setattr(agents, "resume", resume)
-    # The daemon's first answers, before the start has sorted them out: every recorded one is coming back.
-    recovery.expect(e["id"] for e in lifecycle._read_resume())
-    assert statuses(db) == {"first": "resuming", "queued": "resuming", "exhausted": "resuming",
-                            "foreign": "resuming", "manual": "paused"}
-    assert recovery.progress()["pending"] == ["exhausted", "first", "foreign", "queued"]
+    # The daemon's first answers, before its start has begun: decided from the record and the DB as it
+    # starts, those it will bring back are resuming already and the rest paused, never one, then the other.
+    lifecycle.expect_on_start(recovery)
+    assert statuses(db) == {"first": "resuming", "queued": "resuming", "exhausted": "paused",
+                            "foreign": "paused", "manual": "paused"}
+    assert recovery.progress()["pending"] == ["first", "queued"]
     assert lifecycle.resume_after_start(recovery) == []
     assert seen[0] == {"first": "resuming", "queued": "resuming", "exhausted": "paused",
                        "foreign": "paused", "manual": "paused"}
@@ -533,6 +534,8 @@ def test_recovery_lists_queued_sessions_as_resuming_and_failed_ones_as_paused(db
     assert launching == [("first", "resuming"), ("queued", "resuming")]
     assert orders[0] == [["first", "queued", "exhausted", "foreign", "manual"]] * 3
     assert set(statuses(db).values()) == {"paused"}
+    # Which sessions this start was about stays known after it has ended (the app's rows may predate it).
+    assert recovery.brought() == ["first", "queued"]
 
 
 @pytest.mark.variant("concurrent recovery must overlap distinct tmux sessions while serializing chats sharing one session")
@@ -1149,7 +1152,7 @@ def test_resume_reads_only_needed_keys_and_key_timing(db, root, monkeypatch, cap
     assert lifecycle.resume_after_start() == ["chat"]
     assert not caplog.records and len(pending) == 1
     debuglog._write_timings(pending.pop())
-    assert len(caplog.records) == 4
+    assert len(caplog.records) == 5
     for value in (False, None, RuntimeError("offline")):
         answer[0] = value
         caplog.clear()

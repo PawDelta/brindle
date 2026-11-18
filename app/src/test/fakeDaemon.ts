@@ -811,6 +811,8 @@ export class FakeDaemon {
   readonly prioritized: string[] = [];
   /* The session roots POST /recovery/viewed said were on screen, in order. */
   readonly viewed: string[] = [];
+  /* The sessions GET /sessions/{root}/view read alone, in order. */
+  readonly sessionViews: string[] = [];
   readonly sockets: FakeSocket[] = [];
   /* Each visual's live text (seedLive), and the clients on it. */
   private readonly live = new Map<string, { doc: LoroDoc; presence: Map<string, EphemeralStore>; state: LiveDocState; writers: Set<string>; nextVersion: number; canFreeze: boolean; review?: { plan: Plan; gate: Plan["gate"]; me: string } }>();
@@ -953,6 +955,13 @@ export class FakeDaemon {
       if (!query.path) return error("invalid", "path is required", 400);
       if (content === undefined) return error("not_found", `no file ${query.path} in the session's checkout`, 404);
       return json({ path: query.path, content, base: fakeBlob(content) });
+    }
+    // Its chat alone, in its workspace's row as the snapshot has it (view.session_entry).
+    if (what === "view") {
+      const ws = d.workspaces.find((w) => w.agents?.some((a) => a.id === root));
+      if (!ws) return error("not_found", "the session has no checkout", 404);
+      this.sessionViews.push(root);
+      return json({ ...ws, agents: ws.agents?.filter((a) => a.id === root) });
     }
     // The checkout's files as `git ls-files` lists them: sessionFiles' paths, sorted.
     if (what === "tree") return json({ root_id: root, branch: review.branch, files: Object.keys(d.sessionFiles[root] ?? {}).sort() });
@@ -3000,7 +3009,7 @@ export class FakeDaemon {
       const row = plan && this.visualRows.find((v) => v.id === plan);
       return row ? json(row) : error("not_found", "this design wasn't shared from here", 404);
     }
-    if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
+    if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file|view)$/))) return this.sessionReviewRead(m[1], m[2], query);
     // The doc library, as an engine not signed in to a plan answers it (routes_actions._docs_entitlement).
     if (this.data.libraryDocs) {
       if (path === "/analysis-docs") return json({ docs: this.data.libraryDocs.map(({ design: _, ...doc }) => doc) });

@@ -16,6 +16,10 @@ export interface PanesReady {
   recovery?: { done: number; total: number } | null;
   /* Session roots the engine has yet to bring back; absent from an engine that doesn't say. */
   pending?: string[] | null;
+  /* Every root this engine's recovery has named pending, back since or not: until its pane may show
+     (`panesReadyFor`), the rows read so far can't say it is back (the snapshot read before its release
+     has no root for it, the feed's may say paused or nothing), so it is restarting, never paused. */
+  returning?: string[];
   /* Session roots back and read after it, whose panes may show before the rest are; kept once all
      are ready, as those panes' views stay open (only another daemon's start empties it). */
   back?: string[];
@@ -29,3 +33,8 @@ export const panesReadyFor = (panes: PanesReady, root: string | undefined) =>
   panes.ready || (!!root && !!panes.back?.includes(root));
 
 export const PanesReadyContext = createContext<PanesReady>({ ready: true, epoch: 0 });
+
+/* The session screen says which session is on screen (null: none). Once that one is back after a
+   restart, the gate reads its chat alone (GET /sessions/{root}/view) and shows its pane from that,
+   rather than wait for a whole snapshot, seconds each while the rest come back. */
+export const OpenSessionContext = createContext<(root: string | null) => void>(() => {});

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { AnalysisDoc, DaemonClient, DocScope, LibraryFolder } from "../../api/client";
 import { LibraryRail } from "../../components/LibraryRail";
 import { useLibraryFolders } from "../../components/useLibraryFolders";
@@ -10,6 +10,7 @@ import { DocsView, type DocsClient } from "../Knowledge/DocsView";
 import { docQueue } from "./libraryStages";
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   setReaderDoc(null);
   localStorage.clear();
@@ -63,6 +64,8 @@ const rows = () => [...screen.getByTestId("library-list").querySelectorAll("li[d
 const row = (id: string) => screen.getByTestId("library-list").querySelector<HTMLElement>(`li[data-doc="${id}"]`)!;
 
 it("lists designs with Needs you pinned and the rest by folder, and Board shows the same Library by stage, keeping the search and folder", async () => {
+  // Only Date is faked (timers keep running for waitFor); LIBRARY_TEST_NOW lets the date be varied by hand.
+  vi.useFakeTimers({ toFake: ["Date"], now: new Date(process.env.LIBRARY_TEST_NOW ?? "2026-11-18T00:00:30Z") });
   const client = library();
   const { rerender } = render(<DocsView client={client} queue={queue} repos={repos} />);
   await waitFor(() => expect(screen.getByTestId("library-list").querySelectorAll("section[data-group]").length).toBe(4));
@@ -93,8 +96,10 @@ it("lists designs with Needs you pinned and the rest by folder, and Board shows 
   render(<DocsView client={client} queue={queue} repos={repos} />);
   const all = await screen.findByTestId("library-board");
   await waitFor(() => expect(all.querySelectorAll("[data-doc]").length).toBe(4));
-  const columns = Object.fromEntries([...all.querySelectorAll("section[data-column]")].map((s) => [s.getAttribute("data-column"), [...s.querySelectorAll("[data-doc]")].map((c) => c.getAttribute("data-doc"))]));
-  expect(columns).toEqual({ drafting: ["release"], "in-review": ["cloud", "outbox"], approved: [], building: ["coedit"], shipped: [] });
+  // Stages come from each design's record, read after the list: until they arrive every design sits in Drafting.
+  const columns = () => Object.fromEntries([...all.querySelectorAll("section[data-column]")].map((s) => [s.getAttribute("data-column"), [...s.querySelectorAll("[data-doc]")].map((c) => c.getAttribute("data-doc"))]));
+  await waitFor(() => expect(columns().building).toEqual(["coedit"]));
+  expect(columns()).toEqual({ drafting: ["release"], "in-review": ["cloud", "outbox"], approved: [], building: ["coedit"], shipped: [] });
   expect(all.querySelector('[data-doc="cloud"]')!.getAttribute("data-needs-you")).toBe("review");
 });
 

@@ -284,44 +284,103 @@ class SnapshotView:
     Events invalidate it immediately; the short age bound also catches changes
     outside the event stream (pane liveness, transcript usage, and git files).
     One app owns one entry, and concurrent readers join the same rendering.
+    A reader that waited behind a rendering takes one begun after it arrived
+    as its own (it shows all the reader could ask for): while sessions come
+    back, events never stop, and readers piled up behind a slow rendering
+    each rendered again in turn, the pane gate's read last of all.
     """
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.key: tuple[str | None, int] | None = None
+        self.key: tuple[str | None, int, bool] | None = None
         self.at = 0.0
+        self.began = 0.0    # when the rendering ``rows`` holds began
         self.rows: list[dict] | None = None
 
-    def read(self, db: DB, repo: str | None) -> list[dict]:
+    def read(self, db: DB, repo: str | None, read_screens: bool = True) -> list[dict]:
+        arrived = time.monotonic()
         with self.lock:
+            waited = time.monotonic() - arrived
+            if (self.rows is not None and self.key is not None and self.key[0] == repo
+                    and self.key[2] == read_screens and self.began > arrived):
+                _log_read(waited, None, read_screens)
+                return self.rows
             newest = db.conn.execute("SELECT MAX(id) FROM events").fetchone()[0] or 0
-            key = (repo, newest)
+            key = (repo, newest, read_screens)
             if self.rows is None or self.key != key or time.monotonic() - self.at >= 0.25:
-                self.rows = _snapshot_rows(db, repo)
-                self.key, self.at = key, time.monotonic()
+                began = time.monotonic()
+                self.rows = _snapshot_rows(db, repo, read_screens)
+                self.key, self.at, self.began = key, time.monotonic(), began
+                _log_read(waited, self.at - began, read_screens)
+            else:
+                _log_read(waited, None, read_screens)
             return self.rows
 
 
-def _snapshot_rows(db: DB, repo: str | None) -> list[dict]:
+SLOW_SNAPSHOT_READ = 1.0    # seconds: a read sharing a rendering this slow is logged whenever it happens
+
+
+def _log_read(waited: float, rendered: float | None, read_screens: bool) -> None:
+    """The daemon's log (warnings only, its stderr) has each snapshot rendering:
+    how long its reader queued behind another's, and how long its own took.
+    A read that took one begun after it arrived (``rendered`` None) is logged
+    while sessions come back (``read_screens`` False then), or when it waited
+    long. Restarts are measured from it."""
+    if rendered is None and read_screens and waited < SLOW_SNAPSHOT_READ:
+        return
+    if rendered is None:
+        log.warning("brindle: snapshot read waited %.2fs, shared a rendering", waited)
+    else:
+        log.warning("brindle: snapshot read waited %.2fs, rendered in %.2fs", waited, rendered)
+
+
+def _snapshot_rows(db: DB, repo: str | None, read_screens: bool = True) -> list[dict]:
     # Git counts only as far as they are known: the app's first read after the
     # daemon starts must not wait on a git status per workspace (with recovery
     # competing, that took half a minute). The rest is counted afterwards and
     # published (view.warm_later); the events feed's git sweep keeps them current.
     known = view.KnownGit(db)
-    rows = view.snapshot(db, repo, known_git=known)
+    rows = view.snapshot(db, repo, read_screens=read_screens, known_git=known)
     view.warm_later(known.pending)
     return rows
 
 
+def recovering(state) -> bool:
+    """Whether the daemon's start is still bringing sessions back (lifecycle.Recovery)."""
+    recovery = getattr(state, "recovery", None)
+    return recovery is not None and recovery.progress() is not None
+
+
 def _shared_snapshot(db: DB, request: Request) -> list[dict]:
+    # While sessions come back, no agent's screen is read to correct its status: a capture per
+    # running pane, each slow on a machine busy launching them, made every read a second or two,
+    # and the app shows a session that's back only from a read begun after it was. Its hooks say.
+    read_screens = not recovering(request.app.state)
     shared = getattr(request.app.state, "snapshot_view", None)
-    return shared.read(db, _repo(request)) if shared is not None else _snapshot_rows(db, _repo(request))
+    return (shared.read(db, _repo(request), read_screens) if shared is not None
+            else _snapshot_rows(db, _repo(request), read_screens))
 
 
 @_json
 def snapshot(db: DB, request: Request) -> Any:
     rows = _shared_snapshot(db, request)
     return [WorkspaceDTO.model_validate(ws).to_json() for ws in rows]
+
+
+@_json
+def session_view(db: DB, request: Request) -> Any:
+    """A session's chat in its workspace's row (view.session_entry): what the
+    app needs to show its pane the moment the session is back after a restart.
+    It never waits on the shared snapshot's rendering (SnapshotView.lock),
+    which is seconds per read while the other sessions come back."""
+    root = db.get_agent(request.path_params["root"])
+    if root is None or root.parent_id:
+        raise ServiceError("not_found", "no such session", 404)
+    panes, owners = _shared_panes(db)
+    row = view.session_entry(db, root, panes, owners)
+    if row is None:
+        raise ServiceError("not_found", "the session has no checkout", 404)
+    return WorkspaceDTO.model_validate(row).to_json()
 
 
 @_json
@@ -1296,6 +1355,7 @@ ROUTES = [
     # PUT and DELETE on the same path edit (routes_actions).
     Route("/v1/sessions/{root:path}/file", session_file),
     Route("/v1/sessions/{root:path}/tree", session_tree),
+    Route("/v1/sessions/{root:path}/view", session_view),
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),

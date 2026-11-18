@@ -429,6 +429,8 @@ export interface Meta {
   recovered_at?: number | null;
   /* How far that has come: sessions finished with, of those it is bringing back. */
   recovery?: { done: number; total: number; pending?: string[] } | null;
+  /* Every session the daemon's start brings back, or brought (kept once it has ended); absent on older engines. */
+  recovery_sessions?: string[];
   engine_version: string;
   api_version: string;
   pid: number;
@@ -1870,6 +1872,12 @@ export class DaemonClient {
 
   snapshot(repo?: string) {
     return this.get<WorkspaceDTO[]>("/snapshot", { repo });
+  }
+
+  /* A session's chat alone, in its workspace's row as the snapshot gives it (routes_read.session_view):
+     read without queueing behind the snapshot's rendering, which takes seconds while sessions come back. */
+  sessionView(root: string) {
+    return this.get<WorkspaceDTO>(`${this.sessionPath(root)}/view`);
   }
 
   /* null when the session has no goal set. */

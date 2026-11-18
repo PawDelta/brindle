@@ -170,8 +170,10 @@ def _deliver(db: DB, agent_id: str, message: ChatMessageDTO) -> None:
 
 # -- queue owner --------------------------------------------------------------
 # The engine takes the message box's messages (send and queue): /v1/meta's
-# ``chat``, which is what mounts the app's message box.
-SUPPORTED = True
+# ``chat``, which is what mounts the app's message box (and hides Claude Code's
+# own prompt rows). Off for now by the owner's decision (2026-11-18): sessions use
+# Claude Code's own input again; the box, queue and clipping code stay in place.
+SUPPORTED = False
 
 _QUEUE = "chat-queue"          # mark: JSON list of {"id", "text", "attachments": [{name, data_base64}]}
 _TURNS = "chat-queue-turns"    # mark: JSON list of the turn ids that released an item

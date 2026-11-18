@@ -112,7 +112,7 @@ describe("ChatPane", () => {
   // tmux capture-pane -e of live Claude Code 2.1.327 panes, their last rows.
   it.each([
     // At work (171 columns): the working line, the prompt box between its 256-colour grey rules, a blank row, the mode
-    // line ("esc to interrupt"): a box at work, shown whole.
+    // line ("esc to interrupt"): the box is still the prompt, from its first rule down; the working line is over it.
     ["its prompt box", 171, [
       "\x1b[38;5;174m✶\x1b[39m \x1b[38;5;174mBillowing… \x1b[38;5;246m(1m 47s · ↓\x1b[39m \x1b[38;5;246m4.5k tokens · thought for 3s)\x1b[39m",
       "",
@@ -121,7 +121,7 @@ describe("ChatPane", () => {
       `\x1b[38;5;244m${"─".repeat(171)}`,
       "",
       "\x1b[39m  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle) · esc to interrupt\x1b[39m",
-    ], { kind: "working", rows: 0 }],
+    ], { kind: "prompt", rows: 5, top: 2 }],
     // A numbered message typed in the box (120 columns) is still the prompt.
     ["a numbered message in its box", 120, [
       `\x1b[38;5;244m${"─".repeat(120)}`,
@@ -161,19 +161,22 @@ describe("ChatPane", () => {
   // tmux capture-pane -e -p of a live Claude Code 2.1.327 (its fullscreen renderer, 24 rows) through one turn: idle at
   // its prompt box, at work (the working line over the box, "esc to interrupt" in its mode line), its answer streaming
   // in with a message queued, and idle again. Fed through ChatPane as the pane's client draws them, its rows read as
-  // ProviderSurface reads them: the box is cropped only while Claude Code is idle at it. At 34 columns the mode line is
-  // cut short ("esc to inte…") and, streaming, no working line shows over the box: still at work.
+  // ProviderSurface reads them: the box (its rules, its input or queued-message hint, its mode line) is cropped in every
+  // frame, idle or at work, from its first rule down; the working line and the queued message over it stay shown. At 34
+  // columns the mode line is cut short ("esc to inte…").
   it.each([
     ["80", [idle, working, streaming, done]],
     ["34", [idle34, working34, streaming34, done34]],
-  ])("crops Claude Code's prompt box only while it is idle, never through a turn (%s columns)", async (_cols, frames) => {
+  ])("crops Claude Code's prompt box through a turn and keeps its working line (%s columns)", async (_cols, frames) => {
     let feed: (bytes: string) => void = () => {};
     const open = (_at: unknown, _size: unknown, handlers: PtyViewHandlers) => {
       feed = (bytes) => handlers.onData(new TextEncoder().encode(bytes));
       return { write() {}, resize() {}, focus() {}, close() {} };
     };
+    let read: PromptRegion = { kind: "unknown", rows: 0 };
     function Live() {
-      const [prompt, setPrompt] = useState<PromptRegion>({ kind: "unknown", rows: 0 });
+      const [prompt, setPrompt] = useState<PromptRegion>(read);
+      read = prompt;
       return (
         <ChatPane provider="claude" theme="dark" prompt={prompt} composer={null} onDropFiles={() => {}} onComposeText={() => {}}
           terminal={{ at: { server: null, target: "%1" }, open, onRows: (rows) => setPrompt(claudePromptRegion(rows)) }} />
@@ -188,9 +191,14 @@ describe("ChatPane", () => {
         feed(drawn);
         await new Promise<void>((ok) => setTimeout(ok));
       });
-      clipped.push(screen.getByTestId("chat-terminal-frame").dataset.clipRows ?? "");
+      // The rows cropped, and the row the crop starts at (the region's top, which ChatPane hands the terminal).
+      clipped.push(`${screen.getByTestId("chat-terminal-frame").dataset.clipRows} from ${read.top}`);
+      // The working line ("✳ Finagling…") is row 18, above the crop's first row (20): shown.
+      const spinner = frame.split("\n").findIndex((line) => /^(\x1b\[[0-9;]*m)*[✢✳✶✻✽]\s*(\x1b\[[0-9;]*m)*\s*\S+…/.test(line));
+      if (frame === working || frame === working34) expect(spinner).toBe(18);
     }
-    expect(clipped).toEqual(["4", "0", "0", "4"]);
+    // From the box's first rule (row 20 of 24) down, in every frame.
+    expect(clipped).toEqual(["4 from 20", "4 from 20", "4 from 20", "4 from 20"]);
   });
 
   it("hides only Claude prompt rows and restores permission and choice rows", () => {
