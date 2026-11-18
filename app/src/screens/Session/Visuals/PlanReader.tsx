@@ -868,10 +868,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const reviewerNames = signers.filter((r) => r.required).map((r) => (r.sub ? firstName(r.sub) : r.name ?? "")).filter(Boolean);
 
   // The status line.
-  const stage = !open && !teammate ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
+  const stage = plan.state === "writing" ? "Being written" : plan.state === "superseded" ? "Superseded"
+    : !open && !teammate ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
     : frozen ? "Locked for sign-off"
     : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off";
-  const statusLine = teammate?.signedOff ? `You signed off ${frozen ? `version ${frozen.id}` : `r${plan.rev}`}`
+  const statusLine = plan.state === "writing" ? "The supervisor is writing this plan"
+    : plan.state === "superseded" ? "You asked for a newer plan; this one is closed"
+    : teammate?.signedOff ? `You signed off ${frozen ? `version ${frozen.id}` : `r${plan.rev}`}`
     : frozen && gate ? `Version ${frozen.id} · ${gate.signed} of ${plural(gate.required, "sign-off")}`
     : gate && useLiveReview && open ? `Still being written · sign-off opens when ${teammate ? authorName : "you"} freeze${teammate ? "s" : ""} a version`
     : teammate ? "Its author builds it once every required reviewer signs off"
@@ -1094,8 +1097,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
           </>
         ) : (
-          <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided">
-            <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : "You asked for changes. The supervisor is revising the design."}</p>
+          <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided" data-state={plan.state}>
+            <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>
             {plan.verdict?.note && <p className="text-ink-2"><span className="text-ink-3">your note · </span>{plan.verdict.note}</p>}
             {plan.verdict?.comments?.map((c, i) => (
               <p key={i} className="text-ink-2">

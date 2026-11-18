@@ -59,7 +59,11 @@ ASK = "ask"
 LEDE = "lede"
 SPLIT = "split"
 DECISION = "decision:"
-HOLDING = ("open", "redirected")
+HOLDING = ("open", "redirected", "writing")
+# "writing": the empty draft opened when the person asked for a plan, until the supervisor's
+# first proposal fills it. "superseded": a draft the person called off before it was written; closed, not approvable.
+WRITING = "writing"
+SUPERSEDED = "superseded"
 # A row of the build gate.
 SIGNED, CHANGES, WAITING, WAIVED = "signed_off", "changes_requested", "waiting", "waived"
 _MET = (SIGNED, WAIVED)
@@ -581,6 +585,12 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     else:
         markdown = markdown.strip()
         lede, parts = plan_docs.from_markdown(markdown)
+    # The empty draft opened when the person asked: the first proposal (with or without its id)
+    # fills that plan instead of creating another.
+    draft_row = db.conn.execute("SELECT id FROM plans WHERE root_id=? AND state=?", (root.id, WRITING)).fetchone()
+    fill = draft_row is not None and plan_id in (None, draft_row["id"])
+    if fill:
+        plan_id = None
     # The doc format: a new plan starts from the default template, a revision keeps the one
     # its plan was written with; either way a required heading left out comes back, empty.
     where = doc_templates.store()
@@ -603,13 +613,15 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
           for d in decisions),
         *((f"worker {w['id']}", "\n".join([w["title"], w["test"] or "", *w["files"]])) for w in split)])
     current_plan = open_plan(db, root.id)
-    if plan_id is None and current_plan is not None:
+    if plan_id is None and current_plan is not None and not fill:
         raise ServiceError("open_plan", f"plan {current_plan['id']} is still open: revise it with plan_id, "
                            "or wait for the person's decision", 409)
     if plan_id is not None:
         current = _row(db, plan_id)
         if current["root_id"] != root.id:
             raise ServiceError("not_found", "no such plan in this session", 404)
+        if current["state"] == SUPERSEDED:
+            raise ServiceError("superseded", "the person asked for a newer plan; that one is closed", 409)
         if current["state"] not in HOLDING:
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
     replaced = plan_docs.revision(db, plan_id) if plan_id else None
@@ -637,11 +649,16 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         now = time.time()
         # The plan's revisions count the person's own edits too, so they run
         # ahead of its visual's (the supervisor's publications).
-        rev = 1 if visual_rev == 1 else c.execute("SELECT rev FROM plans WHERE id=?", (vid,)).fetchone()[0] + 1
+        rev = 1 if visual_rev == 1 or fill else c.execute("SELECT rev FROM plans WHERE id=?", (vid,)).fetchone()[0] + 1
         args = (rev, markdown, json.dumps(decisions), json.dumps(split), ask, now)
-        if visual_rev == 1:
-            c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
-                      " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
+        if fill:
+            if not c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, ask=?, updated_at=?,"
+                             " state='open' WHERE id=? AND state=?", (*args, vid, WRITING)).rowcount:
+                raise ServiceError("stale", "the draft changed meanwhile; propose again", 409)
+        if visual_rev == 1 or fill:
+            if not fill:
+                c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
+                          " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
             numbered.append(doc_templates.start(c, vid, template, fmt and fmt["naming"]["reference"], now))
             # The plan now holds the session's tasks: the offer to plan first is settled
             # (an open one too: the person asked for a plan in their own words).
@@ -665,7 +682,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                   split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now)
 
     try:
-        v = visuals.publish(db, caller, title, _page(title, markdown), visual_id=plan_id, kind="plan",
+        v = visuals.publish(db, caller, title, _page(title, markdown),
+                            visual_id=draft_row["id"] if fill else plan_id, kind="plan",
                             extra=write if replica is None else write_draft)
     except ServiceError as e:
         if e.code == "visual_request_required":
@@ -685,6 +703,57 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     p = get(db, v["id"])
     plan_docs._changed(db, p, p["rev"])
     return p
+
+
+def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
+    """The person asked for a plan (a message, or Yes to the offer to plan the goal): open the
+    plan now, as an empty draft the supervisor is writing, and return its id. The supervisor's
+    first propose_plan fills it. A session has one plan: if one is
+    open already, asking again just shows it (the supervisor revises it with plan_id). No new
+    draft is made while one is open, or when ``asked_at`` (when the person sent the message) is no later than the session's newest
+    plan: that is a repeated report of a message already answered."""
+    if not visuals.enabled():
+        return None
+    root = db.get_agent(root_id)
+    if root is None:
+        return None
+
+    current = open_plan(db, root_id)
+    if current is not None:
+        # One plan per session: asking again shows the one that is open, and the supervisor
+        # revises it with plan_id (the ask's grant stays for that revision).
+        bus.publish_agent(db, "plan.requested", root_id, visual=current["id"])
+        return current["id"]
+
+    def write(c, vid: str, visual_rev: int) -> None:
+        if c.execute("SELECT 1 FROM plans WHERE root_id=? AND state=?", (root_id, WRITING)).fetchone():
+            raise ServiceError("exists", "a plan is already being written", 409)
+        newest = c.execute("SELECT MAX(created_at) FROM plans WHERE root_id=?", (root_id,)).fetchone()[0]
+        if asked_at is not None and newest is not None and asked_at <= newest:
+            raise ServiceError("exists", "that ask already has its plan", 409)
+        now = time.time()
+        c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
+                  " updated_at) VALUES (?,?,0,'','[]','[]',NULL,?,?,?)", (vid, root_id, WRITING, now, now))
+
+    try:
+        v = visuals.publish(db, root, "Plan", _page("Plan", "The supervisor is writing this plan."),
+                            kind="plan", extra=write)
+    except ServiceError:
+        return None
+    with db.tx() as c:
+        visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
+    bus.publish_agent(db, "autopilot.goal", root_id)
+    bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # the app opens it for the person
+    return v["id"]
+
+
+def cancel_draft(db: DB, root_id: str) -> None:
+    """The person called the plan off before the supervisor wrote it: close the empty draft,
+    so it holds no work."""
+    with db.tx() as c:
+        c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=? AND state=?",
+                  (SUPERSEDED, time.time(), root_id, WRITING))
+    bus.publish_agent(db, "autopilot.goal", root_id)
 
 
 def read_draft(db: DB, caller: Agent | None, plan_id: str) -> dict:
@@ -934,6 +1003,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("invalid", "rev (the revision on screen) is required", 400)
     if rev != p["rev"]:
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
+    if p["state"] == WRITING:
+        raise ServiceError("writing", "the supervisor is still writing this plan", 409)
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
     if approved:
@@ -1069,6 +1140,8 @@ def answer_offer(db: DB, root_id: str, offer_id: Any, accept: bool) -> None:
             queued = _queue_message(c, root_id, told)
     if not claimed:
         raise ServiceError("stale", "this offer is no longer open", 409)
+    if accept:
+        begin(db, root_id)      # the plan is ready for the person's screen now
     bus.publish_agent(db, "autopilot.goal", root_id)
     bus.publish_agent(db, "message.queued", root_id, message_id=queued, sender_id=None)
     try:

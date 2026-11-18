@@ -404,6 +404,25 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
+it("a plan being written offers no sign-off, the same plan can be signed once proposed, and a superseded one stays closed", async () => {
+  let plan = doc(0, "", { state: "writing", sections: [] });
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan };
+  const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
+  const view = render(reader(visual));
+  expect((await screen.findByTestId("plan-decided")).dataset.state).toBe("writing");
+  expect(screen.queryByTestId("plan-build")).toBeNull();
+
+  plan = doc(1, "Workers run on your machine.");     // its first proposal fills the same plan
+  await act(async () => view.rerender(reader({ ...visual, rev: 2 })));
+  await screen.findByTestId("plan-build");
+  expect(screen.queryByTestId("plan-decided")).toBeNull();
+
+  plan = { ...plan, state: "superseded" };
+  await act(async () => view.rerender(reader({ ...visual, rev: 3 })));
+  await waitFor(() => expect(screen.getByTestId("plan-decided").dataset.state).toBe("superseded"));
+  expect(screen.queryByTestId("plan-build")).toBeNull();
+});
+
 it("a design doc whose Team plan ended says so, once, and only then", async () => {
   const open = (plan: Plan) => render(<PlanReader client={{ ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan }} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   const shared = open(doc(1, "Workers run on your machine."));
