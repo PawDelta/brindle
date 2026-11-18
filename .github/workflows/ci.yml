@@ -1,9 +1,8 @@
 name: CI
 
-# One Linux and one macOS job on every pull request and push to main. A push
+# One Linux job and two macOS shards on every pull request and push to main. A push
 # that only changes docs or the desktop app (app/, tested by app.yml) runs
-# nothing. A pull request always gets both test checks, because they are
-# required to merge: when it only changes docs or the app, the jobs start and
+# nothing. On docs-only or app-only pull requests, the test jobs start and
 # skip their steps, so the checks report success under their usual names. The
 # local pre-push tests are off for now; scripts/ci_local.sh still works by hand.
 on:
@@ -12,7 +11,13 @@ on:
     paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md", "app/**"]
   pull_request:
   workflow_dispatch:
-  workflow_call:   # a release runs the same two jobs
+  workflow_call:   # a release runs the same jobs
+
+# Keep pushes independent: app-release waits for the checks on each main SHA.
+# Include the caller workflow name so reusable calls cannot cancel direct CI.
+concurrency:
+  group: ci-tests-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -101,6 +106,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.12"]
+        shard: [1]
+        include:
+          - os: macos-latest
+            python: "3.12"
+            shard: 2
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -108,6 +118,7 @@ jobs:
       issues: read          # ...and who added it
     env:
       CODE: ${{ needs.changes.outputs.code }}
+      PYTEST_ADDOPTS: ${{ matrix.os == 'macos-latest' && format('-p scripts.pytest_shard --test-shard={0}/2', matrix.shard) || '' }}
       # On pull requests the Linux leg records per-test coverage, which
       # scripts/check_new_tests.py uses to hold the tests the change adds.
       GATE: ${{ github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest' }}
@@ -132,9 +143,9 @@ jobs:
         if: env.CODE == 'true'
       - run: uv run python scripts/check_test_quality.py
         if: env.CODE == 'true'
-      - run: uv run pytest -q -n auto -m 'not serial'
+      - run: uv run python -m pytest -q -n auto -m 'not serial'
         if: env.CODE == 'true' && env.GATE != 'true'
-      - run: uv run pytest -q -m serial
+      - run: uv run python -m pytest -q -m serial
         if: env.CODE == 'true' && env.GATE != 'true'
       - run: uv run pytest -q -n auto -m 'not serial' --cov=brindle --cov=scripts --cov-branch --cov-context=test --cov-report=
         if: env.CODE == 'true' && env.GATE == 'true'
