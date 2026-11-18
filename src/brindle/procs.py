@@ -30,6 +30,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,8 +68,54 @@ def _ps(flags: str) -> dict[int, tuple[int, str]]:
     return out
 
 
+_cond = threading.Condition()
+_begun = 0          # reads of the table started
+_done = 0           # the newest read finished
+_reading = False
+_waiting = 0        # callers waiting for a read someone else makes
+_latest: dict[int, Proc] = {}
+
+
 def table() -> dict[int, Proc]:
-    """Every process of this user."""
+    """Every process of this user, as of a read that began after this call.
+
+    Callers at the same moment share reads rather than each listing every
+    process (on macOS two ``ps`` listings with every environment: a restart
+    resumes sessions side by side, and five such listings at once took 2.8 s
+    each where one alone took 0.1 s). A read already under way began before
+    the caller came, so it isn't used: the caller waits for the next, which
+    serves every caller that came meanwhile (never older than the call, as
+    stopping a process by it needs)."""
+    global _begun, _done, _reading, _waiting, _latest
+    with _cond:
+        need = _begun + 1
+        while _done < need:
+            if _reading:
+                _waiting += 1
+                _cond.notify_all()
+                try:
+                    _cond.wait()
+                finally:
+                    _waiting -= 1
+                continue
+            _reading = True
+            _begun += 1
+            mine = _begun
+            _cond.release()
+            try:
+                found = _read_table()
+            except BaseException:
+                _cond.acquire()
+                _reading = False
+                _cond.notify_all()
+                raise
+            _cond.acquire()
+            _latest, _done, _reading = found, mine, False
+            _cond.notify_all()
+        return dict(_latest)
+
+
+def _read_table() -> dict[int, Proc]:
     out: dict[int, Proc] = {}
     proc = PROC
     if (proc / "self" / "stat").exists():
