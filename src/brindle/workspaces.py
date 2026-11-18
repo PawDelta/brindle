@@ -919,7 +919,7 @@ def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
-def footer_summary(db: DB, ws: Workspace) -> list[str]:
+def footer_summary(db: DB, ws: Workspace, sha: str) -> list[str]:
     """What brindle knows of ``ws``'s work, as footer parts: its workers
     (the session's, for a session root), its reviews and the repo's checks.
     A part brindle has no record of is left out."""
@@ -931,8 +931,8 @@ def footer_summary(db: DB, ws: Workspace) -> list[str]:
         parts.append(_plural(reviews, "review"))
     commands = load_repo_config(ws.repo_root).checks
     latest = {}
-    for row in db.conn.execute("SELECT command, ok FROM check_cache WHERE workspace_id=? "
-                               "ORDER BY created_at", (ws.id,)):
+    for row in db.conn.execute("SELECT command, ok FROM check_cache WHERE workspace_id=? AND sha=? "
+                               "ORDER BY created_at", (ws.id, sha)):
         latest[row["command"]] = bool(row["ok"])
     results = [latest[c] for c in commands if c in latest]
     if results and not all(results):
@@ -942,7 +942,7 @@ def footer_summary(db: DB, ws: Workspace) -> list[str]:
     return parts
 
 
-def with_footer(body: str, repo_root: str, ws: Workspace | None = None) -> str:
+def with_footer(body: str, repo_root: str, ws: Workspace | None = None, sha: str | None = None) -> str:
     """``body`` ending with brindle's footer (logo, "Built with brindle" and,
     given ``ws``, what its DB records say), added once (a body that already
     has the old or new one is left alone), unless the repo turned it off
@@ -952,7 +952,7 @@ def with_footer(body: str, repo_root: str, ws: Workspace | None = None) -> str:
     parts = []
     if ws is not None:
         try:
-            parts = footer_summary(DB(), ws)
+            parts = footer_summary(DB(), ws, sha or git.out(["rev-parse", ws.branch], ws.path))
         except Exception:
             parts = []  # unknown: say nothing rather than guess
     footer = " · ".join([f"{PR_LOGO} {PR_FOOTER}", *parts])
@@ -1178,7 +1178,7 @@ def open_pull_request(ws: Workspace, title: str | None = None, draft: bool = Fal
             body = subjects if len(subjects.splitlines()) > 1 else git.out(
                 ["log", "-1", "--format=%b", ws.branch], ws.path)
             args.append("--fill")
-        args += (["--title", title] if title else []) + ["--body", with_footer(body, ws.repo_root, ws)]
+        args += (["--title", title] if title else []) + ["--body", with_footer(body, ws.repo_root, ws, sha)]
         if draft:
             args.append("--draft")
         proc = spawn.action(args, cwd=ws.path)

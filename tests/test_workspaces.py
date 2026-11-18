@@ -238,10 +238,13 @@ def test_pr_footer_counts_come_from_the_db_and_skip_unknown_parts(db, repo, feat
     add(db, feature, "w2", "handoff")
     add(db, feature, "r1", "review", "reviewer")
     db.add_review(feature.id, "s1", "r1", True, "ok")
-    db.set_check(feature.id, "s1", "a", True, "")
+    head = workspaces.git.out(["rev-parse", feature.branch], feature.path)
+    db.set_check(feature.id, "oldsha", "a", True, "")
+    db.set_check(feature.id, "oldsha", "b", False, "")
+    db.set_check(feature.id, head, "b", True, "")   # a passed only on an older revision
     partial = _sent_body(feature, monkeypatch, "x")
-    assert partial.endswith(workspaces.PR_FOOTER + " · 2 workers · 1 review")   # b not run yet
-    db.set_check(feature.id, "s1", "b", True, "")
+    assert partial.endswith(workspaces.PR_FOOTER + " · 2 workers · 1 review")
+    db.set_check(feature.id, head, "a", True, "")
     assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · all checks passed")
-    db.set_check(feature.id, "s1", "b", False, "boom")
+    db.set_check(feature.id, head, "b", False, "boom")
     assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · checks failing")
