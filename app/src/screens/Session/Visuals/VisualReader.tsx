@@ -17,7 +17,7 @@ import { button, field, main, mono } from "../../../components/ui";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { PlanReader } from "./PlanReader";
-import { VisualFrame, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
+import { VisualFrame, ZoomControls, frameMessage, sameSource, useZoom, zoomKey, zoomWheel, type VisualFrameProps, type VisualSource } from "./frame";
 import { ExportButton } from "./ExportButton";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
 
@@ -50,10 +50,38 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
     const m = frameMessage(data);
     if (m?.type === "brindle.esc") back.current();
     else if (m?.type === "choice") onChoice?.(m.option);
+    else if (m?.type === "brindle.zoom") step({ dir: m.dir, factor: m.factor, x: m.x, y: m.y });
     else if (m?.type === "brindle.snapshot") setSnapshot({ source: from, html: m.html });
   };
+  const { zoom, anchor, step } = useZoom();
+  // Pinch and ⌘-scroll over the reader's own DOM (React's onWheel is passive, so a native listener).
+  const sandbox = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = sandbox.current;
+    if (!element) return;
+    const wheel = (event: WheelEvent) => {
+      const dir = zoomWheel(event);
+      if (!dir) return;
+      event.preventDefault();
+      step(dir);
+    };
+    element.addEventListener("wheel", wheel, { passive: false });
+    return () => element.removeEventListener("wheel", wheel);
+  }, [step]);
+  // ⌘+ ⌘− ⌘0 only while focus is in this reader (the page's own keys come as brindle.zoom). The reader
+  // takes focus when it opens with nothing focused, so the keys work at once; a hidden one never has it.
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!document.activeElement || document.activeElement === document.body) root.current?.focus({ preventScroll: true });
+  }, []);
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="visual-reader">
+    <div ref={root} tabIndex={-1} className="flex min-h-0 min-w-0 flex-1 flex-col outline-none" data-testid="visual-reader"
+      onKeyDown={(event) => {
+        const dir = zoomKey(event.nativeEvent);
+        if (!dir) return;
+        event.preventDefault();
+        step(dir);
+      }}>
       {/* One toolbar: Back (Esc) and the title on the left, the visual's own actions on the right. */}
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1 px-s2 pt-2.5">
         <BackButton onBack={onBack} label={backLabel} asking={asking} />
@@ -66,12 +94,15 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
           onRequestSnapshot={() => { setSnapshot(null); setSnapshotRequest((n) => n + 1); }} />}
       </header>
       <div className="flex min-h-0 flex-1 flex-col p-s2">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line-strong" data-testid="visual-sandbox">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line-strong" data-testid="visual-sandbox" ref={sandbox}>
           <div className={`${mono} flex items-center justify-between gap-s2 border-b border-line px-s2 py-0.5 text-[11px] text-ink-3`}>
             <span>sandboxed · no network</span>
-            <span className="truncate">{meta}</span>
+            <span className="flex min-w-0 items-center gap-s2">
+              <span className="truncate">{meta}</span>
+              {source && <ZoomControls zoom={zoom} onZoom={step} />}
+            </span>
           </div>
-          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} onMessage={posted} snapshotRequest={snapshotRequest} covered={exporting} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
+          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} zoom={zoom} zoomAnchor={anchor} onMessage={posted} snapshotRequest={snapshotRequest} covered={exporting} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
         </div>
       </div>
       {footer}

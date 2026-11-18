@@ -174,3 +174,31 @@ test("session terminal: a paste reaches the pty, and a printed URL opens in the 
   await page.keyboard.up(modifier);
   await expect.poll(opened).toEqual(["https://example.com/pr/7"]);
 });
+
+test("a kept Library visual opens large, and zooms by the host's wheel and pinch", async ({ page }) => {
+  await open(page, "library-kept");
+  await page.getByTestId("kept-k_1").click();
+  const reader = page.getByTestId("kept-reader");
+  const frame = page.getByTestId("visual-frame");
+  const viewport = page.viewportSize()!;
+  // Measured in the engine: the reader runs down the content area (the old one was a fixed 70vh) and
+  // its frame takes what the toolbar and border leave.
+  const box = (await reader.boundingBox())!;
+  expect(box.height).toBeGreaterThan(viewport.height * 0.8);
+  expect(box.y + box.height).toBeGreaterThan(viewport.height - 48);
+  expect((await frame.boundingBox())!.height).toBeGreaterThan(viewport.height * 0.6);
+
+  const zoom = async () => Number(await frame.getAttribute("data-zoom"));
+  const sandbox = page.getByTestId("visual-sandbox");
+  await sandbox.hover();
+  await page.keyboard.down("Meta");
+  await page.mouse.wheel(0, -20);
+  await page.keyboard.up("Meta");
+  expect(await zoom()).toBeGreaterThan(1);
+  await page.getByTestId("visual-zoom-reset").click();
+  await page.mouse.wheel(0, 20);
+  expect(await zoom()).toBe(1);
+  await reader.focus();
+  await page.keyboard.press("Control+=");
+  expect(await zoom()).toBe(1.25);
+});

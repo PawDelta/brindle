@@ -84,6 +84,7 @@ const SCENES: Record<string, Route> = {
   library: { screen: "knowledge" },
   // The same Library as columns by stage (the List / Board switch, remembered).
   "library-board": { screen: "knowledge" },
+  "library-kept": { screen: "knowledge", view: "kept" },
   "library-decisions": { screen: "knowledge", view: "decisions" },
   "knowledge-map": { screen: "knowledge", view: "map" },
   "knowledge-record": { screen: "knowledge" },
@@ -222,6 +223,9 @@ if (scene.startsWith("sidebar-foot-")) {
   const claude = daemon.data.usage.providers.find((p) => p.provider === "claude")!;
   claude.windows.find((w) => w.minutes === 10080)!.used = busy ? 88 : 41;
   daemon.data.providers = freshProviders({ claude: { path: "/bin/claude", version: "2" } });
+}
+if (scene === "library-kept") {
+  daemon.keptVisualRows = [{ id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: null, kept_at: Date.now() / 1000 }];
 }
 if (scene === "knowledge-map") {
   // The reported 0.5.12 account has no hosted docs in any of its scopes.

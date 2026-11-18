@@ -423,6 +423,7 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRep
     setTab(next);
     onView?.(next);
   };
+  const [keptOpen, setKeptOpen] = useState(false);
   const [decisions, setDecisions] = useState<DecisionDTO[] | null>(null);
   const [sources, setSources] = useState<KbSource[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -593,12 +594,14 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRep
     );
   }
   return (
-    <section className="flex flex-col gap-s3" aria-label="Library">
-      <PageHeader title="Library" lede="What your agents know and remember about this repo: docs they wrote, decisions they follow, and documents they can look up.">
-        <RepoSelect {...pick} />
-      </PageHeader>
+    <section className={tab === "kept" && keptOpen ? "flex min-h-0 flex-1 flex-col" : "flex flex-col gap-s3"} aria-label="Library">
+      {!(tab === "kept" && keptOpen) && (
+        <PageHeader title="Library" lede="What your agents know and remember about this repo: docs they wrote, decisions they follow, and documents they can look up.">
+          <RepoSelect {...pick} />
+        </PageHeader>
+      )}
       {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
-      {tab === "kept" && <KeptVisuals client={client} />}
+      {tab === "kept" && <KeptVisuals client={client} onOpenChange={setKeptOpen} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
