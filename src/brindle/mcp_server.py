@@ -2158,6 +2158,17 @@ async def check_milestone(milestone: int | None = None) -> str:
 
 
 @mcp.tool()
+async def pr_check(path: str) -> str:
+    """Supervisors: run the pre-PR verification in the checkout at path (cut from
+    origin/main): the full suite with per-test coverage, the serial pass, then
+    scripts/check_new_tests.py. The sidebar shows "checks" while it runs; the
+    reply gives each step's result and the gate verdict."""
+    from brindle import pr_check as pr_check_mod
+
+    return await asyncio.to_thread(pr_check_mod.run_for_caller, path)
+
+
+@mcp.tool()
 def record_audit_decision(finding: str, rationale: str = "") -> str:
     """Autopilot: record the supervisor's acceptance of an audit finding with rationale,
     so subsequent completion audits take the recorded decision into account."""

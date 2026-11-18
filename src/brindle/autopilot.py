@@ -1514,7 +1514,10 @@ def _kill_group(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-def checking(ap: Autopilot, timeout: float = 900.0) -> bool:
+CHECKING_TIMEOUT = 900.0
+
+
+def checking(ap: Autopilot, timeout: float = CHECKING_TIMEOUT) -> bool:
     """Whether a background milestone check is still running."""
     return bool(ap.checking_since) and time.time() - ap.checking_since < timeout
 
