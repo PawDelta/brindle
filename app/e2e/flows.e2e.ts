@@ -177,7 +177,20 @@ test("session terminal: a paste reaches the pty, and a printed URL opens in the 
 
 test("a kept Library visual opens large, and zooms by the host's wheel and pinch", async ({ page }) => {
   await open(page, "library-kept");
+  await page.evaluate(() => {
+    const w = window as unknown as { seen: number[] };
+    w.seen = [];
+    new MutationObserver(() => {
+      const r = document.querySelector('[data-testid="kept-reader"]');
+      if (r) w.seen.push(r.getBoundingClientRect().height);
+    }).observe(document.body, { childList: true, subtree: true });
+  });
   await page.getByTestId("kept-k_1").click();
+  // Never a frame of the reader squeezed into the list's old layout: the page around it has to
+  // give the room back in the same commit the reader opens (a slow CI run measured the gap).
+  const seen = await page.evaluate(() => (window as unknown as { seen: number[] }).seen);
+  expect(seen.length).toBeGreaterThan(0);
+  expect(Math.min(...seen)).toBeGreaterThan(page.viewportSize()!.height * 0.8);
   const reader = page.getByTestId("kept-reader");
   const frame = page.getByTestId("visual-frame");
   const viewport = page.viewportSize()!;
