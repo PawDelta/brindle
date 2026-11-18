@@ -35,22 +35,21 @@ def tokens(model=None, input=0, output=0, cache_read=0, cache_creation=0):
 
 
 def test_gemini_argon_promo_then_later_rates(monkeypatch):
-    import runpy
-
     class Day(dt.date):
         today_is = dt.date(2026, 11, 30)
 
         @classmethod
         def today(cls):
             return cls.today_is
-    monkeypatch.setattr(dt, "date", Day)   # the table is built at import: rebuild it on chosen days
+    monkeypatch.setattr(dt, "date", Day)
 
     def argon():
-        p = runpy.run_path(pricing.__file__)["PRICES"]["gemini-4-argon"]
+        p = pricing.price_for("gemini-4-argon")
         return (p.input, p.output, p.cache_write, p.cache_read)
     assert argon() == (2, 10, 2, 0.1)
-    Day.today_is = dt.date(2026, 12, 1)
+    Day.today_is = dt.date(2026, 12, 1)   # the same process crosses the end of the launch rate
     assert argon() == (4, 20, 4, 0.2)
+    assert pricing.price_for("gemini-4-argon", {"gemini-4-argon": Price(1, 1, 1, 1)}) == Price(1, 1, 1, 1)
 
 
 def test_stale_warning_after_90_days():
