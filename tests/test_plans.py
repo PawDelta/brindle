@@ -993,20 +993,21 @@ def test_plan_is_ready_when_the_person_asks_and_the_first_proposal_fills_it(db, 
     assert started == ["anything"]
 
 
-def test_a_fresh_ask_supersedes_the_open_plan(db, session):
+def test_asking_again_shows_the_open_plan_and_makes_no_second(db, session):
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
-    old = mcp_server.propose_plan(PLAN).split()[2]
-    with pytest.raises(ToolError, match="still open|ask for one"):
-        mcp_server.propose_plan(PLAN)                   # no fresh ask: the refusal stands
-    visual_offers.person_spoke(db, boss, "Make a new planning doc.")
-    new = plans.holding(db, "boss")["id"]
-    assert new != old and plans.get(db, old)["state"] == "superseded"
-    assert plans.get(db, old)["sections"]               # its text and history stay
-    with pytest.raises(ServiceError) as e:
-        plans.decide(db, old, 1, True, person=True)
-    assert e.value.code == "decided"
-    assert mcp_server.propose_plan(PLAN + "\n\nNew.").split()[2] == new
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    with pytest.raises(ToolError, match="still open"):
+        mcp_server.propose_plan(PLAN)                   # one plan per session
+    shown = []
+    from brindle import bus
+    real = bus.publish
+    with patch.object(bus, "publish", lambda db_, kind, **kw: (shown.append((kind, kw.get("visual"))), real(db_, kind, **kw))[1]):
+        visual_offers.person_spoke(db, boss, "Make a new planning doc.")
+    assert ("visual.published", pid) in shown            # the same plan is put in front of the person
+    assert db.conn.execute("SELECT COUNT(*) FROM plans WHERE root_id='boss'").fetchone()[0] == 1
+    assert mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid).split()[2] == pid
+    assert plans.get(db, pid)["rev"] == 2
 
 
 def test_only_the_person_decides_and_only_when_they_asked(db, session):

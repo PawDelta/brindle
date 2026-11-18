@@ -61,7 +61,7 @@ SPLIT = "split"
 DECISION = "decision:"
 HOLDING = ("open", "redirected", "writing")
 # "writing": the empty draft opened when the person asked for a plan, until the supervisor's
-# first proposal fills it. "superseded": closed by a newer ask for a plan; kept, not approvable.
+# first proposal fills it. "superseded": a draft the person called off before it was written; closed, not approvable.
 WRITING = "writing"
 SUPERSEDED = "superseded"
 # A row of the build gate.
@@ -708,15 +708,26 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
 def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
     """The person asked for a plan (a message, or Yes to the offer to plan the goal): open the
     plan now, as an empty draft the supervisor is writing, and return its id. The supervisor's
-    first propose_plan fills it. A plan still waiting on the person is closed as superseded, its
-    comments and history kept: the new ask wins. Nothing happens while a draft is already open,
-    or when ``asked_at`` (when the person sent the message) is no later than the session's newest
+    first propose_plan fills it. A session has one plan: if one is
+    open already, asking again just shows it (the supervisor revises it with plan_id). No new
+    draft is made while one is open, or when ``asked_at`` (when the person sent the message) is no later than the session's newest
     plan: that is a repeated report of a message already answered."""
     if not visuals.enabled():
         return None
     root = db.get_agent(root_id)
     if root is None:
         return None
+
+    current = open_plan(db, root_id)
+    if current is not None:
+        # One plan per session: asking again shows the one that is open, and the supervisor
+        # revises it with plan_id (the ask's grant stays for that revision).
+        ws = db.get_workspace(root.workspace_id)
+        if ws is not None:
+            bus.publish(db, "visual.published", repo_root=ws.repo_root, root_id=root_id, agent_id=root_id,
+                        visual=current["id"], rev=current["visual"]["rev"] if "visual" in current
+                        else visuals.get(db, current["id"])["rev"])
+        return current["id"]
 
     def write(c, vid: str, visual_rev: int) -> None:
         if c.execute("SELECT 1 FROM plans WHERE root_id=? AND state=?", (root_id, WRITING)).fetchone():
@@ -725,8 +736,6 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
         if asked_at is not None and newest is not None and asked_at <= newest:
             raise ServiceError("exists", "that ask already has its plan", 409)
         now = time.time()
-        c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=? AND state IN ('open','redirected')",
-                  (SUPERSEDED, now, root_id))
         c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                   " updated_at) VALUES (?,?,0,'','[]','[]',NULL,?,?,?)", (vid, root_id, WRITING, now, now))
 

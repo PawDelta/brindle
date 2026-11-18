@@ -375,8 +375,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             if re.search(r"\bplan|think\b", text, re.I):     # calling off a chart leaves the plan alone
                 plans.cancel_draft(db, root.id)
         else:
-            # The ask opens its plan at once, an empty draft the supervisor fills (and a plan the
-            # person hasn't decided on gives way to it).
+            # The ask opens its plan at once, an empty draft the supervisor fills (or shows the
+            # session's open plan again).
             plans.begin(db, root.id, asked_at=message_at)
 
 
