@@ -259,7 +259,8 @@ describe("NewSession", () => {
     setup();
     fireEvent.click(await screen.findByRole("button", { name: "Project: proj" }));
     expect(within(screen.getByRole("menu", { name: "Project" })).getAllByRole("menuitemradio")).toHaveLength(2);
-    // Opened on the picked project: one down is the other, and Enter picks it.
+    // Opened on the search box: one down is the first project, two the other, and Enter picks it.
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
     fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Enter" });
     expect(screen.queryByRole("menu")).toBeNull();
@@ -277,6 +278,22 @@ describe("NewSession", () => {
     fireEvent.click(chip);
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Tab" });
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("finds a project by typing part of its name, keeps the actions listed, and Enter picks it", async () => {
+    setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Project: proj" }));
+    const menu = screen.getByRole("menu", { name: "Project" });
+    const search = within(menu).getByRole("searchbox");
+    expect(document.activeElement).toBe(search);
+    fireEvent.change(search, { target: { value: "OTH" } });
+    const left = within(menu).getAllByRole("menuitemradio");
+    expect(left).toHaveLength(1);
+    expect(left[0].textContent).toMatch(/^other/);
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(2);
+    fireEvent.keyDown(search, { key: "Enter" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("button", { name: "Project: other" })).toBeTruthy();
   });
 
   it("says a start is under way the moment Start is pressed, and until its session opens", async () => {
