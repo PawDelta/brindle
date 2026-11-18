@@ -823,7 +823,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
   // The theme switched, or the rows to crop changed, with the view open: xterm.js redraws in the new colours; the
   // client is resized to the new crop, and the pane redraws itself to fit as on any resize.
   useEffect(() => {
-    if (live.current && theme) live.current.term.options.theme = theme;
+    if (live.current) live.current.term.options.theme = theme ?? shellTheme();
   }, [theme]);
   useEffect(() => {
     live.current?.layout();

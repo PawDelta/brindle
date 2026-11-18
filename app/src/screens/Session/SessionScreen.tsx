@@ -12,6 +12,7 @@
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient } from "../../api/client";
+import { logDebug } from "../../api/debug";
 import type { OpenUrl } from "../../api/open";
 import type { InboxItemDTO, QueuedChatMessageDTO } from "../../api/schema";
 import { seenKey } from "../Inbox/items";
@@ -27,7 +28,8 @@ import { AgentMenu, SessionMenu, closeSessionLabel, type CloseSessionItem } from
 import { ChatBox, type ChatBoxTyping } from "./Chat/ChatBox";
 import { ChatDrop } from "./Chat/ChatDrop";
 import { useChatSupport } from "./Chat/support";
-import { TerminalFrame } from "./Chat/ChatPane";
+import { TerminalFrame, chatTheme } from "./Chat/ChatPane";
+import { useAppTheme } from "../../components/useAppTheme";
 import { failure, type Notice } from "./notice";
 import { ProviderSurface } from "./ProviderSurface";
 import { usePrReadiness, useSessionDiff } from "./review";
@@ -88,6 +90,7 @@ export function findNode(node: AgentNode | null, id: string): AgentNode | null {
 }
 
 export function SessionScreen({ client, root, repo, refresh, store, agent, sheet, onSelect, openUrl, onOpen, onCloseSession, onHome, onStartOwn }: SessionScreenProps) {
+  const appTheme = useAppTheme();
   const workspaces = useAppState((s) => s.workspaces);
   const inbox = useAppState((s) => s.inbox);
   const alive = useAppState((s) => s.alive);
@@ -123,15 +126,23 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   }, [onCloseSession, workspaces, root, rootWorkspace, hidden, alive]);
 
   // After a restart (an update), the last daemon paused every session on its way out and the new one is
-  // bringing them back: a row still paused that the resuming engine names pending (or has released, its row
-  // not read again yet: the gate's `stale`) is restarting, not paused. Only once recovery is over is a
-  // paused row paused; a released one whose row has been read again is paused when it says so (the person's).
+  // bringing them back: a row still paused that the resuming engine names pending is restarting, not paused.
   // Nor is one the recovery named, until its pane may show: back or not, the rows read before then (a
-  // snapshot without its root, a feed row from before its release or none) can't say so.
+  // snapshot without its root, a feed row from before its release or none) can't say so. Nor, after that,
+  // until the feed's row has been read since its return (the gate's `stale`, kept past recovery's end), nor
+  // while the gate hasn't heard from the engine since the app (re)connected (`unsure`): a paused row, or no
+  // root in the snapshot, is then a row from before, never the engine's word. Only a row read after its
+  // return says paused (the person's pause); while unsure, the live terminal or Restarting… stays.
   const panes = useContext(PanesReadyContext);
   const pendingHere = panes.pending?.includes(root) === true;
   const returning = !panesReadyFor(panes, root) && (pendingHere || !!panes.returning?.includes(root));
-  const restarting = returning || (session?.status === "paused" && !!panes.pending && (pendingHere || !!panes.stale?.includes(root)));
+  // Recovery named it and it isn't known back, its pane shown anyway (the gate's startup deadline): the same.
+  const unread = pendingHere ? "pending"
+    : panes.returning?.includes(root) && !panes.back?.includes(root) ? "recovery named it, not back yet"
+    : panes.stale?.includes(root) ? "row not read since its return"
+    : panes.unsure ? "engine not heard since connecting" : null;
+  const looksStopped = session ? session.status === "paused" || (tree === null && synced) : tree === null && synced;
+  const restarting = returning || (!!unread && looksStopped);
   const sessionStatus = restarting ? "resuming" : session?.status ?? null;
   const paused = !restarting && (session ? isPaused(session) : tree === null && synced);
   // A session seen live here that pauses under the view (a fresh start in its checkout, a pause from
@@ -142,6 +153,22 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     if (live) setSeenLive(root);
   }, [live, root]);
   const pausedUnder = paused && seenLive === root;
+  // Each switch between live, restarting and paused, with why, to the debug log while it's on: the next
+  // restart's log then shows what the view went by.
+  const view = restarting ? "restarting" : paused ? "paused" : "live";
+  const why = restarting
+    ? returning ? "recovery named it and its pane can't show yet" : `rows can't say paused: ${unread}`
+    : paused ? (session ? `feed row says ${session.status}` : "no feed row and no root in the snapshot") : session ? `feed row says ${session.status}` : tree ? "root in the snapshot" : "nothing read yet";
+  const logged = useRef<{ root: string; view: string } | null>(null);
+  useEffect(() => {
+    const before = logged.current?.root === root ? logged.current.view : null;
+    if (before === view) return;
+    logged.current = { root, view };
+    logDebug("session_view", "info", `${root}: ${before ?? "opened"} → ${view} (${why})`, {
+      root, from: before, to: view, reason: why, row: session?.status ?? null, tree: tree !== null, synced,
+      ready: panes.ready, pending: panes.pending?.includes(root) ?? null, stale: panes.stale?.includes(root) ?? false, unsure: !!panes.unsure, seen_live: seenLive === root,
+    });
+  });
 
   const closeSheet = () => select(selected, null);
   // A lapsed sign-in of the shown agent: its card says so; the sign-in itself is the Inbox's.
@@ -324,7 +351,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         ) : (
           // Files dragged over a Claude Code session land in its message box; any other session's drags stay the terminal's.
           <ChatDrop enabled={!!chatAgent} onFiles={dropFiles} onDragging={setDropping} className="flex min-w-0 flex-1 flex-col gap-3">
-            <TerminalFrame data-testid="terminal-surface">
+            <TerminalFrame ground={appTheme === "light" ? chatTheme("light").background : undefined} data-testid="terminal-surface">
               <ProviderSurface
                 // A sidebar Resume also needs a fresh pane when this session was already selected.
                 key={`${selected}:${paused}`}
