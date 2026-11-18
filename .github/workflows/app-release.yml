@@ -1392,7 +1392,7 @@ jobs:
       # The engine of this same commit, so the smoke tests one commit's engine and app.
       - name: Install the engine
         run: |
-          bash app/scripts/retry.sh uv tool install "$GITHUB_WORKSPACE"
+          bash app/scripts/retry.sh uv tool install --python 3.13 "$GITHUB_WORKSPACE"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/brindle" --version
           if ! "$HOME/.local/bin/brindle" daemon --help >/dev/null 2>&1; then
