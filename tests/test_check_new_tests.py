@@ -1,4 +1,5 @@
 import importlib.util
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 
-def test_a_test_must_cover_something_no_other_test_covers(tmp_path):
+def test_a_test_must_cover_something_no_other_test_covers(tmp_path, monkeypatch):
     src = str(tmp_path / "src/brindle/m.py")
     data = CoverageData(str(tmp_path / ".coverage"))
     for context, lines in [("", [1]),                                    # import time
@@ -27,6 +28,34 @@ def test_a_test_must_cover_something_no_other_test_covers(tmp_path):
     assert redundant == ["tests/test_a.py::test_repeat"]
     assert unmeasured == ["tests/test_a.py::test_skipped"]
     assert gate.analyse(tmp_path / ".coverage", ids[1:2])[ids[1]] == {(src, 4)}
+
+    # branch data, as CI records it, read with one query per new test, not a pass over every context
+    data = CoverageData(str(tmp_path / ".arcs"))
+    for context, arcs in [("", [(-1, 1)]),
+                          *((f"tests/test_b.py::test_old{i}|run", [(1, 2), (2, 3)]) for i in range(20)),
+                          ("tests/test_a.py::test_repeat|run", [(1, 2)]),
+                          ("tests/test_a.py::test_new[x]|setup", [(2, 4)]),
+                          ("tests/test_a.py::test_new[y]|run", [(2, 3)]),
+                          ("tests/test_a.py::test_twin|run", [(5, 6)]),       # two new tests covering
+                          ("tests/test_a.py::test_twin_b|run", [(5, 6)])]:   # the same line: both repeat
+        data.set_context(context)
+        data.add_arcs({src: arcs, str(tmp_path / "src/brindle/n.py"): arcs})
+    data.write()
+    selects = []
+    connect = sqlite3.connect
+
+    def counted(*a, **kw):
+        con = connect(*a, **kw)
+        con.set_trace_callback(lambda sql: selects.append(sql) if sql.lstrip().lower().startswith("select") else None)
+        return con
+
+    monkeypatch.setattr(sqlite3, "connect", counted)
+    ids += ["tests/test_a.py::test_twin", "tests/test_a.py::test_twin_b"]
+    verdicts = gate.analyse(tmp_path / ".arcs", ids)
+    assert verdicts[ids[1]] == {(src, 2), (src, 4), (str(tmp_path / "src/brindle/n.py"), 2),
+                                (str(tmp_path / "src/brindle/n.py"), 4)}
+    assert [verdicts[n] for n in ids if n != ids[1]] == ["redundant", "unmeasured", "redundant", "redundant"]
+    assert len(selects) <= len(ids) + 2
 
 
 def _branch(monkeypatch, tmp_path, base_src, head_src, base_ids, head_ids):
@@ -59,6 +88,15 @@ def test_a_test_that_passes_only_sometimes_fails_the_check_worth_committing(tmp_
     monkeypatch.setattr(gate, "FLAKY_RUNS", 2)
     # one run in two fails, under -n 2 and a different order each time
     assert gate.flaky_python(["tests/test_f.py"]) == {"tests.test_f.test_sometimes": 1}
+    # the scoped coverage run is the first run: only run 2 is made, and only selected tests count
+    assert gate.flaky_python(["tests/test_f.py::test_sometimes"],
+                             {"tests.test_f.test_sometimes", "tests.test_f.test_always"}) == {
+        "tests.test_f.test_sometimes": 2}
+    # a serial row of a table built elsewhere in the module still gets the serial pass
+    (tmp_path / "tests/test_s.py").write_text(
+        "import pytest\nCASES = [pytest.param(1, marks=pytest.mark.serial)]\n"
+        "@pytest.mark.parametrize('n', CASES)\ndef test_fails(n): assert n == 0\n")
+    assert gate.flaky_python(["tests/test_s.py::test_fails"], set()) == {"tests.test_s.test_fails[1]": 1}
 
 
 def test_a_vitest_run_that_fails_without_naming_a_test_still_counts_worth_committing(tmp_path, monkeypatch):
@@ -126,6 +164,24 @@ def test_changed_inputs_and_stable_ids_are_judged_by_real_collection_worth_commi
     assert gate.collect_in(marked, ["test_m.py"]) == {"test_m.py::test_m[1]": None, "test_m.py::test_m[2]": "race"}
 
 
+def test_the_base_tests_collect_against_the_base_source_worth_committing(tmp_path, monkeypatch):
+    # a base test importing a name only the base's src has: collected against the
+    # branch's installed brindle it would be a collection error, not the base's tests
+    (tmp_path / "src/brindle").mkdir(parents=True)
+    (tmp_path / "src/brindle/__init__.py").write_text("ONLY_IN_BASE = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_a.py").write_text(
+        "from brindle import ONLY_IN_BASE\n\n\ndef test_base():\n    assert ONLY_IN_BASE\n")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/x.py").write_text("")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'base'\n")
+    gate._git("init", "-q", cwd=tmp_path)
+    gate._git("add", ".", cwd=tmp_path)
+    gate._git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base", cwd=tmp_path)
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    assert gate.tests_at("HEAD", ["tests/test_a.py"]) == {"tests/test_a.py::test_base": None}
+
+
 def test_a_new_test_that_never_ran_is_not_a_pass_worth_committing(tmp_path, monkeypatch):
     new = "tests/test_a.py::TestMissing::test_new"
     skipped_twin = "tests/test_a.py::TestSkipped::test_new"    # same name, another class
@@ -170,6 +226,9 @@ def test_related_tests_fall_back_to_the_module_worth_committing(tmp_path):
     # the lines only the new test covers are in main(): no test names it, but a file tests the module
     assert gate.related_test_files({"main"}, {"agents"}, set(), tests) == ["tests/test_other.py"]
     assert gate.modules_of({("/r/src/brindle/agents.py", 3), ("/r/tests/test_x.py", 1)}) == {"agents"}
+    # the related run measures just those files, by module name
+    assert gate.coverage_sources({("/r/src/brindle/native/tools.py", 3), ("/r/src/brindle/native/__init__.py", 1),
+                                  ("/r/scripts/mod.py", 2)}) == ["brindle.native", "brindle.native.tools", "scripts"]
 
 
 def test_new_rows_are_judged_worth_committing(monkeypatch, tmp_path, capsys):
@@ -214,3 +273,18 @@ def test_new_rows_are_judged_worth_committing(monkeypatch, tmp_path, capsys):
     _branch(monkeypatch, tmp_path, two % ("0", "1, 2"), two % ("0, 3", "1"), ids([0], [1, 2]), ids([0, 3], [1]))
     assert list(gate.new_tests("x")) == ["tests/test_a.py::test_a[3]"]
     assert gate.selected_python("x", gate.new_tests("x")) == ["tests/test_a.py::test_a[3]"]
+
+    # a renamed file is judged against the file it was: nothing in it is new, nothing to repeat
+    def renamed_git(*args, **kw):
+        if "--name-status" in args:
+            return "R097\ttests/test_old.py\ttests/test_a.py\n"
+        if args[-1] == "x:tests/test_old.py":
+            return src % "'x'"
+        raise gate.subprocess.CalledProcessError(128, "git show")
+
+    _branch(monkeypatch, tmp_path, "", src % "'x'", {}, {"tests/test_a.py::test_t[x]": None})
+    monkeypatch.setattr(gate, "_git", renamed_git)
+    monkeypatch.setattr(gate, "tests_at", lambda b, files: {f"{f}::test_t[x]": None for f in files
+                                                            if f == "tests/test_old.py"})
+    assert gate.new_tests("x") == {}
+    assert gate.selected_python("x", {}) == []

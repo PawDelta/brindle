@@ -41,7 +41,12 @@ bridge to a live Claude Code: `e2e/pty.e2e.ts` drives it, and with
 `session-paused` (a paused session's state card), `session-failed` (a
 worker whose sign-in lapsed: its state card), `session-done` (the
 session's goal reached: "Done · Close" on its sidebar row and Close
-session in its goal), `inbox` (the Inbox page:
+session in its goal), `chat-empty` / `chat-typing` / `chat-long` /
+`chat-paste` / `chat-queued` / `chat-drop` (the supervisor's message box:
+empty, a draft with two files and a screenshot, a 25-line draft at the
+box's tallest, a 412-line paste as a chip with its preview open, two
+messages queued behind a working Claude, and a screenshot dragged over
+the session), `inbox` (the Inbox page:
 every decision across sessions as banner cards, permissions, sign-ins,
 plans, checks and notices acted on in the card, the rest going to the
 session), `agent-supervisor` / `agent-working` / `agent-waiting` /

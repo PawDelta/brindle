@@ -1000,7 +1000,8 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     try:
         env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
         agent_env, enforce = _agent_env_policy(ws)
-        with secrets.org_key(org_env):
+        # The pane's scrub and its report read the session's names from one ask.
+        with secrets.org_key(org_env), tmux.inherited_names_once():
             target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
                                      tag=(AGENT_TAG, agent.id),
                                      keep=credentials,
@@ -6577,6 +6578,35 @@ def turn_succeeded(agent: Agent) -> None:
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``brindle _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
+    turn_end = event == "stop" or (event == "codex-notify" and payload.get("type") == "agent-turn-complete")
+    before = db.get_agent(agent_id) if turn_end else None
+    out = _handle_hook(db, agent_id, event, payload)
+    if before is not None and out is None:
+        _chat_turn_ended(db, before, payload)
+    return out
+
+
+def _chat_turn_ended(db: DB, before: Agent, payload: dict) -> None:
+    """A Stop that let the turn end (or Codex's turn-complete notify): the person's next queued chat message
+    (brindle.chat) is typed in, once per turn, by a detached helper, so this
+    hook returns at once and the CLI takes it at its prompt. A stop sent back,
+    or one that left the agent busy (brindle's own mail woke it), releases none."""
+    from brindle import chat
+
+    if before.status not in ("processing", "waiting"):
+        return   # no turn brindle saw running: a repeated Stop of one already ended
+    try:
+        agent = db.get_agent(before.id)
+        if agent is None or agent.status != "idle" or not chat.queue_snapshot(db, agent.id):
+            return
+        from brindle.providers import brindle_invocation
+
+        processes.detach([*brindle_invocation(), "_chat-turn-end", agent.id, chat.turn_id(before, payload)])
+    except Exception:  # noqa: BLE001 -- must never break the Stop hook
+        log.exception("brindle: couldn't release the chat queue at turn end")
+
+
+def _handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     if event == "codex-pre-tool":
         return _codex_pre_tool_hook(db, agent_id, payload)
     agent = db.get_agent(agent_id)

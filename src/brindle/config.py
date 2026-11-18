@@ -104,7 +104,7 @@ class RepoConfig:
     # Autopilot and merge gates.
     autopilot: bool = True             # deprecated; the goal driver is always on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
-    scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
+    scoped_checks: str | None = None   # "off", "infer" or "coverage"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
     scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (0: no cap)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer-sonnet-high"  # agent profile that reviews branches

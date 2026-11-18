@@ -13,7 +13,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import brindle
-from brindle import airgap, spawn, visuals
+from brindle import airgap, chat, spawn, visuals
 from brindle.config import db_path
 from brindle.daemon import routes_read
 from brindle.daemon.auth import Guard
@@ -42,6 +42,7 @@ async def meta(request: Request) -> JSONResponse:
         "airgap": airgap.enabled(),
         "pty_view": True,       # WS /v1/pty_view: the Windows app's WSL bridge
         "visuals": visuals.enabled(),   # the visuals capability: the app shows the feature only when on
+        "chat": chat.SUPPORTED,   # the session message box: the app shows it only when on (the chat routes send and queue)
         "resuming": getattr(request.app.state, "resuming", False),
         "recovered_at": getattr(request.app.state, "recovered_at", None),
         "recovery": recovery.progress() if recovery else None,

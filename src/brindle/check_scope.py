@@ -26,6 +26,15 @@ left its base decide what runs:
   empty, after trying the changed modules' namesake tests (``tests/test_<module>.py``):
   a scoped check never passes by running nothing.
 
+With ``scoped_checks: "coverage"`` (the repo's tests need pytest-cov) the
+tests are chosen by a per-test coverage map instead (``brindle.coverage_map``):
+each passing full run of the check records one, and a narrowed run selects
+the tests that executed the functions the change edits, plus the branch's own
+and namesake tests. A missing or stale map runs the check in full; a change no
+test executes skips it. The session checkout's check after brindle merges
+origin into it (``session_sync.run_checks``) is narrowed the same way, to
+what the merge brought in.
+
 Every check on a worker's branch also gets ``BRINDLE_CHANGED_FILES`` (see
 ``changed_files``), so a script can narrow itself.
 
@@ -50,7 +59,8 @@ from brindle import git, spawn
 if TYPE_CHECKING:
     from brindle.db import DB, Workspace
 
-ALWAYS_FULL = (".brindle/**",)   # the checks themselves (or the rules) changed
+ALWAYS_FULL = (".brindle/**",)   # under here only a change to how checks run counts (``_changes_checks``)
+CHECK_KEYS = ("checks", "setup", "scoped_checks", "scoped_checks_max_files")   # what a config change must touch
 CAP_NOTE = ("brindle: this change reaches more than {max} test files (scoped_checks_max_files); ran only the "
             "branch's own and namesake tests ({tests}). The full suite runs on the session branch before its PR.")
 FULL_NOTE = "brindle: ran this check in full because {why}."
@@ -64,6 +74,7 @@ _AFFECTED_FILE = re.compile(r"\s(\S+\.py):L\d+\s*$", re.M)
 @dataclass
 class CheckScope:
     full_when: list[str] = field(default_factory=list)
+    coverage: bool = False   # select tests by the per-test coverage map (``brindle.coverage_map``)
 
 
 _PYTEST_PREFIX = ("pytest",), ("python", "-m", "pytest"), ("python3", "-m", "pytest"), ("uv", "run", "pytest"), \
@@ -109,8 +120,40 @@ def inferred(cmd: str, mode: str | None) -> CheckScope | None:
     """The scope ``scoped_checks: "infer"`` gives ``cmd``: pytest on the
     affected tests when it is a plain pytest command that picks no tests
     itself (appending targets would not narrow it), else None."""
-    if mode in (None, "infer") and pytest_selectors(cmd) is False:
+    if mode in (None, "infer", "coverage") and pytest_selectors(cmd) is False:
+        if mode == "coverage":   # a conftest's fixtures run inside each test's coverage context
+            return CheckScope([p for p in INFER_FULL_WHEN if p != "**/conftest.py"], coverage=True)
         return CheckScope(INFER_FULL_WHEN)
+    return None
+
+
+def _changes_checks(ws: Workspace, base: str, path: str) -> bool:
+    """Whether a change to ``path`` under ``.brindle/`` changes how checks run:
+    a config file whose ``CHECK_KEYS`` differ from ``base`` (or that can't be
+    read as JSON). Rules, notes and other files there change no test."""
+    if PurePosixPath(path).name not in ("config.json", "config.local.json"):
+        return False
+    try:
+        now = (Path(ws.path) / path).read_text(encoding="utf-8") if (Path(ws.path) / path).is_file() else "{}"
+        then = git.run(["show", f"{base}:{path}"], ws.path).stdout \
+            if git.ok(["cat-file", "-e", f"{base}:{path}"], ws.path) else "{}"
+        old, new = json.loads(then), json.loads(now)
+    except (OSError, ValueError, git.GitError):
+        return True
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return True
+    return any(old.get(k) != new.get(k) for k in CHECK_KEYS)
+
+
+def recording(ws: Workspace, run: str, cfg):
+    """A ``coverage_map.Recording`` when ``run`` is a full run (perhaps after
+    a note) of one of ``cfg``'s coverage-scoped checks, else None."""
+    from brindle import coverage_map
+
+    for check in cfg.checks:
+        scope = inferred(check, cfg.scoped_checks)
+        if scope is not None and scope.coverage and (run == check or run.endswith("; " + check)):
+            return coverage_map.Recording.start(ws.repo_root, ws.path, check, run)
     return None
 
 
@@ -188,11 +231,13 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
     base, changed = diff
     if not changed:
         return None
-    if any(matches(f, ALWAYS_FULL) or matches(f, scope.full_when) for f in changed):
+    if any(matches(f, ALWAYS_FULL) and _changes_checks(ws, base, f) or matches(f, scope.full_when) for f in changed):
         return cmd
     changed = [f for f in changed if f.endswith(".py")]   # pytest can't be affected by the rest
     if not changed:
         return None
+    if scope.coverage:
+        return _by_coverage(ws, cmd, scope, changed)
     try:
         tests = pytest_targets(ws, base, changed)
     except Unscoped as why:
@@ -210,6 +255,53 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
         note = shlex.quote(CAP_NOTE.format(max=max_files, tests=" ".join(tests)))
         return f"printf '%s\\n' {note}; {cmd} {_quoted(tests)}"
     return f"{cmd} {_quoted(tests)}"   # pytest's exit 5 (no tests collected) fails the check
+
+
+def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str]) -> str | None:
+    """``cmd`` on the tests the coverage map says executed what changed since
+    the map's commit (``changed``, the branch's own change, decides only
+    whether anything runs at all), plus every test file changed since then
+    and the changed modules' namesake tests (a test that reaches code only
+    through a child process isn't in the map); None when no test executes any
+    of it. A missing or stale map, or pytest configuration changed since it,
+    runs ``cmd`` in full, which records a new one. No ``scoped_checks_max_files``
+    cap: every selected test executed the change, so none may be dropped."""
+    from brindle import coverage_map
+
+    data = coverage_map.load(ws.repo_root, cmd)
+    try:
+        if data is None:
+            raise coverage_map.Stale("there is no per-test coverage map for it yet (this run records one)")
+        since = coverage_map.changed_since(ws.path, data)
+        if any(matches(f, scope.full_when) for f in since):
+            raise coverage_map.Stale("pytest's configuration changed since the coverage map was recorded")
+        tests = coverage_map.targets(ws.path, data, since)
+    except coverage_map.Stale as why:
+        return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
+    tests |= {f for f in since if is_test_file(f)}
+    root = Path(ws.path)
+    # Code reached only as a child process leaves no coverage: the scripts and namesake tests of every
+    # file changed since the map, not just the branch's own, as the map's attribution is.
+    changed = [f for f in since if f.endswith(".py")]
+    scripts = [f for f in changed if not is_test_file(f) and _module_path(root, f) is None]
+    if scripts:   # run by path as a child process, so absent from the coverage
+        try:
+            imports = Imports(root)
+        except Unscoped as why:
+            return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
+        for f in scripts:
+            tests |= script_tests(root, f, imports)
+    tests = sorted({t for t in tests if (root / t).is_file()} | set(capped_targets(ws, changed)))
+    if not tests:
+        return None
+    run = f"{cmd} {_quoted(tests)}"
+    # A marker or keyword filter may leave none of the selected tests (pytest's exit 5): nothing of it to run.
+    return f"{run} || [ $? -eq 5 ]" if _filters(cmd) else run
+
+
+def _filters(cmd: str) -> bool:
+    toks = shlex.split(cmd)
+    return any(t in ("-m", "-k") or t.startswith(("-m", "-k")) and len(t) > 2 for t in toks)
 
 
 def capped_targets(ws: Workspace, changed: list[str]) -> list[str]:
@@ -305,6 +397,33 @@ def _module_path(root: Path, path: str) -> str | None:
     return ".".join(parts)
 
 
+def script_tests(root: Path, path: str, imports: Imports | None = None) -> set[str]:
+    """The tests of a file no package import can name (``scripts/x.py``): its
+    namesake tests (``tests/test_x.py``, ``tests/test_x_*.py``), those that
+    name its file (running or loading it by path) and those importing it by
+    its stem (after putting its directory on ``sys.path``)."""
+    imports = imports or Imports(root)
+    name = PurePosixPath(path).name
+    stem = PurePosixPath(path).stem
+    by_name = re.compile(rf"(?<![\w.]){re.escape(name)}\b")
+    found: set[str] = set()
+    for t in imports.files:
+        if not is_test_file(t) or t == path:
+            continue
+        own = PurePosixPath(t).name
+        if (own == f"test_{stem}.py" or own.startswith(f"test_{stem}_") or by_name.search(_text(root / t))
+                or stem.isidentifier() and imports.imports(t, stem, loose=False)):
+            found.add(t)
+    return found
+
+
+def _text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 class Imports:
     """The modules each Python file of a checkout may import, from an AST
     scan: ``import a.b``, ``from a import b`` (relative too, and inside
@@ -330,8 +449,8 @@ class Imports:
         it outright (one that only may, through a nonliteral import, doesn't
         count), those importing a module that names it are added (one level)."""
         module = _module_path(self.root, path)
-        if module is None:
-            raise Unscoped(f"{path} is not in a package, so no import can name it")
+        if module is None:   # a script: its own tests (see ``script_tests``)
+            return script_tests(self.root, path, self)
         tests = [f for f in self.files if is_test_file(f)]
         found = {t for t in tests if self.imports(t, module)}
         if any(self.imports(t, module, loose=False) for t in found):

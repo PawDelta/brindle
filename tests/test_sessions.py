@@ -92,7 +92,7 @@ def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches_and_ow
     assert git.out(["log", "-1", "--format=%s", "main"], str(repo)) == "init"  # nothing merged
 
 
-def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, tmp_path):
+def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, tmp_path, request):
     saved = tmp_path / "claude" / "projects" / "p"
     saved.mkdir(parents=True)
     (saved / "sess-boss.jsonl").write_text("{}")
@@ -113,20 +113,22 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     assert launched[0][1]["watch_pane"] and not launched[1][1]["watch_pane"]
     # The app's daemon pauses what it runs as the app goes, and the next one resumes it.
     monkeypatch.setattr(agents, "_launch", real_launch)
-    _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, monkeypatch)
+    _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, monkeypatch, request)
 
 
 DEAD_PID = 2**22 + 1    # above any pid_max: no process has it (an app that has gone)
 
 
-def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, monkeypatch):
+def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, monkeypatch, request):
     """The app's daemon (lifecycle.serve, --idle-exit) on the suite's private
     tmux server, stopped as the app stops it (SIGTERM) and left behind by an
     app that was force quit, pausing through the real agents.pause; then the
     next start (resume_after_start)."""
+    import asyncio
     import dataclasses
     import signal
     import threading
+    from concurrent.futures import ThreadPoolExecutor
 
     from brindle import company_identity, debuglog, procs, spawn, upgrade
     from brindle.daemon import lifecycle
@@ -190,6 +192,34 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     hook_kept = threading.Event()
     monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: hook_kept.set())
     monkeypatch.setattr(lifecycle, "WATCH_INTERVAL", 0.05)
+    answer = threading.Event()      # the tmux server answering again, once it is held up below
+    # serve leaves the threads asyncio.to_thread started to finish by themselves (lifecycle._run)
+    # and their reads to the process's way out (lifecycle.leave): kept here, and drained as the
+    # test ends, pass or fail, before its patches are undone.
+    executors = []
+    real_loop = asyncio.new_event_loop
+
+    def new_event_loop():
+        loop = real_loop()
+        executors.append(ThreadPoolExecutor(thread_name_prefix="daemon-to-thread"))
+        loop.set_default_executor(executors[-1])
+        return loop
+
+    def drain():
+        """What the daemons left at work runs to its end, its held waits released, and its
+        reads stopped as lifecycle.leave would: none of it counts in spawn.running() past
+        this test."""
+        for waiting in (held, go, answer):
+            waiting.set()
+        for executor in executors:
+            drained = threading.Event()
+            threading.Thread(target=lambda pool=executor: (pool.shutdown(wait=True), drained.set())).start()
+            while not drained.wait(0.05):
+                spawn._stop_reads_at_exit()
+        assert spawn.running() == 0
+
+    request.addfinalizer(drain)
+    monkeypatch.setattr(lifecycle.asyncio, "new_event_loop", new_event_loop)
     servers = []
     real_make = lifecycle.make_server
     monkeypatch.setattr(lifecycle, "make_server", lambda app: servers.append(real_make(app)) or servers[-1])
@@ -306,7 +336,6 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
         db.set_status(aid, "idle")
     db.update_agent("chat", tmux_window=window(root.tmux_session))
     tmux.set_pane_tag(db.get_agent("chat").tmux_window, tmux.AGENT_TAG, "chat")
-    answer = threading.Event()
 
     def close(**targets):
         answer.wait()

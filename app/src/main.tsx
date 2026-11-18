@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { isTauri } from "@tauri-apps/api/core";
 import App from "./App";
+import { watchFileDrops } from "./api/attachments";
 import { DaemonClient } from "./api/client";
 import { watchDebug } from "./api/debug";
 import { AppPtyViews } from "./api/ptyView";
@@ -21,6 +22,10 @@ startupStep("webview");
 
 // The theme the person picked last time, before the first paint.
 applyTheme(readTheme());
+
+// File drags are the page's own (the shell's native handler is off for this webview): taken from the
+// start, so a file dropped anywhere is never opened in the app's place.
+watchFileDrops();
 
 const store = createAppStore();
 

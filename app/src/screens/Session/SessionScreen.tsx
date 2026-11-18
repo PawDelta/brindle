@@ -13,7 +13,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
-import type { InboxItemDTO } from "../../api/schema";
+import type { InboxItemDTO, QueuedChatMessageDTO } from "../../api/schema";
 import { seenKey } from "../Inbox/items";
 import { LoadingButton } from "../../components/LoadingButton";
 import { button, main, mono } from "../../components/ui";
@@ -24,6 +24,9 @@ import { SessionsContext } from "../../store/sessions";
 import type { AppStore } from "../../store/store";
 import { useAppState } from "../../store/useStore";
 import { AgentMenu, SessionMenu, closeSessionLabel, type CloseSessionItem } from "./AgentMenu";
+import { ChatBox } from "./Chat/ChatBox";
+import { ChatDrop } from "./Chat/ChatDrop";
+import { useChatSupport } from "./Chat/support";
 import { failure, type Notice } from "./notice";
 import { ProviderSurface } from "./ProviderSurface";
 import { usePrReadiness, useSessionDiff } from "./review";
@@ -64,6 +67,10 @@ export interface SessionScreenProps {
   onStartOwn?(add: "open" | "clone"): void;
 }
 
+
+/* An agent's states with a live CLI to message: at its prompt, working (Send queues), or waiting on the person. */
+const CHAT_STATES = new Set(["idle", "processing", "waiting"]);
+const NO_QUEUE: QueuedChatMessageDTO[] = [];
 
 /* An ask as the Back badge tells them apart: its inbox identity, and what it says (an identity a
    new question at the same agent reuses still reads as new). */
@@ -204,6 +211,17 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     if (head) seenHead.current = head;
   }, [head, reloadReadiness]);
 
+  // The message box, under a Claude Code agent's live pane: the supervisor's or a worker's, while it runs
+  // here, on an engine that says it takes the box's messages. Files dropped anywhere on the session wait
+  // in the box as chips: the box of the agent they were dropped on, and no other's.
+  const chatSupported = useChatSupport(client);
+  const shown = node?.agent ?? null;
+  const chatAgent = chatSupported && shown && shown.provider === "claude" && !shown.locked && !paused && session?.status !== "resuming" && CHAT_STATES.has(shown.status) && alive[shown.id] !== false ? shown : null;
+  const [dropped, setDropped] = useState<{ agent: string; files: File[] }>();
+  const [dropping, setDropping] = useState(false);
+  const chatId = chatAgent?.id;
+  const dropFiles = useCallback((files: File[]) => setDropped(chatId ? { agent: chatId, files } : undefined), [chatId]);
+
   const host = useRef<HTMLElement>(null);
   useEffect(() => {
     const section = host.current;
@@ -282,20 +300,37 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         ) : !tree && !paused && !session ? (
           <p className="flex-1 text-ink-3">No session {root}.</p>
         ) : (
-          <div className="flex min-w-0 flex-1 flex-col" data-testid="terminal-surface">
-            <ProviderSurface
-              // A sidebar Resume also needs a fresh pane when this session was already selected.
-              key={`${selected}:${paused}`}
-              repo={repo}
-              root={root}
-              agent={node?.agent ?? null}
-              alive={node ? alive[node.agent.id] : undefined}
-              sessionStatus={session?.status === "resuming" || !node || node.agent.id === root ? session?.status ?? null : null}
-              sessionName={session?.name || session?.goal}
-              credentials={credentials}
-              recovery={recovery}
-            />
-          </div>
+          // Files dragged over a Claude Code session land in its message box; any other session's drags stay the terminal's.
+          <ChatDrop enabled={!!chatAgent} onFiles={dropFiles} onDragging={setDropping} className="flex min-w-0 flex-1 flex-col gap-3">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="terminal-surface">
+              <ProviderSurface
+                // A sidebar Resume also needs a fresh pane when this session was already selected.
+                key={`${selected}:${paused}`}
+                repo={repo}
+                root={root}
+                agent={node?.agent ?? null}
+                alive={node ? alive[node.agent.id] : undefined}
+                sessionStatus={session?.status === "resuming" || !node || node.agent.id === root ? session?.status ?? null : null}
+                sessionName={session?.name || session?.goal}
+                credentials={credentials}
+                recovery={recovery}
+              />
+            </div>
+            {chatAgent && (
+              <ChatBox
+                key={chatAgent.id}
+                client={client}
+                agentId={chatAgent.id}
+                busy={chatAgent.status === "processing"}
+                queue={chatAgent.chat_queue ?? NO_QUEUE}
+                droppedFiles={dropped?.agent === chatAgent.id ? dropped.files : undefined}
+                onFilesConsumed={() => setDropped(undefined)}
+                onChanged={refresh}
+                recipient={chatAgent.id === root ? "the supervisor" : agentName(workspaces, chatAgent.id)}
+                dropping={dropping}
+              />
+            )}
+          </ChatDrop>
         )}
       </div>
       {/* Kept once opened, so an unsaved edit outlives a look back at the chat. */}

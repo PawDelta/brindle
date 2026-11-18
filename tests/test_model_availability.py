@@ -492,8 +492,12 @@ def test_existing_tmux_environment_excludes_launcher_only_credentials_and_accoun
     monkeypatch.setenv("CODEX_HOME", "/launcher-account")
     snapshots = {("-g",): "HOME=/server-home\nCODEX_HOME=/server-account\n",
                  ("-t", "=brindle_proj_root"): "CUSTOM=session\n"}
-    monkeypatch.setattr(tmux, "_tmux", lambda command, *scope, **k:
-                        subprocess.CompletedProcess([], 0, snapshots.get(scope, ""), ""))
+    def show(*args, **k):       # both scopes may be asked in one chain (cmd ; cmd)
+        scopes = " ".join(args).split(" ; ")
+        out = "".join(snapshots.get(tuple(s.split()[1:]), "") for s in scopes)
+        return subprocess.CompletedProcess([], 0, out, "")
+
+    monkeypatch.setattr(tmux, "_tmux", show)
     env = tmux.inherited_env("brindle_proj_root")
     assert "OPENAI_API_KEY" not in env and env["CODEX_HOME"] == "/server-account"
     p = profile("codex", env={"CUSTOM": "explicit"})

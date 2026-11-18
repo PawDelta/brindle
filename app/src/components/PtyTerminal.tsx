@@ -577,22 +577,26 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     if (attaching.current) {
       void listenForDrops(event => {
         if (gone) return;
-        const underCursor = event.type === "leave" ? null : document.elementFromPoint(event.x!, event.y!);
+        const underCursor = event.type === "leave" ? null : document.elementFromPoint(event.x, event.y);
         const inside = !!underCursor && el.contains(underCursor);
         setDropShown(inside && event.type !== "drop" && !!attaching.current?.acceptsFiles);
-        if (inside && event.type === "drop" && !event.paths?.length) {
-          // A drag with no file on disk behind it (macOS can offer a promise of one instead): said, not silently lost.
-          setFileNotice({ error: true, text: "That drag didn't include a file. Drag the saved file instead." });
-        } else if (inside && event.type === "drop") {
-          // Reserve the whole drop's position before any upload starts.
-          const destination = attaching.current;
-          const wentAway = !!elsewhere.current;
-          queued(async () => {
-            if (gone || attaching.current !== destination) return;
-            const text = await attachFiles((event.paths ?? []).map(path => ({ path })));
-            if (text) await toPane(text, wentAway);
-          });
-        }
+        if (!inside || event.type !== "drop") return;
+        // The drop is this view's, for the agent it shows as the drop lands: its place in the line is
+        // reserved from here, before a byte is read or any upload starts.
+        const destination = attaching.current;
+        const wentAway = !!elsewhere.current;
+        queued(async () => {
+          const files = await event.read();
+          // Read while the view closed or moved on to another agent: dropped, never attached there.
+          if (gone || attaching.current !== destination) return;
+          if (!files.length) {
+            // A drag with no readable file behind it (a folder, a promised file that never came): said, not silently lost.
+            setFileNotice({ error: true, text: "That drag didn't include a file. Drag the saved file instead." });
+            return;
+          }
+          const text = await attachFiles(files);
+          if (text) await toPane(text, wentAway);
+        });
       }).then(stop => { if (gone) stop(); else unlisten = stop; }, () => {
         if (!gone) setFileNotice({ error: true, text: "Couldn't enable file drops." });
       });

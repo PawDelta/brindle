@@ -111,6 +111,28 @@ export const PaperclipIcon = (p: Props) => (
   </Icon>
 );
 
+/* Waiting its turn: a clock. */
+export const ClockIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 7.5V12l3 2" />
+  </Icon>
+);
+
+/* A block of text: lines, the last one short. */
+export const TextLinesIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M4.5 7h15M4.5 12h15M4.5 17h9" />
+  </Icon>
+);
+
+/* Remove, or close: a cross. */
+export const CloseIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="m6.5 6.5 11 11M17.5 6.5l-11 11" />
+  </Icon>
+);
+
 /* A comment: a speech bubble. */
 export const CommentIcon = (p: Props) => (
   <Icon {...p}>

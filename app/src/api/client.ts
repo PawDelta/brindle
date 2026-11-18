@@ -420,6 +420,9 @@ export interface GoalEnabledAck {
 
 export interface Meta {
   visuals?: boolean;
+  /* The engine takes the session message box's messages (the /agents/{id}/chat routes): the app shows
+     the box only when it says so. Absent on engines without them. */
+  chat?: boolean;
   /* The daemon is still bringing back sessions from its previous shutdown. */
   resuming?: boolean;
   /* Unix seconds when startup recovery ended; absent on older engines. */

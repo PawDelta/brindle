@@ -1707,7 +1707,7 @@ def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, a
 
 
 @pytest.fixture
-def session_pr_forge(db, tmp_path, monkeypatch):
+def session_pr_forge(db, tmp_path, monkeypatch, real_github_lookups):
     from concurrent.futures import Future
 
     from brindle import git, spawn
@@ -2249,7 +2249,7 @@ def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, l
 
 
 @pytest.fixture
-def phase_pr_forge(db, lead, monkeypatch):
+def phase_pr_forge(db, lead, monkeypatch, real_github_lookups):
     """``lead``'s goal in four phases (each milestone's check passes once ``land`` names it), with
     GitHub and git pushes faked in process: ``remote`` is what origin's branches hold, ``opened`` the
     PRs created; ``before_job`` runs between a landing's dispatch and its job."""

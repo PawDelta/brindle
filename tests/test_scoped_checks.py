@@ -34,7 +34,6 @@ EMPTY_NOTE = check_scope.FULL_NOTE.format(
 LONELY_NOTE = check_scope.FULL_NOTE.format(why="no test reaches the changed files and none is named after them")
 BOTH = {"src/pkg/mod.py": MOD.replace("return 1", "return 3").replace("return 2", "return 4")}
 DYNAMIC = f"{PYTEST} tests/test_dynamic.py"   # an unresolvable import runs its own file
-CAFE_NOTE = check_scope.FULL_NOTE.format(why="src/café.py is not in a package, so no import can name it")
 DYNAMIC_IMPORTS = {
     "alias-loader": "from importlib import import_module as load\nload(name)\n",
     "fromlist": "__import__('pkg', fromlist=['new'])\n",
@@ -56,20 +55,28 @@ DYNAMIC_IMPORTS = {
                  marks=pytest.mark.variant("review requested positional relative import arguments")),
     pytest.param("dynamic-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC],
                  marks=pytest.mark.variant("review requested a nonliteral relative import level")),
-    pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [f"printf '%s\\n' {shlex.quote(CAFE_NOTE)}; {PYTEST}"],
+    pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [f"printf '%s\\n' {shlex.quote(LONELY_NOTE)}; {PYTEST}"],
                  marks=pytest.mark.variant("git C-quotes a non-ASCII name without -z; it was once skipped")),
+    # A script no import can name: its namesake test and the test that runs it by path, not the full suite.
+    ("script", PYTEST, {"scripts/build.py": "X = 2\n"}, [f"{PYTEST} tests/test_build.py tests/test_runs_build.py"]),
     ("infer", SELECTS, OTHER, [SELECTS]),   # names tests itself: runs in full
     ("infer", PYTEST, {}, []),   # nothing changed: skipped
     ("infer", PYTEST, {"app/x.tsx": "x\n"}, []),   # no Python-relevant change: skipped
     ("infer", PYTEST, {"uv.lock": "x\n"}, [PYTEST]),
+    ("infer", PYTEST, {".brindle/rules/learned.md": "- a rule\n"}, []),   # rules and notes change no test
+    ("infer", PYTEST, {".brindle/config.json": json.dumps({"checks": [PYTEST, "true"]})}, [PYTEST]),   # the checks did
     ("cap", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
      [f"printf '%s\\n' {shlex.quote(CAPPED_NOTE)}; {PYTEST} {' '.join(CAPPED)}"]),   # test_f dropped
     ("cap-empty", PYTEST, BOTH, [f"printf '%s\\n' {shlex.quote(EMPTY_NOTE)}; {PYTEST}"]),   # no own or namesake test: full
-    ("infer", PYTEST, {"src/pkg/lonely.py": "X = 1\n"}, [f"printf '%s\\n' {shlex.quote(LONELY_NOTE)}; {PYTEST}"]),   # no importer
+    pytest.param("infer", PYTEST, {"src/pkg/lonely.py": "X = 1\n"},   # no importer
+                 [f"printf '%s\\n' {shlex.quote(LONELY_NOTE)}; {PYTEST}"], marks=pytest.mark.variant(
+                     "A package module nothing imports must fail closed to the full suite, not run no tests")),
     ("cap-pr", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER}, [PYTEST]),
 ], ids=["deleted-function", "lookup-failed", "fallback-unmapped",
         "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "quoted-name",
-        "infer-selects", "empty-diff", "non-python-only", "lockfile", "cap", "cap-empty", "no-importers", "cap-pr"])
+        "script", "infer-selects", "empty-diff", "non-python-only", "lockfile", "brindle-rules", "brindle-checks",
+        "cap", "cap-empty", "no-importers",
+        "cap-pr"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
     config = {"checks": [cmd], "scoped_checks": "off" if where == "off" else "infer"}
     if where == "unset":
@@ -88,6 +95,9 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
                  "tests/test_f.py": TEST_F, "tests/test_g.py": "from test_f import helper\n"})
     if where in DYNAMIC_IMPORTS:
         write(repo, {"tests/test_dynamic.py": DYNAMIC_IMPORTS[where]})
+    if where == "script":
+        write(repo, {"scripts/build.py": "X = 1\n", "tests/test_build.py": "def test_b(): pass\n",
+                     "tests/test_runs_build.py": "ARGV = ['python', 'scripts/build.py']\n"})
     sh("git add -A && git commit -qm base", repo)
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"nodes": [

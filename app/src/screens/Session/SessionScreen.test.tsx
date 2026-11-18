@@ -424,6 +424,31 @@ describe("SessionScreen", () => {
     expect(submitted).toHaveLength(enabled ? 2 : 0);
   });
 
+  it("puts the message box under a Claude Code agent's live pane once the engine says it takes its messages, where a file dropped on the session waits for Send; another CLI's pane has none", async () => {
+    const child = { ...worker.agents![0], id: "c1", parent_id: "w1", provider: "codex", window: windowOf("c1") };
+    const workspaces = [root, { ...worker, agents: [...worker.agents!, child] }];
+    // An engine whose chat routes aren't real yet: no composer that can't deliver.
+    mount({ sup1: live }, { workspaces });
+    await waitFor(() => expect(surface().dataset.card).toBe("live"));
+    await flush();
+    expect(screen.queryByTestId("chat-box")).toBeNull();
+    cleanup();
+    const meta = { ...new FakeDaemon().data.meta, chat: true };
+    const { daemon } = mount({ sup1: live, w1: live, c1: live }, { workspaces, meta }, undefined, "sup1", ["sup1", "w1", "c1"]);
+    const box = await screen.findByTestId("chat-box");
+    // A screenshot's thumbnail dropped over the terminal: bytes, no path.
+    const shot = new File([new Uint8Array([137, 80, 78, 71])], "Screenshot.png", { type: "image/png" });
+    fireEvent.drop(screen.getByTestId("terminal-surface"), { dataTransfer: { types: ["Files"], files: [shot], items: [] } });
+    await within(box).findByTestId("attachment-chip");
+    expect(daemon.chatDelivered).toEqual([]);
+    fireEvent.click(within(box).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(daemon.chatDelivered).toEqual([{ agent: "sup1", text: "", attachments: ["Screenshot.png"] }]));
+    await waitFor(() => expect(within(box).queryByTestId("attachment-chip")).toBeNull());
+    pick("c1");
+    await waitFor(() => expect(shownAgent()).toBe("c1"));
+    expect(screen.queryByTestId("chat-box")).toBeNull();
+  });
+
   it("shows a native card, never a shell, for an agent whose process isn't running, with what it left behind a disclosure", async () => {
     // The supervisor's process is gone (liveness says so, the pane is dead): an ended card with Continue.
     const { daemon, term } = mount({ sup1: { live: false, text: "$ \n" } });

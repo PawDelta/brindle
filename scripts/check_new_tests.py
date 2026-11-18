@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
 import contextlib
 import io
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -61,6 +63,12 @@ def changed_test_files(base: str) -> list[str]:
     return [p for p in changed if re.search(r"(^|/)test_[^/]*\.py$", p) and (ROOT / p).is_file()]
 
 
+def base_paths(base: str) -> dict[str, str]:
+    """Each test file the branch renamed (or moved), mapped to its path at ``base``:
+    its tests are judged against the file it was, not as all new."""
+    return inventory.renames(_git(*inventory.RENAMES, f"{base}...HEAD", "--", "tests"))
+
+
 # -- listing the tests: pytest's own collection, so parametrize ids and marks are real
 
 
@@ -75,10 +83,23 @@ class _Collect:
             self.found[item.nodeid] = reason if isinstance(reason, str) and reason.strip() else None
 
 
+def _use_source(src: str) -> None:
+    """Import brindle from ``src`` (a base's own source): drop any brindle already
+    imported and the editable install's import hook, which would otherwise win over
+    sys.path and load the branch's code under the base's tests."""
+    sys.meta_path[:] = [f for f in sys.meta_path if "editable" not in repr(f).lower()]
+    for name in [m for m in sys.modules if m == "brindle" or m.startswith("brindle.")]:
+        del sys.modules[name]
+    sys.path.insert(0, src)
+
+
 def collect_here(files: list[str]) -> dict:
     """pytest's exit status and every test id in ``files`` (relative to the
     current directory) with its variant reason."""
     import pytest
+
+    if os.environ.get("BRINDLE_COLLECT_SRC"):
+        _use_source(os.environ["BRINDLE_COLLECT_SRC"])
 
     plugin = _Collect()
     with contextlib.redirect_stdout(io.StringIO()):
@@ -87,14 +108,19 @@ def collect_here(files: list[str]) -> dict:
     return {"status": int(status), "tests": plugin.found}
 
 
-def collect_in(root: Path, files: list[str]) -> dict[str, str | None]:
-    """The tests of ``files`` as listed by a separate process started in ``root``.
+def collect_in(root: Path, files: list[str], src: Path | None = None) -> dict[str, str | None]:
+    """The tests of ``files`` as listed by a separate process started in ``root``,
+    importing brindle from ``src`` when given (a base's own source, so its tests
+    collect against the code they were written for).
     A collection error or a missing file stops the check: an empty list must not
     pass for "no new tests"."""
     if not files:
         return {}
+    env = None
+    if src is not None:
+        env = {**os.environ, "BRINDLE_COLLECT_SRC": str(src)}
     proc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--collect", *files],
-                          cwd=root, capture_output=True, text=True)
+                          cwd=root, capture_output=True, text=True, env=env)
     try:
         listed = json.loads(proc.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError):
@@ -107,13 +133,13 @@ def collect_in(root: Path, files: list[str]) -> dict[str, str | None]:
 
 def tests_at(base: str, files: list[str]) -> dict[str, str | None]:
     """The test ids ``files`` had at ``base`` (files that didn't exist have none)."""
-    data = subprocess.run(["git", "archive", "--format=tar", base, "tests", "scripts", "pyproject.toml"],
+    data = subprocess.run(["git", "archive", "--format=tar", base, "src", "tests", "scripts", "pyproject.toml"],
                           cwd=ROOT, check=True, capture_output=True).stdout
     tmp = Path(tempfile.mkdtemp(prefix="base-tests-"))
     try:
         with tarfile.open(fileobj=io.BytesIO(data)) as tar:
             tar.extractall(tmp, filter="data")
-        return collect_in(tmp, [f for f in files if (tmp / f).is_file()])
+        return collect_in(tmp, [f for f in files if (tmp / f).is_file()], src=tmp / "src")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -122,17 +148,19 @@ def new_tests(base: str) -> dict[str, str | None]:
     """Ids of the test functions and parametrize rows added since ``base``, each
     mapped to its variant reason."""
     files = changed_test_files(base)
+    was = base_paths(base)
     head = collect_in(ROOT, files)
-    before = tests_at(base, files)
+    before = tests_at(base, [was.get(p, p) for p in files])
     added: dict[str, str | None] = {}
     for path in files:
+        old_path = was.get(path, path)
         try:
-            old_tables = inventory.scan(_git("show", f"{base}:{path}"))
+            old_tables = inventory.scan(_git("show", f"{base}:{old_path}"))
         except subprocess.CalledProcessError:
             old_tables = {}
         new_tables = inventory.scan((ROOT / path).read_text(encoding="utf-8"))
         found: list[str] = []
-        old_by = _by_function(before, path)
+        old_by = _by_function(before, old_path)
         for qual, ids in _by_function(head, path).items():
             old_ids = old_by.get(qual, [])
             candidates = _new_ids(ids, old_ids, old_tables.get(qual), new_tables.get(qual))
@@ -146,7 +174,7 @@ def new_tests(base: str) -> dict[str, str | None]:
         # tables shrinking elsewhere in the file must not hide a table that grew.
         if set(old_by) - set(_by_function(head, path)):
             file_growth = max(0, sum(1 for n in head if n.startswith(path + "::"))
-                              - sum(1 for n in before if n.startswith(path + "::")))
+                              - sum(1 for n in before if n.startswith(old_path + "::")))
             found = found[len(found) - file_growth:] if file_growth else []
         for n in found:
             added[n] = head[n]
@@ -185,40 +213,97 @@ def _new_ids(ids: list[str], old_ids: list[str], old, new) -> list[str]:
 # -- judging them by coverage
 
 
+def _owned_contexts(contexts: list[tuple[str, int]], node_ids) -> dict[str, list[int]]:
+    """For each test id, the ids of its coverage contexts (``<id>|run``, and its
+    rows' ``<id>[x]|setup`` ...); ``contexts`` is sorted by name."""
+    names = [c for c, _ in contexts]
+    owned: dict[str, list[int]] = {}
+    for node_id in node_ids:
+        own = re.compile(re.escape(node_id) + r"(\[.*\])?\|")
+        i = bisect.bisect_left(names, node_id)
+        found = owned.setdefault(node_id, [])
+        while i < len(names) and names[i].startswith(node_id):
+            if own.match(names[i]):
+                found.append(contexts[i][1])
+            i += 1
+    return owned
+
+
 def analyse(coverage_file: Path, node_ids) -> dict[str, set | str]:
     """For each test id: "unmeasured" (it ran no measured code), "redundant"
     (it covers nothing no other test covers) or the set of (file, line) only it
-    covers."""
-    from coverage import CoverageData
+    covers.
 
-    data = CoverageData(str(coverage_file))
-    data.read()
-    files = sorted(data.measured_files())
+    Reads the coverage database directly, touching only what the new tests ran:
+    their arcs (or lines), and for each of those how many contexts in all ran
+    it. A test covers one alone when every context that ran it is the test's own.
+    After two passes over the data, each test costs one indexed query."""
+    if not Path(coverage_file).is_file():
+        raise SystemExit(f"no coverage data at {coverage_file}")
+    con = sqlite3.connect(f"file:{Path(coverage_file).resolve()}?mode=ro", uri=True)
+    try:
+        contexts = sorted(con.execute("select context, id from context"))
+        owned = _owned_contexts(contexts, node_ids)
+        con.execute("create temp table mine (context_id integer, test integer)")
+        con.executemany("insert into mine values (?, ?)",
+                        [(c, t) for t, n in enumerate(owned) for c in owned[n]])
+        con.execute("create index temp.mine_context on mine (context_id)")
+        has_arcs = con.execute("select value from meta where key = 'has_arcs'").fetchone()
+        if has_arcs and int(has_arcs[0]):
+            _arc_counts(con)
+        else:
+            _line_counts(con)
+        con.execute("create index temp.own_test on own (test)")
+        verdicts: dict[str, set | str] = {}
+        for t, node_id in enumerate(owned):
+            rows = con.execute(
+                "select f.path, o.fromno, o.tono, o.n = a.n from own o"
+                " join everyone a on a.file_id = o.file_id and a.fromno = o.fromno and a.tono = o.tono"
+                " join file f on f.id = o.file_id where o.test = ?", (t,)).fetchall()
+            if not any(n > 0 for _, *arc, _ in rows for n in arc):
+                verdicts[node_id] = "unmeasured"
+                continue
+            only = [(path, arc) for path, *arc, alone in rows if alone]
+            verdicts[node_id] = ({(path, n) for path, arc in only for n in arc if n > 0}
+                                 if only else "redundant")
+        return verdicts
+    finally:
+        con.close()
 
-    def measured(pattern):
-        data.set_query_contexts([pattern])
-        lines, arcs = set(), set()
-        for f in files:
-            lines.update((f, n) for n in data.lines(f) or ())
-            if data.has_arcs():
-                arcs.update((f, a) for a in data.arcs(f) or ())
-        return lines, arcs
 
-    verdicts: dict[str, set | str] = {}
-    for node_id in node_ids:
-        own = re.escape(node_id) + r"(\[.*\])?\|"
-        own_lines, own_arcs = measured("^" + own)
-        if not own_lines:
-            verdicts[node_id] = "unmeasured"
-            continue
-        other_lines, other_arcs = measured(f"^(?!{own})")
-        only_lines = own_lines - other_lines
-        only_arcs = own_arcs - other_arcs
-        if not (only_lines or only_arcs):
-            verdicts[node_id] = "redundant"
-            continue
-        verdicts[node_id] = only_lines | {(f, n) for f, arc in only_arcs for n in arc if n > 0}
-    return verdicts
+def _arc_counts(con) -> None:
+    """Temp tables ``own`` (each new test's arcs, with how many of its contexts
+    ran each) and ``everyone`` (how many contexts in all ran each of those arcs)."""
+    # cross join: one pass over arc, looking each row's context up in `mine`
+    con.execute("create temp table own as select m.test, a.file_id, a.fromno, a.tono, count(*) as n"
+                " from arc a cross join mine m where m.context_id = a.context_id group by 1, 2, 3, 4")
+    con.execute("create index temp.own_arc on own (file_id, fromno, tono)")
+    con.execute("create temp table everyone as select a.file_id, a.fromno, a.tono, count(*) as n from arc a"
+                " where exists (select 1 from own o where o.file_id = a.file_id and o.fromno = a.fromno"
+                " and o.tono = a.tono) group by 1, 2, 3")
+    con.execute("create index temp.everyone_arc on everyone (file_id, fromno, tono)")
+
+
+def _line_counts(con) -> None:
+    """The same for line data, each line stored as the arc (line, line)."""
+    from coverage.numbits import numbits_to_nums
+
+    own: dict[tuple, int] = {}
+    for test, file_id, bits in con.execute(
+            "select m.test, l.file_id, l.numbits from line_bits l join mine m on m.context_id = l.context_id"):
+        for n in numbits_to_nums(bits):
+            own[test, file_id, n] = own.get((test, file_id, n), 0) + 1
+    files = {file_id for _, file_id, _ in own}
+    everyone: dict[tuple, int] = {}
+    for file_id, bits in con.execute("select file_id, numbits from line_bits"):
+        if file_id in files:
+            for n in numbits_to_nums(bits):
+                everyone[file_id, n] = everyone.get((file_id, n), 0) + 1
+    con.execute("create temp table own (test integer, file_id integer, fromno integer, tono integer, n integer)")
+    con.executemany("insert into own values (?, ?, ?, ?, ?)", [(t, f, n, n, c) for (t, f, n), c in own.items()])
+    con.execute("create temp table everyone (file_id integer, fromno integer, tono integer, n integer)")
+    con.executemany("insert into everyone values (?, ?, ?, ?)", [(f, n, n, c) for (f, n), c in everyone.items()])
+    con.execute("create index temp.everyone_arc on everyone (file_id, fromno, tono)")
 
 
 def uncovered_alone(coverage_file: Path, node_ids) -> tuple[list[str], list[str]]:
@@ -257,6 +342,19 @@ def modules_of(lines) -> set[str]:
             if re.search(r"/(src/brindle|scripts)/", f.replace("\\", "/")) and Path(f).stem != "__init__"}
 
 
+def coverage_sources(lines) -> list[str]:
+    """``--cov`` sources measuring just the files holding (file, line) pairs: a
+    src/brindle file by its module name (``brindle.native.tools``), scripts/ as a whole."""
+    found = set()
+    for f, _ in lines:
+        posix = f.replace("\\", "/")
+        if m := re.search(r"/src/(brindle/.+)\.py$", posix):
+            found.add(re.sub(r"\.__init__$", "", m[1].replace("/", ".")))
+        elif re.search(r"/scripts/", posix):
+            found.add("scripts")
+    return sorted(found)
+
+
 def related_test_files(names: set[str], modules: set[str], skip: set[str],
                        tests_dir: Path | None = None) -> list[str]:
     """Test files that mention the functions a new test alone covers (names found
@@ -264,12 +362,14 @@ def related_test_files(names: set[str], modules: set[str], skip: set[str],
     modules holding them: the fallback when the name is a ``main``, an alias or a
     private helper no test names. Most mentions first."""
     tests_dir = tests_dir or ROOT / "tests"
-    texts = {p.relative_to(tests_dir.parent).as_posix(): p.read_text(encoding="utf-8", errors="replace")
-             for p in sorted(tests_dir.glob("test_*.py"))}
+    # each file's words once: a set lookup per name, not a regex scan of every file per name
+    words_in = {p.relative_to(tests_dir.parent).as_posix():
+                set(re.findall(r"\w+", p.read_text(encoding="utf-8", errors="replace")))
+                for p in sorted(tests_dir.glob("test_*.py"))}
     score: dict[str, int] = {}
     for words, weight in ((names, 100), (modules, 1)):
         for word in words:
-            hit = [p for p, text in texts.items() if re.search(rf"\b{re.escape(word)}\b", text)]
+            hit = [p for p, found in words_in.items() if word in found]
             if weight == 100 and len(hit) > COMMON_NAME:
                 continue
             for p in hit:
@@ -283,16 +383,25 @@ def _plugin_env(**extra: str) -> dict[str, str]:
     return {**os.environ, "PYTHONPATH": path, **extra}
 
 
-def run_with_coverage(files: list[str], coverage_file: Path, append: bool) -> set[str]:
+def run_with_coverage(files: list[str], coverage_file: Path, append: bool, report: Path | None = None,
+                      sources: list[str] | None = None) -> set[str]:
     """Run test files with per-test coverage: the parallel tests, then the serial ones.
     A failing test is the other checks' business; a pytest that couldn't run the
     files (collection error, bad usage, crash) stops this check. Returns the full
-    node id of every test pytest reported as skipped."""
+    node id of every test pytest reported as skipped. With ``report``, the run is
+    also the first of the flaky check's runs, its results written to
+    ``<report>-<pass>.xml``. It keeps collection order: a shuffled order moves
+    first-call lines between tests, which changes the related files picked and so
+    the verdicts. ``sources`` narrows what is measured (by default all of brindle
+    and scripts/)."""
     skip_file = coverage_file.parent / "skipped.txt"
     env = _plugin_env(COVERAGE_FILE=str(coverage_file), BRINDLE_SKIPPED_FILE=str(skip_file))
-    cov = ["--cov=brindle", "--cov=scripts", "--cov-branch", "--cov-context=test", "--cov-report="]
-    for i, args in enumerate((["-n", "2", "-m", "not serial"], ["-m", "serial"])):
+    cov = [*(f"--cov={s}" for s in sources or ["brindle", "scripts"]),
+           "--cov-branch", "--cov-context=test", "--cov-report="]
+    passes = [["-n", "2", "-m", "not serial"]] + ([["-m", "serial"]] if _has_serial(files) else [])
+    for i, args in enumerate(passes):
         extra = ["--cov-append"] if append or i else []
+        extra += [f"--junitxml={report}-{i}.xml"] if report else []
         proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                                "-p", "new_tests_plugin", *args, *cov, *extra, *files], cwd=ROOT, env=env,
                               capture_output=True, text=True)
@@ -302,20 +411,42 @@ def run_with_coverage(files: list[str], coverage_file: Path, append: bool) -> se
     return set(skip_file.read_text(encoding="utf-8").split("\n")) if skip_file.exists() else set()
 
 
+def _has_serial(files: list[str]) -> bool:
+    """Whether any of ``files`` may hold a serial test: a ``….serial`` attribute
+    anywhere in it (on a test, its class, ``pytestmark`` or a row of a table built
+    elsewhere in the module), or a file that can't be read. The serial pass is a
+    pytest start-up, skipped only when no file can need it."""
+    for path in files:
+        try:
+            tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            return True
+        if any(isinstance(node, ast.Attribute) and node.attr == "serial" for node in ast.walk(tree)):
+            return True
+    return False
+
+
 def _was_skipped(node_id: str, skipped) -> bool:
     return node_id in skipped
 
 
-def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[str], list[str]]:
+def scoped_redundant(base: str, to_check: list[str],
+                     first_run: set[str] | None = None) -> tuple[list[str], list[str], list[str]]:
     """Judge new tests by running only the changed test files, then the files naming
     what a still-unique new test alone covers. Returns (redundant, skipped,
     missing): a test that recorded no coverage and wasn't reported skipped never
-    ran, which is a failure, not a pass."""
+    ran, which is a failure, not a pass. Given ``first_run``, the run of the
+    changed files doubles as the flaky check's first run: the tests that failed
+    in it are added to that set."""
     work = Path(tempfile.mkdtemp(prefix="new-tests-cov-"))
     coverage_file = work / ".coverage"
     try:
         ran = changed_test_files(base)
-        skipped = run_with_coverage(ran, coverage_file, append=False)
+        if first_run is None:
+            skipped = run_with_coverage(ran, coverage_file, append=False)
+        else:
+            skipped = run_with_coverage(ran, coverage_file, append=False, report=work / "run1")
+            first_run |= _junit_failures(sorted(work.glob("run1-*.xml")))
         if not coverage_file.exists():
             raise SystemExit("no coverage was recorded running the changed test files")
         verdicts = analyse(coverage_file, to_check)
@@ -324,7 +455,8 @@ def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[st
             lines = set().union(*unique.values())
             more = related_test_files(enclosing_names(lines), modules_of(lines), set(ran))
             if more:
-                skipped |= run_with_coverage(more, coverage_file, append=True)
+                # only the files holding the lines still in question need measuring
+                skipped |= run_with_coverage(more, coverage_file, append=True, sources=coverage_sources(lines))
                 verdicts.update(analyse(coverage_file, list(unique)))
         unmeasured = [n for n, v in verdicts.items() if v == "unmeasured"]
         return ([n for n, v in verdicts.items() if v == "redundant"],
@@ -357,9 +489,10 @@ def selected_python(base: str, added) -> list[str]:
     """Node ids of the new tests and rows, and of every test function a changed test
     file changed (all its rows)."""
     selected = set()
+    was = base_paths(base)
     for path in changed_test_files(base):
         try:
-            old = _function_dumps(_git("show", f"{base}:{path}"))
+            old = _function_dumps(_git("show", f"{base}:{was.get(path, path)}"))
         except subprocess.CalledProcessError:
             old = {}
         new = _function_dumps((ROOT / path).read_text(encoding="utf-8"))
@@ -368,36 +501,58 @@ def selected_python(base: str, added) -> list[str]:
     return sorted(selected)
 
 
-def flaky_python(selected: list[str]) -> dict[str, int]:
-    """Run ``selected`` FLAKY_RUNS times, each time in parallel (-n 2) and in a
-    different random order; returns how many runs each failing test failed in."""
+def _junit_failures(reports) -> set[str]:
+    """``classname.name`` of each test that failed or errored in pytest junit reports."""
     from xml.etree import ElementTree
 
+    found = set()
+    for report in reports:
+        if Path(report).exists():
+            for case in ElementTree.parse(report).iter("testcase"):
+                if case.find("failure") is not None or case.find("error") is not None:
+                    found.add(f"{case.get('classname')}.{case.get('name')}")
+    return found
+
+
+def _junit_name(node_id: str) -> str:
+    """A node id as pytest's junit report names it: ``tests.test_a.TestX.test_y[p]``."""
+    path, bracket, params = node_id.partition("[")
+    names = path.split("::")
+    names[0] = re.sub(r"\.py$", "", names[0].replace("/", "."))
+    return ".".join(names) + bracket + params
+
+
+def flaky_python(selected: list[str], first_run: set[str] | None = None) -> dict[str, int]:
+    """Run ``selected`` FLAKY_RUNS times, each time in parallel (-n 2) and in a
+    different random order; returns how many runs each failing test failed in.
+    ``first_run``: the failures of a run already made (the scoped coverage run,
+    in parallel and in collection order), which then counts as the first of the
+    FLAKY_RUNS; the others are shuffled with seeds 2 and up."""
     if not selected:
         return {}
-    serial = any("serial" in (ROOT / n.split("::")[0]).read_text(encoding="utf-8", errors="replace")
-                 for n in selected)
+    serial = _has_serial(sorted({n.partition("::")[0] for n in selected}))
     failed: dict[str, int] = {}
+    if first_run is not None:   # only the selected tests' failures: the rest of their files is not repeated
+        wanted = {_junit_name(n) for n in selected}
+        for name in first_run:
+            if name in wanted or name.split("[", 1)[0] in wanted:
+                failed[name] = 1
     work = Path(tempfile.mkdtemp(prefix="new-tests-flaky-"))
     try:
-        for run in range(1, FLAKY_RUNS + 1):
+        for run in range(1 if first_run is None else 2, FLAKY_RUNS + 1):
             env = _plugin_env(BRINDLE_SHUFFLE_SEED=str(run))
-            this_run = set()
+            reports = []
             for part, args in enumerate((["-n", "2", "-m", "not serial"], ["-m", "serial"])):
                 if part and not serial:
                     continue
-                report = work / f"run{run}-{part}.xml"
+                reports.append(work / f"run{run}-{part}.xml")
                 proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                                       "-p", "new_tests_plugin", f"--junitxml={report}", *args, *selected],
+                                       "-p", "new_tests_plugin", f"--junitxml={reports[-1]}", *args, *selected],
                                       cwd=ROOT, env=env, capture_output=True, text=True)
                 if proc.returncode not in (0, 1, 5):
                     raise SystemExit(f"pytest exited {proc.returncode} repeating the new and changed tests "
                                      f"(run {run}):\n{proc.stdout[-1500:]}{proc.stderr[-500:]}")
-                if report.exists():
-                    for case in ElementTree.parse(report).iter("testcase"):
-                        if case.find("failure") is not None or case.find("error") is not None:
-                            this_run.add(f"{case.get('classname')}.{case.get('name')}")
-            for name in this_run:
+            for name in _junit_failures(reports):
                 failed[name] = failed.get(name, 0) + 1
         return failed
     finally:
@@ -466,17 +621,20 @@ def main(argv=None) -> int:
     added = new_tests(args.base)
     to_check = [n for n, reason in added.items() if reason is None]
     missing: list[str] = []
+    first_run: set[str] | None = None   # the scoped coverage run, reused as the first flaky run
     if not to_check:
         redundant, unmeasured = [], []
     elif args.scoped:
-        redundant, unmeasured, missing = scoped_redundant(args.base, to_check)
+        first_run = set()
+        redundant, unmeasured, missing = scoped_redundant(args.base, to_check, first_run)
     else:
         redundant, unmeasured = uncovered_alone(args.coverage, to_check)
     failures = [f"{n} covers no line or branch that other tests don't; delete it, fold it into "
                 f"the test it repeats, or mark it @pytest.mark.variant(\"why\")" for n in redundant]
     failures += [f"{n} recorded no coverage and wasn't reported skipped: it never ran here" for n in missing]
     if args.scoped:
-        for n, count in {**flaky_python(selected_python(args.base, added)), **flaky_vitest(args.base)}.items():
+        flaky = flaky_python(selected_python(args.base, added), first_run)
+        for n, count in {**flaky, **flaky_vitest(args.base)}.items():
             failures.append(f"{n} is flaky: it failed in {count} of {FLAKY_RUNS} runs "
                             "(repeated in parallel, in random order); make it deterministic")
 

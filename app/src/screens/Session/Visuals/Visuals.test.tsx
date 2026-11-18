@@ -894,12 +894,15 @@ describe("visuals", () => {
     expect(screen.getByTestId("visual-answered").textContent).toContain("Stage it first");
   });
 
-  it.each(["2", "b"])("selects the second visual option with %s by position", (key) => {
+  it("selects the second visual option with 2 by position, ignores letters, and shows number hints", () => {
     // Labels and ids start with the opposite letter: shortcuts follow the displayed position.
     const reversed = { ...visual, options: [...visual.options!].reverse() };
-    render(<VisualReader client={new FakeDaemon().client()} visual={reversed} onBack={() => {}} onAnswered={() => {}} Frame={() => <div />} />);
+    const { container } = render(<VisualReader client={new FakeDaemon().client()} visual={reversed} onBack={() => {}} onAnswered={() => {}} Frame={() => <div />} />);
     const options = screen.getAllByRole("radio");
-    fireEvent.keyDown(document.body, { key });
+    expect([...container.querySelectorAll("[role=radiogroup] kbd")].map((k) => k.textContent)).toEqual(["1", "2"]);
+    fireEvent.keyDown(document.body, { key: "b" });
+    expect(options[1].getAttribute("aria-checked")).toBe("false");
+    fireEvent.keyDown(document.body, { key: "2" });
     expect(options[1].getAttribute("aria-checked")).toBe("true");
     expect(options[0].getAttribute("aria-checked")).toBe("false");
   });
@@ -921,13 +924,13 @@ describe("visuals", () => {
   it("keeps the keyboard selection while typing b in the visual note", () => {
     render(<VisualReader client={new FakeDaemon().client()} visual={visual} onBack={() => {}} onAnswered={() => {}} Frame={() => <div />} />);
     const options = screen.getAllByRole("radio");
-    fireEvent.keyDown(document.body, { key: "a" });
+    fireEvent.keyDown(document.body, { key: "1" });
     expect(options[0].getAttribute("aria-checked")).toBe("true");
     const note = screen.getByRole("textbox");
     note.focus();
-    fireEvent.keyDown(note, { key: "b" });
-    fireEvent.change(note, { target: { value: "b" } });
-    expect(note).toHaveProperty("value", "b");
+    fireEvent.keyDown(note, { key: "2" });
+    fireEvent.change(note, { target: { value: "2" } });
+    expect(note).toHaveProperty("value", "2");
     expect(options[0].getAttribute("aria-checked")).toBe("true");
     expect(options[1].getAttribute("aria-checked")).toBe("false");
   });
@@ -1070,10 +1073,10 @@ describe("visuals", () => {
     const reader = (row: VisualDTO) => <VisualReader client={client} visual={row} onAnswered={() => {}} onBack={() => {}} Frame={() => <div />} />;
     const view = render(reader(takesFiles));
     Object.defineProperty(document, "elementFromPoint", { configurable: true, value: (x: number) => x < 100 ? screen.getByTestId("visual-answer") : document.body });
-    // A drop elsewhere is ignored; one over the bar uploads by path.
-    await act(async () => drops.handle({ type: "drop", x: 500, y: 1, paths: ["/elsewhere"] }));
+    // A drop elsewhere is ignored; one over the bar uploads what it carried.
+    await act(async () => drops.handle({ type: "drop", x: 500, y: 1, read: async () => [{ path: "/elsewhere" }] }));
     expect(attach).not.toHaveBeenCalled();
-    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/Users/me/notes.txt"] }));
+    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, read: async () => [{ path: "/Users/me/notes.txt" }] }));
     expect(attach).toHaveBeenCalledWith("a_sup", { path: "/Users/me/notes.txt" });
     await act(async () => finish[0]({ paths: ["/up/notes.txt"], text: "" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove notes.txt" }));
@@ -1084,7 +1087,7 @@ describe("visuals", () => {
     await act(async () => finish[1]({ paths: ["/up/shot.png"], text: "" }));
     expect(screen.getByText("shot.png")).toBeTruthy();
     attach.mockRejectedValueOnce(new Error("too big"));
-    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/big"] }));
+    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, read: async () => [{ path: "/big" }] }));
     expect(screen.getByRole("alert").textContent).toContain("too big");
     // Text suppresses image bytes; Finder's filename text still allows native files, across revision changes.
     native.enabled = true;
@@ -1127,7 +1130,7 @@ describe("visuals", () => {
     await waitFor(() => expect(attach).toHaveBeenLastCalledWith("a_sup", { path: "/clip/new.png" }));
     expect(revisedNote.value).toBe("keepx");
     // A result that lands after the revision changed is dropped.
-    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/late"] }));
+    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, read: async () => [{ path: "/late" }] }));
     view.rerender(reader({ ...takesFiles, rev: 4 }));
     await act(async () => finish[3]({ paths: ["/up/late.txt"], text: "" }));
     expect(screen.queryByText("late.txt")).toBeNull();

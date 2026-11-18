@@ -80,12 +80,21 @@
   color-scheme: light;
 }
 
+/* The session's message box (screens/Session/Chat): its field, a step under the canvas in dark and
+   white in light. */
+:root { --field: #070b09; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) { --field: #ffffff; }
+}
+:root[data-theme="light"] { --field: #ffffff; }
+
 @theme inline {
   /* Ground, lines, text */
   --color-canvas: var(--canvas);
   --color-canvas-2: var(--canvas-2);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-field: var(--field);
   --color-line: var(--line);
   --color-line-strong: var(--line-strong);
   --color-ink: var(--ink);
