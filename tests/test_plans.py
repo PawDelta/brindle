@@ -1004,7 +1004,7 @@ def test_asking_again_shows_the_open_plan_and_makes_no_second(db, session):
     real = bus.publish
     with patch.object(bus, "publish", lambda db_, kind, **kw: (shown.append((kind, kw.get("visual"))), real(db_, kind, **kw))[1]):
         visual_offers.person_spoke(db, boss, "Make a new planning doc.")
-    assert ("visual.published", pid) in shown            # the same plan is put in front of the person
+    assert ("plan.requested", pid) in shown           # the same plan is put in front of the person
     assert db.conn.execute("SELECT COUNT(*) FROM plans WHERE root_id='boss'").fetchone()[0] == 1
     assert mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid).split()[2] == pid
     assert plans.get(db, pid)["rev"] == 2

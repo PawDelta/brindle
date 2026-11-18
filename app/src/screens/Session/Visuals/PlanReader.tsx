@@ -1097,7 +1097,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
           </>
         ) : (
-          <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided">
+          <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided" data-state={plan.state}>
             <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>
             {plan.verdict?.note && <p className="text-ink-2"><span className="text-ink-3">your note · </span>{plan.verdict.note}</p>}
             {plan.verdict?.comments?.map((c, i) => (

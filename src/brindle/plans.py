@@ -722,11 +722,7 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
     if current is not None:
         # One plan per session: asking again shows the one that is open, and the supervisor
         # revises it with plan_id (the ask's grant stays for that revision).
-        ws = db.get_workspace(root.workspace_id)
-        if ws is not None:
-            bus.publish(db, "visual.published", repo_root=ws.repo_root, root_id=root_id, agent_id=root_id,
-                        visual=current["id"], rev=current["visual"]["rev"] if "visual" in current
-                        else visuals.get(db, current["id"])["rev"])
+        bus.publish_agent(db, "plan.requested", root_id, visual=current["id"])
         return current["id"]
 
     def write(c, vid: str, visual_rev: int) -> None:
@@ -747,6 +743,7 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
     with db.tx() as c:
         visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
     bus.publish_agent(db, "autopilot.goal", root_id)
+    bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # the app opens it for the person
     return v["id"]
 
 
