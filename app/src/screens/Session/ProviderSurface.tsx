@@ -193,7 +193,10 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
   // The engine is still bringing its sessions back (a launch, or a new daemon after a restart): the
   // rows may name windows from before, so no pane yet, and none of the cards a missing window or a
   // closed view would bring. What it finished or failed with still shows.
-  const returning = !panesReadyFor(panes, root) && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
+  // A session released once its chat runs has its workers still to come while the recovery goes on:
+  // one not launched yet is on its way back, not paused (a launching one shows starting).
+  const workerComing = !panes.ready && !!agent && !!root && agent.id !== root && agent.status === "paused";
+  const returning = (!panesReadyFor(panes, root) || workerComing) && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
   const card: Card | null = returning ? { kind: "returning" } : surfaceCard(agent, alive, sessionStatus, view, credentials, unshowable);
   const name = agent ? providerName(agent.provider) : "the session";
   const { resume, busy, notice, preflight: savedPreflight, setPreflight } = recovery;

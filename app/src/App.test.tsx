@@ -263,10 +263,13 @@ describe("App", () => {
     expect(paneWaits()).toBe(true);
   });
 
-  it.each(["prioritize a pending session", "a snapshot still in flight", "events keeping the store stale"])("shows a recovered pane while other sessions wait: %s", async (scenario) => {
+  it.each(["prioritize a pending session", "a snapshot still in flight", "events keeping the store stale", "its worker still launching", "its worker not relaunched yet"])("shows a recovered pane while other sessions wait: %s", async (scenario) => {
     vi.useFakeTimers();
     const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, { ...session, id: "sup2" }], workspaces: [root, rootB] });
+    // The open session is released once its chat runs; its worker comes back after it (no window yet).
+    const workerAs = { "its worker still launching": "starting", "its worker not relaunched yet": "paused" }[scenario as string];
+    const coming = workerAs ? [{ ...worker, agents: worker.agents?.map((a) => ({ ...a, status: workerAs, window: null })) }] : [];
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, { ...session, id: "sup2" }], workspaces: [root, rootB, ...coming] });
     const client = daemon.client();
     const store = createAppStore();
     const meta = client.meta.bind(client);
@@ -287,6 +290,8 @@ describe("App", () => {
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
     await act(async () => { await vi.advanceTimersByTimeAsync(scenario === "a snapshot still in flight" ? 300 : 1500); });
     expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    // Live: no card over it, so it takes the keyboard.
+    expect(screen.getByTestId("provider-surface").dataset.card).toBe("live");
     if (scenario === "a snapshot still in flight") {
       await act(async () => { finish([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }, rootB]); });
       await act(async () => { await vi.advanceTimersByTimeAsync(300); });
@@ -294,7 +299,12 @@ describe("App", () => {
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
     } else if (scenario === "events keeping the store stale") {
       expect(daemon.viewed).toEqual(["sup1"]);
-    } else {
+    } else if (scenario === "its worker not relaunched yet") {
+      // Still to come while the recovery goes on: on its way back, not paused (no Continue to race it).
+      fireEvent.click(treeAgent("w1"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(paneWaits()).toBe(true);
+    } else if (!workerAs) {
       expect(paneWaits()).toBe(false);
       expect(daemon.prioritized).toEqual([]);
       fireEvent.click(treeSession("sup2"));
@@ -302,6 +312,35 @@ describe("App", () => {
       expect(paneWaits()).toBe(true);
       expect(daemon.prioritized).toEqual(["sup2"]);
     }
+  });
+
+  it("shows the open session once it is back from its chat's own row, while whole snapshots are still rendering", async () => {
+    vi.useFakeTimers();
+    // The last daemon paused both on its way out: the first rows read say so.
+    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", status: "paused", window: null })) };
+    const pausedRoot = { ...root, agents: root.agents?.map((a) => ({ ...a, status: "paused", window: null })) };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: "paused" }, { ...session, id: "sup2", status: "paused" }], workspaces: [pausedRoot, rootB] });
+    const client = daemon.client();
+    const store = createAppStore();
+    let pending = ["sup1", "sup2"];
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 2 - pending.length, total: 2, pending } }));
+    // Every read after the first is held: the daemon renders snapshots one at a time, seconds each meanwhile.
+    const snapshot = client.snapshot.bind(client);
+    vi.spyOn(client, "snapshot").mockImplementationOnce(snapshot).mockReturnValue(new Promise(() => {}));
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(paneWaits()).toBe(true);
+    // sup1's chat is up in its new window; sup2 is still coming back.
+    daemon.data.workspaces = [root, rootB];
+    daemon.data.sessions = [session, { ...session, id: "sup2", status: "paused" }];
+    pending = ["sup2"];
+    daemon.publish("session.changed", { repo_root: REPO, root_id: "sup1", agent_id: "sup1", payload: {} });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    expect(screen.getByTestId("provider-surface").dataset.card).toBe("live");
+    expect(daemon.sessionViews).toEqual(["sup1"]);
   });
 
   it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
@@ -415,6 +454,104 @@ describe("App", () => {
     expect(bar().getByTestId(/^(agent|session)-id$/).textContent).toBe("sup2");
     expect(state()).not.toBe("restarting");
     expect(bar().getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
+
+  it.each([false, true])("after an update: a session back before any read the app has shows its pane stays restarting, not stopped or paused, through the end of recovery (back before the app first asks: %s)", async (early) => {
+    vi.useFakeTimers();
+    const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    // The engine is bringing sup2 and sup3 back: their feed rows say so, and the last daemon's pause left their roots in no snapshot.
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2", status: "resuming" }, { ...session, id: "sup3", status: "resuming" }],
+      workspaces: [root, { ...root, id: "proj2", agents: [] }, { ...root, id: "proj3", agents: [] }],
+    });
+    const { client, store, sync } = connectDaemon(daemon);
+    let live = { resuming: true, pending: ["sup2", "sup3"] };
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: live.resuming, recovered_at: live.resuming ? null : Date.now() / 1000,
+      recovery: live.resuming ? { done: 3 - live.pending.length, total: 3, pending: live.pending } : null, recovery_sessions: ["sup2", "sup3"] }));
+    // sup2's chat runs: the engine lists it live, no longer pending.
+    const released = () => {
+      daemon.data.sessions = [session, { ...session, id: "sup2" }, { ...session, id: "sup3", status: "resuming" }];
+      daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), { ...root, id: "proj3", agents: [] }];
+      live = { resuming: true, pending: ["sup3"] };
+    };
+    // The app's rows were read before that, and its first look at the engine comes after it.
+    if (early) {
+      await act(() => sync.refresh());
+      released();
+    }
+    // Snapshots are slow while sessions launch: a read begun before sup2's release lands after it, and after recovery's end.
+    const read = client.snapshot.bind(client);
+    vi.spyOn(client, "snapshot").mockImplementation(async () => {
+      const rows = await read();
+      return new Promise((ok) => setTimeout(() => ok(rows), 4000));
+    });
+    // Its pane (live), or that it is coming back, and whether its surface says it stopped (paused, ended).
+    const shown = () => [screen.queryByTestId("terminal")?.textContent === "sup2" ? "live"
+      : ["restarting", "resuming"].includes(within(screen.getByTestId("session-bar")).getByTestId("session-status").dataset.state ?? "") ? "restarting" : "other",
+    ["ended", "failed"].includes(screen.queryByTestId("state-card")?.dataset.kind ?? "")];
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    // Back already: its chat's own row shows its pane, those slow reads still out.
+    expect(shown()).toEqual([early ? "live" : "restarting", false]);
+    // Before any snapshot the app has holds its root.
+    if (!early) released();
+    act(() => daemon.publish("session.changed", { root_id: "sup2" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(shown()).toEqual(["live", false]);
+    // sup3 too, and recovery is over, those reads still out: the feed's own rows read since say paused for neither.
+    daemon.data.sessions = [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }];
+    daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", windowOf("sup3"))];
+    live = { resuming: false, pending: [] };
+    act(() => daemon.publish("session.changed", { root_id: "sup3" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(shown()).toEqual(["live", false]);
+    // The reads land: still its pane.
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000); });
+    expect(shown()).toEqual(["live", false]);
+  });
+
+  it.each([false, true])("after an update: the event of a session's return has the app look at once, so the next read shows its pane (recovery over by then: %s)", async (ended) => {
+    vi.useFakeTimers();
+    const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2", status: "resuming" }, { ...session, id: "sup3", status: "resuming" }],
+      workspaces: [root, { ...root, id: "proj2", agents: [] }, { ...root, id: "proj3", agents: [] }],
+    });
+    const { client, store, sync } = connectDaemon(daemon);
+    let pending = ["sup2", "sup3"];
+    let resuming = true;
+    // The engine's answers take a while too (its meta comes after the read the event starts has begun).
+    let answer = 0;
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => {
+      const got = { ...await meta(), resuming, recovered_at: resuming ? null : Date.now() / 1000,
+        recovery: resuming ? { done: 3 - pending.length, total: 3, pending } : null, recovery_sessions: ["sup2", "sup3"] };
+      return answer ? new Promise((ok) => setTimeout(() => ok(got), answer)) : got;
+    });
+    let slow = false;
+    const read = client.snapshot.bind(client);
+    vi.spyOn(client, "snapshot").mockImplementation(async () => {
+      const rows = await read();
+      return slow ? new Promise((ok) => setTimeout(() => ok(rows), 4000)) : rows;
+    });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    slow = true;      // the gate's next reads are out a while, as sessions launch
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    // sup2's chat runs (ended: sup3's too, recovery over), and its return's event arrives: well before the
+    // gate's next look. The read the event starts is quick, but begins before the engine's answer says so.
+    daemon.data.sessions = [session, { ...session, id: "sup2" }, { ...session, id: "sup3", status: ended ? "idle" : "resuming" }];
+    daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), ended ? at("sup3", "proj3", windowOf("sup3")) : { ...root, id: "proj3", agents: [] }];
+    pending = ["sup3"];
+    resuming = !ended;
+    slow = false;
+    answer = 100;
+    act(() => daemon.publish("session.changed", { root_id: "sup2" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(screen.getByTestId("terminal").textContent).toBe("sup2");
   });
 
   it("test_update_relaunch: a session's pane shown during recovery is not reopened when the recovery ends", async () => {

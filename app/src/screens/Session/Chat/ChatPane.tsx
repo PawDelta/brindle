@@ -12,8 +12,8 @@ import { PtyTerminal, type PtyTerminalProps } from "../../../components/PtyTermi
 
 export type ChatTheme = "dark" | "light";
 export interface PromptRegion {
-  /** "working": Claude Code's box while a turn is in progress, shown whole. */
-  kind: "prompt" | "working" | "permission" | "selection" | "unknown";
+  /** "prompt": Claude Code's box, idle or through a turn; cropped while brindle's message box stands in for it. */
+  kind: "prompt" | "permission" | "selection" | "unknown";
   /** Detected bottom prompt + footer height in terminal cells, not output. */
   rows: number;
   /** The region's first row, counted from the terminal client's first row (detected regions only). */
@@ -121,7 +121,7 @@ export function chatTheme(theme: ChatTheme): ITheme {
 
 // -- clipping: add rows to terminal geometry, clip the bottom, preserve output -
 // Unknown state and non-Claude providers show all rows. Permission and selection
-// restore the full terminal and keyboard access; working/output rows stay visible.
+// restore the full terminal and keyboard access; output and the working line stay visible.
 export function promptClipRows(provider: string, region: PromptRegion): number {
   if (provider !== "claude" || region.kind !== "prompt") return 0;
   return Math.max(0, Math.floor(region.rows));
@@ -141,20 +141,12 @@ export function promptClipRows(provider: string, region: PromptRegion): number {
    region is the box's rows from its first rule through its footer's last line, and where that first rule is
    (`top`, from the client's first row): the crop hides from there, so blank rows under a box that isn't at the
    foot hide too, without being counted (cropping them would only grow the client by as many blank rows again).
-   Only the box Claude Code is idle at is the prompt: through a turn it draws its working line over the box
-   ("✳ Finagling… (3s · ↓ 2 tokens)", a spinner and a verb, the row or two above the box's first rule) and
-   "esc to interrupt" in its mode line, and redraws those rows, the queued messages and its answer as it goes. A box
-   at work is "working": every row shown, the client its own size, until the turn ends and the box is idle again.
-   Idle is told only from what shows it: a mode line drawn whole (a narrow pane cuts it short, "esc to inte…", and
-   streaming there may show no working line: at work, as far as the view can tell), no message queued (the box's
-   "Press up to edit queued messages", or "ctrl+x ctrl+s to send now" under one over it), no working line. */
+   The box is the prompt through a turn too: Claude Code draws its working line over it ("✳ Finagling… (3s · ↓ 2
+   tokens)", the row or two above the box's first rule), "esc to interrupt" in its mode line, and "Press up to edit
+   queued messages" in the box while a message waits (brindle's own queue shows those). The crop starts at the box's
+   first rule, so the working line, the queued messages over the box and the answer stay shown; the box itself never
+   comes back mid-turn, and the client keeps its size from idle through the turn and back. */
 const FOOTER_ROWS = 8;
-const INTERRUPT = "esc to interrupt";
-const QUEUED_INPUT = "edit queued messages";
-const QUEUED = "to send now";
-/* Rows with text read above the box for its working line: notices (Claude Code's own, right-aligned) can sit between. */
-const WORKING_ROWS = 3;
-const WORKING = /^[·✢✳✶✻✽*]\s+\S+…/;
 const isRule = (row: string): boolean => {
   const line = row.trim();
   if (!line.startsWith("───")) return false;
@@ -176,21 +168,5 @@ export function claudePromptRegion(rows: readonly string[]): PromptRegion {
   while (open >= 0 && !isRule(rows[open])) open--;
   if (open < 0 || open === close - 1) return { kind: "unknown", rows: 0 };
   if (!rows[open + 1].startsWith("❯")) return { kind: "unknown", rows: 0 };
-  if (!idleAt(rows, open, close, last)) return { kind: "working", rows: 0 };
   return { kind: "prompt", rows: last - open + 1, top: open };
-}
-
-/* Whether Claude Code is idle at the box from `open` to `close` (its rules), its footer down to `last`: only on a
-   footer drawn whole without the interrupt hint, no message queued, and no working line over the box. */
-function idleAt(rows: readonly string[], open: number, close: number, last: number): boolean {
-  const footer = rows.slice(close + 1, last + 1);
-  if (footer.some((row) => row.includes(INTERRUPT) || row.trimEnd().endsWith("…"))) return false;
-  if (rows.slice(open + 1, close).some((row) => row.includes(QUEUED_INPUT))) return false;
-  for (let y = open - 1, seen = 0; y >= 0 && seen < WORKING_ROWS; y--) {
-    const row = rows[y].trim();
-    if (!row) continue;
-    if (WORKING.test(row) || row.includes(QUEUED)) return false;
-    seen++;
-  }
-  return true;
 }

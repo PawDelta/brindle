@@ -46,6 +46,8 @@ async def meta(request: Request) -> JSONResponse:
         "resuming": getattr(request.app.state, "resuming", False),
         "recovered_at": getattr(request.app.state, "recovered_at", None),
         "recovery": recovery.progress() if recovery else None,
+        # The sessions the daemon's start brings back, or brought: kept once recovery has ended.
+        "recovery_sessions": recovery.brought() if recovery else [],
     })
 
 

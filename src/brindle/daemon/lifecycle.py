@@ -509,12 +509,18 @@ class Recovery:
         # back (``returning``): from the daemon's first answer they read as resuming, not paused (expect).
         self.expected: set[str] | None = None
         self.released: set[str] = set()   # those whose chat runs: shown back while their workers come
+        self.members: set[str] = set()    # all this start brings back, released or finished too (brought)
         self.head = threading.Event()   # the first session is back (or its turn ended): the rest may start
         self.lanes: deque[list[dict]] = deque()     # those whose turn hasn't begun, under lock
         self.total = 0                  # how many entries the record had
         self.handed_over = False        # stop has returned: the record is the way out's now
         self.ordered = False            # ``lanes`` is in place: a prioritize moves them at once
         self.wanted: list[str] = []     # sessions opened before then, in order, under lock
+        self.born = time.monotonic()    # the daemon's start (serve makes it just before serving): the log's +0
+
+    def at(self) -> float:
+        """Seconds since this daemon's start, for recovery's timing log."""
+        return time.monotonic() - self.born
 
     def _save(self) -> bool:
         if self.handed_over:
@@ -544,11 +550,18 @@ class Recovery:
             self.returning.discard(entry["id"])
 
     def expect(self, ids: Iterable[str]) -> None:
-        """The sessions the last daemon left to bring back, read as the daemon starts, before it
-        serves: until resume_after_start has sorted out which it brings back, they are the ones it
-        is bringing back (resuming, progress), so the app never sees them paused in between."""
+        """The sessions this start will bring back, read as the daemon starts, before it serves
+        (expect_on_start): until resume_after_start has its own say, they are the ones it is
+        bringing back (resuming, progress), so the app never sees them paused in between."""
         with self.lock:
             self.expected = set(ids)
+            self.members = set(self.expected)
+
+    def brought(self) -> list[str]:
+        """Every session this start brings back (or brought: released, finished and after it has
+        ended), for the app: a row it read before one came back can't say so (meta)."""
+        with self.lock:
+            return sorted(self.members)
 
     def release(self, root_id: str) -> bool:
         """Session ``root_id``'s chat pane runs: it is shown as back (resuming,
@@ -806,6 +819,46 @@ def _join(threads: list[threading.Thread], recovery: Recovery) -> None:
         alive[0].join(min(wait, 1.0))
 
 
+def _returning(db, entries: list[dict], server: str | None) -> set[str]:
+    """Those of the record's ``entries`` a start brings back: tried fewer than
+    RESUME_TRIES times, recorded on and still on this daemon's tmux ``server``,
+    not closed, and not held by the sign-in sweep (its own to bring back)."""
+    from brindle import agents, signin_pause
+
+    held = set(signin_pause.paused_for_signin())
+    return {entry["id"] for entry in entries
+            if entry.get("tries", 0) < RESUME_TRIES and entry.get("server") == server
+            and (root := db.get_agent(entry["id"])) is not None
+            and root.status != "done" and agents.same_server(root) and root.id not in held}
+
+
+def expect_on_start(recovery: Recovery) -> None:
+    """Before the daemon serves: the sessions its start will bring back, from
+    the record and the DB as they are now (_returning), so its first answer
+    already shows those as resuming and the rest as paused, never one, then
+    the other. Read in full if the DB can't be: shown resuming, until the start
+    has sorted them out, rather than paused."""
+    from brindle import tmux
+    from brindle.db import DB
+
+    entries = _read_resume() or []
+    if not entries:
+        return
+    try:
+        db = DB()
+    except Exception:  # noqa: BLE001 - the start reads them again
+        log.warning("brindle: couldn't read which sessions come back before serving", exc_info=True)
+        recovery.expect(e["id"] for e in entries)
+        return
+    try:
+        recovery.expect(_returning(db, entries, tmux.current_server()))
+    except Exception:  # noqa: BLE001 - as above
+        log.warning("brindle: couldn't read which sessions come back before serving", exc_info=True)
+        recovery.expect(e["id"] for e in entries)
+    finally:
+        db.conn.close()
+
+
 def resume_after_start(recovery: Recovery | None = None) -> list[str]:
     """Recover sessions before optional timing authorization can contact the backend."""
     with debuglog.recovery_timings():
@@ -829,14 +882,19 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
     another (_lanes). A session that fails doesn't hold up the others.
     The session the app showed last (record_viewed) comes back first, alone:
     the others start once its chat's pane runs (or its turn has ended), and
-    then come back beside each other. A session is shown back as soon as its
+    then come back beside each other. That adds its launch to theirs (a
+    10.8 s recovery whose sessions took 2.6-5.3 s each), and is meant to:
+    begun beside it, even only to work out their launches (keys, checks,
+    preflight) while it opened its own, they held it back by a third to half
+    a second, more on a loaded machine, and the whole took no less there
+    (scripts/bench_recovery.py). A session is shown back as soon as its
     chat runs (Recovery.release), while its workers still come.
     Their launches share each model check and preflight per provider and
     identity (agents.shared_launch_checks), rather than run them per agent.
 
     ``recovery``: the daemon's (serve), which may be stopped meanwhile: then
     nothing more is launched, and what is left stays on the record."""
-    from brindle import agents, bus, secrets, signin_pause, tmux
+    from brindle import agents, bus, secrets, tmux
     from brindle.db import DB
 
     recovery = recovery or Recovery()
@@ -853,6 +911,9 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
     began = time.monotonic()
     resumed: list[str] = []
     ordered = 0.0
+    # When each step happened, in seconds since the daemon started (Recovery.at): its timing log.
+    marks: dict[str, float] = {"began": recovery.at()}
+    stamps: dict[str, dict[str, float]] = {}    # per session: its start, its chat up, its end
     try:
         server = tmux.current_server()
         # The environment as this start found it, for every session: each resume writes the
@@ -860,14 +921,10 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
         env = {k: v for k, v in os.environ.items() if v and not secrets.is_job_secret(k)}
         db = DB()
         try:
-            held = set(signin_pause.paused_for_signin())
+            returning = _returning(db, entries, server)
             with recovery.lock:
-                recovery.returning = {
-                    entry["id"] for entry in entries
-                    if entry.get("tries", 0) < RESUME_TRIES and entry.get("server") == server
-                    and (root := db.get_agent(entry["id"])) is not None
-                    and root.status != "done" and agents.same_server(root) and root.id not in held
-                }
+                recovery.returning = returning
+                recovery.members = set(returning)
                 # Sorted out: those it won't bring back read as paused again, and are told so too.
                 told, recovery.expected = recovery.expected or set(), None
             lanes = _lanes(db, _most_recent_first(db, entries))
@@ -884,25 +941,30 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
             lanes.appendleft(first)
         recovery.order(lanes)     # behind any session the person opened meanwhile
         ordered = time.monotonic() - began
+        marks["ordered"] = recovery.at()
 
-        # The session the person had open comes back before any other starts: the other threads
-        # wait until its chat's pane runs, or its turn has ended (failed, cancelled, the daemon
-        # stopping: Recovery.stop), never on time alone. A lead that hangs is _join's to give up on.
-        if first is None or viewed not in recovery.resuming():
+        # The session the person had open comes back before any other starts: the others wait until
+        # its chat's pane runs, or its turn has ended (failed, cancelled, the daemon stopping:
+        # Recovery.stop), never on time alone. A lead that hangs is _join's to give up on.
+        lead_id = viewed if first is not None and viewed in recovery.resuming() else None
+        if lead_id is None:
             recovery.head.set()
 
-        def back(db, root_id: str, lead: bool) -> None:
+        def headed() -> None:
+            marks.setdefault("head", recovery.at())
+            recovery.head.set()
+
+        def back(db, root_id: str) -> None:
             """Session ``root_id``'s chat runs: shown back now, its prompt followed on the side,
             while its workers may still be coming back (the record keeps it till they are)."""
             if recovery.release(root_id):
+                stamps.setdefault(root_id, {})["chat"] = recovery.at()
                 _after_prompt(root_id, recovery)
                 bus.publish_agent(db, "session.changed", root_id)
-            if lead:
-                recovery.head.set()
+            if root_id == lead_id:
+                headed()
 
-        def work(lead: bool = False) -> None:
-            if not lead:
-                recovery.head.wait()
+        def work() -> None:
             db = DB()       # its own: SQLite connections stay on their thread
             try:
                 while not recovery.stopping.is_set():
@@ -910,35 +972,45 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                     if lane is None:
                         return
                     for entry in lane:
-                        waiting = time.monotonic()
-                        root = db.get_agent(entry["id"])
-                        # The person's own session: they are waiting for it, so only critical memory holds it.
-                        busy = 0.0 if root is not None and root.mode == "interactive" else RESUME_BUSY_WAIT
-                        spawn.wait_for_room(recovery.stopping, busy_limit=busy)
-                        waited = time.monotonic() - waiting
-                        if recovery.stopping.is_set():
-                            return
+                        lead = entry["id"] == lead_id
+                        if not lead:
+                            recovery.head.wait()
                         try:
-                            if not recovery.trying(entry):
-                                log.warning("brindle: session %s couldn't be noted as tried; left to the next start",
-                                            entry["id"])
-                            elif _resume_session(db, entry, server, recovery, env, waited=waited,
-                                                 on_chat_up=lambda: back(db, entry["id"], lead)):
-                                back(db, entry["id"], lead)     # if its chat wasn't the one launched
-                                resumed.append(entry["id"])
-                        except agents.Cancelled:
-                            entry["tries"] -= 1     # stopped, it didn't fail
-                            return      # launched now, it would run on past the way out's pause: left pending
-                        except Exception:  # noqa: BLE001 - the others still come back
-                            log.warning("brindle: couldn't resume session %s", entry["id"], exc_info=True)
-                        recovery.finished(entry)
-                        bus.publish_agent(db, "session.changed", entry["id"])
-                        if lead:
-                            recovery.head.set()
+                            if not entry_turn(db, entry):
+                                return
+                        finally:
+                            if lead:
+                                headed()    # however its turn ended, the others go on
             finally:
-                if lead:
-                    recovery.head.set()      # however its turn ended, the others go on
                 db.conn.close()
+
+        def entry_turn(db, entry: dict) -> bool:
+            """``entry``'s session's turn in this start; False once the start is stopping."""
+            waiting = time.monotonic()
+            stamps.setdefault(entry["id"], {})["start"] = recovery.at()
+            root = db.get_agent(entry["id"])
+            # The person's own session: they are waiting for it, so only critical memory holds it.
+            busy = 0.0 if root is not None and root.mode == "interactive" else RESUME_BUSY_WAIT
+            spawn.wait_for_room(recovery.stopping, busy_limit=busy)
+            waited = time.monotonic() - waiting
+            if recovery.stopping.is_set():
+                return False
+            try:
+                if not recovery.trying(entry):
+                    log.warning("brindle: session %s couldn't be noted as tried; left to the next start", entry["id"])
+                elif _resume_session(db, entry, server, recovery, env, waited=waited,
+                                     on_chat_up=lambda: back(db, entry["id"])):
+                    back(db, entry["id"])     # if its chat wasn't the one launched
+                    resumed.append(entry["id"])
+            except agents.Cancelled:
+                entry["tries"] -= 1     # stopped, it didn't fail
+                return False    # launched now, it would run on past the way out's pause: left pending
+            except Exception:  # noqa: BLE001 - the others still come back
+                log.warning("brindle: couldn't resume session %s", entry["id"], exc_info=True)
+            stamps[entry["id"]]["end"] = recovery.at()
+            recovery.finished(entry)
+            bus.publish_agent(db, "session.changed", entry["id"])
+            return True
 
         with agents.shared_launch_checks():
             # What every launch reads per repo first (managed models, the supervisor choice), worked
@@ -947,13 +1019,20 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
             try:
                 with recovery.lock:
                     returning = sorted(recovery.returning)
-                agents.warm_launch_profiles(db, returning)
+                warmers = agents.warm_launch_profiles(db, returning)
+
+                def warmed() -> None:
+                    for warmer in warmers:
+                        warmer.join()
+                    marks["warmed"] = recovery.at()
+
+                threading.Thread(target=warmed, name="brindle-warmed", daemon=True).start()
             except Exception:  # noqa: BLE001 - only a head start: each launch reads them itself
                 log.warning("brindle: couldn't warm the launch checks", exc_info=True)
             finally:
                 db.conn.close()
             # A copy of this context each (one can't be entered twice at once): a new thread starts with none.
-            threads = [threading.Thread(target=contextvars.copy_context().run, args=(work, n == 0),
+            threads = [threading.Thread(target=contextvars.copy_context().run, args=(work,),
                                         name=f"brindle-resume-{n}", daemon=True)
                        for n in range(min(RESUME_PARALLEL, len(lanes)))]
             for thread in threads:
@@ -963,9 +1042,17 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
         with recovery.lock:
             recovery.expected = None
         recovery.idle.set()
-        debuglog.recovery_timing(log, "brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
-                                len(entries), time.monotonic() - began, len(resumed), ordered)
+        marks["ended"] = recovery.at()
+        for root_id, at in sorted(stamps.items(), key=lambda kv: kv[1].get("start", 0.0)):
+            debuglog.recovery_timing(log, "brindle: session %s recovery at %s", root_id, _stamped(at))
+        debuglog.recovery_timing(log, "brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs) at %s",
+                                len(entries), time.monotonic() - began, len(resumed), ordered, _stamped(marks))
     return resumed
+
+
+def _stamped(marks: dict[str, float]) -> str:
+    """``marks`` as the timing log shows them: each step and when, from the daemon's start."""
+    return ", ".join(f"{step} +{at:.2f}s" for step, at in sorted(marks.items(), key=lambda kv: kv[1]))
 
 
 async def _elapse(seconds: float) -> None:
@@ -1241,8 +1328,8 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     recovery = Recovery()
     activity.state.recovery = recovery      # /v1/meta reports its progress to the app
     if idle_exit:
-        # What the last daemon left to bring back, before the first answer: never paused in between.
-        recovery.expect(e["id"] for e in _read_resume() or ())
+        # What this start will bring back, decided before the first answer: never paused in between.
+        expect_on_start(recovery)
         def stopping() -> None:
             recovery.stopping.set()     # nothing more is resumed: it would outlive the pause
             say_pausing()               # the app's daemon pauses what it runs on its way out: the app gives it time
