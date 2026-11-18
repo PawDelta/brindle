@@ -202,21 +202,36 @@ def test_a_stale_no_pr_answer_is_asked_again_soon_so_a_new_pr_is_announced(monke
     """A supervisor's `gh pr create` right after a read of "no PR on this HEAD":
     the old 90 s belief in that none kept the PR's Inbox card (and its
     notification) back for up to 90 s. A found PR is still believed that long."""
-    import time
-    from brindle.daemon import session_review as review
-    asked = []
     from concurrent.futures import Future
-    monkeypatch.setattr(review._pr_pool, "submit", lambda fn, key: asked.append(key) or Future())
+    from brindle import workspaces
+    from brindle.daemon import session_review as review
+    clock = [1000.0]
+    monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
+    pr = {"url": "https://github.com/o/r/pull/500", "number": 500, "title": "t", "headRefName": "x"}
+    looked = []
+
+    def run_now(fn, key):
+        looked.append(key)
+        fn(key)
+        done = Future()
+        done.set_result(None)
+        return done
+
+    monkeypatch.setattr(review._pr_pool, "submit", run_now)
+    monkeypatch.setattr(workspaces, "open_pull_request_for_commit", lambda sha, cwd: pr)
     review._head_cache.clear()
     review._head_flights.clear()
+    review._head_changed.clear()
     none_key, found_key = ("a" * 40, "/none"), ("b" * 40, "/found")
-    now = time.monotonic()
-    review._head_cache[none_key] = (now - review.PR_NONE_TTL - 1, {})
-    review._head_cache[found_key] = (now - review.PR_NONE_TTL - 1, {"url": "https://github.com/o/r/pull/1"})
-    review.open_pr_for_head(*none_key)
-    review.open_pr_for_head(*found_key)
-    assert asked == [none_key]
-    review._head_flights.clear()
+    review._head_cache[none_key] = (clock[0], {})          # read: no PR yet
+    review._head_cache[found_key] = (clock[0], dict(pr))
+    clock[0] += 11                                         # between a short and a 90 s belief
+    review.open_pr_for_head(*none_key, "root1")
+    review.open_pr_for_head(*found_key, "root2")
+    assert looked == [none_key]                            # only the "none" is asked again
+    assert review._head_cache[none_key][1] == pr           # the new PR is found
+    assert review._head_changed == {none_key}              # and announced to the Inbox
+    review._head_changed.clear()
 
 
 def _readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
