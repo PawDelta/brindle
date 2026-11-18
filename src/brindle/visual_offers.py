@@ -161,7 +161,18 @@ _PLAN_REQUEST = re.compile(
     r"(?:(?:write|draft|prepare|put together|draw up|do|make|create|build)\s+(?:(?:me|us)\s+)?(?:up\s+)?"
     r"(?:(?:a|an|the|my|our)\s+)?(?:(?:simple|quick|short|small|new|first)\s+)*"
     r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
-    r"|plan\s+(?:it|this|that)\s+first\b)", re.I)
+    r"|plan\s+(?:it|this|that)\s+first\b)"
+    # Planning as the activity: "let's plan this", "can we plan first", "I want to plan the X feature",
+    # "let's think through the design", "plan this out", "go into planning mode". The sentence must open
+    # with the ask, so "the plan looks good" and "I don't want to plan" grant nothing.
+    r"|(?:(?:let['’]?s|let us|(?:can|could|shall|should) we|we (?:should|need to|must)|"
+    r"i(?:['’]d| would)? (?:want|like|need) to|i(?:['’]d| would)? (?:want|like) us to)"
+    r"\s+(?:(?:first|now|just|really|please)\s+)*"
+    r"(?:plan\b|think\s+(?:through|over|out)\b|think\s+about\s+the\s+(?:design|approach)\b|map\s+(?:it|this|things)?\s*out\b))"
+    r"|plan\s+(?:it|this|that|things|everything)\s+out\b"
+    r"|plan\s+(?:it|this|that)\W*$"
+    r"|(?:(?:go|switch|move|get)\s+(?:in)?to|enter|start|use|open|turn on)\s+(?:the\s+)?plan(?:ning)?\s+(?:mode|view)\b"
+    r"|plan(?:ning)?\s+(?:mode|view)\b", re.I)
 _CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
 _CANCEL_ARTIFACT = (r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan docs?|"
                     r"plan document|plans?|request)\b")
