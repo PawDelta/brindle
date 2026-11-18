@@ -349,6 +349,9 @@ if (scene === "pty") {
   // &shell=<session:window>: a shell on the same server, what the Terminal's POST /terminals/shell starts (e2e/terminal.e2e.ts).
   const shell = params.get("shell");
   if (shell) daemon.shellPanes.push({ server: params.get("server"), target: shell });
+  // &chat=1: the message box under the pane, Claude Code's own prompt box cropped from it (ChatPane), as in a
+  // session whose engine takes messages.
+  if (params.get("chat") === "1") daemon.data.meta = { ...daemon.data.meta, chat: true };
 }
 // The fake daemon on the page, for e2e/flows.e2e.ts: what a view wrote to its pane (`views`), and `print` into one.
 Object.assign(window, { fake: daemon });

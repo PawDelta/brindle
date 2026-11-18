@@ -3,7 +3,16 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PtyViewHandlers } from "../../../api/ptyView";
 import { Terminal } from "@xterm/xterm";
-import { ChatPane, chatTheme, claudePromptRegion, promptClipRows, type ChatTheme } from "./ChatPane";
+import { useState } from "react";
+import { ChatPane, chatTheme, claudePromptRegion, promptClipRows, type ChatTheme, type PromptRegion } from "./ChatPane";
+import idle from "./fixtures/claude-turn-1-idle.txt?raw";
+import working from "./fixtures/claude-turn-2-working.txt?raw";
+import streaming from "./fixtures/claude-turn-3-streaming.txt?raw";
+import done from "./fixtures/claude-turn-4-idle.txt?raw";
+import idle34 from "./fixtures/claude-turn-34-1-idle.txt?raw";
+import working34 from "./fixtures/claude-turn-34-2-working.txt?raw";
+import streaming34 from "./fixtures/claude-turn-34-3-streaming.txt?raw";
+import done34 from "./fixtures/claude-turn-34-4-idle.txt?raw";
 
 // xterm.js watches the pixel ratio through matchMedia, which jsdom lacks.
 beforeEach(() => {
@@ -102,7 +111,8 @@ describe("ChatPane", () => {
 
   // tmux capture-pane -e of live Claude Code 2.1.327 panes, their last rows.
   it.each([
-    // At work (171 columns): the working line, the prompt box between its 256-colour grey rules, a blank row, the mode line.
+    // At work (171 columns): the working line, the prompt box between its 256-colour grey rules, a blank row, the mode
+    // line ("esc to interrupt"): a box at work, shown whole.
     ["its prompt box", 171, [
       "\x1b[38;5;174m✶\x1b[39m \x1b[38;5;174mBillowing… \x1b[38;5;246m(1m 47s · ↓\x1b[39m \x1b[38;5;246m4.5k tokens · thought for 3s)\x1b[39m",
       "",
@@ -111,7 +121,7 @@ describe("ChatPane", () => {
       `\x1b[38;5;244m${"─".repeat(171)}`,
       "",
       "\x1b[39m  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle) · esc to interrupt\x1b[39m",
-    ], { kind: "prompt", rows: 5, top: 2 }],
+    ], { kind: "working", rows: 0 }],
     // A numbered message typed in the box (120 columns) is still the prompt.
     ["a numbered message in its box", 120, [
       `\x1b[38;5;244m${"─".repeat(120)}`,
@@ -146,6 +156,41 @@ describe("ChatPane", () => {
     const rows = Array.from({ length: term.rows }, (_, y) => buffer.getLine(y)?.translateToString(true) ?? "");
     term.dispose();
     expect(claudePromptRegion(rows)).toEqual(region);
+  });
+
+  // tmux capture-pane -e -p of a live Claude Code 2.1.327 (its fullscreen renderer, 24 rows) through one turn: idle at
+  // its prompt box, at work (the working line over the box, "esc to interrupt" in its mode line), its answer streaming
+  // in with a message queued, and idle again. Fed through ChatPane as the pane's client draws them, its rows read as
+  // ProviderSurface reads them: the box is cropped only while Claude Code is idle at it. At 34 columns the mode line is
+  // cut short ("esc to inte…") and, streaming, no working line shows over the box: still at work.
+  it.each([
+    ["80", [idle, working, streaming, done]],
+    ["34", [idle34, working34, streaming34, done34]],
+  ])("crops Claude Code's prompt box only while it is idle, never through a turn (%s columns)", async (_cols, frames) => {
+    let feed: (bytes: string) => void = () => {};
+    const open = (_at: unknown, _size: unknown, handlers: PtyViewHandlers) => {
+      feed = (bytes) => handlers.onData(new TextEncoder().encode(bytes));
+      return { write() {}, resize() {}, focus() {}, close() {} };
+    };
+    function Live() {
+      const [prompt, setPrompt] = useState<PromptRegion>({ kind: "unknown", rows: 0 });
+      return (
+        <ChatPane provider="claude" theme="dark" prompt={prompt} composer={null} onDropFiles={() => {}} onComposeText={() => {}}
+          terminal={{ at: { server: null, target: "%1" }, open, onRows: (rows) => setPrompt(claudePromptRegion(rows)) }} />
+      );
+    }
+    render(<Live />);
+    const clipped: string[] = [];
+    for (const frame of frames) {
+      // The client's screen as tmux redraws it (the alternate screen, taken once on attaching).
+      const drawn = `${clipped.length ? "" : "\x1b[?1049h"}\x1b[H\x1b[2J${frame.replace(/\n$/, "").split("\n").join("\r\n")}`;
+      await act(async () => {
+        feed(drawn);
+        await new Promise<void>((ok) => setTimeout(ok));
+      });
+      clipped.push(screen.getByTestId("chat-terminal-frame").dataset.clipRows ?? "");
+    }
+    expect(clipped).toEqual(["4", "0", "0", "4"]);
   });
 
   it("hides only Claude prompt rows and restores permission and choice rows", () => {

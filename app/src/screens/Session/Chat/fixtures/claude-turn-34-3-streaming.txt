@@ -1,0 +1,24 @@
+      its deepest points.
+  23. The Volga is the longest
+      river in Europe, at about
+      3,500 km.
+  24. The Thames is tidal as far
+      upstream as Teddington Lock
+      in London.
+  25. The Hudson River is tidal as
+      far upstream as Troy, New
+      York.
+  26. The Rhine flows through or
+      along six countries:
+      Switzerland, Liechtenstein,
+      Austria, Germany, France and
+      the Netherlands.
+  27.
+
+[38;5;246m[48;5;237m❯ then say done[39m
+[49m  [38;5;246mctrl+x ctrl+s to send now[39m
+
+[38;5;244m──────────────────────────────────
+[38;5;246m❯ [2m[39mPress up to edit queued messages
+[0m[38;5;244m──────────────────────────────────
+[39m  [38;5;220m⏵⏵ auto mode on[38;5;246m · esc to inte…[39m
