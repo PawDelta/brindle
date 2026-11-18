@@ -1,5 +1,6 @@
 {
   "reviewer": "reviewer",
+  "scoped_checks": "coverage",
   "checks": [
     "uv run python scripts/check_test_quality.py",
     "uv run python scripts/check_new_tests.py --scoped",

@@ -715,6 +715,53 @@ def daemon_read_caches_fresh(monkeypatch):
     monkeypatch.setattr(routes_read, "_start_usable_refresh", routes_read._run_usable_refresh)
 
 
+@pytest.fixture
+def real_github_lookups():
+    """Opts a test out of ``background_reads_end_with_the_test``'s stubbed PR
+    lookups: it runs the real ``workspaces`` ones (against a fake gh or
+    spawn.read of its own)."""
+
+
+@pytest.fixture(autouse=True)
+def background_reads_end_with_the_test(request, monkeypatch):
+    """What a daemon read starts in the background ends with the test that
+    started it. The Inbox's and goal's look for a session's PR runs on
+    session_review's pool: with the machine's real gh it read GitHub over the
+    network and outlived the test, its reads still counted in spawn.running()
+    (and its answers cached) for the next one. So those lookups say "gh can't
+    tell" (None) unless the test asks for ``real_github_lookups``, each test
+    gets its own pool and empty PR caches, and the pool and any
+    view.warm_later count are finished before the next test starts."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brindle import view, workspaces
+    from brindle.daemon import session_review as review
+
+    if "real_github_lookups" not in request.fixturenames:
+        monkeypatch.setattr(workspaces, "open_pull_request_for_commit", lambda sha, cwd: None)
+        monkeypatch.setattr(workspaces, "pull_request_checks", lambda url, cwd: None)
+    for name in ("_pr_cache", "_pr_flights", "_head_cache", "_head_roots"):
+        monkeypatch.setattr(review, name, {})
+    for name in ("_pr_closed", "_pr_changed", "_head_flights", "_head_changed"):
+        monkeypatch.setattr(review, name, set())
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pr-checks")
+    monkeypatch.setattr(review, "_pr_pool", pool)
+    counts: list[threading.Thread] = []
+    warm_later = view.warm_later
+
+    def counted_later(pending):
+        thread = warm_later(pending)
+        if thread is not None:
+            counts.append(thread)
+        return thread
+
+    monkeypatch.setattr(view, "warm_later", counted_later)
+    yield
+    pool.shutdown(wait=True)
+    for thread in counts:
+        thread.join()
+
+
 @pytest.fixture(autouse=True)
 def cli_sign_in_unknown(monkeypatch):
     """No test asks the real claude or codex whether they're signed in (the

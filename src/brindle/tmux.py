@@ -11,9 +11,11 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 from brindle import __version__, spawn
 
@@ -143,8 +145,12 @@ _READS = frozenset({"capture-pane", "has-session", "list-clients", "list-panes",
 
 
 def _is_read(args: tuple[str, ...]) -> bool:
-    if not args or ";" in args:
+    """Whether ``args`` only asks: a chain (``cmd ; cmd``) only if every command in it does."""
+    if not args:
         return False
+    if ";" in args:
+        cut = args.index(";")
+        return _is_read(args[:cut]) and _is_read(args[cut + 1:])
     return args[0] in _READS or (args[0] == "display-message" and "-p" in args)
 
 
@@ -181,17 +187,23 @@ def _tmux(*args: str, input: str | None = None, check: bool = True,
     return proc
 
 
-def _tmux_batch(cmds: list[list[str]]) -> None:
-    """Run several tmux commands in one process (``cmd ; cmd``) instead of one
-    process each. Best effort like ``check=False``. tmux stops a sequence at the
-    first command it rejects (an option an older tmux lacks), so on failure each
-    command is run on its own and only the rejected ones are skipped."""
+def _chain(cmds: list[list[str]]) -> list[str]:
+    """``cmds`` as one tmux argv, joined by tmux's own separator ``;``."""
     args: list[str] = []
     for cmd in cmds:
         if args:
             args.append(";")
         # an argument ending in ";" would read as a separator: escape it
         args.extend(a[:-1] + "\\;" if a.endswith(";") and not a.endswith("\\;") else a for a in cmd)
+    return args
+
+
+def _tmux_batch(cmds: list[list[str]]) -> None:
+    """Run several tmux commands in one process (``cmd ; cmd``) instead of one
+    process each. Best effort like ``check=False``. tmux stops a sequence at the
+    first command it rejects (an option an older tmux lacks), so on failure each
+    command is run on its own and only the rejected ones are skipped."""
+    args = _chain(cmds)
     if args and _tmux(*args, check=False).returncode != 0:
         for cmd in cmds:
             _tmux(*cmd, check=False)
@@ -240,12 +252,21 @@ def ensure_session(session: str, cwd: str, env: dict[str, str], size: tuple[int,
 
     ``size``: the window size to start them at instead, for a caller with no
     terminal that knows it (a daemon's recovery: agent_window_size, as the
-    last daemon left it). It applies to a session that already exists too."""
-    if has_session(session):
-        for k, v in env.items():
-            _tmux("set-environment", "-t", f"={session}", k, v, check=False)
-        if size:
-            _default_size(session, size)
+    last daemon left it). It applies to a session that already exists too.
+
+    A session that exists takes one tmux process for all of it: the check
+    and every update chained (``cmd ; cmd``). tmux stops a chain at its first
+    failing command, so when it fails (no session, or an older tmux refusing
+    an option) the session is checked on its own and each update applied on
+    its own, and only a rejected one is skipped."""
+    updates = [["set-environment", "-t", f"={session}", k, v] for k, v in env.items()]
+    if size:
+        updates.append(["set-option", "-t", session, "default-size", f"{size[0]}x{size[1]}"])
+    chained = _tmux(*_chain([["has-session", "-t", f"={session}"], *updates]), check=False).returncode == 0
+    if chained or (updates and has_session(session)):
+        if not chained:
+            for cmd in updates:
+                _tmux(*cmd, check=False)
         for key in [k for k in _SESSION_HOMES if k[1] == session]:
             del _SESSION_HOMES[key]     # session_infos reads its BRINDLE_HOME again
         return
@@ -298,22 +319,77 @@ def inherited_names(session: str) -> set[str]:
     """The names of every variable a new pane of ``session`` would inherit:
     the tmux server's global environment, the session's own, and this
     process's (which started the server, in the common case). Names only,
-    never values."""
+    never values. Inside inherited_names_once, tmux is asked once per session."""
+    asked = _NAMES_ASKED.get()
+    if asked is not None and session in asked:
+        return set(asked[session])
+    names = _inherited_names(session)
+    if asked is not None:
+        asked[session] = set(names)
+    return names
+
+
+# The answers of inherited_names inside inherited_names_once, by session.
+_NAMES_ASKED: ContextVar[dict[str, set[str]] | None] = ContextVar("brindle_tmux_names_asked", default=None)
+
+
+@contextmanager
+def inherited_names_once() -> Iterator[None]:
+    """Within it, inherited_names asks tmux about a session once: one
+    window's launch reads the names for its scrub and for its report, and
+    nothing changes the session's environment in between."""
+    token = _NAMES_ASKED.set({})
+    try:
+        yield
+    finally:
+        _NAMES_ASKED.reset(token)
+
+
+def _inherited_names(session: str) -> set[str]:
     names = set(os.environ)
-    for scope in (("-g",), ("-t", f"={session}")):
-        proc = _tmux("show-environment", *scope, check=False)
-        if proc.returncode != 0:
-            continue
-        for line in proc.stdout.splitlines():
+    both = _show_environments(session)
+    outs = ([both.stdout] if both.returncode == 0 else
+            [p.stdout for p in (_tmux("show-environment", *scope, check=False) for scope in _env_scopes(session))
+             if p.returncode == 0])
+    for out in outs:
+        for line in out.splitlines():
             if line and not line.startswith("-"):   # "-NAME": marked unset already
                 names.add(line.partition("=")[0])
     return names
 
 
+def _env_scopes(session: str) -> tuple[tuple[str, ...], ...]:
+    """The tmux server's global environment, then ``session``'s."""
+    return ("-g",), ("-t", f"={session}")
+
+
+def _show_environments(session: str) -> subprocess.CompletedProcess:
+    """``show-environment`` for both of _env_scopes in one tmux process
+    (``cmd ; cmd``): their output follows in that order. tmux stops a chain at
+    its first failing command, so a caller asks each on its own after a failure."""
+    return _tmux(*_chain([["show-environment", *scope] for scope in _env_scopes(session)]), check=False)
+
+
+def _read_env(env: dict[str, str], out: str) -> dict[str, str]:
+    for line in out.splitlines():
+        if line.startswith("-"):
+            env.pop(line[1:], None)
+        elif "=" in line:
+            name, _, value = line.partition("=")
+            env[name] = value
+    return env
+
+
 def inherited_env(session: str) -> dict[str, str]:
     """Snapshot the environment a new pane inherits, without logging values."""
-    env = {}
-    for scope in (("-g",), ("-t", f"={session}")):
+    try:
+        both = _show_environments(session)
+    except TmuxError:
+        return dict(os.environ)
+    if both.returncode == 0:    # the global's lines, then the session's: read in turn, as below
+        return _read_env({}, both.stdout)
+    env: dict[str, str] = {}
+    for scope in _env_scopes(session):
         try:
             proc = _tmux("show-environment", *scope, check=False)
         except TmuxError:
@@ -323,12 +399,7 @@ def inherited_env(session: str) -> dict[str, str]:
                 # A new server will inherit the process that creates it.
                 return dict(os.environ)
             continue
-        for line in proc.stdout.splitlines():
-            if line.startswith("-"):
-                env.pop(line[1:], None)
-            elif "=" in line:
-                name, _, value = line.partition("=")
-                env[name] = value
+        _read_env(env, proc.stdout)
     return env
 
 
@@ -553,9 +624,9 @@ def apply_theme(session: str) -> None:
                 "pane-active-border-style", "pane-border-lines", "mode-style",
                 "window-status-format", "window-status-current-format"):
         cmds += [["set-option", "-w", "-t", win, key, opts[key]] for win in wins]
-    _tmux_batch(cmds)
-    set_follow_hooks(session)
-    bind_session_keys(session)
+    # The hooks and key bindings in the same tmux process (each still applied
+    # on its own when an older tmux rejects one of them: _tmux_batch).
+    _tmux_batch([*cmds, *_follow_hook_cmds(session), *_session_key_cmds(session)])
 
 
 # Fired whenever a brindle session's active window changes (picking a different
@@ -575,12 +646,15 @@ def set_follow_hooks(session: str) -> None:
     so there's nothing it would tell us that we don't already know. The
     command redirects its own output and always exits 0, so a bug in it can
     never surface as a visible tmux error or message popup."""
+    _tmux_batch(_follow_hook_cmds(session))
+
+
+def _follow_hook_cmds(session: str) -> list[list[str]]:
     from brindle.providers import brindle_invocation
 
     cmd = " ".join(shlex.quote(a) for a in [*brindle_invocation(), "_sidebar-follow", session])
     shell = f"{cmd} >/dev/null 2>&1 || true"
-    _tmux_batch([["set-hook", "-t", session, hook, f"run-shell -b {shlex.quote(shell)}"]
-                 for hook in FOLLOW_HOOKS])
+    return [["set-hook", "-t", session, hook, f"run-shell -b {shlex.quote(shell)}"] for hook in FOLLOW_HOOKS]
 
 
 SIDEBAR_BOTTOM_LINES = 12
@@ -1128,6 +1202,10 @@ def bind_session_keys(session: str) -> None:
     server-wide in tmux, so every binding is guarded on the ``@brindle`` session
     option set here and falls back to tmux's own default for any other
     session: only brindle's sessions behave differently."""
+    _tmux_batch(_session_key_cmds(session))
+
+
+def _session_key_cmds(session: str) -> list[list[str]]:
     cmds = [["set-option", "-t", session, "@brindle", "1"]]
     clip = clipboard_command()
     for table in ("copy-mode", "copy-mode-vi"):
@@ -1157,7 +1235,7 @@ def bind_session_keys(session: str) -> None:
     unzoomed = f"if-shell {shlex.quote(has_sidebar)} {shlex.quote(hide)} {shlex.quote(pull)}"
     toggle = f"if-shell -F '#{{window_zoomed_flag}}' 'resize-pane -Z' {shlex.quote(unzoomed)}"
     cmds.append(["bind-key", "S", "if-shell", "-F", "#{@brindle}", toggle, ""])
-    _tmux_batch(cmds)
+    return cmds
 
 
 # The default server's socket name: the one `tmux` without -L uses. It holds

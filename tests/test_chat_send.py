@@ -1,8 +1,7 @@
-"""Executable handoff contracts; unimplemented queue cases remain xfailed.
+"""Executable handoff contracts for the chat message box.
 
-Send: -k send; queue: -k queue; attachments: -k attach. Remove the relevant
-xfail as its implementation lands. Only the explicit stub exception is expected;
-other exceptions remain failures. No real CLI, network, or git processes.
+Send: -k send; queue: -k test_queue_; attachments: -k attach.
+No real CLI, network, or git processes.
 """
 
 import base64
@@ -17,8 +16,8 @@ from brindle.daemon import routes_actions
 from brindle.db import Agent, Workspace
 from brindle.service.dto import ChatAttachmentDTO, ChatMessageDTO
 from brindle.service.errors import ServiceError
+from brindle.view_reads import ViewReads
 
-queue_stub = pytest.mark.xfail(raises=chat.ChatNotImplemented, strict=True, reason="chat queue contract stub")
 real_paste = tmux.paste
 
 
@@ -57,16 +56,15 @@ def live(db, tmp_path, monkeypatch):
 
 
 # -- send owner ---------------------------------------------------------------
+@pytest.mark.variant("Multi-line and large pasted text must reach the CLI whole as one submitted turn")
 def test_send_text_reaches_live_cli_as_one_submitted_turn(db, live):
     result = routes_actions.chat_send(db, {"id": "a"}, {"text": "Look at this\nthen explain it"})
     assert result["status"] == "delivered"
     assert live.turns == ["Look at this\nthen explain it"]
-
-
-def test_send_big_pasted_text_is_not_truncated(db, live):
+    # A big multi-line paste with Unicode reaches the CLI whole.
     text = "Please inspect this log\n" + "a long log line with Unicode: ✓\n" * 412
     routes_actions.chat_send(db, {"id": "a"}, {"text": text})
-    assert live.turns == [text]
+    assert live.turns[-1] == text
 
 
 @pytest.mark.parametrize("condition", [
@@ -145,7 +143,8 @@ def transport(live, monkeypatch):
 
 
 @pytest.mark.parametrize(("stage", "change"), [
-    ("load-buffer", "permission"),
+    pytest.param("load-buffer", "permission", marks=pytest.mark.variant(
+        "A permission arriving before the buffer load must withhold every write")),
     pytest.param("paste-buffer", "permission", marks=pytest.mark.variant(
         "A permission arriving after paste must still withhold Enter")),
     pytest.param("load-buffer", "processing", marks=pytest.mark.variant(
@@ -228,18 +227,18 @@ def test_send_overlapping_dispatch_preserves_competing_draft(db, live, transport
 
 
 # -- queue owner --------------------------------------------------------------
-@queue_stub
 def test_queue_busy_send_waits_in_brindle_and_appears_in_snapshot(db, live):
     db.update_agent("a", status="processing")
     result = routes_actions.chat_send(db, {"id": "a"}, {"text": "Next task"})
     assert result["status"] == "queued"
     assert live.turns == []
-    entry = view.agent_entry(db, db.get_agent("a"), alive=True, read_screen=False)
+    reads = ViewReads(db)  # the snapshot's batched reads
+    entry = view.agent_entry(reads, reads.get_agent("a"), alive=True, read_screen=False)
     assert [(item["id"], item["text"]) for item in entry["chat_queue"]] == [(result["message_id"], "Next task")]
     assert chat.queue_snapshot(db, "b") == []
 
 
-@queue_stub
+@pytest.mark.variant("A removed queued message must never be typed at the next turn end")
 def test_queue_remove_never_types_the_removed_message(db, live):
     queued = routes_actions.chat_enqueue(db, {"id": "a"}, {"text": "Discard me"})
     routes_actions.chat_remove(db, {"id": "a", "message_id": queued["message_id"]}, {})
@@ -248,7 +247,7 @@ def test_queue_remove_never_types_the_removed_message(db, live):
     assert live.turns == []
 
 
-@queue_stub
+@pytest.mark.variant("Turn end must release one message in FIFO order and ignore a repeated turn id")
 def test_queue_turn_end_releases_one_fifo_message_and_deduplicates_turn(db, live):
     for text in ("First", "Second"):
         routes_actions.chat_enqueue(db, {"id": "a"}, {"text": text})
@@ -260,7 +259,7 @@ def test_queue_turn_end_releases_one_fifo_message_and_deduplicates_turn(db, live
     assert live.turns == ["First", "Second"]
 
 
-@queue_stub
+@pytest.mark.variant("A permission prompt must not release a queued message into the prompt")
 def test_queue_permission_prompt_does_not_release_a_message(db, live):
     routes_actions.chat_enqueue(db, {"id": "a"}, {"text": "After the turn"})
     chat.on_turn_end(db, "a", "turn-1", permission_prompt=True)
@@ -270,7 +269,7 @@ def test_queue_permission_prompt_does_not_release_a_message(db, live):
     assert live.turns == ["After the turn"]
 
 
-@queue_stub
+@pytest.mark.variant("Send now must interrupt and submit only the selected item, leaving the rest queued")
 def test_queue_send_now_interrupts_then_submits_only_selected_item(db, live):
     routes_actions.chat_enqueue(db, {"id": "a"}, {"text": "Keep waiting"})
     selected = routes_actions.chat_enqueue(db, {"id": "a"}, {"text": "Do now"})
@@ -280,7 +279,88 @@ def test_queue_send_now_interrupts_then_submits_only_selected_item(db, live):
     assert [item.text for item in chat.queue_snapshot(db, "a")] == ["Keep waiting"]
 
 
+def test_queue_send_now_twice_types_the_message_once(db, live, monkeypatch):
+    selected = routes_actions.chat_enqueue(db, {"id": "a"}, {"text": "Do now"})
+    route = {"id": "a", "message_id": selected["message_id"]}
+    refused = []
+
+    def paste(target, text, **kwargs):
+        # A second Send now while the first is typing respects it: no Esc, no paste.
+        with pytest.raises(ServiceError) as second:
+            routes_actions.chat_send_now(db, route, {})
+        refused.append(second.value.code)
+        live.paste(target, text, **kwargs)
+
+    monkeypatch.setattr(tmux, "paste", paste)
+    routes_actions.chat_send_now(db, route, {})
+    # And once it is delivered, a late repeat finds nothing left to send.
+    with pytest.raises(ServiceError):
+        routes_actions.chat_send_now(db, route, {})
+    assert refused == ["conflict"]
+    assert live.events == ["Escape", "submitted"]
+    assert live.turns == ["Do now"]
+
+
+def test_queue_send_now_leaves_a_hook_held_permission_unanswered(db, live):
+    selected = routes_actions.chat_enqueue(db, {"id": "a"}, {"text": "Do now"})
+    db.update_agent("a", status="waiting")
+    db.add_permission_request("a", "tool-1", "{}", "approval", channel="hook", hold_until=9e9)
+    with pytest.raises(ServiceError) as refused:
+        routes_actions.chat_send_now(db, {"id": "a", "message_id": selected["message_id"]}, {})
+    # Its own code, which the app's chip turns into "answer the request first".
+    assert (refused.value.code, refused.value.http_status) == ("permission_pending", 409)
+    assert live.events == []
+    assert [item.text for item in chat.queue_snapshot(db, "a")] == ["Do now"]
+
+
+@pytest.mark.parametrize("trigger", [
+    pytest.param("send_now", marks=pytest.mark.variant(
+        "Remove racing a Send now paste must be refused, not drop a message already being typed")),
+    pytest.param("turn_end", marks=pytest.mark.variant(
+        "Remove racing a turn-end release must be refused, not drop a message already being typed")),
+])
+def test_queue_remove_refuses_a_message_being_typed(db, live, monkeypatch, trigger):
+    queued = routes_actions.chat_enqueue(db, {"id": "a"}, {"text": "In flight"})
+    route = {"id": "a", "message_id": queued["message_id"]}
+    refused = []
+
+    def paste(target, text, **kwargs):
+        # Remove before the external write: the chip must not vanish and the text still go in.
+        with pytest.raises(ServiceError) as removing:
+            routes_actions.chat_remove(db, route, {})
+        refused.append(removing.value.code)
+        live.paste(target, text, **kwargs)
+
+    monkeypatch.setattr(tmux, "paste", paste)
+    if trigger == "send_now":
+        routes_actions.chat_send_now(db, route, {})
+    else:
+        chat.on_turn_end(db, "a", "turn-1")
+    assert refused == ["conflict"]
+    assert live.turns == ["In flight"]
+    assert chat.queue_snapshot(db, "a") == []
+
+
+@pytest.mark.parametrize(("provider", "event", "payload"), [
+    ("claude", "stop", {"session_id": "s"}),
+    ("codex", "codex-notify", {"type": "agent-turn-complete", "turn-id": "t1", "thread-id": "s"}),
+])
+def test_queue_stop_hook_releases_one_item_per_turn(db, live, monkeypatch, provider, event, payload):
+    helpers = []
+    monkeypatch.setattr(agents.processes, "detach", lambda argv, **kwargs: helpers.append(argv))
+    for text in ("First", "Second"):
+        routes_actions.chat_enqueue(db, {"id": "a"}, {"text": text})
+    db.update_agent("a", status="processing", provider=provider)
+    for _ in range(2):  # the turn's end, then a repeated observation of it
+        agents.handle_hook(db, "a", event, payload)
+    for argv in helpers:  # what each started `_chat-turn-end` helper runs
+        chat.on_turn_end(db, "a", argv[-1])
+    assert live.turns == ["First"]
+    assert [item.text for item in chat.queue_snapshot(db, "a")] == ["Second"]
+
+
 # -- attach owner -------------------------------------------------------------
+@pytest.mark.variant("Clipboard screenshot bytes without a source path must be saved under the workspace and sent by reference")
 def test_attach_screenshot_bytes_materialize_without_a_source_path(db, live):
     # A tiny valid PNG, such as a screenshot thumbnail delivered by the clipboard.
     data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6KAAAAABJRU5ErkJggg=="
@@ -297,6 +377,7 @@ def test_attach_screenshot_bytes_materialize_without_a_source_path(db, live):
     assert data not in live.turns[0]
 
 
+@pytest.mark.variant("Text attachments must be sent as a file reference, never inlined as base64")
 def test_attach_send_delivers_text_and_materialized_file_reference(db, live):
     message = ChatMessageDTO(text="Read this", attachments=[
         ChatAttachmentDTO(name="notes.txt", data_base64=base64.b64encode(b"full contents").decode())])

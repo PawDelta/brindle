@@ -1,9 +1,9 @@
-/** Expected failures for the three ChatBox owners. Remove it.fails as each
- * behaviour lands; these exercise user events and resulting state, not mocks.
+/** The three ChatBox owners, through user events and the state they leave, not mocks.
  * send: composer; queue: option A; paste|drop: attachments and large text.
  */
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import { DaemonError } from "../../../api/client";
 import type { ChatMessageDTO, ChatResultDTO, QueuedChatMessageDTO } from "../../../api/schema";
 import { ChatBox } from "./ChatBox";
 
@@ -51,7 +51,7 @@ const send = () => fireEvent.click(screen.getByRole("button", { name: /^send$/i 
 const paste = (text: string) => fireEvent.paste(editor(), { clipboardData: { getData: () => text, files: [] } });
 
 describe("ChatBox send owner", () => {
-  it.fails("send submits a multiline draft once and clears it after success", async () => {
+  it("send submits a multiline draft once and clears it after success", async () => {
     const { server } = mount();
     type("First\nSecond");
     fireEvent.keyDown(editor(), { key: "Enter", shiftKey: true });
@@ -63,7 +63,42 @@ describe("ChatBox send owner", () => {
     expect(editor().value).toBe("");
   });
 
-  it.fails("send failure preserves the draft and exposes an error state", async () => {
+  it("send stays locked for a request in flight when an earlier one finishes its refresh", async () => {
+    const server = new ChatServer();
+    const sent: string[] = [];
+    let deliver!: () => void;
+    let refreshed!: () => void;
+    const client = {
+      // The first message is delivered at once; the second waits on the engine.
+      chatSend: (agent: string, message: ChatMessageDTO) => {
+        sent.push(message.text);
+        return sent.length === 1 ? server.chatSend(agent, message) : new Promise<ChatResultDTO>((done) => { deliver = () => done(server.chatSend(agent, message)); });
+      },
+      chatEnqueue: (agent: string, message: ChatMessageDTO) => server.chatEnqueue(agent, message),
+      chatRemove: (agent: string, id: string) => server.chatRemove(agent, id),
+      chatSendNow: (agent: string, id: string) => server.chatSendNow(agent, id),
+    };
+    // The first message's snapshot refresh is slow; later ones come at once.
+    let refreshes = 0;
+    const onChanged = () => (++refreshes === 1 ? new Promise<void>((done) => { refreshed = done; }) : Promise.resolve());
+    render(<ChatBox client={client} agentId="a" busy={false} queue={[]} onChanged={onChanged} />);
+    type("One");
+    send();
+    await waitFor(() => expect(editor().value).toBe(""));
+    type("Two");
+    fireEvent.keyDown(editor(), { key: "Enter" });
+    await waitFor(() => expect(sent).toEqual(["One", "Two"]));
+    // The first request ends while the second is still out: Enter must not send the second again.
+    await act(async () => refreshed());
+    fireEvent.keyDown(editor(), { key: "Enter" });
+    await act(async () => {});
+    expect(sent).toEqual(["One", "Two"]);
+    await act(async () => deliver());
+    await waitFor(() => expect(server.delivered.map((m) => m.text)).toEqual(["One", "Two"]));
+    expect(editor().value).toBe("");
+  });
+
+  it("send failure preserves the draft and exposes an error state", async () => {
     const server = new ChatServer();
     server.fail = true;
     mount(server);
@@ -74,19 +109,20 @@ describe("ChatBox send owner", () => {
     expect(server.delivered).toEqual([]);
   });
 
-  it.fails("send keeps long typed text editable with a bounded scrolling composer", () => {
+  it("send keeps long typed text editable with a bounded scrolling composer", () => {
     mount();
     const text = Array.from({ length: 60 }, (_, i) => `typed line ${i}`).join("\n");
     type(text);
     expect(editor().value).toBe(text);
     expect(screen.queryByTestId("paste-chip")).toBeNull();
-    expect(getComputedStyle(screen.getByTestId("chat-composer")).maxHeight).toBe("40vh");
+    // The declared limit: this jsdom computes vh against its own window, so the computed value is in px.
+    expect(screen.getByTestId("chat-composer").style.maxHeight).toBe("40vh");
     expect(getComputedStyle(editor()).overflowY).toBe("auto");
   });
 });
 
 describe("ChatBox queue owner", () => {
-  it.fails("queue busy Send holds the full draft and shows a compact chip inside the box", async () => {
+  it("queue busy Send holds the full draft and shows a compact chip inside the box", async () => {
     const server = new ChatServer();
     server.busy = true;
     mount(server);
@@ -101,7 +137,7 @@ describe("ChatBox queue owner", () => {
     expect(editor().value).toBe("");
   });
 
-  it.fails("queue remove deletes only its chip without sending it", async () => {
+  it("queue remove deletes only its chip without sending it", async () => {
     const server = new ChatServer();
     await server.chatEnqueue("a", { text: "Remove" });
     await server.chatEnqueue("a", { text: "Keep" });
@@ -113,7 +149,7 @@ describe("ChatBox queue owner", () => {
     expect(screen.getAllByTestId("queue-chip")).toHaveLength(1);
   });
 
-  it.fails("queue Send now sends the selected chip and preserves the others", async () => {
+  it("queue Send now sends the selected chip and preserves the others", async () => {
     const server = new ChatServer();
     await server.chatEnqueue("a", { text: "Keep waiting" });
     await server.chatEnqueue("a", { text: "Urgent" });
@@ -122,10 +158,24 @@ describe("ChatBox queue owner", () => {
     await waitFor(() => expect(server.delivered.map((m) => m.text)).toEqual(["Urgent"]));
     expect(server.queue.map((m) => m.text)).toEqual(["Keep waiting"]);
   });
+
+  it("queue Send now refused for an unanswered permission request marks that chip, not an error", async () => {
+    const server = new ChatServer();
+    await server.chatEnqueue("a", { text: "Other" });
+    await server.chatEnqueue("a", { text: "Blocked" });
+    server.chatSendNow = async () => { throw new DaemonError("permission_pending", "answer it first", 409); };
+    mount(server);
+    fireEvent.click(within(screen.getAllByTestId("queue-chip")[1]).getByRole("button", { name: /send now/i }));
+    const note = await within(screen.getAllByTestId("queue-chip")[1]).findByTestId("queue-note");
+    expect(note.getAttribute("data-state")).toBe("permission-pending");
+    expect(within(screen.getAllByTestId("queue-chip")[0]).queryByTestId("queue-note")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(server.queue.map((m) => m.text)).toEqual(["Other", "Blocked"]);
+  });
 });
 
 describe("ChatBox paste/drop owner", () => {
-  it.fails.each([
+  it.each([
     ["line threshold", "line\n".repeat(31)],
     ["UTF-8 byte threshold", "✓".repeat(1400)],
   ])("paste above the %s previews and sends the entire content", async (_case, text) => {
@@ -144,7 +194,7 @@ describe("ChatBox paste/drop owner", () => {
     await waitFor(() => expect(server.delivered.map((m) => m.text)).toEqual([`Please inspect\n${text}`]));
   });
 
-  it.fails("paste at both limits stays inline at the current selection", () => {
+  it("paste at both limits stays inline at the current selection", () => {
     mount();
     type("Before after");
     editor().setSelectionRange(7, 7);
@@ -154,7 +204,7 @@ describe("ChatBox paste/drop owner", () => {
     expect(screen.queryByTestId("paste-chip")).toBeNull();
   });
 
-  it.fails("paste chip removal preserves the typed draft", () => {
+  it("paste chip removal preserves the typed draft", () => {
     mount();
     type("Keep this");
     paste("x".repeat(4097));
@@ -163,7 +213,7 @@ describe("ChatBox paste/drop owner", () => {
     expect(editor().value).toBe("Keep this");
   });
 
-  it.fails("drop screenshot bytes without a path waits for Send", async () => {
+  it("drop screenshot bytes without a path waits for Send", async () => {
     const server = new ChatServer();
     const file = new File([new Uint8Array([137, 80, 78, 71])], "Screenshot.png", { type: "image/png" });
     render(<ChatBox client={server} agentId="a" busy={false} queue={[]} droppedFiles={[file]} />);

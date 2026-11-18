@@ -3617,6 +3617,14 @@ def flush_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
     agents.flush(_helper_db(), agent_id)
 
 
+@app.command("_chat-turn-end", hidden=True)
+def chat_turn_end_cmd(agent_id: str, turn_id: str) -> None:
+    """Started by the Stop hook that ended a turn: types the agent's next queued chat message."""
+    from brindle import chat
+
+    chat.on_turn_end(_helper_db(), agent_id, turn_id)
+
+
 @app.command("_review-after-checks", hidden=True)
 def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Option(None, "--caller"),
                             profile: Optional[str] = typer.Option(None, "--profile"),

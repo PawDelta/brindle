@@ -117,7 +117,78 @@ const SCENES: Record<string, Route> = {
   "update-downloading": { screen: "inbox" },
   "update-later": { screen: "inbox" },
   "update-session": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
+  // The supervisor's message box: empty, a draft with files and an image, a long draft, a large paste
+  // with its preview open, messages queued behind a working Claude, and files dragged over the session.
+  "chat-empty": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
+  "chat-typing": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
+  "chat-long": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
+  "chat-paste": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
+  "chat-queued": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
+  "chat-drop": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
 };
+
+/* The long message of the chat scenes: 25 lines. */
+const LONG_MESSAGE = [
+  "Before you start milestone 4, tighten the sidebar: at 240px, 280px and 320px wide I found five problems, listed below with the fix I want for each.",
+  "",
+  "Problems:",
+  "- The Changes row overlaps the milestone list at 240px.",
+  "- The milestone list pushes the sessions out of view when the goal has more than eight rows.",
+  "- The counter wraps under the title at 280px.",
+  "- The resize handle is 2px tall and hard to grab.",
+  "- The selected row loses its border in light mode.",
+  "",
+  "Fixes:",
+  "- Keep the Changes row on one line at every width, and cut the branch name with an ellipsis first.",
+  "- Let the milestone list scroll inside its panel, with the panel capped at 240px tall.",
+  "- Put the counter on its own line when the title wraps.",
+  "- Make the handle 6px tall, with the hover colour of the sidebar's border.",
+  "- Give the selected row the stronger border in both modes.",
+  "",
+  "Rules for the workers:",
+  "- One branch per fix, so I can take them one at a time.",
+  "- A test for each width in Sidebar.test.tsx; the file already has a helper that sets the width.",
+  "- No change to the session bar or the Inbox.",
+  "- Dark and light screenshots of the sidebar at 240px, 280px and 320px with each branch.",
+  "- Keep each branch under 200 changed lines.",
+  "",
+  "Tell me when the first branch is ready for review.",
+  "If any of this clashes with milestone 3's goal panel, stop and ask me before merging either one.",
+].join("\n");
+
+/* The message box of the chat scenes, driven as a person's typing, pasting and dragging would. */
+const chatEditor = () => document.querySelector<HTMLTextAreaElement>('[data-testid="chat-box"] textarea');
+const chatTyped = (text: string) => {
+  const el = chatEditor();
+  if (!el) return;
+  el.focus();
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(el, text);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  requestAnimationFrame(() => (el.scrollTop = el.scrollHeight));
+};
+const carrying = (...files: File[]) => {
+  const data = new DataTransfer();
+  files.forEach((file) => data.items.add(file));
+  return data;
+};
+const chatPasted = (data: DataTransfer) => chatEditor()?.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+/* A screenshot's worth of pixels: a window with a sidebar and some lines. */
+const screenshot = () =>
+  new Promise<File>((done) => {
+    const canvas = Object.assign(document.createElement("canvas"), { width: 1440, height: 900 });
+    const pen = canvas.getContext("2d")!;
+    pen.fillStyle = "#0a100d";
+    pen.fillRect(0, 0, 1440, 900);
+    pen.fillStyle = "#121a16";
+    pen.fillRect(0, 0, 360, 900);
+    for (let row = 0; row < 14; row++) {
+      pen.fillStyle = row % 4 === 1 ? "#34d399" : "#889a90";
+      pen.fillRect(420, 70 + row * 56, 300 + ((row * 173) % 520), 16);
+      pen.fillStyle = row === 5 ? "#e8875a" : "#afbfb6";
+      pen.fillRect(40, 70 + row * 56, 120 + ((row * 97) % 160), 14);
+    }
+    canvas.toBlob((blob) => done(new File([blob!], "Screenshot.png", { type: "image/png" })), "image/png");
+  });
 
 const daemon = new FakeDaemon(structuredClone(data));
 if (scene === "settings-usage") {
@@ -242,6 +313,18 @@ if (scene === "account-enterprise") {
 }
 // The session's goal reached: Done, with its close in the sidebar and the goal panel.
 if (scene === "session-done") daemon.completeGoal("sup-42");
+// The message box shows only on an engine that says it takes its messages.
+if (scene.startsWith("chat-")) daemon.data.meta = { ...daemon.data.meta, chat: true };
+// Claude at work with two messages waiting behind it: a short one, and the long one on its one line.
+if (scene === "chat-queued") {
+  Object.assign(daemon.data.workspaces.flatMap((w) => w.agents ?? []).find((a) => a.id === "sup-42")!, {
+    status: "processing",
+    chat_queue: [
+      { id: "q1", text: "When docs/readme merges, check the sidebar at 280px wide before you start milestone 4.", attachments: [] },
+      { id: "q2", text: LONG_MESSAGE, attachments: [] },
+    ],
+  });
+}
 // Every pane through the fake daemon's pty views: its screen, as a tmux client draws it.
 let views: PtyViews = daemon.ptyViews();
 // The worker's pane through a real tmux client on a pty, as in the app, but
@@ -349,6 +432,30 @@ const press = (label: string) => {
 
 /* Some scenes show the flow a step further: the custom agent builder opened from Medium's list. */
 const THEN: Record<string, () => void> = {
+  "chat-empty": () => chatEditor()?.focus(),
+  "chat-queued": () => chatEditor()?.focus(),
+  "chat-long": () => chatTyped(LONG_MESSAGE),
+  // Two files and a screenshot from the clipboard, then two lines typed.
+  "chat-typing": () =>
+    void screenshot().then((shot) => {
+      chatPasted(carrying(new File(["export function Sidebar() {}\n"], "Sidebar.tsx"), new File(["it('fits', () => {});\n"], "Sidebar.test.tsx"), shot));
+      chatTyped("The sidebar's Changes row overlaps the milestone list at narrow widths (see the screenshot).\nKeep the row on one line and let the list scroll instead; the test file shows the widths we support.");
+    }),
+  // A 412-line test log pasted: over the limit, so a chip, opened to check it.
+  "chat-paste": () => {
+    const log = ["$ npm run test -- --run", "", "> desktop@0.6.3 test", "> vitest --run --reporter=verbose", "", " RUN  v2.1.8 ~/Projects/pawdelta/desktop", "", " ✓ src/store/overview.test.tsx (13)"];
+    for (let i = log.length; i < 412; i++) log.push(`   ✓ overview > case ${i - 7} keeps its order on refresh ${5 + ((i * 7) % 19)}ms`);
+    const data = new DataTransfer();
+    data.setData("text/plain", log.join("\n"));
+    chatPasted(data);
+    chatTyped("This is the log from the run that failed on desktop/sessions. The first error is near line 180: what broke?");
+    // Once the chip is drawn.
+    requestAnimationFrame(() => requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[data-testid="paste-chip"] button')?.click()));
+  },
+  // A screenshot's thumbnail dragged over the session, not yet let go.
+  "chat-drop": () =>
+    void screenshot().then((shot) =>
+      document.querySelector('[data-testid="terminal-surface"]')?.dispatchEvent(new DragEvent("dragenter", { dataTransfer: carrying(shot), bubbles: true, cancelable: true }))),
   "settings-key": () => press('css:button[aria-label="Set GEMINI_API_KEY"]'),
   "agents-make": () => [...document.querySelectorAll("button")].find((b) => b.textContent?.startsWith("+ Make a custom agent"))?.click(),
   // The settings page scrolled to its foot: the engine's health list.

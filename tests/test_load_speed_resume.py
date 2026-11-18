@@ -4,13 +4,15 @@ sessions: four came back at a time, and a session's workers launched one
 after another, so the session with three workers took 26 s by itself.
 Launches that can overlap must overlap: recovery takes about one launch,
 however many sessions or workers there are."""
+import subprocess
 import threading
 import time
 from concurrent.futures import Future
 
 import pytest
 
-from brindle import agents, company_identity, company_login, debuglog, pipeline, procs, providers, spawn, tasks, tmux
+from brindle import (agents, company_identity, company_login, debuglog, pipeline, procs, providers, spawn, tasks,
+                     tmux, workspaces)
 from brindle.daemon import lifecycle
 from brindle.db import Agent, Workspace
 
@@ -57,7 +59,10 @@ def _add(db, tmp_path, aid, parent, here):
                        "", None, time.time(), time.time(), "t", tmux_server=here))
 
 
-@pytest.mark.parametrize("sessions, workers", [(8, 0), (1, 6)], ids=["many sessions", "many workers"])
+@pytest.mark.parametrize("sessions, workers", [
+    pytest.param(8, 0, marks=pytest.mark.variant("Many sessions must recover in parallel, not one after another")),
+    (1, 6),
+], ids=["many sessions", "many workers"])
 def test_recovery_time_does_not_grow_with_sessions_or_workers(db, tmp_path, monkeypatch, sessions, workers):
     here = tmux.current_server()
     roots = [f"s{n}" for n in range(sessions)]
@@ -82,6 +87,83 @@ def test_recovery_time_does_not_grow_with_sessions_or_workers(db, tmp_path, monk
     assert launches.peak == launches.width
 
 
+class FakeTmux:
+    """tmux as brindle's runner (tmux._start) sees it, one record per tmux
+    process: a chain (``cmd ; cmd``) runs its commands in turn and stops at
+    the first that fails, as tmux does; a command named in ``rejects`` fails
+    (an option an older tmux lacks)."""
+
+    def __init__(self, rejects: tuple[str, ...] = ()):
+        self.rejects, self.runs = rejects, []
+        self.sessions: dict[str, dict[str, str]] = {}
+
+    def one(self, args: list[str]) -> tuple[int, str]:
+        if any(r in args for r in self.rejects):
+            return 1, ""
+        if args[0] == "has-session":
+            return (0 if args[-1].lstrip("=") in self.sessions else 1), ""
+        if args[0] == "new-session":
+            self.sessions[args[args.index("-s") + 1]] = {}
+        elif args[0] == "set-environment":
+            self.sessions[args[2].lstrip("=")][args[3]] = args[4]
+        elif args[0] == "new-window":
+            return 0, f"%{len(self.runs)}\n"
+        elif args[0] == "show-environment":
+            return 0, "HOME=/h\n-UNSET\n"
+        return 0, ""
+
+    def start(self, base, args, input=None, **kw):
+        self.runs.append(args)
+        out, cmd = "", []
+        for a in [*args, ";"]:
+            if a != ";":
+                cmd.append(a)
+                continue
+            rc, printed = self.one(cmd)
+            out, cmd = out + printed, []
+            if rc:
+                return subprocess.CompletedProcess([*base, *args], rc, out, "")
+        return subprocess.CompletedProcess([*base, *args], 0, out, "")
+
+
+@pytest.mark.variant("Recovery must batch each window's environment into a few tmux calls: a per-variable "
+                     "regression runs the same lines (real incident: 110-150 tmux calls per session)")
+def test_a_session_recovery_opens_its_windows_in_a_few_tmux_calls(db, tmp_path, monkeypatch):
+    """A session's recovery made 110-150 tmux calls: one `set-environment` per
+    variable at every window, and the inherited environment asked four times a
+    window, each scope on its own. Three agents' windows in one session now
+    take a handful of tmux processes each."""
+    fake = FakeTmux()
+    monkeypatch.setattr(tmux, "_start", fake.start)
+    path = tmp_path / "s"
+    path.mkdir()
+    ws = Workspace(id="ws-s", repo_root=str(tmp_path), name="s", kind="worktree", branch="s", base_branch="main",
+                   path=str(path), port_base=None, tmux_session="t-s", created_at=time.time())
+    db.add_workspace(ws)
+    size = agents._resume_window_size.set((200, 50))      # as a recovery opens them
+    try:
+        for n in range(3):
+            agent = Agent(f"a{n}", ws.id, "developer", "claude", "a0" if n else None, "assign", "starting", "",
+                          None, time.time())
+            db.add_agent(agent)
+            agents._open_window(db, agent, ws, agent.id, ["true"], watch_pane=False)
+    finally:
+        agents._resume_window_size.reset(size)
+    assert len(fake.runs) <= 24     # 60 when every variable and scope was its own process
+    assert fake.sessions["t-s"].keys() >= workspaces.workspace_env(ws).keys()
+
+
+def test_an_older_tmux_still_gets_every_session_update_it_accepts(monkeypatch):
+    """ensure_session chains its updates to a running session into one tmux
+    call; tmux stops a chain at the first command it rejects, so the ones
+    before and after it are applied on their own."""
+    fake = FakeTmux(rejects=("REJECTED",))
+    fake.sessions["t-s"] = {}
+    monkeypatch.setattr(tmux, "_start", fake.start)
+    tmux.ensure_session("t-s", "/", {"A": "1", "REJECTED": "2", "C": "3"})
+    assert fake.sessions["t-s"] == {"A": "1", "C": "3"}
+
+
 def _ask_sign_in(monkeypatch, fake):
     for name in providers._ENV_AUTH["claude"]:
         monkeypatch.delenv(name, raising=False)
@@ -100,15 +182,18 @@ def _ask_identity(monkeypatch, fake):
 SIGNED_IN = (0, '{"loggedIn": true}')
 
 
+def _v(ask, answer, runs, id, why):
+    return pytest.param(ask, answer, runs, id=id, marks=pytest.mark.variant(why))
+
+
 @pytest.mark.parametrize("ask, answer, runs", [
-    (_ask_sign_in, SIGNED_IN, 1),
-    (_ask_sign_in, (1, "unreadable"), 1),
-    (_ask_sign_in, None, 1),                # the probe timed out
-    (_ask_identity, SIGNED_IN, 1),
-    (_ask_identity, (127, ""), 1),          # the CLI couldn't run: unknown
-    (_ask_identity, (124, ""), 2),          # timed out, and once more, longer
-], ids=["sign-in signed in", "sign-in unknown", "sign-in timeout",
-        "identity signed in", "identity unknown", "identity timeout"])
+    _v(_ask_sign_in, SIGNED_IN, 1, "sign-in signed in", "Concurrent sign-in checks share one CLI probe"),
+    _v(_ask_sign_in, (1, "unreadable"), 1, "sign-in unknown", "An unreadable sign-in answer is shared, not re-probed"),
+    _v(_ask_sign_in, None, 1, "sign-in timeout", "A timed-out sign-in probe is shared, not re-probed"),
+    _v(_ask_identity, SIGNED_IN, 1, "identity signed in", "Concurrent identity checks share one CLI probe"),
+    _v(_ask_identity, (127, ""), 1, "identity unknown", "An identity CLI that cannot run is shared, not re-probed"),
+    _v(_ask_identity, (124, ""), 2, "identity timeout", "An identity timeout retries once longer, still shared"),
+])
 def test_launches_side_by_side_ask_the_cli_once(monkeypatch, ask, answer, runs):
     """The same restart ran `claude auth status` twenty times for nine agents
     signed in alike: each launch beside the others found the cache empty and

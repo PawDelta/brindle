@@ -118,8 +118,27 @@ def _added_rows(path: str, name: str, old: list | None, new: list, inputs_change
                              "review every row it produces")
             continue
         base_rows = before if isinstance(before, list) else None
-        lines += [f"{path}::{name} new row: {table[j][:ROW_WIDTH]}" for j in added_positions(base_rows, table)]
+        added = added_positions(base_rows, table)
+        # a table that shrinks or stays level adds no rows (its edited survivors aren't new);
+        # one that grows adds only its growth, as the gate counts it
+        growth = len(table) - len(base_rows) if base_rows is not None else len(table)
+        lines += [f"{path}::{name} new row: {table[j][:ROW_WIDTH]}" for j in added[max(0, len(added) - growth):]
+                  ] if growth > 0 else []
     return lines
+
+
+RENAMES = ["diff", "--name-status", "-M", "--diff-filter=R"]   # + f"{base}...HEAD", "--", "tests"
+
+
+def renames(status: str) -> dict[str, str]:
+    """``git diff --name-status`` output's renamed files: each new path mapped to the old."""
+    return {m[2]: m[1] for m in re.finditer(r"^R\d*\t([^\t\n]+)\t([^\t\n]+)$", status, re.M)}
+
+
+def renamed_tests(root: str | Path, base: str) -> dict[str, str]:
+    """Each test file renamed since ``base``, mapped to its path there: its tests
+    are compared with the file it was, not listed as all new."""
+    return renames(git.out([*RENAMES, f"{base}...HEAD", "--", "tests"], root))
 
 
 def added_tests(root: str | Path, base: str) -> list[str]:
@@ -127,6 +146,7 @@ def added_tests(root: str | Path, base: str) -> list[str]:
     parametrize row added since ``base``."""
     root = Path(root)
     names = git.out(["diff", "--name-only", "--diff-filter=AMR", f"{base}...HEAD", "--", "tests"], root).split()
+    was = renamed_tests(root, base) if names else {}
     lines: list[str] = []
     for path in names:
         if not re.search(r"(^|/)test_[^/]*\.py$", path):
@@ -136,7 +156,7 @@ def added_tests(root: str | Path, base: str) -> list[str]:
         except (OSError, SyntaxError):
             continue
         try:
-            before = scan(git.out(["show", f"{base}:{path}"], root))
+            before = scan(git.out(["show", f"{base}:{was.get(path, path)}"], root))
         except (git.GitError, SyntaxError):
             before = {}
         for name, (tables, inputs) in head.items():

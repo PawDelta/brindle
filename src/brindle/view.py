@@ -310,6 +310,11 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     unread = db.unread_count(a.id)
     if unread:
         entry["unread"] = unread
+    from brindle import chat
+
+    queued = chat.queue_snapshot(db, a.id)
+    if queued:
+        entry["chat_queue"] = [item.to_json() for item in queued]
     if a.hooks_off and status not in _PARENT_NOT_RUNNING:
         entry["hooks_off"] = a.hooks_off
     if detail:

@@ -16,13 +16,6 @@ vi.mock("../api/attachments", async (original) => ({
   listenForDrops: (handler: typeof files.drop) => { files.drop = handler; return files.listen(); },
 }));
 const native = vi.hoisted(() => ({ enabled: false }));
-// The webview's, not the window's: the app's multi-webview feature makes the main webview a child, and Tauri sends a
-// child's drags only to listeners on that webview. One listening on the window never hears them.
-const webviewDrop = vi.hoisted(() => ({ handle: (_event: { payload: unknown }) => {} }));
-vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({
-  onDragDropEvent: async (handle: typeof webviewDrop.handle) => { webviewDrop.handle = handle; return () => {}; },
-}) }));
-vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onDragDropEvent: async () => () => {} }) }));
 vi.mock("@tauri-apps/api/core", async original => ({
   ...await original<typeof import("@tauri-apps/api/core")>(),
   isTauri: () => native.enabled,
@@ -74,29 +67,41 @@ function mount(paste?: () => Promise<string>, write: (text: string) => Promise<v
     return { write: (d) => written.push(d), resize() {}, focus: () => void opened.focused++, close: () => void (opened.closed = true) };
   };
   const clipboard = { text: "" };
-  const view = render(<PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} copy={(text) => (copied.push(text), write(text))} paste={paste ?? (() => Promise.resolve(clipboard.text))} attachments={attachments} />);
-  return { written, copied, clipboard, opened, view, term: () => xterms.at(-1)! };
+  const copy = (text: string) => (copied.push(text), write(text));
+  const pasteFrom = paste ?? (() => Promise.resolve(clipboard.text));
+  const shown = (taking: typeof attachments) => <PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} copy={copy} paste={pasteFrom} attachments={taking} />;
+  const view = render(shown(attachments));
+  // The same view, now on another agent's attachments.
+  return { written, copied, clipboard, opened, view, again: (taking: typeof attachments) => view.rerender(shown(taking)), term: () => xterms.at(-1)! };
 }
+
+/* A drop of files by path at a point: told as it lands, its files given on asking. */
+const dropped = (x: number, y: number, ...paths: string[]) => ({ type: "drop", x, y, read: async () => paths.map(path => ({ path })) });
 
 const parsed = (term: import("@xterm/xterm").Terminal) => act(() => new Promise<void>((r) => term.write("", r)));
 
-it("converts drag position to CSS coordinates per platform", async () => {
+it("hears the webview's own file drops at the pointer as they land, their bytes read on asking, and ignores drags of anything else", async () => {
   const { listenForDrops } = await vi.importActual<typeof import("../api/attachments")>("../api/attachments");
-  native.enabled = true;
-  vi.stubGlobal("devicePixelRatio", 2);
-  const platform = vi.spyOn(navigator, "platform", "get");
-  for (const [os, x, y] of [["MacIntel", 160, 240], ["Linux x86_64", 160, 240], ["Win32", 80, 120]] as const) {
-    platform.mockReturnValue(os);
-    const received: unknown[] = [];
-    const stop = await listenForDrops(drop => received.push(drop));
-    webviewDrop.handle({ payload: { type: "drop", position: { x: 160, y: 240 }, paths: ["/photo.png"] } });
-    expect(received).toEqual([{ type: "drop", x, y, paths: ["/photo.png"] }]);
-    stop();
-  }
-  platform.mockRestore();
+  const received: { type: string; x?: number; y?: number; read?(): Promise<unknown[]> }[] = [];
+  const stop = await listenForDrops(drop => received.push(drop));
+  // A screenshot's floating thumbnail: bytes and a name, no path anywhere.
+  const dragged = (type: string, types: string[], dropped: File[] = []) => {
+    const event = new MouseEvent(type, { clientX: 160, clientY: 240, bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: { types, files: dropped } });
+    document.body.dispatchEvent(event);
+    return event;
+  };
+  expect(dragged("drop", ["text/plain"]).defaultPrevented).toBe(false);
+  // Taken, so the webview never opens the dropped file in the app's place.
+  expect(dragged("drop", ["Files"], [new File([new Uint8Array([137, 80, 78, 71])], "Screenshot.png", { type: "image/png" })]).defaultPrevented).toBe(true);
+  // Told while the drop is handled, before a byte is read: whose drop it is gets settled from what is on screen
+  // now, not from what is there once the bytes are in.
+  expect(received.map(({ type, x, y }) => ({ type, x, y }))).toEqual([{ type: "drop", x: 160, y: 240 }]);
+  expect(await received[0].read!()).toEqual([{ name: "Screenshot.png", data_base64: "iVBORw==" }]);
+  stop();
 });
 
-it("attaches native drops only under the cursor and keeps typing behind the returned paste, showing the refusal reason", async () => {
+it("attaches drops only under the cursor and keeps typing behind the returned paste, showing the refusal reason", async () => {
   let finish: (value: { text: string }) => void = () => {};
   const attach = vi.fn(() => new Promise<{ text: string }>(ok => { finish = ok; }));
   const { view, term, opened, written } = mount(undefined, undefined, { acceptsFiles: true, attach });
@@ -106,15 +111,16 @@ it("attaches native drops only under the cursor and keeps typing behind the retu
   expect(view.queryByTestId("terminal-drop")).not.toBeNull();
   act(() => files.drop({ type: "leave" }));
   expect(view.queryByTestId("terminal-drop")).toBeNull();
-  act(() => files.drop({ type: "drop", x: 300, y: 40, paths: ["/outside"] }));
+  act(() => files.drop(dropped(300, 40, "/outside")));
   await settled();
   expect(attach).not.toHaveBeenCalled();
   expect(view.queryByRole("alert")).toBeNull();
   // A drag over the view with no file behind it is told, not silently lost.
-  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: [] }));
+  act(() => files.drop(dropped(30, 40)));
+  await settled();
   expect(view.queryByRole("alert")).not.toBeNull();
   expect(attach).not.toHaveBeenCalled();
-  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/photo.png", "/notes.txt"] }));
+  act(() => files.drop(dropped(30, 40, "/photo.png", "/notes.txt")));
   act(() => term().input("x", true));
   await settled();
   expect(written).toEqual([]);
@@ -129,7 +135,7 @@ it("attaches native drops only under the cursor and keeps typing behind the retu
   attach.mockRejectedValueOnce(new Error(reason));
   attach.mockResolvedValueOnce({ text: "@after" });
   attach.mockRejectedValueOnce(otherReason);
-  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/before", "/refused.png", "/after", "/missing.txt"] }));
+  act(() => files.drop(dropped(30, 40, "/before", "/refused.png", "/after", "/missing.txt")));
   await settled();
   expect(view.getByRole("alert").textContent).toBe(`${reason} ${otherReason}`);
   expect(written.at(-1)).toBe("\x1b[200~@before @after\x1b[201~");
@@ -217,7 +223,7 @@ it("attaches Windows drop and clipboard paths through the native engine path con
   const { term, opened, written } = mount(undefined, undefined, { acceptsFiles: true, attach: file => client.attach("agent", file) });
   act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
   await parsed(term());
-  act(() => files.drop({ type: "drop", x: 20, y: 20, paths: ["C:\\Users\\name\\photo.png"] }));
+  act(() => files.drop(dropped(20, 20, "C:\\Users\\name\\photo.png")));
   await settled();
   expect(written).toEqual(["\x1b[200~@/windows/c/Users/name/photo.png\x1b[201~"]);
   files.read.mockResolvedValue([{ path: "C:\\Users\\name\\notes.txt" }]);
@@ -229,10 +235,26 @@ it("attaches Windows drop and clipboard paths through the native engine path con
 it("refuses attachments for unsupported agents and discards an attachment after unmount", async () => {
   const attach = vi.fn(async () => ({ text: "@file" }));
   const first = mount(undefined, undefined, { acceptsFiles: false, attach });
-  act(() => files.drop({ type: "drop", x: 20, y: 20, paths: ["/file"] }));
+  act(() => files.drop(dropped(20, 20, "/file")));
   await settled();
   expect(first.view.queryByRole("status")).not.toBeNull();
   expect(attach).not.toHaveBeenCalled();
+  cleanup();
+  // A drop whose bytes are still being read when the view moves on to another agent goes to neither.
+  const other = vi.fn(async () => ({ text: "@wrong" }));
+  let give!: (got: { path: string }[]) => void;
+  const bytes = new Promise<{ path: string }[]>(done => { give = done; });
+  const read = vi.fn(() => bytes);
+  const moved = mount(undefined, undefined, { acceptsFiles: true, attach });
+  act(() => files.drop({ type: "drop", x: 20, y: 20, read }));
+  // The read is under way, for the agent shown as the drop landed, before the view moves on.
+  await settled();
+  expect(read).toHaveBeenCalledTimes(1);
+  moved.again({ acceptsFiles: true, attach: other });
+  await act(async () => give([{ path: "/photo.png" }]));
+  await settled();
+  expect([attach.mock.calls, other.mock.calls, moved.written]).toEqual([[], [], []]);
+  expect(moved.view.queryByRole("alert")).toBeNull();
   cleanup();
   let finish: (value: { text: string }) => void = () => {};
   files.read.mockResolvedValue([{ path: "/file" }]);

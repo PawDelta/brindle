@@ -179,7 +179,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   // Files go to the agent that receives the answer, and only where its provider takes them.
   const target = visual.answer_agent_id;
   const canAttach = !!client.attach && !!target && visual.accepts_files === true && !visual.answer && !visual.answered_in_chat;
-  // `read` yields the files: browser Files are sent as bytes, native drops and clipboard files as paths.
+  // `read` yields the files: picked and dropped files are sent as bytes, the app's clipboard files as paths.
   const upload = async (read: () => Promise<Attachment[]>) => {
     if (!canAttach) return;
     setUploading((n) => n + 1);
@@ -205,11 +205,13 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
     if (!canAttach) return;
     let gone = false;
     let stop: (() => void) | undefined;
-    // Native drops reach the window, not the visual's child webview; only those released over this bar count.
+    // Drops reach the window, not the visual's child webview; only those released over this bar count.
     void listenForDrops((event) => {
-      if (gone || event.type !== "drop" || !event.paths?.length) return;
-      const under = document.elementFromPoint(event.x!, event.y!);
-      if (under && bar.current?.contains(under)) void uploadLatest.current(async () => event.paths!.map((path) => ({ path })));
+      if (gone || event.type !== "drop") return;
+      // Whose drop it is gets settled as it lands; the bytes are read under this revision's upload, which drops
+      // them if the bar has moved on to another by then.
+      const under = document.elementFromPoint(event.x, event.y);
+      if (under && bar.current?.contains(under)) void uploadLatest.current(event.read);
     }).then((unlisten) => { if (gone) unlisten(); else stop = unlisten; }, () => undefined);
     return () => { gone = true; stop?.(); };
   }, [canAttach]);
@@ -264,8 +266,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
         void send();
         return;
       }
-      const index = /^[1-9]$/.test(event.key) ? Number(event.key) - 1
-        : /^[a-z]$/i.test(event.key) ? event.key.toLowerCase().charCodeAt(0) - 97 : -1;
+      const index = /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : -1;
       const option = options[index];
       if (!option || sending) return;
       event.preventDefault();
@@ -299,7 +300,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           <div role="radiogroup" aria-label="Options" className="flex flex-wrap gap-1">
             {options.map((o, index) => (
               <button key={o.id} type="button" role="radio" aria-checked={picked === o.id} title={o.detail} className={`${button} ${picked === o.id ? "border-branch bg-branch-soft" : ""}`} onClick={() => onPick(o.id)}>
-                {index < 26 && <kbd aria-hidden="true" className="mr-1 rounded-[3px] border border-line bg-surface-2 px-1 font-mono text-[10px] font-medium leading-4 text-ink-3">{index < 9 ? `${index + 1} / ` : ""}{String.fromCharCode(97 + index)}</kbd>}
+                {index < 9 && <kbd aria-hidden="true" className="mr-1 rounded-[3px] border border-line bg-surface-2 px-1 font-mono text-[10px] font-medium leading-4 text-ink-3">{index + 1}</kbd>}
                 {o.label}
               </button>
             ))}
@@ -381,7 +382,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
             </>
           )}
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
-            Send answer
+            Send ↵
           </LoadingButton>
           <button type="button" className={button} disabled={sending} data-testid="visual-dismiss" onClick={() => void dismiss()}>Dismiss</button>
         </div>

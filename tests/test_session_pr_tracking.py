@@ -14,7 +14,7 @@ from brindle.db import Agent, Workspace
 
 
 @pytest.fixture
-def tracking(db, tmp_path, monkeypatch):
+def tracking(db, tmp_path, monkeypatch, real_github_lookups):
     ws = Workspace("home", str(tmp_path), "session", "worktree", "session", "main",
                    str(tmp_path), None, "session", 0)
     db.add_workspace(ws)
@@ -145,7 +145,7 @@ def test_goal_tracks_pr_on_fresh_branch_with_copied_changes(db, tracking, monkey
     assert workspaces.open_pull_request_for_commit(session_head, ws.path) is None
 
 
-def test_pull_request_no_match_reuses_immutable_patches(tmp_path, monkeypatch):
+def test_pull_request_no_match_reuses_immutable_patches(tmp_path, monkeypatch, real_github_lookups):
     monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/bin/gh")
     monkeypatch.setattr(workspaces, "_pr_patches", {}, raising=False)
     monkeypatch.setattr(workspaces, "_pr_no_matches", {}, raising=False)

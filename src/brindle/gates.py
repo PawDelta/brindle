@@ -114,7 +114,7 @@ def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: 
             return True, cached["output"] or ""
         if (shared := _read_outcome(result_file, waiting_since)) is not None:
             return shared
-        ok, out = _run_queued(db, ws, run, env, timeout, cancel)
+        ok, out = _run_recorded(db, ws, run, env, timeout, cancel, sha)
         if head(ws) == sha and not git.dirty_files(ws.path):
             if ok:
                 db.set_tree_check(ws.repo_root, tree, ident, ok, out)
@@ -124,16 +124,41 @@ def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: 
         return ok, out
 
 
-def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
-    """The command to run for check ``cmd`` in ``ws`` (None: skip it)."""
+def _repo_config(ws: Workspace):
+    """``ws``'s repo settings as its base branch has them; None when they don't load."""
     from brindle.config import load_repo_config
 
     try:
-        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
+        return load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
+        return None
+
+
+def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
+    """The command to run for check ``cmd`` in ``ws`` (None: skip it)."""
+    cfg = _repo_config(ws)
+    if cfg is None:
         return cmd
     return check_scope.command(ws, cmd, check_scope.inferred(cmd, cfg.scoped_checks), diff,
                                cfg.scoped_checks_max_files)
+
+
+def _run_recorded(db: DB, ws: Workspace, run: str, env: dict[str, str], timeout: int, cancel,
+                  sha: str) -> tuple[bool, str]:
+    """``_run_queued``; a full run of a coverage-scoped check
+    (``check_scope.recording``) also records per-test coverage and, when it
+    passes on the clean commit ``sha``, leaves the check's coverage map."""
+    cfg = _repo_config(ws)
+    rec = None if cfg is None else check_scope.recording(ws, run, cfg)
+    if rec is None:
+        return _run_queued(db, ws, run, env, timeout, cancel)
+    try:
+        ok, out = _run_queued(db, ws, rec.command, {**env, **rec.env}, timeout, cancel)
+        if ok and head(ws) == sha and not git.dirty_files(ws.path):
+            rec.save(ws.path, sha)
+        return ok, out
+    finally:
+        rec.discard()
 
 
 def _read_outcome(path, since: float) -> tuple[bool, str] | None:

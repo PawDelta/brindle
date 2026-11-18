@@ -11,6 +11,7 @@ from collections import defaultdict
 from functools import cached_property
 from sqlite3 import Row
 
+from brindle.chat import _QUEUE as chat_queue
 from brindle.db import DB, Agent, Autopilot, Review, SessionRepo, Workspace, _load
 
 
@@ -80,6 +81,20 @@ class ViewReads(DB):
 
     def unread_count(self, agent_id: str) -> int:
         return self._messages.get(agent_id, (0, 0))[1] or 0
+
+    @cached_property
+    def _chat_queues(self):
+        return dict(self.conn.execute("SELECT agent_id, value FROM agent_marks WHERE kind=?", (chat_queue,)))
+
+    def mark(self, agent_id: str, kind: str) -> str | None:
+        if kind == chat_queue:
+            return self._chat_queues.get(agent_id)
+        return super().mark(agent_id, kind)
+
+    def set_mark(self, agent_id: str, kind: str, value: str | None) -> None:
+        super().set_mark(agent_id, kind, value)
+        if kind == chat_queue:
+            self.__dict__.pop("_chat_queues", None)
 
     @cached_property
     def _reviews(self):

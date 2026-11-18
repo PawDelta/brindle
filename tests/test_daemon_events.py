@@ -95,7 +95,7 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, out
     pytest.param(False, None, marks=pytest.mark.variant("review finding: a missing gh read as confirmed absence, so no PR")),
     pytest.param(True, True, marks=pytest.mark.variant("review finding: a missing gh dropped the PR already recorded")),
 ])
-def test_missing_gh_is_not_confirmed_absence(db, monkeypatch, recorded, expected):
+def test_missing_gh_is_not_confirmed_absence(db, monkeypatch, recorded, expected, real_github_lookups):
     from types import SimpleNamespace
     from brindle import status_cache, workspaces
     from brindle.daemon import session_review as review
@@ -174,6 +174,28 @@ def test_slow_gh_read_has_its_slot(monkeypatch):
     monkeypatch.setattr(workspaces, "pull_request_checks", lambda *a: seen.append(spawn.current()))
     review._pr_pool.submit(review._read_pr_state, url, "/repo").result()
     assert seen and seen[0] is not None
+
+
+def test_a_background_pr_lookup_never_outlives_its_test(tmp_path, monkeypatch):
+    """The Inbox's and goal's look for a PR on a session's HEAD runs on a pool,
+    past the read that asked. In a test it must not ask the machine's gh: that
+    read GitHub over the network, outlived the test and left reads counted in
+    spawn.running() for the next one (the flaky test_spawn rows)."""
+    import os
+    from brindle import spawn
+    from brindle.daemon import session_review as review
+    asked = tmp_path / "gh-asked"
+    gh = tmp_path / "bin" / "gh"
+    gh.parent.mkdir()
+    gh.write_text(f"#!/bin/sh\ntouch {asked}\nexec tail -f /dev/null\n")
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{gh.parent}:{os.environ['PATH']}")
+    flights, submit = [], review._pr_pool.submit
+    monkeypatch.setattr(review._pr_pool, "submit", lambda fn, *args: flights.append(submit(fn, *args)) or flights[-1])
+    key = ("a" * 40, str(tmp_path))
+    review.open_pr_for_head(*key)
+    flights[0].result()     # on the base, the hanging gh until its read's deadline stops it
+    assert not asked.exists() and spawn.running() == 0
 
 
 def _readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):

@@ -2728,6 +2728,8 @@ export class FakeDaemon {
       return json({ saved: true });
     }
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
+    const chat = this.chat(method, path, body);
+    if (chat) return chat;
     if (path === "/github/connection") {
       const fields = (body ?? {}) as Record<string, unknown>;
       if (method === "POST" && this.holdGithub) return new Promise<Response>((resolve) => (this.releaseGithub = () => resolve(this.githubConnection(method, fields))));
@@ -3024,6 +3026,48 @@ export class FakeDaemon {
   private then(next: () => void): void {
     if (this.holdJobs) this.heldJobs.push(next);
     else setTimeout(next, 0);
+  }
+
+  /* What the session's message box delivered, per agent, in order. */
+  chatDelivered: { agent: string; text: string; attachments: string[] }[] = [];
+
+  /* The message box: POST /agents/{id}/chat/send (delivered to an idle agent, queued for a working
+     one), POST .../chat/queue, DELETE .../chat/queue/{message} and POST .../chat/queue/{message}/send-now.
+     The queue is the agent's chat_queue in the snapshot. */
+  private chat(method: string, path: string, body: unknown): Response | null {
+    const m = path.match(/^\/agents\/([^/]+)\/chat\/(send|queue)(?:\/([^/]+)(\/send-now)?)?$/);
+    if (!m) return null;
+    const [, id, to, messageId, now] = m;
+    const agent = this.data.workspaces.flatMap((w) => w.agents ?? []).find((a) => a.id === id);
+    if (!agent) return error("not_found", `no agent ${id}`, 404);
+    const queue = agent.chat_queue ?? [];
+    const changed = (next: typeof queue) => {
+      this.data.workspaces = this.data.workspaces.map((w) => (w.agents?.includes(agent) ? { ...w, agents: w.agents.map((a) => (a === agent ? { ...a, chat_queue: next } : a)) } : w));
+      this.publish("message.queued", { agent_id: id });
+    };
+    if (messageId) {
+      const queued = queue.find((q) => q.id === messageId);
+      if (!queued || to !== "queue") return error("not_found", `no queued message ${messageId}`, 404);
+      if (method === "DELETE" && !now) {
+        changed(queue.filter((q) => q !== queued));
+        return json({ removed: messageId });
+      }
+      if (method !== "POST" || !now) return null;
+      this.chatDelivered.push({ agent: id, text: queued.text, attachments: queued.attachments ?? [] });
+      changed(queue.filter((q) => q !== queued));
+      return json({ status: "delivered", message_id: messageId });
+    }
+    if (method !== "POST") return null;
+    const message = (body ?? {}) as { text?: unknown; attachments?: { name: string }[] };
+    if (typeof message.text !== "string") return error("invalid", "text is required", 400);
+    const attachments = (message.attachments ?? []).map((a) => a.name);
+    if (to === "send" && agent.status !== "processing") {
+      this.chatDelivered.push({ agent: id, text: message.text, attachments });
+      return json({ status: "delivered" });
+    }
+    const queuedId = `q${this.events.length + 1}`;
+    changed([...queue, { id: queuedId, text: message.text, attachments }]);
+    return json({ status: "queued", message_id: queuedId });
   }
 
   /* routes_actions.rewind_agent: `to` is checked at once, the rest in the

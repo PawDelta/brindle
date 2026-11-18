@@ -28,3 +28,12 @@ def test_reviewer_brief_lists_every_new_test_and_row_worth_committing(tmp_path, 
     assert "CASES = list(range(3))` is not a literal" in new_tests.review_section(tmp_path, "main")
     monkeypatch.setattr(new_tests.git, "out", lambda args, cwd: "")
     assert new_tests.added_tests(tmp_path, "main") == []
+    # a renamed file whose table was trimmed (its survivors edited): nothing in it is new
+    table = "import pytest\n@pytest.mark.parametrize('n', %s)\ndef test_t(n): pass\n"
+    (tmp_path / "tests/test_a.py").write_text(table % "[4, 5]")
+    git_out = {"--name-only": "tests/test_a.py", "--name-status": "R090\ttests/test_old.py\ttests/test_a.py",
+               "main:tests/test_old.py": table % "[1, 2, 3]"}
+    monkeypatch.setattr(new_tests.git, "out", lambda args, cwd: git_out.get(args[1], ""))
+    assert new_tests.added_tests(tmp_path, "main") == []
+    git_out["main:tests/test_old.py"] = table % "[1]"     # grown by one: one new row
+    assert new_tests.added_tests(tmp_path, "main") == ["tests/test_a.py::test_t new row: 5"]

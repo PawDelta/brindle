@@ -19,7 +19,7 @@ import { createServer } from "vite";
 const PLAYWRIGHT = "playwright@1.49.1";
 const SCENES = [
   "new-conflict",
-  "new", "new-first", "new-first-clone", "new-projects", "new-cli", "new-composer", "practice", "practice-done", "new-codex-only", "session", "session-waiting", "session-paused", "session-failed", "session-done", "inbox", "agent-supervisor", "agent-working", "agent-waiting", "agent-done", "agent-reviewer", "agent-failed", "agents", "agents-make",
+  "new", "new-first", "new-first-clone", "new-projects", "new-cli", "new-composer", "practice", "practice-done", "new-codex-only", "session", "session-waiting", "session-paused", "session-failed", "session-done", "chat-empty", "chat-typing", "chat-long", "chat-paste", "chat-queued", "chat-drop", "inbox", "agent-supervisor", "agent-working", "agent-waiting", "agent-done", "agent-reviewer", "agent-failed", "agents", "agents-make",
   "library", "library-board", "library-decisions", "knowledge", "knowledge-record", "knowledge-search", "knowledge-empty", "knowledge-add", "settings", "settings-edit", "settings-key", "settings-signin", "settings-health", "account", "account-team", "account-enterprise", "account-free", "account-signed-out",
 ];
 const THEMES = ["dark", "light"];
