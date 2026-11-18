@@ -455,6 +455,7 @@ def session_pr_state(db: DB, root_id: str, url: str | None) -> dict[str, Any] | 
     return state
 
 
+PR_NONE_TTL = 10.0     # how long GitHub's "no PR is open on this HEAD" is believed
 _head_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
 _head_flights: set[tuple[str, str]] = set()
 _head_roots: dict[tuple[str, str], str] = {}     # the session each lookup is for
@@ -505,7 +506,10 @@ def open_pr_for_head(sha: str, cwd: str, root_id: str | None = None) -> dict[str
         if root_id:
             _head_roots[key] = root_id
         cached = _head_cache.get(key)
-        if key not in _head_flights and (cached is None or time.monotonic() - cached[0] >= PR_STATE_TTL):
+        # "No PR yet" is believed only briefly: a supervisor's ``gh pr create`` lands right after it,
+        # and a 90 s-old "none" kept its card (and notification) back that long.
+        ttl = PR_NONE_TTL if cached is not None and cached[1] == {} else PR_STATE_TTL
+        if key not in _head_flights and (cached is None or time.monotonic() - cached[0] >= ttl):
             flight = _pr_pool.submit(_read_head_pr, key)
             if not flight.done():
                 _head_flights.add(key)
