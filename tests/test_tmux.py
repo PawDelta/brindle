@@ -74,7 +74,7 @@ def test_daemon_start_rethemes_running_brindle_sessions_only(tmp_path, monkeypat
     import asyncio
     import threading
 
-    from brindle import debuglog, login_shell_env
+    from brindle import debuglog, login_shell_env, upgrade
     from brindle.daemon import app as daemon_app, events, lifecycle
 
     old = "bg=#0d0d0f"
@@ -116,6 +116,9 @@ def test_daemon_start_rethemes_running_brindle_sessions_only(tmp_path, monkeypat
     monkeypatch.setattr(events, "start_poller", lambda: None)
     monkeypatch.setattr(daemon_app, "build_app", lambda *a, **k: None)
     monkeypatch.setattr(debuglog, "Uploader", lambda: SimpleNamespace(start=lambda: None))
+    # serve() installs the daemon's stale-install hook; restore it so later launches in this
+    # worker aren't refused as "brindle was updated".
+    monkeypatch.setattr(upgrade, "on_stale_launch", upgrade.on_stale_launch)
     lifecycle.serve()
 
     def style(name):
