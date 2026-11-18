@@ -407,6 +407,8 @@ describe("inbox", () => {
     await screen.findByText("Ship it");
     const article = screen.getByText("Ship it").closest("article")!;
     expect(within(article).queryByRole("button", { name: /approve|deny|yes|no\b/i })).toBeNull();
+    // The button stays disabled until the plan's session has loaded (by design: see the next test).
+    await waitFor(() => expect((within(article).getByRole("button", { name: "Open plan" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(within(article).getByRole("button", { name: "Open plan" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "plan_1" });
   });
