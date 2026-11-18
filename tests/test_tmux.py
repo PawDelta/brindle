@@ -56,6 +56,17 @@ def test_a_pane_runs_in_its_worktree_on_a_server_whose_directory_was_deleted(tmp
     assert check.level == doctor.WARN
 
 
+def test_theme_leaves_the_pane_background_to_the_terminal(tmp_path):
+    """A fixed pane bg painted over the app's light palette: black text on black."""
+    tmux.ensure_session("brindle_theme_bg", str(tmp_path), {})
+    # a session styled by an older brindle keeps the old fixed colour until re-themed
+    tmux._tmux("set-option", "-w", "-t", "brindle_theme_bg:", "window-style", "bg=#0d0d0f")
+    tmux.apply_theme("brindle_theme_bg")
+    for opt in ("window-style", "window-active-style"):
+        out = tmux._tmux("show-options", "-wv", "-t", "brindle_theme_bg:", opt).stdout
+        assert "bg=default" in out and "#0d0d0f" not in out
+
+
 def test_sidebar_stays_pinned_on_a_tmux_without_window_resized(monkeypatch):
     """tmux 3.2 (Ubuntu 22.04's) has no window-resized hook and rejects it, so
     the sidebar grew with every window resize. There the pin goes on
