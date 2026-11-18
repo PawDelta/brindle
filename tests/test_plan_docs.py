@@ -17,6 +17,7 @@ SUMMARY = "Workers run on a machine the customer controls. Code never passes thr
 QUOTE = "a machine the customer controls"
 
 
+@pytest.mark.variant("regression: a revision must publish an event to the open plan reader; failed on base")
 def test_supervisor_revision_notifies_the_open_plan_reader(db, session):
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")

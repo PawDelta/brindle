@@ -56,6 +56,7 @@ def test_a_pane_runs_in_its_worktree_on_a_server_whose_directory_was_deleted(tmp
     assert check.level == doctor.WARN
 
 
+@pytest.mark.variant("regression: light mode black-on-black came from a fixed window-style bg; failed on base")
 def test_theme_leaves_the_pane_background_to_the_terminal(tmp_path):
     """A fixed pane bg painted over the app's light palette: black text on black."""
     tmux.ensure_session("brindle_theme_bg", str(tmp_path), {})
