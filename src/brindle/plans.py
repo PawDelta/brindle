@@ -682,7 +682,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         p = get(db, v["id"])
         plan_docs._changed(db, p, p["rev"])
         return {**p, "draft_write": drafted}
-    return get(db, v["id"])
+    p = get(db, v["id"])
+    plan_docs._changed(db, p, p["rev"])
+    return p
 
 
 def read_draft(db: DB, caller: Agent | None, plan_id: str) -> dict:
