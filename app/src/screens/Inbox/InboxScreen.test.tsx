@@ -400,6 +400,17 @@ describe("inbox", () => {
     expect(screen.queryByText("Pick a flow")).toBeNull();
   });
 
+  it("a waiting plan opens in the planning view and offers no approve/deny here", async () => {
+    const plan: InboxItemDTO = { kind: "plan", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "plan_1", reason: "plan awaiting approval", detail: "Ship it" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [plan] });
+    const { onOpen } = mount(daemon);
+    await screen.findByText("Ship it");
+    const article = screen.getByText("Ship it").closest("article")!;
+    expect(within(article).queryByRole("button", { name: /approve|deny|yes|no\b/i })).toBeNull();
+    fireEvent.click(within(article).getByRole("button", { name: "Open plan" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "plan_1" });
+  });
+
   it("a visual decision whose session hasn't loaded yet waits to open and never reads as answered", async () => {
     const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "asks you to choose" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [], inbox: [visualItem] });
