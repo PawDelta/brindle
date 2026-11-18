@@ -2640,6 +2640,17 @@ def audit_pubkey() -> None:
         raise typer.Exit(2)
 
 
+@app.command("pr-check")
+def pr_check_cmd(path: str = typer.Argument(".", help="The checkout to verify (cut from origin/main).")) -> None:
+    """Run the pre-PR verification (suite with coverage, serial pass, new-test gate), showing "checks" in the sidebar."""
+    from brindle import pr_check
+
+    out = pr_check.run_for_caller(os.path.abspath(path))
+    typer.echo(out)
+    if not out.startswith("pre-PR check: PASSED"):
+        raise typer.Exit(1)
+
+
 @app.command()
 def watch(
     all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),

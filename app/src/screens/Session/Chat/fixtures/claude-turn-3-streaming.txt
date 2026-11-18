@@ -1,0 +1,24 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.327[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mHaiku 5.5 with medium effort · Claude Ultra[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m~/Projects/brindle/.brindle/worktrees/fix/pane-clip-during-turn[39m
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mWrite a numbered list of 40 short facts about rivers, one per line, no tools.[39m
+
+[38;5;231m[49m⏺[39m 1. Rivers carry water from highlands to the sea.
+  2. The Nile is often cited as the longest river on Earth, at roughly 6,650 km.
+  3. The Amazon carries more water than any other river.
+  4. The Amazon discharges about one-fifth of all river water entering the
+     oceans.
+  5. Rivers are the main way sediment is moved from land to the ocean.
+  6. A river's source is usually a spring, glacier, lake, or snowmelt.
+  7.
+
+[38;5;246m[48;5;237m❯ and then say done[39m
+[38;5;246m[49m  ⎿  Queued · ctrl+x ctrl+s to send now[39m
+                                                            [38;5;246m◐ medium · /effort[39m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [2m[39mPress up to edit queued messages[0m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · esc to interrupt · ← for agents[39m
