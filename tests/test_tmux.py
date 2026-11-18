@@ -67,6 +67,63 @@ def test_theme_leaves_the_pane_background_to_the_terminal(tmp_path):
         assert "bg=default" in out and "#0d0d0f" not in out
 
 
+def test_daemon_start_rethemes_running_brindle_sessions_only(tmp_path, monkeypatch):
+    """An update leaves running panes with the old dark window-style: the
+    daemon's start (serve) re-themes brindle's sessions, not the person's own."""
+    import asyncio
+    import threading
+
+    from brindle import debuglog, login_shell_env
+    from brindle.daemon import app as daemon_app, events, lifecycle
+
+    old = "bg=#0d0d0f"
+    for name in ("brindle_retheme", "persons_plain"):
+        tmux.ensure_session(name, str(tmp_path), {})
+        tmux._tmux("set-option", "-w", "-t", f"{name}:", "window-style", old)
+
+    swept = threading.Event()
+    real_sweep = getattr(lifecycle, "_retheme_sessions", lambda: None)
+
+    def sweep():
+        real_sweep()
+        swept.set()
+
+    class Server:
+        started = False
+
+        async def serve(self, sockets=None):
+            await asyncio.to_thread(swept.wait, 5)     # startup maintenance finished (or never ran)
+
+    async def idle(*a, **k):
+        return None
+
+    # serve() with everything but the startup sweeps stubbed out
+    monkeypatch.setattr(lifecycle, "_retheme_sessions", sweep, raising=False)
+    for fn in ("_raise_file_limit", "_reset_window_sizes", "_upgrade_sweep", "_keep_codex_hook",
+               "done_pausing", "cleanup"):
+        monkeypatch.setattr(lifecycle, fn, lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_app_parent", lambda: None)
+    monkeypatch.setattr(lifecycle, "prepare", lambda *a, **k: ([], {"port": 0}))
+    monkeypatch.setattr(lifecycle, "_watch", idle)
+    monkeypatch.setattr(lifecycle, "start_live_docs", lambda state: None)
+    monkeypatch.setattr(lifecycle, "stop_live_docs", idle)
+    monkeypatch.setattr(lifecycle, "make_server", lambda app: Server())
+    monkeypatch.setattr(lifecycle, "Activity", lambda app: SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(lifecycle.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(lifecycle.spawn, "enable", lambda: None)
+    monkeypatch.setattr(login_shell_env, "load_in_background", lambda: None)
+    monkeypatch.setattr(events, "start_poller", lambda: None)
+    monkeypatch.setattr(daemon_app, "build_app", lambda *a, **k: None)
+    monkeypatch.setattr(debuglog, "Uploader", lambda: SimpleNamespace(start=lambda: None))
+    lifecycle.serve()
+
+    def style(name):
+        return tmux._tmux("show-options", "-wv", "-t", f"{name}:", "window-style").stdout.strip()
+
+    assert style("brindle_retheme") == "bg=default"
+    assert style("persons_plain") == old
+
+
 def test_sidebar_stays_pinned_on_a_tmux_without_window_resized(monkeypatch):
     """tmux 3.2 (Ubuntu 22.04's) has no window-resized hook and rejects it, so
     the sidebar grew with every window resize. There the pin goes on
