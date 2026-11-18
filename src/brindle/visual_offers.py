@@ -368,6 +368,16 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         bus.publish(db, "visual.dismissed", repo_root=ws.repo_root, root_id=root.id,
                     visual=prompt["id"], rev=prompt["rev"])
     bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
+    if not fold_only and (scope == "plan" or cancelled):
+        from brindle import plans
+
+        if cancelled:
+            if re.search(r"\bplan|think\b", text, re.I):     # calling off a chart leaves the plan alone
+                plans.cancel_draft(db, root.id)
+        else:
+            # The ask opens its plan at once, an empty draft the supervisor fills (and a plan the
+            # person hasn't decided on gives way to it).
+            plans.begin(db, root.id, asked_at=message_at)
 
 
 def keep_typed(db: DB, agent: Agent, text: str | None, expires_at: float, submitted_at: float,

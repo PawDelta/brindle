@@ -956,7 +956,8 @@ def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, se
     _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": []})
     me["sub"] = "a"
     assert kinds() == []                                   # asking for changes answers the request too
-    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss", "plan")          # the revision the person's redirect asks for
     mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
     _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": []}, local_rev=2, remote_rev=2)
     asked(True)
@@ -972,6 +973,40 @@ def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, se
         assert kinds() == []                               # another identity's session shows nothing
     me["sub"] = None                                      # logged out: no cards, no error
     assert kinds() == []
+
+
+def test_plan_is_ready_when_the_person_asks_and_the_first_proposal_fills_it(db, session):
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = plans.holding(db, "boss")["id"]               # the plan exists before the supervisor writes a word
+    draft = plans.get(db, pid)
+    assert (draft["state"], draft["rev"], draft["sections"]) == ("writing", 0, [])
+    assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything")) and started == []
+    with pytest.raises(ServiceError) as e:
+        plans.decide(db, pid, 0, True, person=True)     # nothing to approve yet
+    assert e.value.code == "writing"
+
+    assert mcp_server.propose_plan(PLAN).split()[2] == pid      # the same plan, now its first revision
+    filled = plans.get(db, pid)
+    assert (filled["state"], filled["rev"]) == ("open", 1) and filled["sections"]
+    assert plans.decide(db, pid, 1, True, person=True)["state"] == "approved"
+    assert started == ["anything"]
+
+
+def test_a_fresh_ask_supersedes_the_open_plan(db, session):
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    old = mcp_server.propose_plan(PLAN).split()[2]
+    with pytest.raises(ToolError, match="still open|ask for one"):
+        mcp_server.propose_plan(PLAN)                   # no fresh ask: the refusal stands
+    visual_offers.person_spoke(db, boss, "Make a new planning doc.")
+    new = plans.holding(db, "boss")["id"]
+    assert new != old and plans.get(db, old)["state"] == "superseded"
+    assert plans.get(db, old)["sections"]               # its text and history stay
+    with pytest.raises(ServiceError) as e:
+        plans.decide(db, old, 1, True, person=True)
+    assert e.value.code == "decided"
+    assert mcp_server.propose_plan(PLAN + "\n\nNew.").split()[2] == new
 
 
 def test_only_the_person_decides_and_only_when_they_asked(db, session):
