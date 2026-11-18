@@ -532,6 +532,21 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
     return out
 
 
+def session_entry(db: DB, root: Agent, panes: dict[str, bool], owners: dict[str, str] | None = None) -> dict | None:
+    """A session's chat alone, in its workspace's row as ``snapshot`` gives
+    it: the app shows a session's pane from this as soon as the session is
+    back after a restart, without waiting for a whole snapshot (seconds each
+    while the rest come back). No git, no screen read, no other agent of the
+    workspace: the next snapshot fills those in. None for a checkout gone."""
+    ws = db.get_workspace(root.workspace_id)
+    if ws is None:
+        return None
+    alive = agents.is_alive(root, panes) and agents.owns_pane(
+        db, root, owners if agents.same_server(root, panes) else None)
+    return workspace_entry(db, ws, detail=True, panes=panes, agent_list=[root],
+                           alive={root.id} if alive else set(), read_screens=False, counts=GitCounts())
+
+
 def _autopilot_flags(db: DB, shown: list[Agent]) -> tuple[bool, str | None]:
     """Whether these agents' session runs on autopilot (it reviews its own
     workers, so their reports don't wait on the person), and the id of the one

@@ -19,7 +19,7 @@ import { LoadingButton } from "../../components/LoadingButton";
 import { button, main, mono } from "../../components/ui";
 import type { SheetRef } from "../../routes";
 import { CLI_INK, agentName, cliStatus, isPaused, liveWorkers, needsYou, providerName } from "../../store/overview";
-import { PanesReadyContext } from "../../store/panes";
+import { OpenSessionContext, PanesReadyContext, panesReadyFor } from "../../store/panes";
 import { SessionsContext } from "../../store/sessions";
 import type { AppStore } from "../../store/store";
 import { useAppState } from "../../store/useStore";
@@ -126,11 +126,14 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // bringing them back: a row still paused that the resuming engine names pending (or has released, its row
   // not read again yet: the gate's `stale`) is restarting, not paused. Only once recovery is over is a
   // paused row paused; a released one whose row has been read again is paused when it says so (the person's).
+  // Nor is one the recovery named, until its pane may show: back or not, the rows read before then (a
+  // snapshot without its root, a feed row from before its release or none) can't say so.
   const panes = useContext(PanesReadyContext);
   const pendingHere = panes.pending?.includes(root) === true;
-  const restarting = session?.status === "paused" && !!panes.pending && (pendingHere || !!panes.stale?.includes(root));
+  const returning = !panesReadyFor(panes, root) && (pendingHere || !!panes.returning?.includes(root));
+  const restarting = returning || (session?.status === "paused" && !!panes.pending && (pendingHere || !!panes.stale?.includes(root)));
   const sessionStatus = restarting ? "resuming" : session?.status ?? null;
-  const paused = session ? !restarting && isPaused(session) : tree === null && synced;
+  const paused = !restarting && (session ? isPaused(session) : tree === null && synced);
   // A session seen live here that pauses under the view (a fresh start in its checkout, a pause from
   // elsewhere) stays on screen and says so, with Reopen; one opened already paused doesn't.
   const live = session ? !isPaused(session) : tree !== null;
@@ -161,6 +164,12 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   useEffect(() => {
     client.viewed(root).catch(() => {});
   }, [client, root]);
+  // The app's gate shows this one's pane as soon as it is back after a restart (OpenSessionContext).
+  const opened = useContext(OpenSessionContext);
+  useEffect(() => {
+    opened(root);
+    return () => opened(null);
+  }, [opened, root]);
   // The engine's word on a PR: the Review & open PR entry exists only once it says ready.
   const readiness = usePrReadiness(client, root, store);
   const changes = useSessionDiff(client, root, store);

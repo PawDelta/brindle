@@ -40,6 +40,11 @@ export interface AppState {
   /* When the read whose rows are applied began (snapshotTicket): a read begun before it,
      ending later (the panes gate's, overtaken by sync's), never puts older rows over them. */
   snapshotBegan: number;
+  /* Session root → its chat's own row (GET /sessions/{root}/view), read once it was back after a restart, and
+     the ticket of that moment: a whole snapshot begun before it (seconds each while sessions come back) can
+     still land with the chat as the last daemon left it, so the row is kept over such a snapshot's rows
+     until one begun after it is applied. */
+  sessionViews: Record<string, { began: number; workspace: WorkspaceDTO }>;
   /* Visual id → the bus event that took it out of the Inbox (read, answered, dismissed): an inbox read
      begun before that event still has it, and mustn't put it back. Gone once a later read is applied. */
   settledVisuals: Record<string, number>;
@@ -56,6 +61,8 @@ export type Action =
   | { type: "connection"; state: StreamState }
   /* `since`: the newest bus event applied when the reads began (sync.ts); the store's own when absent. */
   | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox?: InboxItemDTO[]; began?: number; since?: number }
+  /* A session's chat alone (sessionViews), `began`: the ticket taken when it was known to be back. */
+  | { type: "session_view"; root: string; workspace: WorkspaceDTO; began: number }
   | { type: "stream"; message: StreamMessage }
   | { type: "error"; message: string };
 
@@ -74,6 +81,7 @@ export const initialState: AppState = {
   synced: false,
   snapshotVersion: 0,
   snapshotBegan: 0,
+  sessionViews: {},
   settledVisuals: {},
   recent: [],
   error: null,
@@ -108,10 +116,20 @@ export function reduce(state: AppState, action: Action): AppState {
         inbox = inbox.filter((i) => !i.visual_id || !((state.settledVisuals[i.visual_id] ?? 0) > since));
         settledVisuals = Object.fromEntries(Object.entries(state.settledVisuals).filter(([, id]) => id > since));
       }
-      return { ...state, ...liveSnapshot(action.workspaces, inbox, state.pastWorkers), stale: false,
+      // A chat read alone after this read began is newer than its row here (sessionViews).
+      const sessionViews = Object.fromEntries(Object.entries(state.sessionViews)
+        .filter(([, v]) => action.began !== undefined && v.began > action.began));
+      const workspaces = Object.values(sessionViews).reduce((rows, v) => withChat(rows, v.workspace), action.workspaces);
+      return { ...state, ...liveSnapshot(workspaces, inbox, state.pastWorkers), stale: false,
         synced: state.synced || action.inbox !== undefined, error: null,
         snapshotVersion: state.snapshotVersion + 1, snapshotBegan: Math.max(state.snapshotBegan, action.began ?? 0),
-        settledVisuals };
+        settledVisuals, sessionViews };
+    }
+    case "session_view": {
+      // A whole snapshot begun after the session was back has it already, with the rest.
+      if (state.snapshotBegan > action.began) return state;
+      return { ...state, workspaces: withChat(state.workspaces, action.workspace),
+        sessionViews: { ...state.sessionViews, [action.root]: { began: action.began, workspace: action.workspace } } };
     }
     case "error":
       return { ...state, error: action.message };
@@ -122,6 +140,20 @@ export function reduce(state: AppState, action: Action): AppState {
       return applyMessage(ended ? { ...state, lifecycleVersion: state.lifecycleVersion + 1 } : state, message);
     }
   }
+}
+
+/* `rows` with a chat read alone (`row`: its workspace with that agent only) in its place: its agent put
+   over the one listed, or added (a root the last snapshot left out, stopped), the rest of the workspace as
+   listed; its whole row when the workspace isn't listed. */
+function withChat(rows: WorkspaceDTO[], row: WorkspaceDTO): WorkspaceDTO[] {
+  const chat = row.agents?.[0];
+  if (!chat) return rows;
+  if (!rows.some((w) => w.id === row.id)) return [...rows, row];
+  return rows.map((w) => {
+    if (w.id !== row.id) return w;
+    const agents = w.agents ?? [];
+    return { ...w, agents: agents.some((a) => a.id === chat.id) ? agents.map((a) => (a.id === chat.id ? chat : a)) : [...agents, chat] };
+  });
 }
 
 /* One boundary for every live surface, including Inbox badges. Do not drop

@@ -1569,10 +1569,11 @@ def warm_launch_profiles(db: DB, root_ids) -> list[threading.Thread]:
     sessions ``root_ids`` and their workers read per repo before anything
     else (the org's managed models, a supervisor chat's supervisor_choice
     and repo map): cold, ~2 s for a repo's first launch. One thread per
-    repo, in a copy of this context, so it runs beside the sessions' key
-    loads; a launch that gets there first waits for it rather than run it
-    again (_SharedChecks). Nothing it can't work out is kept: the launch
-    tries again. Its threads, unjoined."""
+    step, in a copy of this context, so they run beside each other and the
+    sessions' key loads (one after another, the first launch waited for all
+    three, ~1.1 s); a launch that gets there first waits for it rather than
+    run it again (_SharedChecks). Nothing it can't work out is kept: the
+    launch tries again. Its threads, unjoined."""
     repos: dict[str, list[Workspace]] = {}      # repo -> its supervisor chats' workspaces
     for root_id in root_ids:
         for a in tree(db, root_id):
@@ -1583,21 +1584,23 @@ def warm_launch_profiles(db: DB, root_ids) -> list[threading.Thread]:
             if a.profile == SUPERVISOR and a.mode == "interactive":
                 chats.append(ws)
 
-    def warm(repo_root: str, chats: list[Workspace]) -> None:
-        steps = [lambda: _shared_managed(repo_root)]
+    steps: list[tuple[str, Callable[[], object]]] = []
+    for repo_root, chats in repos.items():
+        steps.append((repo_root, lambda r=repo_root: _shared_managed(r)))
         if chats:
-            steps.append(lambda: _shared(lambda: ("supervisor_choice", repo_root),
-                                         lambda: supervisor_choice(repo_root)))
-            steps += [lambda ws=ws: _shared_supervisor_map(ws) for ws in chats]
-        for step in steps:
-            try:
-                step()
-            except Exception:  # noqa: BLE001 - only a head start: the launch reads it again
-                log.debug("brindle: couldn't warm %s's launch checks", repo_root, exc_info=True)
+            steps.append((repo_root, lambda r=repo_root: _shared(lambda: ("supervisor_choice", r),
+                                                                  lambda: supervisor_choice(r))))
+            steps += [(repo_root, lambda ws=ws: _shared_supervisor_map(ws)) for ws in chats]
 
-    threads = [threading.Thread(target=copy_context().run, args=(warm, repo_root, chats),
+    def warm(repo_root: str, step) -> None:
+        try:
+            step()
+        except Exception:  # noqa: BLE001 - only a head start: the launch reads it again
+            log.debug("brindle: couldn't warm %s's launch checks", repo_root, exc_info=True)
+
+    threads = [threading.Thread(target=copy_context().run, args=(warm, repo_root, step),
                                 name=f"brindle-warm-{n}", daemon=True)
-               for n, (repo_root, chats) in enumerate(repos.items())]
+               for n, (repo_root, step) in enumerate(steps)]
     for thread in threads:
         thread.start()
     return threads
