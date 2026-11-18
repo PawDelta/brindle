@@ -440,6 +440,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
             value={here?.name ?? ""}
             chip={<><FolderIcon />{here?.name}</>}
             heading="Projects"
+            searchable
             items={[
               ...repos.map((r) => {
                 const c = counts(sessions[r.repo_root]);
