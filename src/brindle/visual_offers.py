@@ -161,15 +161,28 @@ _PLAN_REQUEST = re.compile(
     r"(?:(?:write|draft|prepare|put together|draw up|do|make|create|build)\s+(?:(?:me|us)\s+)?(?:up\s+)?"
     r"(?:(?:a|an|the|my|our)\s+)?(?:(?:simple|quick|short|small|new|first)\s+)*"
     r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
-    r"|plan\s+(?:it|this|that)\s+first\b)", re.I)
+    r"|plan\s+(?:it|this|that)\s+first\b)"
+    # Planning as the activity: "let's plan this", "can we plan first", "I want to plan the X feature",
+    # "let's think through the design", "plan this out", "go into planning mode". The sentence must open
+    # with the ask, so "the plan looks good" and "I don't want to plan" grant nothing.
+    r"|(?:(?:let['’]?s|let us|(?:can|could|shall|should) we|we (?:should|need to|must)|"
+    r"i(?:['’]d| would)? (?:want|like|need) to|i(?:['’]d| would)? (?:want|like) us to)"
+    r"\s+(?:(?:first|now|just|really|please)\s+)*"
+    r"(?:plan\b|think\s+(?:through|over|out)\b|think\s+about\s+the\s+(?:design|approach)\b|map\s+(?:it|this|things)?\s*out\b))"
+    r"|(?:(?:can|could|would|will) you\s+)?(?:please\s+)?(?:"
+    r"plan\s+(?:it|this|that|things|everything)\s+out\b"
+    r"|plan\s+(?:it|this|that)(?:\s+please)?\W*$"
+    r"|(?:(?:go|switch|move|get)\s+(?:in)?to|enter|start|use|open|turn on)\s+(?:the\s+)?plan(?:ning)?\s+(?:mode|view)\b"
+    r"|plan(?:ning)?\s+(?:mode|view)(?:\s+(?:please|now|first))?\W*$)", re.I)
 _CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
 _CANCEL_ARTIFACT = (r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan docs?|"
-                    r"plan document|plans?|request)\b")
+                    r"plan document|plan(?:ning)?\s+(?:mode|view)s?|plans?|request)\b")
 # Names the artifact, or says not to make it: a cancel in any clause of a message.
 _CANCEL_REQUEST = re.compile(
     _CANCEL_LEAD + r"(?:(?:cancel|stop|skip|drop|scratch|never\s*mind|forget(?:\s+about)?)\s+(?:(?:the|this|that|my)\s+)?" + _CANCEL_ARTIFACT
     + r"|(?:don['’]?t|do not)\s+(?:make|create|show|draw|build|generate|render|write|draft|prepare|put together|draw up)\b"
     r"(?:\s+(?:me|us|a|an|the|it|this|that))*(?:\s+" + _CANCEL_ARTIFACT + r"|\W*$)"
+    r"|(?:don['’]?t|do not)\s+(?:plan|think\s+(?:through|over|out))\b"
     r"|(?:don['’]?t|do not)\s+do\s+(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + r"|no\s+(?:need\s+for\s+)?(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + ")", re.I)
 # Says only "stop", or "never mind I found it": it cancels unless a new ask follows, as in "never mind, render it".
 _CANCEL_BARE = re.compile(_CANCEL_LEAD + r"(?:(?:never\s*mind|nvm)\s+(?:i|i['’]m|i['’]ve|we|we['’]re|it['’]s|its|got|found|figured|all)\b"
