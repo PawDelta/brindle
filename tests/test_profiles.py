@@ -3,6 +3,21 @@ import pytest
 from brindle.profiles import _frontmatter, _list, load_profile
 
 
+@pytest.mark.parametrize("name, model", [
+    ("developer-codex-luna", "gpt-6-luna"),
+    ("developer-codex-sol", "gpt-6.1-sol"),
+    pytest.param("developer-codex", None, marks=pytest.mark.variant(
+        "the unpinned Codex profile launches the CLI's own default model, with no --model flag")),
+])
+def test_codex_profile_launches_with_its_pinned_model(name, model, tmp_path, monkeypatch):
+    from brindle import providers
+    from brindle.providers import Codex, LaunchContext
+
+    monkeypatch.setattr(providers, "_codex_layers", lambda cwd: [])
+    argv = Codex().command(LaunchContext("w1", load_profile(name), None, cwd=str(tmp_path)))
+    assert (argv[argv.index("--model") + 1] if "--model" in argv else None) == model
+
+
 @pytest.mark.parametrize("raw, expected", [
     (r'''['it\'s', "say \"q\" # x", "\\", "\s", a#b] # note''',
      ["it's", 'say "q" # x', "\\", r"\s", "a#b"]),

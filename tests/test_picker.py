@@ -242,6 +242,18 @@ def test_workers_screen_offers_only_allowed_models_and_sets_one_up(monkeypatch):
     assert user_settings()["routing_medium"] == "claude-sonnet" and signed == ["claude"]
 
 
+@pytest.mark.parametrize("tier, codex_models", [
+    ("light", ["codex", "gpt-6-luna", "gpt-6.1-terra"]),
+    ("medium", ["codex", "gpt-6.1-terra", "gpt-6.1-sol"]),
+    ("heavy", ["codex", "gpt-6.1-sol", "gpt-6-astra"]),
+])
+def test_codex_models_are_offered_in_their_tiers(tier, codex_models):
+    from brindle import worker_models as wm
+
+    offered = [m.id for m in wm.offered(team_policy.Access(), tier) if m.provider == "codex"]
+    assert offered == codex_models
+
+
 def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
     from brindle import key_check, keystore
     from brindle.config import user_profiles_dir, user_settings
@@ -250,7 +262,7 @@ def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
     stored = {}
     monkeypatch.setattr(key_check, "verify", lambda name, value: "rejected" if value == "bad" else None)
     monkeypatch.setattr(keystore, "set_key", lambda name, value, repo_root=None: stored.update({name: value}))
-    out, wm = _workers(team_policy.Access(), ["1", "5", "1", "5", "q"], is_ready=lambda m: False,
+    out, wm = _workers(team_policy.Access(), ["1", "7", "1", "7", "q"], is_ready=lambda m: False,
                        read_secret=lambda name: next(answers))
     assert "✗ rejected" in "\n".join(out) and stored == {"OPENROUTER_API_KEY": "good"}
     assert user_settings()["routing_light"] == "or-qwen3-coder"
