@@ -158,7 +158,12 @@ def test_inbox_reuses_snapshot_and_refreshes_after_an_event(db, tmp_path, monkey
     assert len(calls) == 4
 
 
-@pytest.mark.parametrize("recovering, screens_read", [(True, []), (False, ["ag-live"])])
+@pytest.mark.parametrize("recovering, screens_read", [
+    pytest.param(True, [], marks=pytest.mark.variant(
+        "a snapshot during recovery must not capture any pane's screen (it made renders slow while sessions came back)")),
+    pytest.param(False, ["ag-live"], marks=pytest.mark.variant(
+        "outside recovery the live pane's screen is still read, so the skip is limited to recovery")),
+])
 def test_a_read_while_sessions_come_back_reads_no_screen(db, tmp_path, monkeypatch, fake_git, recovering,
                                                         screens_read):
     """A capture per running pane, each slow on a machine busy launching the
