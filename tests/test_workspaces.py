@@ -220,7 +220,8 @@ def _sent_body(ws, monkeypatch, body):
     pytest.param("Fixes a bug.", marks=pytest.mark.variant("the plain body gets the footer appended")),
     pytest.param("Fixes a bug.\n\nBuilt with [brindle](https://pawdelta.com/brindle)",
                  marks=pytest.mark.variant("an old-style footer already in the body")),
-    "Fixes a bug.\n\n" + workspaces.PR_LOGO + " " + workspaces.PR_FOOTER + " · 1 worker",
+    pytest.param("Fixes a bug.\n\n" + workspaces.PR_LOGO + " " + workspaces.PR_FOOTER + " · 1 worker",
+                 marks=pytest.mark.variant("a new-style footer with counts already in the body")),
     pytest.param("", marks=pytest.mark.variant("an empty body becomes just the footer")),
 ])
 def test_pr_body_ends_with_the_footer_exactly_once(feature, monkeypatch, body):

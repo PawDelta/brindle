@@ -198,6 +198,7 @@ def test_a_background_pr_lookup_never_outlives_its_test(tmp_path, monkeypatch):
     assert not asked.exists() and spawn.running() == 0
 
 
+@pytest.mark.variant("regression: a no-PR answer cached for 90 s hid a just-opened PR; failed on base")
 def test_a_stale_no_pr_answer_is_asked_again_soon_so_a_new_pr_is_announced(monkeypatch):
     """A supervisor's `gh pr create` right after a read of "no PR on this HEAD":
     the old 90 s belief in that none kept the PR's Inbox card (and its
