@@ -796,6 +796,8 @@ export class FakeDaemon {
   /* Visuals in sessions (GET /sessions/{root}/visuals); POST /visuals/{id}/dismiss clears the visual's
      Inbox card and tells the bus, and keeps the row (brindle.visuals.dismiss). */
   visualRows: import("../api/client").VisualDTO[] = [];
+  /* Visuals kept from sessions (GET /kept-visuals). */
+  keptVisualRows: import("../api/client").KeptVisualDTO[] = [];
   readonly visualDismissals: { id: string; rev: number }[] = [];
   /* The permission requests POST /inbox/{id}/permission answered, in order. */
   readonly permissionAnswers: { agent: string; request: string; choice: string }[] = [];
@@ -3003,6 +3005,7 @@ export class FakeDaemon {
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
     if ((m = path.match(/^\/providers\/([^/]+)\/connection$/))) return this.connectionOf(m[1]);
     if ((m = path.match(/^\/sessions\/([^/]+)\/visuals$/))) return json(this.visualRows.filter((v) => v.session === m![1]));
+    if (path === "/kept-visuals") return json(this.keptVisualRows);
     // A Library design shared from here: its plan's visual (routes_visuals.library_design_plan).
     if ((m = path.match(/^\/library\/designs\/([^/]+)\/plan$/))) {
       const plan = this.libraryPlans.get(m[1]);

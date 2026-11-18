@@ -207,16 +207,45 @@ def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, f
 
 
 
-@pytest.mark.parametrize("body", [
-    pytest.param("Fixes a bug.", marks=pytest.mark.variant("the plain body gets the footer appended")),
-    "Fixes a bug.\n\nBuilt with [brindle](https://pawdelta.com/brindle)",
-    pytest.param("", marks=pytest.mark.variant("an empty body becomes just the footer")),
-])
-def test_pr_body_ends_with_the_footer_exactly_once(feature, monkeypatch, body):
+def _sent_body(ws, monkeypatch, body):
     seen = []
     monkeypatch.setattr(workspaces.git, "push", lambda *a, **k: None)
     monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/usr/bin/gh")
     monkeypatch.setattr(workspaces.spawn, "action", lambda args, cwd: (seen.append(args), SimpleNamespace(returncode=0, stdout="https://gh.test/pr/1\n"))[1])
-    workspaces.open_pull_request(feature, title="t", body=body)
-    sent = seen[0][seen[0].index("--body") + 1]
-    assert sent.endswith(workspaces.PR_FOOTER) and sent.count(workspaces.PR_FOOTER) == 1
+    workspaces.open_pull_request(ws, title="t", body=body)
+    return seen[0][seen[0].index("--body") + 1]
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param("Fixes a bug.", marks=pytest.mark.variant("the plain body gets the footer appended")),
+    pytest.param("Fixes a bug.\n\nBuilt with [brindle](https://pawdelta.com/brindle)",
+                 marks=pytest.mark.variant("an old-style footer already in the body")),
+    pytest.param("Fixes a bug.\n\n" + workspaces.PR_LOGO + " " + workspaces.PR_FOOTER + " · 1 worker",
+                 marks=pytest.mark.variant("a new-style footer with counts already in the body")),
+    pytest.param("", marks=pytest.mark.variant("an empty body becomes just the footer")),
+])
+def test_pr_body_ends_with_the_footer_exactly_once(feature, monkeypatch, body):
+    sent = _sent_body(feature, monkeypatch, body)
+    assert sent.count(workspaces.PR_FOOTER) == 1
+    if "·" not in body and "Built with" not in body:
+        assert sent.endswith(workspaces.PR_FOOTER) and "brindle-mark.png" in sent
+
+
+def test_pr_footer_counts_come_from_the_db_and_skip_unknown_parts(db, repo, feature, monkeypatch):
+    write_config(repo, checks=["a", "b"])
+    bare = _sent_body(feature, monkeypatch, "x")
+    assert bare.endswith(workspaces.PR_FOOTER)   # nothing recorded: nothing claimed
+    add(db, feature, "w1", "assign")
+    add(db, feature, "w2", "handoff")
+    add(db, feature, "r1", "review", "reviewer")
+    db.add_review(feature.id, "s1", "r1", True, "ok")
+    head = workspaces.git.out(["rev-parse", feature.branch], feature.path)
+    db.set_check(feature.id, "oldsha", "a", True, "")
+    db.set_check(feature.id, "oldsha", "b", False, "")
+    db.set_check(feature.id, head, "b", True, "")   # a passed only on an older revision
+    partial = _sent_body(feature, monkeypatch, "x")
+    assert partial.endswith(workspaces.PR_FOOTER + " · 2 workers · 1 review")
+    db.set_check(feature.id, head, "a", True, "")
+    assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · all checks passed")
+    db.set_check(feature.id, head, "b", False, "boom")
+    assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · checks failing")

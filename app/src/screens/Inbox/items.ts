@@ -95,8 +95,9 @@ export const KIND_SHORT: Record<string, string> = {
   handover: "handover",
 };
 
-/* An item whose card opens a visual in its reader. */
-export const opensVisual = (item: InboxItemDTO): boolean => item.kind === "visual";
+/* An item whose card opens a visual in its reader. A waiting plan opens the same way: its
+   reader (PlanReader) has Approve and Request changes, so the Inbox offers no bare decision. */
+export const opensVisual = (item: InboxItemDTO): boolean => item.kind === "visual" || (item.kind === "plan" && !!item.visual_id);
 
 /* What is being asked, in a line the person can decide on. */
 export function describeItem(item: InboxItemDTO): string {

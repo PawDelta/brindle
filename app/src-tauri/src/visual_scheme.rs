@@ -53,7 +53,7 @@ pub const SCHEME: &str = "brindle-visual";
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// The message types a page may send the host. Anything else is dropped.
-const FORWARDED: [&str; 3] = ["choice", "brindle.esc", "brindle.snapshot"];
+const FORWARDED: [&str; 4] = ["choice", "brindle.esc", "brindle.snapshot", "brindle.zoom"];
 
 /// The event the main webview gets for each message a visual sends.
 pub const MESSAGE_EVENT: &str = "visual:message";
@@ -261,6 +261,7 @@ pub fn request_allowed(url: &str) -> bool {
 /// in the top frame the bridge to the host.
 pub fn prelude(own: &VisualRef) -> String {
     let message_url = serde_json::to_string(&format!("{}/message", own.url())).expect("a JSON string");
+    let zoom_script = include_str!("visual_zoom.js").trim();
     format!(
         r#"(() => {{
   "use strict";
@@ -272,7 +273,7 @@ pub fn prelude(own: &VisualRef) -> String {
   }}
   if (window !== window.top) return;
   const MESSAGE = {message_url};
-  const FORWARD = new Set(["choice", "brindle.esc", "brindle.snapshot"]);
+  const FORWARD = new Set(["choice", "brindle.esc", "brindle.snapshot", "brindle.zoom"]);
   const send = (payload) => {{
     try {{ fetch(MESSAGE, {{ method: "POST", mode: "no-cors", keepalive: true, body: JSON.stringify(payload) }}).catch(() => {{}}); }} catch (_) {{}}
   }};
@@ -287,6 +288,8 @@ pub fn prelude(own: &VisualRef) -> String {
   }});
   // Esc in a separate webview never reaches the host: forward it.
   document.addEventListener("keydown", (event) => {{ if (event.key === "Escape") send({{ type: "brindle.esc" }}); }}, true);
+  // Zoom: keys, wheel and pinch inside the page, and keeping the zoomed-around point in place (visual_zoom.js).
+  ({zoom_script})(send);
   // The host asks for the rendered DOM; the daemon sanitises what comes back.
   window.addEventListener("message", (event) => {{
     if (event.origin !== "brindle://host" || !event.data || event.data.type !== "brindle.snapshot.request") return;
@@ -801,6 +804,19 @@ pub fn visual_set_bounds<R: Runtime>(
 #[tauri::command]
 pub fn visual_post<R: Runtime>(app: AppHandle<R>, sandbox: State<'_, Sandbox>, label: String, message: Value) -> Result<(), String> {
     post(&app, &sandbox, &label, &message)
+}
+
+/// Zoom the page of `label` (1.0 is actual size): its content scales and scrolls inside the webview.
+#[tauri::command]
+pub fn visual_set_zoom<R: Runtime>(app: AppHandle<R>, sandbox: State<'_, Sandbox>, label: String, zoom: f64) -> Result<(), String> {
+    if sandbox.visual_of(&label).is_none() {
+        return Err(format!("{label} is not an open visual"));
+    }
+    if !(0.25..=5.0).contains(&zoom) {
+        return Err("zoom out of range".into());
+    }
+    let webview = app.get_webview(&label).ok_or_else(|| format!("{label} has no webview"))?;
+    webview.set_zoom(zoom).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

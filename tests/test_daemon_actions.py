@@ -2492,6 +2492,9 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
             with pytest.raises(agents.AgentError) as e:
                 agents.spawn(db, ws, "developer" if worker else "supervisor", provider_name=provider,
                              mode="assign" if worker else how, parent_id="sup" if worker else None, prompt="go")
+            # Only a preflight hold or the stubbed window may stop the launch: any other error
+            # raised earlier (a model check, an identity gate) is named, not read as "no items".
+            assert isinstance(e.value, agents.PreflightBlocked) or str(e.value) == "stopped at the window", e.value
             return getattr(e.value, "items", [])
 
         items = spawn()
