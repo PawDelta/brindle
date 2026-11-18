@@ -13,10 +13,16 @@ import { ReaderChrome } from "../Session/Visuals/VisualReader";
 const repoName = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 const ago = (at: number) => formatAge(Math.max(0, Date.now() / 1000 - at));
 
-export function KeptVisuals({ client }: { client: KeptVisualsClient }) {
+export function KeptVisuals({ client, onOpenChange }: { client: KeptVisualsClient; onOpenChange?(open: boolean): void }) {
   const [kept, setKept] = useState<KeptVisualDTO[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<KeptVisualDTO | null>(null);
+  // The page around the list gives the room back to an open reader (it fills the content area).
+  const isOpen = open !== null;
+  useEffect(() => {
+    onOpenChange?.(isOpen);
+    return () => onOpenChange?.(false);
+  }, [isOpen, onOpenChange]);
   const seq = useRef(0);
   const load = useCallback(() => {
     const mine = ++seq.current;
@@ -30,7 +36,7 @@ export function KeptVisuals({ client }: { client: KeptVisualsClient }) {
 
   if (open) {
     return (
-      <div className="flex h-[70vh] min-h-0 flex-col" data-testid="kept-reader">
+      <div className="flex min-h-0 flex-1 flex-col" data-testid="kept-reader">
         <ReaderChrome
           title={open.title}
           source={{ kind: "kept", id: open.id }}

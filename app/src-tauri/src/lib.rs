@@ -248,6 +248,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         visual_scheme::visual_close,
         visual_scheme::visual_set_bounds,
         visual_scheme::visual_post,
+        visual_scheme::visual_set_zoom,
         visual_scheme::visual_snapshot,
     ])
 }

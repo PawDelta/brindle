@@ -15,6 +15,7 @@ import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type Vis
 import { PARKED, closeParkedVisuals } from "./NativeFrame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
+import { KeptVisuals } from "../../Knowledge/KeptVisuals";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
 import { VisualsSetting } from "../../Settings/VisualsSetting";
@@ -1480,5 +1481,48 @@ describe("export snapshot", () => {
     await waitFor(() => expect(got).toHaveLength(2));
     expect(got[1]).toEqual([{ type: "brindle.snapshot", html: "<p>two</p>" }, second]);
     expect(document.querySelectorAll("iframe")).toHaveLength(0);
+  });
+
+  const keptRow = { id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: null, kept_at: now };
+  const zoomOf = () => Number(screen.getByTestId("visual-frame").dataset.zoom);
+
+  it.each(["session", "library"])("zooms the %s view by buttons, keys, wheel and pinch, and a page's own pinch", async (view) => {
+    if (view === "session") render(<VisualReader client={new FakeDaemon().client()} visual={{ ...visual, unread: false }} onBack={() => {}} onAnswered={() => {}} />);
+    else {
+      const client = new FakeDaemon().client();
+      vi.spyOn(client, "keptVisuals").mockResolvedValue([keptRow]);
+      render(<KeptVisuals client={client} />);
+      fireEvent.click(await screen.findByTestId("kept-k_1"));
+    }
+    expect(zoomOf()).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(zoomOf()).toBe(1.25);
+    fireEvent.keyDown(window, { key: "-", metaKey: true });
+    expect(zoomOf()).toBe(1);
+    fireEvent.keyDown(window, { key: "=", metaKey: true });
+    fireEvent.keyDown(window, { key: "0", metaKey: true });
+    expect(zoomOf()).toBe(1);
+    // ⌘-scroll and a trackpad pinch (a wheel with ctrlKey) zoom; plain scrolling does not.
+    const sandbox = screen.getByTestId("visual-sandbox");
+    fireEvent.wheel(sandbox, { deltaY: -20, metaKey: true });
+    expect(zoomOf()).toBeGreaterThan(1);
+    fireEvent.click(screen.getByTestId("visual-zoom-reset"));
+    fireEvent.wheel(sandbox, { deltaY: 20, ctrlKey: true });
+    expect(zoomOf()).toBeLessThan(1);
+    fireEvent.click(screen.getByTestId("visual-zoom-reset"));
+    fireEvent.wheel(sandbox, { deltaY: -20 });
+    expect(zoomOf()).toBe(1);
+  });
+
+  it("opens a kept Library visual at full size, giving the page's header room back", async () => {
+    const client = new FakeDaemon().client();
+    vi.spyOn(client, "keptVisuals").mockResolvedValue([keptRow]);
+    const open = vi.fn();
+    render(<KeptVisuals client={client} onOpenChange={open} />);
+    fireEvent.click(await screen.findByTestId("kept-k_1"));
+    const reader = screen.getByTestId("kept-reader");
+    expect(reader.className).toContain("flex-1");
+    expect(reader.className).not.toMatch(/h-\[/);
+    expect(open).toHaveBeenLastCalledWith(true);
   });
 });

@@ -53,7 +53,7 @@ pub const SCHEME: &str = "brindle-visual";
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// The message types a page may send the host. Anything else is dropped.
-const FORWARDED: [&str; 3] = ["choice", "brindle.esc", "brindle.snapshot"];
+const FORWARDED: [&str; 4] = ["choice", "brindle.esc", "brindle.snapshot", "brindle.zoom"];
 
 /// The event the main webview gets for each message a visual sends.
 pub const MESSAGE_EVENT: &str = "visual:message";
@@ -272,7 +272,7 @@ pub fn prelude(own: &VisualRef) -> String {
   }}
   if (window !== window.top) return;
   const MESSAGE = {message_url};
-  const FORWARD = new Set(["choice", "brindle.esc", "brindle.snapshot"]);
+  const FORWARD = new Set(["choice", "brindle.esc", "brindle.snapshot", "brindle.zoom"]);
   const send = (payload) => {{
     try {{ fetch(MESSAGE, {{ method: "POST", mode: "no-cors", keepalive: true, body: JSON.stringify(payload) }}).catch(() => {{}}); }} catch (_) {{}}
   }};
@@ -287,6 +287,38 @@ pub fn prelude(own: &VisualRef) -> String {
   }});
   // Esc in a separate webview never reaches the host: forward it.
   document.addEventListener("keydown", (event) => {{ if (event.key === "Escape") send({{ type: "brindle.esc" }}); }}, true);
+  // Zoom keys and pinch / ⌘-scroll inside the page never reach the host: forward them as brindle.zoom.
+  document.addEventListener("keydown", (event) => {{
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+    const dir = event.key === "+" || event.key === "=" ? "in" : event.key === "-" || event.key === "_" ? "out" : event.key === "0" ? "reset" : null;
+    if (dir) {{ event.preventDefault(); send({{ type: "brindle.zoom", dir }}); }}
+  }}, true);
+  window.addEventListener("wheel", (event) => {{
+    if (!(event.ctrlKey || event.metaKey) || !event.deltaY) return;
+    event.preventDefault();
+    const factor = Math.min(1.25, Math.max(0.8, Math.exp(-event.deltaY * 0.01)));
+    send({{ type: "brindle.zoom", dir: event.deltaY < 0 ? "in" : "out", factor, x: event.clientX, y: event.clientY }});
+  }}, {{ passive: false, capture: true }});
+  // WebKit reports a trackpad pinch as gesture events: the scale since the gesture began.
+  let pinched = 1;
+  for (const name of ["gesturestart", "gesturechange", "gestureend"]) {{
+    document.addEventListener(name, (event) => {{
+      event.preventDefault();
+      if (name === "gesturestart") {{ pinched = 1; return; }}
+      if (name === "gestureend" || !(event.scale > 0)) return;
+      const factor = event.scale / pinched;
+      pinched = event.scale;
+      if (factor !== 1) send({{ type: "brindle.zoom", dir: factor > 1 ? "in" : "out", factor, x: event.clientX, y: event.clientY }});
+    }}, {{ passive: false }});
+  }}
+  // After a zoom the host says which point the person zoomed around: keep it under the pointer.
+  window.addEventListener("message", (event) => {{
+    const m = event.data;
+    if (event.origin !== "brindle://host" || !m || m.type !== "brindle.zoom.anchor") return;
+    const [x, y, ratio] = [m.x, m.y, m.ratio];
+    if (![x, y, ratio].every(Number.isFinite)) return;
+    requestAnimationFrame(() => window.scrollBy(x * (1 - ratio), y * (1 - ratio)));
+  }});
   // The host asks for the rendered DOM; the daemon sanitises what comes back.
   window.addEventListener("message", (event) => {{
     if (event.origin !== "brindle://host" || !event.data || event.data.type !== "brindle.snapshot.request") return;
@@ -801,6 +833,19 @@ pub fn visual_set_bounds<R: Runtime>(
 #[tauri::command]
 pub fn visual_post<R: Runtime>(app: AppHandle<R>, sandbox: State<'_, Sandbox>, label: String, message: Value) -> Result<(), String> {
     post(&app, &sandbox, &label, &message)
+}
+
+/// Zoom the page of `label` (1.0 is actual size): its content scales and scrolls inside the webview.
+#[tauri::command]
+pub fn visual_set_zoom<R: Runtime>(app: AppHandle<R>, sandbox: State<'_, Sandbox>, label: String, zoom: f64) -> Result<(), String> {
+    if sandbox.visual_of(&label).is_none() {
+        return Err(format!("{label} is not an open visual"));
+    }
+    if !(0.25..=5.0).contains(&zoom) {
+        return Err("zoom out of range".into());
+    }
+    let webview = app.get_webview(&label).ok_or_else(|| format!("{label} has no webview"))?;
+    webview.set_zoom(zoom).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
