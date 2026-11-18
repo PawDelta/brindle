@@ -1216,6 +1216,20 @@ def _reset_window_sizes() -> None:
         log.warning("brindle: couldn't reset the old daemon's window sizes", exc_info=True)
 
 
+def _retheme_sessions() -> None:
+    """Re-apply the tmux theme to every live brindle session, off the daemon's
+    way: panes started before an update keep the old window-style until
+    something re-themes them. Only ``brindle_`` sessions, never the person's own."""
+    from brindle import tmux
+
+    try:
+        for name, _attached in tmux.list_sessions():
+            if name.startswith("brindle_"):
+                tmux.apply_theme(name)
+    except Exception:
+        log.warning("brindle: couldn't re-theme the running sessions", exc_info=True)
+
+
 def _keep_codex_hook(settle: float = 0.0) -> None:
     """codex_hook.keep_trusted, off the daemon's way, by the one daemon this
     brindle home answers to: one left running from another install (an app on
@@ -1349,6 +1363,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
         resizer = asyncio.create_task(asyncio.to_thread(_reset_window_sizes))
         sweeper = asyncio.create_task(asyncio.to_thread(_upgrade_sweep))
         hook = asyncio.create_task(asyncio.to_thread(_keep_codex_hook))   # an update may have changed it
+        retheme = asyncio.create_task(asyncio.to_thread(_retheme_sessions))   # so may the theme
         # The app's daemon brings back what the last one paused on its way out.
         resumer = asyncio.create_task(resume()) if idle_exit else None
         live = start_live_docs(activity.state)
@@ -1359,6 +1374,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
             resizer.cancel()
             sweeper.cancel()
             hook.cancel()
+            retheme.cancel()
             if resumer:
                 resumer.cancel()
             await stop_live_docs(live)
