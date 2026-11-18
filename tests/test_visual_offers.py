@@ -214,6 +214,8 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
                  marks=pytest.mark.variant("a bare imperative after a question")),
     pytest.param("go into planning mode", "plan", marks=pytest.mark.variant("mode wording")),
     pytest.param("planning view please", "plan", marks=pytest.mark.variant("view wording")),
+    pytest.param("Can you plan this out?", "plan", marks=pytest.mark.variant("polite prefix on the imperative form")),
+    pytest.param("planning view looks good", None, marks=pytest.mark.variant("a remark about an existing view")),
     pytest.param("the plan looks good", None, marks=pytest.mark.variant("a remark about an existing plan")),
     pytest.param("I don't want to plan this", None, marks=pytest.mark.variant("a negated plan ask")),
     pytest.param("I want the plan to use X", None,
@@ -234,6 +236,15 @@ def test_complete_request_intent(db, session, text, scope):
     visuals.publish(db, boss, "Requested", "<p>yes</p>", kind=scope)
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Again", "<p>no</p>", kind=scope)
+
+
+@pytest.mark.parametrize("text", ["let's plan this. Actually, don't plan this.", "cancel planning mode"])
+def test_plan_activity_ask_can_be_cancelled(db, session, text):
+    boss, _ = session
+    agents.send_message(db, boss.id, "let's plan this", person=True)
+    agents.send_message(db, boss.id, text, person=True)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Plan", "<p>no</p>", kind="plan")
 
 
 def test_codex_terminal_submission_folds_and_authorizes(db, session):
