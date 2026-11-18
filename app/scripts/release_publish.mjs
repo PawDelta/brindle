@@ -19,7 +19,8 @@
              build.json into DIR/<name>.
    promote   whether the new latest.json may replace the published one:
              a strictly later run of a version no lower, at a descendant of
-             its commit. The workflow writes it with an S3 conditional put.
+             its commit; unless that commit is no longer on main (history was
+             rewritten), when the later run alone decides. The workflow writes it with an S3 conditional put.
    oidc-token  GitHub's OIDC token for the AWS role (audience sts.amazonaws.com).
 
    Each prints key=value lines, appended to $GITHUB_OUTPUT when that is set. */
@@ -176,17 +177,22 @@ export async function waitForChecks(look, { deadlineMinutes, intervalSeconds, no
  * Whether the new manifest `next` may replace the published `current` (null: none yet).
  * @param {{ version: string } | null} current @param {{ version: string }} next
  * @param {(ancestor: string, commit: string) => boolean} descends
+ * @param {(commit: string) => boolean} [onMain] whether a commit is still on main; a published
+ *   one that is not means history was rewritten, so the build number alone decides
  * @returns {{ go: boolean, reason: string }}
  */
-export function promotion(current, next, descends) {
+export function promotion(current, next, descends, onMain = () => true) {
   const to = parseVersion(next.version);
   if (!to || to.run === null || !to.sha) throw new Error(`${next.version} is not a release-branch build`);
   if (!current) return { go: true, reason: "no release build published yet" };
   const from = parseVersion(current.version);
   if (!from || from.run === null || !from.sha) throw new Error(`the published ${current.version} is not a release-branch build`);
   if (to.run <= from.run) return { go: false, reason: `run ${to.run} is not later than the published run ${from.run}` };
-  if (precedence(to, from) < 0) return { go: false, reason: `${next.version} is older than the published ${current.version}` };
-  if (!descends(from.sha, to.sha)) return { go: false, reason: `${to.sha} does not descend from the published ${from.sha}` };
+  // History rewritten (published commit off main): the run number alone decides.
+  if (onMain(from.sha)) {
+    if (precedence(to, from) < 0) return { go: false, reason: `${next.version} is older than the published ${current.version}` };
+    if (!descends(from.sha, to.sha)) return { go: false, reason: `${to.sha} does not descend from the published ${from.sha}` };
+  }
   return { go: true, reason: `${current.version} -> ${next.version}` };
 }
 
@@ -300,7 +306,8 @@ async function main(args) {
     case "promote": {
       const [currentFile, nextFile] = args.slice(1);
       const current = existsSync(currentFile) ? JSON.parse(readFileSync(currentFile, "utf8")) : null;
-      const decision = promotion(current, JSON.parse(readFileSync(nextFile, "utf8")), (a, c) => isAncestor(a, c));
+      const mainRef = env.MAIN_REF ?? "origin/main";
+      const decision = promotion(current, JSON.parse(readFileSync(nextFile, "utf8")), (a, c) => isAncestor(a, c), (c) => isAncestor(c, mainRef));
       if (!decision.go) console.log(`::warning::not moving release/latest.json: ${decision.reason}`);
       output({ go: decision.go });
       return 0;

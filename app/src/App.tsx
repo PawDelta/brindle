@@ -567,6 +567,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
   // The sessions released one by one while the rest come back, and the daemon they were released by.
   const backNow = useRef<Set<string>>(new Set());
   const backPid = useRef<number | null>(null);
+  // Those of them whose sessions-feed row hasn't been read since their release (still the last daemon's paused).
+  const staleNow = useRef<Set<string>>(new Set());
   // Sticky across probes and stream drops: a later calm meta response alone
   // cannot make sync's pre-recovery rows safe. Clear only after the barrier.
   const recovering = useRef(false);
@@ -610,9 +612,30 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       const applied = store.getState();
       if (applied.error) return;
       const ready = fresh(applied.workspaces, stillPending).filter((id) => eligible.includes(id));
-      void Promise.all([reload(), refresh?.()]).catch(() => {});
-      for (const id of ready) backNow.current.add(id);
-      if (ready.length) setPanes((p) => ({ ...p, back: [...backNow.current] }));
+      for (const id of ready) {
+        backNow.current.add(id);
+        staleNow.current.add(id);
+      }
+      if (ready.length) setPanes((p) => ({ ...p, back: [...backNow.current], stale: [...staleNow.current] }));
+      void Promise.all([readStale(), refresh?.()]).catch(() => {});
+    };
+    // The sessions feed's rows for released sessions are read again: until a read begun after their release
+    // answers, they say what the last daemon left (paused). One that fails keeps them so, and the next
+    // round of `check` asks again.
+    let readingStale = false;
+    const readStale = async () => {
+      const marked = staleNow.current;
+      if (readingStale || marked.size === 0) return;
+      readingStale = true;
+      const ids = [...marked];
+      try {
+        if (!(await reload())) return;
+        for (const id of ids) marked.delete(id);
+        // Unless another daemon has answered since: its own marks are its own.
+        if (marked === staleNow.current) setPanes((p) => ({ ...p, stale: [...marked] }));
+      } finally {
+        readingStale = false;
+      }
     };
     const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
     const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
@@ -684,11 +707,15 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         if (backPid.current !== meta.pid) {
           backPid.current = meta.pid;
           backNow.current = new Set();
+          staleNow.current = new Set();
         }
         const back = [...backNow.current];
-        setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join()
-          ? p : { ...p, recovery, pending: pending ?? null, back }));
+        const stale = [...staleNow.current];
+        setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join() && (p.stale ?? []).join() === stale.join()
+          ? p : { ...p, recovery, pending: pending ?? null, back, stale }));
         if (pending) {
+          // A released session whose feed row a failed read left stale: ask again.
+          void readStale();
           const { seq, workspaces } = await readAfter(meta);
           if (!unchanged()) return;
           await releaseBack(meta, pending, seq, workspaces, unchanged);

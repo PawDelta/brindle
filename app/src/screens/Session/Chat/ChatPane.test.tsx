@@ -2,7 +2,8 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PtyViewHandlers } from "../../../api/ptyView";
-import { ChatPane, chatTheme, promptClipRows, type ChatTheme } from "./ChatPane";
+import { Terminal } from "@xterm/xterm";
+import { ChatPane, chatTheme, claudePromptRegion, promptClipRows, type ChatTheme } from "./ChatPane";
 
 // xterm.js watches the pixel ratio through matchMedia, which jsdom lacks.
 beforeEach(() => {
@@ -97,6 +98,54 @@ describe("ChatPane", () => {
     fireEvent.drop(screen.getByTestId("chat-terminal-frame"), { dataTransfer: { types: ["Files"], files: [shot] } });
     expect(dropped).toEqual([[shot]]);
     expect(attach).not.toHaveBeenCalled();
+  });
+
+  // tmux capture-pane -e of live Claude Code 2.1.327 panes, their last rows.
+  it.each([
+    // At work (171 columns): the working line, the prompt box between its 256-colour grey rules, a blank row, the mode line.
+    ["its prompt box", 171, [
+      "\x1b[38;5;174m✶\x1b[39m \x1b[38;5;174mBillowing… \x1b[38;5;246m(1m 47s · ↓\x1b[39m \x1b[38;5;246m4.5k tokens · thought for 3s)\x1b[39m",
+      "",
+      `\x1b[38;5;244m${"─".repeat(171)}`,
+      "\x1b[38;5;246m❯ \x1b[39m",
+      `\x1b[38;5;244m${"─".repeat(171)}`,
+      "",
+      "\x1b[39m  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle) · esc to interrupt\x1b[39m",
+    ], { kind: "prompt", rows: 5, top: 2 }],
+    // A numbered message typed in the box (120 columns) is still the prompt.
+    ["a numbered message in its box", 120, [
+      `\x1b[38;5;244m${"─".repeat(120)}`,
+      "\x1b[39m❯ 1. Fix the bug",
+      `\x1b[38;5;244m${"─".repeat(120)}`,
+      "\x1b[39m  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m",
+    ], { kind: "prompt", rows: 4, top: 0 }],
+    // /model's picker in the box's place (120 columns): shown, every row.
+    ["/model's picker", 120, [
+      `\x1b[38;5;153m${"▔".repeat(120)}`,
+      "\x1b[39m  \x1b[1m\x1b[38;5;153mSelect model\x1b[0m",
+      "  \x1b[38;5;246mYour pick is the default for new sessions. For other models, use --model.\x1b[39m",
+      "",
+      "    \x1b[38;5;246m1.  \x1b[39mDefault (recommended)  \x1b[38;5;246mOpus 5.5 · Best for everyday, complex tasks\x1b[39m",
+      "  \x1b[38;5;153m❯\x1b[39m \x1b[38;5;246m2.  \x1b[38;5;114mOpus 5.5\x1b[39m \x1b[38;5;114m✔\x1b[39m             \x1b[38;5;246mFor complex work and everyday tasks\x1b[39m",
+      "    \x1b[38;5;246m3.  \x1b[38;5;174mFable 5.2\x1b[39m              \x1b[38;5;246mFor your toughest challenges\x1b[39m",
+      "    \x1b[38;5;246m4.  \x1b[39mSonnet 5.5             \x1b[38;5;246mMost efficient for simpler tasks\x1b[39m",
+      "    \x1b[38;5;246m5.  \x1b[39mHaiku 5.5              \x1b[38;5;246mFastest for quick answers\x1b[39m",
+      "    \x1b[38;5;246m↓ 1 more\x1b[39m",
+      "",
+      "  \x1b[38;5;174m◐\x1b[38;5;246m Medium effort (default)\x1b[39m",
+      "",
+      "  \x1b[38;5;246mUse \x1b[1m/fast\x1b[0m\x1b[38;5;246m to turn on fast mode (Opus 5.5).\x1b[39m",
+      "",
+      "  \x1b[3m\x1b[38;5;246m←/→ to adjust · s to use this session only · Enter to save · Esc to cancel\x1b[0m",
+    ], { kind: "unknown", rows: 0 }],
+  ])("reads %s from a live pane's real rows", async (_name, cols, lines, region) => {
+    // Read as the view reads the pane: xterm.js's rows' text.
+    const term = new Terminal({ cols, rows: lines.length });
+    await new Promise<void>((done) => term.write(lines.join("\r\n"), done));
+    const buffer = term.buffer.active;
+    const rows = Array.from({ length: term.rows }, (_, y) => buffer.getLine(y)?.translateToString(true) ?? "");
+    term.dispose();
+    expect(claudePromptRegion(rows)).toEqual(region);
   });
 
   it("hides only Claude prompt rows and restores permission and choice rows", () => {

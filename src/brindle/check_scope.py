@@ -30,8 +30,10 @@ With ``scoped_checks: "coverage"`` (the repo's tests need pytest-cov) the
 tests are chosen by a per-test coverage map instead (``brindle.coverage_map``):
 each passing full run of the check records one, and a narrowed run selects
 the tests that executed the functions the change edits, plus the branch's own
-and namesake tests. A missing or stale map runs the check in full; a change no
-test executes skips it. The session checkout's check after brindle merges
+and namesake tests. More than ``scoped_checks_max_files`` of them run only the
+most specific to the change (``coverage_map.rank``), the branch's own and
+namesake tests first, after a one-line note. A missing or stale map runs the
+check in full; a change no test executes skips it. The session checkout's check after brindle merges
 origin into it (``session_sync.run_checks``) is narrowed the same way, to
 what the merge brought in.
 
@@ -63,6 +65,9 @@ ALWAYS_FULL = (".brindle/**",)   # under here only a change to how checks run co
 CHECK_KEYS = ("checks", "setup", "scoped_checks", "scoped_checks_max_files")   # what a config change must touch
 CAP_NOTE = ("brindle: this change reaches more than {max} test files (scoped_checks_max_files); ran only the "
             "branch's own and namesake tests ({tests}). The full suite runs on the session branch before its PR.")
+COVERAGE_CAP_NOTE = ("brindle: the coverage map says this change reaches {n} test files, more than {max} "
+                     "(scoped_checks_max_files); ran only the {max} most specific to it, its own and namesake tests "
+                     "first (its own always run). The full suite runs on the session branch before its PR.")
 FULL_NOTE = "brindle: ran this check in full because {why}."
 MAX_SYMBOLS = 30         # more changed symbols than this: use their modules' importing tests instead
 GRAPHIFY_SECONDS = 60
@@ -237,7 +242,7 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
     if not changed:
         return None
     if scope.coverage:
-        return _by_coverage(ws, cmd, scope, changed)
+        return _by_coverage(ws, cmd, scope, changed, max_files)
     try:
         tests = pytest_targets(ws, base, changed)
     except Unscoped as why:
@@ -257,46 +262,74 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
     return f"{cmd} {_quoted(tests)}"   # pytest's exit 5 (no tests collected) fails the check
 
 
-def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str]) -> str | None:
+def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str], max_files: int = 0) -> str | None:
     """``cmd`` on the tests the coverage map says executed what changed since
     the map's commit (``changed``, the branch's own change, decides only
     whether anything runs at all), plus every test file changed since then
     and the changed modules' namesake tests (a test that reaches code only
     through a child process isn't in the map); None when no test executes any
     of it. A missing or stale map, or pytest configuration changed since it,
-    runs ``cmd`` in full, which records a new one. No ``scoped_checks_max_files``
-    cap: every selected test executed the change, so none may be dropped."""
+    runs ``cmd`` in full, which records a new one. More tests than
+    ``max_files`` (0: no cap) run only the most specific to the change
+    (``_most_specific``), after a one-line note saying so: a change to code
+    nearly every test passes through would otherwise run nearly every test."""
     from brindle import coverage_map
 
     data = coverage_map.load(ws.repo_root, cmd)
+    hits: dict[str, int] = {}
     try:
         if data is None:
             raise coverage_map.Stale("there is no per-test coverage map for it yet (this run records one)")
         since = coverage_map.changed_since(ws.path, data)
         if any(matches(f, scope.full_when) for f in since):
             raise coverage_map.Stale("pytest's configuration changed since the coverage map was recorded")
-        tests = coverage_map.targets(ws.path, data, since)
+        tests = coverage_map.targets(ws.path, data, since, hits)
     except coverage_map.Stale as why:
         return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
     tests |= {f for f in since if is_test_file(f)}
     root = Path(ws.path)
+    own = changed
     # Code reached only as a child process leaves no coverage: the scripts and namesake tests of every
     # file changed since the map, not just the branch's own, as the map's attribution is.
     changed = [f for f in since if f.endswith(".py")]
     scripts = [f for f in changed if not is_test_file(f) and _module_path(root, f) is None]
+    scripted: set[str] = set()
     if scripts:   # run by path as a child process, so absent from the coverage
         try:
             imports = Imports(root)
         except Unscoped as why:
             return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
         for f in scripts:
-            tests |= script_tests(root, f, imports)
-    tests = sorted({t for t in tests if (root / t).is_file()} | set(capped_targets(ws, changed)))
+            scripted |= script_tests(root, f, imports)
+    namesakes = capped_targets(ws, changed)
+    tests = sorted({t for t in tests | scripted if (root / t).is_file()} | set(namesakes))
     if not tests:
         return None
-    run = f"{cmd} {_quoted(tests)}"
+    note = ""
+    if 0 < max_files < len(tests):
+        first = capped_targets(ws, own) + namesakes + sorted(scripted)
+        kept = _most_specific(tests, first, coverage_map.rank(data, set(tests), hits), max_files,
+                              keep={t for t in own if is_test_file(t)})
+        note = "printf '%s\\n' " + shlex.quote(COVERAGE_CAP_NOTE.format(n=len(tests), max=max_files)) + "; "
+        tests = kept
+    run = f"{note}{cmd} {_quoted(tests)}"
     # A marker or keyword filter may leave none of the selected tests (pytest's exit 5): nothing of it to run.
     return f"{run} || [ $? -eq 5 ]" if _filters(cmd) else run
+
+
+def _most_specific(tests: list[str], first: list[str], ranked: list[str], max_files: int,
+                   keep: set[str]) -> list[str]:
+    """At most ``max_files`` of ``tests``: ``first`` (the branch's own and
+    namesake tests, then the tests of changed scripts) in that order, then
+    ``ranked`` (``coverage_map.rank``). The branch's own test files (``keep``)
+    are never dropped, even past ``max_files``."""
+    chosen = [t for t in tests if t in keep]
+    for t in first + ranked:
+        if len(chosen) >= max_files:
+            break
+        if t in tests and t not in chosen:
+            chosen.append(t)
+    return sorted(chosen)
 
 
 def _filters(cmd: str) -> bool:

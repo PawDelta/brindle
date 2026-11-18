@@ -129,12 +129,13 @@ def test_a_failing_collector_leaves_an_empty_remote():
 
 def test_provider_capacity_in_sidebar():
     lines = section(Local(providers=[("agy", 0), ("claude", 64), ("codex", 97)],
-                          windows={"claude": [("5h", 64), ("wk", 91), ("Fable", 19)],
+                          windows={"claude": [("5h", 64), ("wk", 91), ("Fable", 2)],
                                    "codex": [("wk", 20)]}))
     body = [t.strip() for t in texts(lines)[1:]]
     assert body[0] == "agy    limit reached"
-    assert body[1] == "claude 5h 36% · wk 9% · Fable 81% used"
-    # past 80% used of any window, the row is bold in the warning colour
+    assert body[1] == "claude 5h 36% · wk 9% · Fable 98% used"
+    # from 97% used of any window (provider_health.CLOSING_PERCENT), the row is
+    # bold in the warning colour; codex's 80% used is not
     assert [ln.style for ln in lines[1:4]] == ["alert", "alert", "normal"]
     assert "$" not in "".join(body)
     assert "█" not in "".join(body) and "░" not in "".join(body)

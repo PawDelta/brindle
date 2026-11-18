@@ -6,7 +6,7 @@
  * Clip only Claude's prompt + footer rows; permission/selection rows stay usable.
  * Never parse/rewrite output into messages or start a headless transport.
  */
-import { useMemo, useState, type DragEvent, type ReactNode } from "react";
+import { useMemo, useState, type DragEvent, type HTMLAttributes, type ReactNode } from "react";
 import type { ITheme } from "@xterm/xterm";
 import { PtyTerminal, type PtyTerminalProps } from "../../../components/PtyTerminal";
 
@@ -15,6 +15,8 @@ export interface PromptRegion {
   kind: "prompt" | "permission" | "selection" | "unknown";
   /** Detected bottom prompt + footer height in terminal cells, not output. */
   rows: number;
+  /** The region's first row, counted from the terminal client's first row (detected regions only). */
+  top?: number;
 }
 
 export interface ChatPaneProps {
@@ -66,15 +68,26 @@ export function ChatPane({ terminal, provider, theme, prompt, composer, onDropFi
         if (files.length) onDropFiles(files);
       }}
     >
-      <div
-        className="flex min-h-0 min-w-0 flex-1 flex-col border border-line-strong"
-        style={{ borderRadius: "10px", padding: "18px 22px", background: palette.background }}
-        data-testid="chat-terminal-frame"
-        data-clip-rows={clip}
-      >
-        <PtyTerminal {...pane} theme={palette} cropRows={clip} typeElsewhere={clip > 0 ? onComposeText : undefined} />
-      </div>
+      <TerminalFrame ground={palette.background} data-testid="chat-terminal-frame" data-clip-rows={clip}>
+        <PtyTerminal {...pane} theme={palette} cropRows={clip} cropFrom={clip > 0 ? prompt.top : undefined} typeElsewhere={clip > 0 ? onComposeText : undefined} />
+      </TerminalFrame>
       {composer}
+    </div>
+  );
+}
+
+/* The card a provider's live session sits in (chat-ui4): a hairline frame, 10px corners and room around the
+   terminal's text, on the ground the terminal draws on (its theme's background; the shell block's unless given),
+   so the room reads as the terminal's own. ChatPane's and the session screen's for every provider's session; on
+   the canvas when what it holds is a state card (ProviderSurface's data-card: paused, ended, signed out). */
+export function TerminalFrame({ ground, children, ...rest }: { ground?: string; children: ReactNode } & Omit<HTMLAttributes<HTMLDivElement>, "className" | "style">) {
+  return (
+    <div
+      {...rest}
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-line-strong bg-shell-bg [&:has(>[data-card]:not([data-card=live]))]:bg-canvas [&>[data-card]:not([data-card=live])]:bg-canvas"
+      style={{ borderRadius: "10px", padding: "18px 22px", ...(ground ? { background: ground } : {}) }}
+    >
+      {children}
     </div>
   );
 }
@@ -111,4 +124,43 @@ export function chatTheme(theme: ChatTheme): ITheme {
 export function promptClipRows(provider: string, region: PromptRegion): number {
   if (provider !== "claude" || region.kind !== "prompt") return 0;
   return Math.max(0, Math.floor(region.rows));
+}
+
+// -- detection: Claude Code's prompt box at the pane's foot, from its rows' text --
+/* Claude Code's prompt box as it draws it (2.1, captured from a live pane):
+     ────────────────────────          a rule, the pane's width
+     ❯ the input, if any               its input, "❯ " then text; a long input wraps onto more rows
+     ────────────────────────          a rule again
+                                       its footer: blank rows, and the mode line
+       ⏵⏵ bypass permissions on (shift+tab to cycle)
+   Rules and text are read without their colours (the CLI's 256-colour greys, whatever the theme). Whatever is
+   typed or pasted in the box ("❯ 1. Fix the bug" too) is still the prompt. A permission question or a picker
+   (/model's) takes the box's place: its border is no closing rule over a footer, and its "❯" (the choice the
+   cursor is on) sits under any rule there is, so it is never taken for the prompt and its rows stay shown. The
+   region is the box's rows from its first rule through its footer's last line, and where that first rule is
+   (`top`, from the client's first row): the crop hides from there, so blank rows under a box that isn't at the
+   foot hide too, without being counted (cropping them would only grow the client by as many blank rows again). */
+const FOOTER_ROWS = 8;
+const isRule = (row: string): boolean => {
+  const line = row.trim();
+  if (!line.startsWith("───")) return false;
+  const drawn = [...line].filter((c) => c === "─").length;
+  return drawn >= 10 && drawn * 2 >= [...line].length;
+};
+
+export function claudePromptRegion(rows: readonly string[]): PromptRegion {
+  let last = rows.length - 1;
+  while (last >= 0 && !rows[last].trim()) last--;
+  // The closing rule: within the footer's rows of the last line, with no "❯" (a picker's cursor) under it.
+  let close = last;
+  while (close >= 0 && last - close <= FOOTER_ROWS && !isRule(rows[close])) {
+    if (rows[close].trimStart().startsWith("❯")) return { kind: "unknown", rows: 0 };
+    close--;
+  }
+  if (close < 0 || last - close > FOOTER_ROWS) return { kind: "unknown", rows: 0 };
+  let open = close - 1;
+  while (open >= 0 && !isRule(rows[open])) open--;
+  if (open < 0 || open === close - 1) return { kind: "unknown", rows: 0 };
+  if (!rows[open + 1].startsWith("❯")) return { kind: "unknown", rows: 0 };
+  return { kind: "prompt", rows: last - open + 1, top: open };
 }

@@ -421,6 +421,175 @@ def test_offer_is_created_at_the_limit_recording_hook(db, repo, world, monkeypat
     assert [row[0] for row in db.conn.execute("SELECT id FROM provider_switches ORDER BY id")] == offers
 
 
+@pytest.mark.parametrize("trigger", [
+    pytest.param("status_line_jitter", marks=pytest.mark.variant(
+        "two status-line readings a second apart must not project a limit and open switch offers")),
+    pytest.param("one_worker_429", marks=pytest.mark.variant(
+        "one worker's 429 is a rate limit, never the account's limit for every supervisor")),
+])
+def test_no_switch_offer_without_a_confirmed_limit_and_false_offers_are_withdrawn(db, repo, world, trigger):
+    """Regression 2026-11-17: right after a restart every Claude supervisor was
+    offered a switch to Codex until the weekly reset, with Claude at 49%. Two
+    panes' status lines read 47% then 49% half a second apart; the projection
+    read that as 100% within minutes (``closing``), and the switch took any
+    unhealthy state for a limit."""
+    from brindle import provider_health
+
+    for root_id in ("a", "b", "c"):
+        _session(db, repo, root_id=root_id)
+    world["quotas"]["claude"] = quota.Quota("claude", [quota.Window(49, NOW + 5 * 24 * HOUR, 10080),
+                                                       quota.Window(25, NOW + 5 * 24 * HOUR, 10080, "Fable")])
+    if trigger == "status_line_jitter":
+        provider_health.record_reading("claude", 47, NOW + 5 * 24 * HOUR, now=NOW - 1)
+        provider_health.record_reading("claude", 49, NOW + 5 * 24 * HOUR, now=NOW - 0.5)
+    else:
+        provider_health.record_rate_limited("claude", now=NOW)
+    # What the earlier build left open for one session.
+    _offer_row(db, "false", "a", "switch", "claude", "codex", "open", limited_until=NOW + 5 * 24 * HOUR)
+
+    assert provider_switch.sweep(db, NOW) == []
+
+    assert [tuple(r) for r in db.conn.execute("SELECT id, state FROM provider_switches")] == [
+        ("false", "withdrawn")]
+    assert provider_switch.inbox_items(db, None, now=NOW) == []
+    # A withdrawn offer consumes nothing: the real limit, same reset, is offered.
+    world["quotas"]["claude"] = _limited("claude", NOW + 5 * 24 * HOUR)
+    assert provider_switch.maybe_offer(db, "a", NOW + 1) is not None
+
+
+def _listed(card, mark) -> dict[str, str]:
+    """What an alert card lists after ``mark`` (SESSIONS_MARK or WORKERS_MARK),
+    as the app reads it: each member's id and what follows it."""
+    part = next(p for p in card.detail.split(" · ") if mark.strip() in p)
+    return dict(entry.partition(" ")[::2] for entry in part.split(": ", 1)[1].split(", "))
+
+
+def _sessions_on(card) -> list[str]:
+    return sorted(_listed(card, provider_switch.SESSIONS_MARK))
+
+
+def _sessions_and_workers_reach_the_weekly_limit(db, world, monkeypatch, repo, *roots) -> float:
+    """Supervisors at ``roots`` ((id, repo) each) and two worktree workers
+    under the first, all on Claude, reach its weekly limit: the workers'
+    turns end on it (the real stop-failure path into brindle.handover, whose
+    replacement would bill per token) and a sweep runs. Returns the reset."""
+    from brindle import handover, limit_report
+
+    monkeypatch.setattr(provider_switch.time, "time", lambda: NOW)
+    monkeypatch.setattr(agents, "pause_worker", lambda db, a, **kw: None)
+    monkeypatch.setattr(handover, "replacement", lambda db, a, ws, after: "developer-codex")
+    monkeypatch.setattr(handover, "per_token", lambda profile, repo_root: True)
+    for root_id, where in roots:
+        _session(db, where, root_id=root_id)
+    for worker_id in ("w1", "w2"):
+        ws = workspaces.create(db, str(repo), f"feat/{worker_id}").workspace
+        db.add_agent(Agent(worker_id, ws.id, "developer", "claude", roots[0][0], "assign", "idle",
+                           f"@{worker_id}", None, NOW, task="Parse the flags"))
+    week = NOW + 5 * 24 * HOUR
+    world["quotas"]["claude"] = quota.Quota("claude", [quota.Window(100, week, 10080)])
+    for worker_id in ("w1", "w2"):
+        limit_report.on_stop_failure(db, db.get_agent(worker_id), rate_limited=True, now=NOW)
+    provider_switch.sweep(db, NOW)
+    return week
+
+
+@pytest.mark.variant("a worker out of handovers shares the card with billed ones: each says its own cost")
+@pytest.mark.parametrize("held_bills", [True, False])
+def test_an_alert_says_per_worker_whether_continuing_bills_per_token(db, repo, world, spawned, monkeypatch,
+                                                                     held_bills):
+    """w2 is out of handovers (held: Continue starts its replacement with no
+    other ask), w1 asks first because its replacement bills per token; both
+    go through brindle.handover's real cutoff into one card."""
+    from brindle import handover
+    from brindle.service import inbox
+
+    monkeypatch.setattr(handover, "hops", lambda db, chain: handover.MAX_HOPS if chain == "w2" else 0)
+    _sessions_and_workers_reach_the_weekly_limit(db, world, monkeypatch, repo, ("a", repo))
+    monkeypatch.setattr(handover, "per_token", lambda profile, repo_root: held_bills)   # what w2's would cost
+
+    [card] = inbox.items(db, None, panes={})
+    held = "w2 (out of handovers; could continue on developer-codex" + ("; billed per token)" if held_bills else ")")
+    assert _listed(card, provider_switch.WORKERS_MARK) == {"w1": "→ developer-codex (billed per token)",
+                                                           "w2": held.partition(" ")[2]}
+    assert card.choices[0].label == "Continue on developer-codex (billed per token)"   # w1 bills either way
+    # w2 alone (w1 answered): its Continue says what it costs.
+    [h1] = handover._in_state(db, handover.ASKING)
+    handover.answer(db, h1.id, "stop")
+    [card] = inbox.items(db, None, panes={})
+    assert card.choices[0].label.endswith("(billed per token)") == held_bills
+
+
+@pytest.mark.variant("with nowhere to switch the sessions, the workers' handovers are still one card, answered once")
+def test_workers_waiting_on_one_limit_share_one_handover_card(db, repo, world, spawned, monkeypatch):
+    from brindle import handover
+    from brindle.daemon import routes_actions
+    from brindle.service import inbox
+
+    world["installed"] = {"claude"}     # no other provider: no switch to offer
+    _sessions_and_workers_reach_the_weekly_limit(db, world, monkeypatch, repo, ("a", repo))
+
+    [card] = inbox.items(db, None, panes={})
+    assert card.kind == handover.KIND and [c.id for c in card.choices] == ["continue", "wait", "stop"]
+    routes_actions.handover_choice(db, {"id": card.request_id}, {"choice": "stop"})
+    assert [r[0] for r in db.conn.execute("SELECT state FROM handovers")] == [handover.STOPPED] * 2
+    assert inbox.items(db, None, panes={}) == []
+
+
+def test_a_limit_is_one_inbox_card_for_every_session_and_worker_and_answers_them_together(
+        db, repo, tmp_path, world, spawned, monkeypatch):
+    """Founder, 2026-11-17: out of quota on anything is ONE alert. Three
+    supervisors (one in another repo) and two worktree workers, whose
+    replacement would bill per token, reach Claude's weekly limit: one card in
+    every repo's Inbox with the same members, whatever target each session
+    would take; the workers' answer and Switch each go to all of them; a
+    session reaching the limit after the switch joins that card."""
+    from conftest import sh
+    from brindle import handover
+    from brindle.daemon import routes_actions
+    from brindle.service import inbox
+
+    other = tmp_path / "other"
+    other.mkdir()
+    sh("git init -q", other)
+    week = _sessions_and_workers_reach_the_weekly_limit(db, world, monkeypatch, repo, ("a", repo), ("b", repo),
+                                                        ("c", other))
+    # A session the sweep would move elsewhere is on the same limit all the same.
+    _session(db, repo, root_id="d")
+    _offer_row(db, "to-agy", "d", "switch", "claude", "antigravity", "open", limited_until=week)
+
+    [card] = inbox.items(db, None, panes={})
+    # Every destination is named, and each session with its own.
+    assert (card.kind, card.detail.split(" · ")[0]) == (provider_switch.KIND_OFFER, "claude → codex+antigravity")
+    assert _listed(card, provider_switch.SESSIONS_MARK) == {"a": "→ codex", "b": "→ codex", "c": "→ codex",
+                                                            "d": "→ antigravity"}
+    # Each worker says what continuing costs before Continue is pressed.
+    assert _listed(card, provider_switch.WORKERS_MARK) == {"w1": "→ developer-codex (billed per token)",
+                                                           "w2": "→ developer-codex (billed per token)"}
+    assert [c.id for c in card.choices] == ["continue", "wait", "stop"]
+    assert card.choices[0].label.endswith("(billed per token)")
+    assert inbox.items(db, str(other), panes={}) == inbox.items(db, str(repo), panes={}) == [card]
+
+    routes_actions.provider_switch(db, {"root": card.root_id}, {"offer": card.request_id, "workers": "wait"})
+    assert [r[0] for r in db.conn.execute("SELECT state FROM handovers")] == [handover.PARKED] * 2
+    routes_actions.provider_switch(db, {"root": card.root_id}, {"offer": card.request_id, "accept": True})
+    assert sorted(c["provider_name"] for c in spawned) == ["antigravity", "codex", "codex", "codex"]
+    # The switched-away sessions ask nothing: the one notice is all.
+    [notice] = inbox.items(db, None, panes={})
+    assert notice.detail.startswith(provider_switch.NOTICE_PREFIX + "claude → codex+antigravity")
+    assert sorted(_listed(notice, provider_switch.SESSIONS_MARK).values()) == ["→ antigravity"] + ["→ codex"] * 3
+
+    _session(db, repo, root_id="e")
+    provider_switch.sweep(db, NOW + 1)
+    [card] = inbox.items(db, None, panes={})
+    assert (card.kind, card.root_id) == (provider_switch.KIND_OFFER, "e")
+    routes_actions.provider_switch(db, {"root": "e"}, {"offer": card.request_id, "accept": True, "always": True})
+    assert config.user_settings().get("quota_switch") == "auto" and len(spawned) == 5
+    [notice] = inbox.items(db, None, panes={})
+    assert len(_sessions_on(notice)) == 5
+    routes_actions.provider_switch(db, {"root": notice.root_id}, {"offer": notice.request_id, "accept": False})
+    assert inbox.items(db, None, panes={}) == []
+
+
 def test_handoff_note_carries_goal_workers_tasks_messages_and_transcript_tail(db, repo, world, tmp_path):
     ws = _session(db, repo)
     transcript = tmp_path / "root.jsonl"

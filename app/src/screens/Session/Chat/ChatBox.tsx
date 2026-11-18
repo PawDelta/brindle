@@ -7,7 +7,7 @@
  * Pane owner: hosts this box below the live CLI and forwards session drops.
  * Keep these regions independent; coordinate shared prop/API changes.
  */
-import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent, type KeyboardEvent, type Ref } from "react";
 import { fileAttachment } from "../../../api/attachments";
 import { DaemonError, type DaemonClient } from "../../../api/client";
 import type { ChatMessageDTO, QueuedChatMessageDTO } from "../../../api/schema";
@@ -31,6 +31,14 @@ export interface ChatBoxProps {
   provider?: string;
   /** Files are being dragged over the session: the empty box says where they land. */
   dropping?: boolean;
+  /** What's typed or pasted in the agent's pane while the box stands in for its hidden prompt comes here. */
+  typing?: Ref<ChatBoxTyping>;
+}
+
+/** Text typed elsewhere (the agent's pane) put in the box at its caret, the keyboard moved to the box with it:
+ * "" only moves the keyboard (a composition or dead key, whose text the box's own field then takes). */
+export interface ChatBoxTyping {
+  type(text: string): void;
 }
 
 /* A paste over either limit becomes a chip; at or under both it is ordinary text. */
@@ -68,18 +76,44 @@ interface Pasted {
 const chipClass = "inline-flex h-7 max-w-full items-center gap-2 rounded-md border bg-surface-2 pl-2 pr-1 text-[12.5px] text-ink";
 const removeClass = "inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-ink-3 hover:bg-line hover:text-ink focus-visible:outline-2 focus-visible:outline-branch";
 
-export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesConsumed, onChanged, recipient = "Claude Code", provider = "Claude", dropping = false }: ChatBoxProps) {
+/* Each agent's unsent draft (text, attached files, pasted-text chips) lives here, not in the component: the
+   box can be unmounted mid-draft (the session's mount condition, a snapshot refresh) and comes back as it was.
+   It is emptied by a successful send or by the person; ids are shared so a restored chip never clashes. */
+/* The store is the one truth, and every mounted box subscribes to it, so a send that ends while another
+   instance of the same agent's box is showing updates that one too. `token` is the request out for the
+   agent, if any: it outlives the component, so a remounted box can't send the same draft again. */
+interface Slot { text: string; files: Attached[]; pastes: Pasted[]; token: number | null }
+const EMPTY: Slot = { text: "", files: [], pastes: [], token: null };
+const slots = new Map<string, Slot>();
+const watchers = new Set<() => void>();
+const watch = (tell: () => void) => {
+  watchers.add(tell);
+  return () => void watchers.delete(tell);
+};
+const change = (agent: string, update: (now: Slot) => Slot) => {
+  slots.set(agent, update(slots.get(agent) ?? EMPTY));
+  watchers.forEach((tell) => tell());
+};
+let nextChipId = 0;
+let nextRequest = 0;
+export const clearChatDrafts = () => {
+  slots.clear();
+  watchers.forEach((tell) => tell());
+};
+type Next<T> = T | ((now: T) => T);
+const resolve = <T,>(next: Next<T>, now: T): T => (typeof next === "function" ? (next as (now: T) => T)(now) : next);
+
+export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesConsumed, onChanged, recipient = "Claude Code", provider = "Claude", dropping = false, typing }: ChatBoxProps) {
   // -- send owner -------------------------------------------------------------
   // One-line composer grows to 40vh, then scrolls; controls remain visible.
   // Enter submits, Shift+Enter inserts a newline; IME composition never submits.
   // The draft stays on failure; on success only what was sent is cleared, and
   // only if the box is still the same agent's.
-  const [text, setText] = useState("");
-  const [files, setFiles] = useState<Attached[]>([]);
-  const [pastes, setPastes] = useState<Pasted[]>([]);
+  const { text, files, pastes, token: pending } = useSyncExternalStore(watch, () => slots.get(agentId) ?? EMPTY);
+  const setText = (next: Next<string>) => change(agentId, (s) => ({ ...s, text: resolve(next, s.text) }));
+  const setFiles = (next: Next<Attached[]>) => change(agentId, (s) => ({ ...s, files: resolve(next, s.files) }));
+  const setPastes = (next: Next<Pasted[]>) => change(agentId, (s) => ({ ...s, pastes: resolve(next, s.pastes) }));
   const [error, setError] = useState<string | null>(null);
-  // The agent whose message is out, while it is.
-  const [sending, setSending] = useState<string | null>(null);
   const [scrolled, setScrolled] = useState(false);
   const [preview, setPreview] = useState<number | null>(null);
   // Queued here and not in the snapshot yet; removed or sent here and still in it.
@@ -89,7 +123,6 @@ export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesCon
 
   const editor = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
-  const ids = useRef(0);
   const caret = useRef<number | null>(null);
   const shown = useRef({ agentId, mounted: true });
   shown.current.agentId = agentId;
@@ -104,9 +137,6 @@ export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesCon
   const [owner, setOwner] = useState(agentId);
   if (owner !== agentId) {
     setOwner(agentId);
-    setText("");
-    setFiles([]);
-    setPastes([]);
     setError(null);
     setPreview(null);
     setHeld([]);
@@ -152,36 +182,32 @@ export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesCon
   };
 
   const canSend = text.trim().length > 0 || files.length > 0 || pastes.length > 0;
-  // One request out per agent, and each releases the lock once, by its own token: a request that ends
-  // late (its snapshot refresh still running) can't unlock one sent after it. A ref, since the state
-  // lags a key repeat.
-  const inFlight = useRef<{ agent: string; token: number } | null>(null);
-  const requests = useRef(0);
+  // One request out per agent (held in the store, so a remounted box respects it), and each releases the
+  // lock once, by its own token: a request that ends late (its snapshot refresh still running) can't
+  // unlock one sent after it.
   const submit = async () => {
-    if (inFlight.current?.agent === agentId || !canSend) return;
-    const token = ++requests.current;
-    inFlight.current = { agent: agentId, token };
-    const release = () => {
-      if (inFlight.current?.token !== token) return;
-      inFlight.current = null;
-      if (shown.current.mounted) setSending(null);
-    };
+    if ((slots.get(agentId) ?? EMPTY).token !== null || !canSend) return;
+    const token = ++nextRequest;
+    const release = () => change(started.agentId, (s) => (s.token === token ? { ...s, token: null } : s));
     const started = { agentId, text, files, pastes };
+    change(agentId, (s) => ({ ...s, token }));
     // What was typed, then every paste in full, in the order pasted.
     const body = [...(text.trim() ? [text] : []), ...pastes.map((p) => p.text)].join("\n");
     const message: ChatMessageDTO = files.length
       ? { text: body, attachments: files.map(({ name, data_base64 }) => ({ name, data_base64 })) }
       : { text: body };
-    setSending(agentId);
     setError(null);
     try {
       // A busy agent's message waits in brindle's queue; the engine may still queue one sent to an idle agent.
       const result = await (busy ? client.chatEnqueue(agentId, message) : client.chatSend(agentId, message));
-      release();
+      // What was sent leaves the agent's draft, whichever box (if any) is showing it; later edits stay.
+      change(started.agentId, (s) => ({
+        text: s.text === started.text ? "" : s.text,
+        files: s.files.filter((f) => !started.files.includes(f)),
+        pastes: s.pastes.filter((p) => !started.pastes.includes(p)),
+        token: s.token === token ? null : s.token,
+      }));
       if (!still(started.agentId)) return;
-      setText((now) => (now === started.text ? "" : now));
-      setFiles((now) => now.filter((f) => !started.files.includes(f)));
-      setPastes((now) => now.filter((p) => !started.pastes.includes(p)));
       setPreview(null);
       const id = result.status === "queued" ? result.message_id : null;
       if (id) setHeld((now) => [...now, { id, text: body, attachments: started.files.map((f) => f.name) }]);
@@ -255,7 +281,7 @@ export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesCon
     const added = read.flatMap((r, i): Attached[] => {
       if (r.status !== "fulfilled") return [];
       const type = list[i].type;
-      return [{ id: ++ids.current, ...r.value, bytes: list[i].size, image: type.startsWith("image/") ? `data:${type};base64,${r.value.data_base64}` : null, pasted }];
+      return [{ id: ++nextChipId, ...r.value, bytes: list[i].size, image: type.startsWith("image/") ? `data:${type};base64,${r.value.data_base64}` : null, pasted }];
     });
     if (added.length) setFiles((now) => [...now, ...added]);
     const unread = list.filter((_, i) => read[i].status === "rejected").map((f) => f.name);
@@ -280,6 +306,17 @@ export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesCon
     caret.current = from + pasted.length;
     setText(el.value.slice(0, from) + pasted + el.value.slice(to));
   };
+  useImperativeHandle(typing, () => ({
+    type(typed: string) {
+      const el = editor.current;
+      if (!el) return;
+      if (document.activeElement !== el) {
+        el.focus({ preventScroll: true });
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
+      if (typed) insert(typed);
+    },
+  }));
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     const copied = Array.from(e.clipboardData.files ?? []);
     const pasted = e.clipboardData.getData("text/plain").replace(/\r\n?/g, "\n");
@@ -295,7 +332,7 @@ export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesCon
     e.preventDefault();
     const lines = lineCount(pasted);
     const bytes = byteCount(pasted);
-    if (lines > PASTE_LINES || bytes > PASTE_BYTES) setPastes((now) => [...now, { id: ++ids.current, text: pasted, lines, bytes }]);
+    if (lines > PASTE_LINES || bytes > PASTE_BYTES) setPastes((now) => [...now, { id: ++nextChipId, text: pasted, lines, bytes }]);
     else insert(pasted);
   };
 
@@ -432,7 +469,7 @@ export function ChatBox({ client, agentId, busy, queue, droppedFiles, onFilesCon
               </p>
             ) : null}
           </div>
-          <button type="button" className={main} disabled={!canSend || sending === agentId} onClick={() => void submit().then(() => editor.current?.focus())}>
+          <button type="button" className={main} disabled={!canSend || pending !== null} onClick={() => void submit().then(() => editor.current?.focus())}>
             Send
           </button>
         </div>

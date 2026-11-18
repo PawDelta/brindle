@@ -23,7 +23,8 @@ export interface SessionsFeed {
   sessions: Record<string, SessionDTO[]>;
   /* The last failed load's message; the last lists stay, once loaded. */
   error: string | null;
-  reload(): Promise<void>;
+  /* Reads the lists again (one begun after the call); true when that read answered and was applied. */
+  reload(): Promise<boolean>;
   /* The repo a session root belongs to, as the list gave it. */
   repoOf(root: string): string | null;
   /* The session row for a root, from any repo. */
@@ -83,7 +84,7 @@ export function SessionsProvider({ client, children }: { client: DaemonClient | 
   // (at launch, after a reconnect), and a load per event, all at once, once
   // took every file descriptor the app's shell had (each request is a
   // connection to the daemon). Asked again while one is out, it runs once more after.
-  const loading = useRef<Promise<void> | null>(null);
+  const loading = useRef<Promise<boolean> | null>(null);
   const again = useRef(false);
   // Sessions being closed: out of the lists from the click until the engine's
   // own list, asked for after the close succeeded, has answered (a failed
@@ -93,13 +94,13 @@ export function SessionsProvider({ client, children }: { client: DaemonClient | 
   // Closed roots → the newest load started before the engine said so: only a later load settles them.
   const closedAt = useRef(new Map<string, number>());
 
-  const load = useCallback(async () => {
-    if (!client) return;
+  const load = useCallback(async (): Promise<boolean> => {
+    if (!client) return false;
     const seq = ++latest.current;
     try {
       const found = await client.repos();
       const lists = await Promise.all(found.map((r) => client.sessions(r.repo_root)));
-      if (seq !== latest.current) return;
+      if (seq !== latest.current) return false;
       setRepos(found);
       setSessions(Object.fromEntries(found.map((r, i) => [r.repo_root, lists[i]])));
       setError(null);
@@ -109,22 +110,26 @@ export function SessionsProvider({ client, children }: { client: DaemonClient | 
         for (const root of settled) closedAt.current.delete(root);
         setClosing((c) => new Set([...c].filter((root) => !settled.includes(root))));
       }
+      return true;
     } catch (e) {
       if (seq === latest.current) setError(message(e));
+      return false;
     }
   }, [client]);
 
-  const reload = useCallback((): Promise<void> => {
+  const reload = useCallback((): Promise<boolean> => {
     if (loading.current) {
       again.current = true;
       return loading.current;
     }
     const run = (async () => {
+      let ok = false;
       try {
         do {
           again.current = false;
-          await load();
+          ok = await load();
         } while (again.current);
+        return ok;
       } finally {
         loading.current = null;
       }

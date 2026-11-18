@@ -19,8 +19,8 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import (agents, autopilot, bus, git, handover, identity_lock, permissions, prompt_answer, provider_switch,
-                     session_sync, tmux, view)
+from brindle import (agents, autopilot, bus, git, identity_lock, permissions, prompt_answer, provider_switch,
+                     session_sync, sessions, tmux, view)
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent, Workspace, request_subagent
@@ -359,7 +359,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
                 continue
             ap = db.get_autopilot(row.id)
             # The workspace holds one asking id; each root's own state is the truth.
-            if ap and ap.state == "blocked" and not any(
+            # A session handed to another (a provider switch) asks nothing: its
+            # successor carries on, and the switch has its own card.
+            if ap and ap.state == "blocked" and not sessions.handed_away(ap) and not any(
                     i.kind == "question" and i.agent_id == a["id"] for i in out):
                 out.append(InboxItemDTO(kind="question", reason="has a question", **link,
                                         request_id=str(occurrences.get(f"question:{a['id']}", 0))))
@@ -380,8 +382,10 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
     all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _review_items(db, repo_root)
+                 # One card per provider limit: sessions to switch and workers'
+                 # handovers (brindle.handover) on it alike.
                  + _visual_items(db, repo_root) + provider_switch.inbox_items(db, repo_root)
-                 + handover.inbox_items(db, repo_root) + _plan_offer_items(db, repo_root) + _setup_items()
+                 + _plan_offer_items(db, repo_root) + _setup_items()
                  + _org_blocks(db, repo_root) + _org_notices())
     # Requests can outlive the live snapshot (notably document requests).
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask

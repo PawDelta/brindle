@@ -263,6 +263,18 @@
           "default": null,
           "title": "Dismissed At"
         },
+        "failed_why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failed Why"
+        },
         "headless": {
           "anyOf": [
             {
@@ -12900,6 +12912,18 @@
               ],
               "default": null,
               "title": "Dismissed At"
+            },
+            "failed_why": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Failed Why"
             },
             "headless": {
               "anyOf": [

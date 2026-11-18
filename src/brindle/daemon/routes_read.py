@@ -35,6 +35,7 @@ from brindle import (
     keystore,
     knowledge,
     profiles,
+    provider_health,
     quota,
     session_sync,
     sessions,
@@ -1233,14 +1234,15 @@ def analysis_doc(db: DB, request: Request) -> Any:
     return dict(got, tasks=tasks) if isinstance(got, dict) and tasks is not None else got
 
 
-USAGE_NEAR_PERCENT = 80.0
+# One threshold for "close to the limit", every provider alike: provider_health's.
+USAGE_NEAR_PERCENT = provider_health.CLOSING_PERCENT
 USAGE_NEAR_RESET_SECONDS = 3600
 
 
 @_json
 def get_usage(db: DB, request: Request) -> Any:
     """Each provider's quota windows, and ``near``: the providers that are
-    limited, past 80% of their fullest window or about to reset it within the
+    limited, at USAGE_NEAR_PERCENT of their fullest window or about to reset it within the
     hour, worst first. Providers brindle knows nothing current about come back
     with ``known: false``."""
     now = time.time()

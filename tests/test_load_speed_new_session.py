@@ -207,3 +207,39 @@ def test_new_worktree_start_fetches_while_its_checks_run(db, repo, monkeypatch):
     with pytest.raises(_Stop):
         routes_actions.start_session(db, {}, {"repo": str(repo), "choice": "n"})
     assert overlapped == [True]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_start_answers_once_the_session_row_exists_and_launches_behind_it(db, repo, monkeypatch, fails):
+    """The reply names the new session while its CLI is still launching; a launch that then fails
+    leaves the session failed with the reason on the bus, not an error nobody is waiting on."""
+    from brindle import agents
+
+    holding, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def launch(own, agent, ws, **kw):
+        holding.set()
+        assert release.wait(5)
+        try:
+            if fails:
+                raise agents.AgentError("claude isn't installed")
+        finally:
+            done.set()
+
+    monkeypatch.setattr(routes_actions, "session_blockers", lambda *a: None)
+    monkeypatch.setattr(git, "missing_user_identity", lambda path: [])
+    monkeypatch.setattr(svc, "supervisor_provider", lambda root, provider=None: "claude")
+    monkeypatch.setattr(svc, "preflight", lambda *a: [])
+    monkeypatch.setattr(agents, "_launch", launch)
+    monkeypatch.setattr(svc, "cull_detached", lambda root=None: None)
+    got = routes_actions.start_session(db, {}, {"repo": str(repo)})
+    assert holding.wait(5) and not done.is_set()      # answered before the launch finished
+    assert db.get_agent(got["id"]).status == "starting"
+    release.set()
+    assert done.wait(5)
+    for t in threading.enumerate():
+        if t.name.startswith("brindle-launch-"):
+            t.join(5)       # its failure is recorded before the thread ends
+    if fails:
+        failed = db.get_agent(got["id"])
+        assert (failed.status, failed.failed_why) == ("failed", "launch: claude isn't installed")

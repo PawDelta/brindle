@@ -298,7 +298,7 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
                         prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
                         autopilot=_get(body, "autopilot", bool), branch=branch,
                         worktree=worktree, choice=_get(body, "choice"),
-                        session_id=_get(body, "session_id"), fetched=fetched)
+                        session_id=_get(body, "session_id"), fetched=fetched, defer=True)
     if isinstance(got, svc.Opened):
         return {"opened": SessionDTO.from_agent(got.root).to_json()}
     if isinstance(got, svc.Started):
@@ -467,8 +467,15 @@ def provider_switch(db: DB, params: dict, body: Body) -> Any:
     provider_switch or provider_switch_back): ``{"offer": id, "accept": bool}``.
     Accept runs brindle.provider_switch.switch for either kind and answers
     the session now driving; a second press answers the same session.
-    ``always: true`` saves quota_switch="auto" before switching."""
-    from brindle import config, provider_switch as ps
+    ``always: true`` saves quota_switch="auto" before switching.
+
+    One card stands for every session out of quota on one limit
+    (``provider_switch.group_of``): the answer goes to all of them, the
+    named offer first. Its own session is answered; another session whose
+    switch fails shows its own failed card instead. ``{"offer": id,
+    "workers": "continue" | "wait" | "stop"}`` answers the workers waiting
+    on the same card instead (brindle.handover.answer, for each)."""
+    from brindle import agents, config, handover, provider_switch as ps
 
     root, _ = _root(db, params["root"])
     offer = ps.get(db, _get(body, "offer", required=True))
@@ -476,37 +483,60 @@ def provider_switch(db: DB, params: dict, body: Body) -> Any:
     if offer is None or (offer.root_id != root.id and not notice):
         raise ServiceError("not_found", "no such provider switch offer for this session", 404)
     now = time.time()
+    if body.get("workers") is not None:
+        choice = _get(body, "workers")
+        if choice not in handover.CHOICES:
+            raise ServiceError("invalid", f"workers must be one of: {', '.join(handover.CHOICES)}")
+        return {"workers": [handover.answer(db, h.id, choice, now) for h in ps.workers_of(db, offer.id, now)]}
+    group = ps.group_of(db, offer.id, now)
     if not _get(body, "accept", bool, required=True):
-        if notice:
-            ps.dismiss_notice(db, offer.id)
-        else:
-            ps.dismiss(db, offer.id, now)
+        for each in group:
+            if notice:
+                ps.dismiss_notice(db, each.id)
+            else:
+                ps.dismiss(db, each.id, now)
         return {"accepted": False}
     if _get(body, "always", bool, default=False):
         config.set_user("quota_switch", "auto")
-    if notice:
-        original = offer
-        ps.maybe_offer_back(db, now, switch_id=original.id)
-        row = db.conn.execute("SELECT id FROM provider_switches WHERE back_of=?", (original.id,)).fetchone()
-        if row is None:
-            raise ServiceError("unavailable", "the original provider is unavailable", 409)
-        offer = ps.get(db, row["id"])
-    new = ps.switch(db, offer.id, now)
+
+    def carry_out(each: ps.Offer):
+        if notice:   # a notice's Switch back now: its switch's back offer
+            ps.maybe_offer_back(db, now, switch_id=each.id)
+            row = db.conn.execute("SELECT id FROM provider_switches WHERE back_of=?", (each.id,)).fetchone()
+            if row is None:
+                raise ServiceError("unavailable", "the original provider is unavailable", 409)
+            each = ps.get(db, row["id"])
+        return ps.switch(db, each.id, now)
+
+    new = carry_out(group[0])
+    for each in group[1:]:
+        try:
+            carry_out(each)
+        except (agents.AgentError, ServiceError):
+            continue    # that session's own card shows what went wrong
     return SessionDTO.from_agent(new).to_json()
 
 
 def handover_choice(db: DB, params: dict, body: Body) -> Any:
     """The person's answer on a handover Inbox card (kind handover):
     ``{"choice": "wait" | "continue" | "stop"}``. A second answer finds the
-    card taken and changes nothing (brindle.handover.answer)."""
-    from brindle import handover
+    card taken and changes nothing (brindle.handover.answer). One card
+    stands for every worker waiting on one provider limit
+    (``provider_switch.workers_of``): the answer goes to each, this one first."""
+    from brindle import handover, provider_switch
 
+    now = time.time()
+    choice = _get(body, "choice", required=True)
+    # The card's members as shown, read before this answer closes its own.
+    others = [h for h in provider_switch.workers_of(db, params["id"], now) if h.id != params["id"]]
     try:
-        done = handover.answer(db, params["id"], _get(body, "choice", required=True), time.time())
+        done = handover.answer(db, params["id"], choice, now)
     except KeyError:
         raise ServiceError("not_found", "no such handover", 404) from None
     except ValueError as e:
         raise ServiceError("invalid", str(e)) from None
+    for h in others:
+        handover.answer(db, h.id, choice, now)
     return {"done": done}
 
 

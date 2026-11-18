@@ -14,7 +14,8 @@ with an action to return early instead of asking first.
 
 Records live in the ``provider_switches`` table (see db.py): one row per
 offer, ``kind`` switch or back, ``state`` open -> switching -> done (or
-dismissed / failed). Pressing Switch claims the row with one UPDATE from
+dismissed / failed, or withdrawn once its limit is not confirmed: see
+``withdraw_unconfirmed``). Pressing Switch claims the row with one UPDATE from
 open to switching, so a second press (two windows, a double click) finds it
 taken and gets the same supervisor back instead of starting another.
 
@@ -34,12 +35,12 @@ import os
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from brindle import identity_lock, quota
 from brindle.db import DB, Agent
-from brindle.service.dto import InboxActionDTO, InboxItemDTO
+from brindle.service.dto import InboxActionDTO, InboxChoiceDTO, InboxItemDTO
 
 # Providers that can run an interactive supervisor, in the order a tie in
 # headroom is broken. Native (local model) is left out: see the design doc.
@@ -62,7 +63,7 @@ class Offer:
     kind: str                    # switch | back
     from_provider: str
     to_provider: str
-    state: str                   # open | switching | done | dismissed | failed
+    state: str                   # open | switching | done | dismissed | failed | withdrawn
     limited_until: float | None
     new_root_id: str | None
     back_of: str | None
@@ -235,18 +236,33 @@ def pick_target(current: str, repo_root: str | None, now: float) -> str | None:
     return next(iter(_targets(current, repo_root, now)), None)
 
 
+def confirmed_until(provider: str, now: float, model: str | None = None) -> float | None:
+    """When ``provider``'s confirmed limit lifts, or None while there is
+    none: a recorded limit, or a full account window (or a full one-model
+    cap on ``model``). Only this moves a supervisor away. A forecast
+    (``closing``), one 429 (``rate_limited``) or a run of errors
+    (``erroring``) is no limit: each lifts on its own, and acting on it once
+    offered every supervisor a switch while Claude was at 49%."""
+    if provider not in SUPERVISOR_PROVIDERS:
+        return None
+    from brindle import provider_health
+
+    return provider_health.limited_until(provider, model, now=now)
+
+
 def out_of_quota(db: DB, root_id: str, now: float) -> float | None:
-    """When the supervisor ``root_id``'s provider is available again, or
-    None while it is in quota, or when ``root_id`` isn't an active session
-    root (a worker, or a paused or done session)."""
+    """When the supervisor ``root_id``'s provider (on the model it runs) is
+    available again after a confirmed limit (``confirmed_until``), or None
+    while there is none, or when ``root_id`` isn't an active session root (a
+    worker, or a paused or done session)."""
     root = db.get_agent(root_id)
     if (root is None or root.parent_id is not None or root.mode != "interactive"
             or root.status in ("paused", "done") or root.dismissed_at is not None
             or identity_lock.locked_by(root.id)):
         return None
     ws = db.get_workspace(root.workspace_id)
-    return limited_until(root.provider, now,
-                         _supervisor_model(root.provider, ws.repo_root if ws else None, root.profile))
+    return confirmed_until(root.provider, now,
+                           _supervisor_model(root.provider, ws.repo_root if ws else None, root.profile))
 
 
 # -- offers ----------------------------------------------------------------------
@@ -294,7 +310,7 @@ def maybe_offer(db: DB, root_id: str, now: float) -> Offer | None:
                   "WITH RECURSIVE lineage(id) AS (SELECT ? UNION "
                   "SELECT p.root_id FROM provider_switches p JOIN lineage l ON p.new_root_id=l.id "
                   "WHERE p.state='done') SELECT id FROM lineage) AND kind='switch' "
-                  "AND from_provider=? AND limited_until=?)",
+                  "AND state != 'withdrawn' AND from_provider=? AND limited_until=?)",
                   (offer_id, root_id, root.provider, target, until, now, now,
                    root_id, root.provider, until))
     return open_offer(db, root_id)
@@ -361,10 +377,32 @@ def dismiss_notice(db: DB, offer_id: str) -> None:
                   (f"provider-switch-notice:{offer_id}",))
 
 
+def withdraw_unconfirmed(db: DB, now: float) -> list[str]:
+    """Withdraw every open switch offer whose session has no confirmed limit
+    (``out_of_quota`` is None): its provider is back in quota, or the limit
+    was never real (an offer made on a forecast before ``confirmed_until``),
+    or the session stopped. A withdrawn offer consumes nothing: a real limit
+    later, even with the same reset, is offered afresh. Another identity's
+    session is left as it is. Returns the offers withdrawn."""
+    withdrawn = []
+    for row in db.conn.execute("SELECT id, root_id FROM provider_switches "
+                               "WHERE kind='switch' AND state='open'").fetchall():
+        if identity_lock.locked_by(row["root_id"]) or out_of_quota(db, row["root_id"], now) is not None:
+            continue
+        with db.tx() as c:
+            if c.execute("UPDATE provider_switches SET state='withdrawn', updated_at=? "
+                         "WHERE id=? AND state='open'", (now, row["id"])).rowcount:
+                withdrawn.append(row["id"])
+    return withdrawn
+
+
 def sweep(db: DB, now: float) -> list[Offer]:
-    """New offers for active roots, or carry them out with automatic consent."""
+    """New offers for active roots, or carry them out with automatic consent.
+    Offers whose limit isn't confirmed (any more) are withdrawn first, so the
+    first sweep after a start clears what an earlier build offered wrongly."""
     from brindle import agents
 
+    withdraw_unconfirmed(db, now)
     offers = maybe_offer_back(db, now)
     automatic = quota_switch() == "auto"
     for root in db.list_agents():
@@ -602,17 +640,44 @@ def switch_back(db: DB, offer_id: str, now: float) -> Agent:
 NOTICE_PREFIX = "notice: "  # marks a completed-switch notice's detail: "notice: from → to · HH:MM"
 
 
-def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> list[InboxItemDTO]:
-    """Open offers as Inbox cards: KIND_OFFER or KIND_BACK, ``request_id``
-    the offer id, ``detail`` "<from> -> <to>", ``action`` POST
-    /v1/sessions/{root}/provider-switch. Built on every Inbox read, so it
-    reads only the database, quota.json and the targets the last sweep
-    found (``check_cards``): never preflight, profiles or policy."""
-    from brindle import sessions
+SESSIONS_MARK = " sessions: "  # a card for several sessions ends "· <n> sessions: <id>, <id>"
+WORKERS_MARK = " workers: "    # workers paused on the same limit: "· <n> workers: <id>, <id>"
 
-    now = time.time() if now is None else now
+
+@dataclass
+class _Alert:
+    """One Inbox card: everything waiting on the person about one limit (a
+    provider, or one model's cap, until one reset). Its members are the
+    same whichever repo's Inbox shows it, and one answer goes to them all."""
+    kind: str                                    # limit | back | failed
+    offers: list = field(default_factory=list)   # (Offer, root, ws): open switch (limit) or back offers
+    notices: list = field(default_factory=list)  # (Offer, new root, ws): switches made on this limit
+    workers: list = field(default_factory=list)  # (Handover, worker, ws, its own card): workers asking
+
+    def repos(self) -> set:
+        return {m[2].repo_root for m in self.offers + self.notices + self.workers}
+
+
+def _alerts(db: DB, now: float) -> list[_Alert]:
+    """Every card the Inbox shows about quota, in every repo: one per limit,
+    keyed by provider and reset (``limited_until``; a worker's handover:
+    its provider and ``until_ts``), whatever target each session would move
+    to and whether it has switched already. Sessions offered a switch, the
+    switches made (their notices) and the workers whose handover waits on
+    the person (brindle.handover: a replacement billed per token, or a task
+    out of handovers) all share it; a later session or worker on that limit
+    joins it. The offers back once it resets share another, keyed by the
+    provider back in quota. A failed switch is a card of its own. Reads only
+    the database, quota.json and the targets the last sweep found
+    (``check_cards``): never preflight, profiles or policy."""
+    from brindle import handover, sessions
+
     checked = _card_targets.get(db.path, {})
-    items = []
+    alerts: dict[tuple, _Alert] = {}
+
+    def alert(key: tuple) -> _Alert:
+        return alerts.setdefault(key, _Alert(key[0]))
+
     for row in db.conn.execute(
             "SELECT * FROM provider_switches WHERE kind='switch' AND state='done' "
             "AND NOT EXISTS (SELECT 1 FROM inbox_dismissed WHERE key='provider-switch-notice:' || provider_switches.id) "
@@ -623,27 +688,17 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
         ws = db.get_workspace(root.workspace_id) if root else None
         if (root is None or ws is None or root.status in ("paused", "done")
                 or root.parent_id is not None or root.mode != "interactive" or root.dismissed_at is not None
-                or root.provider != offer.to_provider or identity_lock.locked_by(root.id)
-                or (repo_root is not None and ws.repo_root != repo_root)):
+                or root.provider != offer.to_provider or identity_lock.locked_by(root.id)):
             continue
         ap = db.get_autopilot(root.id)
         if ap and sessions.handed_away(ap):
             continue
-        reset = time.strftime("%H:%M", time.localtime(offer.limited_until)) if offer.limited_until else "unknown"
-        items.append(InboxItemDTO(kind=KIND_BACK,
-                                  reason=f"Switched to {offer.to_provider} · {offer.from_provider} was out of quota, back at {reset}",
-                                  detail=f"{NOTICE_PREFIX}{offer.from_provider} → {offer.to_provider}"
-                                         + (f" · {reset}" if offer.limited_until else ""),
-                                  agent_id=root.id, workspace_id=ws.id,
-                                  root_id=root.id, request_id=offer.id,
-                                  action=InboxActionDTO(method="POST",
-                                      path=f"/v1/sessions/{root.id}/provider-switch")))
+        alert(("limit", offer.from_provider, offer.limited_until)).notices.append((offer, root, ws))
     for row in db.conn.execute("SELECT * FROM provider_switches WHERE state IN ('open', 'failed') ORDER BY created_at, id"):
         offer = Offer(**dict(row))
         root = db.get_agent(offer.root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
-        if (root is None or ws is None or (repo_root is not None and ws.repo_root != repo_root)
-                or identity_lock.locked_by(root.id)):
+        if root is None or ws is None or identity_lock.locked_by(root.id):
             continue
         if offer.state != "failed" and offer.kind == "switch" and (root.provider != offer.from_provider
                                        or out_of_quota(db, root.id, now) is None):
@@ -651,11 +706,145 @@ def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> l
         if offer.state != "failed" and offer.to_provider not in checked.get(
                 (offer.from_provider, ws.repo_root, offer.kind == "back"), ()):
             continue
-        detail = f"{offer.from_provider} → {offer.to_provider}"
-        items.append(InboxItemDTO(kind=KIND_BACK if offer.kind == "back" else KIND_OFFER,
-                                  reason=("Provider switch failed. Check the session before continuing."
-                                          if offer.state == "failed" else "Switch provider or choose Not now"),
-                                  detail=detail,
+        if offer.state == "failed":
+            alert(("failed", offer.id)).offers.append((offer, root, ws))
+        elif offer.kind == "back":
+            alert(("back", offer.to_provider, offer.limited_until)).offers.append((offer, root, ws))
+        else:
+            alert(("limit", offer.from_provider, offer.limited_until)).offers.append((offer, root, ws))
+    for card in handover.inbox_items(db, None):
+        h = handover.get(db, card.request_id)
+        worker = db.get_agent(h.from_agent) if h else None
+        ws = db.get_workspace(worker.workspace_id) if worker else None
+        if h is not None and worker is not None and ws is not None:
+            alert(("limit", worker.provider, h.until_ts)).workers.append((h, worker, ws, card))
+    return list(alerts.values())
+
+
+def _alert_of(db: DB, member_id: str, now: float) -> _Alert | None:
+    """The alert ``member_id`` (an offer or a handover) belongs to now."""
+    for a in _alerts(db, now):
+        if member_id in {m[0].id for m in a.offers + a.notices + a.workers}:
+            return a
+    return None
+
+
+def group_of(db: DB, offer_id: str, now: float) -> list[Offer]:
+    """The offers one answer on ``offer_id``'s card goes to, ``offer_id``'s
+    own first: the alert's open offers, or its switches made when
+    ``offer_id`` is one (a notice). Just that offer when no card shows it."""
+    a = _alert_of(db, offer_id, now)
+    members = ([] if a is None else [m[0] for m in a.offers] if offer_id in {m[0].id for m in a.offers}
+               else [m[0] for m in a.notices])
+    if not members:
+        offer = get(db, offer_id)
+        return [offer] if offer else []
+    return sorted(members, key=lambda o: o.id != offer_id)
+
+
+def workers_of(db: DB, member_id: str, now: float) -> list:
+    """The handovers waiting on the person in ``member_id``'s alert (an
+    offer's, or a handover's own first): what a workers' answer goes to."""
+    a = _alert_of(db, member_id, now)
+    return sorted((m[0] for m in a.workers), key=lambda h: h.id != member_id) if a else []
+
+
+def _worker_choices(workers: list) -> list[InboxChoiceDTO]:
+    """The workers' answers on an alert (brindle.handover.answer, given to
+    each): continue on the replacement each was offered, wait, or stop."""
+    picks = {h.to_profile for h, *_ in workers if h.to_profile}
+    billed = " (billed per token)" if any(_bills(h, ws) for h, _, ws, _ in workers) else ""
+    cont = ([InboxChoiceDTO(id="continue", label=(f"Continue on {next(iter(picks))}" if len(picks) == 1
+                                                  else "Continue each on its replacement") + billed)]
+            if picks else [])
+    return cont + [InboxChoiceDTO(id="wait", label="Wait for its provider"), InboxChoiceDTO(id="stop", label="Stop")]
+
+
+def _bills(h, ws) -> bool:
+    """Whether continuing ``h``'s worker on its offered replacement bills per
+    token, whatever paused it: an asking handover was paused for exactly
+    that; one held after its last handover (brindle.handover.MAX_HOPS) may
+    offer a billed replacement too, and Continue starts it with no other
+    ask (``handover.per_token``, which counts what it can't tell as billed)."""
+    from brindle import handover
+
+    if not h.to_profile:
+        return False
+    return h.state == handover.ASKING or handover.per_token(h.to_profile, ws.repo_root)
+
+
+def _worker_entry(h, worker: Agent, ws) -> str:
+    """One worker as an alert lists it, with what continuing would mean:
+    "w1 → developer-codex (billed per token)", or "w2 (out of handovers;
+    could continue on developer-codex; billed per token)". No commas:
+    entries are joined by them."""
+    from brindle import handover
+
+    cost = " (billed per token)" if _bills(h, ws) else ""
+    if h.state == handover.ASKING:
+        return f"{worker.id} → {h.to_profile}{cost}"
+    return (f"{worker.id} (out of handovers" + (f"; could continue on {h.to_profile}" if h.to_profile else "")
+            + ("; billed per token" if cost else "") + ")")
+
+
+def _to(shown: list) -> str:
+    """Where an alert's sessions go: their targets, "+"-joined when they differ."""
+    return "+".join(dict.fromkeys(o.to_provider for o, _, _ in shown))
+
+
+def inbox_items(db: DB, repo_root: str | None, *, now: float | None = None) -> list[InboxItemDTO]:
+    """One Inbox card per alert (``_alerts``), shown in every repo one of
+    its members is in, with all of its members. A limit with sessions to
+    switch is KIND_OFFER (once they have all switched, the notice, KIND_BACK
+    with NOTICE_PREFIX); one with only workers waiting is the handover card
+    (brindle.handover's own, for one worker). ``request_id`` is the first
+    member, ``detail`` "<from> → <to>" (a notice: "notice: <from> → <to> ·
+    HH:MM"; <to> "+"-joins the targets when sessions go to different ones),
+    then "· <n> sessions: <id> → <target>, ..." when it is for several and
+    "· <n> workers: <entry>, ..." (``_worker_entry``: each worker's
+    replacement and whether it bills per token); their answers are the
+    card's ``choices``. ``action`` POST /v1/sessions/{root}/provider-switch
+    on the first session; an answer there goes to the whole card
+    (``group_of``, ``workers_of``)."""
+    now = time.time() if now is None else now
+    items = []
+    for a in _alerts(db, now):
+        if repo_root is not None and repo_root not in a.repos():
+            continue
+        workers = (f" · {len(a.workers)}{WORKERS_MARK}" + ", ".join(_worker_entry(h, w, ws) for h, w, ws, _ in a.workers)
+                   if a.workers else "")
+        choices = _worker_choices(a.workers) if a.workers else None
+        shown = a.offers or a.notices
+        if not shown:   # workers only: brindle.handover's card, for all of them
+            # Its Continue says whether it bills, held or asking alike (``_bills``).
+            card = a.workers[0][3].model_copy(update={"choices": choices})
+            if len(a.workers) > 1:
+                card = card.model_copy(update={
+                    "reason": f"{len(a.workers)} workers stopped at their provider's limit; "
+                              + card.reason[0].lower() + card.reason[1:],
+                    "detail": (card.detail or "") + workers, "choices": choices})
+            items.append(card)
+            continue
+        offer, root, ws = shown[0]
+        to = _to(shown)
+        # Each session with the provider it moves (or moved) to: they can differ.
+        many = (f" · {len(shown)}{SESSIONS_MARK}" + ", ".join(f"{r.id} → {o.to_provider}" for o, r, _ in shown)
+                if len(shown) > 1 else "")
+        if not a.offers:
+            reset = time.strftime("%H:%M", time.localtime(offer.limited_until)) if offer.limited_until else "unknown"
+            kind = KIND_BACK
+            reason = (f"Switched {'to' if len(shown) == 1 else f'{len(shown)} sessions to'} {to.replace('+', ' and ')} "
+                      f"· {offer.from_provider} was out of quota, back at {reset}")
+            detail = (f"{NOTICE_PREFIX}{offer.from_provider} → {to}"
+                      + (f" · {reset}" if offer.limited_until else "") + many + workers)
+        else:
+            kind = KIND_BACK if offer.kind == "back" else KIND_OFFER
+            switched = f" ({len(a.notices)} switched already)" if a.notices else ""
+            reason = ("Provider switch failed. Check the session before continuing." if a.kind == "failed"
+                      else "Switch provider or choose Not now"
+                      + (f" for {len(shown)} sessions" if len(shown) > 1 else "") + switched)
+            detail = f"{offer.from_provider} → {to}" + many + workers
+        items.append(InboxItemDTO(kind=kind, reason=reason, detail=detail, choices=choices,
                                   agent_id=root.id, workspace_id=ws.id, root_id=root.id,
                                   request_id=offer.id,
                                   action=InboxActionDTO(method="POST",

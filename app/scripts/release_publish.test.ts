@@ -130,6 +130,7 @@ describe("ci-gate: App (and CI when it ran), newest run for exactly the commit, 
 
 describe("a release-branch build's version, files and latest.json", () => {
   const short = (sha: string) => sha.slice(0, 12);
+  const gone = "0123456789ab"; // a commit that was rewritten away: in no branch
   const manifest = (dir: string, name: string, version: string) => {
     const path = join(dir, name);
     writeFileSync(path, JSON.stringify({ version, platforms: {} }));
@@ -145,10 +146,14 @@ describe("a release-branch build's version, files and latest.json", () => {
     ["the same run again (a re-run)", `0.1.0-rc.9+release.5.${short(R.b)}`, `0.1.0-rc.9+release.5.${short(R.b)}`, false],
     ["a lower version in a later run", `0.1.0-rc.10+release.4.${short(R.a)}`, `0.1.0-rc.9+release.5.${short(R.b)}`, false],
     ["a commit that does not descend from the published one", `0.1.0-rc.9+release.4.${short(R.b)}`, `0.1.0-rc.9+release.5.${short(R.x)}`, false],
+    // history rewritten: the published commit is gone from main, so the build number decides
+    ["published commit not on main, newer build", `0.1.0-rc.9+release.4.${gone}`, `0.1.0-rc.9+release.5.${short(R.c)}`, true],
+    ["published commit not on main, lower semver, newer build", `0.2.1+release.4.${gone}`, `0.2.0+release.5.${short(R.c)}`, true],
+    ["published commit not on main, older build", `0.1.0-rc.9+release.6.${gone}`, `0.1.0-rc.9+release.5.${short(R.c)}`, false],
   ])("promote: %s", async (_case, current, next, go) => {
     const dir = mkdtempSync(join(tmpdir(), "promote-"));
     const currentFile = current ? manifest(dir, "current.json", current) : join(dir, "absent.json");
-    const { status, out } = await run(["promote", currentFile, manifest(dir, "next.json", next)], {}, R.dir);
+    const { status, out } = await run(["promote", currentFile, manifest(dir, "next.json", next)], { MAIN_REF: "main" }, R.dir);
     expect(status, out).toBe(0);
     expect(out).toContain(`go=${go}`);
   });

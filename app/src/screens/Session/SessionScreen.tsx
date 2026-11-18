@@ -24,9 +24,10 @@ import { SessionsContext } from "../../store/sessions";
 import type { AppStore } from "../../store/store";
 import { useAppState } from "../../store/useStore";
 import { AgentMenu, SessionMenu, closeSessionLabel, type CloseSessionItem } from "./AgentMenu";
-import { ChatBox } from "./Chat/ChatBox";
+import { ChatBox, type ChatBoxTyping } from "./Chat/ChatBox";
 import { ChatDrop } from "./Chat/ChatDrop";
 import { useChatSupport } from "./Chat/support";
+import { TerminalFrame } from "./Chat/ChatPane";
 import { failure, type Notice } from "./notice";
 import { ProviderSurface } from "./ProviderSurface";
 import { usePrReadiness, useSessionDiff } from "./review";
@@ -121,7 +122,15 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     return { label: closeSessionLabel(liveWorkers(workers, alive), unmerged.length), close: () => onCloseSession(root) };
   }, [onCloseSession, workspaces, root, rootWorkspace, hidden, alive]);
 
-  const paused = session ? isPaused(session) : tree === null && synced;
+  // After a restart (an update), the last daemon paused every session on its way out and the new one is
+  // bringing them back: a row still paused that the resuming engine names pending (or has released, its row
+  // not read again yet: the gate's `stale`) is restarting, not paused. Only once recovery is over is a
+  // paused row paused; a released one whose row has been read again is paused when it says so (the person's).
+  const panes = useContext(PanesReadyContext);
+  const pendingHere = panes.pending?.includes(root) === true;
+  const restarting = session?.status === "paused" && !!panes.pending && (pendingHere || !!panes.stale?.includes(root));
+  const sessionStatus = restarting ? "resuming" : session?.status ?? null;
+  const paused = session ? !restarting && isPaused(session) : tree === null && synced;
   // A session seen live here that pauses under the view (a fresh start in its checkout, a pause from
   // elsewhere) stays on screen and says so, with Reopen; one opened already paused doesn't.
   const live = session ? !isPaused(session) : tree !== null;
@@ -144,7 +153,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // A practice run (the demo's practice repo): its steps over the terminal, and its own actions in the bar.
   const practice = usePractice(client, repo, root, tree?.children.length ?? 0);
   // Opening a session the engine hasn't brought back yet asks it to do this one next; no answer matters.
-  const comingBack = useContext(PanesReadyContext).pending?.includes(root) === true;
+  const comingBack = pendingHere;
   useEffect(() => {
     if (comingBack) client.prioritize(root).catch(() => {});
   }, [client, root, comingBack]);
@@ -216,11 +225,14 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // in the box as chips: the box of the agent they were dropped on, and no other's.
   const chatSupported = useChatSupport(client);
   const shown = node?.agent ?? null;
-  const chatAgent = chatSupported && shown && shown.provider === "claude" && !shown.locked && !paused && session?.status !== "resuming" && CHAT_STATES.has(shown.status) && alive[shown.id] !== false ? shown : null;
+  const chatAgent = chatSupported && shown && shown.provider === "claude" && !shown.locked && !paused && sessionStatus !== "resuming" && CHAT_STATES.has(shown.status) && alive[shown.id] !== false ? shown : null;
   const [dropped, setDropped] = useState<{ agent: string; files: File[] }>();
   const [dropping, setDropping] = useState(false);
   const chatId = chatAgent?.id;
   const dropFiles = useCallback((files: File[]) => setDropped(chatId ? { agent: chatId, files } : undefined), [chatId]);
+  // Typed in the agent's pane while the box stands in for its hidden prompt: into the box, the keyboard with it.
+  const typing = useRef<ChatBoxTyping>(null);
+  const composeText = useCallback((text: string) => typing.current?.type(text), []);
 
   const host = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -254,7 +266,8 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         repo={repo}
         node={node}
         alive={node ? alive[node.agent.id] : undefined}
-        sessionStatus={session?.status ?? null}
+        sessionStatus={sessionStatus}
+        restarting={restarting}
         paused={paused}
         reload={reload}
         refresh={refresh}
@@ -302,7 +315,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         ) : (
           // Files dragged over a Claude Code session land in its message box; any other session's drags stay the terminal's.
           <ChatDrop enabled={!!chatAgent} onFiles={dropFiles} onDragging={setDropping} className="flex min-w-0 flex-1 flex-col gap-3">
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="terminal-surface">
+            <TerminalFrame data-testid="terminal-surface">
               <ProviderSurface
                 // A sidebar Resume also needs a fresh pane when this session was already selected.
                 key={`${selected}:${paused}`}
@@ -310,12 +323,15 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
                 root={root}
                 agent={node?.agent ?? null}
                 alive={node ? alive[node.agent.id] : undefined}
-                sessionStatus={session?.status === "resuming" || !node || node.agent.id === root ? session?.status ?? null : null}
+                sessionStatus={sessionStatus === "resuming" || !node || node.agent.id === root ? sessionStatus : null}
+                restarting={restarting}
                 sessionName={session?.name || session?.goal}
                 credentials={credentials}
                 recovery={recovery}
+                hidePrompt={!!chatAgent && chatAgent.id === node?.agent.id}
+                onComposeText={composeText}
               />
-            </div>
+            </TerminalFrame>
             {chatAgent && (
               <ChatBox
                 key={chatAgent.id}
@@ -328,6 +344,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
                 onChanged={refresh}
                 recipient={chatAgent.id === root ? "the supervisor" : agentName(workspaces, chatAgent.id)}
                 dropping={dropping}
+                typing={typing}
               />
             )}
           </ChatDrop>
@@ -360,7 +377,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
 }
 
 /* The selected agent's status and controls. */
-function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, onChat, visuals, practice, hidePause = false }: {
+function SessionBar({ client, root, repo, node, alive, sessionStatus, restarting = false, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, onChat, visuals, practice, hidePause = false }: {
   client: DaemonClient;
   /* A practice run's own actions (End practice run; done, Start your own), before Pause. */
   practice?: ReactNode;
@@ -373,6 +390,8 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   node: AgentNode | null;
   alive: boolean | undefined;
   sessionStatus: string | null;
+  /* Paused by the last daemon on its way out, and being brought back by this one (a restart). */
+  restarting?: boolean;
   paused: boolean;
   reload: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -404,7 +423,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
     }
   };
   const resuming = sessionStatus === "resuming";
-  const status = resuming ? { glyph: "◌", label: "Resuming", style: "dim" as const, needs: false }
+  const status = resuming ? { glyph: "◌", label: restarting ? "Restarting…" : "Resuming", style: "dim" as const, needs: false }
     : node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
   const named = useContext(SessionsContext)?.find(root)?.name;
   const who = node ? (node.agent.id === root ? (named || "supervisor") : agentName(workspaces, node.agent.id)) : named || "supervisor";
@@ -421,7 +440,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         <span className={`${mono} hidden text-xs text-ink-3 sm:inline`} data-testid={node ? "agent-id" : "session-id"} title={node?.workspace.branch}>
           {node?.agent.id ?? root}
         </span>
-        <span className={`flex items-center gap-1 text-xs ${resuming ? "rounded-full bg-branch-soft px-2 py-0.5 text-branch" : status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status" data-state={resuming ? "resuming" : node?.agent.status ?? sessionStatus ?? "paused"} data-tone={resuming ? "work" : undefined}>
+        <span className={`flex items-center gap-1 text-xs ${resuming ? "rounded-full bg-branch-soft px-2 py-0.5 text-branch" : status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status" data-state={restarting ? "restarting" : resuming ? "resuming" : node?.agent.status ?? sessionStatus ?? "paused"} data-tone={resuming ? "work" : undefined}>
           <span className={`font-mono ${CLI_INK[status.style]}`} aria-hidden>
             {status.glyph}
           </span>
