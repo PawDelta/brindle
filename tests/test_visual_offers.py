@@ -238,7 +238,9 @@ def test_complete_request_intent(db, session, text, scope):
         visuals.publish(db, boss, "Again", "<p>no</p>", kind=scope)
 
 
-@pytest.mark.parametrize("text", ["let's plan this. Actually, don't plan this.", "cancel planning mode"])
+@pytest.mark.parametrize("text", [
+    pytest.param("let's plan this. Actually, don't plan this.", marks=pytest.mark.variant("a cancel after a new flexible plan ask")),
+    pytest.param("cancel planning mode", marks=pytest.mark.variant("cancelling the planning-mode wording"))])
 def test_plan_activity_ask_can_be_cancelled(db, session, text):
     boss, _ = session
     agents.send_message(db, boss.id, "let's plan this", person=True)
