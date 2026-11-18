@@ -302,6 +302,10 @@ jobs:
           rustup default stable
           bash app/scripts/retry.sh rustup target add --toolchain stable "$TARGET"
           rustc --version
+      # The rustc version keys the cache: a new stable toolchain recompiles everything.
+      - name: Rust version
+        id: rustc
+        run: echo "version=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -311,9 +315,9 @@ jobs:
             app/src-tauri/target
             !app/src-tauri/target/release/bundle
             !app/src-tauri/target/*/release/bundle
-          key: cargo-${{ runner.os }}-${{ matrix.arch }}-apple-darwin-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-apple-darwin-rustc-${{ steps.rustc.outputs.version }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ matrix.arch }}-apple-darwin-
+            cargo-${{ runner.os }}-${{ matrix.arch }}-apple-darwin-rustc-${{ steps.rustc.outputs.version }}-
       - name: Install
         run: bash app/scripts/retry.sh npm --prefix app ci
 
@@ -1023,6 +1027,10 @@ jobs:
           bash app/scripts/retry.sh rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
           rustc --version
+      # The rustc version keys the cache: a new stable toolchain recompiles everything.
+      - name: Rust version
+        id: rustc
+        run: echo "version=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1032,9 +1040,9 @@ jobs:
             app/src-tauri/target
             !app/src-tauri/target/release/bundle
             !app/src-tauri/target/*/release/bundle
-          key: cargo-${{ runner.os }}-host-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-host-rustc-${{ steps.rustc.outputs.version }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-host-
+            cargo-${{ runner.os }}-host-rustc-${{ steps.rustc.outputs.version }}-
 
       # Builds the AppImage and the .deb, then checks them: nothing that fails
       # the smoke is kept or published.
@@ -1177,6 +1185,10 @@ jobs:
           bash app/scripts/retry.sh rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
           rustc --version
+      # The rustc version keys the cache: a new stable toolchain recompiles everything.
+      - name: Rust version
+        id: rustc
+        run: echo "version=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1186,9 +1198,9 @@ jobs:
             app/src-tauri/target
             !app/src-tauri/target/release/bundle
             !app/src-tauri/target/*/release/bundle
-          key: cargo-${{ runner.os }}-host-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-host-rustc-${{ steps.rustc.outputs.version }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-host-
+            cargo-${{ runner.os }}-host-rustc-${{ steps.rustc.outputs.version }}-
       - name: Install
         run: bash app/scripts/retry.sh npm --prefix app ci
 
@@ -1399,6 +1411,10 @@ jobs:
           bash app/scripts/retry.sh rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
           rustc --version
+      # The rustc version keys the cache: a new stable toolchain recompiles everything.
+      - name: Rust version
+        id: rustc
+        run: echo "version=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1408,9 +1424,9 @@ jobs:
             app/src-tauri/target
             !app/src-tauri/target/release/bundle
             !app/src-tauri/target/*/release/bundle
-          key: cargo-${{ runner.os }}-host-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-host-rustc-${{ steps.rustc.outputs.version }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-host-
+            cargo-${{ runner.os }}-host-rustc-${{ steps.rustc.outputs.version }}-
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Install tmux
         run: bash app/scripts/retry.sh brew install tmux
