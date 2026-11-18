@@ -197,8 +197,11 @@ test("a kept Library visual opens large, and zooms by the host's wheel and pinch
   // Measured in the engine: the reader runs down the content area (the old one was a fixed 70vh) and
   // its frame takes what the toolbar and border leave.
   const box = (await reader.boundingBox())!;
-  expect(box.height).toBeGreaterThan(viewport.height * 0.8);
-  expect(box.y + box.height).toBeGreaterThan(viewport.height - 48);
+  // Edge to edge: from the sidebar's right edge to the viewport's right and bottom, no gutter.
+  const side = (await page.getByRole("complementary", { name: "Sidebar" }).boundingBox())!;
+  expect(Math.abs(box.x - (side.x + side.width))).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.x + box.width - viewport.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.y + box.height - viewport.height)).toBeLessThanOrEqual(1);
   expect((await frame.boundingBox())!.height).toBeGreaterThan(viewport.height * 0.6);
 
   const zoom = async () => Number(await frame.getAttribute("data-zoom"));
@@ -214,4 +217,8 @@ test("a kept Library visual opens large, and zooms by the host's wheel and pinch
   await reader.focus();
   await page.keyboard.press("Control+=");
   expect(await zoom()).toBe(1.25);
+  // Back returns to the Kept visuals list.
+  await page.getByTestId("visual-back").click();
+  await expect(page.getByTestId("kept-k_1")).toBeVisible();
+  await expect(reader).toHaveCount(0);
 });

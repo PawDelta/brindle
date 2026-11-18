@@ -22,7 +22,9 @@ import { ExportButton } from "./ExportButton";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
 
 /* The reader's frame and chrome, the session's and Knowledge's (read-only) alike. */
-export function ReaderChrome({ title, source, missing, meta, actions, onBack, backLabel = "Back", asking, onChoice, footer, Frame = VisualFrame, exportClient, repo }: {
+export function ReaderChrome({ title, source, missing, meta, actions, onBack, backLabel = "Back", asking, onChoice, footer, Frame = VisualFrame, exportClient, repo, bleed }: {
+  /* The frame takes the whole area under the toolbar: no padding, border or rounding. */
+  bleed?: boolean;
   exportClient?: ExportClient;
   repo?: string;
   title: string;
@@ -83,7 +85,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
         step(dir);
       }}>
       {/* One toolbar: Back (Esc) and the title on the left, the visual's own actions on the right. */}
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 px-s2 pt-2.5">
+      <header className={`flex flex-wrap items-center gap-x-2 gap-y-1 px-s2 ${bleed ? "py-1.5" : "pt-2.5"}`}>
         <BackButton onBack={onBack} label={backLabel} asking={asking} />
         <span className="mx-1 h-5 w-px bg-line" aria-hidden />
         <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
@@ -93,8 +95,8 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
           source={snapshot && sameSource(snapshot.source, source) ? { kind: "visual", id: source.id, rev: source.rev, html: snapshot.html } : null}
           onRequestSnapshot={() => { setSnapshot(null); setSnapshotRequest((n) => n + 1); }} />}
       </header>
-      <div className="flex min-h-0 flex-1 flex-col p-s2">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line-strong" data-testid="visual-sandbox" ref={sandbox}>
+      <div className={`flex min-h-0 flex-1 flex-col ${bleed ? "" : "p-s2"}`}>
+        <div className={`flex min-h-0 flex-1 flex-col overflow-hidden ${bleed ? "border-t border-line" : "rounded-lg border border-line-strong"}`} data-testid="visual-sandbox" ref={sandbox}>
           <div className={`${mono} flex items-center justify-between gap-s2 border-b border-line px-s2 py-0.5 text-[11px] text-ink-3`}>
             <span>sandboxed · no network</span>
             <span className="flex min-w-0 items-center gap-s2">

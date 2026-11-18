@@ -60,6 +60,8 @@ export interface KnowledgeScreenProps {
   onView?(view: KnowledgeView): void;
   /* What the repo on screen holds, for the sidebar's counts. */
   onCounts?(counts: Pick<LibraryCounts, "imported" | "decisions" | "kept">): void;
+  /* A kept visual is open: the page around the Library drops its padding for it. */
+  onReading?(reading: boolean): void;
   /* A library doc (its id) to open in the reader, or an imported one (its number). */
   doc?: number | string;
   /* `doc` is a design: it opens in the design reader. */
@@ -409,7 +411,7 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRepo, onView, onCounts, doc, design, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
+export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRepo, onView, onCounts, onReading, doc, design, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
   const pick = useRepo(fromRepo);
   const { repo, repos } = pick;
   const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
@@ -424,6 +426,7 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRep
     onView?.(next);
   };
   const [keptOpen, setKeptOpen] = useState(false);
+  const keptOpenChange = useCallback((open: boolean) => { setKeptOpen(open); onReading?.(open); }, [onReading]);
   const [decisions, setDecisions] = useState<DecisionDTO[] | null>(null);
   const [sources, setSources] = useState<KbSource[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -601,7 +604,7 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, folder, inRep
         </PageHeader>
       )}
       {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
-      {tab === "kept" && <KeptVisuals client={client} onOpenChange={setKeptOpen} />}
+      {tab === "kept" && <KeptVisuals client={client} onOpenChange={keptOpenChange} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>

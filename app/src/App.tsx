@@ -136,7 +136,8 @@ function OpenInLibrary({ navigate, to }: { navigate(route: Route): void; to: Rou
   return null;
 }
 
-function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, onLibraryCounts }: {
+function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, onLibraryCounts, onLibraryReading }: {
+  onLibraryReading?(reading: boolean): void;
   /* The Library's screen says what it holds, for its sidebar's counts. */
   onLibraryCounts?(counts: LibraryCounts): void;
   route: Route;
@@ -176,6 +177,7 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           inRepo={route.repo}
           onView={(view) => navigate({ ...route, view })}
           onCounts={onLibraryCounts}
+          onReading={onLibraryReading}
           doc={route.doc}
           design={route.design}
           session={route.session}
@@ -288,6 +290,8 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   /* What the open Library holds, as its screen read it: the counts in its sidebar. */
   const [libraryCounts, setLibraryCounts] = useState<LibraryCounts>({});
   const noteLibraryCounts = useCallback((now: LibraryCounts) => setLibraryCounts((was) => (was.decisions === now.decisions && was.imported === now.imported && was.kept === now.kept ? was : now)), []);
+  /* A kept visual is open in the Library: it fills the content area, so the page drops its padding. */
+  const [libraryReading, setLibraryReading] = useState(false);
   const visitNow = useRef(visit);
   visitNow.current = visit;
   const restoreScroll = useRef<number | null>(null);
@@ -388,7 +392,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   // sheet lies over it); the pages scroll.
   const shown = route ?? HOME;
   // The Library's designs fill it too: their table header and results line stay put while the rows scroll.
-  const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox" || (shown.screen === "knowledge" && libraryView(shown) === "docs");
+  const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox" || (shown.screen === "knowledge" && libraryView(shown) === "docs") || (shown.screen === "knowledge" && libraryReading);
   // A visual open in the session takes the whole window (design/visualizer-build-plan-amendments.md
   // item 1): the sidebar hides, still mounted, so Back finds it as it was (folds, scroll, split).
   const reading = shown.screen === "session" && shown.sheet?.kind === "visual";
@@ -423,9 +427,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
                 <>
                   {/* Keep the previous page mounted so its drafts, terminal and nested scroll survive Settings. */}
                   <div hidden={settingsFrom !== null} className={settingsFrom ? "hidden" : `relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
-                    <Screen route={settingsFrom?.route ?? route} visit={settingsFrom?.visit ?? visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} onLibraryCounts={noteLibraryCounts} />
+                    <Screen route={settingsFrom?.route ?? route} visit={settingsFrom?.visit ?? visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} onLibraryCounts={noteLibraryCounts} onLibraryReading={setLibraryReading} />
                   </div>
-                  {settingsFrom && <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} onLibraryCounts={noteLibraryCounts} />}
+                  {settingsFrom && <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} onLibraryCounts={noteLibraryCounts} onLibraryReading={setLibraryReading} />}
                 </>
               ) : feedError ? (
                 // Nothing to land on: the sessions couldn't be read (the engine itself may be fine). Ask again.
