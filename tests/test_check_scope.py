@@ -60,6 +60,23 @@ def test_imports_scope_the_check(repo, tmp_path, monkeypatch, changed, max_files
     assert check_scope.command(ws, PYTEST, check_scope.CheckScope(), (base, [changed]), max_files) == ran
 
 
+def test_tests_pytest_would_not_collect_are_not_named(repo, monkeypatch):
+    """Naming a path bypasses norecursedirs and testpaths: parked tests under dev/ must not run."""
+    (repo / "pyproject.toml").write_text('[tool.pytest.ini_options]\ntestpaths = ["tests"]\nnorecursedirs = ["dev", ".*"]\n')
+    for name in ("dev/x/test_a.py", "tests/test_b.py"):
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("def test_t():\n    pass\n")
+    sh("git add -A && git commit -qm base", repo)
+    base = sh("git rev-parse HEAD", repo)
+    monkeypatch.setattr(codemap, "graph_path", lambda ws: None)
+    ws = SimpleNamespace(path=str(repo))
+    scope = check_scope.CheckScope()
+
+    both = check_scope.command(ws, PYTEST, scope, (base, ["dev/x/test_a.py", "tests/test_b.py"]))
+    assert both == run(["tests/test_b.py"])
+    assert check_scope.command(ws, PYTEST, scope, (base, ["dev/x/test_a.py"])) is None   # nothing left: a pass
+
+
 HUB = ("from math import floor as operation\n\nLIMIT = 1\n\n\ndef a():\n    return LIMIT\n\n\n"
        "def b():\n    return operation(2.5)\n\n\ndef helper():\n    return 0\n")
 # Every test imports the hub module; each runs only part of it (by line, as coverage records it): helper() none.

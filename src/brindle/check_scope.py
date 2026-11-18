@@ -238,7 +238,8 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
         return None
     if any(matches(f, ALWAYS_FULL) and _changes_checks(ws, base, f) or matches(f, scope.full_when) for f in changed):
         return cmd
-    changed = [f for f in changed if f.endswith(".py")]   # pytest can't be affected by the rest
+    # pytest can't be affected by the rest, nor by test files it wouldn't collect on its own
+    changed = collectable(Path(ws.path), [f for f in changed if f.endswith(".py")])
     if not changed:
         return None
     if scope.coverage:
@@ -302,7 +303,7 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
         for f in scripts:
             scripted |= script_tests(root, f, imports)
     namesakes = capped_targets(ws, changed)
-    tests = sorted({t for t in tests | scripted if (root / t).is_file()} | set(namesakes))
+    tests = sorted({t for t in collectable(root, sorted(tests | scripted)) if (root / t).is_file()} | set(namesakes))
     if not tests:
         return None
     note = ""
@@ -347,7 +348,7 @@ def capped_targets(ws: Workspace, changed: list[str]) -> list[str]:
             stem = PurePosixPath(f).stem
             for pattern in (f"test_{stem}.py", f"test_{stem}_*.py"):
                 tests.update(p.relative_to(root).as_posix() for p in (root / "tests").glob(pattern))
-    return sorted(t for t in tests if (root / t).is_file())
+    return sorted(t for t in collectable(root, sorted(tests)) if (root / t).is_file())
 
 
 def _quoted(files: list[str]) -> str:
@@ -357,6 +358,56 @@ def _quoted(files: list[str]) -> str:
 def is_test_file(path: str) -> bool:
     name = PurePosixPath(path).name
     return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+
+_PYTEST_NORECURSE = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}"]
+
+
+def _pytest_ini(root: Path) -> dict:
+    """The repo's pytest ``testpaths`` and ``norecursedirs`` (lists), as configured."""
+    import configparser
+    import tomllib
+
+    try:
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        opts = data.get("tool", {}).get("pytest", {}).get("ini_options")
+        if isinstance(opts, dict):
+            return {k: (v.split() if isinstance(v, str) else list(v)) for k, v in opts.items()
+                    if k in ("testpaths", "norecursedirs")}
+    except (OSError, ValueError):
+        pass
+    for name in ("pytest.ini", "tox.ini", "setup.cfg"):
+        cp = configparser.ConfigParser()
+        try:
+            if not cp.read(root / name, encoding="utf-8"):
+                continue
+        except (OSError, configparser.Error):
+            continue
+        section = "tool:pytest" if name == "setup.cfg" else "pytest"
+        if cp.has_section(section):
+            return {k: cp.get(section, k).split() for k in ("testpaths", "norecursedirs") if cp.has_option(section, k)}
+    return {}
+
+
+def collectable(root: Path, files: list[str]) -> list[str]:
+    """``files`` minus the test files pytest wouldn't collect on its own: outside
+    the repo's ``testpaths``, or under a ``norecursedirs`` pattern (naming a path
+    on the command line bypasses both). Non-test files are kept as they are."""
+    import fnmatch
+
+    cfg = _pytest_ini(root)
+    testpaths = [p.strip("/") for p in cfg.get("testpaths", [])]
+    skip = cfg.get("norecursedirs", _PYTEST_NORECURSE)
+
+    def keep(f: str) -> bool:
+        if not is_test_file(f):
+            return True
+        parts = PurePosixPath(f).parts
+        if any(fnmatch.fnmatch(d, pat) for d in parts[:-1] for pat in skip):
+            return False
+        return not testpaths or any(fnmatch.fnmatch(f, p) or fnmatch.fnmatch(f, p + "/*") for p in testpaths)
+
+    return [f for f in files if keep(f)]
 
 
 class Unscoped(Exception):
@@ -413,7 +464,7 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str]:
         imports = Imports(Path(ws.path))
         for f in sorted(unmapped):
             tests |= imports.tests_reaching(f)
-    return sorted(t for t in tests if (Path(ws.path) / t).is_file())
+    return sorted(t for t in collectable(Path(ws.path), sorted(tests)) if (Path(ws.path) / t).is_file())
 
 
 def _module_path(root: Path, path: str) -> str | None:
