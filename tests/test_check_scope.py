@@ -127,7 +127,9 @@ def fake_coverage_run(commands):
                  marks=pytest.mark.variant("A map older than the code must follow calls added since, or it misses "
                                            "the tests reaching the change through them")),
     # brindle pr on a session's branch: scoped to what it changes since origin/main, not the full suite.
-    ("pre-pr", None, "return LIMIT\n", "return LIMIT + 1\n", "tests/test_a.py::test_a"),
+    pytest.param("pre-pr", None, "return LIMIT\n", "return LIMIT + 1\n", "tests/test_a.py::test_a",
+                 marks=pytest.mark.variant("brindle pr must narrow its checks to the PR's diff, not run the full "
+                                           "suite (the reuse test in test_gates can't tell: a full pass is cached)")),
 ], ids=["worker", "merge-main", "import", "outdated-map", "pre-pr"])
 def test_coverage_map_selects_the_tests_that_ran_the_changed_function(db, repo, monkeypatch, where, drift, old, new,
                                                                        ran):
