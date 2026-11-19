@@ -58,7 +58,7 @@ def test_request_doc_read_and_dismiss(db, tmp_path, monkeypatch):
     shown = [i for i in inbox.items(db, repo, panes={}) if i.kind == "doc"]
     assert [(i.doc, i.section, i.reason, i.agent_id, i.root_id) for i in shown] == [
         (doc, "Storage", "Check the proposed storage.", "sup1", "sup1"),
-        (doc, None, "Read the whole plan.", "sup1", "sup1"),
+        (doc, "needs_you", "Read the whole plan.", "sup1", "sup1"),
     ]
     assert shown[0].request_id != shown[1].request_id
     db.update_agent("sup1", status="paused", status_since=1, tmux_window="@1")
