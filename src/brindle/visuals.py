@@ -442,7 +442,7 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     if references:
         message += "\n" + "\n".join(references)
     try:
-        agents.send_message(db, v["root_id"], message, person=True)
+        agents.send_message(db, v["root_id"], message, person=True, fold_visuals=False)
     except BaseException:
         with db.tx() as c:
             c.execute("UPDATE visuals SET answer=NULL WHERE id=? AND answer=?", (v["id"], record))
@@ -514,17 +514,38 @@ def has_approved_design(db: DB, root_id: str, goal: str) -> bool:
     return False
 
 
-def answered_in_chat(c, root_id: str, said_at: float) -> list:
+def answered_in_chat(c, root_id: str, said_at: float, text: str) -> list:
     """Fold only decision revisions already published when this person message was sent.
 
     The chat message itself reaches the supervisor; no option is inferred and
     no extra agent message is needed. Run in the input observation transaction.
     """
-    return c.execute(
-        "UPDATE visuals SET dismissed_rev=rev, answered_in_chat_rev=rev, read_rev=MAX(read_rev, rev) "
-        "WHERE root_id=? AND kind='visual' AND question IS NOT NULL AND options IS NOT NULL "
-        "AND answer IS NULL AND dismissed_rev < rev AND updated_at < ? RETURNING id, rev",
-        (root_id, said_at)).fetchall()
+    rows = c.execute(
+        "SELECT id, rev, question, options FROM visuals WHERE root_id=? AND kind='visual' "
+        "AND question IS NOT NULL AND options IS NOT NULL AND answer IS NULL "
+        "AND dismissed_rev < rev AND updated_at < ?", (root_id, said_at)).fetchall()
+    normalized_text = " ".join(re.findall(r"[\w]+", text.casefold()))
+    text_words = normalized_text.split()
+    folded = []
+    for row in rows:
+        labels = [str(option.get("label", "")).casefold() for option in json.loads(row["options"])]
+        # Require the whole label, and skip labels too short to distinguish from
+        # ordinary words. Option ids are often single letters, so don't match them
+        # against free-form chat.
+        if not any(
+            (tokens := re.findall(r"[\w]+", label))
+            and (len(tokens) > 1 or (len(tokens[0]) >= 4 and tokens[0] not in {"this", "that", "with", "from"}))
+            and len(tokens) <= len(text_words)
+            and re.search(rf"(?<!\w){re.escape(' '.join(tokens))}(?!\w)", normalized_text)
+            for label in labels
+        ):
+            continue
+        cur = c.execute(
+            "UPDATE visuals SET dismissed_rev=rev, answered_in_chat_rev=rev, read_rev=MAX(read_rev, rev) "
+            "WHERE id=? AND rev=? AND answer IS NULL AND dismissed_rev < rev", (row["id"], row["rev"]))
+        if cur.rowcount:
+            folded.append((row["id"], row["rev"]))
+    return folded
 
 
 def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
@@ -554,7 +575,7 @@ def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
     text = (f"The person dismissed visual {v['id']} (r{rev}) without answering. "
             "Don't wait for an answer; carry on without one.")
     try:
-        agents.send_message(db, v["by_agent"], text, person=True)
+        agents.send_message(db, v["by_agent"], text, person=True, fold_visuals=False)
     except BaseException:
         with db.tx() as c:
             c.execute("UPDATE visuals SET dismissed_rev=0 WHERE id=? AND dismissed_rev=?", (v["id"], rev))
@@ -563,7 +584,7 @@ def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
         # The dismissal is delivered once the publisher has it; a supervisor that can't be told
         # (paused, say) must not undo that or make a repeat tell the publisher again.
         try:
-            agents.send_message(db, v["root_id"], text, person=True)
+            agents.send_message(db, v["root_id"], text, person=True, fold_visuals=False)
         except Exception:
             pass
     bus.publish(db, "visual.dismissed", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], rev=rev)
