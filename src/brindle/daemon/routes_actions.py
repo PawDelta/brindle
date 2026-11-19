@@ -2389,7 +2389,8 @@ def library_on_this_mac(repo: str | None = None) -> bool:
     from brindle.pro import analysis_docs, local_library
 
     _docs_entitlement(repo)
-    return local_library.location(fetch=analysis_docs.fetch_switches) == local_library.LOCAL
+    return local_library.location(fetch=analysis_docs.fetch_switches,
+                                  learn=local_library.learn_group) == local_library.LOCAL
 
 
 def own_scope(repo: str | None = None) -> dict:

@@ -27,15 +27,20 @@ describe("DocSwitches", () => {
     expect(client.setDocSwitch).toHaveBeenCalledWith("share", false);
   });
 
-  it("moves the library and says when some plans weren't moved", async () => {
+  it("moves the library, says when some plans weren't moved, and moves them on a repeat choice", async () => {
     const free = { ...SWITCHES[0], locked: false, org: null };
-    const client = { docSwitches: vi.fn().mockResolvedValue([free]),
-      setDocSwitch: vi.fn().mockResolvedValue({ switches: [{ ...free, on: true, choice: "on" }], moved: 2, left: 1 }) };
-    render(<DocSwitches client={client} />);
+    const servers = [{ ...free, on: true, choice: "on" as const }];
+    const setDocSwitch = vi.fn().mockResolvedValueOnce({ switches: servers, moved: 2, left: 1 })
+      .mockResolvedValueOnce({ switches: servers, moved: 1, left: 0 });
+    render(<DocSwitches client={{ docSwitches: vi.fn().mockResolvedValue([free]), setDocSwitch }} />);
     fireEvent.click(await screen.findByRole("radio", { name: "brindle servers" }));
-    expect(client.setDocSwitch).toHaveBeenCalledWith("store", true);
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByRole("radio", { name: "brindle servers" }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("radio", { name: "brindle servers" }));     // the advertised repeat
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(setDocSwitch.mock.calls).toEqual([["store", true], ["store", true]]);
+    fireEvent.click(screen.getByRole("radio", { name: "brindle servers" }));     // all moved: nothing to do
+    expect(setDocSwitch).toHaveBeenCalledTimes(2);
   });
 
   it("shows the daemon's refusal", async () => {

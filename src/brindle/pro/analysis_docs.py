@@ -198,7 +198,8 @@ class AnalysisDocs:
 
         client, store = self._deps()
         try:
-            return local_library.location(store, fetch=lambda: fetch_switches(client, store)) == local_library.SERVER
+            return local_library.location(store, fetch=lambda: fetch_switches(client, store),
+                                          learn=lambda: local_library.learn_group(client, store)) == local_library.SERVER
         except Exception:  # noqa: BLE001
             return False
 
@@ -206,7 +207,8 @@ class AnalysisDocs:
         from brindle.pro import local_library
 
         try:
-            local_library.add(doc.files, doc.source, repo_root=self.repo_root)
+            local_library.add(doc.files, doc.source, repo_root=self.repo_root, identity=self._identity(),
+                              store=self._store)
         except Exception:  # noqa: BLE001 - never raises into an approval
             log.info("plan not kept in the local library", exc_info=True)
 
@@ -221,21 +223,26 @@ class AnalysisDocs:
         except Exception as e:  # noqa: BLE001
             log.info("analysis doc not sent (%s)", type(e).__name__)
 
-    def upload(self, doc: Doc, *, notice: bool = False) -> str | None:
+    def upload(self, doc: Doc, *, notice: bool = False, repo_key: str | None = None) -> str | None:
         """Store ``doc`` in the person's library on the server, whatever the
-        library location: its doc id, or None when it wasn't stored."""
+        library location, under ``repo_key`` (the server's key for its repo)
+        or else the key of this uploader's repo identity: its doc id, or None
+        when it wasn't stored."""
         from brindle.pro import auth
 
         ent = self.entitlement()
-        identity = self._identity() if ent else None
-        if ent is None or identity is None:
+        if ent is None:
             return None
-        key = self.keys.get(ent.org_id)
+        if not repo_key:
+            identity = self._identity()
+            if identity is None:
+                return None
+            repo_key = self.keys.get(ent.org_id).repo_key(identity)
         if notice:
             self._first_notice()
         client, store = self._deps()
         body = {"scope": {"kind": "user", "id": ent.sub}, "files": mask_data(doc.files),
-                "source": mask_data(doc.source), "repo_key": key.repo_key(identity)}
+                "source": mask_data(doc.source), "repo_key": repo_key}
         status, resp = auth.authed(client, store, "POST", "/analysis-docs", auth.JSONBody(body))
         if status != 200:
             log.info("analysis doc not stored (HTTP %s)", status)
@@ -426,7 +433,9 @@ def switch_states(client=None, store=None) -> list[dict]:
         group = _own_group(policy, asked_scopes.result())
     from brindle.pro import local_library
 
-    kept = local_library.person_choice(lambda: choices)     # the library location chosen on this Mac
+    if "analysis_docs_team" in ent.features:
+        local_library.remember_group(group, store)          # where approvals go reads the same team
+    kept = local_library.person_choice(lambda: choices, store)   # the library location chosen on this Mac
     if kept is not None:
         choices = {**choices, "store": "on" if kept == local_library.SERVER else "off"}
     states = []

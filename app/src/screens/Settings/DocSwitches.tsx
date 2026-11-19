@@ -33,6 +33,8 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
   const [switches, setSwitches] = useState<DocSwitch[] | null>(null);
   const [busy, setBusy] = useState<DocSwitchName | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /* Plans a move left where they were: choosing the same location again moves them. */
+  const [unmoved, setUnmoved] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -53,6 +55,7 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
     try {
       const got = await client.setDocSwitch(name, on);
       setSwitches(got.switches);
+      if (name === "store") setUnmoved(got.left ?? 0);
       if (got.left) setError(`${got.left} ${got.left === 1 ? "plan wasn't" : "plans weren't"} moved yet. Choose ${where(on)} again to try again.`);
     } catch (e) {
       setError(message(e));
@@ -90,7 +93,7 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
                       aria-checked={s.on === l.on}
                       disabled={s.locked || busy !== null}
                       className={`rounded px-s1 py-0.5 text-xs disabled:cursor-not-allowed disabled:opacity-50 ${s.on === l.on ? "bg-branch text-on-branch" : "text-ink-2"}`}
-                      onClick={() => s.on !== l.on && void set(s.name, l.on)}
+                      onClick={() => (s.on !== l.on || unmoved > 0) && void set(s.name, l.on)}
                     >
                       {l.label}
                     </button>
