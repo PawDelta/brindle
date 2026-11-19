@@ -8,7 +8,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { LibraryPerson, SharedDesign } from "../../../api/client";
-import type { SharedDesignClient } from "./client";
+import type { ShareLinkClient, SharedDesignClient } from "./client";
+import { designLinkTarget } from "./ShareLink";
 import type { LiveClient } from "./DocEditor";
 import { BackButton, useEscBack } from "./chrome";
 import { sharedSource } from "./docSource";
@@ -32,7 +33,7 @@ function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
 }
 
 export function SharedDesignReader({ client, docId, title, repo, onBack, backLabel, work }: {
-  client: SharedDesignClient & Partial<LiveClient>;
+  client: SharedDesignClient & Partial<LiveClient> & Partial<ShareLinkClient>;
   /* The design's work items, when it was opened from the Library. */
   work?: Work;
   docId: string;
@@ -78,7 +79,9 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="shared-design-reader">
       {shown && teammate ? (
-        <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work} liveClient={client.visualLive ? client as LiveClient : undefined}
+        <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work}
+          shareLink={shown.can_edit ? designLinkTarget(client, docId, repo) : undefined}
+          liveClient={client.visualLive ? client as LiveClient : undefined}
           chrome={{ lead, modes: client.visualLive ? MODES : COLUMN_MODES, allowed, onMode: setMode }} />
       ) : (
         <>

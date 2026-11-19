@@ -2284,6 +2284,9 @@ def account_login(db: DB, params: dict, body: Body) -> Any:
                 flow.ended = True
                 if _SIGN_IN and _SIGN_IN[0] is flow:
                     _SIGN_IN.clear()
+        from brindle.daemon import lifecycle
+
+        lifecycle._poll_review_queue()
         return {"signed_in": True}
 
     return start_job("account.login", work, job=flow.job)

@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { DaemonError, type SharedDesign } from "../../../api/client";
-import type { SharedDesignClient } from "./client";
+import { DaemonError, type DesignShareLink, type SharedDesign } from "../../../api/client";
+import type { ShareLinkClient, SharedDesignClient } from "./client";
 import { SharedDesignReader } from "./SharedDesignReader";
 
 afterEach(() => {
@@ -67,4 +67,43 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
   expect(screen.queryByText("Workers run here.")).toBeNull();
   await act(async () => granted(doc));
   expect(screen.getByText("Workers run here.")).toBeTruthy();
+});
+
+it("an editor on Pro copies the design's link, revokes it, and sees an org policy's refusal; Free gets no link", async () => {
+  const url = "https://pawdelta.com/api/brindle/v1/share-links/dsl_x";
+  let current: DesignShareLink = { available: true, link: null };
+  const copied: string[] = [];
+  Object.assign(navigator, { clipboard: { writeText: async (text: string) => { copied.push(text); } } });
+  let copy: () => Promise<DesignShareLink> = async () => (current = { available: true, link: { url, created_at: 1, access: "anyone" } });
+  const revoke = vi.fn(async () => (current = { available: true, link: null }));
+  const client: SharedDesignClient & ShareLinkClient = {
+    sharedDesign: async () => ({ ...design, can_edit: true }),
+    writeSharedDesign: async () => design,
+    libraryPeople: async () => ({ people: [] }),
+    designShareLink: async () => current,
+    copyDesignShareLink: () => copy(),
+    revokeDesignShareLink: revoke,
+  };
+  const { unmount } = render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />);
+  await act(async () => {});
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Share" })));
+  const panel = () => within(screen.getByTestId("share-link"));
+  await act(async () => fireEvent.click(panel().getByRole("button", { name: "Copy link" })));
+  expect(copied).toEqual([url]);
+  expect((panel().getByRole("textbox") as HTMLInputElement).value).toBe(url);
+
+  await act(async () => fireEvent.click(panel().getByRole("button", { name: "Revoke link" })));
+  expect(revoke).toHaveBeenCalledWith("doc_1", undefined);
+  expect(panel().queryByRole("textbox")).toBeNull();
+
+  copy = async () => { throw new DaemonError("share_links_off", "an organization that holds this design does not allow share links", 403); };
+  await act(async () => fireEvent.click(panel().getByRole("button", { name: "Copy link" })));
+  expect(panel().getByRole("alert").textContent).toContain("does not allow share links");
+  unmount();
+
+  current = { available: false, link: null };
+  render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />);
+  await act(async () => {});
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Share" })));   // its review is shared: reviewers only
+  expect(screen.queryByTestId("share-link")).toBeNull();
 });

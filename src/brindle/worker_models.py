@@ -26,9 +26,12 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1"
 # Ranked worker profiles for each tier. Availability checks fall through this
 # order; the learner may choose another eligible candidate when enabled.
 TIER_PREFERENCES: dict[str, tuple[str, ...]] = {
-    "light": ("developer-codex", "developer-light", "developer-sonnet", "developer", "developer-local"),
-    "medium": ("developer-codex", "developer-sonnet", "developer", "developer-heavy"),
-    "heavy": ("developer-heavy", "developer-gemini", "developer", "developer-codex"),
+    "light": ("developer-codex", "developer-light", "developer-sonnet", "developer", "developer-local",
+              "developer-codex-luna", "developer-codex-terra"),
+    "medium": ("developer-codex", "developer-sonnet", "developer", "developer-heavy",
+               "developer-codex-terra", "developer-codex-sol"),
+    "heavy": ("developer-heavy", "developer-gemini", "developer", "developer-codex",
+              "developer-codex-sol", "developer-codex-astra"),
     "advanced": ("developer-fable", "developer-heavy", "developer-gemini"),
 }
 
@@ -50,6 +53,10 @@ CATALOG: tuple[Model, ...] = (
     Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "developer-sonnet", ("light", "medium")),
     Model("claude-opus", "Claude Opus", CLI, "claude", "developer-heavy", ("medium", "heavy")),
     Model("codex", "Codex", CLI, "codex", "developer-codex"),
+    Model("gpt-6-luna", "GPT-6-Luna", CLI, "codex", "developer-codex-luna", ("light",)),
+    Model("gpt-6.1-terra", "GPT-6.1-Terra", CLI, "codex", "developer-codex-terra", ("light", "medium")),
+    Model("gpt-6.1-sol", "GPT-6.1-Sol", CLI, "codex", "developer-codex-sol", ("medium", "heavy")),
+    Model("gpt-6-astra", "GPT-6-Astra", CLI, "codex", "developer-codex-astra", ("heavy",)),
     Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "developer-gemini", ("medium", "heavy")),
     Model("local-qwen3-coder", "Qwen3 Coder 30B", LOCAL, "native", "developer-local", ("light", "medium"),
           "qwen3-coder:30b"),
