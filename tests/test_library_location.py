@@ -124,9 +124,27 @@ def test_round_trip_keeps_one_record_per_plan_and_its_repo(remote):
     assert local_library.records() == []
 
 
+@pytest.mark.parametrize("status", [503, pytest.param(404, marks=pytest.mark.variant(
+    "a server copy that is gone is uploaded again rather than assumed"))])
+def test_move_to_servers_keeps_a_plan_whose_server_copy_is_unconfirmed(status, remote):
+    kept = local_library.add([{"name": "plan.md", "md": "# Kept"}], {}, identity="a" * 40)["doc_id"]
+    local_library.server_copy(kept)
+    remote.uploads.clear()
+    remote.routes["GET /analysis-docs/uploaded"] = [(status, {"error": "unavailable"})]
+
+    got = local_library.set_location("server")
+
+    if status == 503:           # not confirmed: the local copy stays, counted as left
+        assert (got["left"], len(remote.uploads)) == (1, 0) and local_library.get(kept) is not None
+    else:                       # gone: uploaded again before the local copy goes
+        assert (got["left"], len(remote.uploads)) == (0, 1) and local_library.get(kept) is None
+
+
 @pytest.mark.parametrize("level", ["team", pytest.param("org", marks=pytest.mark.variant(
-    "an Enterprise org's own enforced value applies without any team"))])
+    "an Enterprise org's own enforced value applies when its team's switches are empty"))])
 def test_enforced_location_beats_the_persons_choice(level, tmp_path, remote):
+    from brindle.daemon import routes_actions
+
     sign_in(remote, features=("analysis_docs", "analysis_docs_team", "analysis_docs_enterprise"))
     enforced = {"store": "enforced_on"}
     remote.routes["GET /orgs/org_1/analysis-docs/policy"] = [(200, {
@@ -134,6 +152,7 @@ def test_enforced_location_beats_the_persons_choice(level, tmp_path, remote):
     remote.routes["GET /analysis-docs/scopes"] = [(200, {"scopes": SHARED})]
     local_library.remember("local")
 
+    assert routes_actions.library_on_this_mac() is False        # the daemon's own read learns the team
     with pytest.raises(ad.Locked):
         local_library.set_location("local")
     assert sent(remote) == []

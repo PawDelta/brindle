@@ -168,6 +168,7 @@ def learn_group(client=None, store=None) -> str | None:
     cached for offline reads) and remember it."""
     from brindle.pro import analysis_docs
 
+    client, store = analysis_docs._session(client, store)
     ent = entitlement(store)
     if ent is None or "analysis_docs_team" not in ent.features:
         remember_group(None, store)
@@ -359,13 +360,16 @@ def server_copy(doc_id: str, client=None, store=None) -> str:
 
 
 def _on_server(server_id: str, client, store) -> bool:
-    """Whether the server still has ``server_id`` (anything but a 404 says it might)."""
+    """Whether the server still has ``server_id``: True only on a 200, False
+    on a 404. Any other answer raises, so the local copy is kept."""
     from brindle.pro import analysis_docs
 
     try:
         analysis_docs.api("GET", f"/analysis-docs/{quote(server_id, safe='')}", client=client, store=store)
     except analysis_docs.Refused as e:
-        return e.status != 404
+        if e.status == 404:
+            return False
+        raise
     return True
 
 
