@@ -508,10 +508,12 @@ def trust_folder(path: str) -> bool:
     key = os.path.realpath(path)  # how Claude Code keys it (its cwd, symlinks resolved)
     try:
         data, main = _read_json(config), linked_main(path)
-        if _trusted(data, key) or (main is not None and _trusted(data, os.path.realpath(main))):
+        # The theme brindle seeded before CI_THEME, in its own folder: moved here, on a launch, once.
+        theme = _brindle_owned_folder() and data.get("theme") == OLD_THEME
+        if not theme and (_trusted(data, key) or (main is not None and _trusted(data, os.path.realpath(main)))):
             return True  # the usual case: nothing to write
         with _config_lock():
-            return _write_trust(config, key)
+            return _write_trust(config, key, theme)
     except (OSError, ValueError, AttributeError, TypeError) as e:
         import logging
 
@@ -539,12 +541,6 @@ def _brindle_owned_folder() -> bool:
     return bool(provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR"))
 
 
-def _seed_theme(data: dict, owned: bool) -> None:
-    """Give Claude Code brindle's theme where none is set; in brindle's own
-    folder, move the "dark" theme brindle used to seed to CI_THEME."""
-    if owned and data.get("theme") == OLD_THEME:
-        data["theme"] = CI_THEME
-    data.setdefault("theme", CI_THEME)
 
 
 def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
@@ -559,11 +555,10 @@ def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
     a JSON object) when it can't write."""
     config = os.path.realpath(claude_global_config())
     os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
-    owned = _brindle_owned_folder()
 
     def seed(data: dict) -> None:
         data["hasCompletedOnboarding"] = True
-        _seed_theme(data, owned)
+        data.setdefault("theme", CI_THEME)
         projects = data.setdefault("projects", {})
         for path in trusted:
             projects.setdefault(os.path.realpath(path), {})["hasTrustDialogAccepted"] = True
@@ -638,11 +633,10 @@ def record_claude_onboarding() -> str:
     anyone. Returns the file's path; raises OSError or ValueError."""
     config = os.path.realpath(claude_global_config())
     os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
-    owned = _brindle_owned_folder()
 
     def onboarded(data: dict) -> None:
         data["hasCompletedOnboarding"] = True
-        _seed_theme(data, owned)
+        data.setdefault("theme", CI_THEME)
 
     with _config_lock():
         _update_config(config, onboarded, create=True)
@@ -721,10 +715,13 @@ def _trusted(data: dict, key: str) -> bool:
     return (data.get("projects") or {}).get(key, {}).get("hasTrustDialogAccepted") is True
 
 
-def _write_trust(config: str, key: str) -> bool:
-    """trust_folder's write; the caller holds the lock."""
+def _write_trust(config: str, key: str, theme: bool = False) -> bool:
+    """trust_folder's write; the caller holds the lock. ``theme``: also move
+    the theme brindle seeded (OLD_THEME) to CI_THEME, if it is still that."""
     def trust(data: dict) -> None:
         data.setdefault("projects", {}).setdefault(key, {})["hasTrustDialogAccepted"] = True
+        if theme and data.get("theme") == OLD_THEME:
+            data["theme"] = CI_THEME
 
     _update_config(config, trust)       # no write when another launch trusted it meanwhile
     return True
