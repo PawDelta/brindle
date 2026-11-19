@@ -246,13 +246,17 @@ def design_doc(parts: list[dict]) -> list[dict]:
     a free-form doc and stay as written."""
     parts = [dict(s) for s in parts]
     taken = {s["id"] for s in parts}
-    for s in parts:
-        if s["id"] not in SPINE and re.fullmatch(r"s\d+", s["id"]):
-            key = _HEADINGS.get(_heading(s["title"]))
-            if key and key not in taken:
+    # Headings alone only make a spine doc when at least three match: a couple of
+    # coincidental titles (Risks, Architecture) in a free-form doc stay as written.
+    named = {s["id"]: _HEADINGS.get(_heading(s["title"])) for s in parts
+             if s["id"] not in SPINE and re.fullmatch(r"s\d+", s["id"])}
+    named = {sid: key for sid, key in named.items() if key and key not in taken}
+    if len(set(named.values())) + len(taken & set(SPINE)) >= 3:
+        for s in parts:
+            if s["id"] in named and named[s["id"]] not in taken:
                 taken.discard(s["id"])
-                taken.add(key)
-                s["id"] = key
+                taken.add(named[s["id"]])
+                s["id"] = named[s["id"]]
     if not any(s["id"] in SPINE for s in parts):
         return parts
     for sid in SPINE:
