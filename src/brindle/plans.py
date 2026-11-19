@@ -64,6 +64,9 @@ HOLDING = ("open", "redirected", "writing")
 # first proposal fills it. "superseded": a draft the person called off before it was written; closed, not approvable.
 WRITING = "writing"
 SUPERSEDED = "superseded"
+# Withdrawn without approval (cancel): closed, not approvable, holds nothing. The tasks it held wait on each
+# one's decision (tasks.plan_holds, plan_cancel_holds), not on the plan.
+CANCELLED = "cancelled"
 # A row of the build gate.
 SIGNED, CHANGES, WAITING, WAIVED = "signed_off", "changes_requested", "waiting", "waived"
 _MET = (SIGNED, WAIVED)
@@ -627,6 +630,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             raise ServiceError("not_found", "no such plan in this session", 404)
         if current["state"] == SUPERSEDED:
             raise ServiceError("superseded", "the person asked for a newer plan; that one is closed", 409)
+        if current["state"] == CANCELLED:
+            raise ServiceError("cancelled", "that plan was cancelled; propose a new plan instead", 409)
         if current["state"] not in HOLDING:
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
     replaced = plan_docs.revision(db, plan_id) if plan_id else None
@@ -1079,6 +1084,79 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
             _to_library(p, picks, comments, note, titles, doc_record)
         tasks.on_resumed(db, p["root_id"], why="the person's approval of the plan")
     return get(db, p["id"])
+
+
+def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None = None) -> dict:
+    """Close an open or redirected plan as cancelled, approving nothing: the
+    person's Cancel (``person``, with the revision on screen as ``rev``), or the
+    session's supervisor withdrawing its own (``caller``; ``rev`` optional).
+    Whatever the review state, a shared plan's share is dropped
+    (shared_docs.drop_share), so its Library doc is unshared at the next pass
+    that reaches the Library. It is never sent to the Library (_to_library).
+
+    The tasks it held stay queued, each marked with the plan
+    (plan_cancel_holds): they neither start nor get dropped until the
+    supervisor decides each one, with start_now or cancel_task. One message
+    to the supervisor names them."""
+    from brindle import agents, autopilot, plan_docs, tasks
+    from brindle.pro import shared_docs
+
+    visuals.require_enabled()
+    p = get(db, plan_id)
+    if person:
+        visuals._unlocked(p["root_id"])
+        if not isinstance(rev, int) or isinstance(rev, bool):
+            raise ServiceError("invalid", "rev (the revision on screen) is required", 400)
+    elif caller is None or caller.id != p["root_id"]:
+        raise ServiceError("forbidden", "only the session's supervisor withdraws its plan", 403)
+    if rev is not None and rev != p["rev"]:
+        raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
+    if p["state"] == WRITING:
+        raise ServiceError("writing", "the supervisor is still writing this plan", 409)
+    if p["state"] not in ("open", "redirected"):
+        raise ServiceError("decided", "this plan is already decided", 409)
+    root = p["root_id"]
+    at = time.time()
+    with db.tx() as c:
+        # Selected before the plan's state changes, in the same write transaction: a task queued
+        # by an assign whose reply is still going out (unanswered) is held too, and nothing
+        # committed after this read can slip past the cancel.
+        held = [t for t in db.list_tasks(state="pending") + db.list_tasks(state=tasks.UNANSWERED)
+                if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.open_plan_holds(db, t)]
+        if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=? AND state IN ('open','redirected')",
+                         (CANCELLED, at, p["id"], p["rev"])).rowcount:
+            raise ServiceError("decided", "this plan is already decided", 409)
+        row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+        if row is not None:
+            shared_docs.drop_share(c, row)
+        for t in held:
+            c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at)"
+                      " SELECT id, ?, ? FROM tasks WHERE id=? AND state IN ('pending', ?)",
+                      (p["id"], at, t.id, tasks.UNANSWERED))
+        queued = _queue_message(c, root, _cancelled_message(p, held, person))
+    bus.publish_agent(db, "message.queued", root, message_id=queued, sender_id=None)
+    try:
+        agents.flush(db, root)
+    except Exception:  # noqa: BLE001 - it stays queued: the supervisor gets it at its next turn
+        log.warning("brindle: couldn't push plan %s's cancellation to %s now; it stays queued", p["id"], root,
+                    exc_info=True)
+    bus.publish_agent(db, "autopilot.goal", root)
+    p = get(db, p["id"])
+    plan_docs._changed(db, p, p["rev"])
+    return p
+
+
+def _cancelled_message(p: dict, held: list, person: bool) -> str:
+    lines = [f"{'The person cancelled' if person else 'You withdrew'} plan {p['id']} (r{p['rev']}): it is closed, "
+             "nothing was approved, and it won't go to the Library."]
+    if not held:
+        return "\n".join([*lines, "It held no queued tasks."])
+    lines.append(f"{len(held)} task(s) it held stay queued: none starts or is dropped on its own. Decide each one: "
+                 "start_now(task_id) starts it, cancel_task(task_id) gives it up.")
+    for t in held:
+        brief = next((ln.strip() for ln in t.task_text.splitlines() if ln.strip()), "")[:120]
+        lines.append(f"- {t.id} (branch {t.branch or 'none'}): {brief}")
+    return "\n".join(lines)
 
 
 def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,

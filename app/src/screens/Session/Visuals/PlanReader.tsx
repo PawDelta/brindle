@@ -59,7 +59,7 @@ import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -421,7 +421,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [note, setNote] = useState("");
   const [attached, setAttached] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
-  const [sending, setSending] = useState<"confirm" | "approve" | "changes" | null>(null);
+  const [sending, setSending] = useState<"confirm" | "approve" | "changes" | "cancel" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -729,6 +729,15 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       setPicks({});
     }
   };
+  /* Close the plan without approving it: nothing is built or sent to the Library, and the tasks it held wait for the supervisor. */
+  const cancelPlanning = async () => {
+    if (historical || !client || !client.cancelPlan) return;
+    setSending("cancel");
+    const now = await send(() => client.cancelPlan!(plan.id, plan.rev));
+    if (!alive.current) return;
+    setSending(null);
+    if (now) setNote("");
+  };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   const stopSharing = async () => {
     if (historical) return;
@@ -875,12 +884,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const reviewerNames = signers.filter((r) => r.required).map((r) => (r.sub ? firstName(r.sub) : r.name ?? "")).filter(Boolean);
 
   // The status line.
-  const stage = plan.state === "writing" ? "Being written" : plan.state === "superseded" ? "Superseded"
-    : !open && !teammate ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
+  const closed = plan.state === "cancelled";
+  const stage = plan.state === "writing" ? "Being written" : plan.state === "superseded" ? "Superseded" : closed ? "Cancelled"
+    : !open && !teammate ?(plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
     : frozen ? "Locked for sign-off"
     : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off";
   const statusLine = plan.state === "writing" ? "The supervisor is writing this plan"
     : plan.state === "superseded" ? "You asked for a newer plan; this one is closed"
+    : plan.state === "cancelled" ? "Closed without approval; the tasks it held wait for the supervisor"
     : teammate?.signedOff ? `You signed off ${frozen ? `version ${frozen.id}` : `r${plan.rev}`}`
     : frozen && gate ? `Version ${frozen.id} · ${gate.signed} of ${plural(gate.required, "sign-off")}`
     : gate && useLiveReview && open ? `Still being written · sign-off opens when ${teammate ? authorName : "you"} freeze${teammate ? "s" : ""} a version`
@@ -941,7 +952,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
                 {plan.title} <DocReference reference={plan.reference} className="ml-1 font-sans" />
               </h1>
-              <DocStatus stage={stage} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
+              <DocStatus stage={stage} presentation={closed ? "closed" : undefined} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
                 reviewers={statusReviewers} frozen={!!frozen} byline={byline} workItem={workItem}
                 brief={!!plan.ask} briefOpen={briefOpen} onBrief={() => setBriefOpen((o) => !o)}
                 state={plan.state} held={policyHeld ? "policy" : undefined} />
@@ -1079,6 +1090,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
+              {client?.cancelPlan && <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>}
               <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
                 title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
                 Request changes
@@ -1112,8 +1124,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
           </>
         ) : (
+          <>
+          {/* A redirected plan stays open to cancel (never to approve): the person may close it instead of waiting for a revision. */}
+          {plan.state === "redirected" && client?.cancelPlan && (
+            <div className="col-span-full flex justify-end">
+              <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
+            </div>
+          )}
           <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided" data-state={plan.state}>
-            <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>
+            {plan.state === "cancelled"
+              ? <p data-testid="plan-closed">This planning is closed without approval. The tasks it held wait for the supervisor's decision on each.</p>
+              : <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>}
             {plan.verdict?.note && <p className="text-ink-2"><span className="text-ink-3">your note · </span>{plan.verdict.note}</p>}
             {plan.verdict?.comments?.map((c, i) => (
               <p key={i} className="text-ink-2">
@@ -1122,6 +1143,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               </p>
             ))}
           </div>
+          </>
         )}
         {error && error !== gate?.unconfirmed?.message && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
       </footer>

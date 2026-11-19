@@ -1408,6 +1408,13 @@ CREATE TABLE IF NOT EXISTS plan_unshares (
     owner TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- A task a cancelled plan held: it waits for the supervisor's start_now or cancel_task, not
+-- for the plan (brindle.plans.cancel, brindle.tasks.plan_holds).
+CREATE TABLE IF NOT EXISTS plan_cancel_holds (
+    task_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 -- Which local thread or reply each Library thread or reply became, so a pull
 -- adds it once; status is the Library's as last seen. A negative remote_id is
 -- a thread with no Library thread: status 'sending' for one sent whose answer
@@ -4414,6 +4421,20 @@ class DB:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self.conn.execute(f"SELECT * FROM tasks {where} ORDER BY created_at", args)
         return [_load(Task, r) for r in rows]
+
+    def cancelled_hold(self, task_id: str) -> str | None:
+        """The plan a cancel left task ``task_id`` held behind, if any (plan_cancel_holds)."""
+        row = self.conn.execute("SELECT plan_id FROM plan_cancel_holds WHERE task_id=?", (task_id,)).fetchone()
+        return row["plan_id"] if row else None
+
+    def set_cancelled_hold(self, task_id: str, plan_id: str | None) -> None:
+        """Hold task ``task_id`` behind plan ``plan_id``'s cancel, or (None) release it."""
+        with self.tx() as c:
+            if plan_id is None:
+                c.execute("DELETE FROM plan_cancel_holds WHERE task_id=?", (task_id,))
+            else:
+                c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at) VALUES (?,?,?)",
+                          (task_id, plan_id, time.time()))
 
     def update_task(self, task_id: str, **fields: object) -> None:
         cols = ", ".join(f"{k}=?" for k in fields)

@@ -410,6 +410,13 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
     return plans.to_dto(db, p)
 
 
+def cancel_plan(db: DB, params: dict, body: dict) -> Any:
+    """The person cancels an open or redirected plan (brindle.plans.cancel): closed, nothing approved."""
+    from brindle import plans
+
+    return plans.to_dto(db, plans.cancel(db, params["id"], body.get("rev"), person=True))
+
+
 # The design doc (brindle.plan_docs). Like decide, only the person reaches
 # these: each answers with the plan as it is now.
 
@@ -842,6 +849,7 @@ ROUTES = [
     Route("/v1/visuals/{id}/snapshot", _endpoint(snapshot), methods=["POST"]),
     Route("/v1/plans/{id}", plan),
     Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
+    Route("/v1/plans/{id}/cancel", _endpoint(cancel_plan), methods=["POST"]),
     Route("/v1/plans/{id}/revisions/{n}", plan_revision),
     Route("/v1/plans/{id}/history", plan_history),
     Route("/v1/plans/{id}/revisions/{n}/changes", plan_comparison),

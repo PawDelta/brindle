@@ -593,7 +593,7 @@ class PlanDTO(_DTO):
     session: str
     title: str
     rev: int
-    state: Literal["open", "redirected", "approved", "writing", "superseded"]
+    state: Literal["open", "redirected", "approved", "writing", "superseded", "cancelled"]
     # The person's request as the supervisor restated it; a comment on it
     # names the section "ask".
     ask: str | None = None
