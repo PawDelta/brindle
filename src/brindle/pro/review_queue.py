@@ -39,8 +39,10 @@ def poll(*, client=None, store=None) -> bool:
     still holds exactly that record (``auth.refresh_captured``), and the
     account is read again from the refreshed record. No separate read of the
     store or of "who is signed in" can pair one account's answer with
-    another's name. False (nothing changed) when logged out, offline, refused,
-    not entitled or switched."""
+    another's name. True when the queue read differs from the last one (the
+    caller tells the app, which only re-reads its Inbox on an event); False
+    when it is unchanged, or when logged out, offline, refused, not entitled
+    or switched."""
     import time
 
     from brindle import airgap
@@ -60,8 +62,15 @@ def poll(*, client=None, store=None) -> bool:
         rec = store.load() or {}
         if not rec.get("refresh_token"):
             return False
-        sub = owner(rec)
-        if float(rec.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK:
+        # A stored entitlement that has expired (the machine slept, the app was closed
+        # for a while) is renewed from this record like an expired access token:
+        # checked first, it failed every pass and the queue was never asked.
+        try:
+            sub = owner(rec)
+            stale = float(rec.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK
+        except license.Expired:
+            stale = True
+        if stale:
             rec = auth.refresh_captured(store, rec, client.transport)
             sub = owner(rec)
         status, body = client.call("GET", PATH, None, token=rec.get("access_token"))
@@ -70,9 +79,11 @@ def poll(*, client=None, store=None) -> bool:
         return False
     if status != 200:
         return False
+    items = _items(body)
     with _lock:
-        _seen[sub] = _items(body)
-    return True
+        changed = _seen.get(sub) != items
+        _seen[sub] = items
+    return changed
 
 
 def waiting(sub: str | None) -> list[dict]:
