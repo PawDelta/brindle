@@ -12,6 +12,7 @@ import brindle
 from brindle import cli
 from brindle import agents, bus, disk, gates, git, mcp_server, providers, services, workspaces
 from brindle.config import load_repo_config
+from brindle.db import Workspace
 
 from conftest import sh
 from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
@@ -227,8 +228,9 @@ def _sent_body(ws, monkeypatch, body):
 def test_pr_body_ends_with_the_footer_exactly_once(feature, monkeypatch, body):
     sent = _sent_body(feature, monkeypatch, body)
     assert sent.count(workspaces.PR_FOOTER) == 1
-    if "·" not in body and "Built with" not in body:
-        assert sent.endswith(workspaces.PR_FOOTER) and "brindle-mark.png" in sent
+    assert sent.count("brindle-mark.png") == 1   # a bare text footer is upgraded to the full one
+    if "·" not in body:
+        assert sent.endswith(workspaces.PR_FOOTER)
 
 
 def test_pr_footer_counts_come_from_the_db_and_skip_unknown_parts(db, repo, feature, monkeypatch):
@@ -249,3 +251,33 @@ def test_pr_footer_counts_come_from_the_db_and_skip_unknown_parts(db, repo, feat
     assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · all checks passed")
     db.set_check(feature.id, head, "b", False, "boom")
     assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · checks failing")
+
+
+def test_session_root_summary_counts_workers_linked_by_root_agent_id(db, feature):
+    add(db, feature, "root", "interactive", "supervisor")
+    worker_ws = Workspace("w-ws", feature.repo_root, "w", "worktree", feature.path + "-w", "main",
+                          feature.path + "-w", None, "w", 0)
+    db.add_workspace(worker_ws)
+    db.set_workspace_session_root(worker_ws.id, "root")   # pilot.root_of gives an agent id
+    add(db, worker_ws, "wk", "assign")
+    assert workspaces.footer_summary(db, feature, "sha") == ["1 worker"]
+
+
+def test_pr_poll_adds_footer_to_a_gh_opened_pr_once(db, feature, monkeypatch):
+    state = {"body": "Made by hand.", "edits": 0}
+    monkeypatch.setattr(workspaces.shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(workspaces.spawn, "read", lambda args, **k: SimpleNamespace(
+        returncode=0, stdout=json.dumps({"state": "OPEN", "body": state["body"]})))
+
+    def edit(args, **k):
+        state["edits"] += 1
+        state["body"] = args[args.index("--body") + 1]
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(workspaces.spawn, "action", edit)
+    pr = {"url": "https://gh.test/pr/9"}
+    workspaces.ensure_pr_footer(pr, "sha", feature.path)
+    assert state["edits"] == 1 and workspaces._has_full_footer(state["body"])
+    state["body"] = "A person rewrote it."
+    workspaces.ensure_pr_footer(pr, "sha", feature.path)
+    assert state["edits"] == 1 and state["body"] == "A person rewrote it."
