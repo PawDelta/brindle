@@ -508,10 +508,12 @@ def trust_folder(path: str) -> bool:
     key = os.path.realpath(path)  # how Claude Code keys it (its cwd, symlinks resolved)
     try:
         data, main = _read_json(config), linked_main(path)
-        if _trusted(data, key) or (main is not None and _trusted(data, os.path.realpath(main))):
+        # The theme brindle seeded before CI_THEME, in its own folder: moved here, on a launch, once.
+        theme = _brindle_owned_folder() and data.get("theme") == OLD_THEME
+        if not theme and (_trusted(data, key) or (main is not None and _trusted(data, os.path.realpath(main)))):
             return True  # the usual case: nothing to write
         with _config_lock():
-            return _write_trust(config, key)
+            return _write_trust(config, key, theme)
     except (OSError, ValueError, AttributeError, TypeError) as e:
         import logging
 
@@ -520,8 +522,25 @@ def trust_folder(path: str) -> bool:
 
 
 # The first-run answers a person gives Claude Code once on their own machine.
-CI_THEME = "dark"
+# Claude Code's ANSI theme ("dark-ansi"): its diff and code colours come from
+# the terminal's 16-colour palette, so they follow the app's light or dark
+# theme instead of a fixed dark background.
+CI_THEME = "dark-ansi"
+# The theme brindle seeded before CI_THEME. Only brindle's own config folder
+# (provider_homes) is migrated to CI_THEME: the person's own ~/.claude.json
+# keeps the theme they chose.
+OLD_THEME = "dark"
 API_KEY_SUFFIX = 20   # Claude Code records an approved key by its last 20 characters
+
+
+def _brindle_owned_folder() -> bool:
+    """Whether Claude Code runs from a config folder brindle made and keeps
+    (provider_homes), rather than the person's own."""
+    from brindle import provider_homes
+
+    return bool(provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR"))
+
+
 
 
 def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
@@ -696,10 +715,13 @@ def _trusted(data: dict, key: str) -> bool:
     return (data.get("projects") or {}).get(key, {}).get("hasTrustDialogAccepted") is True
 
 
-def _write_trust(config: str, key: str) -> bool:
-    """trust_folder's write; the caller holds the lock."""
+def _write_trust(config: str, key: str, theme: bool = False) -> bool:
+    """trust_folder's write; the caller holds the lock. ``theme``: also move
+    the theme brindle seeded (OLD_THEME) to CI_THEME, if it is still that."""
     def trust(data: dict) -> None:
         data.setdefault("projects", {}).setdefault(key, {})["hasTrustDialogAccepted"] = True
+        if theme and data.get("theme") == OLD_THEME:
+            data["theme"] = CI_THEME
 
     _update_config(config, trust)       # no write when another launch trusted it meanwhile
     return True
