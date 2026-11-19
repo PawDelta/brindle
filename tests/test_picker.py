@@ -250,7 +250,7 @@ def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
     stored = {}
     monkeypatch.setattr(key_check, "verify", lambda name, value: "rejected" if value == "bad" else None)
     monkeypatch.setattr(keystore, "set_key", lambda name, value, repo_root=None: stored.update({name: value}))
-    out, wm = _workers(team_policy.Access(), ["1", "5", "1", "5", "q"], is_ready=lambda m: False,
+    out, wm = _workers(team_policy.Access(), ["1", "7", "1", "7", "q"], is_ready=lambda m: False,
                        read_secret=lambda name: next(answers))
     assert "✗ rejected" in "\n".join(out) and stored == {"OPENROUTER_API_KEY": "good"}
     assert user_settings()["routing_light"] == "or-qwen3-coder"
