@@ -239,6 +239,20 @@ _HEADINGS = {**{_heading(t): i for i, t in TITLES.items()}, **{_heading(i): i fo
              "goals": "goals", "alternatives": "alternatives", "risks": "risks", "rollout": "rollout"}
 
 
+def canonical_ids(parts: list[dict], only: set[str]) -> list[dict]:
+    """``parts`` with the sections whose ids are in ``only`` renamed to their spine id,
+    when their title is a spine heading and no other section has it."""
+    taken = {s["id"] for s in parts}
+    out = []
+    for s in parts:
+        key = _HEADINGS.get(_heading(s["title"])) if s["id"] in only else None
+        if key and key not in taken:
+            taken.add(key)
+            s = {**s, "id": key}
+        out.append(s)
+    return out
+
+
 def design_doc(parts: list[dict], force: bool = False, map_only: bool = False) -> list[dict]:
     """A proposal as the design-doc spine: sections with a spine id, or
     (markdown headings) a spine title, take the canonical id; every required

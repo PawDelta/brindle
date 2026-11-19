@@ -619,8 +619,11 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     if plan_id is None or on_spine:
         parts = plan_docs.design_doc(parts, force=on_spine and not template, map_only=bool(template))
         markdown = plan_docs.render(lede, parts)
+    own = {s["id"] for s in parts}
     parts, added = doc_templates.apply(template, parts)
     if added:
+        # A heading the template brought in empty takes its spine id too (Open questions stays one section).
+        parts = plan_docs.canonical_ids(parts, {s["id"] for s in parts} - own)
         markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)

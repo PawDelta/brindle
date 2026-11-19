@@ -255,10 +255,14 @@ def test_without_a_format_nothing_changes(db, session):
     assert doc_templates.of(db, pid) is None and "Reference" not in reply
 
 
-def test_custom_template_keeps_spine_ids_and_a_real_decision_target(db, session, monkeypatch):
+@pytest.mark.parametrize("template_has_open_questions", [False, True])
+def test_custom_template_keeps_spine_ids_and_a_real_decision_target(db, session, monkeypatch,
+                                                                    template_has_open_questions):
     boss, _ = session
     sections = [{"title": "Proposed design", "kind": "text", "required": True},
                 {"title": "Context", "kind": "text", "required": True}]
+    if template_has_open_questions:
+        sections.append({"title": "Open questions", "kind": "text", "required": True})
     monkeypatch.setattr(doc_templates, "default_template",
                         lambda fmt: {"id": "t", "name": "T", "default": True, "sections": sections})
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
@@ -268,7 +272,10 @@ def test_custom_template_keeps_spine_ids_and_a_real_decision_target(db, session,
         {"id": "d2", "title": "Two", "options": option}])
     sections = plan_docs.revision(db, p["id"])["sections"]
     ids = [s["id"] for s in sections]
-    assert ids[:2] == ["proposed-design", "context"]
+    assert ids == ["proposed-design", "context", "open-questions"]      # one target, never a duplicate
+    if template_has_open_questions:
+        # The omitted required heading stays empty, so the sign-off gate still sees it missing.
+        assert doc_templates.missing(doc_templates.of(db, p["id"])["template"], sections) == ["Open questions"]
     decisions = plans.get(db, p["id"])["decisions"]
     assert [d["section"] for d in decisions] == ["context", "open-questions"]
     assert {d["section"] for d in decisions} <= set(ids)
