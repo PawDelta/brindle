@@ -116,6 +116,8 @@ def test_usage_cost():
                     cache_creation_tokens=10_000, model="claude-sonnet-5-5-20260901")
     assert usage.usage_cost(u) == pytest.approx((1000 * 2 + 2000 * 10 + 100_000 * 0.1 + 10_000 * 2.5) / 1e6)
     assert usage.usage_cost(usage.Usage(5, 5, model="mystery")) is None
+    terra = usage.Usage(input_tokens=1000, output_tokens=2000, cache_read_tokens=100_000, model="gpt-6.1-terra")
+    assert usage.usage_cost(terra) == pytest.approx((1000 * 1 + 2000 * 5 + 100_000 * 0.05) / 1e6)
     assert usage.usage_cost(None) is None
     line = usage.summary_line(u, usage.usage_cost(u))
     assert line.endswith("· sonnet · ~$0.06")
