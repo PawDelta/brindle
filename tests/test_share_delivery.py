@@ -38,7 +38,7 @@ def test_a_share_the_library_has_no_document_for_can_be_stopped_and_approved(db,
     _owner_shares(db, pid, net, monkeypatch)
     unconfirmed = plans.gate(db, plans.get(db, pid))["unconfirmed"]
     assert unconfirmed["can_stop_sharing"] is True
-    with pytest.raises(ServiceError):   # the Library has nothing to edit: say so, don't retry the 404
+    with pytest.raises(ServiceError):   # the Library has nothing to edit: the error says so
         sd.set_reviewers(db, pid, [{"sub": "u_a", "required": True}], **net)
     sd.stop_sharing(db, pid, 1)
     assert plans.gate(db, plans.get(db, pid)) is None
