@@ -273,9 +273,33 @@ class PlanOfferDTO(_DTO):
     reasons: list[str]
 
 
+class PersonDTO(_DTO):
+    """A teammate: the Library's account id, and their profile name (None when they set none)."""
+    sub: str
+    name: str | None = None
+
+
+class SignoffDTO(_DTO):
+    """A design's sign-off progress, as of its newest sign-off: ``signed`` of
+    ``required`` required reviewers on revision ``rev``, and who is still to sign."""
+    rev: int
+    signed: int
+    required: int
+    waiting: list[PersonDTO] = []
+
+
 class InboxItemDTO(_DTO):
     kind: str
     reason: str
+    # Which part of the Inbox the row belongs in: "needs_you" or "from_team".
+    # Unrelated to ``section``, a document request's heading.
+    inbox_group: str | None = None
+    from_person: PersonDTO | None = None   # a teammate's row: who asked for the review, signed or commented
+    read: bool | None = None       # a team row's read state, kept per person in the Library
+    item_key: str | None = None    # a team row's key: POST /v1/inbox/read marks it read
+    thread_id: int | None = None   # a shared-doc comment's thread in the design
+    excerpt: str | None = None     # a shared-doc comment's newest words
+    signoff: SignoffDTO | None = None
     # An org notice belongs to no agent or workspace.
     agent_id: str | None = None
     workspace_id: str | None = None
@@ -284,8 +308,8 @@ class InboxItemDTO(_DTO):
     notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
     request_id: str | None = None  # a doc request's id, or a recurring notification's source occurrence
     doc: int | str | None = None   # integer kb_docs id or opaque analysis-doc library id
-    section: str | None = None
-    fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
+    section: str | None = None     # a document request's heading in ``doc``
+    fix: str | None = None        # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
     choices: list[InboxChoiceDTO] | None = None   # a handover card's answers, each posted to ``action``

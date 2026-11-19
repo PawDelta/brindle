@@ -1197,20 +1197,22 @@ def _sync_shared_docs() -> None:
 
 
 def _poll_review_queue() -> None:
-    """review_queue.poll for the signed-in account; a failure is only logged.
-    A changed queue is announced on the bus (``review_queue.changed``): the app
-    re-reads its Inbox only when an event arrives, and it notifies for each new
-    card, so without one a request waited for some unrelated event."""
-    from brindle import bus
+    """review_queue.poll and the team Inbox's feed (inbox_team.poll) for the
+    signed-in account; a failure is only logged. A change is announced on the
+    bus (``review_queue.changed``, ``inbox.changed``): the app re-reads its
+    Inbox only when an event arrives, and it notifies for each new card, so
+    without one a request waited for some unrelated event."""
+    from brindle import bus, inbox_team
     from brindle.db import DB
     from brindle.pro import review_queue
 
     try:
-        if not review_queue.poll():
-            return
+        changed = review_queue.poll()
         db = DB()
         try:
-            bus.publish(db, "review_queue.changed")
+            if changed:
+                bus.publish(db, "review_queue.changed")
+            inbox_team.poll(db)
         finally:
             db.conn.close()
     except Exception:  # noqa: BLE001 - a poll must never stop the watch
