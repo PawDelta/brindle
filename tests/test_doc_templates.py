@@ -232,7 +232,7 @@ def test_an_orgs_format_never_comes_from_this_machine(db, session, library):
         doc_templates.save(doc_templates.ORG, {"blocks": []}, version=0)
     assert e.value.code == "upstream"
     pid, _ = _propose(db, boss)
-    assert doc_templates.of(db, pid) is None and "Rollout" not in plans.get(db, pid)["markdown"]
+    assert doc_templates.of(db, pid) is None and "## Rollout\n" not in plans.get(db, pid)["markdown"]
 
 
 def test_reference_pattern_and_levels(db, tmp_path):
@@ -247,9 +247,37 @@ def test_reference_pattern_and_levels(db, tmp_path):
     assert local.take(db, "team:t1") == "TEAM-0001"                                # numbered per pattern
 
 
-@pytest.mark.variant("Solo users with no format configured see no change to new docs")
+@pytest.mark.variant("Solo users with no format configured get no template and no reference")
 def test_without_a_format_nothing_changes(db, session):
     boss, _ = session
     pid, reply = _propose(db, boss, "# Presets\n\nOne page.\n\n## Goal\n\nPresets.")
-    assert plans.get(db, pid)["markdown"] == "# Presets\n\nOne page.\n\n## Goal\n\nPresets."
+    assert plans.get(db, pid)["markdown"].startswith("# Presets\n\nOne page.\n\n## Goal\n\nPresets.")
     assert doc_templates.of(db, pid) is None and "Reference" not in reply
+
+
+@pytest.mark.parametrize("template_has_open_questions", [False, True])
+def test_custom_template_keeps_spine_ids_and_a_real_decision_target(db, session, monkeypatch,
+                                                                    template_has_open_questions):
+    boss, _ = session
+    # An optional extra the supervisor leaves out, and one they send empty, are never stored.
+    sections = [{"title": "Proposed design", "kind": "text", "required": True},
+                {"title": "Architecture", "kind": "text", "required": False},
+                {"title": "Context", "kind": "text", "required": True}]
+    if template_has_open_questions:
+        sections.append({"title": "Open questions", "kind": "text", "required": True})
+    monkeypatch.setattr(doc_templates, "default_template",
+                        lambda fmt: {"id": "t", "name": "T", "default": True, "sections": sections})
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    option = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    p = plans.propose(db, boss, "# T\n\n## Context\n\nWhy.\n\n## Audience\n\n## Proposed design\n\nHow.", [
+        {"id": "d1", "title": "One", "options": option, "section": "context"},
+        {"id": "d2", "title": "Two", "options": option}])
+    sections = plan_docs.revision(db, p["id"])["sections"]
+    ids = [s["id"] for s in sections]
+    assert ids == ["proposed-design", "context", "open-questions"]      # one target, never a duplicate
+    if template_has_open_questions:
+        # The omitted required heading stays empty, so the sign-off gate still sees it missing.
+        assert doc_templates.missing(doc_templates.of(db, p["id"])["template"], sections) == ["Open questions"]
+    decisions = plans.get(db, p["id"])["decisions"]
+    assert [d["section"] for d in decisions] == ["context", "open-questions"]
+    assert {d["section"] for d in decisions} <= set(ids)

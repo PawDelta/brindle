@@ -991,6 +991,10 @@ export interface PlanDecisionDTO {
   id: string;
   mine?: string | null;
   options: PlanOptionDTO[];
+  /**
+   * The section whose end shows this decision's card; older plans have none.
+   */
+  section?: string;
   title: string;
   votes?: {
     [k: string]: string[];

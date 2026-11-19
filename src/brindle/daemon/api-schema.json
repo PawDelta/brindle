@@ -6111,6 +6111,11 @@
               "title": "Options",
               "type": "array"
             },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
+            },
             "title": {
               "title": "Title",
               "type": "string"
@@ -7365,6 +7370,11 @@
           },
           "title": "Options",
           "type": "array"
+        },
+        "section": {
+          "default": "open-questions",
+          "title": "Section",
+          "type": "string"
         },
         "title": {
           "title": "Title",
@@ -8685,6 +8695,11 @@
               },
               "title": "Options",
               "type": "array"
+            },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
             },
             "title": {
               "title": "Title",
@@ -11441,6 +11456,11 @@
               },
               "title": "Options",
               "type": "array"
+            },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
             },
             "title": {
               "title": "Title",
