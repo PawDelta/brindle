@@ -202,13 +202,15 @@ class Spool:
 
     def _write(self, path, entries: list[dict]) -> None:
         lines = [json.dumps(e, separators=(",", ":")) for e in entries]
+        dropped = 0
         while lines and (len(lines) > self.max_events
                          or sum(len(x) + 1 for x in lines) > self.max_bytes):
             lines.pop(0)
-            self.dropped += 1
+            dropped += 1
+        self.dropped += dropped
         write_private(path, ("\n".join(lines) + "\n" if lines else "").encode())
-        if self.dropped:
-            log.warning("brindle Pro event spool full; %d oldest event(s) dropped", self.dropped)
+        if dropped:
+            log.warning("brindle Pro event spool full; %d oldest event(s) dropped", dropped)
 
     def append(self, org_id: str, events: list[dict]) -> None:
         path, lock = self._paths()
@@ -277,6 +279,7 @@ class ProEvents(EventsPlugin):
                  spool: Spool | None = None, entitlement=None, start_thread: bool = True) -> None:
         self.repo_root = repo_root
         self._store, self._client = store, client
+        self._fixed_client = client is not None
         self.keys = OrgKeys(store=store, client=client, key_store=key_store)
         self._entitlement = entitlement
         self._identities: dict[str, str | None] = {}
@@ -286,6 +289,8 @@ class ProEvents(EventsPlugin):
         self._wake = threading.Event()
         self._delay = 0.0
         self._next_try = 0.0
+        self._last_error: str | None = None
+        self._streak_logged: str | None = None
         self._thread = None
         self._start_thread = start_thread
 
@@ -408,19 +413,57 @@ class ProEvents(EventsPlugin):
         for org in order:
             self.spool.append(org, pending[org])
 
-    def _post(self, org: str, batch: list[dict]) -> int:
-        from brindle.pro import auth, credentials
+    def _is_other_org(self, org: str) -> bool:
+        """True only when a verified entitlement positively identifies a
+        different org than ``org``; an unavailable entitlement returns False so
+        a transient lookup error never drops current-org audit events."""
+        from brindle.pro import license
 
-        if self._store is None:
-            self._store = credentials.default_store()
-        if self._client is None:
-            creds = self._store.load() or {}
-            self._client = auth.Client(creds.get("base_url"), auth.UrllibTransport(timeout=SEND_TIMEOUT))
         try:
-            status, _ = auth.authed(self._client, self._store, "POST", f"/orgs/{org}/events",
-                                    auth.JSONBody({"events": batch}))
-        except auth.AuthError:
+            ent = (self._entitlement() if self._entitlement
+                   else license.current(refresh=False, store=self._store))
+        except Exception:  # noqa: BLE001
+            return False
+        cur = getattr(ent, "org_id", None)
+        return isinstance(cur, str) and bool(ORG_RE.match(cur)) and cur != org
+
+    def _backoff(self) -> None:
+        self._delay = min(MAX_BACKOFF, max(1.0, self._delay * 2))
+        self._next_try = time.monotonic() + self._delay * random.uniform(0.8, 1.2)
+
+    def _log_backoff(self, status: int) -> None:
+        reason = self._last_error or (f"HTTP {status}" if status else "send_error")
+        if self._streak_logged != reason:
+            log.warning("brindle Pro: event send failed (%s); backing off", reason)
+            self._streak_logged = reason
+
+    def _post(self, org: str, batch: list[dict]) -> int:
+        from brindle.pro import auth, credentials, license
+
+        self._last_error = None
+        try:
+            if self._store is None:
+                self._store = credentials.default_store()
+            if not self._fixed_client:
+                creds = self._store.load() or {}
+                base = auth.base_url(creds.get("base_url"))
+                if self._client is None or self._client.base != base:
+                    self._client = auth.Client(base, auth.UrllibTransport(timeout=SEND_TIMEOUT))
+            status, body = auth.authed(self._client, self._store, "POST", f"/orgs/{org}/events",
+                                       auth.JSONBody({"events": batch}))
+        except auth.AuthError as e:
+            self._last_error = f"auth:{e.code}"
             return 0
+        except license.LicenseError as e:
+            self._last_error = f"license:{e}"
+            return 0
+        except credentials.CredentialError:
+            self._last_error = "credentials"
+            return 0
+        if status not in (200, 201, 202):
+            err = body.get("error") if isinstance(body, dict) else None
+            code = err if isinstance(err, str) and ORG_RE.match(err) else None
+            self._last_error = f"HTTP {status} ({code})" if code else f"HTTP {status}"
         return status
 
     def send_pending(self) -> bool:
@@ -432,11 +475,14 @@ class ProEvents(EventsPlugin):
             return False
         with self.spool.sender() as mine:
             if not mine:
+                self._backoff()
                 return False
             while True:
                 head = self.spool.head()
                 if head is None:
                     self._delay = 0.0
+                    self._next_try = 0.0
+                    self._streak_logged = None
                     return True
                 org, batch = head
                 status = self._post(org, batch)
@@ -450,19 +496,22 @@ class ProEvents(EventsPlugin):
                     # A backend older than by_model refuses the key: keep the rest of the event.
                     status = self._post(org, [{k: v for k, v in e.items() if k != "by_model"}
                                               for e in sent])
-                if status in (403, 404) and all(health):
-                    # Route health from an org the backend doesn't take it for (a personal plan).
+                if status in (403, 404) and (all(health) or self._is_other_org(org)):
+                    # Route health from an org the backend doesn't take it for, or events left
+                    # behind for an org this sign-in is positively no longer on.
                     status = 400
                 if status in (200, 201, 202):
                     self.spool.pop(org, len(batch))
                     self._delay = 0.0
+                    self._next_try = 0.0
+                    self._streak_logged = None
                 elif status in (400, 413, 422):
                     log.warning("brindle Pro: backend rejected %d audit event(s) (HTTP %d); dropped",
                                 len(batch), status)
                     self.spool.pop(org, len(batch))
                 else:
-                    self._delay = min(MAX_BACKOFF, max(1.0, self._delay * 2))
-                    self._next_try = time.monotonic() + self._delay * random.uniform(0.8, 1.2)
+                    self._log_backoff(status)
+                    self._backoff()
                     return False
 
     def _run(self) -> None:

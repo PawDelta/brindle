@@ -15,7 +15,8 @@
    on-branch / on-sap for text on those two, and for the terminal a raised
    shell ground (its tab strip) and the shell's own fail red. The sidebar
    sits on the same surfaces, with purple (branch) only as its accent for
-   what is selected or focused; the shell blocks stay dark. Every colour in the app is one of these tokens.
+   what is selected or focused; the shell blocks take the theme's ground and
+   ink too (--shell-*, set in both light blocks and dark :root). Every colour in the app is one of these tokens.
    Dark is the default; light under prefers-color-scheme or
    data-theme="light", and data-theme="dark" forces dark
    (components/ThemeToggle.tsx). */
@@ -60,6 +61,7 @@
     --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
     --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
     --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
+    --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #046e50; --shell-cursor: #046e50; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
     color-scheme: light;
   }
 }
@@ -77,6 +79,7 @@
   --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
   --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
   --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
+  --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #046e50; --shell-cursor: #046e50; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
   color-scheme: light;
 }
 

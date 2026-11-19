@@ -12,7 +12,9 @@ import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
-import { PARKED, closeParkedVisuals } from "./NativeFrame";
+import { PARKED, closeParkedVisuals, themeMessage } from "./NativeFrame";
+// The page's side of the app theme, the very file the prelude embeds (visual_scheme.rs).
+import pageScript from "../../../../src-tauri/src/visual_theme.js?raw";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { KeptVisuals } from "../../Knowledge/KeptVisuals";
@@ -1560,4 +1562,85 @@ describe("export snapshot", () => {
       fireEvent.click(screen.getByTestId("visual-zoom-reset"));
       await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_zoom", { label, zoom: 1 }));
     });
+});
+
+describe("visual theme", () => {
+  const DARK = "--canvas:#080d0b;--ink:#e8f0eb";
+  const LIGHT = "--canvas:#f4f6f6;--ink:#0e1716";
+  const shapes = {
+    darkFirst: `:root{${DARK};color-scheme:dark}
+      @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){${LIGHT};color-scheme:light}}
+      :root[data-theme="light"]{${LIGHT};color-scheme:light}`,
+    lightFirst: `:root{${LIGHT};color-scheme:light}
+      @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){${DARK};color-scheme:dark}}
+      :root[data-theme="dark"]{${DARK};color-scheme:dark}`,
+  };
+  // The root's --canvas as a browser cascades it (jsdom doesn't evaluate @media): later wins, and
+  // prefers-color-scheme answers the system's scheme unless the page rewrote it.
+  const canvas = (doc: Document, system: "light" | "dark") => {
+    let value = "";
+    const media = (text: string) => !/max-width:\s*0px/.test(text)
+      && Array.from(text.matchAll(/prefers-color-scheme\s*:\s*(light|dark)/gi)).every((m) => m[1] === system);
+    const visit = (rules: CSSRuleList) => {
+      for (const rule of Array.from(rules)) {
+        // The frame's rules are of its own realm: told apart by shape, not instanceof.
+        if ("media" in rule) { if (media((rule as CSSMediaRule).media.mediaText)) visit((rule as CSSMediaRule).cssRules); }
+        else if ("selectorText" in rule && doc.documentElement.matches((rule as CSSStyleRule).selectorText)) {
+          value = (rule as CSSStyleRule).style.getPropertyValue("--canvas").trim() || value;
+        }
+      }
+    };
+    for (const sheet of Array.from(doc.styleSheets)) visit(sheet.cssRules);
+    return value;
+  };
+
+  it.each(["darkFirst", "lightFirst"] as const)("a %s page follows the app's light and dark, live, whatever the system's", async (shape) => {
+    const frame = document.body.appendChild(document.createElement("iframe"));
+    const page = frame.contentWindow! as typeof globalThis & Window;
+    const doc = frame.contentDocument!;
+    doc.documentElement.innerHTML = `<head><style>${shapes[shape]}</style></head><body>board</body>`;
+    // The page's own matchMedia answers the system (jsdom has none): only the script may change that.
+    let systemNow: "light" | "dark" = "dark";
+    let widthNow = 900;
+    const live: (() => void)[] = [];
+    page.matchMedia = ((query: string) => {
+      const answer = () => Array.from(query.matchAll(/max-width:\s*(\d+)px/gi)).every((m) => widthNow <= Number(m[1]))
+        && Array.from(query.matchAll(/prefers-color-scheme\s*:\s*(light|dark)/gi)).every((m) => m[1] === systemNow);
+      const listeners: ((event: { matches: boolean }) => void)[] = [];
+      let last = answer();
+      live.push(() => { if (answer() !== last) { last = answer(); for (const fn of listeners) fn({ matches: last }); } });
+      return { media: query, get matches() { return answer(); }, addEventListener: (_: string, fn: (typeof listeners)[number]) => listeners.push(fn) };
+    }) as unknown as typeof page.matchMedia;
+    // The browser re-evaluates its lists, as on a resize.
+    const resize = (width: number) => { widthNow = width; for (const check of live) check(); };
+    new Function("window", "document", "MutationObserver", `(${pageScript.trim()})()`)(page, doc, page.MutationObserver);
+    const host = () => page.dispatchEvent(new page.MessageEvent("message", { data: themeMessage(), origin: "brindle://host" }));
+    // The system is the other scheme each time, as when the app is set apart from it.
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    // A script's own question, and the switches it hears, follow the app too.
+    const darkQuery = page.matchMedia("(prefers-color-scheme: dark)");
+    const heard: boolean[] = [];
+    darkQuery.addEventListener("change", (event) => heard.push(event.matches));
+    for (const [app, system] of [["light", "dark"], ["dark", "light"], ["light", "dark"]] as const) {
+      systemNow = system;
+      document.documentElement.dataset.theme = app;
+      host();
+      await Promise.resolve();
+      expect(canvas(doc, system)).toBe(app === "light" ? "#f4f6f6" : "#080d0b");
+      expect(darkQuery.matches).toBe(app === "dark");
+      expect(heard.at(-1)).toBe(app === "dark");
+      expect(doc.documentElement.dataset.theme).toBe(app);
+      expect(doc.documentElement.style.getPropertyValue("color-scheme")).toBe(app);
+    }
+    // With the app's scheme set, the rest of a compound query still changes it, and says so.
+    const narrowLight = page.matchMedia("(prefers-color-scheme: light) and (max-width: 600px)");
+    const narrowed: boolean[] = [];
+    narrowLight.addEventListener("change", (event) => narrowed.push(event.matches));
+    resize(500);
+    expect(narrowed).toEqual([true]);
+    expect(narrowLight.matches).toBe(true);
+    resize(900);
+    delete document.documentElement.dataset.theme;
+    frame.remove();
+  });
 });
