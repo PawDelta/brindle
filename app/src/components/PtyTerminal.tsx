@@ -872,7 +872,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       </div>
       {/* A copy reached the app's clipboard: said for a moment, out of the way of the pane's text and clicks. */}
       {copiedShown && (
-        <div role="status" className="pointer-events-none absolute right-s2 top-s2 z-20 rounded-md border border-shell-line bg-shell-bg px-s2 py-0.5 text-xs text-shell-acc" data-testid="terminal-copied">
+        <div role="status" className="pointer-events-none absolute right-s2 top-s2 z-20 rounded-md bg-shell-ink px-s2 py-1 text-sm font-medium text-shell-bg shadow-md" data-testid="terminal-copied">
           Copied
         </div>
       )}
