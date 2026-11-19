@@ -20,6 +20,7 @@ def _write(tmp_path, data):
     _config(tmp_path).chmod(0o600)
 
 
+@pytest.mark.variant("seeding and onboarding must keep a theme the person chose (setdefault, never assignment)")
 def test_theme_a_person_chose_is_kept_by_the_seed_and_the_onboarding(tmp_path):
     _write(tmp_path, {"theme": "light"})
     providers.seed_ci_config([])
