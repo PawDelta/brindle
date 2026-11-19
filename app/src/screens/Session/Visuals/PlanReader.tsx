@@ -39,7 +39,7 @@ import { PaperclipIcon } from "../../../components/icons";
 import { button, field, label, main, quiet } from "../../../components/ui";
 import { CloudLoginStatus, useCloudLogin } from "../../Inbox/CloudSignIn";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
-import type { PlanDocClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
+import type { PlanDocClient, PlanSharingClient, PlansClient, ShareLinkClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { Popover, ReaderBar } from "./DocBar";
 import { Diagram } from "./DocDiagram";
@@ -53,12 +53,13 @@ import { DocPresence, type LiveCapability } from "./DocPresence";
 import { DocStatus, type StatusReviewer } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
+import { ShareLinkPanel, useShareLink, type ShareLinkTarget } from "./ShareLink";
 import { Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient> & Partial<LiveClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<ShareLinkClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -214,10 +215,12 @@ export function ModePicker({ modes, current, allowed, onPick }: { modes: typeof 
   );
 }
 
-export function PlanReader({ client, visual, repo, onBack, asking, onChanged, backLabel, work }: {
+export function PlanReader({ client, visual, repo, onBack, asking, onChanged, backLabel, work, docId }: {
   client: Client;
   /* The design's work items, when it was opened from the Library. */
   work?: Work;
+  /* Its Library doc id, when it was opened from the Library: the Share menu's link. */
+  docId?: string;
   visual: VisualDTO;
   repo?: string;
   onBack(): void;
@@ -267,6 +270,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="plan-reader">
       {shown ? (
         <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
+          shareLink={docId && client.designShareLink && client.copyDesignShareLink && client.revokeDesignShareLink ? { client: client as ShareLinkClient, docId, repo } : undefined}
           chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode }}
           top={shown.state === "approved" && (
             <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">
@@ -316,8 +320,10 @@ export interface Teammate {
   directory: LibraryPerson[];
 }
 
-export function DesignDoc({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history = null, workItems = null, workItem = null, work }: {
+export function DesignDoc({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history = null, workItems = null, workItem = null, work, shareLink }: {
   source: DocSource;
+  /* The design in the Library, for someone who may edit it: the Share menu's Copy link and Revoke link. */
+  shareLink?: ShareLinkTarget;
   /* The design's work items in the tracker, from the Library: the Tasks tab, the status line, "Create work item". */
   work?: Work;
   /* The doc's author, on this machine: sharing, the verdict and the build. */
@@ -339,13 +345,14 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
 }) {
   return (
     <FormatProvider>
-      <DesignDocBody source={source} author={author} teammate={receivedTeammate} plan={receivedPlan} mode={chosenMode} writes={writes} liveClient={liveClient} chrome={chrome} top={top} history={history} workItems={workItems} workItem={workItem} work={work} />
+      <DesignDocBody source={source} author={author} teammate={receivedTeammate} plan={receivedPlan} mode={chosenMode} writes={writes} liveClient={liveClient} chrome={chrome} top={top} history={history} workItems={workItems} workItem={workItem} work={work} shareLink={shareLink} />
     </FormatProvider>
   );
 }
 
-function DesignDocBody({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history, workItems, workItem: receivedWorkItem, work }: {
+function DesignDocBody({ source, author, teammate: receivedTeammate, plan: receivedPlan, mode: chosenMode, writes, liveClient, chrome, top, history, workItems, workItem: receivedWorkItem, work, shareLink }: {
   work?: Work;
+  shareLink?: ShareLinkTarget;
   source: DocSource;
   author?: { client: Client; visual: VisualDTO };
   teammate?: Teammate;
@@ -392,6 +399,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [refreshes, setRefreshes] = useState(0);
   const [raw, setRaw] = useState(false);
   const [sharingOpen, setSharingOpen] = useState(false);
+  const link = useShareLink(shareLink);
   const [briefOpen, setBriefOpen] = useState(false);
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
   // A suggestion's section text as it is being typed on the page (SuggestEditor).
@@ -901,6 +909,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     </dl>
   );
   const canShare = !!gate || (!!sharing && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
+  // The link: Pro and up (the daemon says `available`), for whoever may edit the design.
+  const linked = shareLink && link.state?.available ? { target: shareLink, state: link.state } : null;
+  const shareMenu = (canShare || linked) && (
+    <Popover label="Share" open={sharingOpen} onOpenChange={setSharingOpen} testid="plan-share">
+      {canShare && reviewersPanel}
+      {linked && <ShareLinkPanel target={linked.target} state={linked.state} onState={link.setState} />}
+    </Popover>
+  );
   const presence = docLive && (
     <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={myName} onState={setLiveState} onCapability={setLiveCapability} onText={setLiveTexts} refreshes={refreshes}
       mode={mode} stripHost={stripHost} reviewers={reviewerNames} onHistory={() => { if (collapsed) collapse(false); setTab("history"); }} />
@@ -913,7 +929,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           presence={presence}
           markdown={{ pressed: raw, onToggle: () => setRaw((r) => !r) }}
           modes={{ current: mode, picker: <ModePicker modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} /> }}
-          share={canShare && !historical && <Popover label="Share" open={sharingOpen} onOpenChange={setSharingOpen} testid="plan-share">{reviewersPanel}</Popover>} />
+          share={!historical && shareMenu} />
       )}
       {!chrome && presence && <div className="hidden">{presence}</div>}
       {top}

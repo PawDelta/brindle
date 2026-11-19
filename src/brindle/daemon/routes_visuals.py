@@ -729,6 +729,36 @@ def library_design_plan(db: DB, request: Request) -> Any:
     return visuals.to_dto(db, v)
 
 
+def _share_link(repo: str | None, work: Callable[[Any], Any]) -> Any:
+    """A design's share link (brindle.pro.share_links), by its Library doc id.
+    Below Pro a read answers ``available: false`` and nothing is sent; the
+    Library's refusal (an org's link policy, not an editor) keeps its reason."""
+    from brindle import config, redact
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import auth, share_links
+
+    if repo:
+        config.load_repo_config(repo)        # its air-gap setting applies first
+    try:
+        return work(share_links)
+    except auth.TransportError as e:         # unreachable
+        raise ServiceError("upstream", redact.mask(str(e)), actions.upstream_error(e).http_status) from e
+
+
+@_json
+def share_link(db: DB, request: Request) -> Any:
+    return _share_link(request.query_params.get("repo") or None, lambda s: s.read(request.path_params["id"]))
+
+
+def share_link_copy(db: DB, params: dict, body: dict) -> Any:
+    """The link to copy: the design's own, or a new one when it has none."""
+    return _share_link(_get(body, "repo"), lambda s: s.copy(params["id"]))
+
+
+def share_link_revoke(db: DB, params: dict, body: dict) -> Any:
+    return _share_link(params.get("repo") or None, lambda s: s.revoke(params["id"]))
+
+
 @_json
 def library_people(db: DB, request: Request) -> Any:
     """The people of the person's org, to pick reviewers from, leaving out
@@ -768,6 +798,9 @@ ROUTES = [
     WebSocketRoute("/v1/visuals/{id}/live", visual_live),
     Route("/v1/library/designs/{id}/question", _endpoint(doc_question), methods=["POST"]),
     Route("/v1/library/designs/{id}/plan", library_design_plan),
+    Route("/v1/library/designs/{id}/share-link", share_link),
+    Route("/v1/library/designs/{id}/share-link", _endpoint(share_link_copy), methods=["POST"]),
+    Route("/v1/library/designs/{id}/share-link", _endpoint(share_link_revoke), methods=["DELETE"]),
     Route("/v1/sessions/{id:path}/visual-input", _endpoint(visual_input), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-offer", session_offer),
     Route("/v1/sessions/{id:path}/visual-offer", _endpoint(resolve_offer), methods=["POST"]),
