@@ -1090,7 +1090,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     ready = ReadinessWatch()
     monitor = health.Monitor(clock)
     hook_due = clock() + CODEX_HOOK_EVERY
-    shared_due = clock() + SHARED_DOCS_EVERY
+    shared_due = clock()
     cull_due = clock() + CULL_EVERY
     switch_due = clock() + PROVIDER_SWITCH_EVERY
     sharing: asyncio.Task | None = None     # on its own task: a slow Library never holds up these checks
