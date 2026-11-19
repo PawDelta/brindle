@@ -214,11 +214,14 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
   }, [client, id, repo, onScopes, local]);
   useEffect(load, [load]);
 
-  const act = async (what: () => Promise<string>) => {
+  /* `what` answers what to say, or null to keep its menu open for a further step. */
+  const act = async (what: () => Promise<string | null>) => {
     setBusy(true);
     setSaid(null);
     try {
-      setSaid(await what());
+      const said = await what();
+      if (said === null) return;
+      setSaid(said);
       setMenu(null);
     } catch (e) {
       setSaid(message(e));
@@ -243,7 +246,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
       } catch (e) {
         if (!(e instanceof DaemonError && e.code === "shared_plan")) throw e;
         setStranded(e.message);
-        return "";
+        return null;     // the delete card stays open, now asking to stop sharing
       }
       onDeleted();
       return "Deleted.";
