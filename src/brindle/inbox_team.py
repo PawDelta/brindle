@@ -1,17 +1,19 @@
-"""The team half of the Inbox (brindle Pro, Team plan): sign-off progress and
-shared-doc comments the Library reports for the signed-in person's own docs,
-with read state kept per person.
+"""The team half of the Inbox (brindle Pro): what the Library's per-person
+feed (``GET /me/inbox``, docs/shared-designs-api.md in the web repo) reports
+for the signed-in person, with read state kept per person on the server.
 
-The Library's per-person feed (``GET /me/inbox``) is the source. Its rows are
-read-only until the person marks one read (``POST /me/inbox/read``), and the
-Library keeps that state per account, so a row read on one machine is read on
-every other. Nothing here is stored on this machine, apart from the last feed
-read for each account (the same pattern as :mod:`brindle.pro.review_queue`):
-a failed poll keeps what was last read.
+The daemon's watch polls the feed next to the review queue (``poll``); the
+Inbox shows sign-off progress and comment threads from it (``items``) and
+takes each review request's sender and read state from it (``review_row``).
+A row is marked read with ``POST /me/inbox/read`` (``mark_read``): the server
+keeps that per account, so a row read on one machine is read on every other.
+Nothing is stored here but the last feed read for each account (the pattern
+of :mod:`brindle.pro.review_queue`): a failed poll keeps what was last read.
 
-Comments on one thread are one row: the key is the thread, so a second comment
-on it updates the row rather than adding one. Every change publishes
-``inbox.changed`` on the bus, so the app re-reads its Inbox at once."""
+The server already makes one item per comment thread. Sign-offs come one per
+signer; the Inbox shows one progress row per design, under a key of its own
+(``signoffs:<doc_id>``) that ``mark_read`` expands to the sign-offs it covers.
+Every change publishes ``inbox.changed``, so the app re-reads its Inbox."""
 
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ import threading
 
 from brindle import bus
 from brindle.db import DB
-from brindle.service.dto import InboxItemDTO, PersonDTO
+from brindle.service.dto import InboxItemDTO, PersonDTO, SignoffDTO
 
 log = logging.getLogger(__name__)
 
@@ -28,115 +30,181 @@ FEED = "/me/inbox"
 READ = "/me/inbox/read"
 CHANGED = "inbox.changed"
 NEEDS_YOU, FROM_TEAM = "needs_you", "from_team"
-SIGNOFF, COMMENT = "signoff_progress", "shared_doc_comment"
-KINDS = (SIGNOFF, COMMENT)     # review requests come from the review queue (pro/review_queue), with their sender
+REVIEW, SIGNED, COMMENT = "review_requested", "signed_off", "shared_doc_comment"   # the feed's kinds
+PROGRESS = "signoff_progress"       # the Inbox's own kind for a design's sign-offs ("signed_off" is the
+                                    # author's local card once every sign-off is in)
+NEW_KINDS = (PROGRESS, COMMENT)     # Inbox kinds that only exist with the team Inbox
+# Rows a teammate's action put in the Inbox; every other kind waits on the person.
+TEAM_KINDS = (REVIEW, PROGRESS, COMMENT, SIGNED, "changes_requested")
+MAX_KEYS = 200                      # per POST /me/inbox/read
 
 _lock = threading.Lock()
 _seen: dict[str, list[dict]] = {}      # account sub -> the feed rows as last read
 
 
-def _person(raw: object) -> PersonDTO | None:
-    if isinstance(raw, dict) and isinstance(raw.get("id"), str) and raw["id"]:
+def group(kind: str) -> str:
+    """The Inbox group a row of ``kind`` belongs in."""
+    return FROM_TEAM if kind in TEAM_KINDS else NEEDS_YOU
+
+
+def person(raw: object) -> PersonDTO | None:
+    """A feed person (``{sub, name}``), or a bare account id."""
+    if isinstance(raw, str) and raw:
+        return PersonDTO(sub=raw)
+    if isinstance(raw, dict) and isinstance(raw.get("sub"), str) and raw["sub"]:
         name = raw.get("name")
-        return PersonDTO(id=raw["id"], name=name if isinstance(name, str) and name else raw["id"])
+        return PersonDTO(sub=raw["sub"], name=name if isinstance(name, str) and name else None)
     return None
 
 
+def _int(raw: object, default: int = 0) -> int:
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else default
+
+
 def _rows(raw: object) -> list[dict]:
-    """The usable feed rows: a known kind, a key, and the doc they are about."""
+    """The usable feed rows: a known kind, a key and the doc they are about."""
     rows = raw.get("items") if isinstance(raw, dict) else None
     out = []
     for r in rows if isinstance(rows, list) else []:
-        if not isinstance(r, dict) or r.get("kind") not in KINDS:
+        if not isinstance(r, dict) or r.get("kind") not in (REVIEW, SIGNED, COMMENT):
             continue
-        doc, key = r.get("doc_id"), r.get("key")
+        doc, key = r.get("doc_id"), r.get("item_key")
         if not isinstance(doc, str) or not doc or not isinstance(key, str) or not key:
             continue
         title = r.get("title")
-        out.append({"kind": r["kind"], "key": key, "doc_id": doc, "thread_id": r.get("thread_id"),
-                    "title": title if isinstance(title, str) and title else "Design doc",
-                    "from": _person(r.get("from")), "signed": r.get("signed"), "required": r.get("required"),
-                    "comments": r.get("comments") if isinstance(r.get("comments"), int) else 1,
-                    "read": bool(r.get("read")), "updated_at": float(r.get("updated_at") or 0)})
+        row = {"kind": r["kind"], "key": key, "doc_id": doc, "read": r.get("read") is True,
+               "title": title if isinstance(title, str) and title else "Design doc",
+               "created_at": _int(r.get("created_at"))}
+        if r["kind"] == REVIEW:
+            row["sender"] = person(r.get("sender"))
+        elif r["kind"] == SIGNED:
+            waiting = r.get("waiting")
+            row.update(rev=_int(r.get("rev")), signer=person(r.get("signer")), signed=_int(r.get("signed")),
+                       required=_int(r.get("required")),
+                       waiting=[p for p in map(person, waiting if isinstance(waiting, list) else []) if p])
+        else:
+            if not isinstance(r.get("thread_id"), int):
+                continue
+            excerpt = r.get("excerpt")
+            row.update(thread_id=r["thread_id"], suggestion=r.get("suggestion") is True,
+                       author=person(r.get("author")), excerpt=excerpt if isinstance(excerpt, str) else "",
+                       count=max(_int(r.get("count"), 1), 1))
+        out.append(row)
     return out
 
 
-def fetch(call, token: str | None) -> list[dict]:
-    """The person's feed, as ``call("GET", FEED, None, token=...)`` returns it.
-    Raises when the Library can't be read."""
-    status, body = call("GET", FEED, None, token=token)
-    if status != 200:
-        raise RuntimeError(f"the Library's inbox feed answered {status}")
-    return _rows(body)
+def poll(db: DB, *, client=None, store=None) -> bool:
+    """Read the signed-in account's feed (``review_queue.account``) and
+    remember it under that account. True, with ``inbox.changed`` published,
+    when it differs from the last read; a failed read keeps the last one."""
+    from brindle.pro import review_queue
 
-
-def poll(db: DB, sub: str, call, token: str | None) -> bool:
-    """Read the account's feed and remember it. True when it changed; a failed
-    read keeps the last one and says nothing."""
     try:
-        rows = fetch(call, token)
+        signed = review_queue.account(client, store)
+        if signed is None:
+            return False
+        client, sub, token = signed
+        status, body = client.call("GET", FEED, None, token=token)
     except Exception:  # noqa: BLE001 - offline or refused: keep what we have; the next pass tries again
         log.debug("brindle: couldn't read the team inbox", exc_info=True)
         return False
+    if status != 200:
+        return False
+    rows = _rows(body)
     with _lock:
         changed = _seen.get(sub) != rows
         _seen[sub] = rows
     if changed:
-        bus.publish(db, CHANGED, sub=sub)
+        bus.publish(db, CHANGED)
     return changed
 
 
-def mark_read(db: DB, sub: str, key: str, call, token: str | None) -> None:
-    """Mark one feed row read for ``sub`` in the Library, then here, and tell
-    the apps. Raises when the Library refuses it, so nothing is marked locally."""
-    status, _ = call("POST", READ, {"key": key}, token=token)
-    if status != 200:
-        raise RuntimeError(f"the Library didn't take the read mark ({status})")
-    with _lock:
-        for r in _seen.get(sub, []):
-            if r["key"] == key:
-                r["read"] = True
-    bus.publish(db, CHANGED, sub=sub)
-
-
-def _grouped(rows: list[dict]) -> list[dict]:
-    """One row per comment thread: the newest comment's row, carrying the count
-    of comments on it. Other kinds pass through unchanged."""
-    threads: dict[str, dict] = {}
-    out = []
+def _signoffs(rows: list[dict]) -> dict[str, list[dict]]:
+    """Each design's sign-off rows, newest first."""
+    out: dict[str, list[dict]] = {}
     for r in rows:
-        if r["kind"] != COMMENT:
-            out.append(r)
-            continue
-        key = f"comment:{r['doc_id']}:{r['thread_id'] or r['key']}"
-        if key not in threads:
-            threads[key] = {**r, "key": key}
-            out.append(threads[key])
-            continue
-        kept = threads[key]
-        kept["comments"] += r["comments"]
-        if r["updated_at"] >= kept["updated_at"]:   # the newest comment decides who sent it, and read state
-            kept.update({"from": r["from"], "updated_at": r["updated_at"], "read": r["read"], "title": r["title"]})
+        if r["kind"] == SIGNED:
+            out.setdefault(r["doc_id"], []).append(r)
+    for found in out.values():
+        found.sort(key=lambda r: (-r["rev"], -r["created_at"]))
     return out
 
 
+def _progress_key(doc_id: str) -> str:
+    return f"signoffs:{doc_id}"
+
+
+def mark_read(db: DB, keys: list[str], *, client=None, store=None) -> list[str]:
+    """Mark the Inbox rows ``keys`` (as ``items`` and ``review_row`` give them)
+    read for the signed-in account, in the Library first: a progress row's key
+    stands for every sign-off it covers. Returns the keys now read; the next
+    read of the feed, on any machine, shows them read."""
+    from brindle.pro import review_queue
+    from brindle.service.errors import ServiceError
+
+    try:
+        signed = review_queue.account(client, store)
+    except Exception as e:  # noqa: BLE001 - a credential that can't be used is the person's to fix
+        raise ServiceError("signed_out", "sign in to brindle Pro to mark Inbox rows read", 401) from e
+    if signed is None:
+        raise ServiceError("signed_out", "sign in to brindle Pro to mark Inbox rows read", 401)
+    client, sub, token = signed
+    with _lock:
+        groups = {_progress_key(doc): [r["key"] for r in found]
+                  for doc, found in _signoffs(_seen.get(sub, [])).items()}
+    wanted = {k: groups.get(k, [k]) for k in dict.fromkeys(keys)}
+    server = list(dict.fromkeys(s for found in wanted.values() for s in found))
+    marked: set[str] = set()
+    for i in range(0, len(server), MAX_KEYS):
+        try:
+            status, body = client.call("POST", READ, {"item_keys": server[i:i + MAX_KEYS]}, token=token)
+        except Exception as e:  # noqa: BLE001 - offline: nothing is marked here either
+            raise ServiceError("unavailable", "couldn't reach the Library to mark Inbox rows read", 503) from e
+        if status != 200:
+            raise ServiceError("unavailable", f"the Library didn't take the read marks ({status})", 502)
+        read = body.get("read") if isinstance(body, dict) else None
+        marked.update(k for k in (read if isinstance(read, list) else []) if isinstance(k, str))
+    with _lock:
+        for r in _seen.get(sub, []):
+            if r["key"] in marked:
+                r["read"] = True
+    bus.publish(db, CHANGED)
+    return [k for k, found in wanted.items() if found and all(s in marked for s in found)]
+
+
+def review_row(sub: str | None, doc_id: str) -> dict | None:
+    """The feed's review request for ``doc_id``: its key, sender and read state."""
+    with _lock:
+        return next((dict(r) for r in _seen.get(sub or "", [])
+                     if r["kind"] == REVIEW and r["doc_id"] == doc_id), None)
+
+
 def items(sub: str | None) -> list[InboxItemDTO]:
-    """The team rows for ``sub``'s Inbox, from the last feed read. Nothing for
-    no account, or one never read."""
+    """Sign-off progress and comment threads for ``sub``'s Inbox, from the
+    last feed read, newest first. Nothing for no account, or one never read."""
     if not sub:
         return []
     with _lock:
         rows = [dict(r) for r in _seen.get(sub, [])]
-    out = []
-    for r in _grouped(rows):
-        base = {"doc": r["doc_id"], "detail": r["title"], "from_person": r["from"], "read": r["read"],
-                "item_key": r["key"], "section": FROM_TEAM}
-        if r["kind"] == SIGNOFF:
-            out.append(InboxItemDTO(kind=SIGNOFF, reason=f"{r['signed']} of {r['required']} required", **base))
-        else:
-            reason = "Commented" if r["comments"] == 1 else f"{r['comments']} comments"
-            out.append(InboxItemDTO(kind=COMMENT, reason=reason, **base))
-    return out
+    out: list[tuple[int, InboxItemDTO]] = []
+    for doc, found in _signoffs(rows).items():
+        newest = found[0]
+        out.append((max(r["created_at"] for r in found), InboxItemDTO(
+            kind=PROGRESS, reason=f"{newest['signed']} of {newest['required']} signed off", inbox_group=FROM_TEAM,
+            doc=doc, detail=newest["title"], from_person=newest["signer"], item_key=_progress_key(doc),
+            read=all(r["read"] for r in found),
+            signoff=SignoffDTO(rev=newest["rev"], signed=newest["signed"], required=newest["required"],
+                               waiting=newest["waiting"]))))
+    for r in rows:
+        if r["kind"] != COMMENT:
+            continue
+        what = "Suggested" if r["suggestion"] else "Commented"
+        out.append((r["created_at"], InboxItemDTO(
+            kind=COMMENT, reason=what if r["count"] == 1 else f"{r['count']} comments", inbox_group=FROM_TEAM,
+            doc=r["doc_id"], detail=r["title"], from_person=r["author"], item_key=r["key"], read=r["read"],
+            thread_id=r["thread_id"], excerpt=r["excerpt"])))
+    out.sort(key=lambda t: -t[0])
+    return [i for _, i in out]
 
 
 def clear() -> None:

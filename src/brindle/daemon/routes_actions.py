@@ -543,6 +543,17 @@ def handover_choice(db: DB, params: dict, body: Body) -> Any:
 # -- inbox -----------------------------------------------------------------------
 
 
+def inbox_read(db: DB, params: dict, body: Body) -> Any:
+    """Mark team Inbox rows read by their ``item_key``s, for the signed-in
+    person on every machine (the Library keeps read state per person)."""
+    from brindle import inbox_team
+
+    keys = _get(body, "item_keys", list, required=True)
+    if not keys or len(keys) > inbox_team.MAX_KEYS or not all(isinstance(k, str) and k for k in keys):
+        raise ServiceError("invalid", f"item_keys must be 1 to {inbox_team.MAX_KEYS} keys")
+    return {"read": inbox_team.mark_read(db, keys)}
+
+
 def inbox_action(db: DB, params: dict, body: Body) -> Any:
     """``id`` is the item's agent (an org notice's ``notice_id`` for "read")."""
     item, action = params["id"], params["action"]
@@ -3358,6 +3369,7 @@ ROUTES = [
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
     _post("/sessions/{root:path}/pr/push", push_session_pr),
     _post("/sessions/{root:path}/pr", open_session_pr),
+    _post("/inbox/read", inbox_read),
     _post("/inbox/{id}/{action}", inbox_action),
     _post("/agents/{id}/message", message_agent),
     _post("/agents/{id}/chat/send", chat_send),

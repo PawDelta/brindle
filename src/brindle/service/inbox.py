@@ -287,8 +287,17 @@ def _dismiss_key(item: InboxItemDTO) -> str:
     data = item.to_json()
     if data.get("choices") is None:
         data.pop("choices", None)   # added later: an item without choices keeps the key it always had
-    for k in ("section", "from_person", "read", "item_key"):
-        data.pop(k, None)           # added with the team Inbox: a dismissal keeps the key it had before them
+    # Added with the team Inbox, so every kind that existed before keeps the key
+    # it always had (a dismissal stored then still hides its card). The group and
+    # the read state never tell two rows apart, and a team row's read mark must
+    # not bring back a row dismissed before it.
+    data.pop("inbox_group", None)
+    data.pop("read", None)
+    if item.kind not in inbox_team.NEW_KINDS:
+        for k in ("from_person", "item_key", "thread_id", "excerpt", "signoff"):
+            data.pop(k, None)
+    if item.kind == "question":
+        data["detail"] = None       # its words came later; request_id tells one question from the next
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
@@ -349,10 +358,11 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
                     for p in asking]
             if reason and not asking:
                 kind = _kind(a, ws, reason)
+                asked = db.get_autopilot(row.id) if kind == "question" else None
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
                                         request_id=str(occurrences.get(f"question:{a['id']}", 0)) if kind == "question"
                                         else str(row.status_since) if kind in ("waiting", "credentials", "failed") else None,
-                                        detail=row.failed_why.removeprefix("review: ")
+                                        detail=asked.question if asked else row.failed_why.removeprefix("review: ")
                                         if (row.failed_why or "").startswith("review: ") else None,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
             # A worker's plan proposal is its supervisor's to approve (approve_plan); it is
@@ -393,7 +403,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask
     # for attention again just because a historical request is still stored.
     hidden = dismissed_keys(db)
-    return [i if i.section else i.model_copy(update={"section": inbox_team.NEEDS_YOU})
+    return [i.model_copy(update={"inbox_group": inbox_team.group(i.kind)})
             for i in all_items if _dismiss_key(i) not in hidden and (not i.agent_id
             or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a))]
 
@@ -538,8 +548,12 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
 
     for q in review_queue.waiting(me):
         link = links.get(q["doc_id"]) or {"doc": q["doc_id"]}
-        out.append(InboxItemDTO(kind="review_requested", reason="Review requested", section=inbox_team.FROM_TEAM,
-                                from_person=inbox_team._person(q.get("from")),
+        # Who asked, and whether it was read, is the team feed's; before the feed
+        # has been read, the queue's design author stands in for the sender.
+        fed = inbox_team.review_row(me, q["doc_id"]) or {}
+        out.append(InboxItemDTO(kind="review_requested", reason="Review requested",
+                                from_person=fed.get("sender") or inbox_team.person(q.get("author")),
+                                item_key=fed.get("key"), read=fed.get("read"),
                                 detail=link.get("title") or q["title"], **{k: v for k, v in link.items() if k != "title"}))
     return out
 

@@ -2983,20 +2983,27 @@
           "type": "object"
         },
         "PersonDTO": {
-          "description": "A teammate: the Library's id and the name they show.",
+          "description": "A teammate: the Library's account id, and their profile name (None when they set none).",
           "properties": {
-            "id": {
-              "title": "Id",
-              "type": "string"
-            },
             "name": {
-              "title": "Name",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "sub": {
+              "title": "Sub",
               "type": "string"
             }
           },
           "required": [
-            "id",
-            "name"
+            "sub"
           ],
           "title": "PersonDTO",
           "type": "object"
@@ -3075,6 +3082,38 @@
           ],
           "title": "PlanOfferMilestoneDTO",
           "type": "object"
+        },
+        "SignoffDTO": {
+          "description": "A design's sign-off progress, as of its newest sign-off: ``signed`` of\n``required`` required reviewers on revision ``rev``, and who is still to sign.",
+          "properties": {
+            "required": {
+              "title": "Required",
+              "type": "integer"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "signed": {
+              "title": "Signed",
+              "type": "integer"
+            },
+            "waiting": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PersonDTO"
+              },
+              "title": "Waiting",
+              "type": "array"
+            }
+          },
+          "required": [
+            "rev",
+            "signed",
+            "required"
+          ],
+          "title": "SignoffDTO",
+          "type": "object"
         }
       },
       "properties": {
@@ -3143,6 +3182,18 @@
           "default": null,
           "title": "Doc"
         },
+        "excerpt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excerpt"
+        },
         "fix": {
           "anyOf": [
             {
@@ -3165,6 +3216,18 @@
             }
           ],
           "default": null
+        },
+        "inbox_group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inbox Group"
         },
         "item_key": {
           "anyOf": [
@@ -3267,6 +3330,29 @@
           ],
           "default": null,
           "title": "Section"
+        },
+        "signoff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignoffDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
         },
         "url": {
           "anyOf": [
@@ -5874,20 +5960,27 @@
       "type": "object"
     },
     "PersonDTO": {
-      "description": "A teammate: the Library's id and the name they show.",
+      "description": "A teammate: the Library's account id, and their profile name (None when they set none).",
       "properties": {
-        "id": {
-          "title": "Id",
-          "type": "string"
-        },
         "name": {
-          "title": "Name",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "sub": {
+          "title": "Sub",
           "type": "string"
         }
       },
       "required": [
-        "id",
-        "name"
+        "sub"
       ],
       "title": "PersonDTO",
       "type": "object"
@@ -12720,6 +12813,66 @@
       "title": "SharedDesignDTO",
       "type": "object"
     },
+    "SignoffDTO": {
+      "$defs": {
+        "PersonDTO": {
+          "description": "A teammate: the Library's account id, and their profile name (None when they set none).",
+          "properties": {
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PersonDTO",
+          "type": "object"
+        }
+      },
+      "description": "A design's sign-off progress, as of its newest sign-off: ``signed`` of\n``required`` required reviewers on revision ``rev``, and who is still to sign.",
+      "properties": {
+        "required": {
+          "title": "Required",
+          "type": "integer"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "signed": {
+          "title": "Signed",
+          "type": "integer"
+        },
+        "waiting": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PersonDTO"
+          },
+          "title": "Waiting",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rev",
+        "signed",
+        "required"
+      ],
+      "title": "SignoffDTO",
+      "type": "object"
+    },
     "StoppedAgentDTO": {
       "description": "An agent stopped because the provider's credentials were refused (failed_why auth).",
       "properties": {
@@ -13707,6 +13860,10 @@
     {
       "method": "GET",
       "path": "/v1/inbox"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/inbox/read"
     },
     {
       "method": "POST",
