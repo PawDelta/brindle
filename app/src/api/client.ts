@@ -2557,8 +2557,9 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
   }
 
-  deleteDoc(id: string) {
-    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, {});
+  /* A doc an open plan is shared through is refused (409 shared_plan) unless `confirm`; on confirm the plan stops being shared. */
+  deleteDoc(id: string, confirm = false) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, confirm ? { confirm } : {});
   }
 
   /* With `dir` the daemon writes the file there; without, it comes back as base64. */

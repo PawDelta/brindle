@@ -196,6 +196,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
   const [menu, setMenu] = useState<"share" | "export" | "delete" | null>(null);
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
+  const [stranded, setStranded] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (local) return;
@@ -234,9 +235,16 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
       return on ? `Shared with ${scopeName(s)}.` : `No longer shared with ${scopeName(s)}.`;
     });
 
+  /* A doc an open plan is shared through comes back refused with why; the second press confirms. */
   const remove = () =>
     act(async () => {
-      await client.deleteDoc(id);
+      try {
+        await client.deleteDoc(id, stranded !== null);
+      } catch (e) {
+        if (!(e instanceof DaemonError && e.code === "shared_plan")) throw e;
+        setStranded(e.message);
+        return "";
+      }
       onDeleted();
       return "Deleted.";
     });
@@ -294,9 +302,9 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
       {menu === "export" && <ExportMenu client={client} id={id} title={doc?.title} repo={repo} pickFolder={pickFolder} onSaid={setSaid} />}
       {menu === "delete" && (
         <div role="alert" className={`${alert} flex flex-wrap items-center justify-between gap-s1`}>
-          <span>Delete this doc from the library? Briefs stop using it. This can't be undone.</span>
-          <button type="button" className={button} disabled={busy} onClick={() => void remove()}>
-            Delete for good
+          <span>{stranded ?? "Delete this doc from the library? Briefs stop using it. This can't be undone."}</span>
+          <button type="button" className={button} disabled={busy} data-state={stranded ? "shared-plan" : undefined} onClick={() => void remove()}>
+            {stranded ? "Stop sharing and delete" : "Delete for good"}
           </button>
         </div>
       )}
