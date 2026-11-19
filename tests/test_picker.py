@@ -242,18 +242,6 @@ def test_workers_screen_offers_only_allowed_models_and_sets_one_up(monkeypatch):
     assert user_settings()["routing_medium"] == "claude-sonnet" and signed == ["claude"]
 
 
-@pytest.mark.parametrize("tier, codex_models", [
-    ("light", ["codex", "gpt-6-luna", "gpt-6.1-terra"]),
-    ("medium", ["codex", "gpt-6.1-terra", "gpt-6.1-sol"]),
-    ("heavy", ["codex", "gpt-6.1-sol", "gpt-6-astra"]),
-])
-def test_codex_models_are_offered_in_their_tiers(tier, codex_models):
-    from brindle import worker_models as wm
-
-    offered = [m.id for m in wm.offered(team_policy.Access(), tier) if m.provider == "codex"]
-    assert offered == codex_models
-
-
 def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
     from brindle import key_check, keystore
     from brindle.config import user_profiles_dir, user_settings

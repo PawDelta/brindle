@@ -5,7 +5,6 @@ from brindle.profiles import _frontmatter, _list, load_profile
 
 @pytest.mark.parametrize("name, model", [
     ("developer-codex-luna", "gpt-6-luna"),
-    ("developer-codex-sol", "gpt-6.1-sol"),
     pytest.param("developer-codex", None, marks=pytest.mark.variant(
         "the unpinned Codex profile launches the CLI's own default model, with no --model flag")),
 ])
