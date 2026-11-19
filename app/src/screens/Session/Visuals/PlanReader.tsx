@@ -1046,7 +1046,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               {next ? nextOptionConfirm : teammate.rights.signOff && !teammate.signedOff && (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>Approve</LoadingButton>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>{signName}</LoadingButton>
               )}
             </div>
           </>
