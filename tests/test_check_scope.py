@@ -414,11 +414,18 @@ PARAMETRIZED = "import pytest\nfrom values import VALUES\n\n\n@pytest.mark.param
 
 
 @pytest.mark.parametrize("files,tests,cases,renamed,edit,max_tests,ran", [
-    # Main renamed a test after the map: the cap divides its file as pytest collects it now, never by the
-    # name the map remembers.
-    ({"tests/test_r.py": "def test_aaa_removed():\n    pass\n\n\ndef test_b():\n    pass\n"},
-     ["tests/test_r.py::test_aaa_removed", "tests/test_r.py::test_b"], [1, 1],
-     ("tests/test_r.py", "test_aaa_removed", "test_aaa_new"), CORE, 1, ["tests/test_r.py::test_b"]),
+    # Main renamed a parametrized test after the map: the cap divides its file as pytest collects it now,
+    # never by the name the map remembers, and counts the renamed test's five cases, not one.
+    ({"tests/test_r.py": "import pytest\n\n\n@pytest.mark.parametrize('n', range(5))\ndef test_aaa_removed(n):\n"
+                         "    pass\n\n\ndef test_b():\n    pass\n"},
+     ["tests/test_r.py::test_aaa_removed", "tests/test_r.py::test_b"], [5, 1],
+     ("tests/test_r.py", "test_aaa_removed", "test_aaa_new"), CORE, 2,
+     ["tests/test_r.py::test_aaa_new[0]", "tests/test_r.py::test_b"]),
+    # The namesake comes before a smaller, less specific test even when only part of it fits.
+    ({"tests/test_core.py": "import pytest\n\n\n@pytest.mark.parametrize('n', range(5))\ndef test_c(n):\n    pass\n",
+      "tests/test_g.py": "def test_g():\n    pass\n"},
+     ["tests/test_core.py::test_c", "tests/test_g.py::test_g"], [5, 1], None, CORE, 1,
+     ["tests/test_core.py::test_c[0]"]),
     # One parametrized test with more cases than the cap runs only as many of its cases as fit, and they are
     # today's: the branch changes the parameter table, not the test file reading it.
     # (A fixture's params= in a conftest is module-level code there: that runs the check in full.)
@@ -433,7 +440,7 @@ PARAMETRIZED = "import pytest\nfrom values import VALUES\n\n\n@pytest.mark.param
         CORE, 2, ["tests/test_core.py", "tests/test_more.py::test_m"],
         marks=pytest.mark.variant("A test already run by its whole namesake file must not use up the budget, "
                                   "or the cap runs fewer relevant tests than it allows")),
-], ids=["renamed-since-map", "oversized-params-changed", "covered-costs-nothing"])
+], ids=["renamed-since-map", "namesake-first", "oversized-params-changed", "covered-costs-nothing"])
 def test_capped_selection_keeps_max_tests_with_tests_that_exist(repo, monkeypatch, files, tests, cases, renamed,
                                                                  edit, max_tests, ran):
     """The max_tests cap never names a test or case the checkout no longer
@@ -444,6 +451,7 @@ def test_capped_selection_keeps_max_tests_with_tests_that_exist(repo, monkeypatc
 
     cmd = "pytest -q"   # collected for real, with this interpreter's pytest
     monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-q")   # a quiet mode configured outside must not hide the ids collected
     for name, text in {"pkg/__init__.py": "", "pkg/core.py": "def core():\n    return 1\n", **files}.items():
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / name).write_text(text)

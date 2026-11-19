@@ -336,9 +336,10 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
         return None
     note = ""
     counts = coverage_map.test_counts(data)
+    now: dict[str, int] = {}   # cases per test as collected now, for a file the cap divided
 
     def size(t: str) -> int:   # its cases: a parametrized test, or a whole file, counts every one
-        return max(counts.get(t, 0), 1)
+        return max(now.get(t, counts.get(t, 0)), 1)
 
     total = sum(map(size, tests))
     if 0 < max_tests < total:
@@ -349,14 +350,24 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
         tests = sorted(set(tests) | {n for n in nodes if coverage_map.test_file(n) in whole - stale})
         ranked = coverage_map.rank(data, set(tests), hits)
         order = {t: i for i, t in enumerate(coverage_map.rank(data, set(tests) | nodes, hits))}
-        current: dict[str, list[str]] = {}
+        current: dict[str, list[str] | None] = {}
 
         def split(t: str) -> list[str]:
             # Parts as pytest collects them now: a fixture's or a table's parameters may have changed
-            # since the map in files other than the test's own.
+            # since the map in files other than the test's own. One collection that fails (pytest
+            # broken here) ends the dividing: the rest would fail the same way, one slow run each.
             file = coverage_map.test_file(t)
             if file not in current:
-                current[file] = _collected(ws, cmd, file) if (root / file).is_file() else []
+                if None in current.values() or not (root / file).is_file():
+                    return []
+                current[file] = _collected(ws, cmd, file)
+                if current[file] is None:
+                    return []
+                for i in current[file]:
+                    now[coverage_map.node(i)] = now.get(coverage_map.node(i), 0) + 1
+                now[file] = len(current[file])
+            if not current[file]:
+                return []
             if "::" not in t:   # the file's tests, those selected by the change first
                 parts = dict.fromkeys(coverage_map.node(i) for i in current[file])
                 return sorted(parts, key=lambda n: (order.get(n, len(order)), n))
@@ -370,23 +381,24 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
     return f"{run} || [ $? -eq 5 ]" if _filters(cmd) else run
 
 
-def _collected(ws: Workspace, cmd: str, file: str) -> list[str]:
+def _collected(ws: Workspace, cmd: str, file: str) -> list[str] | None:
     """The test ids (``file::test[case]``) pytest collects from ``file`` in
     ``ws`` now, with ``cmd``'s pytest and its marker and keyword filters;
-    none when it can't say."""
+    None when it can't say. The verbosity is set outright (``-q`` from the
+    repo's addopts or PYTEST_ADDOPTS on top would print counts, not ids)."""
     toks = shlex.split(cmd)
     head = next((h for h in _PYTEST_PREFIX if tuple(toks[:len(h)]) == h), None)
     if head is None:
-        return []
+        return None
     rest = toks[len(head):]
     filters = [t for pair in zip(rest, rest[1:]) if pair[0] in ("-m", "-k") for t in pair]
     try:
-        proc = spawn.read([*head, "--collect-only", "-q", "-p", "no:cacheprovider", *filters, file], cwd=ws.path,
-                          timeout=COLLECT_SECONDS)
+        proc = spawn.read([*head, "--collect-only", "--verbosity=-1", "-p", "no:cacheprovider", *filters, file],
+                          cwd=ws.path, timeout=COLLECT_SECONDS)
     except (OSError, subprocess.TimeoutExpired, spawn.Busy):
-        return []
-    if proc.returncode != 0:
-        return []
+        return None
+    if proc.returncode not in (0, 5):   # 5: nothing collected (a filter left none)
+        return None
     return [line.strip() for line in proc.stdout.splitlines() if line.startswith(file + "::")]
 
 
@@ -404,10 +416,10 @@ def _most_specific(tests: list[str], first: list[str], ranked: list[str], max_te
     """Of ``tests``, as many test cases as fit in ``max_tests`` (a selector
     counting ``size(t)``, a single case 1): ``first`` (the branch's own and
     namesake tests, then the tests of changed scripts) in that order, then
-    ``ranked`` (``coverage_map.rank``). Then, while room is left, one that was
-    too big is ``split`` into its parts (a file into its tests, a test into
-    its cases), as many of them as fit; one ``split`` can't divide is passed
-    over. A test
+    ``ranked`` (``coverage_map.rank``). One too big for what is left is
+    ``split`` there and then into its parts (a file into its tests, a test
+    into its cases), as many of them as fit, before any later candidate; one
+    ``split`` can't divide is passed over. A test
     whose file (or case whose test) is already chosen costs nothing more and
     is left out. The branch's own test files (``keep``) are never dropped,
     even past ``max_tests``; when nothing fits at all and nothing divides, the
@@ -422,7 +434,7 @@ def _most_specific(tests: list[str], first: list[str], ranked: list[str], max_te
             del chosen[inner]
         chosen[t] = cost(t)
 
-    def fit(t: str, divide: bool) -> None:
+    def fit(t: str) -> None:
         room = max_tests - sum(chosen.values())
         if room <= 0 or t in chosen or any(p in chosen for p in _parents(t)):
             return
@@ -430,16 +442,15 @@ def _most_specific(tests: list[str], first: list[str], ranked: list[str], max_te
         if cost(t) - inside <= room:
             add(t)
             return
-        for part in split(t) if divide else ():
-            fit(part, divide)
+        for part in split(t):
+            fit(part)
 
     for t in tests:
         if t in keep:
             add(t)
     candidates = list(dict.fromkeys(t for t in first + ranked if t in tests))
-    for divide in (False, True):   # whole ones first: dividing one costs a collection
-        for t in candidates:
-            fit(t, divide)
+    for t in candidates:
+        fit(t)
     if not chosen and candidates:
         chosen[candidates[0]] = cost(candidates[0])
     return sorted(chosen)

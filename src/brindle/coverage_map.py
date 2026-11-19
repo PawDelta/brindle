@@ -381,6 +381,7 @@ def test_counts(data: dict) -> dict[str, int]:
     for i, t in enumerate(tests):
         if "::" in t:
             got = cases[i] if i < len(cases) else 1
+            got = len(got) if isinstance(got, list) else got   # (a list of case ids, as an early map kept)
             out[t] = got if isinstance(got, int) and got > 0 else 1
             out[test_file(t)] = out.get(test_file(t), 0) + out[t]
     return out
