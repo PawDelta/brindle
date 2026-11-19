@@ -6111,6 +6111,11 @@
               "title": "Options",
               "type": "array"
             },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
+            },
             "title": {
               "title": "Title",
               "type": "string"
@@ -7207,7 +7212,8 @@
             "redirected",
             "approved",
             "writing",
-            "superseded"
+            "superseded",
+            "cancelled"
           ],
           "title": "State",
           "type": "string"
@@ -7364,6 +7370,11 @@
           },
           "title": "Options",
           "type": "array"
+        },
+        "section": {
+          "default": "open-questions",
+          "title": "Section",
+          "type": "string"
         },
         "title": {
           "title": "Title",
@@ -8684,6 +8695,11 @@
               },
               "title": "Options",
               "type": "array"
+            },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
             },
             "title": {
               "title": "Title",
@@ -11441,6 +11457,11 @@
               "title": "Options",
               "type": "array"
             },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
+            },
             "title": {
               "title": "Title",
               "type": "string"
@@ -12573,7 +12594,8 @@
             "redirected",
             "approved",
             "writing",
-            "superseded"
+            "superseded",
+            "cancelled"
           ],
           "title": "State",
           "type": "string"
@@ -13844,6 +13866,10 @@
     {
       "method": "GET",
       "path": "/v1/plans/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/cancel"
     },
     {
       "method": "POST",
