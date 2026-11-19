@@ -81,6 +81,7 @@ import { visualLink } from "../screens/Session/Visuals/client";
 import { VISUAL_LINK, VisualLinkContext } from "../screens/Session/Visuals/link";
 import { message } from "../screens/Session/Visuals/chrome";
 import { scrollByWheel } from "./terminalScroll";
+import { useAppTheme } from "./useAppTheme";
 
 /* What the view is doing: opening, showing the pane, closed (the client
    exited: its view session or the window went), or why it couldn't open. */
@@ -91,13 +92,16 @@ export type Renderer = "webgl" | "dom";
 /* The shell block palette (styles.css --shell-*, set per theme), read from the
    tokens as the page has them; xterm takes none of
    its own where a token is missing (a test page with no stylesheet). */
-export function shellTheme(): { background?: string; foreground?: string; cursor?: string; selectionBackground?: string } {
+export function shellTheme(): ITheme {
   if (typeof document === "undefined") return {};
   const style = getComputedStyle(document.documentElement);
   const token = (name: string) => style.getPropertyValue(name).trim() || undefined;
   // The cursor is the shell ink, softened (--shell-cursor), not the green accent.
   const cursor = token("--shell-cursor");
+  // The 16 ANSI colours: what the CLIs draw diffs and code in, so light and dark each carry their own.
+  const ansi = Object.fromEntries(Object.entries(ANSI_TOKENS).map(([colour, name]) => [colour, token(name)]));
   return {
+    ...ansi,
     background: token("--shell-bg"),
     foreground: token("--shell-ink"),
     cursor,
@@ -105,6 +109,21 @@ export function shellTheme(): { background?: string; foreground?: string; cursor
     selectionBackground: cursor && /^#[0-9a-f]{6}$/i.test(cursor) ? `${cursor}40` : undefined,
   };
 }
+
+/* xterm.js's colours for a view: the shell block's palette (shellTheme) under whatever the caller gives (the
+   session pane's own light palette, which sets its ANSI colours itself). */
+export function terminalTheme(theme?: ITheme): ITheme {
+  return { ...shellTheme(), ...theme };
+}
+
+/* The ANSI colours as styles.css tokens (--shell-*), xterm's names. */
+const ANSI_TOKENS = {
+  black: "--shell-black", red: "--shell-red", green: "--shell-green", yellow: "--shell-yellow",
+  blue: "--shell-blue", magenta: "--shell-magenta", cyan: "--shell-cyan", white: "--shell-white",
+  brightBlack: "--shell-bright-black", brightRed: "--shell-bright-red", brightGreen: "--shell-bright-green",
+  brightYellow: "--shell-bright-yellow", brightBlue: "--shell-bright-blue", brightMagenta: "--shell-bright-magenta",
+  brightCyan: "--shell-bright-cyan", brightWhite: "--shell-bright-white",
+} as const;
 
 /* WebGL where it works, else xterm.js's own DOM renderer (xterm 6 has no
    canvas one), which is many times slower on a full screen redrawn a frame
@@ -299,7 +318,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       fontSize: 13,
       scrollback: 0,
       macOptionClickForcesSelection: true,
-      theme: themed.current ?? shellTheme(),
+      theme: terminalTheme(themed.current),
       minimumContrastRatio: contrasted.current,
       linkHandler: { activate: follow },
     });
@@ -826,10 +845,12 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
   }, [server, target, open]);
 
   // The theme switched, or the rows to crop changed, with the view open: xterm.js redraws in the new colours; the
-  // client is resized to the new crop, and the pane redraws itself to fit as on any resize.
+  // client is resized to the new crop, and the pane redraws itself to fit as on any resize. The app's own theme
+  // (useAppTheme) counts too: the shell's ANSI tokens change with it even where the caller passes no theme.
+  const appTheme = useAppTheme();
   useEffect(() => {
-    if (live.current) live.current.term.options.theme = theme ?? shellTheme();
-  }, [theme]);
+    if (live.current) live.current.term.options.theme = terminalTheme(theme);
+  }, [theme, appTheme]);
   useEffect(() => {
     if (live.current) live.current.term.options.minimumContrastRatio = minimumContrastRatio;
   }, [minimumContrastRatio]);

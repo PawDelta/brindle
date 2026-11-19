@@ -520,8 +520,31 @@ def trust_folder(path: str) -> bool:
 
 
 # The first-run answers a person gives Claude Code once on their own machine.
-CI_THEME = "dark"
+# Claude Code's ANSI theme ("dark-ansi"): its diff and code colours come from
+# the terminal's 16-colour palette, so they follow the app's light or dark
+# theme instead of a fixed dark background.
+CI_THEME = "dark-ansi"
+# The theme brindle seeded before CI_THEME. Only brindle's own config folder
+# (provider_homes) is migrated to CI_THEME: the person's own ~/.claude.json
+# keeps the theme they chose.
+OLD_THEME = "dark"
 API_KEY_SUFFIX = 20   # Claude Code records an approved key by its last 20 characters
+
+
+def _brindle_owned_folder() -> bool:
+    """Whether Claude Code runs from a config folder brindle made and keeps
+    (provider_homes), rather than the person's own."""
+    from brindle import provider_homes
+
+    return bool(provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR"))
+
+
+def _seed_theme(data: dict, owned: bool) -> None:
+    """Give Claude Code brindle's theme where none is set; in brindle's own
+    folder, move the "dark" theme brindle used to seed to CI_THEME."""
+    if owned and data.get("theme") == OLD_THEME:
+        data["theme"] = CI_THEME
+    data.setdefault("theme", CI_THEME)
 
 
 def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
@@ -536,10 +559,11 @@ def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
     a JSON object) when it can't write."""
     config = os.path.realpath(claude_global_config())
     os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
+    owned = _brindle_owned_folder()
 
     def seed(data: dict) -> None:
         data["hasCompletedOnboarding"] = True
-        data.setdefault("theme", CI_THEME)
+        _seed_theme(data, owned)
         projects = data.setdefault("projects", {})
         for path in trusted:
             projects.setdefault(os.path.realpath(path), {})["hasTrustDialogAccepted"] = True
@@ -614,10 +638,11 @@ def record_claude_onboarding() -> str:
     anyone. Returns the file's path; raises OSError or ValueError."""
     config = os.path.realpath(claude_global_config())
     os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
+    owned = _brindle_owned_folder()
 
     def onboarded(data: dict) -> None:
         data["hasCompletedOnboarding"] = True
-        data.setdefault("theme", CI_THEME)
+        _seed_theme(data, owned)
 
     with _config_lock():
         _update_config(config, onboarded, create=True)
