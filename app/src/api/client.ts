@@ -854,6 +854,12 @@ export interface TrackerLink {
   read_at?: number | null;
 }
 
+/* A design's share link: who it opens for under the org's policy now (`off`: the org turned links off). */
+export interface DesignShareLink {
+  available: boolean;
+  link: { url: string; created_at: number | null; access: "anyone" | "org" | "off" } | null;
+}
+
 export interface DesignWorkItems {
   items: TrackerLink[];
   connected: Partial<Record<TrackerName, boolean>>;
@@ -2367,6 +2373,35 @@ export class DaemonClient {
      the author's own design, opened in the author's reader. A 404 for anyone else's. */
   libraryDesignPlan(doc: string) {
     return this.get<VisualDTO>(`/library/designs/${encodeURIComponent(doc)}/plan`);
+  }
+
+  /* A design's share link (brindle/pro/share_links.py): `available` is false below Pro (nothing asked of
+     the Library). Copying answers the design's link, made only when it has none; revoking turns it off. A
+     refusal by an org's link policy keeps the Library's own reason as the error's message. */
+  designShareLink(doc: string, repo?: string) {
+    return this.get<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, { repo });
+  }
+
+  copyDesignShareLink(doc: string, repo?: string) {
+    return this.post<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, repo ? { repo } : {});
+  }
+
+  revokeDesignShareLink(doc: string, repo?: string) {
+    return this.delete<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
+  /* The same link for a plan, by its id: its Library doc when this account shared it from here
+     (`available` false for a plan that isn't in the Library). */
+  planShareLink(id: string, repo?: string) {
+    return this.get<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, { repo });
+  }
+
+  copyPlanShareLink(id: string, repo?: string) {
+    return this.post<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, repo ? { repo } : {});
+  }
+
+  revokePlanShareLink(id: string, repo?: string) {
+    return this.delete<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
   }
 
   /* Work items (Jira, Azure DevOps) on a design. Reads answer the last read with `unreachable` when the
