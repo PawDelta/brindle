@@ -334,10 +334,10 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
     if not tests:
         return None
     note = ""
-    per_file = coverage_map.tests_per_file(data)
+    counts = coverage_map.test_counts(data)
 
-    def size(t: str) -> int:
-        return 1 if "::" in t else max(per_file.get(t, 0), 1)
+    def size(t: str) -> int:   # its cases: a parametrized test, or a whole file, counts every one
+        return max(counts.get(t, 0), 1)
 
     total = sum(map(size, tests))
     if 0 < max_tests < total:

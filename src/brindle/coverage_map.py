@@ -177,7 +177,8 @@ def _write_atomic(path: Path, text: str) -> None:
 def build(root: Path, data_file: Path, sha: str, check: str) -> dict:
     """The map of a coverage data file (coverage.py's SQLite format, read
     directly so brindle needn't depend on coverage) for checkout ``root``."""
-    executed = _executed(root, data_file)
+    cases: dict[str, set[str]] = {}
+    executed = _executed(root, data_file, cases)
     index: dict[str, int] = {}
     files: dict[str, dict[str, list[int]]] = {}
     for path in git.paths(["ls-files", "*.py"], root):   # (git.paths adds -z last: no "--" before the spec)
@@ -193,11 +194,13 @@ def build(root: Path, data_file: Path, sha: str, check: str) -> dict:
         files[path] = {q: sorted(ids) for q, ids in entry.items()}
     tests = sorted(index, key=index.get)
     return {"version": VERSION, "check": check, "commit": sha, "built": time.time(), "tests": tests,
-            "files": files}
+            "cases": [len(cases.get(t, ())) or 1 for t in tests], "files": files}
 
 
-def _executed(root: Path, data_file: Path) -> dict[str, dict[int, set[str]]]:
-    """{repo-relative file: {line: tests (``node``) whose context executed it}}."""
+def _executed(root: Path, data_file: Path,
+              cases: dict[str, set[str]] | None = None) -> dict[str, dict[int, set[str]]]:
+    """{repo-relative file: {line: tests (``node``) whose context executed it}}.
+    ``cases`` gets each test's cases (its parametrized ids) as they ran."""
     roots = {str(root), str(root.resolve())}
     con = sqlite3.connect(f"file:{data_file}?mode=ro", uri=True)
     try:
@@ -211,6 +214,9 @@ def _executed(root: Path, data_file: Path) -> dict[str, dict[int, set[str]]]:
         for cid, ctx in con.execute("SELECT id, context FROM context"):
             if test := node(ctx):
                 contexts[cid] = test
+                if cases is not None:
+                    case, bar, phase = ctx.rpartition("|")
+                    cases.setdefault(test, set()).add(case if bar and phase in _PHASES else ctx)
         out: dict[str, dict[int, set[str]]] = {}
 
         def add(fid, cid, line):
@@ -365,12 +371,17 @@ def targets(root: str | Path, data: dict, files: list[str], hits: dict[str, int]
     return found
 
 
-def tests_per_file(data: dict) -> dict[str, int]:
-    """How many of the map's tests each test file holds."""
+def test_counts(data: dict) -> dict[str, int]:
+    """How many test cases each of the map's tests (every case of a
+    parametrized one) and each test file holds, as the map's run saw them."""
+    tests = data.get("tests") or []
+    cases = data.get("cases") or []
     out: dict[str, int] = {}
-    for t in data.get("tests") or []:
+    for i, t in enumerate(tests):
         if "::" in t:
-            out[test_file(t)] = out.get(test_file(t), 0) + 1
+            n = cases[i] if i < len(cases) and isinstance(cases[i], int) and cases[i] > 0 else 1
+            out[t] = n
+            out[test_file(t)] = out.get(test_file(t), 0) + n
     return out
 
 
