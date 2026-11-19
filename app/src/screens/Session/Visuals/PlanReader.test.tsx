@@ -182,7 +182,7 @@ it("design doc reader", async () => {
   const calls: unknown[][] = [];
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => plan),
-    plan: async () => plan, decidePlan: async () => plan,
+    plan: async () => plan, decidePlan: async (_id, verdict) => { calls.push(["verdict", verdict]); return plan; },
     commentPlan: async (_id, rev, anchor, text) => {
       calls.push(["comment", rev, anchor, text]);
       const end = anchor.kind === "text" ? anchor.start + anchor.quote.length : undefined;
@@ -260,18 +260,19 @@ it("design doc reader", async () => {
   expect(screen.queryByTestId("plan-review-strip")).toBeNull();
   expect(localStorage.getItem(REVIEW_COLLAPSED_KEY)).toBe("0");
 
-  // The decision: the bottom bar leads to it, and confirms the option picked in its table.
+  // A supervisor's recommendation does not count as the person's selection.
   const section = () => within(screen.getByTestId("plan-doc")).getByRole("region", { name: /Where cloud workers run/ });
   expect(decision.getAttribute("data-next")).toBe("true");
+  const approve = () => within(screen.getByTestId("plan-verdict")).getByTestId("plan-build") as HTMLButtonElement;
+  expect(approve().disabled).toBe(true);
+  expect(section().getAttribute("data-state")).toBe("undecided");
   fireEvent.click(screen.getByRole("tab", { name: /Decisions/ }));
   expect(within(screen.getByTestId("plan-todo")).getByRole("button").getAttribute("data-state")).toBe("current");
   fireEvent.click(within(section()).getByRole("radio", { name: "B · PawDelta-hosted" }));
-  await act(async () => fireEvent.click(within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Confirm B" })));
-  expect(calls.pop()).toEqual(["confirm", 3, "where", "hosted"]);
-  expect(section().getAttribute("data-next")).toBeNull();
-  expect(within(section()).getByRole("radio", { name: "B · PawDelta-hosted" }).querySelector("[data-votes]")?.getAttribute("data-votes")).toBe("1");
-  expect(within(screen.getByTestId("plan-todo")).getByRole("button").getAttribute("data-state")).toBe("done");
-  expect(within(screen.getByTestId("plan-verdict")).getByTestId("plan-build")).toBeTruthy();
+  expect(approve().disabled).toBe(false);
+  expect(section().getAttribute("data-state")).toBeNull();
+  await act(async () => fireEvent.click(approve()));
+  expect(calls.pop()).toEqual(["verdict", expect.objectContaining({ approved: true, picks: { where: "hosted" } })]);
 });
 
 const doc = (rev: number, text: string, more: Partial<Plan> = {}): Plan => ({ id: visual.id, session: "boss", title: "Cloud workers", rev, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
@@ -309,7 +310,6 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   const replied: Plan = { ...base, threads: [{ ...base.threads![0], replies: [{ id: 2, author: "person", text: "Yes, rented too.", at: 12 }] }] };
   const reads: ((p: Plan) => void)[] = [];
   let reply!: (p: Plan) => void;
-  const confirmed: string[] = [];
   const sent: boolean[] = [];
   // The engine marks a reply `sent` once a verdict has carried it.
   const delivered = (p: Plan): Plan => ({ ...p, threads: p.threads!.map((t) => ({ ...t, replies: t.replies?.map((r) => ({ ...r, sent: true })) })) });
@@ -321,7 +321,6 @@ it("design doc writes go one at a time, a read sent before one came back can't u
     // The first verdict is answered at once; the second, when the test says so.
     decidePlan: (_id, verdict) => (sent.push(verdict.approved) === 1 ? Promise.resolve(redirected) : new Promise<Plan>((resolve) => { decided = resolve; })),
     replyPlan: () => new Promise<Plan>((resolve) => { reply = resolve; }),
-    confirmPlan: async (_id, _rev, decision) => { confirmed.push(decision); return replied; },
   };
   const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
   const view = render(reader(visual));
@@ -333,9 +332,9 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Reply" }));
   fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "Yes, rented too." } });
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" }));
-  // While the reply is out no other write goes: the engine's two answers could cross.
-  fireEvent.click(bar().getByRole("button", { name: "Confirm A" }));
-  expect(confirmed).toEqual([]);
+  // A decision pick is local and can be made while the reply is in flight.
+  fireEvent.click(within(screen.getByRole("radiogroup", { name: "Where" })).getByRole("radio", { name: "A · Own" }));
+  expect((bar().getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(true);
   await act(async () => reply(replied));
   // The read sent before the reply came back lands after it, without the reply: it is dropped.
   await act(async () => reads[1](base));
