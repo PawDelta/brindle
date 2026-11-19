@@ -133,7 +133,9 @@ def fake_coverage_run(commands):
                  marks=pytest.mark.variant("brindle pr must narrow its checks to the PR's diff, not run the full "
                                            "suite (the reuse test in test_gates can't tell: a full pass is cached)")),
     # A repo without CI opts in to the whole suite before a PR (None: the same full run the map came from).
-    ("pre_pr_full", None, "return LIMIT\n", "return LIMIT + 1\n", None),
+    pytest.param("pre_pr_full", None, "return LIMIT\n", "return LIMIT + 1\n", None,
+                 marks=pytest.mark.variant("pre_pr_full: true must keep the full pre-PR run; ignoring the opt-in "
+                                           "narrows checks in a repo with no CI")),
 ], ids=["worker-node", "merge-main-node", "import", "outdated-map", "pre_pr", "pre_pr_full"])
 def test_coverage_map_selects_the_tests_that_ran_the_changed_function(db, repo, monkeypatch, where, drift, old, new,
                                                                        ran):
@@ -422,10 +424,12 @@ PARAMETRIZED = "import pytest\nfrom values import VALUES\n\n\n@pytest.mark.param
      ("tests/test_r.py", "test_aaa_removed", "test_aaa_new"), CORE, 2,
      ["tests/test_r.py::test_aaa_new[0]", "tests/test_r.py::test_b"]),
     # The namesake comes before a smaller, less specific test even when only part of it fits.
-    ({"tests/test_core.py": "import pytest\n\n\n@pytest.mark.parametrize('n', range(5))\ndef test_c(n):\n    pass\n",
+    pytest.param({"tests/test_core.py": "import pytest\n\n\n@pytest.mark.parametrize('n', range(5))\ndef test_c(n):\n    pass\n",
       "tests/test_g.py": "def test_g():\n    pass\n"},
      ["tests/test_core.py::test_c", "tests/test_g.py::test_g"], [5, 1], None, CORE, 1,
-     ["tests/test_core.py::test_c[0]"]),
+     ["tests/test_core.py::test_c[0]"],
+                 marks=pytest.mark.variant("The namesake test keeps first place even when only part of it fits; "
+                                           "losing it to a smaller, less specific test runs the wrong tests")),
     # One parametrized test with more cases than the cap runs only as many of its cases as fit, and they are
     # today's: the branch changes the parameter table, not the test file reading it.
     # (A fixture's params= in a conftest is module-level code there: that runs the check in full.)
