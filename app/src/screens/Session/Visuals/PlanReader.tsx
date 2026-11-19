@@ -1072,7 +1072,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               {next ? nextOptionConfirm : (
                 <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
                   data-testid="plan-build" data-gate={gate?.state} onClick={() => void decide(true)}>
-                  {gate ? "Start building" : "Sign off"}
+                  Approve
                 </LoadingButton>
               )}
             </div>
