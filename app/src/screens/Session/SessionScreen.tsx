@@ -74,6 +74,8 @@ export interface SessionScreenProps {
 /* An agent's states with a live CLI to message: at its prompt, working (Send queues), or waiting on the person. */
 const CHAT_STATES = new Set(["idle", "processing", "waiting"]);
 const NO_QUEUE: QueuedChatMessageDTO[] = [];
+/* An agent's states, read from the engine, whose pane isn't running (GET agent says exited for a dead pane). */
+const PANE_DOWN = new Set(["paused", "done", "failed", "exited"]);
 
 /* An ask as the Back badge tells them apart: its inbox identity, and what it says (an identity a
    new question at the same agent reuses still reads as new). */
@@ -134,6 +136,23 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // root in the snapshot, is then a row from before, never the engine's word. Only a row read after its
   // return says paused (the person's pause); while unsure, the live terminal or Restarting… stays.
   const panes = useContext(PanesReadyContext);
+  // Likewise the liveness sweep's "not alive" for a session recovery brought back: it may be a look taken
+  // before its return, arriving after it. It stands once the engine, asked after it came (GET agent looks
+  // at the pane itself), says the pane is down too; till then the pane stays as it is.
+  const nodeId = node?.agent.id ?? null;
+  const said = nodeId ? alive[nodeId] : undefined;
+  const saidAt = useAppState((s) => (nodeId ? s.aliveAt[nodeId] : undefined));
+  const recovered = !!nodeId && !!panes.recovered?.includes(nodeId);
+  const [downCheck, setDownCheck] = useState<{ id: string; at: number | undefined; down: boolean } | null>(null);
+  useEffect(() => {
+    if (!nodeId || !recovered || said !== false) return;
+    let current = true;
+    void client.agent(nodeId).then((found) => {
+      if (current) setDownCheck({ id: nodeId, at: saidAt, down: PANE_DOWN.has(found.status) });
+    }, () => {});
+    return () => { current = false; };
+  }, [client, nodeId, recovered, said, saidAt]);
+  const nodeAlive = said === false && recovered && !(downCheck?.id === nodeId && downCheck.at === saidAt && downCheck.down) ? undefined : said;
   const pendingHere = panes.pending?.includes(root) === true;
   const returning = !panesReadyFor(panes, root) && (pendingHere || !!panes.returning?.includes(root));
   // Recovery named it and it isn't known back, its pane shown anyway (the gate's startup deadline): the same.
@@ -270,7 +289,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // in the box as chips: the box of the agent they were dropped on, and no other's.
   const chatSupported = useChatSupport(client);
   const shown = node?.agent ?? null;
-  const chatAgent = chatSupported && shown && shown.provider === "claude" && !shown.locked && !paused && sessionStatus !== "resuming" && CHAT_STATES.has(shown.status) && alive[shown.id] !== false ? shown : null;
+  const chatAgent = chatSupported && shown && shown.provider === "claude" && !shown.locked && !paused && sessionStatus !== "resuming" && CHAT_STATES.has(shown.status) && nodeAlive !== false ? shown : null;
   const [dropped, setDropped] = useState<{ agent: string; files: File[] }>();
   const [dropping, setDropping] = useState(false);
   const chatId = chatAgent?.id;
@@ -310,7 +329,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         root={root}
         repo={repo}
         node={node}
-        alive={node ? alive[node.agent.id] : undefined}
+        alive={nodeAlive}
         sessionStatus={sessionStatus}
         restarting={restarting}
         paused={paused}
@@ -367,7 +386,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
                 repo={repo}
                 root={root}
                 agent={node?.agent ?? null}
-                alive={node ? alive[node.agent.id] : undefined}
+                alive={nodeAlive}
                 sessionStatus={sessionStatus === "resuming" || !node || node.agent.id === root ? sessionStatus : null}
                 restarting={restarting}
                 sessionName={session?.name || session?.goal}
