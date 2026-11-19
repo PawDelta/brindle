@@ -935,6 +935,34 @@ describe("App", () => {
     await expect(checked.mock.results.at(-1)!.value).rejects.toMatchObject({ status: 401 });
   });
 
+  it("keeps the session's terminal mounted but out of sight on Settings and the Library", async () => {
+    // jsdom loads no Tailwind: an element is out of sight when an ancestor carries the `hidden` class, or the
+    // `hidden` attribute with no display utility (e.g. `contents`) that would override it in the real CSS.
+    const outOfSight = (el: Element) => {
+      for (let n: Element | null = el; n; n = n.parentElement) {
+        const classes = n.className?.toString().split(/\s+/) ?? [];
+        if (classes.includes("hidden")) return true;
+        if (n.hasAttribute("hidden") && !classes.some((c) => /^(contents|flex|grid|block|inline|inline-flex)$/.test(c))) return true;
+      }
+      return false;
+    };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], goal });
+    const { client, store, sync } = connectDaemon(daemon);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await screen.findByRole("region", { name: "Session" });
+    // The person's docked shell is open under the session; the session's own pane is the other "terminal".
+    fireEvent.click(screen.getByTestId("terminal-toggle"));
+    const panel = await screen.findByTestId("terminal-panel");
+    expect(outOfSight(panel)).toBe(false);
+    for (const open of [() => fireEvent.click(link("Open Account › Usage")), () => fireEvent.click(within(screen.getByTestId("sidebar-foot-row")).getByRole("button", { name: /^Library/ }))]) {
+      open();
+      await waitFor(() => expect(outOfSight(screen.getByTestId("terminal-panel"))).toBe(true));
+      expect(screen.getByTestId("terminal-panel")).toBe(panel);
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => expect(outOfSight(panel)).toBe(false));
+    }
+  });
+
   it("library sidebar: the foot's button opens the Library with the sidebar as its navigation, ← Sessions and ⌘L go back, and Settings keeps Agents", async () => {
     const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj" };
     const decided = { id: "a".repeat(32), repo_key: "proj", topic: "storage", body: "use sqlite", rationale: "", scope: [], status: "accepted", created_at: 1 };
