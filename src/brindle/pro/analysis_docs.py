@@ -446,7 +446,8 @@ def switch_states(client=None, store=None) -> list[dict]:
         states.append({"name": name, "choice": choices.get(name) if choices.get(name) in ("on", "off") else None,
                        "on": analysis_policy.resolve_switch(name, choices, group=group, policy=policy,
                                                             org=ent.org_id, plan=ent.plan),
-                       "locked": enforced is not None, "org": enforced})
+                       "locked": enforced is not None, "org": enforced,
+                       "reason": f"Set by your organization's admin ({ent.org_id})." if enforced else None})
     return states
 
 

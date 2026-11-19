@@ -1,4 +1,4 @@
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { FitAddon } from "@xterm/addon-fit";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -883,6 +883,33 @@ it("crops rows under the view's foot with a taller client, restores them, and sw
   // The same view throughout: the crop and theme change it, never reopen it.
   expect(xterms).toHaveLength(1);
   fits.mockRestore();
+});
+
+it("gives xterm the ANSI palette of the shell tokens, and re-gives it when the app theme flips", async () => {
+  // The shell tokens of styles.css: the dark block (:root) and the light one, as the page gets them.
+  const css = readFileSync(resolve(import.meta.dirname, "../styles.css"), "utf8");
+  const block = (selector: string) => {
+    const start = css.indexOf(`${selector} {`);
+    return css.slice(start, css.indexOf("}", start) + 1);
+  };
+  const style = document.createElement("style");
+  style.textContent = block(":root") + block(':root[data-theme="light"]');
+  document.head.append(style);
+  const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const open: PtyViewOpener = () => ({ write() {}, resize() {}, focus() {}, close() {} });
+  try {
+    document.documentElement.dataset.theme = "light";
+    render(<PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} />);
+    const light = token("--shell-red");
+    expect(xterms.at(-1)!.options.theme?.red).toBe(light);
+    expect(xterms.at(-1)!.options.theme?.brightWhite).toBe(token("--shell-bright-white"));
+    document.documentElement.dataset.theme = "dark";
+    await waitFor(() => expect(xterms.at(-1)!.options.theme?.red).toBe(token("--shell-red")));
+    expect(token("--shell-red")).not.toBe(light);
+  } finally {
+    style.remove();
+    delete document.documentElement.dataset.theme;
+  }
 });
 
 it("reads a light shell block from the stylesheet's light theme: a light ground, dark ink", () => {
