@@ -33,22 +33,28 @@ export function planLinkTarget(client: Partial<PlanShareLinkClient>, planId: str
 /* Whether the design offers a link at all: null until the daemon answers, and on any failure to read
    it (signed out, offline), so a menu never shows actions it can't carry out. Read again whenever
    `fresh` changes (the Share menu opening, a plan getting shared into the Library): a plan with no
-   link a moment ago may have one now. Only the newest read's answer counts. */
+   link a moment ago may have one now. Only the newest answer counts: a copy or revoke the person
+   made (`setState`) outdates every read still out, which saw the link before it. */
 export function useShareLink(target: ShareLinkTarget | undefined, fresh?: unknown) {
-  const [state, setState] = useState<DesignShareLink | null>(null);
+  const [state, setRead] = useState<DesignShareLink | null>(null);
   const latest = useRef(target);
   latest.current = target;
+  const generation = useRef(0);
   const key = target?.key;
   useEffect(() => {
-    setState(null);
+    generation.current++;
+    setRead(null);
   }, [key]);
   useEffect(() => {
     const t = latest.current;
     if (!t) return;
-    let live = true;
-    t.read().then((got) => { if (live) setState(got); }, () => {});
-    return () => { live = false; };
+    const asked = ++generation.current;
+    t.read().then((got) => { if (generation.current === asked) setRead(got); }, () => {});
   }, [key, fresh]);
+  const setState = useCallback((next: DesignShareLink) => {
+    generation.current++;
+    setRead(next);
+  }, []);
   return { state, setState };
 }
 
