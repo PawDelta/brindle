@@ -780,7 +780,7 @@ def run_checks(db: DB, ws_id: str, old_sha: str) -> str | None:
     """Run the session checkout's checks on the files a sync from
     ``old_sha`` brought in (a pytest check narrowed to the tests they reach,
     any other check in full), and tell the supervisor how they went."""
-    from brindle import autopilot, check_scope, gates, workspaces
+    from brindle import autopilot, gates, workspaces
 
     ws = db.get_workspace(ws_id)
     if ws is None:
@@ -792,10 +792,8 @@ def run_checks(db: DB, ws_id: str, old_sha: str) -> str | None:
     env = workspaces.workspace_env(ws)
     failed: list[str] = []
     for cmd in cfg.checks:
-        run = check_scope.command(ws, cmd, check_scope.inferred(cmd, cfg.scoped_checks), (old_sha, files))
-        if run is None:
-            continue
-        ok, output = gates.run_checked(db, ws, run, env, cfg.check_timeout, full=True)
+        # Scoped by what the sync brought in, with the repo's caps; a tree whose full run passed is reused.
+        ok, output = gates.run_checked(db, ws, cmd, env, cfg.check_timeout, against=(old_sha, files))
         if not ok:
             failed.append(f"{cmd}\n{autopilot.tail(output)}")
     if failed:
