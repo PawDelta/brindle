@@ -2386,6 +2386,20 @@ def delete_doc_destination(db: DB, params: dict, body: Body) -> Any:
     return docs_org_api("DELETE", "destination", repo=_get(body, "repo"), admin=True)
 
 
+def library_on_this_mac(repo: str | None = None) -> bool:
+    """Whether the person's plans are kept on this Mac (local_library.location;
+    the server is asked only while their choice is unknown here)."""
+    from brindle.pro import analysis_docs, local_library
+
+    _docs_entitlement(repo)
+    return local_library.location(fetch=analysis_docs.fetch_switches,
+                                  learn=local_library.learn_group) == local_library.LOCAL
+
+
+def own_scope(repo: str | None = None) -> dict:
+    return {"kind": "user", "id": _docs_entitlement(repo).sub}
+
+
 def doc_switches(repo: str | None = None) -> dict:
     """``{"switches": [{name, on, choice, locked, org}]}``: the person's own
     switches (analysis_docs.switch_states). 402 when not entitled, 502 when
@@ -2408,12 +2422,13 @@ def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", f"name is one of {', '.join(analysis_policy.SWITCHES)}")
     _docs_entitlement(repo)
     try:
-        analysis_docs.set_switch(on, name=name)
+        got = analysis_docs.set_switch(on, name=name)
     except analysis_docs.Locked as e:
         raise ServiceError("forbidden", str(e), 403) from e
     except (RuntimeError, auth.TransportError) as e:
         raise ServiceError("upstream", str(e), 502) from e
-    return doc_switches(repo)
+    moved = {k: got[k] for k in ("moved", "left") if k in got} if name == "store" and isinstance(got, dict) else {}
+    return {**doc_switches(repo), **moved}
 
 
 def put_doc_format(db: DB, params: dict, body: Body) -> Any:
@@ -2481,16 +2496,46 @@ def _doc_path(params: dict, *rest: str) -> str:
 
 
 def share_doc(db: DB, params: dict, body: Body) -> Any:
-    """Share a doc with ``scope`` (team:<id> or org:<id>; never ``user``)."""
+    """Share a doc with ``scope`` (team:<id> or org:<id>; never ``user``). A
+    doc kept on this Mac is put on the server first: only that one doc."""
+    from brindle.pro import auth, local_library
+
     kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
-    return docs_api("POST", _doc_path(params, "share"), {"scope": {"kind": kind, "id": scope_id}},
-                    repo=params.get("repo"))
+    repo = params.get("repo")
+    kept = local_library.get(params["id"])
+    if kept is None:
+        return docs_api("POST", _doc_path(params, "share"), {"scope": {"kind": kind, "id": scope_id}}, repo=repo)
+    _docs_entitlement(repo)
+    try:
+        server_id = local_library.server_copy(params["id"])
+    except (RuntimeError, auth.AuthError, auth.TransportError) as e:
+        raise ServiceError("upstream", str(e), 502) from e
+    got = docs_api("POST", _doc_path({"id": server_id}, "share"), {"scope": {"kind": kind, "id": scope_id}},
+                   repo=repo)
+    shared = [s for s in kept.get("shared") or [] if s != {"kind": kind, "id": scope_id}]
+    local_library.update(params["id"], shared=[*shared, {"kind": kind, "id": scope_id}])
+    return got
 
 
 def unshare_doc(db: DB, params: dict, body: Body) -> Any:
-    """Stop sharing a doc with ``scope`` (team:<id> or org:<id>)."""
+    """Stop sharing a doc with ``scope`` (team:<id> or org:<id>). The server
+    copy of a doc kept on this Mac goes once it is shared nowhere, while the
+    library is on this Mac."""
+    from brindle.pro import local_library
+
     kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
-    return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=params.get("repo"))
+    repo = params.get("repo")
+    kept = local_library.get(params["id"])
+    if kept is None or not kept.get("server_id"):
+        return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=repo)
+    server = {"id": kept["server_id"]}
+    got = docs_api("DELETE", _doc_path(server, "share", kind, scope_id), repo=repo)
+    shared = [s for s in kept.get("shared") or [] if s != {"kind": kind, "id": scope_id}]
+    local_library.update(params["id"], shared=shared)
+    if not shared and library_on_this_mac(repo):
+        docs_api("DELETE", _doc_path(server), repo=repo)
+        local_library.update(params["id"], server_id=None)
+    return got
 
 
 def _folder_call(body: Body, run: Callable) -> Any:
@@ -2625,7 +2670,18 @@ def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
 
 
 def delete_doc(db: DB, params: dict, body: Body) -> Any:
-    return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+    """Delete a doc; one kept on this Mac goes from here, and its server copy
+    (while shared) first."""
+    from brindle.pro import local_library
+
+    kept = local_library.get(params["id"])
+    if kept is None:
+        return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+    _docs_entitlement(params.get("repo"))
+    if kept.get("server_id"):
+        docs_api("DELETE", _doc_path({"id": kept["server_id"]}), repo=params.get("repo"))
+    local_library.remove(params["id"])
+    return {"deleted": params["id"]}
 
 
 def export_doc(db: DB, params: dict, body: Body) -> Any:

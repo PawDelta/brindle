@@ -1003,6 +1003,14 @@ export interface DocSwitch {
   org: "enforced_on" | "enforced_off" | null;
 }
 
+/* PUT /analysis-docs/switches: the switches after the change, and for `store` (the library
+   location) how many plans moved and how many are left where they were. */
+export interface DocSwitchesSet {
+  switches: DocSwitch[];
+  moved?: number;
+  left?: number;
+}
+
 /* Settings › Doc format (brindle.doc_templates): a template's sections in
    order, each with its kind, whether it is required, and the line the
    supervisor is told; naming; and what an empty required section stops. */
@@ -2568,9 +2576,11 @@ export class DaemonClient {
     return (await this.get<{ switches: DocSwitch[] }>("/analysis-docs/switches", { repo })).switches;
   }
 
-  /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked. */
+  /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked.
+     `store` is the library location (on: brindle servers, off: this Mac); setting it moves
+     the plans, and `left` counts those not moved yet. */
   async setDocSwitch(name: DocSwitchName, on: boolean) {
-    return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
+    return this.put<DocSwitchesSet>("/analysis-docs/switches", { name, on });
   }
 
   /* Settings › Doc format for one level (org, or team:<id>). */
