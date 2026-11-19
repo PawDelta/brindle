@@ -127,17 +127,19 @@ def fake_coverage_run(commands):
                  marks=pytest.mark.variant("A map older than the code must follow calls added since, or it misses "
                                            "the tests reaching the change through them")),
     # brindle pr on a session's branch: scoped to what it changes since origin/main, not the full suite.
-    pytest.param("pre-pr", None, "return LIMIT\n", "return LIMIT + 1\n", "tests/test_a.py::test_a",
+    pytest.param("pre_pr", None, "return LIMIT\n", "return LIMIT + 1\n", "tests/test_a.py::test_a",
                  marks=pytest.mark.variant("brindle pr must narrow its checks to the PR's diff, not run the full "
                                            "suite (the reuse test in test_gates can't tell: a full pass is cached)")),
-], ids=["worker", "merge-main", "import", "outdated-map", "pre-pr"])
+    # A repo without CI opts in to the whole suite before a PR (None: the same full run the map came from).
+    ("pre_pr_full", None, "return LIMIT\n", "return LIMIT + 1\n", None),
+], ids=["worker-node", "merge-main-node", "import", "outdated-map", "pre_pr", "pre_pr_full"])
 def test_coverage_map_selects_the_tests_that_ran_the_changed_function(db, repo, monkeypatch, where, drift, old, new,
                                                                        ran):
     """A full run records which tests executed each function; a change to one
     function of a module every test imports then runs only the tests that
     executed it, on a worker's branch, after a merge of main and before a PR
     alike."""
-    config = {"checks": [PYTEST], "scoped_checks": "coverage"}
+    config = {"checks": [PYTEST], "scoped_checks": "coverage", "pre_pr_full": where == "pre_pr_full"}
     files = {".brindle/config.json": json.dumps(config), "src/pkg/__init__.py": "", "src/pkg/hub.py": HUB,
              **{name: "from pkg import hub\n\n\n" + text for name, text in HUB_TESTS.items()}}
     for name, text in files.items():
@@ -161,7 +163,7 @@ def test_coverage_map_selects_the_tests_that_ran_the_changed_function(db, repo, 
         (Path(ws.path) / "src/pkg/hub.py").write_text(hub.replace(old, new))
         sh("git commit -qam work", Path(ws.path))
         assert gates.run_checked(db, ws, PYTEST, {}, 30)[0]
-    elif where == "pre-pr":   # no worker on the branch: only the PR's own diff narrows it
+    elif where.startswith("pre_pr"):   # no worker on the branch: only the PR's own diff narrows it
         ws = workspaces.create(db, str(repo), "sess").workspace
         (Path(ws.path) / "src/pkg/hub.py").write_text(hub.replace(old, new))
         sh("git commit -qam work", Path(ws.path))
@@ -174,7 +176,7 @@ def test_coverage_map_selects_the_tests_that_ran_the_changed_function(db, repo, 
         session_sync.run_checks(db, root.id, before)
 
     assert "--cov-context=test" in commands[0]
-    assert commands[1:] == [f"{PYTEST} {ran}"]
+    assert commands[1:] == [commands[0] if ran is None else f"{PYTEST} {ran}"]
 
 
 RUN_Y = "\n\n\ndef run():\n    return Y\n"
@@ -365,18 +367,18 @@ def test_a_script_changed_since_the_map_runs_the_tests_that_run_it(repo, monkeyp
     assert run == f"{PYTEST} tests/test_driver.py tests/test_runs_build.py"
 
 
-def test_a_hub_change_runs_only_the_tests_most_specific_to_it(repo, monkeypatch):
+def test_a_hub_change_runs_at_most_max_tests_most_specific_to_it(repo, monkeypatch):
     """A change to a function nearly every test passes through runs at most
-    ``max_tests`` tests: the branch's own and namesake ones (a whole file
-    counting the tests the map has in it), then single tests whose coverage
-    is mostly the changed code, not the 186 the map credits."""
+    ``max_tests`` test cases: the branch's own and namesake ones (a whole
+    file counting every case the map has in it), then single tests whose
+    coverage is mostly the changed code, not the 186 the map credits."""
     from brindle import coverage_map
 
     hub = "def hub():\n    return 1\n"
     own = "def test_o():\n    assert 1\n"
     specific = [f"tests/test_s{i}.py::test_x" for i in range(10)]
     generic = [f"tests/test_g{i:02}.py::test_{x}" for i in range(88) for x in "xy"]
-    owned = [f"tests/test_own.py::test_{i}" for i in range(5)]   # five tests: the own file counts five
+    owned = ["tests/test_own.py::test_o"]   # parametrized: five cases, so the own file counts five
     names = ["tests/test_hub.py::test_x", *owned, *specific, *generic]
     files = {"pkg/__init__.py": "", "pkg/hub.py": hub,
              **{coverage_map.test_file(t): "def test_x(): pass\n\n\ndef test_y(): pass\n" for t in names},
@@ -391,7 +393,8 @@ def test_a_hub_change_runs_only_the_tests_most_specific_to_it(repo, monkeypatch)
              "pkg/big.py": {f"f{i}": broad for i in range(10)},
              "tests/test_own.py": {q: [1] for q in coverage_map.line_scopes(own)}}
     base = sh("git rev-parse HEAD", repo)
-    monkeypatch.setattr(coverage_map, "load", lambda root, check: {"commit": base, "tests": names, "files": known})
+    data = {"commit": base, "tests": names, "cases": [5 if t in owned else 1 for t in names], "files": known}
+    monkeypatch.setattr(coverage_map, "load", lambda root, check: data)
     (repo / "pkg/hub.py").write_text(hub.replace("1", "2"))
     (repo / "tests/test_own.py").write_text(own.replace("1", "2"))
     ws = SimpleNamespace(path=str(repo), repo_root=str(repo))
@@ -399,6 +402,6 @@ def test_a_hub_change_runs_only_the_tests_most_specific_to_it(repo, monkeypatch)
     run = check_scope.command(ws, PYTEST, check_scope.CheckScope(coverage=True),
                               (base, ["pkg/hub.py", "tests/test_own.py"]), max_files=40, max_tests=40)
     ran = shlex.split(run.rsplit(f"; {PYTEST}", 1)[-1])
-    assert run.startswith("printf") and len(ran) == 40 - len(owned) + 1
+    assert run.startswith("printf") and len(ran) == 40 - 5 + 1
     assert {"tests/test_hub.py", "tests/test_own.py", *specific} <= set(ran)
     assert all("::" in t for t in set(ran) - {"tests/test_hub.py", "tests/test_own.py"})

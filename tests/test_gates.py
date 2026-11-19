@@ -8,7 +8,7 @@ from brindle import autopilot, codemap, gates, workspaces
 from brindle.db import Agent
 
 
-def test_a_pr_on_a_tree_that_passed_in_full_runs_nothing_again(db, repo, monkeypatch):
+def test_pre_pr_on_a_tree_that_passed_in_full_runs_nothing_again(db, repo, monkeypatch):
     """The scoped run before a PR reuses the full pass the same tree already
     has (here from a gate run), rather than running its narrower command."""
     cmd = "uv run pytest -q"
