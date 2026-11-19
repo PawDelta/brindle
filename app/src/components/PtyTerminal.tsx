@@ -67,6 +67,7 @@
 
 import { ClipboardAddon, type IClipboardProvider } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
@@ -314,6 +315,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     const follow = linkOpener(() => browsed.current, mac, () => visuals.current);
     const term = new XTerm({
       cursorBlink: true,
+      allowProposedApi: true, // the Unicode addon's `term.unicode`
       fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 13,
       scrollback: 0,
@@ -324,6 +326,9 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // Unicode 11 widths, as Claude Code and tmux measure: emoji such as ✅ take 2 columns (xterm.js defaults to 6).
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = "11";
     term.loadAddon(new WebLinksAddon(follow));
     term.loadAddon(new WebLinksAddon(follow, { urlRegex: VISUAL_LINK }));
     let gone = false;

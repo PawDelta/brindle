@@ -1089,6 +1089,11 @@ CREATE TABLE IF NOT EXISTS doc_requests (
     why TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- PRs whose brindle footer brindle has already checked or added once
+-- (workspaces.ensure_pr_footer): never touched again, so a later edit stands.
+CREATE TABLE IF NOT EXISTS pr_footer_done (
+    url TEXT PRIMARY KEY
+);
 -- A supervisor's operational memory (brindle.supervisor_state owns this): a
 -- compact JSON state folded from the event bus up to ``last_event``, which a
 -- restart seeds the fresh session with.
