@@ -607,16 +607,18 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     fill = draft_row is not None and plan_id in (None, draft_row["id"])
     if fill:
         plan_id = None
-    # A new plan, or a revision of one already on the spine, follows the design-doc spine; an older
-    # free-form plan keeps its sections as they are.
-    if plan_id is None or any(s["id"] in plan_docs.SPINE for s in plan_docs.revision(db, plan_id)["sections"]):
-        parts = plan_docs.design_doc(parts)
-        markdown = plan_docs.render(lede, parts)
     # The doc format: a new plan starts from the default template, a revision keeps the one
     # its plan was written with; either way a required heading left out comes back, empty.
     where = doc_templates.store()
     fmt = None if plan_id else doc_templates.resolve(where=where)
     template = doc_templates.default_template(fmt) if fmt else (doc_templates.of(db, plan_id) or {}).get("template")
+    # With no custom template, a new plan or a revision of one already on the spine follows the
+    # design-doc spine (an older free-form plan keeps its sections as they are).
+    on_spine = plan_id is not None and any(
+        s["id"] in plan_docs.SPINE for s in plan_docs.revision(db, plan_id)["sections"])
+    if not template and (plan_id is None or on_spine):
+        parts = plan_docs.design_doc(parts, force=on_spine)
+        markdown = plan_docs.render(lede, parts)
     parts, added = doc_templates.apply(template, parts)
     if added:
         markdown = plan_docs.render(lede, parts)

@@ -31,12 +31,13 @@ def test_extras_left_out_or_empty_are_not_present(db, session):
 def test_markdown_only_proposal_maps_headings_to_the_spine(db, session):
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
-    md = "# T\n\nLede.\n\n## Tech stack\n\n## Context\n\nWhy.\n\n## Open questions\n"
-    p = plans.propose(db, boss, md, [{**DECISIONS[0], "section": "context"}])
+    md = "# T\n\nLede.\n\n## Context\n\nWhy.\n\n## Open questions\n"
+    p = plans.propose(db, boss, md, [{**DECISIONS[0], "section": "context"}, {**DECISIONS[0], "id": "d2"}])
     dto = plans.to_dto(db, plans.get(db, p["id"]))
     ids = [s["id"] for s in dto["sections"]]
     assert ids == ["context", "goals", "proposed-design", "alternatives", "risks", "rollout", "open-questions"]
-    assert dto["decisions"][0]["section"] == "context"
+    assert [d["section"] for d in dto["decisions"]] == ["context", "open-questions"]
+    assert {d["section"] for d in dto["decisions"]} <= set(ids)
 
 
 def test_decision_attaches_to_its_section_else_open_questions(db, session):

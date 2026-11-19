@@ -239,25 +239,21 @@ _HEADINGS = {**{_heading(t): i for i, t in TITLES.items()}, **{_heading(i): i fo
              "goals": "goals", "alternatives": "alternatives", "risks": "risks", "rollout": "rollout"}
 
 
-def design_doc(parts: list[dict]) -> list[dict]:
-    """A new proposal as the design-doc spine: sections with a spine id, or
+def design_doc(parts: list[dict], force: bool = False) -> list[dict]:
+    """A proposal as the design-doc spine: sections with a spine id, or
     (markdown headings) a spine title, take the canonical id; every required
     spine section is present, in order. Sections naming none of the spine are
-    a free-form doc and stay as written."""
+    a free-form doc and stay as written, unless ``force`` (a revision of a
+    plan that is already on the spine)."""
     parts = [dict(s) for s in parts]
     taken = {s["id"] for s in parts}
-    # Headings alone only make a spine doc when at least three match: a couple of
-    # coincidental titles (Risks, Architecture) in a free-form doc stay as written.
-    named = {s["id"]: _HEADINGS.get(_heading(s["title"])) for s in parts
-             if s["id"] not in SPINE and re.fullmatch(r"s\d+", s["id"])}
-    named = {sid: key for sid, key in named.items() if key and key not in taken}
-    if len(set(named.values())) + len(taken & set(SPINE)) >= 3:
-        for s in parts:
-            if s["id"] in named and named[s["id"]] not in taken:
-                taken.discard(s["id"])
-                taken.add(named[s["id"]])
-                s["id"] = named[s["id"]]
-    if not any(s["id"] in SPINE for s in parts):
+    for s in parts:
+        key = _HEADINGS.get(_heading(s["title"]))
+        if s["id"] not in SPINE and re.fullmatch(r"s\d+", s["id"]) and key and key not in taken:
+            taken.discard(s["id"])
+            taken.add(key)
+            s["id"] = key
+    if not force and not any(s["id"] in SPINE for s in parts):
         return parts
     for sid in SPINE:
         if sid not in EXTRAS and sid not in taken:
