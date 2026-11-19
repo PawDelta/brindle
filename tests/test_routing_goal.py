@@ -68,6 +68,8 @@ def _asked_with(db, repo, asked, **kw):
 
 
 def test_the_most_specific_level_wins_and_the_org_clamps_it(db, repo, boss, monkeypatch):
+    # The weights asked are what's under test, not whether each candidate's model window can open.
+    monkeypatch.setattr("brindle.agents.model_problem", lambda name, ws: None)
     # Nothing set anywhere: no goal, and the learner is asked exactly as before goals.
     assert _asked_with(db, repo, boss) is None
     config.user_config_path().write_text(json.dumps({"routing_goal": "fast"}))
