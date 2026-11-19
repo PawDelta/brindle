@@ -71,12 +71,10 @@ DYNAMIC_IMPORTS = {
     pytest.param("infer", PYTEST, {"src/pkg/lonely.py": "X = 1\n"},   # no importer
                  [f"printf '%s\\n' {shlex.quote(LONELY_NOTE)}; {PYTEST}"], marks=pytest.mark.variant(
                      "A package module nothing imports must fail closed to the full suite, not run no tests")),
-    ("cap-pr", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER}, [PYTEST]),
 ], ids=["deleted-function", "lookup-failed", "fallback-unmapped",
         "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "quoted-name",
         "script", "infer-selects", "empty-diff", "non-python-only", "lockfile", "brindle-rules", "brindle-checks",
-        "cap", "cap-empty", "no-importers",
-        "cap-pr"])
+        "cap", "cap-empty", "no-importers"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
     config = {"checks": [cmd], "scoped_checks": "off" if where == "off" else "infer"}
     if where == "unset":
@@ -123,13 +121,9 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
     sh("git add -A && git commit -qm work --allow-empty", Path(ws.path))
 
     cfg = load_repo_config(ws.repo_root)
-    if where == "cap-pr":   # the pre-PR run on a worker's workspace never narrows
-        with gates.pr_checked(db, ws):
-            pass
-    else:
-        assert all(gates.run_checked(db, ws, cmd, {}, 30)[0] for cmd in cfg.checks)
+    assert all(gates.run_checked(db, ws, cmd, {}, 30)[0] for cmd in cfg.checks)
     assert commands == ran
-    full = where in ("supervisor", "cap-pr")
+    full = where == "supervisor"
     assert envs == [None if full else "\n".join(sorted(changes))] * len(ran)   # the real gate dispatch sets it
 
 

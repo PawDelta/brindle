@@ -105,7 +105,9 @@ class RepoConfig:
     autopilot: bool = True             # deprecated; the goal driver is always on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
     scoped_checks: str | None = None   # "off", "infer" or "coverage"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
-    scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (with a coverage map: up to this many, most specific first) (0: no cap)
+    scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this many files runs only its own and namesake tests (0: no cap)
+    scoped_checks_max_tests: int = 300  # with a coverage map: at most this many tests run, most specific first (0: no cap)
+    pre_pr_full: bool = False          # run every check in full before a PR (for a repo without CI); else scoped to the PR's diff
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer-sonnet-high"  # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips automatic selection)
@@ -506,7 +508,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
                 "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks",
-                "scoped_checks_max_files", "agent_env_mode"):
+                "scoped_checks_max_files", "scoped_checks_max_tests", "pre_pr_full", "agent_env_mode"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])

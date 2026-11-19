@@ -56,16 +56,16 @@ Abandoned = autopilot.CheckCancelled   # raised when a run's ``cancel`` turns tr
 
 
 def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
-                cancel=None, full: bool = False) -> tuple[bool, str]:
+                cancel=None, full: bool = False, against: tuple[str, list[str]] | None = None) -> tuple[bool, str]:
     """Run or reuse a check and retain its conclusive outcome for the worker task."""
-    ok, out = _run_checked(db, ws, cmd, env, timeout, cancel, full)
+    ok, out = _run_checked(db, ws, cmd, env, timeout, cancel, full, against)
     if not timed_out(out):
         db.record_task_check(ws.id, cmd, ok)
     return ok, out
 
 
 def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
-                 cancel=None, full: bool = False) -> tuple[bool, str]:
+                 cancel=None, full: bool = False, against: tuple[str, list[str]] | None = None) -> tuple[bool, str]:
     """Run ``cmd`` in ``ws``, or reuse the cached PASSING result for the same
     (repo, tree sha, command) if the tree was clean when that result was
     cached: an identical tree hits in any workspace, or the supervisor's
@@ -85,12 +85,16 @@ def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: 
 
     On a worker's branch a scoped check (``brindle.check_scope``) runs only
     what the branch's changes reach, or nothing; the result is recorded for
-    ``cmd`` all the same, and cached by tree for the command that actually ran."""
+    ``cmd`` all the same, and cached by tree for the command that actually ran.
+    ``against`` (merge base, changed files) scopes it by that diff instead, in
+    any workspace (the run before a PR, the session checkout after a sync);
+    ``full`` never narrows it. A narrowed run on a tree whose full run of
+    ``cmd`` already passed reuses that pass."""
     # Taken before the git calls below, which can be slow on a loaded
     # machine: a holder that finished after we arrived still counts.
     waiting_since = time.time()
     sha = head(ws)
-    diff = None if full else check_scope.changed_files(db, ws)   # ``full``: the pre-PR run never narrows
+    diff = None if full else against if against is not None else check_scope.changed_files(db, ws)
     if diff is not None:   # a script can narrow itself; the gate never trusts that for the cache
         env = {**env, "BRINDLE_CHANGED_FILES": "\n".join(diff[1])}
     run = _scoped(ws, cmd, diff)
@@ -107,6 +111,9 @@ def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: 
     # the worker reported, a reviewer's summary and the merge gate can all
     # want the same result at once; the later ones wait, then reuse it.
     tree = git.out(["rev-parse", "HEAD^{tree}"], ws.path)
+    if ident != cmd and (passed := db.get_tree_check(ws.repo_root, tree, cmd)) is not None and passed["ok"]:
+        db.set_check(ws.id, sha, cmd, True, passed["output"] or "")   # the whole check passed: so does any part
+        return True, passed["output"] or ""
     with _check_lock(ws.repo_root, tree, ident, cancel) as result_file:
         cached = db.get_tree_check(ws.repo_root, tree, ident)
         if cached is not None and cached["ok"]:
@@ -140,7 +147,7 @@ def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
     if cfg is None:
         return cmd
     return check_scope.command(ws, cmd, check_scope.inferred(cmd, cfg.scoped_checks), diff,
-                               cfg.scoped_checks_max_files)
+                               cfg.scoped_checks_max_files, cfg.scoped_checks_max_tests)
 
 
 def _run_recorded(db: DB, ws: Workspace, run: str, env: dict[str, str], timeout: int, cancel,
@@ -642,7 +649,10 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
     """Hold ``ws``'s branch (the base and checkout locks a session edit or a
     merge into it also take) while it is checked for a PR, and yield the
     verified sha: the push inside the ``with`` must publish exactly that.
-    Every check configured now runs in full on a clean checkout of that HEAD
+    Every check configured now runs on a clean checkout of that HEAD, scoped
+    like a worker's branch to what the branch changes since it left the PR's
+    base (``check_scope.pr_diff``; CI runs the full suite on the PR), or in
+    full with the repo's ``pre_pr_full`` (for a repo without CI)
     (a tree that already passed counts, as does a command ``passed``, (sha,
     commands), recorded passing on this very HEAD: a check configured since
     still runs); ``ChecksFailed`` on the first failure, ``WorkspaceError`` if
@@ -674,13 +684,14 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
             raise workspaces.WorkspaceError(f"not opening a PR: {behind}.")
         sha = head(ws)
         env = workspaces.workspace_env(ws)
+        diff = None if cfg.pre_pr_full else check_scope.pr_diff(ws)   # None: in full
         with queue_place(time.time()):
             reuse = set(passed[1]) if passed and passed[0] == sha else set()
             for n, cmd in enumerate(cfg.checks, 1):
                 if cmd not in reuse:
                     if progress:
                         progress(f"check {n}/{len(cfg.checks)}: {cmd}")
-                    ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, full=True)
+                    ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, full=diff is None, against=diff)
                     if not ok and timed_out(out):
                         raise workspaces.WorkspaceError(
                             f"checks timed out, not a failure: {cmd}; nothing was pushed. "
