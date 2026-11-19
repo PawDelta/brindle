@@ -83,6 +83,7 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
         del config["scoped_checks"]
     if where.startswith("cap"):
         config["scoped_checks_max_files"] = 0 if where == "cap-none" else 1
+        config["pre_pr_full"] = where == "cap-pr"   # a repo without CI: everything before its PR
         if where != "cap-empty":   # the namesake tests of mod.py; one test per `_*` and plain name
             write(repo, {"tests/test_mod.py": "def test_m(): pass\n", "tests/test_mod_extra.py": "def test_e(): pass\n"})
     write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
@@ -99,6 +100,8 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
         write(repo, {"scripts/build.py": "X = 1\n", "tests/test_build.py": "def test_b(): pass\n",
                      "tests/test_runs_build.py": "ARGV = ['python', 'scripts/build.py']\n"})
     sh("git add -A && git commit -qm base", repo)
+    if where == "cap-pr":   # the PR's diff is just the work: only pre_pr_full keeps it from narrowing
+        sh("git push -q origin main", repo)
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"nodes": [
         {"id": "mod_f", "label": "f()", "source_file": "src/pkg/mod.py"},
@@ -123,7 +126,7 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
     sh("git add -A && git commit -qm work --allow-empty", Path(ws.path))
 
     cfg = load_repo_config(ws.repo_root)
-    if where == "cap-pr":   # the pre-PR run on a worker's workspace never narrows
+    if where == "cap-pr":   # with pre_pr_full the pre-PR run never narrows
         with gates.pr_checked(db, ws):
             pass
     else:

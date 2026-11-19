@@ -1,9 +1,11 @@
-"""Per-test coverage maps: which test files executed each function of a checkout.
+"""Per-test coverage maps: which tests executed each function of a checkout.
 
 With ``scoped_checks: "coverage"`` (see ``brindle.check_scope``), every full
 run of a plain pytest check that passes on a clean commit records per-test
 coverage (pytest-cov's ``--cov-context=test``) and leaves behind a map, under
-``brindle_home()/coverage-maps``, of the test files whose setup, call or
+``brindle_home()/coverage-maps``, of the tests (pytest node ids,
+``tests/test_x.py::TestY::test_z``, parameters dropped so every case of a
+parametrized test is one entry) whose setup, call or
 teardown executed each function, class and module-level line of every
 tracked Python file at the commit it ran on. A later, narrowed run of that
 check selects the tests that executed what changed since that commit (the
@@ -56,7 +58,7 @@ from typing import NamedTuple
 
 from brindle import git
 
-VERSION = 1
+VERSION = 2   # 2: tests are node ids (1 had test files; such a map counts as missing and is recorded again)
 COVERAGE_ARGS = ("--cov=.", "--cov-context=test", "--cov-report=")
 PYTEST_CONFIG = ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")
 LEFTOVER_SECONDS = 86400   # a run directory older than this belongs to a run that died
@@ -195,7 +197,7 @@ def build(root: Path, data_file: Path, sha: str, check: str) -> dict:
 
 
 def _executed(root: Path, data_file: Path) -> dict[str, dict[int, set[str]]]:
-    """{repo-relative file: {line: test files whose context executed it}}."""
+    """{repo-relative file: {line: tests (``node``) whose context executed it}}."""
     roots = {str(root), str(root.resolve())}
     con = sqlite3.connect(f"file:{data_file}?mode=ro", uri=True)
     try:
@@ -207,8 +209,7 @@ def _executed(root: Path, data_file: Path) -> dict[str, dict[int, set[str]]]:
                 paths[fid] = PurePosixPath(Path(rel)).as_posix()
         contexts = {}
         for cid, ctx in con.execute("SELECT id, context FROM context"):
-            test = ctx.split("::", 1)[0] if "::" in ctx else ""
-            if test:
+            if test := node(ctx):
                 contexts[cid] = test
         out: dict[str, dict[int, set[str]]] = {}
 
@@ -229,6 +230,28 @@ def _executed(root: Path, data_file: Path) -> dict[str, dict[int, set[str]]]:
         return out
     finally:
         con.close()
+
+
+_PHASES = ("setup", "run", "teardown")
+
+
+def node(context: str) -> str:
+    """The test a pytest-cov context (``tests/t.py::C::test_x[a-1]|run``)
+    names, as a node id pytest selects every case of: no phase, no
+    parameters (their ids may not be stable from run to run). "" for a
+    context that is no test's (collection, module import)."""
+    test, bar, phase = context.rpartition("|")
+    if not bar or phase not in _PHASES:
+        test = context
+    file, sep, name = test.partition("::")
+    if not sep or not file or not name:
+        return ""
+    return f"{file}::{name.split('[', 1)[0]}"
+
+
+def test_file(selector: str) -> str:
+    """The file of a test selector: a node id's file, or the file itself."""
+    return selector.split("::", 1)[0]
 
 
 def line_scopes(text: str) -> list[str]:
@@ -266,9 +289,11 @@ def changed_since(root: str | Path, data: dict) -> list[str]:
 
 
 def targets(root: str | Path, data: dict, files: list[str], hits: dict[str, int] | None = None) -> set[str]:
-    """The test files ``data`` (a ``load``ed map) says executed what changed
-    in ``files`` (see ``changed_since``) between the map's commit and the
-    checkout at ``root``. Raises ``Stale`` when a change reaches code the map
+    """The tests ``data`` (a ``load``ed map) says executed what changed in
+    ``files`` (see ``changed_since``) between the map's commit and the
+    checkout at ``root``: the map's node ids, and whole test files for a
+    change the map can't attribute to single tests (a table, a fixture).
+    Raises ``Stale`` when a change reaches code the map
     doesn't know. ``hits``, when given, counts for each selected test how
     many of the changed scopes selected it (for ``rank``)."""
     root = Path(root)
@@ -338,6 +363,15 @@ def targets(root: str | Path, data: dict, files: list[str], hits: dict[str, int]
     for path, names in sorted(conftest_names.items()):
         add(conftest_tests(root, path, names, commit))
     return found
+
+
+def tests_per_file(data: dict) -> dict[str, int]:
+    """How many of the map's tests each test file holds."""
+    out: dict[str, int] = {}
+    for t in data.get("tests") or []:
+        if "::" in t:
+            out[test_file(t)] = out.get(test_file(t), 0) + 1
+    return out
 
 
 def rank(data: dict, tests: set[str], hits: dict[str, int]) -> list[str]:
