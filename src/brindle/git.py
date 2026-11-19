@@ -1456,16 +1456,40 @@ def checkout_lock(path: str | Path, timeout: float | None = None):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+class PushRefused(GitError):
+    """A push that a pre-push hook or the remote turned down, rather than
+    one git or the network couldn't make: ``reason`` is what the hook or the
+    remote said, without git's own "failed to push some refs" summary."""
+
+    def __init__(self, branch: str, reason: str) -> None:
+        super().__init__(f"{branch} wasn't pushed: {reason}")
+        self.branch, self.reason = branch, reason
+
+
+def _pushed(path: str | Path, args: list[str], branch: str) -> None:
+    proc = run(args, path, check=False)
+    if proc.returncode == 0:
+        return
+    # A hook may say why on either stream; git's own summary goes to stderr.
+    said = "\n".join(s.strip() for s in (proc.stdout or "", proc.stderr or "") if s.strip())
+    lines = [line for line in said.splitlines()
+             if line.strip() and not line.startswith("error: failed to push some refs")]
+    if not lines or any(line.startswith("fatal:") for line in lines):
+        raise GitError(f"git push origin {branch}: {said}")     # git or the network: not a refusal
+    raise PushRefused(branch, "\n".join(lines))
+
+
 def push(path: str | Path, branch: str, sha: str | None = None, track: bool = True) -> None:
     """Push ``branch``; with ``sha``, exactly that commit to it (the local
     branch never moves; ``track``: the local ``branch`` follows the pushed
     one). Signed in to github.com through brindle's connection when the
-    person made one."""
+    person made one. ``PushRefused`` when a pre-push hook or the remote
+    turns it down."""
     signed_in = connected_github_config()
     if sha is None:
-        run([*signed_in, "push", "--set-upstream", "origin", branch], path)
+        _pushed(path, [*signed_in, "push", "--set-upstream", "origin", branch], branch)
         return
-    run([*signed_in, "push", "origin", f"{sha}:refs/heads/{branch}"], path)
+    _pushed(path, [*signed_in, "push", "origin", f"{sha}:refs/heads/{branch}"], branch)
     if track:
         run(["branch", "--set-upstream-to", f"origin/{branch}", branch], path, check=False)
 
