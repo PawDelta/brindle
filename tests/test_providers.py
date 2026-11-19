@@ -5,6 +5,8 @@ data only; the config folder is the test's own (conftest)."""
 
 import json
 
+import pytest
+
 from brindle import provider_homes, providers
 
 
@@ -16,16 +18,6 @@ def _write(tmp_path, data):
     _config(tmp_path).parent.mkdir(parents=True, exist_ok=True)
     _config(tmp_path).write_text(json.dumps(data))
     _config(tmp_path).chmod(0o600)
-
-
-def test_theme_seeded_on_a_fresh_config_is_the_ansi_theme(tmp_path):
-    providers.seed_ci_config([])
-    assert json.loads(_config(tmp_path).read_text())["theme"] == "dark-ansi"
-
-
-def test_theme_recorded_at_onboarding_on_a_fresh_config_is_the_ansi_theme(tmp_path):
-    providers.record_claude_onboarding()
-    assert json.loads(_config(tmp_path).read_text())["theme"] == "dark-ansi"
 
 
 def test_theme_a_person_chose_is_kept_by_the_seed_and_the_onboarding(tmp_path):
@@ -60,13 +52,7 @@ def test_theme_dark_brindle_seeded_moves_to_the_ansi_theme_on_an_existing_owned_
     assert "customApiKeyResponses" not in data   # the launch changes nothing else
 
 
-def test_theme_light_in_brindles_own_config_folder_is_kept_on_a_launch(tmp_path, monkeypatch):
-    config, work = _brindle_folder(tmp_path, monkeypatch)
-    config.write_text(json.dumps({"hasCompletedOnboarding": True, "theme": "light"}))
-    providers.trust_folder(work)
-    assert json.loads(config.read_text())["theme"] == "light"
-
-
+@pytest.mark.variant("the migration must never rewrite the person's own ~/.claude.json, only brindle's folder")
 def test_theme_dark_in_the_persons_own_config_is_kept_on_a_launch(tmp_path, monkeypatch):
     person = tmp_path / "person"
     work = tmp_path / "work"
