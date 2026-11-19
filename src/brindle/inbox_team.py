@@ -120,13 +120,15 @@ def poll(db: DB, *, client=None, store=None) -> bool:
 
 
 def _signoffs(rows: list[dict]) -> dict[str, list[dict]]:
-    """Each design's sign-off rows, newest first."""
+    """Each design's sign-off rows, newest first. Times are whole seconds and the
+    Library orders a tie by key, not by when each was signed: within one
+    revision and second, the one with more signatures is the later."""
     out: dict[str, list[dict]] = {}
     for r in rows:
         if r["kind"] == SIGNED:
             out.setdefault(r["doc_id"], []).append(r)
     for found in out.values():
-        found.sort(key=lambda r: (-r["rev"], -r["created_at"]))
+        found.sort(key=lambda r: (-r["rev"], -r["created_at"], -r["signed"]))
     return out
 
 

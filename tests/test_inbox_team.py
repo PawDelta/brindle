@@ -34,13 +34,14 @@ class Library:
         self.items = [
             {"item_key": "review:ad_2", "kind": "review_requested", "created_at": 30, "doc_id": "ad_2",
              "title": "Ana's plan", "sender": ANA},
+            # Ana, then Chen, signed in the same second: the Library lists a tie by key, Ana's first.
+            {"item_key": "signoff:ad_1:2:u_ana", "kind": "signed_off", "created_at": 20, "doc_id": "ad_1",
+             "title": "Engine plan", "rev": 2, "signer": ANA, "signed": 1, "required": 3, "waiting": [BO, CHEN]},
             {"item_key": "signoff:ad_1:2:u_chen", "kind": "signed_off", "created_at": 20, "doc_id": "ad_1",
              "title": "Engine plan", "rev": 2, "signer": CHEN, "signed": 2, "required": 3, "waiting": [BO]},
             {"item_key": "thread:ad_1:7", "kind": "shared_doc_comment", "created_at": 15, "doc_id": "ad_1",
              "title": "Engine plan", "thread_id": 7, "suggestion": False, "author": CHEN,
              "excerpt": "Does a rented VM count?", "count": 2},
-            {"item_key": "signoff:ad_1:2:u_ana", "kind": "signed_off", "created_at": 10, "doc_id": "ad_1",
-             "title": "Engine plan", "rev": 2, "signer": ANA, "signed": 1, "required": 3, "waiting": [BO, CHEN]},
         ]
         self.read, self.asked = set(), []
 
