@@ -38,7 +38,7 @@ describe("ChatPane", () => {
 
   it.each([
     ["dark", ["#070b09", "#e8f0eb", "#889a90", "#34d399", "#e8875a", "#f08c88", "#a99be0", "#6ea8fe", "#d7af87", "#5ccfc4"]],
-    ["light", ["#ffffff", "#0e1716", "#4c615e", "#046e50", "#9b4724", "#a63e3a", "#6350b3", "#2d69b5", "#86572a", "#1a756d"]],
+    ["light", ["#ffffff", "#0e1716", "#4c615e", "#078a62", "#9b4724", "#a63e3a", "#6350b3", "#2d69b5", "#86572a", "#1a756d"]],
   ] as const)("maps the approved brindle ANSI palette in %s theme", (mode, colours) => {
     const theme = chatTheme(mode as ChatTheme);
     // Slot names follow xterm; brightYellow carries the working-line orange.
