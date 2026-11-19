@@ -52,36 +52,38 @@
     --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
     --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
     --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
-    --fawn: #046e50;
+    --fawn: #078a62;
     --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
-    --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+    --pass: #078a62; --pass-soft: rgba(7, 138, 98, 0.1);
     --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
     --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
     --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
-    --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+    --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #078a62;
     --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
     --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
-    --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #046e50; --shell-cursor: #046e50; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
+    --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #078a62; --shell-cursor: #078a62; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
     color-scheme: light;
   }
+  :root:not([data-theme="dark"]) ::selection { background: #dcebe5; color: #0e1716; }
 }
 
 :root[data-theme="light"] {
   --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
   --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
   --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
-  --fawn: #046e50;
+  --fawn: #078a62;
   --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
-  --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+  --pass: #078a62; --pass-soft: rgba(7, 138, 98, 0.1);
   --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
   --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
   --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
-  --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+  --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #078a62;
   --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
   --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
-  --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #046e50; --shell-cursor: #046e50; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
+  --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #078a62; --shell-cursor: #078a62; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
   color-scheme: light;
 }
+:root[data-theme="light"] ::selection { background: #dcebe5; color: #0e1716; }
 
 /* The session's message box (screens/Session/Chat): its field, a step under the canvas in dark and
    white in light. */
