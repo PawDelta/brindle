@@ -72,6 +72,13 @@ MAX_BASES = 5                # draft texts handed to the supervisor kept per pla
 SUPERVISED = "From the supervisor's revision: these words changed here since it read them."
 # Section ids the comment anchors already use for something else.
 RESERVED = {"ask", "lede", "split"}
+# The design-doc spine: stable section ids, in reading order. The extras are
+# kept only when they have something to say; architecture and tech-stack sit
+# inside Proposed design, audience right after Context.
+SPINE = ("context", "audience", "goals", "proposed-design", "architecture", "tech-stack", "alternatives", "risks",
+         "rollout", "open-questions")
+EXTRAS = frozenset({"audience", "architecture", "tech-stack"})
+OPEN_QUESTIONS = "open-questions"
 # What an SVG diagram may hold: drawing elements and presentation attributes
 # only. Nothing that runs (scripts, event handlers, animation that can set an
 # attribute), styles (CSS can load) or loads (images, links, foreign content).
@@ -217,7 +224,21 @@ def parse_sections(raw: Any) -> list[dict]:
         out.append({"id": sid, "title": visuals._text(s.get("title"), "a section's title", visuals.MAX_LABEL, True),
                     "kind": kind, "markdown": body,
                     "caption": visuals._text(s.get("caption"), "a diagram's caption", visuals.MAX_DETAIL)})
-    return out
+    return _spine(out)
+
+
+def _spine(parts: list[dict]) -> list[dict]:
+    """Spine sections in reading order; an extra with nothing in it is never
+    stored, and a spine heading with nothing to say gets one line. Sections
+    with other ids keep their place after whatever precedes them."""
+    parts = [s for s in parts if s["id"] not in EXTRAS or s["markdown"] or s["kind"] != "markdown"]
+    rank, keyed = -1, []
+    for n, s in enumerate(parts):
+        rank = SPINE.index(s["id"]) if s["id"] in SPINE else rank
+        keyed.append((rank, n, s))
+    out = [s for _, _, s in sorted(keyed, key=lambda k: k[:2])]
+    return [dict(s, markdown="None.") if s["id"] in SPINE and s["kind"] == "markdown" and not s["markdown"] else s
+            for s in out]
 
 
 def insert_revision(c, plan_id: str, rev: int, author: str, source: str, lede: str, sections: list[dict],
@@ -1041,12 +1062,6 @@ def compare_revisions(current: dict, previous: dict | None) -> dict:
                           *(f"− {p}" for p in option.get("cons", [])),
                           *option.get("touches", [])]
             out[f"decision:{d['id']}"] = {"title": d["title"], "markdown": "\n".join(filter(None, lines))}
-        if r["split"]:
-            out["split"] = {"title": "Tasks", "markdown": "\n\n".join(
-                "\n".join(filter(None, [w["title"], w.get("test"),
-                                       ", ".join(w.get("files") or []),
-                                       "After: " + ", ".join(w["after"]) if w.get("after") else ""]))
-                for w in r["split"])}
         if r.get("ask"):
             out["ask"] = {"title": "Question", "markdown": r["ask"]}
         return out
@@ -1079,7 +1094,7 @@ def revision_dto(db: DB, plan_id: str, rev: Any) -> dict:
     if r is None:
         raise ServiceError("not_found", "no such revision", 404)
     return PlanRevisionDetailDTO(**_revision_dto(r), lede=r["lede"], sections=r["sections"], markdown=r["markdown"],
-                                 decisions=r["decisions"], split=r["split"], ask=r["ask"]).to_json()
+                                 decisions=r["decisions"], split=[], ask=r["ask"]).to_json()
 
 
 def fields(db: DB, p: dict) -> dict:

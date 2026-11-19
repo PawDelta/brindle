@@ -288,6 +288,8 @@ class PlanDecision(BaseModel):
     options: list[PlanOption] = Field(description="2-12 alternatives you weighed, yours among them")
     mine: str | None = Field(default=None, description="the option id you'd pick")
     challenge: str | None = Field(default=None, description="your own strongest argument against your pick")
+    section: str | None = Field(default=None, description="the id of the section where this question comes up; "
+                                "its card shows at the end of it (default: open-questions)")
 
 
 class PlanWorker(BaseModel):
@@ -318,11 +320,16 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     `sections` (each markdown, mermaid or svg; the person comments, suggests
     edits and confirms decisions on them) and then `markdown` is only the
     title and lede; or pass the whole doc as `markdown`, one ## heading per
-    section. Put the goal, the design with diagrams, what's hard to undo and
-    the open questions in sections; `decisions` carry options (pros, cons, the
-    files each touches), your pick (`mine`) and your strongest argument
-    against it (`challenge`); `split` has each worker's files and the one test
-    that proves it done. brindle renders it itself. While it's open, every
+    section. Sections follow a fixed design-doc spine with stable ids:
+    context, goals, proposed-design, alternatives, risks, rollout (plain-
+    language phases), open-questions ("None." when empty). Add audience,
+    architecture or tech-stack only when they apply; an empty one is dropped.
+    `decisions` carry options (pros, cons, the files each touches), your
+    pick (`mine`), your strongest argument against it (`challenge`) and a
+    `section` id where the question comes up (none: open-questions).
+    `split` has each worker's files and the one test that proves it done;
+    it is for plan_worker linking and the board only, the person never sees
+    it. brindle renders the doc itself. While it's open, every
     assign in this session is queued and starts only once the person
     approves. What they wrote since your last revision (each comment,
     suggestion and reply, naming its thread #N) arrives in one message when

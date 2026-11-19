@@ -176,7 +176,11 @@ def _option_extras(raw: list, options: list[dict]) -> list[dict]:
     return options
 
 
-def _decisions(raw: Any) -> list[dict]:
+def _decisions(raw: Any, known: set[str] | None = None) -> list[dict]:
+    """``known``: the revision's section ids; a decision's ``section`` anchor
+    must name one, else (or with none given) it falls to open-questions."""
+    from brindle import plan_docs
+
     if raw is None:
         return []
     if not isinstance(raw, list) or len(raw) > MAX_DECISIONS:
@@ -195,7 +199,11 @@ def _decisions(raw: Any) -> list[dict]:
         mine = d.get("mine")
         if mine is not None and mine not in {o["id"] for o in options}:
             raise ServiceError("invalid", f"decision {did}'s pick isn't one of its options", 400)
+        anchor = d.get("section")
+        if not isinstance(anchor, str) or (known is not None and anchor not in known):
+            anchor = plan_docs.OPEN_QUESTIONS
         out.append({"id": did, "title": visuals._text(d.get("title"), "a decision's title", visuals.MAX_QUESTION, True),
+                    "section": anchor,
                     "options": _option_extras(d["options"], options), "mine": mine,
                     "challenge": visuals._text(d.get("challenge"), "a decision's challenge", visuals.MAX_DETAIL)})
     return out
@@ -487,7 +495,7 @@ def to_dto(db: DB, p: dict) -> dict:
     from brindle.service.dto import PlanDTO
 
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
-                   state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=_board(db, p),
+                   state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=[],
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
                    reference=doc_templates.reference_of(db, p["id"]), **plan_docs.fields(db, p)).to_json()
@@ -610,7 +618,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     given = [name for name, raw in (("decisions", decisions), ("split", split), ("ask", ask)) if raw]
-    decisions, split = _decisions(decisions), _split(split)
+    decisions, split = _decisions(decisions, {s["id"] for s in parts}), _split(split)
     ask = visuals._text(ask, "ask", visuals.MAX_NOTE)
     title = visuals._text(title, "title", visuals.MAX_TITLE) or _title(markdown) or "Plan"
     visuals._refuse_secrets([
@@ -847,8 +855,6 @@ def anchors(p: dict) -> dict[str, str]:
         out[ASK] = "What I understood (your restated ask)"
     if lede:
         out[LEDE] = "The overview"
-    if p["split"]:
-        out[SPLIT] = "The split"
     out.update({DECISION + d["id"]: f"Decision {d['id']} ({d['title']})" for d in p["decisions"]})
     return out
 

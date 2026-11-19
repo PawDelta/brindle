@@ -150,9 +150,9 @@ def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkey
     with monkeypatch.context() as race:
         race.setattr(mcp_server._Request, "link_plan", competing_assignment)
         asyncio.run(mcp_server.assign("developer", "competing schema request", plan_worker=f"{pid}:schema"))
-    assert plans.to_dto(db, plans.get(db, pid))["split"][0]["task_id"] != cancelled.id
+    assert plans._board(db, plans.get(db, pid))[0]["task_id"] != cancelled.id
     asyncio.run(mcp_server.handoff("developer", "UI", plan_worker=f"{pid}:ui"))
-    board = lambda: plans.to_dto(db, plans.get(db, pid))["split"]  # noqa: E731
+    board = lambda: plans._board(db, plans.get(db, pid))  # noqa: E731
     first, second = board()
     assert first["task_id"] != second["task_id"]
     assert [(w["state"], w["test_state"]) for w in board()] == [("queued", "not run")] * 2
@@ -288,8 +288,9 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
         assert (org["pros"], org["cons"], org["touches"]) == (["One place"], ["Admins only"],
                                                                ["src/brindle/pro/policy.py"])
         assert (repo["pros"], repo["touches"]) == ([], [])
-        assert (got["split"][0]["files"], got["split"][0]["test"]) == (["src/brindle/db.py"],
-                                                                       "tests/test_presets.py::test_schema")
+        stored = plans._board(db, plans.get(db, pid))[0]
+        assert (stored["files"], stored["test"]) == (["src/brindle/db.py"], "tests/test_presets.py::test_schema")
+        assert got["split"] == []
         # Redirect: the person's pick and comments (on a section, the ask, a decision) reach the supervisor.
         r = client.post(f"/v1/plans/{pid}/decide", json={
             "rev": 1, "approved": False, "picks": {"d1": "repo"},

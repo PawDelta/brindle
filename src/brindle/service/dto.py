@@ -358,6 +358,8 @@ class PlanDecisionDTO(_DTO):
     options: list[PlanOptionDTO]
     mine: str | None = None
     challenge: str | None = None
+    # The section whose end shows this decision's card; older plans have none.
+    section: str = "open-questions"
     # Who voted for which option ({option: [voter]}), and the person's own
     # confirmed pick, which their verdict starts from.
     votes: dict[str, list[str]] = {}
