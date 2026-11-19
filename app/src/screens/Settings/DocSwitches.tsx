@@ -81,7 +81,7 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
             <div key={s.name} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-s3 px-s2 py-s1" data-testid={`doc-switch-${s.name}`}>
               <div className="min-w-0">
                 <div className="text-sm font-medium">{about.name}</div>
-                <p className="text-xs text-ink-3">{s.locked ? locked : about.help}</p>
+                <p className="text-xs text-ink-3">{s.locked ? `${locked} ${s.reason ?? ""}`.trim() : about.help}</p>
               </div>
               {s.name === "store" ? (
                 <div role="radiogroup" aria-label={about.name} className="flex shrink-0 rounded-md border border-line-strong p-0.5">

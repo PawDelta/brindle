@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from brindle.pro import analysis_docs as ad
+from brindle.pro import analysis_policy
 from brindle.redact import mask
 from brindle.service.errors import ServiceError
 
@@ -28,6 +29,7 @@ from brindle.service.errors import ServiceError
 POLICY_REFUSALS = ("share_links_off", "org_only", "sign_in_required", "sso_required")
 ACCESS = ("anyone", "org", "off")
 NO_PLAN = "share links come with brindle Pro and up"
+LINKS_OFF = "Share links are turned off by your organization's admin."
 
 
 class _Turns:
@@ -127,18 +129,44 @@ def available(store=None) -> bool:
 
 
 def read(doc_id: str, *, client=None, store=None) -> dict:
-    """``{available, link}``: ``available`` false (nothing sent) below Pro."""
+    """Link and effective access; an org refusal is visible before making a link.
+
+    ``available`` is false (nothing sent) below Pro. An off policy leaves
+    revocation available but refuses copying, including links already made.
+    """
     client, store = ad._session(client, store)
     if not available(store):
         return {"available": False, "link": None}
-    return {"available": True, "link": _ask("GET", doc_id, client, store)}
+    access, org = _access(client, store)
+    if access == "off":
+        return {"available": True, "link": None, "access": access, "reason": f"{LINKS_OFF} ({org})"}
+    link = _ask("GET", doc_id, client, store)
+    if link and link["access"] == "off":
+        return {"available": True, "link": link, "access": "off", "reason": LINKS_OFF}
+    if org is not None:
+        return {"available": True, "link": link, "access": link["access"] if link else access,
+                "reason": f"Set by your organization's admin ({org})."}
+    return {"available": True, "link": link}
+
+
+def _access(client, store) -> tuple[str, str | None]:
+    ent = ad.require_entitlement(store)
+    if "analysis_docs_enterprise" not in ent.features:
+        return "anyone", None
+    policy = analysis_policy.fetch(ent.org_id, client, store)
+    return policy.get("share_links", "org"), ent.org_id
 
 
 def copy(doc_id: str, *, client=None, store=None) -> dict:
     """The design's link to copy: the one it has, else a new one. Asked again
     in its turn, so copies that overlap all get the one link."""
     with TURNS.hold(doc_id):
-        link = _ask("GET", doc_id, client, store) or _ask("POST", doc_id, client, store)
+        state = read(doc_id, client=client, store=store)
+        if not state["available"]:
+            raise ServiceError("not_entitled", NO_PLAN, 402)
+        if state.get("access") == "off":
+            raise ServiceError("share_links_off", state["reason"], 403)
+        link = state["link"] or _ask("POST", doc_id, client, store)
     if link is None:
         raise ServiceError("upstream", "the Library made no link", 502)
     return {"available": True, "link": link}

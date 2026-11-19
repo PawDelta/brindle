@@ -857,6 +857,8 @@ export interface TrackerLink {
 /* A design's share link: who it opens for under the org's policy now (`off`: the org turned links off). */
 export interface DesignShareLink {
   available: boolean;
+  access?: "anyone" | "org" | "off";
+  reason?: string;
   link: { url: string; created_at: number | null; access: "anyone" | "org" | "off" } | null;
 }
 
@@ -1001,6 +1003,7 @@ export interface DocSwitch {
   choice: "on" | "off" | null;
   locked: boolean;
   org: "enforced_on" | "enforced_off" | null;
+  reason?: string | null;
 }
 
 /* PUT /analysis-docs/switches: the switches after the change, and for `store` (the library
@@ -2562,8 +2565,9 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
   }
 
-  deleteDoc(id: string) {
-    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, {});
+  /* A doc an open plan is shared through is refused (409 shared_plan) unless `confirm`; on confirm the plan stops being shared. */
+  deleteDoc(id: string, confirm = false) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, confirm ? { confirm } : {});
   }
 
   /* With `dir` the daemon writes the file there; without, it comes back as base64. */

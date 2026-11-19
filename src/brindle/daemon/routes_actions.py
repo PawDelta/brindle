@@ -2671,17 +2671,33 @@ def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
 
 def delete_doc(db: DB, params: dict, body: Body) -> Any:
     """Delete a doc; one kept on this Mac goes from here, and its server copy
-    (while shared) first."""
+    (while shared) first.
+
+    A doc an open plan is shared for review through is refused (409
+    ``shared_plan``, with the ``plans``) unless ``confirm`` is true; on
+    confirm, those plans are unshared here (shared_docs.release_deleted) and
+    become personal docs again, so no sync is left pointing at a deleted doc."""
     from brindle.pro import local_library
+    from brindle.pro import shared_docs as sd
 
     kept = local_library.get(params["id"])
+    ids = [params["id"], *([kept["server_id"]] if kept and kept.get("server_id") else [])]
+    stranded = sd.open_shares_of(db, ids)
+    if stranded and not _get(body, "confirm", bool, default=False):
+        names = ", ".join(f"“{s['title']}”" for s in stranded)
+        raise ServiceError("shared_plan", f"This doc is shared for review on an open plan ({names}). Deleting it "
+                           "stops sharing that plan: it becomes a personal doc again.", 409, plans=stranded)
     if kept is None:
-        return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
-    _docs_entitlement(params.get("repo"))
-    if kept.get("server_id"):
-        docs_api("DELETE", _doc_path({"id": kept["server_id"]}), repo=params.get("repo"))
-    local_library.remove(params["id"])
-    return {"deleted": params["id"]}
+        got = docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+    else:
+        _docs_entitlement(params.get("repo"))
+        if kept.get("server_id"):
+            docs_api("DELETE", _doc_path({"id": kept["server_id"]}), repo=params.get("repo"))
+        local_library.remove(params["id"])
+        got = {"deleted": params["id"]}
+    if stranded:
+        sd.release_deleted(db, ids)
+    return got
 
 
 def export_doc(db: DB, params: dict, body: Body) -> Any:

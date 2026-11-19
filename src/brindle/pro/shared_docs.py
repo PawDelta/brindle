@@ -1339,6 +1339,38 @@ def stop_sharing(db: DB, plan_id: str, rev: Any, *, store=None) -> None:
     plan_docs._changed(db, p, p["rev"])
 
 
+def open_shares_of(db: DB, doc_ids: list[str]) -> list[dict]:
+    """The open plans shared for review through any of these Library
+    documents, as ``{plan_id, title}``: what deleting the document would strand."""
+    ids = [d for d in doc_ids if d]
+    if not ids:
+        return []
+    rows = db.conn.execute(
+        f"SELECT p.id, p.markdown FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
+        f" WHERE p.state='open' AND s.doc_id IN ({','.join('?' * len(ids))})", ids).fetchall()
+    return [{"plan_id": r["id"], "title": plans._title(r["markdown"]) or r["id"]} for r in rows]
+
+
+def release_deleted(db: DB, doc_ids: list[str]) -> list[str]:
+    """Unshare, here, the open plans whose Library document was deleted, as
+    :func:`stop_sharing` does, so each becomes a personal doc again instead of
+    syncing against a document that is gone. Nothing is left to unshare on the
+    Library. Returns the plans released."""
+    ids = [d for d in doc_ids if d]
+    released = []
+    for share_ in open_shares_of(db, ids):
+        with db.tx() as c:
+            gone = c.execute(f"DELETE FROM plan_shares WHERE plan_id=? AND doc_id IN ({','.join('?' * len(ids))})",
+                             (share_["plan_id"], *ids)).rowcount
+            if gone:
+                c.execute("DELETE FROM plan_share_threads WHERE plan_id=?", (share_["plan_id"],))
+        if gone:
+            p = plans.get(db, share_["plan_id"])
+            plan_docs._changed(db, p, p["rev"])
+            released.append(p["id"])
+    return released
+
+
 def _gone(e: Exception) -> bool:
     return isinstance(e, ad.Refused) and e.status == 404
 

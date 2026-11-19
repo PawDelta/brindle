@@ -111,6 +111,10 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
   org docs [<switch> <state>] [--group ID] [--org ORG]
             show analysis-doc policy and your effective switches, or set a switch
             (admin): off, default_on, enforced_on, enforced_off
+            store enforced_off keeps plans on This Mac; enforced_on uses servers;
+            store off leaves the location to each person (default: This Mac)
+  org docs share_links <anyone|org|off> [--org ORG]
+            set the Enterprise org's share-link policy (admin; default: org)
   license install <file>  install an offline (brindle Enterprise) license; verified with the
                     pinned keys, no network; used in air-gap mode and when not logged in
   license status    show the installed offline license and the air-gap status
@@ -303,9 +307,14 @@ class _OrgCommands:
         client = self._client(base)
         policy = analysis_policy.fetch(org_id, client, self.store)
         if setting:
-            switches = policy["switches"] if group is None else policy["groups"].setdefault(
-                group, {"switches": {}})["switches"]
-            switches[setting[0]] = setting[1]
+            if setting[0] == "share_links":
+                if group is not None:
+                    raise auth.AuthError("share links are an org policy, not a group policy", code="bad_request")
+                policy["share_links"] = setting[1]
+            else:
+                switches = policy["switches"] if group is None else policy["groups"].setdefault(
+                    group, {"switches": {}})["switches"]
+                switches[setting[0]] = setting[1]
             policy = analysis_policy.update(org_id, client, self.store, policy)
         user = analysis_policy.request(client, self.store, "GET", "/me/analysis-docs/settings").get("switches", {})
         ent = license.current(refresh=False, store=self.store)
@@ -562,8 +571,9 @@ class ProAccount(_OrgCommands):
             or (sub in ("use", "invite", "join") and len(rest) == 2)
             or (sub == "learning-share" and len(rest) <= 2 and rest[1:] in ([], ["on"], ["off"]))
             or (sub == "docs" and (len(rest) == 1 or (len(rest) == 3
-                and rest[1] in ("store", "share", "assist", "prompt_analysis", "import_upload")
-                and rest[2] in ("off", "default_on", "enforced_on", "enforced_off"))))
+                and ((rest[1] in ("store", "share", "assist", "prompt_analysis", "import_upload")
+                      and rest[2] in ("off", "default_on", "enforced_on", "enforced_off"))
+                     or (rest[1] == "share_links" and rest[2] in ("anyone", "org", "off"))))))
             or (sub == "company" and (rest[1:] in ([], ["unlink"])
                                       or (len(rest) == 3 and rest[1] == "link")))
             or (sub == "member" and len(rest) == 4 and rest[1] == "policy-role")

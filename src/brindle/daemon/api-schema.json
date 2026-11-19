@@ -6908,11 +6908,16 @@
           "type": "object"
         },
         "PlanUnconfirmedDTO": {
-          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead;\n``can_edit_reviewers``: they may change who reviews it (the Library refused\nthe share, ``access_refused``, or the review can't be confirmed).",
           "properties": {
             "approval_held": {
               "default": false,
               "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_edit_reviewers": {
+              "default": false,
+              "title": "Can Edit Reviewers",
               "type": "boolean"
             },
             "can_stop_sharing": {
@@ -6930,7 +6935,8 @@
                 "sign_in",
                 "key_unavailable",
                 "library_error",
-                "other_account"
+                "other_account",
+                "access_refused"
               ],
               "title": "Reason",
               "type": "string"
@@ -7771,11 +7777,16 @@
           "type": "object"
         },
         "PlanUnconfirmedDTO": {
-          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead;\n``can_edit_reviewers``: they may change who reviews it (the Library refused\nthe share, ``access_refused``, or the review can't be confirmed).",
           "properties": {
             "approval_held": {
               "default": false,
               "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_edit_reviewers": {
+              "default": false,
+              "title": "Can Edit Reviewers",
               "type": "boolean"
             },
             "can_stop_sharing": {
@@ -7793,7 +7804,8 @@
                 "sign_in",
                 "key_unavailable",
                 "library_error",
-                "other_account"
+                "other_account",
+                "access_refused"
               ],
               "title": "Reason",
               "type": "string"
@@ -9284,11 +9296,16 @@
       "type": "object"
     },
     "PlanUnconfirmedDTO": {
-      "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+      "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead;\n``can_edit_reviewers``: they may change who reviews it (the Library refused\nthe share, ``access_refused``, or the review can't be confirmed).",
       "properties": {
         "approval_held": {
           "default": false,
           "title": "Approval Held",
+          "type": "boolean"
+        },
+        "can_edit_reviewers": {
+          "default": false,
+          "title": "Can Edit Reviewers",
           "type": "boolean"
         },
         "can_stop_sharing": {
@@ -9306,7 +9323,8 @@
             "sign_in",
             "key_unavailable",
             "library_error",
-            "other_account"
+            "other_account",
+            "access_refused"
           ],
           "title": "Reason",
           "type": "string"
@@ -12220,11 +12238,16 @@
           "type": "object"
         },
         "PlanUnconfirmedDTO": {
-          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead;\n``can_edit_reviewers``: they may change who reviews it (the Library refused\nthe share, ``access_refused``, or the review can't be confirmed).",
           "properties": {
             "approval_held": {
               "default": false,
               "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_edit_reviewers": {
+              "default": false,
+              "title": "Can Edit Reviewers",
               "type": "boolean"
             },
             "can_stop_sharing": {
@@ -12242,7 +12265,8 @@
                 "sign_in",
                 "key_unavailable",
                 "library_error",
-                "other_account"
+                "other_account",
+                "access_refused"
               ],
               "title": "Reason",
               "type": "string"
@@ -13686,6 +13710,18 @@
       "path": "/v1/library/designs/{id}/question"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/library/designs/{id}/share-link"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/library/designs/{id}/share-link"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/designs/{id}/share-link"
+    },
+    {
       "method": "GET",
       "path": "/v1/library/designs/{id}/work-items"
     },
@@ -13856,6 +13892,18 @@
     {
       "method": "POST",
       "path": "/v1/plans/{id}/share"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/plans/{id}/share-link"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}/share-link"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/share-link"
     },
     {
       "method": "POST",
