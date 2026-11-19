@@ -321,6 +321,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     if message_at is None:
         message_at = time.time()
     scope = request_intent(text)
+    closed_prompts = []
     with db.tx() as c:
         if staged_only:
             if message_at <= time.time() - FOLD:
@@ -351,7 +352,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                       (time.time(), root.id))
         if fold_visuals:
-            visuals.answered_in_chat(c, root.id, message_at, text)
+            closed_prompts = visuals.answered_in_chat(c, root.id, message_at, text)
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
@@ -379,6 +380,9 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         if not fold_only and scope and not cancelled:
             _grant(c, root.id, scope)
             _link(c, root.id, text, "grant")
+    for visual_id, rev in closed_prompts:
+        bus.publish(db, "visual.dismissed", repo_root=ws.repo_root, root_id=root.id,
+                    visual=visual_id, rev=rev)
     bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
     if not fold_only and (scope == "plan" or cancelled):
         from brindle import plans

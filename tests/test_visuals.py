@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import time
@@ -196,21 +197,25 @@ def test_person_message_closes_only_earlier_prompts_in_its_session(db, session, 
     prompt = visuals.publish(db, worker, "Release", "<p>x</p>", "Which?", OPTIONS)
     untouched = visuals.publish(db, other, "Other", "<p>x</p>", "Which?", OPTIONS)
     clock[0] = 200.0
-    agents.send_message(db, boss.id, "Use the first approach", person=True)
+    agents.send_message(db, boss.id, "Use Tag first", person=True)
     closed = visuals.get(db, prompt["id"])
     assert closed["dismissed_rev"] == closed["rev"]
     assert closed["answer"] is None
     assert visuals.to_dto(db, closed)["answered_in_chat"] is True
+    events = db.conn.execute("SELECT payload FROM events WHERE kind='visual.dismissed' AND root_id=?",
+                             (boss.id,)).fetchall()
+    assert any(json.loads(event["payload"]) == {"visual": prompt["id"], "rev": closed["rev"]}
+               for event in events)
     assert [v["id"] for v in visuals.inbox_pending(db, None)] == [untouched["id"]]
     assert db.conn.execute("SELECT body FROM inbox WHERE agent_id=? ORDER BY id DESC", (boss.id,)).fetchone()[0] \
-        == "Use the first approach"
+        == "Use Tag first"
 
     clock[0] = 300.0
     later = visuals.publish(db, worker, "Release", "<p>new</p>", "Which now?", OPTIONS,
                             visual_id=prompt["id"] if revise else None)
     clock[0] = 400.0
     # A delayed CLI report of the same message must preserve the newer publication.
-    visual_offers.person_spoke(db, boss, "Use the first approach", cli_prompt=True, said_at=200.0)
+    visual_offers.person_spoke(db, boss, "Use Tag first", cli_prompt=True, said_at=200.0)
     assert {v["id"] for v in visuals.inbox_pending(db, None)} == {untouched["id"], later["id"]}
     assert visuals.to_dto(db, visuals.get(db, later["id"]))["answered_in_chat"] is False
 
@@ -220,7 +225,7 @@ def test_unrelated_chat_and_visual_answer_delivery_do_not_fold_open_decisions(db
     monkeypatch.setattr(time, "time", lambda: 200.0)
     first = visuals.publish(db, worker, "Release", "<p>x</p>", "Which label?", OPTIONS)
 
-    visual_offers.person_spoke(db, boss, "I am still choosing an option", typed=True)
+    visual_offers.person_spoke(db, boss, "I have a question", typed=True)
     assert visuals.get(db, first["id"])["dismissed_rev"] == 0
 
     # The answer notification is system generated, although send_message marks

@@ -524,15 +524,21 @@ def answered_in_chat(c, root_id: str, said_at: float, text: str) -> list:
         "SELECT id, rev, question, options FROM visuals WHERE root_id=? AND kind='visual' "
         "AND question IS NOT NULL AND options IS NOT NULL AND answer IS NULL "
         "AND dismissed_rev < rev AND updated_at < ?", (root_id, said_at)).fetchall()
-    words = set(re.findall(r"[\w]+", text.casefold()))
+    normalized_text = " ".join(re.findall(r"[\w]+", text.casefold()))
+    text_words = normalized_text.split()
     folded = []
     for row in rows:
-        labels = {str(option.get("label", "")).casefold() for option in json.loads(row["options"])}
-        labels.update(str(option.get("id", "")).casefold() for option in json.loads(row["options"]))
-        # A chat reply can name an option (or a distinctive word in its label).
-        # Generic conversation does not imply that the person abandoned the visual.
-        if not any(label and (label in text.casefold() or words.intersection(re.findall(r"[\w]+", label)))
-                   for label in labels):
+        labels = [str(option.get("label", "")).casefold() for option in json.loads(row["options"])]
+        # Require the whole label, and skip labels too short to distinguish from
+        # ordinary words. Option ids are often single letters, so don't match them
+        # against free-form chat.
+        if not any(
+            (tokens := re.findall(r"[\w]+", label))
+            and (len(tokens) > 1 or (len(tokens[0]) >= 4 and tokens[0] not in {"this", "that", "with", "from"}))
+            and len(tokens) <= len(text_words)
+            and re.search(rf"(?<!\w){re.escape(' '.join(tokens))}(?!\w)", normalized_text)
+            for label in labels
+        ):
             continue
         cur = c.execute(
             "UPDATE visuals SET dismissed_rev=rev, answered_in_chat_rev=rev, read_rev=MAX(read_rev, rev) "
