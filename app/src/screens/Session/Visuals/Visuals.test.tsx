@@ -1292,7 +1292,7 @@ describe("visuals", () => {
       ] }],
       split: [
         { id: "w1", title: "Remote launch", after: [], files: ["spawn.py", "tmux.py"], test: "test_remote_spawn" },
-        { id: "w2", title: "Pro gate", after: ["w1"], files: ["pro/account.py", "spawn.py"] },
+        { id: "w2", title: "Pro gate", after: [], files: ["pro/account.py", "spawn.py"] },
       ],
     };
     const sent: PlanVerdict[] = [];
