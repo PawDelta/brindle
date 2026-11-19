@@ -30,8 +30,8 @@ export interface AppState {
   pastWorkers: string[];
   /* Agent id → whether its process is alive, from the daemon's liveness sweep. */
   alive: Record<string, boolean>;
-  /* How many liveness messages have come, and agent id → the one that last said its `alive`:
-     what the sweep said before a session came back after a restart is from before (store/panes.ts). */
+  /* How many liveness messages have come, and agent id → the one that last said its `alive`: a check
+     of that word (store/panes.ts recovered) answers for that one, not for one said after it. */
   liveness: number;
   aliveAt: Record<string, number>;
   org: { bar: string[] | null; notices: OrgNotice[] };

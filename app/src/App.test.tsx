@@ -638,7 +638,8 @@ describe("App", () => {
       say(id, "idle");
     };
     // The engine's liveness sweep, every 2 s: whether each session's pane is up (none is until it is back).
-    const sweep = () => act(() => daemon.send({ type: "liveness", agents: Object.fromEntries(["sup2", "sup3", "sup4"].map((id) => [id, !engine.pending.includes(id) && daemon.data.sessions.some((s) => s.id === id && s.status !== "paused")])), gone: [] }));
+    const look = () => ({ type: "liveness" as const, agents: Object.fromEntries(["sup2", "sup3", "sup4"].map((id) => [id, !engine.pending.includes(id) && daemon.data.sessions.some((s) => s.id === id && s.status !== "paused")])), gone: [] });
+    const sweep = () => act(() => daemon.send(look()));
     // The paused screen, by state: the bar's paused state or the surface's ended card.
     const pausedShown = () => screen.queryByTestId("session-status")?.dataset.state === "paused" || screen.queryByTestId("state-card")?.dataset.kind === "ended";
     let clock = 0;
@@ -666,6 +667,8 @@ describe("App", () => {
       say("sup2", "processing");
       await watch(100);
     }
+    // A sweep looks at the panes (sup3's is down), and sends what it saw only after sup3 is back and shown.
+    const late = look();
     // The one on screen.
     back("sup3");
     await watch(1500);
@@ -675,6 +678,9 @@ describe("App", () => {
       go.forEach((answer) => answer());
       await watch(1500);
     }
+    expect(screen.getByTestId("terminal").textContent).toBe("sup3");
+    act(() => daemon.send(late));
+    await watch(1000);
     expect(screen.getByTestId("terminal").textContent).toBe("sup3");
     // sup4 doesn't come back: recovery is over, its row paused.
     engine = { resuming: false, pending: [] };

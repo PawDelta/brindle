@@ -581,8 +581,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
   const backPid = useRef<number | null>(null);
   // Those of them whose sessions-feed row hasn't been read since their release (still the last daemon's paused).
   const staleNow = useRef<Set<string>>(new Set());
-  // Each session brought back → the liveness count when it was known back (store/panes.ts aliveFrom).
-  const aliveFromNow = useRef<Record<string, number>>({});
+  // Every session this daemon's recovery brought back, known back (store/panes.ts recovered).
+  const recoveredNow = useRef<string[]>([]);
   // Every session that daemon's recovery has named pending: restarting until its pane may show (store/panes.ts).
   const returningNow = useRef<Set<string>>(new Set());
   // Those the engine has said are back, each with the snapshot ticket (and stream) at that moment: rows of any
@@ -606,6 +606,9 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     // while its recovery may still be under way (the gate then keeps watching, panes shown).
     let heard = false;
     let released = false;
+    const recover = (id: string) => {
+      if (!recoveredNow.current.includes(id)) recoveredNow.current = [...recoveredNow.current, id];
+    };
     // The engine has said recovery is over (or there was none): the gate's work is done.
     const settle = (pid: number | null) => {
       startupStep("panes_ready");
@@ -616,20 +619,19 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       if (pid !== null) shownFrom.current = pid;
       // Every session this recovery brought back and not released on its own: its feed row may still be the
       // last daemon's (paused), read before it came back. Stale, like a released one's, until read again.
-      // So is what the liveness sweep said of it till now: its pane was down until it came back.
-      const { liveness } = store.getState();
+      // So may be what the liveness sweep says of it: its pane was down until it came back.
       for (const id of returningNow.current) {
         if (backNow.current.has(id)) continue;
         staleNow.current.add(id);
-        aliveFromNow.current = { ...aliveFromNow.current, [id]: liveness };
+        recover(id);
       }
       returningNow.current = new Set();
       const stale = [...staleNow.current];
-      const aliveFrom = aliveFromNow.current;
+      const recovered = recoveredNow.current;
       // `back` stays: a session released ahead of the rest already has its fresh view. So does `stale`: those
       // rows can't say paused until a feed read begun after their return answers (readStale). The epoch moves
       // only when the panes weren't shown yet (the deadline may have shown them).
-      setPanes((p) => ({ ready: true, epoch: p.ready ? p.epoch : p.epoch + 1, recovery: null, back: p.back, stale, aliveFrom }));
+      setPanes((p) => ({ ready: true, epoch: p.ready ? p.epoch : p.epoch + 1, recovery: null, back: p.back, stale, recovered }));
       void readStale().catch(() => {});
     };
     // The startup deadline while the engine is (or may be) still bringing sessions back: the panes show, but
@@ -640,18 +642,17 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       released = true;
       setPanes((p) => (p.ready ? p : { ...p, ready: true, epoch: p.epoch + 1 }));
     };
-    // Sessions known back from here on, their panes shown: their feed rows (stale) and what the liveness
-    // sweep has said of them (aliveFrom) are from before their return until read again.
+    // Sessions known back from here on, their panes shown: their feed rows are from before their return
+    // until read again (stale), and the liveness sweep's "not alive" may be too (recovered).
     const knownBack = (ids: string[]) => {
-      const { liveness } = store.getState();
       for (const id of ids) {
         backSince.current.delete(id);
         backNow.current.add(id);
         staleNow.current.add(id);
-        aliveFromNow.current = { ...aliveFromNow.current, [id]: liveness };
+        recover(id);
       }
-      const aliveFrom = aliveFromNow.current;
-      setPanes((p) => ({ ...p, back: [...backNow.current], stale: [...staleNow.current], aliveFrom }));
+      const recovered = recoveredNow.current;
+      setPanes((p) => ({ ...p, back: [...backNow.current], stale: [...staleNow.current], recovered }));
     };
     // Per session (an engine that names the sessions still to come back): each one whose chat has its
     // window in rows read after it came back is released at once, whatever the others are doing. Its
@@ -867,7 +868,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
           staleNow.current = new Set();
           returningNow.current = new Set();
           backSince.current = new Map();
-          aliveFromNow.current = {};
+          recoveredNow.current = [];
         }
         // Those this recovery brings back, or brought while this app was starting (back before its first meta,
         // rows it read meanwhile can be from before), are restarting until their panes may show.
@@ -877,9 +878,9 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         const back = [...backNow.current];
         const stale = [...staleNow.current];
         const returning = [...returningNow.current];
-        const aliveFrom = aliveFromNow.current;
-        setPanes((p) => (!p.unsure && p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join() && (p.stale ?? []).join() === stale.join() && (p.returning ?? []).join() === returning.join() && p.aliveFrom === aliveFrom
-          ? p : { ...p, recovery, pending: pending ?? null, back, stale, returning, unsure: false, aliveFrom }));
+        const recovered = recoveredNow.current;
+        setPanes((p) => (!p.unsure && p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join() && (p.stale ?? []).join() === stale.join() && (p.returning ?? []).join() === returning.join() && p.recovered === recovered
+          ? p : { ...p, recovery, pending: pending ?? null, back, stale, returning, unsure: false, recovered }));
         if (pending) {
           // A released session whose feed row a failed read left stale: ask again.
           void readStale();
