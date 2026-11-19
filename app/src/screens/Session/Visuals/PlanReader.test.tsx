@@ -68,6 +68,7 @@ it.each(["author", "shared"])("opens %s history through the reader and shows the
   await screen.findByText("Latest passage.");
   const verdictButton = () => screen.getByTestId(reader === "author" ? "plan-build" : "plan-sign-off") as HTMLButtonElement;
   expect(verdictButton().disabled).toBe(false);
+  expect(screen.getAllByRole("button")).toContain(verdictButton());
   fireEvent.click(screen.getByRole("tab", { name: "History" }));
   await act(async () => {});
   const timeline = screen.getByTestId("doc-history");
@@ -114,7 +115,7 @@ it("keeps an approved plan board live from recorded worker events and drops stal
   const view = render(inTestStore(<><PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} /></>, store));
   await act(async () => reads.shift()!(plan));
   expect(screen.queryByRole("region", { name: "Plan board" })).toBeNull();
-  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign off" })));
+  await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
   const event = (id: number) => act(() => store.dispatch({ type: "stream", message: { type: "event", id, ts: id, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "a_schema", workspace_id: null, task_id: "t_schema", payload: {} } }));
   event(1);
   await act(async () => reads.shift()!({ ...plan, state: "approved" }));
@@ -167,7 +168,7 @@ it("asks immediately in the thread without turning the question into a change re
   expect(thread.dataset.question).toBe("true");
   expect(thread.querySelector('[data-from-supervisor="true"]')).toBeTruthy();
   expect((screen.getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
-  expect((screen.getByRole("button", { name: "Sign off" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("design doc reader", async () => {
@@ -270,7 +271,7 @@ it("design doc reader", async () => {
   expect(section().getAttribute("data-next")).toBeNull();
   expect(within(section()).getByRole("radio", { name: "B · PawDelta-hosted" }).querySelector("[data-votes]")?.getAttribute("data-votes")).toBe("1");
   expect(within(screen.getByTestId("plan-todo")).getByRole("button").getAttribute("data-state")).toBe("done");
-  expect(within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Sign off" })).toBeTruthy();
+  expect(within(screen.getByTestId("plan-verdict")).getByTestId("plan-build")).toBeTruthy();
 });
 
 const doc = (rev: number, text: string, more: Partial<Plan> = {}): Plan => ({ id: visual.id, session: "boss", title: "Cloud workers", rev, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
