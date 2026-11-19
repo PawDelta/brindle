@@ -15,6 +15,9 @@ anything, and :func:`copy` and :func:`revoke` refuse before anything is sent.
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from brindle.pro import analysis_docs as ad
@@ -25,6 +28,52 @@ from brindle.service.errors import ServiceError
 POLICY_REFUSALS = ("share_links_off", "org_only", "sign_in_required", "sso_required")
 ACCESS = ("anyone", "org", "off")
 NO_PLAN = "share links come with brindle Pro and up"
+
+
+class _Turns:
+    """One copy or revoke at a time per design. A copy reads the link and makes
+    one only when there is none; a second copy overlapping it would make another,
+    which replaces the first's, so the first's URL would already be dead.
+    ``queued`` counts those waiting for a design's turn, under ``cond``."""
+
+    def __init__(self) -> None:
+        self.cond = threading.Condition()
+        self.busy: set[str] = set()
+        self.queued: dict[str, int] = {}
+
+    @contextmanager
+    def hold(self, doc_id: str) -> Iterator[None]:
+        with self.cond:
+            self.queued[doc_id] = self.queued.get(doc_id, 0) + 1
+            self.cond.notify_all()
+            self.cond.wait_for(lambda: doc_id not in self.busy)
+            self.queued[doc_id] -= 1
+            self.busy.add(doc_id)
+        try:
+            yield
+        finally:
+            with self.cond:
+                self.busy.discard(doc_id)
+                if not self.queued.get(doc_id):
+                    self.queued.pop(doc_id, None)
+                self.cond.notify_all()
+
+
+TURNS = _Turns()
+
+
+def plan_doc(db, plan_id: str, store=None) -> str | None:
+    """The Library doc of a plan shared from here by the account signed in now,
+    or None (never shared, refused, another account's, or no account)."""
+    row = db.conn.execute("SELECT doc_id, owner, access_refused FROM plan_shares WHERE plan_id=?",
+                          (plan_id,)).fetchone()
+    if row is None or row["doc_id"] is None or row["access_refused"]:
+        return None
+    try:
+        me = ad.require_entitlement(ad._session(None, store)[1]).sub
+    except RuntimeError:
+        return None
+    return row["doc_id"] if row["owner"] == me else None
 
 
 def _path(doc_id: str) -> str:
@@ -86,14 +135,17 @@ def read(doc_id: str, *, client=None, store=None) -> dict:
 
 
 def copy(doc_id: str, *, client=None, store=None) -> dict:
-    """The design's link to copy: the one it has, else a new one."""
-    link = _ask("GET", doc_id, client, store) or _ask("POST", doc_id, client, store)
+    """The design's link to copy: the one it has, else a new one. Asked again
+    in its turn, so copies that overlap all get the one link."""
+    with TURNS.hold(doc_id):
+        link = _ask("GET", doc_id, client, store) or _ask("POST", doc_id, client, store)
     if link is None:
         raise ServiceError("upstream", "the Library made no link", 502)
     return {"available": True, "link": link}
 
 
 def revoke(doc_id: str, *, client=None, store=None) -> dict:
-    """Turn the link off. Anyone who already opened it keeps what they read."""
-    _ask("DELETE", doc_id, client, store)
+    """Turn the link off, after any copy in flight. Anyone who already opened it keeps what they read."""
+    with TURNS.hold(doc_id):
+        _ask("DELETE", doc_id, client, store)
     return {"available": True, "link": None}

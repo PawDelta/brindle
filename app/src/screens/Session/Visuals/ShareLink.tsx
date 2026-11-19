@@ -6,28 +6,45 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesignShareLink } from "../../../api/client";
 import { button, quiet } from "../../../components/ui";
 import { message } from "./chrome";
-import type { ShareLinkClient } from "./client";
+import type { PlanShareLinkClient, ShareLinkClient } from "./client";
 
+/* Where the link is asked for: `key` names the design, so a switch drops the earlier one's answers. */
 export interface ShareLinkTarget {
-  client: ShareLinkClient;
-  docId: string;
-  repo?: string;
+  key: string;
+  read(): Promise<DesignShareLink>;
+  copy(): Promise<DesignShareLink>;
+  revoke(): Promise<DesignShareLink>;
+}
+
+/* A Library design, by its doc id (someone who may edit another person's design). */
+export function designLinkTarget(client: Partial<ShareLinkClient>, docId: string, repo?: string): ShareLinkTarget | undefined {
+  const { designShareLink: read, copyDesignShareLink: copy, revokeDesignShareLink: revoke } = client;
+  if (!read || !copy || !revoke) return undefined;
+  return { key: `doc:${docId}`, read: () => read.call(client, docId, repo), copy: () => copy.call(client, docId, repo), revoke: () => revoke.call(client, docId, repo) };
+}
+
+/* The author's plan, by its id, wherever it was opened: the daemon finds its Library doc. */
+export function planLinkTarget(client: Partial<PlanShareLinkClient>, planId: string, repo?: string): ShareLinkTarget | undefined {
+  const { planShareLink: read, copyPlanShareLink: copy, revokePlanShareLink: revoke } = client;
+  if (!read || !copy || !revoke) return undefined;
+  return { key: `plan:${planId}`, read: () => read.call(client, planId, repo), copy: () => copy.call(client, planId, repo), revoke: () => revoke.call(client, planId, repo) };
 }
 
 /* Whether the design offers a link at all: null until the daemon answers, and on any failure to read
    it (signed out, offline), so a menu never shows actions it can't carry out. */
 export function useShareLink(target: ShareLinkTarget | undefined) {
   const [state, setState] = useState<DesignShareLink | null>(null);
-  const client = target?.client;
-  const docId = target?.docId;
-  const repo = target?.repo;
+  const latest = useRef(target);
+  latest.current = target;
+  const key = target?.key;
   useEffect(() => {
     setState(null);
-    if (!client || !docId) return;
+    const t = latest.current;
+    if (!t) return;
     let live = true;
-    client.designShareLink(docId, repo).then((got) => { if (live) setState(got); }, () => {});
+    t.read().then((got) => { if (live) setState(got); }, () => {});
     return () => { live = false; };
-  }, [client, docId, repo]);
+  }, [key]);
   return { state, setState };
 }
 
@@ -46,25 +63,25 @@ export function ShareLinkPanel({ target, state, onState }: {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Whose answer this is: a design switched under an open menu drops the earlier one's.
-  const asked = useRef(target.docId);
-  asked.current = target.docId;
+  const asked = useRef(target.key);
+  asked.current = target.key;
   const run = useCallback(async (call: () => Promise<DesignShareLink>, after?: (got: DesignShareLink) => Promise<void>) => {
-    const doc = target.docId;
+    const key = target.key;
     setBusy(true);
     setError(null);
     setCopied(false);
     try {
       const got = await call();
-      if (asked.current !== doc) return;
+      if (asked.current !== key) return;
       onState(got);
       await after?.(got);
     } catch (e) {
-      if (asked.current === doc) setError(message(e));
+      if (asked.current === key) setError(message(e));
     } finally {
-      if (asked.current === doc) setBusy(false);
+      if (asked.current === key) setBusy(false);
     }
-  }, [target.docId, onState]);
-  const copy = () => run(() => target.client.copyDesignShareLink(target.docId, target.repo), async (got) => {
+  }, [target.key, onState]);
+  const copy = () => run(() => target.copy(), async (got) => {
     if (!got.link) return;
     try {
       await navigator.clipboard.writeText(got.link.url);
@@ -73,7 +90,7 @@ export function ShareLinkPanel({ target, state, onState }: {
       setError("Couldn't copy the link: select it below and copy it yourself.");
     }
   });
-  const revoke = () => run(() => target.client.revokeDesignShareLink(target.docId, target.repo));
+  const revoke = () => run(() => target.revoke());
   const link = state.link;
   return (
     <section className="grid gap-1.5 border-t border-line pt-2.5" data-testid="share-link">

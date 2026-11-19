@@ -39,7 +39,7 @@ import { PaperclipIcon } from "../../../components/icons";
 import { button, field, label, main, quiet } from "../../../components/ui";
 import { CloudLoginStatus, useCloudLogin } from "../../Inbox/CloudSignIn";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
-import type { PlanDocClient, PlanSharingClient, PlansClient, ShareLinkClient, VisualsClient } from "./client";
+import type { PlanDocClient, PlanShareLinkClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { Popover, ReaderBar } from "./DocBar";
 import { Diagram } from "./DocDiagram";
@@ -53,13 +53,13 @@ import { DocPresence, type LiveCapability } from "./DocPresence";
 import { DocStatus, type StatusReviewer } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
-import { ShareLinkPanel, useShareLink, type ShareLinkTarget } from "./ShareLink";
+import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
 import { Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<ShareLinkClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -215,12 +215,10 @@ export function ModePicker({ modes, current, allowed, onPick }: { modes: typeof 
   );
 }
 
-export function PlanReader({ client, visual, repo, onBack, asking, onChanged, backLabel, work, docId }: {
+export function PlanReader({ client, visual, repo, onBack, asking, onChanged, backLabel, work }: {
   client: Client;
   /* The design's work items, when it was opened from the Library. */
   work?: Work;
-  /* Its Library doc id, when it was opened from the Library: the Share menu's link. */
-  docId?: string;
   visual: VisualDTO;
   repo?: string;
   onBack(): void;
@@ -270,7 +268,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="plan-reader">
       {shown ? (
         <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
-          shareLink={docId && client.designShareLink && client.copyDesignShareLink && client.revokeDesignShareLink ? { client: client as ShareLinkClient, docId, repo } : undefined}
+          shareLink={planLinkTarget(client, shown.id, repo)}
           chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode }}
           top={shown.state === "approved" && (
             <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">

@@ -759,6 +759,34 @@ def share_link_revoke(db: DB, params: dict, body: dict) -> Any:
     return _share_link(params.get("repo") or None, lambda s: s.revoke(params["id"]))
 
 
+# The same link for a plan opened in its session: its Library doc, when this
+# account shared it from here. A plan not in the Library has no link to offer.
+
+
+def _plan_doc(db: DB, plan_id: str) -> str:
+    from brindle.pro import share_links
+
+    doc = share_links.plan_doc(db, plan_id)
+    if doc is None:
+        raise ServiceError("not_in_library", "this plan isn't in your Library, so it has no link", 409)
+    return doc
+
+
+@_json
+def plan_share_link(db: DB, request: Request) -> Any:
+    repo = request.query_params.get("repo") or None
+    doc = _share_link(repo, lambda s: s.plan_doc(db, request.path_params["id"]))
+    return {"available": False, "link": None} if doc is None else _share_link(repo, lambda s: s.read(doc))
+
+
+def plan_share_link_copy(db: DB, params: dict, body: dict) -> Any:
+    return _share_link(_get(body, "repo"), lambda s: s.copy(_plan_doc(db, params["id"])))
+
+
+def plan_share_link_revoke(db: DB, params: dict, body: dict) -> Any:
+    return _share_link(params.get("repo") or None, lambda s: s.revoke(_plan_doc(db, params["id"])))
+
+
 @_json
 def library_people(db: DB, request: Request) -> Any:
     """The people of the person's org, to pick reviewers from, leaving out
@@ -827,6 +855,9 @@ ROUTES = [
     Route("/v1/plans/{id}/share", _endpoint(plan_share), methods=["POST"]),
     Route("/v1/plans/{id}/reviewers", _endpoint(plan_reviewers), methods=["POST"]),
     Route("/v1/plans/{id}/sync", _endpoint(plan_sync), methods=["POST"]),
+    Route("/v1/plans/{id}/share-link", plan_share_link),
+    Route("/v1/plans/{id}/share-link", _endpoint(plan_share_link_copy), methods=["POST"]),
+    Route("/v1/plans/{id}/share-link", _endpoint(plan_share_link_revoke), methods=["DELETE"]),
     Route("/v1/plans/{id}/stop-sharing", _endpoint(plan_stop_sharing), methods=["POST"]),
     Route("/v1/plans/{id}/sign-off", _endpoint(plan_sign_off), methods=["POST"]),
     Route("/v1/plans/{id}/policy-override", _endpoint(plan_policy_override), methods=["POST"]),

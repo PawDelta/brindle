@@ -2390,6 +2390,20 @@ export class DaemonClient {
     return this.delete<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
   }
 
+  /* The same link for a plan, by its id: its Library doc when this account shared it from here
+     (`available` false for a plan that isn't in the Library). */
+  planShareLink(id: string, repo?: string) {
+    return this.get<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, { repo });
+  }
+
+  copyPlanShareLink(id: string, repo?: string) {
+    return this.post<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, repo ? { repo } : {});
+  }
+
+  revokePlanShareLink(id: string, repo?: string) {
+    return this.delete<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
   /* Work items (Jira, Azure DevOps) on a design. Reads answer the last read with `unreachable` when the
      tracker or Library can't be reached; writes raise (the Library's refusal keeps its own status). */
   designWorkItems(doc: string, repo?: string) {

@@ -434,6 +434,32 @@ it("a design doc whose Team plan ended says so, once, and only then", async () =
   expect(await screen.findAllByTestId("plan-team-ended")).toHaveLength(1);
 });
 
+it("the author's plan opened in its session offers its Library link by plan id, and none when it isn't in the Library", async () => {
+  const url = "https://pawdelta.com/api/brindle/v1/share-links/dsl_p";
+  const plan = doc(1, "Workers run on your machine.");
+  let inLibrary = true;
+  const copies: string[] = [];
+  Object.assign(navigator, { clipboard: { writeText: async () => {} } });
+  const client = {
+    ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
+    planShareLink: async () => ({ available: inLibrary, link: null }),
+    copyPlanShareLink: async (id: string) => { copies.push(id); return { available: true, link: { url, created_at: 1, access: "anyone" as const } }; },
+    revokePlanShareLink: async () => ({ available: true, link: null }),
+  };
+  const first = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await openShare();
+  await act(async () => fireEvent.click(within(screen.getByTestId("share-link")).getByRole("button", { name: "Copy link" })));
+  expect(copies).toEqual([plan.id]);
+  expect((within(screen.getByTestId("share-link")).getByRole("textbox") as HTMLInputElement).value).toBe(url);
+  first.unmount();
+
+  inLibrary = false;
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await screen.findByTestId("plan-build");
+  await act(async () => {});
+  expect(screen.queryByRole("button", { name: "Share" })).toBeNull();
+});
+
 it("a doc the Library can't confirm says why in plain words, with Sign in, and Stop sharing goes on to build", async () => {
   const said = "The engine's plain words for why.";
   const plan = doc(1, "Workers run on your machine.", { gate: { state: "ready", reason: null, required: 0, signed: 0, waiting_on: [], reviewers: [],
