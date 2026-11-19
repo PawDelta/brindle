@@ -70,7 +70,7 @@ export function ChatPane({ terminal, provider, theme, prompt, composer, onDropFi
       }}
     >
       <TerminalFrame ground={palette.background} data-testid="chat-terminal-frame" data-clip-rows={clip}>
-        <PtyTerminal {...pane} theme={palette} cropRows={clip} cropFrom={clip > 0 ? prompt.top : undefined} typeElsewhere={clip > 0 ? onComposeText : undefined} />
+        <PtyTerminal {...pane} theme={palette} minimumContrastRatio={chatContrast(theme)} cropRows={clip} cropFrom={clip > 0 ? prompt.top : undefined} typeElsewhere={clip > 0 ? onComposeText : undefined} />
       </TerminalFrame>
       {composer}
     </div>
@@ -100,8 +100,8 @@ export function TerminalFrame({ ground, children, ...rest }: { ground?: string; 
    magenta branch, blue group-1, yellow thread-in, cyan group-4. The slots the
    table leaves open follow the same tokens: their bright twins the same hue, and
    black/white the ground and text ends of each theme (black the ground's in dark,
-   the text's in light; white the reverse), so a program's default text in either
-   ANSI-only theme lands on ink. */
+   the text's in light; white the reverse). In light white is a grey that still reads on the field, since
+   SGR 37/97 text is drawn with it, so a program's default text in either ANSI-only theme lands on ink. */
 const PALETTES: Record<ChatTheme, ITheme> = {
   dark: {
     background: "#070b09", foreground: "#e8f0eb", cursor: "#afbfb6", cursorAccent: "#070b09", selectionBackground: "#889a9040",
@@ -109,14 +109,35 @@ const PALETTES: Record<ChatTheme, ITheme> = {
     brightBlack: "#889a90", brightRed: "#f08c88", brightGreen: "#34d399", brightYellow: "#e8875a", brightBlue: "#6ea8fe", brightMagenta: "#a99be0", brightCyan: "#5ccfc4", brightWhite: "#e8f0eb",
   },
   light: {
-    background: "#ffffff", foreground: "#0e1716", cursor: "#3a4d4a", cursorAccent: "#ffffff", selectionBackground: "#4c615e33",
-    black: "#0e1716", red: "#a63e3a", green: "#046e50", yellow: "#86572a", blue: "#2f6fbf", magenta: "#6350b3", cyan: "#1f8a80", white: "#e9eded",
-    brightBlack: "#4c615e", brightRed: "#a63e3a", brightGreen: "#046e50", brightYellow: "#9b4724", brightBlue: "#2f6fbf", brightMagenta: "#6350b3", brightCyan: "#1f8a80", brightWhite: "#f4f6f6",
+    background: "#ffffff", foreground: "#0e1716", cursor: "#046e50", cursorAccent: "#ffffff", selectionBackground: "#4c615e33",
+    black: "#0e1716", red: "#a63e3a", green: "#046e50", yellow: "#86572a", blue: "#2d69b5", magenta: "#6350b3", cyan: "#1a756d", white: "#556b68",
+    brightBlack: "#4c615e", brightRed: "#a63e3a", brightGreen: "#046e50", brightYellow: "#9b4724", brightBlue: "#2d69b5", brightMagenta: "#6350b3", brightCyan: "#1a756d", brightWhite: "#3a4d4a",
   },
 };
 
 export function chatTheme(theme: ChatTheme): ITheme {
-  return { ...PALETTES[theme] };
+  // Claude's captured sent prompts use extended ANSI 237 for the ground and
+  // 231 for text, even when the terminal's default ground is light. Supply the
+  // full standard cube/ramp in both modes: xterm retains extended slots omitted
+  // from a later theme, so switching back to dark must restore them explicitly.
+  const hex = (n: number) => n.toString(16).padStart(2, "0");
+  const levels = [0, 95, 135, 175, 215, 255];
+  const extendedAnsi = Array.from({ length: 240 }, (_, i) => {
+    if (i >= 216) return `#${hex(8 + (i - 216) * 10).repeat(3)}`;
+    return `#${hex(levels[Math.floor(i / 36)])}${hex(levels[Math.floor(i / 6) % 6])}${hex(levels[i % 6])}`;
+  });
+  if (theme === "light") {
+    extendedAnsi[237 - 16] = "#e9eded";
+    extendedAnsi[231 - 16] = PALETTES.light.foreground!;
+  }
+  return { ...PALETTES[theme], extendedAnsi };
+}
+
+/* Claude Code draws secondary text and accents in 256-colour greys and truecolour tuned for a dark terminal; on
+   the light ground they fade. In light xterm.js lifts any cell's text to WCAG AA (4.5:1) against its ground, so
+   every colour the CLI picks reads; dark keeps the CLI's colours as drawn. */
+export function chatContrast(theme: ChatTheme): number {
+  return theme === "light" ? 4.5 : 1;
 }
 
 // -- clipping: add rows to terminal geometry, clip the bottom, preserve output -
