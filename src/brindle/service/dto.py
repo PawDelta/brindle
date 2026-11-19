@@ -273,9 +273,19 @@ class PlanOfferDTO(_DTO):
     reasons: list[str]
 
 
+class PersonDTO(_DTO):
+    """A teammate: the Library's id and the name they show."""
+    id: str
+    name: str
+
+
 class InboxItemDTO(_DTO):
     kind: str
     reason: str
+    section: str | None = None     # "needs_you" or "from_team"
+    from_person: PersonDTO | None = None   # a teammate's row: who sent the review request, sign-off or comment
+    read: bool | None = None       # a team row's read state, kept per person in the Library
+    item_key: str | None = None    # a team row's key: POST /v1/inbox/read marks it read
     # An org notice belongs to no agent or workspace.
     agent_id: str | None = None
     workspace_id: str | None = None
@@ -284,7 +294,6 @@ class InboxItemDTO(_DTO):
     notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
     request_id: str | None = None  # a doc request's id, or a recurring notification's source occurrence
     doc: int | str | None = None   # integer kb_docs id or opaque analysis-doc library id
-    section: str | None = None
     fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None

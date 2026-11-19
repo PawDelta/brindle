@@ -26,7 +26,9 @@ def _items(raw: object) -> list[dict]:
     for r in rows if isinstance(rows, list) else []:
         if isinstance(r, dict) and isinstance(r.get("doc_id"), str) and r["doc_id"]:
             title = r.get("title")
-            out.append({"doc_id": r["doc_id"], "title": title if isinstance(title, str) and title else "Design doc"})
+            sender = r.get("from")   # who asked for the review: {id, name}, when the Library says
+            out.append({"doc_id": r["doc_id"], "title": title if isinstance(title, str) and title else "Design doc",
+                        "from": sender if isinstance(sender, dict) else None})
     return out
 
 

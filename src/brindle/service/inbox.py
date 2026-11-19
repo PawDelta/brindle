@@ -19,8 +19,8 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import (agents, autopilot, bus, git, identity_lock, permissions, prompt_answer, provider_switch,
-                     session_sync, sessions, tmux, view)
+from brindle import (agents, autopilot, bus, git, identity_lock, inbox_team, permissions, prompt_answer,
+                     provider_switch, session_sync, sessions, tmux, view)
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent, Workspace, request_subagent
@@ -287,6 +287,8 @@ def _dismiss_key(item: InboxItemDTO) -> str:
     data = item.to_json()
     if data.get("choices") is None:
         data.pop("choices", None)   # added later: an item without choices keeps the key it always had
+    for k in ("section", "from_person", "read", "item_key"):
+        data.pop(k, None)           # added with the team Inbox: a dismissal keeps the key it had before them
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
@@ -363,7 +365,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
             # successor carries on, and the switch has its own card.
             if ap and ap.state == "blocked" and not sessions.handed_away(ap) and not any(
                     i.kind == "question" and i.agent_id == a["id"] for i in out):
-                out.append(InboxItemDTO(kind="question", reason="has a question", **link,
+                out.append(InboxItemDTO(kind="question", reason="has a question", **link, detail=ap.question,
                                         request_id=str(occurrences.get(f"question:{a['id']}", 0))))
             if ap and autopilot.proposing(ap):
                 checks = json.loads(ap.proposal).get("checks") or []
@@ -386,12 +388,13 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
                  # handovers (brindle.handover) on it alike.
                  + _visual_items(db, repo_root) + provider_switch.inbox_items(db, repo_root)
                  + _plan_offer_items(db, repo_root) + _setup_items()
-                 + _org_blocks(db, repo_root) + _org_notices())
+                 + _org_blocks(db, repo_root) + _org_notices() + inbox_team.items(_my_sub()))
     # Requests can outlive the live snapshot (notably document requests).
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask
     # for attention again just because a historical request is still stored.
     hidden = dismissed_keys(db)
-    return [i for i in all_items if _dismiss_key(i) not in hidden and (not i.agent_id
+    return [i if i.section else i.model_copy(update={"section": inbox_team.NEEDS_YOU})
+            for i in all_items if _dismiss_key(i) not in hidden and (not i.agent_id
             or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a))]
 
 
@@ -535,7 +538,8 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
 
     for q in review_queue.waiting(me):
         link = links.get(q["doc_id"]) or {"doc": q["doc_id"]}
-        out.append(InboxItemDTO(kind="review_requested", reason="Review requested",
+        out.append(InboxItemDTO(kind="review_requested", reason="Review requested", section=inbox_team.FROM_TEAM,
+                                from_person=inbox_team._person(q.get("from")),
                                 detail=link.get("title") or q["title"], **{k: v for k, v in link.items() if k != "title"}))
     return out
 

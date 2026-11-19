@@ -2982,6 +2982,25 @@
           "title": "PermissionDTO",
           "type": "object"
         },
+        "PersonDTO": {
+          "description": "A teammate: the Library's id and the name they show.",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "PersonDTO",
+          "type": "object"
+        },
         "PlanOfferDTO": {
           "description": "Current session context for deciding whether to plan the goal first.",
           "properties": {
@@ -3136,6 +3155,29 @@
           "default": null,
           "title": "Fix"
         },
+        "from_person": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PersonDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "item_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Key"
+        },
         "kind": {
           "title": "Kind",
           "type": "string"
@@ -3173,6 +3215,18 @@
             }
           ],
           "default": null
+        },
+        "read": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Read"
         },
         "reason": {
           "title": "Reason",
@@ -5817,6 +5871,25 @@
         "describe"
       ],
       "title": "PermissionRuleDTO",
+      "type": "object"
+    },
+    "PersonDTO": {
+      "description": "A teammate: the Library's id and the name they show.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "PersonDTO",
       "type": "object"
     },
     "PlanAnchorDTO": {
