@@ -1,7 +1,9 @@
 """check_scope narrows a pytest check to the tests that import a change,
 however they import it, instead of falling back to the full suite."""
 import json
+import os
 import shlex
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,8 +82,12 @@ def test_tests_pytest_would_not_collect_are_not_named(repo, monkeypatch):
 HUB = ("from math import floor as operation\n\nLIMIT = 1\n\n\ndef a():\n    return LIMIT\n\n\n"
        "def b():\n    return operation(2.5)\n\n\ndef helper():\n    return 0\n")
 # Every test imports the hub module; each runs only part of it (by line, as coverage records it): helper() none.
-RAN = {"tests/test_a.py::test_a": [7], "tests/test_b.py::test_b": [11], "tests/test_c.py::test_c": []}
-HUB_TESTS = {"tests/test_a.py": "def test_a():\n    assert hub.a()\n", "tests/test_b.py": "def test_b():\n    assert hub.b()\n",
+# test_a2 shares test_a's file but runs none of it; test_b's contexts carry its parameters.
+RAN = {"tests/test_a.py::test_a": [7], "tests/test_a.py::test_a2": [], "tests/test_b.py::test_b[1]": [11],
+       "tests/test_b.py::test_b[2]": [11], "tests/test_c.py::test_c": []}
+HUB_TESTS = {"tests/test_a.py": "def test_a():\n    assert hub.a()\n\n\ndef test_a2():\n    assert hub\n",
+             "tests/test_b.py": "import pytest\n\n\n@pytest.mark.parametrize('n', [1, 2])\ndef test_b(n):\n"
+                                "    assert hub.b()\n",
              "tests/test_c.py": "def test_c():\n    assert hub\n"}
 
 
@@ -106,30 +112,43 @@ def fake_coverage_run(commands):
 
 
 @pytest.mark.parametrize("where,drift,old,new,ran", [
-    pytest.param("worker", None, "return LIMIT\n", "return LIMIT + 1\n", "tests/test_a.py", marks=pytest.mark.variant(
-        "A function-body change on a worker's branch must run only the tests that executed it, not every importer")),
-    pytest.param("merge-main", None, "operation(2.5)", "operation(3.5)", "tests/test_b.py", marks=pytest.mark.variant(
-        "The session checkout's check after a merge of main must scope by the map too, from the pre-merge commit")),
+    # Only the test that ran a(), not test_a2 beside it in the same file.
+    pytest.param("worker", None, "return LIMIT\n", "return LIMIT + 1\n", "tests/test_a.py::test_a",
+                 marks=pytest.mark.variant("A function-body change on a worker's branch must run only the tests that "
+                                           "executed it, not every importer")),
+    # Every case of a parametrized test, by its node id without parameters.
+    pytest.param("merge-main", None, "operation(2.5)", "operation(3.5)", "tests/test_b.py::test_b",
+                 marks=pytest.mark.variant("The session checkout's check after a merge of main must scope by the map "
+                                           "too, from the pre-merge commit")),
     # A module-level value or import runs the tests of the code reading it, though they never name it
     # (a module-level assignment the same way: see the reordered rows below).
-    ("worker", None, "floor as", "ceil as", "tests/test_b.py"),
+    ("worker", None, "floor as", "ceil as", "tests/test_b.py::test_b"),
     # Since the map, main made a() call helper(): a change to helper() reaches test_a through a().
-    pytest.param("worker", ("return LIMIT\n", "return LIMIT + helper()\n"), "return 0", "return 1", "tests/test_a.py",
+    pytest.param("worker", ("return LIMIT\n", "return LIMIT + helper()\n"), "return 0", "return 1",
+                 "tests/test_a.py::test_a",
                  marks=pytest.mark.variant("A map older than the code must follow calls added since, or it misses "
                                            "the tests reaching the change through them")),
-], ids=["worker", "merge-main", "import", "outdated-map"])
+    # brindle pr on a session's branch: scoped to what it changes since origin/main, not the full suite.
+    pytest.param("pre_pr", None, "return LIMIT\n", "return LIMIT + 1\n", "tests/test_a.py::test_a",
+                 marks=pytest.mark.variant("brindle pr must narrow its checks to the PR's diff, not run the full "
+                                           "suite (the reuse test in test_gates can't tell: a full pass is cached)")),
+    # A repo without CI opts in to the whole suite before a PR (None: the same full run the map came from).
+    ("pre_pr_full", None, "return LIMIT\n", "return LIMIT + 1\n", None),
+], ids=["worker-node", "merge-main-node", "import", "outdated-map", "pre_pr", "pre_pr_full"])
 def test_coverage_map_selects_the_tests_that_ran_the_changed_function(db, repo, monkeypatch, where, drift, old, new,
                                                                        ran):
     """A full run records which tests executed each function; a change to one
     function of a module every test imports then runs only the tests that
-    executed it, on a worker's branch and after a merge of main alike."""
-    config = {"checks": [PYTEST], "scoped_checks": "coverage"}
+    executed it, on a worker's branch, after a merge of main and before a PR
+    alike."""
+    config = {"checks": [PYTEST], "scoped_checks": "coverage", "pre_pr_full": where == "pre_pr_full"}
     files = {".brindle/config.json": json.dumps(config), "src/pkg/__init__.py": "", "src/pkg/hub.py": HUB,
              **{name: "from pkg import hub\n\n\n" + text for name, text in HUB_TESTS.items()}}
     for name, text in files.items():
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / name).write_text(text)
     sh("git add -A && git commit -qm base", repo)
+    sh("git push -q origin main", repo)   # the base a PR shows its diff against
     commands = []
     monkeypatch.setattr(autopilot, "run_check", fake_coverage_run(commands))
     root = workspaces.adopt_root(db, str(repo))
@@ -146,6 +165,12 @@ def test_coverage_map_selects_the_tests_that_ran_the_changed_function(db, repo, 
         (Path(ws.path) / "src/pkg/hub.py").write_text(hub.replace(old, new))
         sh("git commit -qam work", Path(ws.path))
         assert gates.run_checked(db, ws, PYTEST, {}, 30)[0]
+    elif where.startswith("pre_pr"):   # no worker on the branch: only the PR's own diff narrows it
+        ws = workspaces.create(db, str(repo), "sess").workspace
+        (Path(ws.path) / "src/pkg/hub.py").write_text(hub.replace(old, new))
+        sh("git commit -qam work", Path(ws.path))
+        with gates.pr_checked(db, ws):
+            pass
     else:   # main brought in a change to b(); the session checkout's check covers just that
         (repo / "src/pkg/hub.py").write_text(HUB.replace(old, new))
         sh("git commit -qam 'merge origin/main'", repo)
@@ -153,7 +178,7 @@ def test_coverage_map_selects_the_tests_that_ran_the_changed_function(db, repo, 
         session_sync.run_checks(db, root.id, before)
 
     assert "--cov-context=test" in commands[0]
-    assert commands[1:] == [f"{PYTEST} {ran}"]
+    assert commands[1:] == [commands[0] if ran is None else f"{PYTEST} {ran}"]
 
 
 RUN_Y = "\n\n\ndef run():\n    return Y\n"
@@ -344,18 +369,21 @@ def test_a_script_changed_since_the_map_runs_the_tests_that_run_it(repo, monkeyp
     assert run == f"{PYTEST} tests/test_driver.py tests/test_runs_build.py"
 
 
-def test_a_hub_change_runs_only_the_tests_most_specific_to_it(repo, monkeypatch):
+def test_a_hub_change_runs_at_most_max_tests_most_specific_to_it(repo, monkeypatch):
     """A change to a function nearly every test passes through runs at most
-    ``max_files`` tests: the branch's own and namesake ones, then those whose
-    coverage is mostly the changed code, not the 100 the map credits."""
+    ``max_tests`` test cases: the branch's own and namesake ones (a whole
+    file counting every case the map has in it), then single tests whose
+    coverage is mostly the changed code, not the 186 the map credits."""
     from brindle import coverage_map
 
     hub = "def hub():\n    return 1\n"
     own = "def test_o():\n    assert 1\n"
-    specific = [f"tests/test_s{i}.py" for i in range(10)]
-    generic = [f"tests/test_g{i:02}.py" for i in range(88)]
-    names = ["tests/test_hub.py", "tests/test_own.py", *specific, *generic]
-    files = {"pkg/__init__.py": "", "pkg/hub.py": hub, **{t: "def test_x(): pass\n" for t in names},
+    specific = [f"tests/test_s{i}.py::test_x" for i in range(10)]
+    generic = [f"tests/test_g{i:02}.py::test_{x}" for i in range(88) for x in "xy"]
+    owned = ["tests/test_own.py::test_o"]   # parametrized: five cases, so the own file counts five
+    names = ["tests/test_hub.py::test_x", *owned, *specific, *generic]
+    files = {"pkg/__init__.py": "", "pkg/hub.py": hub,
+             **{coverage_map.test_file(t): "def test_x(): pass\n\n\ndef test_y(): pass\n" for t in names},
              "tests/test_own.py": own}
     for name, text in files.items():
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
@@ -367,13 +395,82 @@ def test_a_hub_change_runs_only_the_tests_most_specific_to_it(repo, monkeypatch)
              "pkg/big.py": {f"f{i}": broad for i in range(10)},
              "tests/test_own.py": {q: [1] for q in coverage_map.line_scopes(own)}}
     base = sh("git rev-parse HEAD", repo)
-    monkeypatch.setattr(coverage_map, "load", lambda root, check: {"commit": base, "tests": names, "files": known})
+    data = {"commit": base, "tests": names, "cases": [5 if t in owned else 1 for t in names], "files": known}
+    monkeypatch.setattr(coverage_map, "load", lambda root, check: data)
     (repo / "pkg/hub.py").write_text(hub.replace("1", "2"))
     (repo / "tests/test_own.py").write_text(own.replace("1", "2"))
     ws = SimpleNamespace(path=str(repo), repo_root=str(repo))
 
     run = check_scope.command(ws, PYTEST, check_scope.CheckScope(coverage=True),
-                              (base, ["pkg/hub.py", "tests/test_own.py"]), 40)
+                              (base, ["pkg/hub.py", "tests/test_own.py"]), max_files=40, max_tests=40)
     ran = shlex.split(run.rsplit(f"; {PYTEST}", 1)[-1])
-    assert run.startswith("printf") and len(ran) == 40
+    assert run.startswith("printf") and len(ran) == 40 - 5 + 1
     assert {"tests/test_hub.py", "tests/test_own.py", *specific} <= set(ran)
+    assert all("::" in t for t in set(ran) - {"tests/test_hub.py", "tests/test_own.py"})
+
+
+CORE = ("pkg/core.py", "return 1", "return 2")
+PARAMETRIZED = "import pytest\nfrom values import VALUES\n\n\n@pytest.mark.parametrize('v', VALUES)\ndef test_example(v):\n    pass\n"
+
+
+@pytest.mark.parametrize("files,tests,cases,renamed,edit,max_tests,ran", [
+    # Main renamed a parametrized test after the map: the cap divides its file as pytest collects it now,
+    # never by the name the map remembers, and counts the renamed test's five cases, not one.
+    ({"tests/test_r.py": "import pytest\n\n\n@pytest.mark.parametrize('n', range(5))\ndef test_aaa_removed(n):\n"
+                         "    pass\n\n\ndef test_b():\n    pass\n"},
+     ["tests/test_r.py::test_aaa_removed", "tests/test_r.py::test_b"], [5, 1],
+     ("tests/test_r.py", "test_aaa_removed", "test_aaa_new"), CORE, 2,
+     ["tests/test_r.py::test_aaa_new[0]", "tests/test_r.py::test_b"]),
+    # The namesake comes before a smaller, less specific test even when only part of it fits.
+    ({"tests/test_core.py": "import pytest\n\n\n@pytest.mark.parametrize('n', range(5))\ndef test_c(n):\n    pass\n",
+      "tests/test_g.py": "def test_g():\n    pass\n"},
+     ["tests/test_core.py::test_c", "tests/test_g.py::test_g"], [5, 1], None, CORE, 1,
+     ["tests/test_core.py::test_c[0]"]),
+    # One parametrized test with more cases than the cap runs only as many of its cases as fit, and they are
+    # today's: the branch changes the parameter table, not the test file reading it.
+    # (A fixture's params= in a conftest is module-level code there: that runs the check in full.)
+    ({"tests/values.py": "VALUES = ['old-a', 'old-b', 'old-c']\n", "tests/test_x.py": PARAMETRIZED},
+     ["tests/test_x.py::test_example"], [3], None, ("tests/values.py", "old-", "new-"), 2,
+     ["tests/test_x.py::test_example[new-a]", "tests/test_x.py::test_example[new-b]"]),
+    # The namesake file runs its covering test anyway: that test costs nothing more, leaving room for another.
+    pytest.param(
+        {"tests/test_core.py": "def test_c():\n    pass\n", "tests/test_more.py": "def test_m():\n    pass\n",
+         "tests/test_other.py": "def test_o():\n    pass\n"},
+        ["tests/test_core.py::test_c", "tests/test_more.py::test_m", "tests/test_other.py::test_o"], [1] * 3, None,
+        CORE, 2, ["tests/test_core.py", "tests/test_more.py::test_m"],
+        marks=pytest.mark.variant("A test already run by its whole namesake file must not use up the budget, "
+                                  "or the cap runs fewer relevant tests than it allows")),
+], ids=["renamed-since-map", "namesake-first", "oversized-params-changed", "covered-costs-nothing"])
+def test_capped_selection_keeps_max_tests_with_tests_that_exist(repo, monkeypatch, files, tests, cases, renamed,
+                                                                 edit, max_tests, ran):
+    """The max_tests cap never names a test or case the checkout no longer
+    has (it divides a selection as pytest collects it now), never runs more
+    cases than it allows, and doesn't charge for a test already running as
+    part of its whole file."""
+    from brindle import coverage_map
+
+    cmd = "pytest -q"   # collected for real, with this interpreter's pytest
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-q")   # a quiet mode configured outside must not hide the ids collected
+    for name, text in {"pkg/__init__.py": "", "pkg/core.py": "def core():\n    return 1\n", **files}.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    sh("git add -A && git commit -qm base", repo)
+    everyone = list(range(len(tests)))
+    known = {name: {q: [] for q in coverage_map.line_scopes(text)} for name, text in files.items()}
+    known["pkg/core.py"] = {"": everyone, "core": everyone}
+    for i, t in enumerate(tests):
+        known[coverage_map.test_file(t)][t.split("::")[1]] = [i]
+    data = {"commit": sh("git rev-parse HEAD", repo), "tests": tests, "cases": cases, "files": known}
+    monkeypatch.setattr(coverage_map, "load", lambda root, check: data)
+    if renamed:   # on main, after the map was recorded: the branch starts from here
+        path, old, new = renamed
+        (repo / path).write_text((repo / path).read_text().replace(old, new))
+        sh("git commit -qam rename", repo)
+    base = sh("git rev-parse HEAD", repo)
+    path, old, new = edit
+    (repo / path).write_text((repo / path).read_text().replace(old, new))
+    ws = SimpleNamespace(path=str(repo), repo_root=str(repo))
+
+    run = check_scope.command(ws, cmd, check_scope.CheckScope(coverage=True), (base, [path]), max_tests=max_tests)
+    assert run.startswith("printf") and shlex.split(run.rsplit(f"; {cmd}", 1)[-1]) == ran
