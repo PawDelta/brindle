@@ -46,7 +46,14 @@ def _session_with_goal(db, repo, *, on_main: bool = False, commit: bool = True):
     return ws
 
 
-@pytest.mark.parametrize("case", ["sweep", "kill", "sweep-no-commits", "reflog-expired", "main", "config-locked"])
+@pytest.mark.parametrize("case", [
+    pytest.param("sweep", marks=pytest.mark.variant("the hourly sweep is the close path that lost session 18's goal")),
+    pytest.param("kill", marks=pytest.mark.variant("killing a supervisor is a separate close path that must archive too")),
+    pytest.param("sweep-no-commits", marks=pytest.mark.variant("a branch with no commits of its own must still be told apart on reopen")),
+    pytest.param("reflog-expired", marks=pytest.mark.variant("restoring must not depend on the branch's reflog")),
+    pytest.param("main", marks=pytest.mark.variant("a session on the default branch in the person's own checkout restores there")),
+    "config-locked",
+])
 def test_a_closed_sessions_goal_comes_back_when_its_branch_is_reopened(db, repo, monkeypatch, case):
     """Pause, then close a supervisor with milestones; its rows then go (the
     hourly sweep removes the closed session's worktree, or it is killed).
@@ -90,6 +97,7 @@ def test_a_closed_sessions_goal_comes_back_when_its_branch_is_reopened(db, repo,
     assert db.get_autopilot("second00").goal is None
 
 
+@pytest.mark.variant("a reused branch name must not inherit an old session's goal")
 def test_a_new_branch_that_only_reuses_the_name_starts_without_the_goal(db, repo, monkeypatch):
     """A session branch merged and deleted frees its name; a new session cut
     from the default branch under that name is not the old one reopened,
@@ -109,6 +117,7 @@ def test_a_new_branch_that_only_reuses_the_name_starts_without_the_goal(db, repo
     assert db.get_autopilot("7760dd04").goal is None and not db.milestones("7760dd04")
 
 
+@pytest.mark.variant("two concurrent deletes of one branch's sessions must share one mark")
 def test_two_sessions_of_a_branch_deleted_at_once_get_its_one_mark(db, repo, monkeypatch):
     """Two sessions of one branch deleted at the same time: the second's
     archive happens while the first is between reading that the branch has
