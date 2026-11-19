@@ -22,9 +22,21 @@ def test_extras_left_out_or_empty_are_not_present(db, session):
         {"id": "context", "title": "Context", "markdown": "Why."},
         {"id": "open-questions", "title": "Open questions", "markdown": ""},
     ])
-    assert [s["id"] for s in dto["sections"]] == ["context", "rollout", "open-questions"]
+    assert [s["id"] for s in dto["sections"]] == [
+        "context", "goals", "proposed-design", "alternatives", "risks", "rollout", "open-questions"]
     assert dto["sections"][-1]["markdown"] == "None."
     assert "Tech stack" not in dto["markdown"]
+
+
+def test_markdown_only_proposal_maps_headings_to_the_spine(db, session):
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    md = "# T\n\nLede.\n\n## Tech stack\n\n## Context\n\nWhy.\n\n## Open questions\n"
+    p = plans.propose(db, boss, md, [{**DECISIONS[0], "section": "context"}])
+    dto = plans.to_dto(db, plans.get(db, p["id"]))
+    ids = [s["id"] for s in dto["sections"]]
+    assert ids == ["context", "goals", "proposed-design", "alternatives", "risks", "rollout", "open-questions"]
+    assert dto["decisions"][0]["section"] == "context"
 
 
 def test_decision_attaches_to_its_section_else_open_questions(db, session):
@@ -36,6 +48,7 @@ def test_decision_attaches_to_its_section_else_open_questions(db, session):
                    [anchored, elsewhere, plain])
     assert {d["id"]: d["section"] for d in dto["decisions"]} == {
         "d1": "proposed-design", "d2": "open-questions", "d3": "open-questions"}
+    assert {d["section"] for d in dto["decisions"]} <= {s["id"] for s in dto["sections"]}
 
 
 def test_split_is_off_the_persons_doc_but_still_links_workers(db, session):

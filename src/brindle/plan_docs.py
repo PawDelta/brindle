@@ -224,7 +224,41 @@ def parse_sections(raw: Any) -> list[dict]:
         out.append({"id": sid, "title": visuals._text(s.get("title"), "a section's title", visuals.MAX_LABEL, True),
                     "kind": kind, "markdown": body,
                     "caption": visuals._text(s.get("caption"), "a diagram's caption", visuals.MAX_DETAIL)})
-    return _spine(out)
+    return out
+
+
+TITLES = {"context": "Context", "audience": "Audience", "goals": "Goals and non-goals",
+          "proposed-design": "Proposed design", "architecture": "Architecture", "tech-stack": "Tech stack",
+          "alternatives": "Alternatives considered", "risks": "Risks and what's hard to undo",
+          "rollout": "Rollout and tasks", "open-questions": "Open questions"}
+def _heading(text: str) -> str:
+    return re.sub(r"[^a-z ]", "", text.lower().replace("-", " ")).strip()
+
+
+_HEADINGS = {**{_heading(t): i for i, t in TITLES.items()}, **{_heading(i): i for i in TITLES},
+             "goals": "goals", "alternatives": "alternatives", "risks": "risks", "rollout": "rollout"}
+
+
+def design_doc(parts: list[dict]) -> list[dict]:
+    """A new proposal as the design-doc spine: sections with a spine id, or
+    (markdown headings) a spine title, take the canonical id; every required
+    spine section is present, in order. Sections naming none of the spine are
+    a free-form doc and stay as written."""
+    parts = [dict(s) for s in parts]
+    taken = {s["id"] for s in parts}
+    for s in parts:
+        if s["id"] not in SPINE and re.fullmatch(r"s\d+", s["id"]):
+            key = _HEADINGS.get(_heading(s["title"]))
+            if key and key not in taken:
+                taken.discard(s["id"])
+                taken.add(key)
+                s["id"] = key
+    if not any(s["id"] in SPINE for s in parts):
+        return parts
+    for sid in SPINE:
+        if sid not in EXTRAS and sid not in taken:
+            parts.append({"id": sid, "title": TITLES[sid], "kind": "markdown", "markdown": "", "caption": None})
+    return _spine(parts)
 
 
 def _spine(parts: list[dict]) -> list[dict]:
