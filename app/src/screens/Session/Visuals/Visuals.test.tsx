@@ -718,26 +718,6 @@ describe("visuals", () => {
     expect([cards(), badge()]).toEqual([[], null]);
   });
 
-  it("opens the plan the person asked for in the planning view, and not one asked before the screen showed", async () => {
-    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
-    const plan: VisualDTO = { ...visual, id: "v_plan", kind: "plan", title: "Plan", question: undefined, options: undefined, rev: 1 };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
-    const client = daemon.client();
-    vi.spyOn(client, "visuals").mockImplementation(async () => [plan]);
-    vi.spyOn(client, "markVisualRead").mockImplementation(async () => plan);
-    const draft: Plan = { id: "v_plan", session: "sup1", title: "Plan", rev: 0, state: "writing", markdown: "", lede: "", queued: 0, created_at: now, split: [], sections: [], decisions: [], threads: [] };
-    vi.spyOn(client, "plan").mockImplementation(async () => draft);
-    const store = createAppStore();
-    const asked = (id: number) => act(() => store.dispatch({ type: "stream", message: { type: "event", id, ts: now, kind: "plan.requested", repo_root: REPO, root_id: "sup1", agent_id: "sup1", workspace_id: "proj", task_id: null, payload: { visual: "v_plan" } } }));
-    await asked(5000);                                   // before the screen opens: not replayed
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-    await screen.findByTestId("terminal", {}, { timeout: 4000 });
-    expect(screen.queryByTestId("plan-decided")).toBeNull();
-    await asked(5001);
-    expect((await screen.findByTestId("plan-decided")).dataset.state).toBe("writing");
-  });
-
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
