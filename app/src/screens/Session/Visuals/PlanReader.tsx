@@ -884,12 +884,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const reviewerNames = signers.filter((r) => r.required).map((r) => (r.sub ? firstName(r.sub) : r.name ?? "")).filter(Boolean);
 
   // The status line.
-  const stage = plan.state === "writing" ? "Being written" : plan.state === "superseded" ? "Superseded"
-    : !open && !teammate ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
+  const stage = plan.state === "writing" ? "Being written" : plan.state === "superseded" ? "Superseded" : plan.state === "cancelled" ? "Cancelled"
+    : !open && !teammate ?(plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
     : frozen ? "Locked for sign-off"
     : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off";
   const statusLine = plan.state === "writing" ? "The supervisor is writing this plan"
     : plan.state === "superseded" ? "You asked for a newer plan; this one is closed"
+    : plan.state === "cancelled" ? "Closed without approval; the tasks it held wait for the supervisor"
     : teammate?.signedOff ? `You signed off ${frozen ? `version ${frozen.id}` : `r${plan.rev}`}`
     : frozen && gate ? `Version ${frozen.id} · ${gate.signed} of ${plural(gate.required, "sign-off")}`
     : gate && useLiveReview && open ? `Still being written · sign-off opens when ${teammate ? authorName : "you"} freeze${teammate ? "s" : ""} a version`
@@ -1122,8 +1123,15 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
           </>
         ) : (
+          <>
+          {/* A redirected plan stays open to cancel (never to approve): the person may close it instead of waiting for a revision. */}
+          {plan.state === "redirected" && client?.cancelPlan && (
+            <div className="col-span-full flex justify-end">
+              <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
+            </div>
+          )}
           <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided" data-state={plan.state}>
-            <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>
+            <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : plan.state === "cancelled" ? "This planning is closed without approval. The tasks it held wait for the supervisor's decision on each." : "You asked for changes. The supervisor is revising the design."}</p>
             {plan.verdict?.note && <p className="text-ink-2"><span className="text-ink-3">your note · </span>{plan.verdict.note}</p>}
             {plan.verdict?.comments?.map((c, i) => (
               <p key={i} className="text-ink-2">
@@ -1132,6 +1140,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               </p>
             ))}
           </div>
+          </>
         )}
         {error && error !== gate?.unconfirmed?.message && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
       </footer>

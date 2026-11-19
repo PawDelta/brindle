@@ -1116,10 +1116,13 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
     if p["state"] not in ("open", "redirected"):
         raise ServiceError("decided", "this plan is already decided", 409)
     root = p["root_id"]
-    held = [t for t in db.list_tasks(state="pending")
-            if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.open_plan_holds(db, t)]
     at = time.time()
     with db.tx() as c:
+        # Selected before the plan's state changes, in the same write transaction: a task queued
+        # by an assign whose reply is still going out (unanswered) is held too, and nothing
+        # committed after this read can slip past the cancel.
+        held = [t for t in db.list_tasks(state="pending") + db.list_tasks(state=tasks.UNANSWERED)
+                if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.open_plan_holds(db, t)]
         if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=? AND state IN ('open','redirected')",
                          (CANCELLED, at, p["id"], p["rev"])).rowcount:
             raise ServiceError("decided", "this plan is already decided", 409)
@@ -1128,7 +1131,8 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
             shared_docs.drop_share(c, row)
         for t in held:
             c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at)"
-                      " SELECT id, ?, ? FROM tasks WHERE id=? AND state='pending'", (p["id"], at, t.id))
+                      " SELECT id, ?, ? FROM tasks WHERE id=? AND state IN ('pending', ?)",
+                      (p["id"], at, t.id, tasks.UNANSWERED))
         queued = _queue_message(c, root, _cancelled_message(p, held, person))
     bus.publish_agent(db, "message.queued", root, message_id=queued, sender_id=None)
     try:

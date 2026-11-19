@@ -44,6 +44,26 @@ def test_cancelled_plan_keeps_its_held_tasks_queued_and_names_them(how, db, sess
     assert held.id in said and "feat/schema" in said and "build the schema" in said
 
 
+def test_cancel_between_an_assign_queuing_and_its_reply_holds_that_task_too(db, session, monkeypatch):
+    """An assign queued behind the plan, cancelled before its reply releases the task: the task
+    is held, not started, and the supervisor's message names it."""
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    release = mcp_server._Request.answer
+
+    def cancel_then_release(self):
+        plans.cancel(db, pid, 1, person=True)
+        release(self)
+    monkeypatch.setattr(mcp_server._Request, "answer", cancel_then_release)
+    asyncio.run(mcp_server.assign("developer", "build the schema", branch="feat/schema"))
+
+    [held] = db.list_tasks()
+    assert db.cancelled_hold(held.id) == pid
+    assert tasks.sweep(db) == 0 and started == []
+    assert held.id in messages(db)[-1] and "feat/schema" in messages(db)[-1]
+
+
 def test_start_now_starts_the_held_task_and_cancel_task_gives_up_the_other(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")

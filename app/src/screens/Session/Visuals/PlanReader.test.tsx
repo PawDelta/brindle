@@ -277,6 +277,28 @@ it("design doc reader", async () => {
 const doc = (rev: number, text: string, more: Partial<Plan> = {}): Plan => ({ id: visual.id, session: "boss", title: "Cloud workers", rev, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
   sections: [{ id: "summary", title: "Summary", markdown: text }], decisions: [], threads: [], ...more });
 
+it("a redirected plan can be cancelled from the reader, and a cancelled plan shows it is closed", async () => {
+  const redirected = doc(1, "Workers run on your machine.", { state: "redirected", verdict: { approved: false, at: 13, rev: 1 } });
+  const cancelled: Plan = { ...redirected, state: "cancelled" };
+  const cancels: number[] = [];
+  const client: PlansClient & PlanDocClient & VisualsClient & Pick<DaemonClient, "cancelPlan"> = {
+    ...visuals, ...docWrites(() => cancelled),
+    plan: async () => redirected, decidePlan: async () => redirected,
+    cancelPlan: async (_id, rev) => { cancels.push(rev); return cancelled; },
+  };
+  const view = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await screen.findByText("Workers run on your machine.");
+  expect((screen.getByTestId("plan-verdict").querySelector("[data-testid=plan-build]"))).toBeNull();
+  fireEvent.click(screen.getByTestId("plan-cancel"));
+  await waitFor(() => expect(cancels).toEqual([1]));
+  view.unmount();
+
+  render(<PlanReader client={{ ...client, plan: async () => cancelled }} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await screen.findByText("Workers run on your machine.");
+  expect(screen.getByTestId("plan-decided").dataset.state).toBe("cancelled");
+  expect(screen.queryByTestId("plan-cancel")).toBeNull();
+});
+
 it("design doc writes go one at a time, a read sent before one came back can't undo it, and a reply is feedback to send", async () => {
   const base = doc(1, "Workers run on your machine.", {
     decisions: [{ id: "where", title: "Where", mine: "own", options: [{ id: "own", label: "A · Own" }, { id: "hosted", label: "B · Hosted" }] }],
