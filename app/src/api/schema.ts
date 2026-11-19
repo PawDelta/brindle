@@ -1127,6 +1127,7 @@ export interface PlanGateRowDTO {
 export interface PlanUnconfirmedDTO {
   approval_held?: boolean;
   can_stop_sharing?: boolean;
+  can_edit_reviewers?: boolean;
   message: string;
   reason: "offline" | "sign_in" | "key_unavailable" | "library_error" | "other_account";
 }
