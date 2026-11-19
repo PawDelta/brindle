@@ -75,6 +75,7 @@ COVERAGE_CAP_NOTE = ("brindle: the coverage map says this change reaches {n} tes
 FULL_NOTE = "brindle: ran this check in full because {why}."
 MAX_SYMBOLS = 30         # more changed symbols than this: use their modules' importing tests instead
 GRAPHIFY_SECONDS = 60
+COLLECT_SECONDS = 120    # pytest --collect-only of one test file, to divide it under scoped_checks_max_tests
 SKIPPED = "skipped: "     # run_checked's output for a skipped check starts with this
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.M)
 _AFFECTED_FILE = re.compile(r"\s(\S+\.py):L\d+\s*$", re.M)
@@ -347,20 +348,19 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
         stale = {f for f in since if is_test_file(f)}
         tests = sorted(set(tests) | {n for n in nodes if coverage_map.test_file(n) in whole - stale})
         ranked = coverage_map.rank(data, set(tests), hits)
-        order = {t: i for i, t in enumerate(ranked)}
-        in_file: dict[str, list[str]] = {}
-        for t in data.get("tests") or []:
-            if "::" in t:
-                in_file.setdefault(coverage_map.test_file(t), []).append(t)
-        cases = coverage_map.case_ids(data)
+        order = {t: i for i, t in enumerate(coverage_map.rank(data, set(tests) | nodes, hits))}
+        current: dict[str, list[str]] = {}
 
         def split(t: str) -> list[str]:
+            # Parts as pytest collects them now: a fixture's or a table's parameters may have changed
+            # since the map in files other than the test's own.
             file = coverage_map.test_file(t)
-            if file in stale or not (root / file).is_file():
-                return []
+            if file not in current:
+                current[file] = _collected(ws, cmd, file) if (root / file).is_file() else []
             if "::" not in t:   # the file's tests, those selected by the change first
-                return sorted(in_file.get(t, []), key=lambda n: (order.get(n, len(order)), n))
-            return cases.get(t, [])
+                parts = dict.fromkeys(coverage_map.node(i) for i in current[file])
+                return sorted(parts, key=lambda n: (order.get(n, len(order)), n))
+            return [i for i in current[file] if i != t and coverage_map.node(i) == t]
 
         tests = _most_specific(tests, first, ranked, max_tests, keep={t for t in own if is_test_file(t)},
                                size=size, split=split)
@@ -368,6 +368,26 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
     run = f"{note}{cmd} {_quoted(tests)}"
     # A marker or keyword filter may leave none of the selected tests (pytest's exit 5): nothing of it to run.
     return f"{run} || [ $? -eq 5 ]" if _filters(cmd) else run
+
+
+def _collected(ws: Workspace, cmd: str, file: str) -> list[str]:
+    """The test ids (``file::test[case]``) pytest collects from ``file`` in
+    ``ws`` now, with ``cmd``'s pytest and its marker and keyword filters;
+    none when it can't say."""
+    toks = shlex.split(cmd)
+    head = next((h for h in _PYTEST_PREFIX if tuple(toks[:len(h)]) == h), None)
+    if head is None:
+        return []
+    rest = toks[len(head):]
+    filters = [t for pair in zip(rest, rest[1:]) if pair[0] in ("-m", "-k") for t in pair]
+    try:
+        proc = spawn.read([*head, "--collect-only", "-q", "-p", "no:cacheprovider", *filters, file], cwd=ws.path,
+                          timeout=COLLECT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired, spawn.Busy):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.startswith(file + "::")]
 
 
 def _parents(t: str) -> list[str]:
@@ -384,9 +404,10 @@ def _most_specific(tests: list[str], first: list[str], ranked: list[str], max_te
     """Of ``tests``, as many test cases as fit in ``max_tests`` (a selector
     counting ``size(t)``, a single case 1): ``first`` (the branch's own and
     namesake tests, then the tests of changed scripts) in that order, then
-    ``ranked`` (``coverage_map.rank``). One too big for what is left is
-    ``split`` into its parts (a file into its tests, a test into its cases),
-    as many of them as fit; one ``split`` can't divide is passed over. A test
+    ``ranked`` (``coverage_map.rank``). Then, while room is left, one that was
+    too big is ``split`` into its parts (a file into its tests, a test into
+    its cases), as many of them as fit; one ``split`` can't divide is passed
+    over. A test
     whose file (or case whose test) is already chosen costs nothing more and
     is left out. The branch's own test files (``keep``) are never dropped,
     even past ``max_tests``; when nothing fits at all and nothing divides, the
@@ -401,7 +422,7 @@ def _most_specific(tests: list[str], first: list[str], ranked: list[str], max_te
             del chosen[inner]
         chosen[t] = cost(t)
 
-    def fit(t: str) -> None:
+    def fit(t: str, divide: bool) -> None:
         room = max_tests - sum(chosen.values())
         if room <= 0 or t in chosen or any(p in chosen for p in _parents(t)):
             return
@@ -409,15 +430,16 @@ def _most_specific(tests: list[str], first: list[str], ranked: list[str], max_te
         if cost(t) - inside <= room:
             add(t)
             return
-        for part in split(t):
-            fit(part)
+        for part in split(t) if divide else ():
+            fit(part, divide)
 
     for t in tests:
         if t in keep:
             add(t)
     candidates = list(dict.fromkeys(t for t in first + ranked if t in tests))
-    for t in candidates:
-        fit(t)
+    for divide in (False, True):   # whole ones first: dividing one costs a collection
+        for t in candidates:
+            fit(t, divide)
     if not chosen and candidates:
         chosen[candidates[0]] = cost(candidates[0])
     return sorted(chosen)

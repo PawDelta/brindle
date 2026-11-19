@@ -1,7 +1,9 @@
 """check_scope narrows a pytest check to the tests that import a change,
 however they import it, instead of falling back to the full suite."""
 import json
+import os
 import shlex
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -407,40 +409,48 @@ def test_a_hub_change_runs_at_most_max_tests_most_specific_to_it(repo, monkeypat
     assert all("::" in t for t in set(ran) - {"tests/test_hub.py", "tests/test_own.py"})
 
 
-CASES = [f"[{i}]" for i in range(5)]
+CORE = ("pkg/core.py", "return 1", "return 2")
+PARAMETRIZED = "import pytest\nfrom values import VALUES\n\n\n@pytest.mark.parametrize('v', VALUES)\ndef test_example(v):\n    pass\n"
 
 
-@pytest.mark.parametrize("files,tests,cases,renamed,max_tests,ran", [
-    # Main renamed a test after the map: its file runs whole, never the name the map remembers.
+@pytest.mark.parametrize("files,tests,cases,renamed,edit,max_tests,ran", [
+    # Main renamed a test after the map: the cap divides its file as pytest collects it now, never by the
+    # name the map remembers.
     ({"tests/test_r.py": "def test_aaa_removed():\n    pass\n\n\ndef test_b():\n    pass\n"},
-     ["tests/test_r.py::test_aaa_removed", "tests/test_r.py::test_b"], [[""], [""]],
-     ("tests/test_r.py", "test_aaa_removed", "test_aaa_new"), 1, ["tests/test_r.py"]),
-    # One parametrized test with more cases than the cap runs only as many of its cases as fit.
-    ({"tests/test_p.py": "import pytest\n\n\n@pytest.mark.parametrize('n', range(5))\ndef test_p(n):\n    pass\n"},
-     ["tests/test_p.py::test_p"], [CASES], None, 3, [f"tests/test_p.py::test_p{c}" for c in CASES[:3]]),
+     ["tests/test_r.py::test_aaa_removed", "tests/test_r.py::test_b"], [1, 1],
+     ("tests/test_r.py", "test_aaa_removed", "test_aaa_new"), CORE, 1, ["tests/test_r.py::test_b"]),
+    # One parametrized test with more cases than the cap runs only as many of its cases as fit, and they are
+    # today's: the branch changes the parameter table, not the test file reading it.
+    # (A fixture's params= in a conftest is module-level code there: that runs the check in full.)
+    ({"tests/values.py": "VALUES = ['old-a', 'old-b', 'old-c']\n", "tests/test_x.py": PARAMETRIZED},
+     ["tests/test_x.py::test_example"], [3], None, ("tests/values.py", "old-", "new-"), 2,
+     ["tests/test_x.py::test_example[new-a]", "tests/test_x.py::test_example[new-b]"]),
     # The namesake file runs its covering test anyway: that test costs nothing more, leaving room for another.
     pytest.param(
         {"tests/test_core.py": "def test_c():\n    pass\n", "tests/test_more.py": "def test_m():\n    pass\n",
          "tests/test_other.py": "def test_o():\n    pass\n"},
-        ["tests/test_core.py::test_c", "tests/test_more.py::test_m", "tests/test_other.py::test_o"], [[""]] * 3, None,
-        2, ["tests/test_core.py", "tests/test_more.py::test_m"],
+        ["tests/test_core.py::test_c", "tests/test_more.py::test_m", "tests/test_other.py::test_o"], [1] * 3, None,
+        CORE, 2, ["tests/test_core.py", "tests/test_more.py::test_m"],
         marks=pytest.mark.variant("A test already run by its whole namesake file must not use up the budget, "
                                   "or the cap runs fewer relevant tests than it allows")),
-], ids=["renamed-since-map", "oversized-parametrized", "covered-costs-nothing"])
+], ids=["renamed-since-map", "oversized-params-changed", "covered-costs-nothing"])
 def test_capped_selection_keeps_max_tests_with_tests_that_exist(repo, monkeypatch, files, tests, cases, renamed,
-                                                                 max_tests, ran):
-    """The max_tests cap never names a test the map knows but the checkout
-    no longer has, never runs more cases than it allows, and doesn't charge
-    for a test already running as part of its whole file."""
+                                                                 edit, max_tests, ran):
+    """The max_tests cap never names a test or case the checkout no longer
+    has (it divides a selection as pytest collects it now), never runs more
+    cases than it allows, and doesn't charge for a test already running as
+    part of its whole file."""
     from brindle import coverage_map
 
-    core = "def core():\n    return 1\n"
-    for name, text in {"pkg/__init__.py": "", "pkg/core.py": core, **files}.items():
+    cmd = "pytest -q"   # collected for real, with this interpreter's pytest
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    for name, text in {"pkg/__init__.py": "", "pkg/core.py": "def core():\n    return 1\n", **files}.items():
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / name).write_text(text)
     sh("git add -A && git commit -qm base", repo)
+    everyone = list(range(len(tests)))
     known = {name: {q: [] for q in coverage_map.line_scopes(text)} for name, text in files.items()}
-    known["pkg/core.py"] = {"": list(range(len(tests))), "core": list(range(len(tests)))}
+    known["pkg/core.py"] = {"": everyone, "core": everyone}
     for i, t in enumerate(tests):
         known[coverage_map.test_file(t)][t.split("::")[1]] = [i]
     data = {"commit": sh("git rev-parse HEAD", repo), "tests": tests, "cases": cases, "files": known}
@@ -450,9 +460,9 @@ def test_capped_selection_keeps_max_tests_with_tests_that_exist(repo, monkeypatc
         (repo / path).write_text((repo / path).read_text().replace(old, new))
         sh("git commit -qam rename", repo)
     base = sh("git rev-parse HEAD", repo)
-    (repo / "pkg/core.py").write_text(core.replace("1", "2"))
+    path, old, new = edit
+    (repo / path).write_text((repo / path).read_text().replace(old, new))
     ws = SimpleNamespace(path=str(repo), repo_root=str(repo))
 
-    run = check_scope.command(ws, PYTEST, check_scope.CheckScope(coverage=True), (base, ["pkg/core.py"]),
-                              max_tests=max_tests)
-    assert run.startswith("printf") and shlex.split(run.rsplit(f"; {PYTEST}", 1)[-1]) == ran
+    run = check_scope.command(ws, cmd, check_scope.CheckScope(coverage=True), (base, [path]), max_tests=max_tests)
+    assert run.startswith("printf") and shlex.split(run.rsplit(f"; {cmd}", 1)[-1]) == ran
