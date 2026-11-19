@@ -30,6 +30,10 @@ export interface AppState {
   pastWorkers: string[];
   /* Agent id → whether its process is alive, from the daemon's liveness sweep. */
   alive: Record<string, boolean>;
+  /* How many liveness messages have come, and agent id → the one that last said its `alive`:
+     what the sweep said before a session came back after a restart is from before (store/panes.ts). */
+  liveness: number;
+  aliveAt: Record<string, number>;
   org: { bar: string[] | null; notices: OrgNotice[] };
   /* Something changed that only a fresh snapshot shows. */
   stale: boolean;
@@ -76,6 +80,8 @@ export const initialState: AppState = {
   inbox: [],
   pastWorkers: [],
   alive: {},
+  liveness: 0,
+  aliveAt: {},
   org: { bar: null, notices: [] },
   stale: false,
   synced: false,
@@ -183,10 +189,16 @@ function applyMessage(state: AppState, m: StreamMessage): AppState {
     case "resnapshot":
       return { ...state, stale: true };
     case "liveness": {
-      if (m.gone === undefined) return { ...state, alive: { ...m.agents } };
+      const liveness = state.liveness + 1;
+      const said = Object.fromEntries(Object.keys(m.agents).map((id) => [id, liveness]));
+      if (m.gone === undefined) return { ...state, alive: { ...m.agents }, liveness, aliveAt: said };
       const alive = { ...state.alive, ...m.agents };
-      for (const id of m.gone) delete alive[id];
-      return { ...state, alive };
+      const aliveAt = { ...state.aliveAt, ...said };
+      for (const id of m.gone) {
+        delete alive[id];
+        delete aliveAt[id];
+      }
+      return { ...state, alive, liveness, aliveAt };
     }
     case "git":
       return {

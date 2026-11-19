@@ -30,7 +30,18 @@ export interface PanesReady {
   /* The engine hasn't answered the gate since the app (re)connected: rows read meanwhile may be a
      recovering engine's, so none of them can say a session is paused. */
   unsure?: boolean;
+  /* Each session this engine's recovery brought back → the store's `liveness` count when the gate
+     learned it was back: a "not alive" the sweep said no later than that is from before its return
+     (its pane was down until then), never an end of it; a later sweep's word stands (`aliveNow`). */
+  aliveFrom?: Record<string, number>;
 }
+
+/* An agent's liveness as the session view may go by: a "not alive" said before its session came back
+   after a restart is unknown, not ended. */
+export const aliveNow = (panes: PanesReady, id: string, alive: boolean | undefined, said: number | undefined) => {
+  const from = panes.aliveFrom?.[id];
+  return alive === false && from !== undefined && (said ?? 0) <= from ? undefined : alive;
+};
 
 /* Whether this session's panes may show: all of them are ready, or this one is back. */
 export const panesReadyFor = (panes: PanesReady, root: string | undefined) =>

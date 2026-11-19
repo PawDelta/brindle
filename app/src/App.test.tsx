@@ -605,6 +605,91 @@ describe("App", () => {
     expect(screen.getByTestId("terminal").textContent).toBe("sup2");
   });
 
+  it.each(["a feed read begun before its return answers after it", "the startup deadline passes mid-recovery", "the stream reconnects mid-recovery"])("update restart: every row paused, the sessions coming back one by one, the view is never paused until the engine says so after recovery (%s)", async (order) => {
+    vi.useFakeTimers();
+    const at = (id: string, window: string | null) => ({ ...root, id: `proj-${id}`, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    const none = (id: string) => ({ ...root, id: `proj-${id}`, agents: [] });
+    const row = (id: string, status: string) => ({ ...session, id, workspace_id: `proj-${id}`, status });
+    // The last daemon paused every session on its way out: every row says paused, no root in any snapshot.
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: ["sup2", "sup3", "sup4"].map((id) => row(id, "paused")),
+      workspaces: ["sup2", "sup3", "sup4"].map(none),
+    });
+    const { client, store, sync } = connectDaemon(daemon);
+    let engine = { resuming: true, pending: ["sup2", "sup3", "sup4"] };
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: engine.resuming, recovered_at: engine.resuming ? null : Date.now() / 1000,
+      recovery: engine.resuming ? { done: 3 - engine.pending.length, total: 3, pending: engine.pending } : null, recovery_sessions: ["sup2", "sup3", "sup4"] }));
+    // The feed's reads: rows as they are when asked; held, they answer only when let go.
+    const sessions = client.sessions.bind(client);
+    let held: (() => void)[] | null = null;
+    vi.spyOn(client, "sessions").mockImplementation(async (repo) => {
+      const rows = await sessions(repo);
+      const hold = held;
+      return hold ? new Promise((ok) => hold.push(() => ok(rows))) : rows;
+    });
+    // A session's status changes as the engine says it (its event marks the store's rows stale).
+    const say = (id: string, status: string) => act(() => void daemon.publish("agent.status", { root_id: id, agent_id: id, payload: { status } }));
+    const back = (id: string) => {
+      daemon.data.sessions = daemon.data.sessions.map((s) => (s.id === id ? { ...s, status: "idle" } : s));
+      daemon.data.workspaces = daemon.data.workspaces.map((w) => (w.id === `proj-${id}` ? at(id, windowOf(id)) : w));
+      engine = { resuming: true, pending: engine.pending.filter((p) => p !== id) };
+      say(id, "idle");
+    };
+    // The engine's liveness sweep, every 2 s: whether each session's pane is up (none is until it is back).
+    const sweep = () => act(() => daemon.send({ type: "liveness", agents: Object.fromEntries(["sup2", "sup3", "sup4"].map((id) => [id, !engine.pending.includes(id) && daemon.data.sessions.some((s) => s.id === id && s.status !== "paused")])), gone: [] }));
+    // The paused screen, by state: the bar's paused state or the surface's ended card.
+    const pausedShown = () => screen.queryByTestId("session-status")?.dataset.state === "paused" || screen.queryByTestId("state-card")?.dataset.kind === "ended";
+    let clock = 0;
+    const watch = async (ms: number) => {
+      for (let t = 0; t < ms; t += 100) {
+        if ((clock += 100) % 2000 === 0) sweep();
+        await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+        expect(pausedShown()).toBe(false);
+      }
+    };
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup3", repo: REPO }} />);
+    await watch(1500);
+    expect(screen.getByTestId("session-status").dataset.state).toBe("restarting");
+    // Another session first.
+    back("sup2");
+    await watch(1000);
+    if (order === "the startup deadline passes mid-recovery") await watch(30000);
+    if (order === "the stream reconnects mid-recovery") {
+      act(() => daemon.drop());
+      await watch(3000);
+      expect(store.getState().connection).toBe("open");
+    }
+    if (order === "a feed read begun before its return answers after it") {
+      held = [];
+      say("sup2", "processing");
+      await watch(100);
+    }
+    // The one on screen.
+    back("sup3");
+    await watch(1500);
+    if (held) {
+      const go = held;
+      held = null;
+      go.forEach((answer) => answer());
+      await watch(1500);
+    }
+    expect(screen.getByTestId("terminal").textContent).toBe("sup3");
+    // sup4 doesn't come back: recovery is over, its row paused.
+    engine = { resuming: false, pending: [] };
+    say("sup4", "paused");
+    await watch(2000);
+    expect(screen.getByTestId("terminal").textContent).toBe("sup3");
+    // After recovery the engine says sup3 is paused (stopped elsewhere): that shows.
+    daemon.data.sessions = daemon.data.sessions.map((s) => (s.id === "sup3" ? { ...s, status: "paused" } : s));
+    daemon.data.workspaces = daemon.data.workspaces.map((w) => (w.id === "proj-sup3" ? none("sup3") : w));
+    say("sup3", "paused");
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    console.log("END", screen.queryByTestId("session-status")?.dataset.state, screen.queryByTestId("state-card")?.dataset.kind, screen.queryByTestId("terminal")?.textContent);
+    expect(pausedShown()).toBe(true);
+  });
+
   it("test_update_relaunch: a session's pane shown during recovery is not reopened when the recovery ends", async () => {
     vi.useFakeTimers();
     const sup2 = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: windowOf("sup2") })) };

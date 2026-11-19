@@ -20,7 +20,7 @@ import { LoadingButton } from "../../components/LoadingButton";
 import { button, main, mono } from "../../components/ui";
 import type { SheetRef } from "../../routes";
 import { CLI_INK, agentName, cliStatus, isPaused, liveWorkers, needsYou, providerName } from "../../store/overview";
-import { OpenSessionContext, PanesReadyContext, panesReadyFor } from "../../store/panes";
+import { OpenSessionContext, PanesReadyContext, aliveNow, panesReadyFor } from "../../store/panes";
 import { SessionsContext } from "../../store/sessions";
 import type { AppStore } from "../../store/store";
 import { useAppState } from "../../store/useStore";
@@ -134,6 +134,9 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // root in the snapshot, is then a row from before, never the engine's word. Only a row read after its
   // return says paused (the person's pause); while unsure, the live terminal or Restarting… stays.
   const panes = useContext(PanesReadyContext);
+  // Likewise the liveness sweep: its "not alive" from before the session came back is no end of it (aliveNow).
+  const aliveAt = useAppState((s) => s.aliveAt);
+  const nodeAlive = node ? aliveNow(panes, node.agent.id, alive[node.agent.id], aliveAt[node.agent.id]) : undefined;
   const pendingHere = panes.pending?.includes(root) === true;
   const returning = !panesReadyFor(panes, root) && (pendingHere || !!panes.returning?.includes(root));
   // Recovery named it and it isn't known back, its pane shown anyway (the gate's startup deadline): the same.
@@ -270,7 +273,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // in the box as chips: the box of the agent they were dropped on, and no other's.
   const chatSupported = useChatSupport(client);
   const shown = node?.agent ?? null;
-  const chatAgent = chatSupported && shown && shown.provider === "claude" && !shown.locked && !paused && sessionStatus !== "resuming" && CHAT_STATES.has(shown.status) && alive[shown.id] !== false ? shown : null;
+  const chatAgent = chatSupported && shown && shown.provider === "claude" && !shown.locked && !paused && sessionStatus !== "resuming" && CHAT_STATES.has(shown.status) && nodeAlive !== false ? shown : null;
   const [dropped, setDropped] = useState<{ agent: string; files: File[] }>();
   const [dropping, setDropping] = useState(false);
   const chatId = chatAgent?.id;
@@ -310,7 +313,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         root={root}
         repo={repo}
         node={node}
-        alive={node ? alive[node.agent.id] : undefined}
+        alive={nodeAlive}
         sessionStatus={sessionStatus}
         restarting={restarting}
         paused={paused}
@@ -367,7 +370,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
                 repo={repo}
                 root={root}
                 agent={node?.agent ?? null}
-                alive={node ? alive[node.agent.id] : undefined}
+                alive={nodeAlive}
                 sessionStatus={sessionStatus === "resuming" || !node || node.agent.id === root ? sessionStatus : null}
                 restarting={restarting}
                 sessionName={session?.name || session?.goal}
