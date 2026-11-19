@@ -3,6 +3,7 @@ ones go once nothing is in them, their changes saved as a patch and their
 branch kept; the person's own checkouts are never touched."""
 
 import dataclasses
+import logging
 import os
 import time
 from pathlib import Path
@@ -159,3 +160,31 @@ def test_scratchpad_worktree_of_a_session_without_rows(db, repo, tmp_path, monke
     worktree_cleanup.sweep(db)
 
     assert probe.exists() == (record == "none")
+
+
+def test_sweep_skips_a_repo_root_removed_after_discovery_and_still_sweeps_the_others(
+        db, repo, tmp_path, monkeypatch, caplog):
+    """A repo root that is listed as known but whose folder is removed before
+    the sweep reaches it is skipped quietly: nothing is logged above DEBUG
+    about it, nothing is created or deleted there, and the other repo's
+    finished scratchpad worktree still goes."""
+    base = tmp_path / "cc-tmp"
+    monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(base))
+    pad = base / f"claude-{os.getuid()}" / "-Users-someone-proj" / "sess-789" / "scratchpad"
+    pad.mkdir(parents=True)
+    probe = pad / "probe"
+    git.run(["worktree", "add", "-q", "--detach", str(probe), "HEAD"], repo)
+    ws = workspaces.adopt_root(db, str(repo))
+    _agent(db, ws.id, session_ref="sess-789")
+    gone = tmp_path / "bench"
+    monkeypatch.setattr(agents, "is_alive", lambda *a, **kw: False)
+    roots = sorted([str(gone), str(repo)])
+    monkeypatch.setattr(disk, "_repos", lambda db, here: roots)
+
+    with caplog.at_level(logging.DEBUG, logger="brindle"):
+        worktree_cleanup.sweep(db)
+
+    about_gone = [r for r in caplog.records if str(gone) in r.getMessage()]
+    assert all(r.levelno <= logging.DEBUG for r in about_gone)
+    assert not gone.exists()
+    assert not probe.exists()
