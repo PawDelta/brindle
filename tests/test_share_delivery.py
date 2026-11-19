@@ -13,12 +13,11 @@ def test_a_share_the_library_refuses_offers_the_owner_a_way_out(db, parts, monke
     pid, lib, net = parts
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
     lib.share_status = 404
-    monkeypatch.setattr(sd, "account", lambda store=None: "user_1")   # the signed-in owner who shared it
     try:
         sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a", "required": True}])
     except RuntimeError:
         pass   # the Library refused the share: the owner's plan keeps its link and its refusal
     unconfirmed = plans.gate(db, plans.get(db, pid))["unconfirmed"]
     assert unconfirmed["reason"] == plans.ACCESS_REFUSED
-    assert unconfirmed["can_stop_sharing"] is True
+    assert unconfirmed["can_stop_sharing"] is False   # a refusal never opens a way around the review
     assert unconfirmed["can_edit_reviewers"] is True

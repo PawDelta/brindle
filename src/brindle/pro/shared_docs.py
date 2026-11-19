@@ -1297,13 +1297,9 @@ def may_stop(row, who: str | None) -> bool:
     refusal (of access or by a rule) nor unreadable. No answer yet can't show
     there are no rules."""
     review = json.loads(row["review"])
-    if row["access_refused"] is not None:
-        # The Library refused this account the share, so no reviewer or rule it counts was ever shown
-        # here: the owner may stop, unless a review was seen to demand one.
-        held = not row["review_asked"]
-    else:
-        held = row["unconfirmed"] is not None and not row["review_asked"] and not plans.demands_review(review)
-    return (held and who == row["owner"] and not review.get(review_policies.REFUSED))
+    return (row["unconfirmed"] is not None and who == row["owner"] and not row["review_asked"]
+            and row["access_refused"] is None and not review.get(review_policies.REFUSED)
+            and not plans.demands_review(review))
 
 
 def stop_sharing(db: DB, plan_id: str, rev: Any, *, store=None) -> None:
