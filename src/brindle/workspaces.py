@@ -973,8 +973,6 @@ def with_footer(body: str, repo_root: str, ws: Workspace | None = None, sha: str
         return "\n".join(_LOGO_TAG.sub(PR_LOGO, line) if PR_FOOTER in line else line for line in lines)
     if lines and lines[-1].strip() == PR_FOOTER:
         body = "\n".join(lines[:-1])   # a bare text-only footer at the end: the full one replaces it
-    elif PR_FOOTER in body:
-        return body                    # mentioned elsewhere in the text: not ours to touch
     parts = []
     if ws is not None:
         try:

@@ -226,11 +226,13 @@ def _sent_body(ws, monkeypatch, body):
     pytest.param("Fixes a bug.\n\n" + workspaces.PR_LOGO.replace('width="18" height="13"', 'height="20"')
                  + " " + workspaces.PR_FOOTER + " · 1 worker",
                  marks=pytest.mark.variant("the earlier 20px-high logo is resized, not doubled")),
+    pytest.param("Built with [brindle](https://pawdelta.com/brindle)\n\nTesting: ran it.",
+                 marks=pytest.mark.variant("a non-final bare mention still gets the full footer")),
     pytest.param("", marks=pytest.mark.variant("an empty body becomes just the footer")),
 ])
 def test_pr_body_ends_with_the_footer_exactly_once(feature, monkeypatch, body):
     sent = _sent_body(feature, monkeypatch, body)
-    assert sent.count(workspaces.PR_FOOTER) == 1
+    assert workspaces._has_full_footer(sent)
     assert sent.count(workspaces.PR_LOGO) == 1   # a bare text footer is upgraded to the full one
     if "·" not in body:
         assert sent.endswith(workspaces.PR_FOOTER)
