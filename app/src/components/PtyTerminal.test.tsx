@@ -308,6 +308,16 @@ it("sends Caps Lock letters on keydown exactly once without invoking clipboard s
   expect(written.at(-1)).toBe("B");
 });
 
+it("measures emoji two columns wide, as Claude Code and tmux do", async () => {
+  const { opened, term } = mount();
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[2J\x1b[H✅x")));
+  await parsed(term());
+  const line = term().buffer.active.getLine(0)!;
+  expect(line.getCell(0)!.getWidth()).toBe(2);
+  expect(line.getCell(1)!.getWidth()).toBe(0);
+  expect(line.getCell(2)!.getChars()).toBe("x");
+});
+
 it("draws the client's bytes as they come and sends what xterm.js says, as is", async () => {
   const { written, opened, view, term } = mount();
   expect(opened.at).toEqual({ server: "brindle", target: "s:@1" });
