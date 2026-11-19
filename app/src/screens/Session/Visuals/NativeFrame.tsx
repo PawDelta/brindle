@@ -136,14 +136,19 @@ export function useSpareVisual(visuals: readonly VisualDTO[] | null) {
   }, [id, rev]);
 }
 
-function themeMessage() {
+export function themeMessage() {
   const style = getComputedStyle(document.documentElement);
   const vars = Object.fromEntries([
     "canvas", "canvas-2", "surface", "surface-2", "line", "line-strong", "ink", "ink-2", "ink-3",
     "fawn", "fawn-soft", "sap", "sap-soft", "pass", "pass-soft", "branch", "branch-soft", "fail", "fail-soft",
     "on-fawn", "on-branch", "on-sap", "thread-in", "thread-top", "thread-mid", "thread-out", "sans", "mono",
   ].map((name) => [`--${name}`, style.getPropertyValue(`--${name}`).trim()]));
-  return { type: "brindle.theme", vars };
+  // The app's light or dark (styles.css: data-theme forces one, else the system's, dark by default).
+  // The page follows it, data-theme and prefers-color-scheme alike (src-tauri/src/visual_theme.js).
+  const forced = document.documentElement.dataset.theme;
+  const scheme = forced === "light" || forced === "dark" ? forced
+    : window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  return { type: "brindle.theme", scheme, vars };
 }
 
 export function NativeFrame({ source, title, onMessage, zoom = 1, zoomAnchor = null, snapshotRequest = 0, covered: menuOver = false }: VisualFrameProps) {

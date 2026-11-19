@@ -88,8 +88,8 @@ export type TerminalView = { kind: "connecting" } | { kind: "live" } | { kind: "
 
 export type Renderer = "webgl" | "dom";
 
-/* The shell block palette (styles.css --shell-*, the site's: dark in both
-   themes), read from the tokens as the page has them; xterm takes none of
+/* The shell block palette (styles.css --shell-*, set per theme), read from the
+   tokens as the page has them; xterm takes none of
    its own where a token is missing (a test page with no stylesheet). */
 export function shellTheme(): { background?: string; foreground?: string; cursor?: string; selectionBackground?: string } {
   if (typeof document === "undefined") return {};
