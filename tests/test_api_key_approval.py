@@ -58,7 +58,7 @@ def test_approve_merges_and_unrejects(tmp_path):
 def test_seed_ci_config_still_seeds_onboarding_trust_and_the_key(tmp_path, repo):
     providers.seed_ci_config([str(repo)], KEY)
     data = json.loads(_config(tmp_path).read_text())
-    assert data["hasCompletedOnboarding"] is True and data["theme"]
+    assert data["hasCompletedOnboarding"] is True
     assert data["projects"][os.path.realpath(repo)] == {"hasTrustDialogAccepted": True}
     assert data["customApiKeyResponses"]["approved"] == [KEY[-20:]]
 

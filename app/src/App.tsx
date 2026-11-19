@@ -447,7 +447,10 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
             )}
           </main>
           {/* Docked under the session (or whatever page is shown): the screen above gets shorter, nothing lies over it. */}
-          <TerminalPanel />
+          {/* Only the session screen shows it (not Settings, the Library or a full-window visual); its shells keep running while hidden. */}
+          <div className={shown.screen === "session" && !reading ? "contents" : "hidden"}>
+            <TerminalPanel />
+          </div>
         </div>
         {client && <Walkthrough autoStart={firstRun} onStep={showWalkthroughStep} />}
         <ReconnectOverlay phase={reconnect} focusBefore={focusBefore} onRetry={check} />
