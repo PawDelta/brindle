@@ -1052,6 +1052,28 @@ def _checked(db: DB, ws: Workspace, job: Job, passed: tuple[str, list[str]] | No
                             passed=passed, checked=checked)
 
 
+def _not_while_preparing(ws: Workspace, key: tuple[str, str]) -> None:
+    """Refused (409) while brindle's own preparation runs the PR checks on
+    this branch: they hold its checkout, so the person's Open PR or Push
+    could only fail with a merge "under way"."""
+    with _PR_LOCK:
+        preparing = key in _PR_WORK
+    if preparing:
+        raise ServiceError("busy", f"brindle is still running the PR checks on {ws.branch}; "
+                           "open the PR once they finish (the Inbox says when)", 409)
+
+
+@contextlib.contextmanager
+def _refusal_said(ws: Workspace):
+    """A push the repository's pre-push hook or its remote turned down,
+    said plainly: what they said, and that nothing was opened."""
+    try:
+        yield
+    except git.PushRefused as e:
+        raise ServiceError("push_refused", f"{ws.branch} wasn't pushed, so no PR was opened or updated. "
+                           f"The repository refused the push:\n{e.reason}", 409) from None
+
+
 def open_session_pr(db: DB, params: dict, body: Body) -> Any:
     """Push the session branch and open its PR (``title``, ``body``,
     ``draft``) the way ``brindle pr`` does: only ever on the person's
@@ -1066,6 +1088,7 @@ def open_session_pr(db: DB, params: dict, body: Body) -> Any:
     review.require_ready(db, root, ws)
     title, text, draft = _get(body, "title"), _get(body, "body"), _get(body, "draft", bool, False)
     key = (root.id, ws.branch)
+    _not_while_preparing(ws, key)
 
     def work(db: DB, job: Job) -> Any:
         identity_lock.ensure(root)      # again: the person signed in may have changed since
@@ -1073,7 +1096,7 @@ def open_session_pr(db: DB, params: dict, body: Body) -> Any:
         prep = db.conn.execute(f"SELECT sha, checks FROM session_pr_prep WHERE {_SESSION_PR} AND state = 'passed'",
                                key).fetchone()
         passed = (prep["sha"], json.loads(prep["checks"] or "[]")) if prep else None
-        with _checked(db, ws, job, passed=passed) as head:
+        with _checked(db, ws, job, passed=passed) as head, _refusal_said(ws):
             url = workspaces.open_pull_request(ws, title, draft, body=text, sha=head)
         if url is None:     # the person opens it from the compare page: no PR to record yet
             url = workspaces.compare_url(ws)
@@ -1109,7 +1132,7 @@ def push_session_pr(db: DB, params: dict, body: Body) -> Any:
 
     def work(db: DB, job: Job) -> Any:
         identity_lock.ensure(root)
-        with _checked(db, ws, job) as verified:
+        with _checked(db, ws, job) as verified, _refusal_said(ws):
             git.push(ws.path, ws.branch, sha=verified)
         db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (verified, *key))
         bus.publish_agent(db, "session.pr_pushed", root.id, url=pr["url"], commit=verified)
