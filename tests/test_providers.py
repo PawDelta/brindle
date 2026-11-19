@@ -1,10 +1,11 @@
 """The colour theme brindle seeds into Claude Code's global config (the
-first-run answers it gives on a fresh runner or once on a person's machine).
-Fake data only; the config folder is the test's own (conftest)."""
+first-run answers it gives on a fresh runner or once on a person's machine),
+and the move of a "dark" theme brindle seeded earlier on each launch. Fake
+data only; the config folder is the test's own (conftest)."""
 
 import json
 
-from brindle import providers
+from brindle import provider_homes, providers
 
 
 def _config(tmp_path):
@@ -36,38 +37,43 @@ def test_theme_a_person_chose_is_kept_by_the_seed_and_the_onboarding(tmp_path):
 
 def _brindle_folder(tmp_path, monkeypatch):
     """Claude Code runs from brindle's own signed-in config folder (provider_homes),
-    the person's own home beside it."""
-    from brindle import provider_homes
-
-    person, ours = tmp_path / "person", tmp_path / "ours"
-    person.mkdir()
-    ours.mkdir()
+    the person's own home beside it. Returns the folder's .claude.json and a repo
+    folder for a launch to trust."""
+    person, ours, work = tmp_path / "person", tmp_path / "ours", tmp_path / "work"
+    for folder in (person, ours, work):
+        folder.mkdir()
     monkeypatch.setenv("HOME", str(person))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(ours))
     (ours / provider_homes.SIGNED_IN).write_text("1\n")
-    return ours / ".claude.json"
+    return ours / ".claude.json", str(work)
 
 
-def test_theme_dark_in_brindles_own_config_folder_migrates_to_the_ansi_theme(tmp_path, monkeypatch):
-    config = _brindle_folder(tmp_path, monkeypatch)
-    config.write_text(json.dumps({"theme": "dark"}))
-    providers.seed_ci_config([])
-    assert json.loads(config.read_text())["theme"] == "dark-ansi"
+def test_theme_dark_brindle_seeded_moves_to_the_ansi_theme_on_an_existing_owned_launch(tmp_path, monkeypatch):
+    # An already-onboarded brindle folder (no onboarding again) whose theme brindle seeded as "dark".
+    config, work = _brindle_folder(tmp_path, monkeypatch)
+    config.write_text(json.dumps({"hasCompletedOnboarding": True, "theme": "dark"}))
+    assert providers.trust_folder(work)
+    data = json.loads(config.read_text())
+    assert data["theme"] == "dark-ansi"
+    assert data["hasCompletedOnboarding"] is True
+    assert "customApiKeyResponses" not in data   # the launch changes nothing else
 
 
-def test_theme_light_in_brindles_own_config_folder_is_kept(tmp_path, monkeypatch):
-    config = _brindle_folder(tmp_path, monkeypatch)
-    config.write_text(json.dumps({"theme": "light"}))
-    providers.seed_ci_config([])
+def test_theme_light_in_brindles_own_config_folder_is_kept_on_a_launch(tmp_path, monkeypatch):
+    config, work = _brindle_folder(tmp_path, monkeypatch)
+    config.write_text(json.dumps({"hasCompletedOnboarding": True, "theme": "light"}))
+    providers.trust_folder(work)
     assert json.loads(config.read_text())["theme"] == "light"
 
 
-def test_theme_dark_in_the_persons_own_config_is_kept(tmp_path, monkeypatch):
+def test_theme_dark_in_the_persons_own_config_is_kept_on_a_launch(tmp_path, monkeypatch):
     person = tmp_path / "person"
+    work = tmp_path / "work"
     person.mkdir()
+    work.mkdir()
     monkeypatch.setenv("HOME", str(person))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    (person / ".claude.json").write_text(json.dumps({"theme": "dark"}))
-    providers.record_claude_onboarding()
+    (person / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True, "theme": "dark"}))
+    providers.trust_folder(str(work))
     assert json.loads((person / ".claude.json").read_text())["theme"] == "dark"
