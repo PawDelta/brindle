@@ -2426,11 +2426,15 @@ def _docs_switch(on: bool, name: str) -> None:
 
     _docs_arm()
     try:
-        analysis_docs.set_switch(on, name=name)
+        got = analysis_docs.set_switch(on, name=name)
     except (auth.AuthError, RuntimeError) as e:
         _fail(f"library: {e}")
-    state = "on" if on else "off"
-    typer.echo(f"storing library items is {state}" if name == "store" else f"library: {name} is {state}")
+    if name == "store":
+        left = got.get("left", 0) if isinstance(got, dict) else 0
+        typer.echo(f"library location: {'brindle servers' if on else 'this Mac'}"
+                   + (f" ({left} plans not moved yet: run this again to retry)" if left else ""))
+        return
+    typer.echo(f"library: {name} is {'on' if on else 'off'}")
 
 
 _SWITCH_HELP = ("Which of your own switches: store (the default), share, assist, prompt_analysis "
@@ -2439,13 +2443,13 @@ _SWITCH_HELP = ("Which of your own switches: store (the default), share, assist,
 
 @docs_app.command("on")
 def docs_on(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
-    """Turn one of your switches on; without --switch, store approved plans in the Library after they merge."""
+    """Turn one of your switches on; without --switch, keep your Library of approved plans on brindle servers."""
     _docs_switch(True, switch)
 
 
 @docs_app.command("off")
 def docs_off(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
-    """Turn one of your switches off; without --switch, stop storing approved plans in the Library."""
+    """Turn one of your switches off; without --switch, keep your Library of approved plans on this Mac."""
     _docs_switch(False, switch)
 
 

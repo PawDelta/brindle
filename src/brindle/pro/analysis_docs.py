@@ -9,9 +9,11 @@ raises into it. When the queue is full, uploads are dropped. After a 200 the
 local copies are deleted; on any failure they stay.
 
 Nothing is sent in air-gap mode, without the ``analysis_docs`` entitlement
-(the docs then stay in the folder, a Knowledge source), or when the ``store``
-switch resolves to off (:func:`resolve_switch`). The first upload prints a
-one-time notice naming ``brindle docs off``. ``repo_key`` is the org-key HMAC
+(the docs then stay in the folder, a Knowledge source), or when the library
+location is this Mac (the ``store`` switch resolves to off:
+:func:`brindle.pro.local_library.location`); an approved plan is then kept in
+the library on this Mac instead. The first upload prints a one-time notice
+naming ``brindle docs off``. ``repo_key`` is the org-key HMAC
 of the repo's identity (:mod:`brindle.pro.orgkey`); without an org key or an
 identity nothing is sent.
 
@@ -51,8 +53,8 @@ MAX_FILES = 20
 SWITCHES = ("standard", "store", "share", "assist", "prompt_analysis")
 PLAN_DEFAULT_ON = analysis_policy.PLAN_DEFAULT_ON
 NOTICE_MARK = "analysis-docs-notice"
-NOTICE = ("brindle stores your analysis docs encrypted in your personal library once their "
-          "branch merges. Turn this off any time with `brindle docs off`.")
+NOTICE = ("brindle stores your approved plans encrypted in your personal library on brindle's servers. "
+          "Keep them on this Mac instead any time with `brindle docs off`.")
 
 
 # -- switches -----------------------------------------------------------------------------------
@@ -71,6 +73,7 @@ class Doc:
     files: list[dict]                                    # {name, md}, named below the docs folder
     source: dict                                         # {kind, ref}
     paths: list[tuple[Path, bytes]] = field(default_factory=list)   # each local copy and what was sent
+    plan: bool = False      # an approved plan: kept in the library on this Mac when it isn't uploaded
 
 
 def _read(path: Path) -> bytes | None:
@@ -173,7 +176,12 @@ class AnalysisDocs:
     def submit(self, docs: list[Doc]) -> None:
         """Queue ``docs`` for upload. Never blocks, never raises."""
         try:
-            if not docs or self.entitlement() is None:
+            if not docs:
+                return
+            if self.entitlement() is None:          # nothing is sent: plans stay on this Mac
+                for d in docs:
+                    if d.plan:
+                        self._keep_local(d)
                 return
             for d in docs:
                 try:
@@ -184,44 +192,66 @@ class AnalysisDocs:
             log.info("analysis doc submit skipped", exc_info=True)
 
     def _store_on(self) -> bool:
-        """Whether the user's ``store`` switch is on. Failing to read it counts as off."""
+        """Whether the library is on brindle's servers (:func:`local_library.location`).
+        Failing to read the person's choice leaves it on this Mac."""
+        from brindle.pro import local_library
+
         client, store = self._deps()
         try:
-            return resolve_switch("store", fetch_switches(client, store), store=store)
+            return local_library.location(store, fetch=lambda: fetch_switches(client, store)) == local_library.SERVER
         except Exception:  # noqa: BLE001
             return False
 
+    def _keep_local(self, doc: Doc) -> None:
+        from brindle.pro import local_library
+
+        try:
+            local_library.add(doc.files, doc.source, repo_root=self.repo_root)
+        except Exception:  # noqa: BLE001 - never raises into an approval
+            log.info("plan not kept in the local library", exc_info=True)
+
     def _send_one(self, doc: Doc) -> None:
         try:
-            from brindle.pro import auth
-
-            ent = self.entitlement()
-            identity = self._identity() if ent else None
-            if ent is None or identity is None or not self._store_on():
+            if not self._store_on():
+                if doc.plan:
+                    self._keep_local(doc)
                 return
-            key = self.keys.get(ent.org_id)
-            self._first_notice()
-            client, store = self._deps()
-            body = {"scope": {"kind": "user", "id": ent.sub}, "files": mask_data(doc.files),
-                    "source": mask_data(doc.source), "repo_key": key.repo_key(identity)}
-            status, resp = auth.authed(client, store, "POST", "/analysis-docs", auth.JSONBody(body))
-            if status != 200:
-                log.info("analysis doc not stored (HTTP %s)", status)
-                return
-            session = doc.source.get("session")
-            doc_id = (resp.get("doc_id") or resp.get("id")) if isinstance(resp, dict) else None
-            if isinstance(session, str) and session and isinstance(doc_id, str):
-                from brindle import knowledge
-                from brindle.db import DB
-
-                db = DB()
-                try:
-                    knowledge.record_receipt(db, session, [(UPDATED_ITEM, doc_id, "uploaded")])
-                finally:
-                    db.conn.close()
-            _delete_local(doc)
+            if self.upload(doc, notice=True) is not None:
+                _delete_local(doc)
         except Exception as e:  # noqa: BLE001
             log.info("analysis doc not sent (%s)", type(e).__name__)
+
+    def upload(self, doc: Doc, *, notice: bool = False) -> str | None:
+        """Store ``doc`` in the person's library on the server, whatever the
+        library location: its doc id, or None when it wasn't stored."""
+        from brindle.pro import auth
+
+        ent = self.entitlement()
+        identity = self._identity() if ent else None
+        if ent is None or identity is None:
+            return None
+        key = self.keys.get(ent.org_id)
+        if notice:
+            self._first_notice()
+        client, store = self._deps()
+        body = {"scope": {"kind": "user", "id": ent.sub}, "files": mask_data(doc.files),
+                "source": mask_data(doc.source), "repo_key": key.repo_key(identity)}
+        status, resp = auth.authed(client, store, "POST", "/analysis-docs", auth.JSONBody(body))
+        if status != 200:
+            log.info("analysis doc not stored (HTTP %s)", status)
+            return None
+        session = doc.source.get("session")
+        doc_id = (resp.get("doc_id") or resp.get("id")) if isinstance(resp, dict) else None
+        if isinstance(session, str) and session and isinstance(doc_id, str):
+            from brindle import knowledge
+            from brindle.db import DB
+
+            db = DB()
+            try:
+                knowledge.record_receipt(db, session, [(UPDATED_ITEM, doc_id, "uploaded")])
+            finally:
+                db.conn.close()
+        return doc_id if isinstance(doc_id, str) else ""     # stored, even without an id to name it
 
     def _first_notice(self) -> None:
         from brindle.pro._files import private_dir, write_private
@@ -394,6 +424,11 @@ def switch_states(client=None, store=None) -> list[dict]:
         policy = {"switches": got["switches"] if "analysis_docs_enterprise" in ent.features else {},
                   "groups": got["groups"]}
         group = _own_group(policy, asked_scopes.result())
+    from brindle.pro import local_library
+
+    kept = local_library.person_choice(lambda: choices)     # the library location chosen on this Mac
+    if kept is not None:
+        choices = {**choices, "store": "on" if kept == local_library.SERVER else "off"}
     states = []
     for name in analysis_policy.SWITCHES:
         enforced = next((v for v in (policy["switches"].get(name),
@@ -408,7 +443,9 @@ def switch_states(client=None, store=None) -> list[dict]:
 
 def set_switch(on: bool, *, name: str = "store", client=None, store=None) -> dict:
     """Set the person's own ``name`` switch, keeping the others. Raises
-    :class:`Locked` when their org enforces it."""
+    :class:`Locked` when their org enforces it. ``store`` is the library
+    location (on: brindle's servers, off: this Mac), and setting it moves the
+    plans there (:func:`local_library.set_location`)."""
     if name not in analysis_policy.SWITCHES:
         raise RuntimeError(f"no switch {name!r}: one of {', '.join(analysis_policy.SWITCHES)}")
     client, store = _session(client, store)
@@ -416,6 +453,11 @@ def set_switch(on: bool, *, name: str = "store", client=None, store=None) -> dic
     if state["locked"]:
         raise Locked(f"your organisation has {name} {'on' if state['org'] == 'enforced_on' else 'off'} "
                      "for everyone")
+    if name == "store":
+        from brindle.pro import local_library
+
+        return local_library.set_location(local_library.SERVER if on else local_library.LOCAL,
+                                          client=client, store=store)
     switches = {**fetch_switches(client, store), name: "on" if on else "off"}
     return api("PUT", "/me/analysis-docs/settings", {"switches": switches}, client=client, store=store)
 

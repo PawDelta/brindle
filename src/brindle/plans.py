@@ -1106,15 +1106,16 @@ def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles
 
 def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
                 doc: list[str] = ()) -> None:
-    """Store the approved plan in the person's plan library. Entitlement, the
-    store switch and the network are the uploader's to judge; nothing here
+    """Store the approved plan in the person's plan library, on brindle's
+    servers or on this Mac (Settings › Library location). Entitlement, the
+    location and the network are the uploader's to judge; nothing here
     blocks or fails an approval."""
     try:
         from brindle.pro import analysis_docs
 
         md = _record(p, picks, comments, note, titles, doc)
         doc = analysis_docs.Doc(files=[{"name": f"plan-{p['id']}.md", "md": md}],
-                                source={"kind": "goal", "ref": p["id"], "session": p["root_id"]})
+                                source={"kind": "goal", "ref": p["id"], "session": p["root_id"]}, plan=True)
         analysis_docs.on_merged(p["visual"]["repo_root"], [doc])
     except Exception:  # noqa: BLE001 - the approval stands
         log.info("brindle: plan %s not queued for the library", p["id"], exc_info=True)
