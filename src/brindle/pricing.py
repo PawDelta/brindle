@@ -98,6 +98,7 @@ PRICES: dict[str, Price] = {
     # OpenAI (Standard tier)
     "gpt-6-astra": _openai(10, 1, 50, write=12.50),
     "gpt-6.1-sol": _openai(2, 0.10, 10, write=2.50),
+    "gpt-6.1-terra": _openai(1, 0.05, 5, write=1.25),
     "gpt-6-sol": _openai(2, 0.20, 10, write=2.50),
     "gpt-6-luna": _openai(0.10, 0.01, 0.50, write=0.125),
     "gpt-5.6-sol": _openai(4, 0.40, 20, write=5.00),
