@@ -59,7 +59,7 @@ import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -421,7 +421,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [note, setNote] = useState("");
   const [attached, setAttached] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
-  const [sending, setSending] = useState<"confirm" | "approve" | "changes" | null>(null);
+  const [sending, setSending] = useState<"confirm" | "approve" | "changes" | "cancel" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -728,6 +728,15 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       setAttached([]);
       setPicks({});
     }
+  };
+  /* Close the plan without approving it: nothing is built or sent to the Library, and the tasks it held wait for the supervisor. */
+  const cancelPlanning = async () => {
+    if (historical || !client || !client.cancelPlan) return;
+    setSending("cancel");
+    const now = await send(() => client.cancelPlan!(plan.id, plan.rev));
+    if (!alive.current) return;
+    setSending(null);
+    if (now) setNote("");
   };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   const stopSharing = async () => {
@@ -1079,6 +1088,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
+              {client?.cancelPlan && <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>}
               <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
                 title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
                 Request changes

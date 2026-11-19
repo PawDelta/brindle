@@ -2286,6 +2286,11 @@ export class DaemonClient {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 
+  /* Cancel an open or redirected plan without approving it (brindle/plans.py cancel): a 409 once decided. */
+  cancelPlan(id: string, rev: number) {
+    return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/cancel`, { rev });
+  }
+
   /* The design doc's writes (brindle/plan_docs.py). Each names the revision on screen where the
      engine checks it (a newer one is a 409) and answers with the plan as it is now. */
   commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string, question = false) {
