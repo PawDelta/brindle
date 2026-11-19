@@ -297,8 +297,8 @@ it("a redirected plan can be cancelled from the reader, and the same reader then
   await screen.findByTestId("plan-closed");
   expect(cancels).toEqual([1]);
   expect(screen.queryByTestId("plan-cancel")).toBeNull();
-  // The status line must not show the wrong outcome (changes requested, supervisor revising).
-  expect(screen.getByTestId("plan-status").textContent).not.toMatch(/Changes requested|revising/);
+  // The status is rendered in its closed presentation, not the changes-requested one.
+  expect(screen.getByTestId("plan-status").dataset.presentation).toBe("closed");
 });
 
 it("design doc writes go one at a time, a read sent before one came back can't undo it, and a reply is feedback to send", async () => {
