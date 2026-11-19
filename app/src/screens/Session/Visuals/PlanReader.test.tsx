@@ -436,8 +436,8 @@ it("a design doc whose Team plan ended says so, once, and only then", async () =
 
 it("the author's plan opened in its session offers its Library link by plan id, and none when it isn't in the Library", async () => {
   const url = "https://pawdelta.com/api/brindle/v1/share-links/dsl_p";
-  const plan = doc(1, "Workers run on your machine.");
-  let inLibrary = true;
+  let plan = doc(1, "Workers run on your machine.");
+  let inLibrary = false;
   const copies: string[] = [];
   Object.assign(navigator, { clipboard: { writeText: async () => {} } });
   const client = {
@@ -446,18 +446,22 @@ it("the author's plan opened in its session offers its Library link by plan id, 
     copyPlanShareLink: async (id: string) => { copies.push(id); return { available: true, link: { url, created_at: 1, access: "anyone" as const } }; },
     revokePlanShareLink: async () => ({ available: true, link: null }),
   };
-  const first = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
-  await openShare();
-  await act(async () => fireEvent.click(within(screen.getByTestId("share-link")).getByRole("button", { name: "Copy link" })));
-  expect(copies).toEqual([plan.id]);
-  expect((within(screen.getByTestId("share-link")).getByRole("textbox") as HTMLInputElement).value).toBe(url);
-  first.unmount();
-
-  inLibrary = false;
-  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const store = createAppStore();
+  render(inTestStore(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />, store));
   await screen.findByTestId("plan-build");
   await act(async () => {});
-  expect(screen.queryByRole("button", { name: "Share" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Share" })).toBeNull();        // not in the Library: no link
+
+  // Shared for review in this same reader: the plan now has its Library doc, and the menu its link.
+  inLibrary = true;
+  plan = { ...plan, gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["u_r"], reviewers: [{ sub: "u_r", required: true, status: "waiting" }] } };
+  await act(async () => {
+    store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 1, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: {} } });
+  });
+  await openShare();
+  await act(async () => fireEvent.click(within(await screen.findByTestId("share-link")).getByRole("button", { name: "Copy link" })));
+  expect(copies).toEqual([plan.id]);
+  expect((within(screen.getByTestId("share-link")).getByRole("textbox") as HTMLInputElement).value).toBe(url);
 });
 
 it("a doc the Library can't confirm says why in plain words, with Sign in, and Stop sharing goes on to build", async () => {

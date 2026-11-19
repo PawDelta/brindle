@@ -397,7 +397,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [refreshes, setRefreshes] = useState(0);
   const [raw, setRaw] = useState(false);
   const [sharingOpen, setSharingOpen] = useState(false);
-  const link = useShareLink(shareLink);
+  // Asked again as the menu opens and once the plan is shared: sharing is what puts it in the Library.
+  const link = useShareLink(shareLink, `${sharingOpen}:${!!receivedPlan.gate}`);
   const [briefOpen, setBriefOpen] = useState(false);
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
   // A suggestion's section text as it is being typed on the page (SuggestEditor).
