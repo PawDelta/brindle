@@ -6848,7 +6848,9 @@ def _handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | Non
             pilot.user_spoke(db, agent)
             from brindle import visual_offers
 
-            visual_offers.person_spoke(db, agent, prompt, cli_prompt=True, carries_delivery=carries_delivery)
+            # A prompt carrying brindle's delivery isn't all the person's words: it answers no visual.
+            visual_offers.person_spoke(db, agent, prompt, cli_prompt=True, carries_delivery=carries_delivery,
+                                       fold_visuals=not carries_delivery)
     elif event == "notification":
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:

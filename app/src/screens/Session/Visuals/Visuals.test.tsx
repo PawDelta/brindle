@@ -1267,6 +1267,7 @@ describe("visuals", () => {
     const latest = (p: Plan) => act(async () => reads[reads.length - 1](p));
     view.rerender(reader({ ...row, rev: 2 }));
     await latest(settled(2));
+    fireEvent.click(screen.getByRole("radio", { name: "Org policy" }));
     await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
     view.rerender(reader({ ...row, rev: 3 }));
     await latest(settled(3));

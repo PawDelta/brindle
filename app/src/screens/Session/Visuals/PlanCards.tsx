@@ -72,7 +72,7 @@ const optionRow = "grid grid-cols-[14px_minmax(0,1.15fr)_minmax(0,1.5fr)_minmax(
 
 /* A decision's alternatives as a table: one row each, the picked one marked, the supervisor's pick
    "recommended", the trade-offs as + and − lines, the files it would touch, and who voted for it.
-   A row is a radio: picking one is the person's draft until they confirm it in the bottom bar. */
+   A row is a radio: the person's selection is sent with their verdict. */
 export function Decision({ decision: d, chosen, open, onPick }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void }) {
   return (
     <div role="radiogroup" aria-label={d.title} className="-mx-2.5 grid font-sans text-[13px] leading-normal">

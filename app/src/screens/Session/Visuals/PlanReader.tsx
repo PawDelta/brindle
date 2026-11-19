@@ -421,7 +421,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [note, setNote] = useState("");
   const [attached, setAttached] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
-  const [sending, setSending] = useState<"confirm" | "approve" | "changes" | "cancel" | null>(null);
+  const [sending, setSending] = useState<"approve" | "changes" | "cancel" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -511,11 +511,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const draftStale = !!drafting && sourceOf(anchorOf(drafting.draft)) !== drafting.source;
   const editStale = !!editing && bodyOf(editing.section) !== editing.source;
 
-  // A decision's pick: what the person sent once decided; else their draft, their confirmed
-  // pick, then the supervisor's. It is settled once confirmed with no other draft over it.
+  // A decision is settled for an open plan only after the person picks an option. A supervisor
+  // recommendation is displayed, but does not count as the person's choice.
   const drafted = (d: PlanDecisionDTO) => (d.options.some((o) => o.id === picks[d.id]) ? picks[d.id] : undefined);
   const chosen = (d: PlanDecisionDTO) => (open ? drafted(d) : plan.verdict?.picks?.[d.id]) ?? d.confirmed ?? d.mine ?? null;
-  const settled = (d: PlanDecisionDTO) => !open || (!!d.confirmed && (drafted(d) ?? d.confirmed) === d.confirmed);
+  const settled = (d: PlanDecisionDTO) => !open || !!drafted(d);
   const next = plan.decisions.find((d) => !settled(d));
   const decided = plan.decisions.filter(settled).length;
   const todo: TodoItem[] = plan.decisions.map((d) => {
@@ -746,13 +746,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (now) await decide(true);
     else if (alive.current) setSending(null);
   };
-  const confirm = async () => {
-    const option = next && chosen(next);
-    if (historical || !next || !option) return;
-    setSending("confirm");
-    await write(() => source.vote(plan.rev, next.id, option));
-    if (alive.current) setSending(null);
-  };
   const signOff = async () => {
     if (historical || !source.signOff || reviewBlocked) return;
     setSending("approve");
@@ -766,7 +759,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (done && frozen) setRefreshes((n) => n + 1);
     return done;
   };
-  const nextOption = next?.options.find((o) => o.id === chosen(next));
   const signers = (gate?.reviewers ?? []).filter((r) => r.sub);
   const iAmUnsigned = signers.some((r) => (r.you || (!!teammate?.me && r.sub === teammate.me)) && r.required && r.status !== "signed_off");
   const unsignedOthers = unsigned.filter((r) => !(r.you || (!!teammate?.me && r.sub === teammate.me)));
@@ -786,11 +778,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // A text section: its text with the threads' ranges drawn in, or, being edited, its text where
   // it reads (live) or its markdown in a box.
   const commentButton = (on: () => void, name = "Comment") => canComment && <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={on}>{name}</button>;
-  const nextOptionConfirm = next && (
-    <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={!!historical || busy || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
-      <span className="truncate">{nextOption ? `Confirm ${shortName(nextOption.label)}` : "Confirm"}</span>
-    </LoadingButton>
-  );
   // Editing opens a section where it reads; Suggesting is done on a highlight, as a tracked change.
   const editControl = (section: string, title: string) => mode === "editing" && editing?.section !== section && (
     <button type="button" className={`${quiet} -my-0.5 text-xs`} aria-label={`Edit ${title}`} disabled={!!editing} onClick={() => setEditing({ section, text: bodyOf(section), source: bodyOf(section) })}>
@@ -993,7 +980,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             {plan.decisions.map((d, i) => {
               const mine = settled(d) ? (open ? "confirmed" : null) : d === next ? "yours to take next" : null;
               return (
-                <section key={d.id} id={`plan-decision-${d.id}`} aria-labelledby={`plan-title-decision-${d.id}`} data-next={d === next || undefined} className={`grid gap-2.5 border-t pt-4 ${d === next ? "border-pass" : "border-line"}`}>
+                <section key={d.id} id={`plan-decision-${d.id}`} aria-labelledby={`plan-title-decision-${d.id}`} data-next={d === next || undefined} data-state={open && !settled(d) ? "undecided" : undefined} className={`grid gap-2.5 border-t pt-4 ${open && !settled(d) ? "border-pass" : "border-line"}`}>
                   <h3 className={heading}>
                     <span aria-hidden className={margin}>{plan.sections.length + i + 1}</span>
                     <span id={`plan-title-decision-${d.id}`}>{`Decision · ${d.title}`}</span>
@@ -1071,7 +1058,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
-              {next ? nextOptionConfirm : teammate.rights.signOff && !teammate.signedOff && (
+              {!next && teammate.rights.signOff && !teammate.signedOff && (
                 <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>{signName}</LoadingButton>
               )}
             </div>
@@ -1089,16 +1076,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               </span>
             </div>
             <div className="flex items-center gap-2">
-              {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
+              {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Choose a decision</button>}
               {client?.cancelPlan && <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>}
               <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
                 title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
                 Request changes
               </LoadingButton>
-              {/* One main action at a time: the next decision's confirmation, then the sign-off. */}
-              {next ? nextOptionConfirm : (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
-                  data-testid="plan-build" data-gate={gate?.state} onClick={() => void decide(true)}>
+              {/* The person's selections and verdict travel together. */}
+              {(
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || !!next || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={next ? "Choose every decision first" : gate && gate.state !== "ready" ? gateWhy : undefined}
+                  onClick={() => { if (next) jump(next.id); else void decide(true); }}
+                  data-testid="plan-build" data-gate={gate?.state}>
                   Approve
                 </LoadingButton>
               )}
