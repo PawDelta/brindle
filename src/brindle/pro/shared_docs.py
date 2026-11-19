@@ -88,6 +88,7 @@ NO_FEATURE = "entitlement_required"     # the Library's refusal when the plan la
 LAPSE_GOOD_FOR = 300.0       # seconds the server's word that a Team plan ended lets work go with no gate
 LAPSE_CHECK_AFTER = 120.0    # the background pass asks again once that word is this old
 SCOPE_KINDS = ("group", "org")
+NOT_FOUND = "not_found"      # the Library's answer when the share's document is gone (plan_shares.access_refused)
 CLAIM_FOR = 60.0             # seconds a create or push in flight holds the plan; then it is presumed dead
 FIRST_REVISION = 1           # what the Library numbers a new document's head
 REVIEW = ("rev", "reviewers", "sign_offs", "pending_reviewers", "ready", "policy_reviewers", "pending_policies")
@@ -469,6 +470,9 @@ def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=No
     _review_open(p)
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
+    if share_["access_refused"] == NOT_FOUND:
+        raise ServiceError("share_not_found", "the Library has no document for this plan's share, so its reviewers "
+                           "can't be changed. Stop sharing and build, then share it again.", 409)
     people = _reviewers(reviewers)
     _grant(db, p, share_["doc_id"], people, None, client, store)
     if _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(share_["doc_id"], "/reviewers"),
@@ -1297,6 +1301,9 @@ def may_stop(row, who: str | None) -> bool:
     refusal (of access or by a rule) nor unreadable. No answer yet can't show
     there are no rules."""
     review = json.loads(row["review"])
+    if row["access_refused"] == NOT_FOUND:
+        # The Library has no document for the owner's share, so no review is left to bypass.
+        return who == row["owner"]
     return (row["unconfirmed"] is not None and who == row["owner"] and not row["review_asked"]
             and row["access_refused"] is None and not review.get(review_policies.REFUSED)
             and not plans.demands_review(review))
