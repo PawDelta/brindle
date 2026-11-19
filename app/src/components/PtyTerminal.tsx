@@ -141,6 +141,8 @@ export interface PtyTerminalProps {
   onSize?(cols: number, rows: number): void;
   /* xterm.js's colours, applied as they change (the app's theme switched): the shell block's (shellTheme) unless given. */
   theme?: ITheme;
+  /* xterm.js's minimum contrast between a cell's text and its ground, applied as it changes (with the theme): 1 (none) unless given. */
+  minimumContrastRatio?: number;
   /* Rows under the view's foot the client draws and the view clips (the module's comment): none unless given. */
   cropRows?: number;
   /* While rows are cropped, the client's row their mask starts at where that is above the view's foot (a provider's
@@ -241,7 +243,7 @@ export function linkOpener(openUrl: () => OpenUrl, mac: boolean, openVisual?: ()
   };
 }
 
-export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, cropRows = 0, cropFrom, typeElsewhere, onRows }: PtyTerminalProps) {
+export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, minimumContrastRatio = 1, cropRows = 0, cropFrom, typeElsewhere, onRows }: PtyTerminalProps) {
   const footFrom = useRef(cropFrom);
   footFrom.current = cropFrom;
   const elsewhere = useRef(typeElsewhere);
@@ -254,6 +256,8 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
   const foot = useRef<HTMLDivElement>(null);
   const themed = useRef(theme);
   themed.current = theme;
+  const contrasted = useRef(minimumContrastRatio);
+  contrasted.current = minimumContrastRatio;
   const footRows = useRef(cropRows);
   footRows.current = cropRows;
   // The open view's xterm.js and its layout, for a theme or row crop changing while it's open.
@@ -296,6 +300,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       scrollback: 0,
       macOptionClickForcesSelection: true,
       theme: themed.current ?? shellTheme(),
+      minimumContrastRatio: contrasted.current,
       linkHandler: { activate: follow },
     });
     const fit = new FitAddon();
@@ -825,6 +830,9 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
   useEffect(() => {
     if (live.current) live.current.term.options.theme = theme ?? shellTheme();
   }, [theme]);
+  useEffect(() => {
+    if (live.current) live.current.term.options.minimumContrastRatio = minimumContrastRatio;
+  }, [minimumContrastRatio]);
   useEffect(() => {
     live.current?.layout();
   }, [cropRows, cropFrom]);
