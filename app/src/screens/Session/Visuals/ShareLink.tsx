@@ -100,20 +100,25 @@ export function ShareLinkPanel({ target, state, onState }: {
       setError("Couldn't copy the link: select it below and copy it yourself.");
     }
   });
-  const revoke = () => run(() => target.revoke());
+  const revoke = () => run(async () => {
+    const got = await target.revoke();
+    return { ...state, ...got, access: state.access ?? state.link?.access };
+  });
   const link = state.link;
+  const locked = state.access === "off" || link?.access === "off";
   return (
     <section className="grid gap-1.5 border-t border-line pt-2.5" data-testid="share-link">
       <div className="flex items-center gap-2">
         <span className="text-[12.5px] font-semibold text-ink">Link</span>
         <span className="flex-1" />
-        <button type="button" className={`${button} text-xs`} disabled={busy} onClick={copy}>{copied ? "Copied" : "Copy link"}</button>
-        {link && <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={revoke}>Revoke link</button>}
+        {!locked && <button type="button" className={`${button} text-xs`} disabled={busy} onClick={copy}>{copied ? "Copied" : "Copy link"}</button>}
+        {(link || locked) && <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={revoke}>Revoke link</button>}
       </div>
-      {link && <input readOnly aria-label="Share link" value={link.url} onFocus={(e) => e.currentTarget.select()}
+      {link && !locked && <input readOnly aria-label="Share link" value={link.url} onFocus={(e) => e.currentTarget.select()}
         className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-[11.5px] text-ink-2" />}
       <p className="m-0 text-[12px] leading-[1.5] text-ink-3">
-        {link ? ACCESS[link.access] : "A link lets people outside this design's team read it."}
+        {locked ? state.reason ?? ACCESS.off : link ? ACCESS[link.access] : state.access ? ACCESS[state.access] : "A link lets people outside this design's team read it."}
+        {!locked && state.reason && <> {state.reason}</>}
         {" "}Revoking a link stops it opening, but can't take back copies people already opened.
       </p>
       {error && <p role="alert" className="m-0 text-[12px] text-fail">{error}</p>}
