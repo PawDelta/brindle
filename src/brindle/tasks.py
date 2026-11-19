@@ -1540,14 +1540,15 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
         mine = autopilot.root_of(db, t.caller_id) == caller.id
     if not mine:
         raise ValueError(f"Task {task_id} isn't yours to start: only its caller or its session root can.")
-    if t.state != "pending" or t.waiting is None:
+    cancelled_by = db.cancelled_hold(t.id)
+    if t.state != "pending" or (t.waiting is None and cancelled_by is None):
         raise ValueError(f"Task {task_id} is {t.state}, not waiting for room: nothing to force.")
     if session_sync.resolver_wait(db, t.id):
         raise ValueError(f"Task {task_id} waits for its session to be quiet.")
     caller_ws = db.get_workspace(t.caller_ws_id)
     if not caller_ws or session_paused(db, t):
         raise ValueError(f"Task {task_id} can't start now (its session is paused or gone).")
-    if plan_holds(db, t):
+    if open_plan_holds(db, t):
         raise ValueError(f"Task {task_id} waits on the session's plan: it starts when the person approves it "
                          "(or chooses not to plan first).")
     try:
@@ -1570,10 +1571,14 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
             raise ValueError("Another worker was just started despite the load and is still starting; "
                              "try again once it is up, or let this one wait for room.")
         raise ValueError(f"Task {task_id} was just started or cancelled.")
+    # The supervisor's start_now is the decision a cancelled plan's held task waited for.
+    if cancelled_by is not None:
+        db.set_cancelled_hold(t.id, None)
     try:
         worker = start_queued(db, t)
     except agents.AgentError as e:
         db.release_forced_task(t.id)   # frees the slot
+        db.set_cancelled_hold(t.id, cancelled_by)
         db.update_task(t.id, started_at=None)
         raise ValueError(f"It could not start: {e}") from e
     text = f"Started {worker.id} for task {t.id} ({FORCED})."
@@ -1652,9 +1657,16 @@ def plan_holds(db: DB, t: Task) -> bool:
     """Whether ``t`` waits on its session's planning doc (brindle.plans), or
     on brindle's offer to plan the goal first: while the person hasn't
     approved the plan (or answered No to the offer), nothing the session
-    assigned starts, whatever wakes the task; that answer starts it (``on_resumed``)."""
+    assigned starts, whatever wakes the task; that answer starts it (``on_resumed``).
+    Also a task its plan's cancel left held (plan_cancel_holds): it waits for
+    the supervisor's start_now or cancel_task, never for the plan."""
     if not t.caller_id:
         return False
+    return db.cancelled_hold(t.id) is not None or open_plan_holds(db, t)
+
+
+def open_plan_holds(db: DB, t: Task) -> bool:
+    """Whether the session's open plan (or unanswered offer to plan first) holds ``t``."""
     from brindle import autopilot, plans
 
     return plans.holding(db, autopilot.root_of(db, t.caller_id)) is not None

@@ -376,6 +376,28 @@ def read_plan(plan_id: str) -> str:
 
 
 @mcp.tool()
+def withdraw_plan(plan_id: str) -> str:
+    """Supervisors: withdraw your own plan while it is open or redirected,
+    without the person's approval, when it's no longer the plan to build
+    (for example, the person's request changed). The plan closes, nothing is
+    approved and it isn't sent to the Library; a shared plan's share is
+    stopped. Tasks it held stay queued and start on neither their own: the
+    person is told too. Decide each held task you're told of: start_now
+    starts it, cancel_task gives it up."""
+    from brindle import plans
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        p = plans.cancel(db, plan_id, None, person=False, caller=caller)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    return (f"Withdrew plan {p['id']} (r{p['rev']}). Tasks it held stay queued until you decide each one: "
+            "start_now or cancel_task. Their list is in your inbox.")
+
+
+@mcp.tool()
 def reply_doc_question(doc_id: str, thread_id: int, text: str) -> str:
     """Answer your person's assigned Library design question in its thread.
     Use the document and thread IDs delivered with the question."""
@@ -910,6 +932,8 @@ def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str, branch: str
         state = "queued by a request still being answered"
     elif t.state != "pending":
         state = "being started right now"
+    elif db.cancelled_hold(t.id) is not None:
+        state = "held behind a cancelled plan: start_now starts it, cancel_task gives it up"
     elif tasks.plan_holds(db, t):
         state = "waiting on the session's plan, or on brindle's offer to plan first"
     elif deps:

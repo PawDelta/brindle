@@ -973,7 +973,7 @@ export interface PlanDTO {
   sections: PlanSectionDTO[];
   session: string;
   split: PlanWorkerDTO[];
-  state: "open" | "redirected" | "approved" | "writing" | "superseded";
+  state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled";
   team_ended?: boolean;
   threads?: PlanThreadDTO[];
   title: string;
@@ -1552,7 +1552,7 @@ export interface SharedDesignDTO {
   session: string;
   signed_off?: boolean;
   split: PlanWorkerDTO[];
-  state: "open" | "redirected" | "approved" | "writing" | "superseded";
+  state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled";
   team_ended?: boolean;
   threads?: PlanThreadDTO[];
   title: string;

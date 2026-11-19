@@ -1309,6 +1309,17 @@ def may_stop(row, who: str | None) -> bool:
             and not plans.demands_review(review))
 
 
+def drop_share(c, row) -> None:
+    """Take a plan's share out in ``c``'s transaction (the caller's): its Library doc
+    is queued to be unshared (:func:`_send_unshares`, at the next pass that reaches
+    the Library), and its threads and link go. Whatever the review state."""
+    if row["doc_id"] is not None:
+        c.execute("INSERT OR REPLACE INTO plan_unshares (doc_id, owner, created_at) VALUES (?,?,?)",
+                  (row["doc_id"], row["owner"], time.time()))
+    c.execute("DELETE FROM plan_share_threads WHERE plan_id=?", (row["plan_id"],))
+    c.execute("DELETE FROM plan_shares WHERE plan_id=?", (row["plan_id"],))
+
+
 def stop_sharing(db: DB, plan_id: str, rev: Any, *, store=None) -> None:
     """Make a plan the Library can't confirm a personal doc, so it can be
     approved as one. The check and the change are one transaction, so a sync
@@ -1321,10 +1332,7 @@ def stop_sharing(db: DB, plan_id: str, rev: Any, *, store=None) -> None:
         row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         allowed = p["state"] == "open" and row is not None and row["doc_id"] is not None and may_stop(row, who)
         if allowed:
-            c.execute("INSERT OR REPLACE INTO plan_unshares (doc_id, owner, created_at) VALUES (?,?,?)",
-                      (row["doc_id"], row["owner"], time.time()))
-            c.execute("DELETE FROM plan_share_threads WHERE plan_id=?", (p["id"],))
-            c.execute("DELETE FROM plan_shares WHERE plan_id=?", (p["id"],))
+            drop_share(c, row)
     if not allowed:
         raise ServiceError("stop_sharing_refused", "This plan's sharing can't be stopped from here: its review has "
                            "to be confirmed by the Library.", 409)
