@@ -37,6 +37,7 @@ claims it (moves it to its own file), so no second session picks it up:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -51,7 +52,7 @@ from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config, workspace_config
 from brindle import bus, escapes, knowledge, spawn
-from brindle.db import DB, Agent, Autopilot, Milestone, Workspace, check_state
+from brindle.db import DB, Agent, Autopilot, GoalArchive, Milestone, Workspace, check_state
 from brindle.profiles import load_profile
 
 log = logging.getLogger(__name__)
@@ -660,7 +661,112 @@ def enable(db: DB, root_id: str, ws: Workspace, *, claim: bool = True) -> Plan |
     plan = _claim_seed(db, root_id, ws) if claim else None
     if plan:
         set_goal(db, root_id, plan.goal, plan.milestones, plan.detail)
+    elif claim:
+        restore_archived_goal(db, root_id, ws)
     return plan
+
+
+# -- a deleted session's goal, kept for its branch ----------------------------------
+
+
+def archive_extras(db: DB, root_id: str) -> dict:
+    """What a goal archive keeps beside the rows (``DB._archive_goals``):
+    the session's repo and branch, the branch's tip, and its goal file's
+    text as the person may have edited it. Read before its rows are deleted.
+    Never raises: what can't be read is left out, except that ``unmarked``
+    says the branch is there but its lifecycle token couldn't be had, so
+    the archive couldn't be told apart from a later branch of its name
+    (``DB._goal_archive_extras`` then keeps the session)."""
+    from brindle import git
+
+    out: dict = {}
+    try:
+        root = db.get_agent(root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if ws is None:
+            return out
+        out.update(repo_root=ws.repo_root, branch=ws.branch)
+        out["tip"] = git.run(["rev-parse", "--verify", "--quiet", f"refs/heads/{ws.branch}"], ws.repo_root,
+                             check=False).stdout.strip() or None
+        if out["tip"]:   # never for a branch already gone: a later one of its name would inherit the mark
+            out["branch_mark"] = _branch_mark(ws.repo_root, ws.branch, create=True)
+        path = session_goals_path(db, root_id)
+        if path is not None and path.is_file():
+            out["goals_text"] = path.read_bytes().decode("utf-8")
+    except Exception:  # noqa: BLE001 - the rows are archived whatever the files say
+        log.exception("brindle: couldn't read session %s's branch or goal file for its archive", root_id)
+    out["unmarked"] = bool(out.get("tip")) and not out.get("branch_mark")
+    return out
+
+
+# A token in the branch's own git config section, which lives exactly as long
+# as the branch: `git branch -d/-m` and brindle's drop_branch remove or move
+# it, and no reflog expiry or gc touches it. A branch deleted and made again
+# under its name starts without one.
+_MARK_KEY = "brindleLifecycle"
+
+
+def _branch_mark(repo_root: str, branch: str, *, create: bool = False) -> str | None:
+    """``branch``'s lifecycle token, made (``create``) when it has none: read,
+    made and read back under one lock per repo across brindle's processes, so
+    two archives of the branch at once never make two (an existing token is
+    never replaced). None when there is none and it couldn't be written (a
+    held ``config.lock``, say)."""
+    from brindle import git, pipeline
+
+    key = f"branch.{branch}.{_MARK_KEY}"
+
+    def read() -> str | None:
+        return git.run(["config", "--get", key], repo_root, check=False).stdout.strip() or None
+
+    repo = hashlib.sha1(os.path.realpath(repo_root).encode()).hexdigest()[:16]
+    with pipeline._reentrant_lock("branch-mark-" + repo):
+        mark = read()
+        if mark is None and create:
+            if git.run(["config", key, secrets.token_hex(8)], repo_root, check=False).returncode == 0:
+                mark = read()
+    return mark
+
+
+def _archive_fits(ws: Workspace, arc: GoalArchive) -> bool:
+    """Whether ``ws`` is the archived session's branch reopened, not a new
+    branch that only has its name, whether or not commits were made or
+    merged since: its lifecycle token is still the one archived."""
+    from brindle import git
+
+    try:
+        return arc.branch_mark is not None and _branch_mark(ws.repo_root, ws.branch) == arc.branch_mark
+    except git.GitError:
+        return False
+
+
+def restore_archived_goal(db: DB, root_id: str, ws: Workspace) -> bool:
+    """A new session on a branch whose earlier session was deleted (closed
+    and then swept, killed, dropped) takes that session's goal back: its
+    milestones with their checks and results, and its goal file as it was
+    (edits in it are taken up as on a resume). True when it did. Never raises."""
+    try:
+        arc = db.goal_archive_for(ws.repo_root, ws.branch) if ws.branch else None
+        if arc is None or not _archive_fits(ws, arc):
+            return False
+        if not db.restore_goal_archive(arc.root_id, root_id):
+            return False   # another session took it back first
+    except Exception:  # noqa: BLE001 - a session starts without it rather than not at all
+        log.exception("brindle: couldn't restore the goal archived for %s", ws.branch)
+        return False
+    path = session_goals_path(db, root_id)
+    if arc.goals_text and path is not None and parse_goals(arc.goals_text) is not None:
+        try:
+            _goals_dir(path)
+            _replace(path, arc.goals_text)
+        except OSError:
+            log.exception("brindle: couldn't restore the session's goal file")
+        reload_goals_file(db, root_id)
+    write_goals_file(db, root_id)
+    ap = db.get_autopilot(root_id)
+    bus.publish_agent(db, "autopilot.goal", root_id, goal=ap.goal if ap else None,
+                      milestones=len(db.milestones(root_id)))
+    return True
 
 
 def set_enabled(db: DB, root_id: str, on: bool) -> None:

@@ -134,7 +134,7 @@ describe("Sidebar", () => {
     ["paused", "review", "done", "Done", "done"],
     ["idle", "merging", "done", "Done", "done"],
   ])("session status word: %s / %s / %s reads as %s", async (status, stage, goal_phase, word, colour) => {
-    mount({ workspaces: [{ ...root, agents: [{ ...root.agents![0], model: "claude-sonnet-4" }] }, worker], sessions: [{ ...live, status }], goal: { ...goal, stage, goal_phase } }, { screen: "session", root: "sup1", repo: REPO });
+    mount({ workspaces: [{ ...root, agents: [{ ...root.agents![0], model: "claude-sonnet-4", status: status === "processing" ? "processing" : root.agents![0].status }] }, worker], sessions: [{ ...live, status }], goal: { ...goal, stage, goal_phase } }, { screen: "session", root: "sup1", repo: REPO });
     await waitFor(() => expect(within(sessionRow("sup1")!).getByTestId("session-status").textContent).toBe(word));
     const row = sessionRow("sup1")!;
     const label = within(row).getByTestId("session-status");
