@@ -507,13 +507,12 @@ def trust_folder(path: str) -> bool:
     config = os.path.realpath(claude_global_config())
     key = os.path.realpath(path)  # how Claude Code keys it (its cwd, symlinks resolved)
     try:
+        _seed_claude_theme()
         data, main = _read_json(config), linked_main(path)
-        # The theme brindle seeded before CI_THEME, in its own folder: moved here, on a launch, once.
-        theme = _brindle_owned_folder() and data.get("theme") == OLD_THEME
-        if not theme and (_trusted(data, key) or (main is not None and _trusted(data, os.path.realpath(main)))):
+        if _trusted(data, key) or (main is not None and _trusted(data, os.path.realpath(main))):
             return True  # the usual case: nothing to write
         with _config_lock():
-            return _write_trust(config, key, theme)
+            return _write_trust(config, key)
     except (OSError, ValueError, AttributeError, TypeError) as e:
         import logging
 
@@ -527,18 +526,29 @@ def trust_folder(path: str) -> bool:
 # theme instead of a fixed dark background.
 CI_THEME = "dark-ansi"
 # The theme brindle seeded before CI_THEME. Only brindle's own config folder
-# (provider_homes) is migrated to CI_THEME: the person's own ~/.claude.json
+# (provider_homes) is migrated to CI_THEME: the person's own settings.json
 # keeps the theme they chose.
 OLD_THEME = "dark"
 API_KEY_SUFFIX = 20   # Claude Code records an approved key by its last 20 characters
 
 
-def _brindle_owned_folder() -> bool:
-    """Whether Claude Code runs from a config folder brindle made and keeps
-    (provider_homes), rather than the person's own."""
+def _seed_claude_theme() -> None:
+    """Seed or migrate settings only in brindle's own Claude config folder.
+    Keep every other setting and theme."""
     from brindle import provider_homes
 
-    return bool(provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR"))
+    folder = provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR")
+    if not folder:
+        return
+    config = os.path.realpath(os.path.join(folder, "settings.json"))
+    os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
+
+    def theme(data: dict) -> None:
+        if "theme" not in data or data["theme"] == OLD_THEME:
+            data["theme"] = CI_THEME
+
+    with _config_lock():
+        _update_config(config, theme, create=True, lock_path=config)
 
 
 
@@ -558,13 +568,13 @@ def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
 
     def seed(data: dict) -> None:
         data["hasCompletedOnboarding"] = True
-        data.setdefault("theme", CI_THEME)
         projects = data.setdefault("projects", {})
         for path in trusted:
             projects.setdefault(os.path.realpath(path), {})["hasTrustDialogAccepted"] = True
         if api_key:
             _record_approval(data, api_key)
 
+    _seed_claude_theme()
     with _config_lock():
         _update_config(config, seed, create=True, mode=0o600)
     return config
@@ -627,8 +637,8 @@ def claude_chrome_chosen(env: dict[str, str] | None = None) -> bool:
 
 def record_claude_onboarding() -> str:
     """Record that the person went through Claude Code's first-run screens,
-    as Claude Code records it (``hasCompletedOnboarding``), with its theme
-    left as they set it or the CI default. Only after the person confirmed
+    as Claude Code records it (``hasCompletedOnboarding``), seeding the theme
+    in brindle's settings.json. Only after the person confirmed
     its security notes in the app: brindle never acknowledges them for
     anyone. Returns the file's path; raises OSError or ValueError."""
     config = os.path.realpath(claude_global_config())
@@ -636,8 +646,8 @@ def record_claude_onboarding() -> str:
 
     def onboarded(data: dict) -> None:
         data["hasCompletedOnboarding"] = True
-        data.setdefault("theme", CI_THEME)
 
+    _seed_claude_theme()
     with _config_lock():
         _update_config(config, onboarded, create=True)
     return config
@@ -715,13 +725,10 @@ def _trusted(data: dict, key: str) -> bool:
     return (data.get("projects") or {}).get(key, {}).get("hasTrustDialogAccepted") is True
 
 
-def _write_trust(config: str, key: str, theme: bool = False) -> bool:
-    """trust_folder's write; the caller holds the lock. ``theme``: also move
-    the theme brindle seeded (OLD_THEME) to CI_THEME, if it is still that."""
+def _write_trust(config: str, key: str) -> bool:
+    """trust_folder's write; the caller holds the lock."""
     def trust(data: dict) -> None:
         data.setdefault("projects", {}).setdefault(key, {})["hasTrustDialogAccepted"] = True
-        if theme and data.get("theme") == OLD_THEME:
-            data["theme"] = CI_THEME
 
     _update_config(config, trust)       # no write when another launch trusted it meanwhile
     return True
