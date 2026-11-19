@@ -405,3 +405,54 @@ def test_a_hub_change_runs_at_most_max_tests_most_specific_to_it(repo, monkeypat
     assert run.startswith("printf") and len(ran) == 40 - 5 + 1
     assert {"tests/test_hub.py", "tests/test_own.py", *specific} <= set(ran)
     assert all("::" in t for t in set(ran) - {"tests/test_hub.py", "tests/test_own.py"})
+
+
+CASES = [f"[{i}]" for i in range(5)]
+
+
+@pytest.mark.parametrize("files,tests,cases,renamed,max_tests,ran", [
+    # Main renamed a test after the map: its file runs whole, never the name the map remembers.
+    ({"tests/test_r.py": "def test_aaa_removed():\n    pass\n\n\ndef test_b():\n    pass\n"},
+     ["tests/test_r.py::test_aaa_removed", "tests/test_r.py::test_b"], [[""], [""]],
+     ("tests/test_r.py", "test_aaa_removed", "test_aaa_new"), 1, ["tests/test_r.py"]),
+    # One parametrized test with more cases than the cap runs only as many of its cases as fit.
+    ({"tests/test_p.py": "import pytest\n\n\n@pytest.mark.parametrize('n', range(5))\ndef test_p(n):\n    pass\n"},
+     ["tests/test_p.py::test_p"], [CASES], None, 3, [f"tests/test_p.py::test_p{c}" for c in CASES[:3]]),
+    # The namesake file runs its covering test anyway: that test costs nothing more, leaving room for another.
+    pytest.param(
+        {"tests/test_core.py": "def test_c():\n    pass\n", "tests/test_more.py": "def test_m():\n    pass\n",
+         "tests/test_other.py": "def test_o():\n    pass\n"},
+        ["tests/test_core.py::test_c", "tests/test_more.py::test_m", "tests/test_other.py::test_o"], [[""]] * 3, None,
+        2, ["tests/test_core.py", "tests/test_more.py::test_m"],
+        marks=pytest.mark.variant("A test already run by its whole namesake file must not use up the budget, "
+                                  "or the cap runs fewer relevant tests than it allows")),
+], ids=["renamed-since-map", "oversized-parametrized", "covered-costs-nothing"])
+def test_capped_selection_keeps_max_tests_with_tests_that_exist(repo, monkeypatch, files, tests, cases, renamed,
+                                                                 max_tests, ran):
+    """The max_tests cap never names a test the map knows but the checkout
+    no longer has, never runs more cases than it allows, and doesn't charge
+    for a test already running as part of its whole file."""
+    from brindle import coverage_map
+
+    core = "def core():\n    return 1\n"
+    for name, text in {"pkg/__init__.py": "", "pkg/core.py": core, **files}.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    sh("git add -A && git commit -qm base", repo)
+    known = {name: {q: [] for q in coverage_map.line_scopes(text)} for name, text in files.items()}
+    known["pkg/core.py"] = {"": list(range(len(tests))), "core": list(range(len(tests)))}
+    for i, t in enumerate(tests):
+        known[coverage_map.test_file(t)][t.split("::")[1]] = [i]
+    data = {"commit": sh("git rev-parse HEAD", repo), "tests": tests, "cases": cases, "files": known}
+    monkeypatch.setattr(coverage_map, "load", lambda root, check: data)
+    if renamed:   # on main, after the map was recorded: the branch starts from here
+        path, old, new = renamed
+        (repo / path).write_text((repo / path).read_text().replace(old, new))
+        sh("git commit -qam rename", repo)
+    base = sh("git rev-parse HEAD", repo)
+    (repo / "pkg/core.py").write_text(core.replace("1", "2"))
+    ws = SimpleNamespace(path=str(repo), repo_root=str(repo))
+
+    run = check_scope.command(ws, PYTEST, check_scope.CheckScope(coverage=True), (base, ["pkg/core.py"]),
+                              max_tests=max_tests)
+    assert run.startswith("printf") and shlex.split(run.rsplit(f"; {PYTEST}", 1)[-1]) == ran

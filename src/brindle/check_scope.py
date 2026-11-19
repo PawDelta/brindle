@@ -292,8 +292,8 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
     reaches code only through a child process isn't in the map); None when no
     test executes any of it. A missing or stale map, or pytest configuration
     changed since it, runs ``cmd`` in full, which records a new one. More
-    tests than ``max_tests`` (0: no cap; a whole file counts as the tests the
-    map has in it) run only the most specific to the change
+    test cases than ``max_tests`` (0: no cap; a whole file or a parametrized
+    test counts every case the map has of it) run only the most specific to the change
     (``_most_specific``), after a one-line note saying so: a change to code
     nearly every test passes through would otherwise run nearly every test."""
     from brindle import coverage_map
@@ -342,38 +342,85 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
     total = sum(map(size, tests))
     if 0 < max_tests < total:
         first = capped_targets(ws, own) + namesakes + sorted(scripted)
-        # A whole file too big to fit leaves its tests the map selected to compete one by one.
-        tests = sorted(set(tests) | {n for n in nodes if coverage_map.test_file(n) in whole})
-        tests = _most_specific(tests, first, coverage_map.rank(data, set(tests), hits), max_tests,
-                               keep={t for t in own if is_test_file(t)}, size=size)
+        # A test file changed since the map may have renamed or dropped the tests the map names: it only
+        # ever runs whole. One unchanged since is split, when too big, into its tests and their cases.
+        stale = {f for f in since if is_test_file(f)}
+        tests = sorted(set(tests) | {n for n in nodes if coverage_map.test_file(n) in whole - stale})
+        ranked = coverage_map.rank(data, set(tests), hits)
+        order = {t: i for i, t in enumerate(ranked)}
+        in_file: dict[str, list[str]] = {}
+        for t in data.get("tests") or []:
+            if "::" in t:
+                in_file.setdefault(coverage_map.test_file(t), []).append(t)
+        cases = coverage_map.case_ids(data)
+
+        def split(t: str) -> list[str]:
+            file = coverage_map.test_file(t)
+            if file in stale or not (root / file).is_file():
+                return []
+            if "::" not in t:   # the file's tests, those selected by the change first
+                return sorted(in_file.get(t, []), key=lambda n: (order.get(n, len(order)), n))
+            return cases.get(t, [])
+
+        tests = _most_specific(tests, first, ranked, max_tests, keep={t for t in own if is_test_file(t)},
+                               size=size, split=split)
         note = "printf '%s\\n' " + shlex.quote(COVERAGE_CAP_NOTE.format(n=total, max=max_tests)) + "; "
     run = f"{note}{cmd} {_quoted(tests)}"
     # A marker or keyword filter may leave none of the selected tests (pytest's exit 5): nothing of it to run.
     return f"{run} || [ $? -eq 5 ]" if _filters(cmd) else run
 
 
+def _parents(t: str) -> list[str]:
+    """What else selects selector ``t``: its file, and for one case its test."""
+    if "::" not in t:
+        return []
+    file, _, name = t.partition("::")
+    test = f"{file}::{name.split('[', 1)[0]}"
+    return [file] if test == t else [file, test]
+
+
 def _most_specific(tests: list[str], first: list[str], ranked: list[str], max_tests: int,
-                   keep: set[str], size=lambda t: 1) -> list[str]:
-    """Of ``tests``, as many as fit in ``max_tests`` (each counting
-    ``size(t)``): ``first`` (the branch's own and namesake tests, then the
-    tests of changed scripts) in that order, then ``ranked``
-    (``coverage_map.rank``); one that doesn't fit is passed over for the next,
-    and a test (node id) whose file is chosen whole is left out. The branch's
-    own test files (``keep``) are never dropped, even past ``max_tests``;
-    when nothing fits at all, the first candidate runs alone."""
-    chosen = [t for t in tests if t in keep]
-    used = sum(map(size, chosen))
-    candidates = [t for t in first + ranked if t in tests]
+                   keep: set[str], size=lambda t: 1, split=lambda t: []) -> list[str]:
+    """Of ``tests``, as many test cases as fit in ``max_tests`` (a selector
+    counting ``size(t)``, a single case 1): ``first`` (the branch's own and
+    namesake tests, then the tests of changed scripts) in that order, then
+    ``ranked`` (``coverage_map.rank``). One too big for what is left is
+    ``split`` into its parts (a file into its tests, a test into its cases),
+    as many of them as fit; one ``split`` can't divide is passed over. A test
+    whose file (or case whose test) is already chosen costs nothing more and
+    is left out. The branch's own test files (``keep``) are never dropped,
+    even past ``max_tests``; when nothing fits at all and nothing divides, the
+    first candidate runs alone (a scoped check never passes on nothing)."""
+    chosen: dict[str, int] = {}
+
+    def cost(t: str) -> int:
+        return 1 if "[" in t.partition("::")[2] else size(t)
+
+    def add(t: str) -> None:
+        for inner in [c for c in chosen if t in _parents(c)]:   # what ``t`` now runs anyway
+            del chosen[inner]
+        chosen[t] = cost(t)
+
+    def fit(t: str) -> None:
+        room = max_tests - sum(chosen.values())
+        if room <= 0 or t in chosen or any(p in chosen for p in _parents(t)):
+            return
+        inside = sum(n for c, n in chosen.items() if t in _parents(c))
+        if cost(t) - inside <= room:
+            add(t)
+            return
+        for part in split(t):
+            fit(part)
+
+    for t in tests:
+        if t in keep:
+            add(t)
+    candidates = list(dict.fromkeys(t for t in first + ranked if t in tests))
     for t in candidates:
-        if used >= max_tests:
-            break
-        if t not in chosen and used + size(t) <= max_tests:
-            chosen.append(t)
-            used += size(t)
+        fit(t)
     if not chosen and candidates:
-        chosen = candidates[:1]
-    whole = {t for t in chosen if "::" not in t}
-    return sorted(t for t in chosen if "::" not in t or t.split("::", 1)[0] not in whole)
+        chosen[candidates[0]] = cost(candidates[0])
+    return sorted(chosen)
 
 
 def _filters(cmd: str) -> bool:

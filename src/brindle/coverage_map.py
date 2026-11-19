@@ -194,7 +194,8 @@ def build(root: Path, data_file: Path, sha: str, check: str) -> dict:
         files[path] = {q: sorted(ids) for q, ids in entry.items()}
     tests = sorted(index, key=index.get)
     return {"version": VERSION, "check": check, "commit": sha, "built": time.time(), "tests": tests,
-            "cases": [len(cases.get(t, ())) or 1 for t in tests], "files": files}
+            # Each test's cases as their id's tail ("[a-1]"; "" for one that isn't parametrized).
+            "cases": [sorted(c[len(t):] for c in cases.get(t, {t})) for t in tests], "files": files}
 
 
 def _executed(root: Path, data_file: Path,
@@ -379,10 +380,20 @@ def test_counts(data: dict) -> dict[str, int]:
     out: dict[str, int] = {}
     for i, t in enumerate(tests):
         if "::" in t:
-            n = cases[i] if i < len(cases) and isinstance(cases[i], int) and cases[i] > 0 else 1
-            out[t] = n
-            out[test_file(t)] = out.get(test_file(t), 0) + n
+            got = cases[i] if i < len(cases) else 1
+            n = len(got) if isinstance(got, list) else got if isinstance(got, int) else 1
+            out[t] = max(n, 1)
+            out[test_file(t)] = out.get(test_file(t), 0) + out[t]
     return out
+
+
+def case_ids(data: dict) -> dict[str, list[str]]:
+    """The node id of each case of the map's parametrized tests, by test."""
+    tests = data.get("tests") or []
+    cases = data.get("cases") or []
+    return {t: [t + c for c in got] for t, got in zip(tests, cases)
+            if "::" in t and isinstance(got, list) and len(got) > 1
+            and all(isinstance(c, str) and c.startswith("[") for c in got)}
 
 
 def rank(data: dict, tests: set[str], hits: dict[str, int]) -> list[str]:
