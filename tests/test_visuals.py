@@ -253,6 +253,29 @@ def test_chat_folds_an_open_decision_only_when_the_whole_message_picks_an_option
         == said
 
 
+def test_a_cli_prompt_carrying_a_brindle_delivery_never_folds_a_decision(db, session, monkeypatch):
+    _, boss, worker = session
+    monkeypatch.setattr(time, "time", lambda: 200.0)
+    body = "Worker w1 finished: tests pass."
+    prompt = f"{body} Ship it"
+    # A label the whole prompt matches exactly, brindle's delivery and the person's words together.
+    options = [{"id": "a", "label": prompt}, {"id": "b", "label": "None, keep exploring"}]
+    v = visuals.publish(db, worker, "Ship", "<p>x</p>", "Ship?", options)
+    monkeypatch.setattr(time, "time", lambda: 300.0)
+    mid = db.enqueue("boss", body, "w1")
+    db.record_pane_delivery(mid, "boss", json.dumps(
+        {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")),
+         "provider": "claude", "body": body, "lead": "brindle delivered this message:",
+         "stage": "body", "stopped": True}))
+
+    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
+    assert visuals.to_dto(db, visuals.get(db, v["id"]))["answered_in_chat"] is False
+
+    # The person's own exact pick through the same hook still folds it.
+    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "b"})
+    assert visuals.to_dto(db, visuals.get(db, v["id"]))["answered_in_chat"] is True
+
+
 def test_unrelated_chat_and_visual_answer_delivery_do_not_fold_open_decisions(db, session, monkeypatch):
     _, boss, worker = session
     monkeypatch.setattr(time, "time", lambda: 200.0)
