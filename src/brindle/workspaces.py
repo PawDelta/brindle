@@ -15,6 +15,7 @@ from __future__ import annotations
 import filecmp
 import glob
 import json
+import logging
 import os
 import re
 import shutil
@@ -40,6 +41,8 @@ from brindle.config import (
     worktrees_dir,
 )
 from brindle.db import DB, GoalArchiveError, Workspace
+
+log = logging.getLogger(__name__)
 
 ROOT_NAME = "root"
 
@@ -918,7 +921,8 @@ def sync_with_base(ws: Workspace) -> SyncResult:
 PR_FOOTER = "Built with [brindle](https://pawdelta.com/brindle)"
 # The old footer text is a prefix of the new one, so one match covers both.
 PR_LOGO = ('<img src="https://github.com/PawDelta/brindle/raw/main/docs/assets/brindle-mark.png" '
-           'height="20" alt="">')
+           'width="18" height="13" alt="">')
+_LOGO_TAG = re.compile(r'<img src="[^"]*brindle-mark\.png"[^>]*>')   # any size brindle ever wrote
 
 
 def _plural(n: int, noun: str) -> str:
@@ -929,7 +933,10 @@ def footer_summary(db: DB, ws: Workspace, sha: str) -> list[str]:
     """What brindle knows of ``ws``'s work, as footer parts: its workers
     (the session's, for a session root), its reviews and the repo's checks.
     A part brindle has no record of is left out."""
-    ids = [ws.id] + [w.id for w in db.find_workspaces(ws.repo_root) if w.session_root == ws.id]
+    # A worker's ``session_root`` is its session's root *agent* id (pilot.root_of),
+    # not a workspace id: match it against the agents living in ``ws``.
+    roots = {ws.id} | {a.id for a in db.list_agents(ws.id)}
+    ids = [ws.id] + [w.id for w in db.find_workspaces(ws.repo_root) if w.session_root in roots]
     workers = {a.id for i in ids for a in db.list_agents(i) if a.mode in ("assign", "handoff")}
     reviews = sum(len(db.workspace_reviews(i)) for i in ids)
     parts = [_plural(len(workers), "worker")] if workers else []
@@ -948,13 +955,24 @@ def footer_summary(db: DB, ws: Workspace, sha: str) -> list[str]:
     return parts
 
 
+def _has_full_footer(body: str) -> bool:
+    """Whether a line of ``body`` is brindle's own footer: the logo and the text."""
+    return any(PR_LOGO in line and PR_FOOTER in line for line in body.split("\n"))
+
+
 def with_footer(body: str, repo_root: str, ws: Workspace | None = None, sha: str | None = None) -> str:
     """``body`` ending with brindle's footer (logo, "Built with brindle" and,
     given ``ws``, what its DB records say), added once (a body that already
     has the old or new one is left alone), unless the repo turned it off
     (``"pr_footer": false``)."""
-    if not load_repo_config(repo_root).pr_footer or PR_FOOTER in body:
+    if not load_repo_config(repo_root).pr_footer or _has_full_footer(body):
         return body
+    lines = body.rstrip().split("\n")
+    if any(_LOGO_TAG.search(line) and PR_FOOTER in line for line in lines):
+        # brindle's footer with an older logo size: resize it, don't add a second.
+        return "\n".join(_LOGO_TAG.sub(PR_LOGO, line) if PR_FOOTER in line else line for line in lines)
+    if lines and lines[-1].strip() == PR_FOOTER:
+        body = "\n".join(lines[:-1])   # a bare text-only footer at the end: the full one replaces it
     parts = []
     if ws is not None:
         try:
@@ -1076,11 +1094,50 @@ def _read_pr_patch(base: str, head: str, cwd: str) -> str | None:
     return "".join(files)
 
 
+def ensure_pr_footer(pr: dict, sha: str, cwd: str) -> None:
+    """Give an open PR holding a brindle workspace's commit ``sha`` (``cwd``
+    is that workspace) brindle's footer once, for PRs opened without
+    ``brindle pr``. Checked or added once per PR (recorded), so a person's
+    later edit is never undone. Respects ``pr_footer: false``."""
+    url = pr.get("url")
+    if not url or not shutil.which("gh"):
+        return
+    db = DB()
+    ws = db.workspace_by_path(cwd)
+    if ws is None or not load_repo_config(ws.repo_root).pr_footer:
+        return
+    if db.conn.execute("SELECT 1 FROM pr_footer_done WHERE url=?", (url,)).fetchone():
+        return
+    out = spawn.read(["gh", "pr", "view", url, "--json", "state,body"], cwd=cwd, text=True,
+                     timeout=PR_STATE_SECONDS)
+    info = json.loads(out.stdout) if out.returncode == 0 else None
+    if not isinstance(info, dict) or info.get("state") != "OPEN" or not isinstance(info.get("body"), str):
+        return
+    body = info["body"]
+    if not _has_full_footer(body):
+        edit = spawn.action(["gh", "pr", "edit", url, "--body", with_footer(body, ws.repo_root, ws, sha)], cwd=cwd)
+        if edit.returncode != 0:
+            return
+    with db.conn:
+        db.conn.execute("INSERT OR IGNORE INTO pr_footer_done (url) VALUES (?)", (url,))
+
+
 def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
     """The open PR (``{number, title, url, headRefName}``) that contains commit
     ``sha``, whatever its head branch, or a unique PR carrying the same complete
     changes under new commit identities. ``{}`` when none matches; None when
-    ``gh`` is missing or couldn't say (nothing is known)."""
+    ``gh`` is missing or couldn't say (nothing is known). A match without
+    brindle's footer gets it (``ensure_pr_footer``)."""
+    found = _open_pull_request_for_commit(sha, cwd)
+    if found:
+        try:
+            ensure_pr_footer(found, sha, cwd)
+        except Exception:  # noqa: BLE001 - the footer is a courtesy: never lose the PR lookup
+            log.exception("brindle: couldn't add the footer to PR %s", found.get("url"))
+    return found
+
+
+def _open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
     if not shutil.which("gh"):
         return None
     try:
