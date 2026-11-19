@@ -616,8 +616,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     # design-doc spine (an older free-form plan keeps its sections as they are).
     on_spine = plan_id is not None and any(
         s["id"] in plan_docs.SPINE for s in plan_docs.revision(db, plan_id)["sections"])
-    if not template and (plan_id is None or on_spine):
-        parts = plan_docs.design_doc(parts, force=on_spine)
+    if plan_id is None or on_spine:
+        parts = plan_docs.design_doc(parts, force=on_spine and not template, map_only=bool(template))
         markdown = plan_docs.render(lede, parts)
     parts, added = doc_templates.apply(template, parts)
     if added:
@@ -626,6 +626,12 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     given = [name for name, raw in (("decisions", decisions), ("split", split), ("ask", ask)) if raw]
     decisions, split = _decisions(decisions, {s["id"] for s in parts}), _split(split)
+    if template and any(d["section"] == plan_docs.OPEN_QUESTIONS for d in decisions) and not any(
+            s["id"] == plan_docs.OPEN_QUESTIONS for s in parts):
+        # A custom template may leave no Open questions: unanchored decisions still need a target.
+        parts = [*parts, {"id": plan_docs.OPEN_QUESTIONS, "title": plan_docs.TITLES[plan_docs.OPEN_QUESTIONS],
+                          "kind": "markdown", "markdown": "None.", "caption": None}]
+        markdown = plan_docs.render(lede, parts)
     ask = visuals._text(ask, "ask", visuals.MAX_NOTE)
     title = visuals._text(title, "title", visuals.MAX_TITLE) or _title(markdown) or "Plan"
     visuals._refuse_secrets([

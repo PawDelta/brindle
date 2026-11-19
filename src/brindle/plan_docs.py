@@ -239,12 +239,13 @@ _HEADINGS = {**{_heading(t): i for i, t in TITLES.items()}, **{_heading(i): i fo
              "goals": "goals", "alternatives": "alternatives", "risks": "risks", "rollout": "rollout"}
 
 
-def design_doc(parts: list[dict], force: bool = False) -> list[dict]:
+def design_doc(parts: list[dict], force: bool = False, map_only: bool = False) -> list[dict]:
     """A proposal as the design-doc spine: sections with a spine id, or
     (markdown headings) a spine title, take the canonical id; every required
     spine section is present, in order. Sections naming none of the spine are
     a free-form doc and stay as written, unless ``force`` (a revision of a
-    plan that is already on the spine)."""
+    plan that is already on the spine). ``map_only``: just the canonical ids,
+    for a doc laid out by a custom template (its headings and order win)."""
     parts = [dict(s) for s in parts]
     taken = {s["id"] for s in parts}
     for s in parts:
@@ -253,7 +254,7 @@ def design_doc(parts: list[dict], force: bool = False) -> list[dict]:
             taken.discard(s["id"])
             taken.add(key)
             s["id"] = key
-    if not force and not any(s["id"] in SPINE for s in parts):
+    if map_only or (not force and not any(s["id"] in SPINE for s in parts)):
         return parts
     for sid in SPINE:
         if sid not in EXTRAS and sid not in taken:

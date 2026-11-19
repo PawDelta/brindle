@@ -253,3 +253,22 @@ def test_without_a_format_nothing_changes(db, session):
     pid, reply = _propose(db, boss, "# Presets\n\nOne page.\n\n## Goal\n\nPresets.")
     assert plans.get(db, pid)["markdown"] == "# Presets\n\nOne page.\n\n## Goal\n\nPresets."
     assert doc_templates.of(db, pid) is None and "Reference" not in reply
+
+
+def test_custom_template_keeps_spine_ids_and_a_real_decision_target(db, session, monkeypatch):
+    boss, _ = session
+    sections = [{"title": "Proposed design", "kind": "text", "required": True},
+                {"title": "Context", "kind": "text", "required": True}]
+    monkeypatch.setattr(doc_templates, "default_template",
+                        lambda fmt: {"id": "t", "name": "T", "default": True, "sections": sections})
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    option = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    p = plans.propose(db, boss, "# T\n\n## Context\n\nWhy.\n\n## Proposed design\n\nHow.", [
+        {"id": "d1", "title": "One", "options": option, "section": "context"},
+        {"id": "d2", "title": "Two", "options": option}])
+    sections = plan_docs.revision(db, p["id"])["sections"]
+    ids = [s["id"] for s in sections]
+    assert ids[:2] == ["proposed-design", "context"]
+    decisions = plans.get(db, p["id"])["decisions"]
+    assert [d["section"] for d in decisions] == ["context", "open-questions"]
+    assert {d["section"] for d in decisions} <= set(ids)
