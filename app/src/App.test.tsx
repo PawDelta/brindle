@@ -935,7 +935,7 @@ describe("App", () => {
     await expect(checked.mock.results.at(-1)!.value).rejects.toMatchObject({ status: 401 });
   });
 
-  it("keeps the session's terminal mounted but out of sight on Settings and the Library", async () => {
+  it("keeps the session's terminal mounted but out of sight on Settings, the Library and a visual", async () => {
     // jsdom loads no Tailwind: an element is out of sight when an ancestor carries the `hidden` class, or the
     // `hidden` attribute with no display utility (e.g. `contents`) that would override it in the real CSS.
     const outOfSight = (el: Element) => {
@@ -947,6 +947,7 @@ describe("App", () => {
       return false;
     };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], goal });
+    daemon.visualRows = [{ id: "v_1", session: "sup1", title: "Release flow", by: "supervisor", kind: "visual", rev: 1, answer: null, kept: false, unread: true, created_at: Date.now() / 1000 - 60 }];
     const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     await screen.findByRole("region", { name: "Session" });
@@ -954,7 +955,11 @@ describe("App", () => {
     fireEvent.click(screen.getByTestId("terminal-toggle"));
     const panel = await screen.findByTestId("terminal-panel");
     expect(outOfSight(panel)).toBe(false);
-    for (const open of [() => fireEvent.click(link("Open Account › Usage")), () => fireEvent.click(within(screen.getByTestId("sidebar-foot-row")).getByRole("button", { name: /^Library/ }))]) {
+    const openVisual = async () => {
+      fireEvent.click(await screen.findByTestId("visuals-button"));
+      fireEvent.click(await within(await screen.findByTestId("visuals-panel")).findByRole("button", { name: /Release flow/ }));
+    };
+    for (const open of [() => fireEvent.click(link("Open Account › Usage")), () => fireEvent.click(within(screen.getByTestId("sidebar-foot-row")).getByRole("button", { name: /^Library/ })), openVisual]) {
       open();
       await waitFor(() => expect(outOfSight(screen.getByTestId("terminal-panel"))).toBe(true));
       expect(screen.getByTestId("terminal-panel")).toBe(panel);
