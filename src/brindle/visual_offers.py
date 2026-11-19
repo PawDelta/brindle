@@ -297,7 +297,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
                  fold_only: bool = False, typed: bool = False, cli_prompt: bool = False,
                  said_at: float | None = None, mid_turn: bool = False, carries_delivery: bool = False,
-                 staged_only: bool = False) -> None:
+                 staged_only: bool = False, fold_visuals: bool = True) -> None:
     """Called only for authenticated person input, never for agent messages.
 
     ``typed``: the app watched the person key in all of ``text`` themselves.
@@ -350,7 +350,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         if not mid_turn:
             c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                       (time.time(), root.id))
-        closed_prompts = visuals.answered_in_chat(c, root.id, message_at)
+        if fold_visuals:
+            visuals.answered_in_chat(c, root.id, message_at, text)
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
