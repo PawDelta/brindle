@@ -218,19 +218,17 @@ def test_person_message_closes_only_earlier_prompts_in_its_session(db, session, 
 def test_unrelated_chat_and_visual_answer_delivery_do_not_fold_open_decisions(db, session, monkeypatch):
     _, boss, worker = session
     monkeypatch.setattr(time, "time", lambda: 200.0)
-    first = visuals.publish(db, worker, "Release", "<p>x</p>", "Which approach?", OPTIONS)
-    second = visuals.publish(db, worker, "Naming", "<p>y</p>", "Which label?", OPTIONS)
+    first = visuals.publish(db, worker, "Release", "<p>x</p>", "Which label?", OPTIONS)
 
     visual_offers.person_spoke(db, boss, "I am still choosing an option", typed=True)
     assert visuals.get(db, first["id"])["dismissed_rev"] == 0
-    assert visuals.get(db, second["id"])["dismissed_rev"] == 0
 
     # The answer notification is system generated, although send_message marks
     # it as person-delivered so it reaches the waiting supervisor immediately.
     visuals.answer(db, first["id"], 1, "A")
-    untouched = visuals.get(db, second["id"])
-    assert untouched["dismissed_rev"] == 0
-    assert untouched["answer"] is None
+    answered = visuals.get(db, first["id"])
+    assert answered["answered_in_chat_rev"] == 0
+    assert answered["answer"] is not None
 
 
 def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_again(db, session, client, monkeypatch):

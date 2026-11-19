@@ -379,9 +379,6 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         if not fold_only and scope and not cancelled:
             _grant(c, root.id, scope)
             _link(c, root.id, text, "grant")
-    for prompt in closed_prompts:
-        bus.publish(db, "visual.dismissed", repo_root=ws.repo_root, root_id=root.id,
-                    visual=prompt["id"], rev=prompt["rev"])
     bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
     if not fold_only and (scope == "plan" or cancelled):
         from brindle import plans
