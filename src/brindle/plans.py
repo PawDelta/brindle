@@ -617,21 +617,31 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     on_spine = plan_id is not None and any(
         s["id"] in plan_docs.SPINE for s in plan_docs.revision(db, plan_id)["sections"])
     if plan_id is None or on_spine:
-        parts = plan_docs.design_doc(parts, force=on_spine and not template, map_only=bool(template))
+        parts = plan_docs.design_doc(parts, force=not template, map_only=bool(template))
         markdown = plan_docs.render(lede, parts)
     own = {s["id"] for s in parts}
     parts, added = doc_templates.apply(template, parts)
     if added:
         # A heading the template brought in empty takes its spine id too (Open questions stays one section).
         parts = plan_docs.canonical_ids(parts, {s["id"] for s in parts} - own)
+    if template:
+        # An optional extra (audience, architecture, tech stack) with nothing in it is never stored,
+        # whether the supervisor left it empty or the template brought it in; a required one stays,
+        # empty, for sign-off to ask for.
+        required = {doc_templates._key(t["title"]) for t in template["sections"] if t.get("required")}
+        kept = [s for s in parts if not plan_docs.empty_extra(s) or doc_templates._key(s["title"]) in required]
+        added = added or len(kept) != len(parts)
+        parts = kept
+    if added:
         markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     given = [name for name, raw in (("decisions", decisions), ("split", split), ("ask", ask)) if raw]
     decisions, split = _decisions(decisions, {s["id"] for s in parts}), _split(split)
-    if template and any(d["section"] == plan_docs.OPEN_QUESTIONS for d in decisions) and not any(
+    if any(d["section"] == plan_docs.OPEN_QUESTIONS for d in decisions) and not any(
             s["id"] == plan_docs.OPEN_QUESTIONS for s in parts):
-        # A custom template may leave no Open questions: unanchored decisions still need a target.
+        # A custom template or an older free-form plan may have no Open questions: unanchored
+        # decisions still need a target.
         parts = [*parts, {"id": plan_docs.OPEN_QUESTIONS, "title": plan_docs.TITLES[plan_docs.OPEN_QUESTIONS],
                           "kind": "markdown", "markdown": "None.", "caption": None}]
         markdown = plan_docs.render(lede, parts)

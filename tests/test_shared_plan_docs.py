@@ -198,7 +198,7 @@ def parts(db, session, tmp_path, backend):
     store = credentials.FileStore(tmp_path / "pro")
     login_as(backend, store, features=TEAM_LOGIN)
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
-    pid = plans.propose(db, boss, "# Cloud workers", DECISIONS,
+    pid = plans.propose(db, boss, "# Cloud workers", [{**DECISIONS[0], "section": "summary"}],
                         sections=[{"id": "summary", "title": "Summary", "markdown": SUMMARY}])["id"]
     return pid, Library(backend), {"client": auth.Client(None, backend), "store": store}
 
@@ -876,6 +876,7 @@ def test_a_teammates_edit_comes_in_as_a_revision_and_later_sends_go_on_it(db, pa
     assert sd.sync(db, pid, **net)["pushed"] is False
     got = plans.to_dto(db, plans.get(db, pid))
     assert (got["rev"], got["sections"][0]["markdown"]) == (2, "Workers run anywhere.")
+    assert got["decisions"][0]["section"] == "summary"     # the anchor the Library's wire shape doesn't carry
     assert got["revisions"][-1]["author"] == "teammate:u_e"
     assert (sd.link(db, pid)["remote_rev"], sd.link(db, pid)["local_rev"]) == (2, 2)
 
@@ -1426,6 +1427,8 @@ def test_a_plan_with_no_sections_is_refused_before_anything_is_created(db, sessi
     login_as(backend, store, features=TEAM_LOGIN)
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = plans.propose(db, boss, "# Just a title\n\nNo headings.")["id"]
+    with db.tx() as c:      # a free-form plan from before the spine, with no ## headings
+        c.execute("UPDATE plan_revisions SET sections='[]' WHERE plan_id=?", (pid,))
     Library(backend)
     with pytest.raises(RuntimeError):
         sd.share(db, pid, TEAM, client=auth.Client(None, backend), store=store)

@@ -257,8 +257,8 @@ def design_doc(parts: list[dict], force: bool = False, map_only: bool = False) -
     """A proposal as the design-doc spine: sections with a spine id, or
     (markdown headings) a spine title, take the canonical id; every required
     spine section is present, in order. Sections naming none of the spine are
-    a free-form doc and stay as written, unless ``force`` (a revision of a
-    plan that is already on the spine). ``map_only``: just the canonical ids,
+    a free-form doc and stay as written, unless ``force`` (a new plan, or a
+    revision of one already on the spine). ``map_only``: just the canonical ids,
     for a doc laid out by a custom template (its headings and order win)."""
     parts = [dict(s) for s in parts]
     taken = {s["id"] for s in parts}
@@ -274,6 +274,12 @@ def design_doc(parts: list[dict], force: bool = False, map_only: bool = False) -
         if sid not in EXTRAS and sid not in taken:
             parts.append({"id": sid, "title": TITLES[sid], "kind": "markdown", "markdown": "", "caption": None})
     return _spine(parts)
+
+
+def empty_extra(s: dict) -> bool:
+    """An optional spine extra (by id or heading) with nothing in it."""
+    extra = s["id"] in EXTRAS or _HEADINGS.get(_heading(s["title"])) in EXTRAS
+    return extra and s["kind"] == "markdown" and not (s["markdown"] or "").strip()
 
 
 def _spine(parts: list[dict]) -> list[dict]:

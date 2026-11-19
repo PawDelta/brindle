@@ -2,6 +2,8 @@
 they apply, decisions anchored to a section, and the worker split kept off
 the person's doc."""
 
+import pytest
+
 from brindle import plans, visual_offers
 from test_plans import DECISIONS, session  # noqa: F401 - fixture
 
@@ -28,14 +30,20 @@ def test_extras_left_out_or_empty_are_not_present(db, session):
     assert "Tech stack" not in dto["markdown"]
 
 
-def test_markdown_only_proposal_maps_headings_to_the_spine(db, session):
+@pytest.mark.parametrize("body, first", [
+    ("## Context\n\nWhy.\n\n## Open questions\n", []),
+    # No spine heading at all: a new plan still gets the whole spine, its own section first.
+    ("## Summary\n\nA small change.", ["s1"]),
+])
+def test_markdown_only_proposal_maps_headings_to_the_spine(db, session, body, first):
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
-    md = "# T\n\nLede.\n\n## Context\n\nWhy.\n\n## Open questions\n"
-    p = plans.propose(db, boss, md, [{**DECISIONS[0], "section": "context"}, {**DECISIONS[0], "id": "d2"}])
+    p = plans.propose(db, boss, f"# T\n\nLede.\n\n{body}",
+                      [{**DECISIONS[0], "section": "context"}, {**DECISIONS[0], "id": "d2"}])
     dto = plans.to_dto(db, plans.get(db, p["id"]))
     ids = [s["id"] for s in dto["sections"]]
-    assert ids == ["context", "goals", "proposed-design", "alternatives", "risks", "rollout", "open-questions"]
+    assert ids == [*first, "context", "goals", "proposed-design", "alternatives", "risks", "rollout",
+                   "open-questions"]
     assert [d["section"] for d in dto["decisions"]] == ["context", "open-questions"]
     assert {d["section"] for d in dto["decisions"]} <= set(ids)
 

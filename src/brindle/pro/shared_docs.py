@@ -656,15 +656,30 @@ def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
     return changes
 
 
-def _readable(view: dict) -> dict:
+def _anchors(view: dict, ours: dict | None) -> dict[str, str]:
+    """Each decision's section anchor: the Library's when it carries one,
+    else the one it has in ``ours`` (this plan's own revision), since the
+    Library's wire shape has no field for it yet."""
+    out = {d["id"]: d["section"] for d in (ours or {}).get("decisions") or []
+           if isinstance(d, dict) and isinstance(d.get("section"), str)}
+    out.update({d["id"]: d["section"] for d in view.get("decisions") or []
+                if isinstance(d, dict) and isinstance(d.get("id"), str) and isinstance(d.get("section"), str)})
+    return out
+
+
+def _readable(view: dict, ours: dict | None = None) -> dict:
     """The Library's head as a revision of this plan: held to what a
     supervisor's proposal must be, because it is drawn and shown here, and
-    with secrets masked. Raises ``RuntimeError`` if it can't be one."""
+    with secrets masked. Each decision keeps its section anchor (from the
+    view, else from ``ours``). Raises ``RuntimeError`` if it can't be one."""
     try:
         content = mask_data(_content(view))
         sections = plan_docs.parse_sections(content["sections"])
         lede = plan_docs._body_text(content["lede"], "the overview", plans.MAX_MARKDOWN).strip()
-        out = {"lede": lede, "sections": sections, "decisions": plans._decisions(content["decisions"]),
+        anchors = _anchors(view, ours)
+        decisions = plans._decisions([{**d, "section": anchors.get(d.get("id"))} for d in content["decisions"]],
+                                     {s["id"] for s in sections})
+        out = {"lede": lede, "sections": sections, "decisions": decisions,
                "split": plans._split(content["split"]), "ask": visuals._text(content["ask"], "ask", visuals.MAX_NOTE),
                "markdown": plan_docs.render(lede, sections)}
     except (ServiceError, KeyError, TypeError, AttributeError) as e:
@@ -687,7 +702,7 @@ def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
         with db.tx() as c:
             c.execute("UPDATE plan_shares SET remote_rev=? WHERE plan_id=?", (view["rev"], p["id"]))
         return 0
-    new = _readable(view)
+    new = _readable(view, cur)
     before = {s["id"]: s for s in cur["sections"]}
     after = {s["id"]: s for s in new["sections"]}
     changed = [sid for sid in dict.fromkeys([*before, *after]) if before.get(sid) != after.get(sid)]
@@ -1099,7 +1114,8 @@ def _carry_over(db: DB, p: dict, share_: dict, view: dict, replica: DraftReplica
     the revision read here, in one transaction. Returns 1 if it ran."""
     if replica is None or p["state"] != "open" or share_["local_rev"] == p["rev"]:
         return 0
-    ours, new = plan_docs.revision(db, p["id"]), _readable(view)
+    ours = plan_docs.revision(db, p["id"])
+    new = _readable(view, ours)
     authors = {r["author"] for r in db.conn.execute(
         "SELECT author FROM plan_revisions WHERE plan_id=? AND rev>?", (p["id"], share_["local_rev"]))}
     by = plan_docs.SUPERVISOR if authors == {plan_docs.SUPERVISOR} else plan_docs.PERSON
