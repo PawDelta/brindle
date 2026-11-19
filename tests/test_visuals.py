@@ -197,7 +197,7 @@ def test_person_message_closes_only_earlier_prompts_in_its_session(db, session, 
     prompt = visuals.publish(db, worker, "Release", "<p>x</p>", "Which?", OPTIONS)
     untouched = visuals.publish(db, other, "Other", "<p>x</p>", "Which?", OPTIONS)
     clock[0] = 200.0
-    agents.send_message(db, boss.id, "Use Tag first", person=True)
+    agents.send_message(db, boss.id, "Tag first", person=True)
     closed = visuals.get(db, prompt["id"])
     assert closed["dismissed_rev"] == closed["rev"]
     assert closed["answer"] is None
@@ -208,16 +208,49 @@ def test_person_message_closes_only_earlier_prompts_in_its_session(db, session, 
                for event in events)
     assert [v["id"] for v in visuals.inbox_pending(db, None)] == [untouched["id"]]
     assert db.conn.execute("SELECT body FROM inbox WHERE agent_id=? ORDER BY id DESC", (boss.id,)).fetchone()[0] \
-        == "Use Tag first"
+        == "Tag first"
 
     clock[0] = 300.0
     later = visuals.publish(db, worker, "Release", "<p>new</p>", "Which now?", OPTIONS,
                             visual_id=prompt["id"] if revise else None)
     clock[0] = 400.0
     # A delayed CLI report of the same message must preserve the newer publication.
-    visual_offers.person_spoke(db, boss, "Use Tag first", cli_prompt=True, said_at=200.0)
+    visual_offers.person_spoke(db, boss, "Tag first", cli_prompt=True, said_at=200.0)
     assert {v["id"] for v in visuals.inbox_pending(db, None)} == {untouched["id"], later["id"]}
     assert visuals.to_dto(db, visuals.get(db, later["id"]))["answered_in_chat"] is False
+
+
+@pytest.mark.parametrize("said,folds", [
+    ("a", True),
+    pytest.param("A.", True, marks=pytest.mark.variant("case and punctuation around a bare id are ignored")),
+    ("option b", True),
+    ("None, keep exploring", True),
+    ("i was answering", False),
+    pytest.param("IT STILL SAYS ANSWERED IN CHAT", False, marks=pytest.mark.variant(
+        "a shouted complaint about the fold must not fold")),
+    pytest.param("a combo of B and C", False, marks=pytest.mark.variant(
+        "a sentence naming several option ids is not a pick")),
+    pytest.param("what about the inbox link", False, marks=pytest.mark.variant(
+        "label words in a question about the topic are not a pick")),
+    pytest.param("ignore", False, marks=pytest.mark.variant("a single unrelated word is not a pick")),
+    pytest.param("None, keep exploring for now", False, marks=pytest.mark.variant(
+        "a longer sentence holding a whole label is not a pick")),
+])
+def test_chat_folds_an_open_decision_only_when_the_whole_message_picks_an_option(db, session, monkeypatch,
+                                                                                said, folds):
+    _, boss, worker = session
+    monkeypatch.setattr(time, "time", lambda: 200.0)
+    options = [{"id": "a", "label": "Inbox + link A: readable path on pawdelta.com"},
+               {"id": "b", "label": "None, keep exploring"}, {"id": "c", "label": "Something else"}]
+    v = visuals.publish(db, worker, "Links", "<p>x</p>", "Which link?", options)
+    monkeypatch.setattr(time, "time", lambda: 300.0)
+
+    agents.send_message(db, boss.id, said, person=True)
+
+    assert visuals.to_dto(db, visuals.get(db, v["id"]))["answered_in_chat"] is folds
+    # Folded or not, the message itself reaches the supervisor.
+    assert db.conn.execute("SELECT body FROM inbox WHERE agent_id=? ORDER BY id DESC", (boss.id,)).fetchone()[0] \
+        == said
 
 
 def test_unrelated_chat_and_visual_answer_delivery_do_not_fold_open_decisions(db, session, monkeypatch):
