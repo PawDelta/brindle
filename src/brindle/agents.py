@@ -32,7 +32,7 @@ from brindle import bus, cloud_credential, company_identity, company_login, debu
 from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
-from brindle.db import DB, Agent, Review, Workspace, request_subagent
+from brindle.db import DB, Agent, GoalArchiveError, Review, Workspace, request_subagent
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
 from brindle.redact import mask
@@ -4469,6 +4469,10 @@ def kill(db: DB, agent_id: str) -> None:
     # Deletion removes the row publish_agent uses to resolve its context.
     ws = db.get_workspace(agent.workspace_id)
     session_root = root_of(db, agent.id)
+    try:   # before it is stopped: a session whose goal can't be archived is kept as it is
+        db.archive_goals(root_id=agent.id)
+    except GoalArchiveError as e:
+        raise AgentError(str(e)) from e
     _note_reviewer_end(db, agent)
     _stop(db, agent)
     db.delete_agent(agent.id)
