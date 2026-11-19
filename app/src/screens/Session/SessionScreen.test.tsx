@@ -100,6 +100,8 @@ const fake = vi.hoisted(() => {
       registerEscHandler: () => ({ dispose() {} }),
       registerOscHandler: () => ({ dispose() {} }),
     };
+    /* The Unicode addon registers its widths here; the recorder measures nothing. */
+    unicode = { register() {}, activeVersion: "6" };
     onBinary(_fn: Listener<string>) {
       return { dispose() {} };
     }
