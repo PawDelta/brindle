@@ -2432,7 +2432,7 @@ def _docs_switch(on: bool, name: str) -> None:
     if name == "store":
         left = got.get("left", 0) if isinstance(got, dict) else 0
         typer.echo(f"library location: {'brindle servers' if on else 'this Mac'}"
-                   + (f" ({left} plans not moved yet: run this again to retry)" if left else ""))
+                   + (f" ({left} plans not moved yet: run this again to move them)" if left else ""))
         return
     typer.echo(f"library: {name} is {'on' if on else 'off'}")
 
