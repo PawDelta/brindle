@@ -3100,7 +3100,7 @@ def render_unread(db: DB, messages: list) -> str:
 
 
 def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
-                 person: bool = False) -> str:
+                 person: bool = False, fold_visuals: bool = True) -> str:
     """Deliver now if the agent is idle; otherwise queue until it is.
     Returns ``"delivered"`` or ``"queued"``. ``person`` marks a message from
     the person running brindle, which is always pushed."""
@@ -3111,7 +3111,7 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
     if person:
         from brindle import visual_offers
 
-        visual_offers.person_spoke(db, agent, body)
+        visual_offers.person_spoke(db, agent, body, fold_visuals=fold_visuals)
     if not person and runs_process(agent) and is_alive(agent) and pulls_messages(db, agent):
         # Keep the message unread and deliver only a notice, once for everything unread.
         db.enqueue_held(agent.id, body, sender_id)
