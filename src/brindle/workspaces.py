@@ -921,7 +921,8 @@ def sync_with_base(ws: Workspace) -> SyncResult:
 PR_FOOTER = "Built with [brindle](https://pawdelta.com/brindle)"
 # The old footer text is a prefix of the new one, so one match covers both.
 PR_LOGO = ('<img src="https://github.com/PawDelta/brindle/raw/main/docs/assets/brindle-mark.png" '
-           'height="20" alt="">')
+           'width="18" height="13" alt="">')
+_LOGO_TAG = re.compile(r'<img src="[^"]*brindle-mark\.png"[^>]*>')   # any size brindle ever wrote
 
 
 def _plural(n: int, noun: str) -> str:
@@ -967,6 +968,9 @@ def with_footer(body: str, repo_root: str, ws: Workspace | None = None, sha: str
     if not load_repo_config(repo_root).pr_footer or _has_full_footer(body):
         return body
     lines = body.rstrip().split("\n")
+    if any(_LOGO_TAG.search(line) and PR_FOOTER in line for line in lines):
+        # brindle's footer with an older logo size: resize it, don't add a second.
+        return "\n".join(_LOGO_TAG.sub(PR_LOGO, line) if PR_FOOTER in line else line for line in lines)
     if lines and lines[-1].strip() == PR_FOOTER:
         body = "\n".join(lines[:-1])   # a bare text-only footer at the end: the full one replaces it
     elif PR_FOOTER in body:

@@ -223,12 +223,15 @@ def _sent_body(ws, monkeypatch, body):
                  marks=pytest.mark.variant("an old-style footer already in the body")),
     pytest.param("Fixes a bug.\n\n" + workspaces.PR_LOGO + " " + workspaces.PR_FOOTER + " · 1 worker",
                  marks=pytest.mark.variant("a new-style footer with counts already in the body")),
+    pytest.param("Fixes a bug.\n\n" + workspaces.PR_LOGO.replace('width="18" height="13"', 'height="20"')
+                 + " " + workspaces.PR_FOOTER + " · 1 worker",
+                 marks=pytest.mark.variant("the earlier 20px-high logo is resized, not doubled")),
     pytest.param("", marks=pytest.mark.variant("an empty body becomes just the footer")),
 ])
 def test_pr_body_ends_with_the_footer_exactly_once(feature, monkeypatch, body):
     sent = _sent_body(feature, monkeypatch, body)
     assert sent.count(workspaces.PR_FOOTER) == 1
-    assert sent.count("brindle-mark.png") == 1   # a bare text footer is upgraded to the full one
+    assert sent.count(workspaces.PR_LOGO) == 1   # a bare text footer is upgraded to the full one
     if "·" not in body:
         assert sent.endswith(workspaces.PR_FOOTER)
 
@@ -253,6 +256,7 @@ def test_pr_footer_counts_come_from_the_db_and_skip_unknown_parts(db, repo, feat
     assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · checks failing")
 
 
+@pytest.mark.variant("a worker's session_root is the root agent id, which the counts test never links")
 def test_session_root_summary_counts_workers_linked_by_root_agent_id(db, feature):
     add(db, feature, "root", "interactive", "supervisor")
     worker_ws = Workspace("w-ws", feature.repo_root, "w", "worktree", feature.path + "-w", "main",
