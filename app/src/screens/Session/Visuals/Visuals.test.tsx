@@ -1267,12 +1267,12 @@ describe("visuals", () => {
     const latest = (p: Plan) => act(async () => reads[reads.length - 1](p));
     view.rerender(reader({ ...row, rev: 2 }));
     await latest(settled(2));
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign off" })));
+    await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
     view.rerender(reader({ ...row, rev: 3 }));
     await latest(settled(3));
     await act(async () => replies[1]({ ...plan, rev: 2, state: "approved", verdict: { approved: true, at: now, rev: 2 } }));
     expect(screen.getByTestId("plan-rev").textContent).toBe("rev 3");
-    expect(screen.getByRole("button", { name: "Sign off" })).toBeTruthy();
+    expect(screen.getByTestId("plan-build")).toBeTruthy();
     // Reopened later, a decided plan shows the alternative the person sent, not the supervisor's.
     view.unmount();
     render(reader(row));
