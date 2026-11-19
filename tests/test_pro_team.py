@@ -270,12 +270,16 @@ def test_rejected_batches_are_dropped_not_retried_forever(team):
     assert Spool().entries() == []
 
 
-def test_spool_caps_drop_the_oldest(tmp_path):
+def test_spool_caps_drop_the_oldest(tmp_path, caplog):
     d = tmp_path / "pro"
     d.mkdir(mode=0o700)
     s = Spool(d, max_events=5)
     s.append(ORG, [{"kind": "merge", "n": i} for i in range(8)])
     assert [e["event"]["n"] for e in s.entries()] == [3, 4, 5, 6, 7] and s.dropped == 3
+    caplog.clear()
+    s.pop(ORG, 2)
+    assert [e["event"]["n"] for e in s.entries()] == [5, 6, 7] and s.dropped == 3
+    assert caplog.records == []
     small = Spool(d, max_bytes=300)
     small.append(ORG, [{"kind": "merge", "n": i, "pad": "x" * 50} for i in range(20)])
     assert (d / "events-spool.jsonl").stat().st_size <= 300
@@ -288,6 +292,79 @@ def test_no_org_key_means_no_team_events(team):
     p.emit(ev())
     p.flush()
     assert Spool().entries() == [] and team.events == [] and p.dropped_no_key == 1
+
+
+def test_transient_license_error_backs_off_and_sends_later(team, monkeypatch, caplog):
+    from types import SimpleNamespace
+    from brindle.pro import license
+
+    wall = [1_800_000_000.0]
+    mono = [100.0]
+    clock = SimpleNamespace(time=lambda: wall[0], monotonic=lambda: mono[0])
+    for mod in (team_events, auth, license):
+        monkeypatch.setattr(mod, "time", clock)
+
+    login(team, team_claims(iat=int(wall[0]) - 600, exp=int(wall[0]) + 3600),
+          org_id=ORG, access_expires_at=wall[0] + 900)
+    p = events_plugin(team)
+    p.keys.get(ORG)                     # org key cached while the access token is fresh
+
+    # 15 minutes later: access token expired, offline entitlement still valid,
+    # and the backend's fresh entitlement is ahead of the local clock past LEEWAY.
+    wall[0] += 900.0
+    skewed_iat = int(wall[0]) + license.LEEWAY + 30
+    team.routes[f"GET /entitlement?org_id={ORG}"] = [
+        (200, {"entitlement": sign(team.key, team_claims(iat=skewed_iat, exp=skewed_iat + 3600))}),
+    ]
+    team.routes["POST /orgs/org_stale/events"] = [(403, {"error": "forbidden"})]
+    Spool().append("org_stale", [{"kind": "merge", "at": wall[0]}])
+    p.emit(ev("assign"))
+    p._drain_queue()
+
+    with caplog.at_level("WARNING", logger="brindle.pro.team_events"):
+        # First attempt hits LicenseError("entitlement is not valid yet") inside
+        # auth.authed -> refresh: backs off and logs once with no tokens.
+        assert p.send_pending() is False
+        assert p._delay >= 1.0 and p._next_try > mono[0]
+        assert len(caplog.records) == 1
+        assert "not valid yet" in caplog.records[0].getMessage()
+
+        # Next attempts drop the stale org's 403 batch, then hit repeated 503s
+        # on the current org: log once for the 503 streak, not on every backoff.
+        post_results = [
+            (503, {"error": "unavailable"}),
+            (503, {"error": "unavailable"}),
+            (403, {"error": "forbidden"}),
+        ]
+        real_post = team.routes[f"POST /orgs/{ORG}/events"]
+        team.routes[f"POST /orgs/{ORG}/events"] = lambda f, h: (
+            post_results.pop(0) if post_results else real_post(f, h))
+        mono[0] = p._next_try + 1.0
+        assert p.send_pending() is False
+        after_first_503 = len(caplog.records)
+        assert any("503" in r.getMessage() for r in caplog.records)
+        mono[0] = p._next_try + 1.0
+        assert p.send_pending() is False
+        assert len(caplog.records) == after_first_503
+
+        # A 403 while the local entitlement lookup is unavailable must retain
+        # the batch and back off rather than treating it as an abandoned org.
+        mono[0] = p._next_try + 1.0
+        p._entitlement = lambda: (_ for _ in ()).throw(license.LicenseError("entitlement is not valid yet"))
+        assert p.send_pending() is False
+        assert p._delay >= 1.0 and p._next_try > mono[0]
+        assert [e["event"]["kind"] for e in Spool().entries()] == ["assign"]
+        p._entitlement = None
+
+        # Once the backend recovers, the spooled batch sends and backoff resets.
+        mono[0] = p._next_try + 1.0
+        wall[0] = float(skewed_iat)
+        assert p.send_pending() is True
+        assert [e["kind"] for e in team.events] == ["assign"]
+        assert Spool().entries() == [] and p._delay == 0.0 and p._next_try == 0.0
+        logged = "\n".join(r.getMessage() for r in caplog.records)
+        for secret in ("at_1", "at_2", "cpr_1", "cpr_2"):
+            assert secret not in logged
 
 
 # -- account org commands and wiring ------------------------------------------------------------------

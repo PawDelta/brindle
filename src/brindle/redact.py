@@ -315,11 +315,14 @@ class MaskingStream:
 
     def finish(self) -> None:
         with self._lock:
-            if self._pending:
-                self._stream.write(mask(self._pending))
-                self._pending = ""
+            pending, self._pending = self._pending, ""
             self._dropping, self._dropped = None, ""
-            self._stream.flush()
+            try:     # at exit the stream may be closed already: nothing more can reach it
+                if pending:
+                    self._stream.write(mask(pending))
+                self._stream.flush()
+            except (ValueError, OSError):
+                pass
 
     def __getattr__(self, name: str):
         return getattr(self._stream, name)

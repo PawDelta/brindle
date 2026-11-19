@@ -39,8 +39,25 @@ it("keeps the light cursor visible while typing in Claude's prompt", async () =>
   await act(() => new Promise<void>(resolve => terminal.write("", resolve)));
   expect(terminal.buffer.active.getLine(0)!.translateToString(true)).toBe("h");
   const colours = (terminal as unknown as { _core: { _themeService: { colors: { cursor: { css: string }; cursorAccent: { css: string } } } } })._core._themeService.colors;
-  expect(colours.cursor.css).toBe("#046e50");
+  expect(colours.cursor.css).toBe("#078a62");
   expect(colours.cursorAccent.css).toBe("#ffffff");
+});
+
+it("selects text on an opaque light ground the dark ink reads on, in light mode", () => {
+  render(<ChatPane provider="claude" theme="light" prompt={{ kind: "unknown", rows: 0 }} composer={null}
+    onDropFiles={() => {}} onComposeText={() => {}}
+    terminal={{ at: { server: null, target: "%1" }, open: () => ({ write() {}, resize() {}, focus() {}, close() {} }) }} />);
+  const terminal = terminals.at(-1)!;
+  const theme = terminal.options.theme!;
+  // Six-digit hex: no alpha for the WebGL renderer to draw near-solid.
+  expect(theme.selectionBackground).toMatch(/^#[0-9a-f]{6}$/i);
+  const lum = (hex: string) => {
+    const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (lum(theme.selectionBackground!) + 0.05) / (lum(theme.foreground!) + 0.05);
+  expect(ratio).toBeGreaterThanOrEqual(4.5);
+  expect(lum(theme.selectionBackground!)).toBeGreaterThan(0.75);
 });
 
 it("renders captured sent-message cells on a light ground and restores their dark palette on switching", async () => {

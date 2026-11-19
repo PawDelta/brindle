@@ -374,7 +374,7 @@ def _signed_in_providers() -> list[str]:
         return []
 
 
-def _fetch_entitlement(client: Client, access: str, now: float, org_id: str | None = None):
+def _fetch_entitlement(client: Client, access: str, now: float | None, org_id: str | None = None):
     """(token, verified entitlement), or 401 when the access token was refused.
     ``org_id`` selects a team org (default: the personal org)."""
     params = {}
@@ -394,7 +394,7 @@ def _fetch_entitlement(client: Client, access: str, now: float, org_id: str | No
     tok = body.get("entitlement")
     if not isinstance(tok, str):
         raise AuthError("backend returned no entitlement", code="bad_response")
-    ent = license.verify(tok, issuer=client.base, now=now, grace=0)
+    ent = license.verify(tok, issuer=client.base, now=time.time() if now is None else now, grace=0)
     if org_id is not None and ent.org_id != org_id:
         raise AuthError("backend returned an entitlement for another org", code="bad_response")
     return tok, ent
@@ -649,26 +649,26 @@ def refresh(client: Client, store, seen: dict | None = None, *, now: float | Non
     token is expired (or ``force``). ``seen`` is the credentials the caller
     read before deciding to refresh: if another process rotated them since,
     its result is used instead of spending a refresh token again."""
-    now = time.time() if now is None else now
     with refresh_lock():
+        t = time.time() if now is None else now
         cur = store.load() or {}
         if not cur.get("refresh_token"):
             raise AuthError("not logged in to brindle Pro", code="invalid_grant", revoked=True)
         elsewhere = seen is not None and cur.get("refresh_token") != seen.get("refresh_token")
         if elsewhere:
-            ent = _usable_entitlement(cur, client.base, now)
+            ent = _usable_entitlement(cur, client.base, t)
             if ent is not None:
                 license.clear_cache()
                 return ent
         fresh_access = bool(cur.get("access_token")) and \
-            float(cur.get("access_expires_at") or 0) > now + ACCESS_SLACK
+            float(cur.get("access_expires_at") or 0) > t + ACCESS_SLACK
         rotated = False
         if not fresh_access or (force and not elsewhere):
-            cur, rotated = _rotate(client, store, cur, now, adopt=True), True
+            cur, rotated = _rotate(client, store, cur, t, adopt=True), True
         org = cur.get("org_id")
         got = _fetch_entitlement(client, cur["access_token"], now, org)
         if got == 401 and not rotated:
-            cur = _rotate(client, store, cur, now, adopt=True)
+            cur = _rotate(client, store, cur, time.time() if now is None else now, adopt=True)
             got = _fetch_entitlement(client, cur["access_token"], now, org)
         if got == 401:
             raise AuthError("backend refused a fresh access token", code="invalid_token")
@@ -688,12 +688,11 @@ def refresh_captured(store, record: dict, transport: Transport | None = None, *,
     refresh token is spent at ``record``'s own ``base_url`` and the rotated pair
     is saved at once, and only then is the entitlement fetched and the record
     updated. If that fetch fails, the saved pair is kept and the error raised."""
-    now = time.time() if now is None else now
     client = Client(record.get("base_url"), transport)
     with refresh_lock():
         if (store.load() or {}) != record:
             raise AuthError("the stored sign-in changed", code="record_changed")
-        new = _rotate(client, store, record, now)
+        new = _rotate(client, store, record, time.time() if now is None else now)
         got = _fetch_entitlement(client, new["access_token"], now, new.get("org_id"))
         if got == 401:
             raise AuthError("backend refused a fresh access token", code="invalid_token")
@@ -708,19 +707,19 @@ def switch_org(client: Client, store, org_id: str | None, *,
     """Make ``org_id`` (None: the personal org) the org whose entitlement is
     stored and used. Nothing changes unless the backend issues a valid
     entitlement for it."""
-    now = time.time() if now is None else now
     if org_id is not None and not ORG_ID_RE.match(org_id):
         raise AuthError("invalid org id", code="bad_request")
     with refresh_lock():
+        t = time.time() if now is None else now
         cur = store.load() or {}
         if not cur.get("refresh_token"):
             raise AuthError("not logged in to brindle Pro (run `brindle account login`)",
                             code="not_logged_in")
-        if float(cur.get("access_expires_at") or 0) <= now + ACCESS_SLACK:
-            cur = _rotate(client, store, cur, now)
+        if float(cur.get("access_expires_at") or 0) <= t + ACCESS_SLACK:
+            cur = _rotate(client, store, cur, t)
         got = _fetch_entitlement(client, cur["access_token"], now, org_id)
         if got == 401:
-            cur = _rotate(client, store, cur, now)
+            cur = _rotate(client, store, cur, time.time() if now is None else now)
             got = _fetch_entitlement(client, cur["access_token"], now, org_id)
         if got == 401:
             raise AuthError("backend refused a fresh access token", code="invalid_token")
@@ -740,12 +739,12 @@ def authed(client: Client, store, method: str, path: str, form: dict | None = No
            *, now: float | None = None, headers: dict | None = None) -> tuple[int, dict]:
     """Call a Bearer endpoint (with extra ``headers``), refreshing the access
     token first if it is about to expire and once more if the backend answers 401."""
-    now = time.time() if now is None else now
+    t = time.time() if now is None else now
     cur = store.load() or {}
     if not cur.get("refresh_token"):
         raise AuthError("not logged in to brindle Pro (run `brindle account login`)",
                         code="not_logged_in")
-    if float(cur.get("access_expires_at") or 0) <= now + ACCESS_SLACK:
+    if float(cur.get("access_expires_at") or 0) <= t + ACCESS_SLACK:
         refresh(client, store, cur, now=now)
         cur = store.load() or {}
     status, body = client.call(method, path, form, token=cur.get("access_token"), headers=headers)
