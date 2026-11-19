@@ -7207,7 +7207,8 @@
             "redirected",
             "approved",
             "writing",
-            "superseded"
+            "superseded",
+            "cancelled"
           ],
           "title": "State",
           "type": "string"
@@ -12573,7 +12574,8 @@
             "redirected",
             "approved",
             "writing",
-            "superseded"
+            "superseded",
+            "cancelled"
           ],
           "title": "State",
           "type": "string"
@@ -13844,6 +13846,10 @@
     {
       "method": "GET",
       "path": "/v1/plans/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/cancel"
     },
     {
       "method": "POST",
