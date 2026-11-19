@@ -191,6 +191,27 @@ CREATE TABLE IF NOT EXISTS phase_prs (
     why TEXT,
     PRIMARY KEY (root_id, phase)
 );
+-- A deleted session's goal (its autopilot row, milestones with their results,
+-- and its goal file's text), kept when its agents row goes: the cascade from
+-- agents would otherwise wipe them. A session started again on the branch
+-- takes it back (autopilot.restore_archived_goal). No foreign keys, so it
+-- outlives the rows it was copied from. goal: JSON; tip: the branch's commit
+-- when it was archived; branch_mark: the branch's lifecycle token, kept in
+-- its git config (which a branch made again under its name doesn't have);
+-- restored_by: the session that took it back. Never evicted.
+CREATE TABLE IF NOT EXISTS goal_archives (
+    root_id TEXT PRIMARY KEY,
+    repo_root TEXT,
+    branch TEXT,
+    tip TEXT,
+    branch_mark TEXT,
+    archived_at REAL NOT NULL,
+    goal TEXT NOT NULL,
+    goals_text TEXT,
+    restored_by TEXT,
+    restored_at REAL
+);
+CREATE INDEX IF NOT EXISTS goal_archives_branch ON goal_archives(repo_root, branch);
 -- Short goal labels live outside the released autopilot table.
 CREATE TABLE IF NOT EXISTS goal_summaries (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
@@ -1525,6 +1546,31 @@ class Milestone:
     phase_name: str | None = None    # the goal's phase this milestone sits in (goals.md `phase:`)
 
 
+class GoalArchiveError(RuntimeError):
+    """A session's goal couldn't be archived in a form a reopened branch can
+    take back: whatever was about to delete its rows must keep them."""
+
+
+@dataclass
+class GoalArchive:
+    """A deleted session's goal, kept for its branch (see the goal_archives table)."""
+    root_id: str
+    repo_root: str | None
+    branch: str | None
+    tip: str | None
+    archived_at: float
+    goal: str                       # JSON: the autopilot fields and the milestones
+    goals_text: str | None = None
+    restored_by: str | None = None
+    restored_at: float | None = None
+    branch_mark: str | None = None  # the branch's lifecycle token (autopilot._branch_mark)
+
+
+# The milestone fields a goal archive keeps (results included).
+_ARCHIVED_MILESTONE = ("title", "check_cmd", "detail", "status", "checked_at", "output", "checked_sha",
+                       "passed_sha", "profile", "repo", "state", "state_why", "ever_passed", "phase_name")
+
+
 _EXIT = re.compile(r"\(exit (-?\d+)\)\s*$")
 
 
@@ -2259,7 +2305,9 @@ class DB:
         # The sessions this workspace is home to go with it, and their visuals.
         roots = [r[0] for r in self.conn.execute(
             "SELECT id FROM agents WHERE workspace_id=? AND parent_id IS NULL", (ws_id,))]
+        kept = self._goal_archive_extras(self._GOALS_IN_WORKSPACE, (ws_id,))
         with self.tx() as c:
+            self._archive_goals(kept)   # before the cascade (workspace -> agents -> autopilot) takes them
             c.execute("DELETE FROM workspaces WHERE id=?", (ws_id,))
         if ws:
             if roots:
@@ -2960,7 +3008,9 @@ class DB:
         self._publish_result(agent_id)
 
     def delete_agent(self, agent_id: str) -> None:
+        kept = self._goal_archive_extras(self._GOALS_OF_AGENT, (agent_id,))
         with self.tx() as c:
+            self._archive_goals(kept)   # before the cascade from agents takes the goal
             c.execute("DELETE FROM agents WHERE id=?", (agent_id,))
             c.execute("DELETE FROM agent_marks WHERE agent_id=?", (agent_id,))
             c.execute("DELETE FROM report_outbox WHERE agent_id=?", (agent_id,))
@@ -3615,6 +3665,127 @@ class DB:
                 if len(rest) > 2 and rest[2]:
                     c.execute("INSERT INTO milestone_phases (milestone_id, phase) VALUES (?,?)",
                               (cur.lastrowid, rest[2]))
+
+    # -- goal archives (autopilot.restore_archived_goal) ----------------------
+
+    _GOALS_OF_AGENT = "SELECT p.root_id FROM autopilot p WHERE p.root_id=? AND p.goal IS NOT NULL"
+    _GOALS_IN_WORKSPACE = ("SELECT p.root_id FROM autopilot p JOIN agents a ON a.id=p.root_id "
+                           "WHERE a.workspace_id=? AND p.goal IS NOT NULL")
+    # An archive a new session may take: not taken yet, and its session gone.
+    _ARCHIVE_FREE = ("restored_by IS NULL AND NOT EXISTS "
+                     "(SELECT 1 FROM agents WHERE agents.id=goal_archives.root_id)")
+
+    def archive_goals(self, *, root_id: str | None = None, workspace_id: str | None = None) -> None:
+        """Archive the goal of session ``root_id``, or of every session at home
+        in ``workspace_id``, now: for a caller about to remove what the archive
+        reads (the worktree its goal file may sit in, the branch), before
+        deleting the rows, which archives again. An archive isn't taken back
+        while its session's row is still there. ``GoalArchiveError`` (as from
+        ``delete_agent`` and ``delete_workspace``): the caller keeps the session."""
+        if root_id is not None:
+            kept = self._goal_archive_extras(self._GOALS_OF_AGENT, (root_id,))
+        else:
+            kept = self._goal_archive_extras(self._GOALS_IN_WORKSPACE, (workspace_id,))
+        if kept:
+            with self.tx():
+                self._archive_goals(kept)
+
+    def _goal_archive_extras(self, sql: str, args: tuple) -> dict[str, dict]:
+        """For each session root ``sql`` selects, what only git and the files
+        can say: its repo and branch, the branch's tip and its goal file's
+        text (``autopilot.archive_extras``). Read before the deleting
+        transaction, so no git or file read holds the write lock. Never raises."""
+        roots = [r[0] for r in self.conn.execute(sql, args)]
+        if not roots:
+            return {}
+        from brindle import autopilot
+
+        kept = {r: autopilot.archive_extras(self, r) for r in roots}
+        for root_id, extra in kept.items():
+            if not extra.get("unmarked"):
+                continue
+            row = self.conn.execute("SELECT branch_mark FROM goal_archives WHERE root_id=?", (root_id,)).fetchone()
+            if row is None or row["branch_mark"] is None:   # an earlier archive didn't mark it either
+                raise GoalArchiveError(
+                    f"session {root_id}'s branch {extra.get('branch')} couldn't be marked in its git config, "
+                    "so its goal couldn't be archived; the session is kept for a later try")
+        return kept
+
+    def _archive_goals(self, kept: dict[str, dict]) -> None:
+        """Copy the goal of each session in ``kept`` (root -> its extras) into
+        goal_archives, milestones and their results included, inside the
+        caller's transaction: the rows they come from are deleted in it."""
+        c = self.conn
+        for root_id, extra in kept.items():
+            ap = self.get_autopilot(root_id)
+            if ap is None or not ap.goal:
+                continue
+            goal = {
+                "goal": ap.goal, "detail": ap.detail, "summary": ap.summary, "state": ap.state,
+                "goal_sha": ap.goal_sha, "audit_sha": ap.audit_sha, "audit_ok": ap.audit_ok,
+                "audit_history": ap.audit_history, "plan_offer": ap.plan_offer,
+                "offer_goal_at": ap.offer_goal_at,
+                "milestones": [{k: getattr(m, k) for k in _ARCHIVED_MILESTONE} for m in self.milestones(root_id)],
+            }
+            # Archived again (an earlier one before teardown): what can no longer
+            # be read (a removed worktree's goal file, a deleted branch) keeps
+            # what the earlier one read.
+            c.execute(
+                "INSERT INTO goal_archives (root_id, repo_root, branch, tip, branch_mark, archived_at, goal, "
+                "goals_text) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(root_id) DO UPDATE SET "
+                "repo_root=COALESCE(excluded.repo_root, repo_root), branch=COALESCE(excluded.branch, branch), "
+                "tip=COALESCE(excluded.tip, tip), branch_mark=COALESCE(excluded.branch_mark, branch_mark), "
+                "archived_at=excluded.archived_at, goal=excluded.goal, "
+                "goals_text=COALESCE(excluded.goals_text, goals_text), restored_by=NULL, restored_at=NULL",
+                (root_id, extra.get("repo_root"), extra.get("branch"), extra.get("tip"), extra.get("branch_mark"),
+                 time.time(), json.dumps(goal), extra.get("goals_text")))
+
+    def goal_archive_for(self, repo_root: str, branch: str) -> GoalArchive | None:
+        """The newest goal archived from a deleted session on ``branch`` that
+        no session has taken back yet."""
+        row = self.conn.execute(
+            f"SELECT * FROM goal_archives WHERE repo_root=? AND branch=? AND {self._ARCHIVE_FREE} "
+            "ORDER BY archived_at DESC LIMIT 1", (repo_root, branch)).fetchone()
+        return _load(GoalArchive, row) if row else None
+
+    def restore_goal_archive(self, archived_root: str, root_id: str) -> bool:
+        """Give session ``root_id`` the goal archived from ``archived_root``,
+        milestones with their results, in one transaction that also marks the
+        archive taken. False, with nothing changed, when another session took
+        it first, its own session is still there (archived ahead of a removal
+        that then didn't happen), or ``root_id`` has a goal of its own."""
+        with self.tx() as c:
+            row = c.execute(f"SELECT goal FROM goal_archives WHERE root_id=? AND {self._ARCHIVE_FREE}",
+                            (archived_root,)).fetchone()
+            own = c.execute("SELECT goal FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
+            if row is None or own is None or own["goal"]:
+                return False
+            c.execute("UPDATE goal_archives SET restored_by=?, restored_at=? WHERE root_id=?",
+                      (root_id, time.time(), archived_root))
+            g = json.loads(row["goal"])
+            fields: dict[str, object] = {
+                "goal": g["goal"], "detail": g.get("detail"), "summary": g.get("summary"),
+                # A finished goal stays finished; anything in flight starts over.
+                "state": "done" if g.get("state") == "done" else "running",
+                "goal_sha": g.get("goal_sha"), "audit_sha": g.get("audit_sha"), "audit_ok": g.get("audit_ok"),
+                "audit_history": g.get("audit_history"),
+            }
+            if g.get("plan_offer") is not None:
+                fields["plan_offer"] = g["plan_offer"]
+            if g.get("offer_goal_at") is not None:
+                fields["offer_goal_at"] = g["offer_goal_at"]
+            self.update_autopilot(root_id, **fields)
+            ms = g.get("milestones") or []
+            self.set_milestones(root_id, [(m["title"], m["check_cmd"], m["detail"], m["profile"], m["repo"],
+                                           m["phase_name"]) for m in ms])
+            for position, m in enumerate(ms, start=1):
+                c.execute(
+                    "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=?, passed_sha=?, "
+                    "state=?, state_why=?, ever_passed=? WHERE root_id=? AND position=?",
+                    (m["status"], m["checked_at"], m["output"], m["checked_sha"], m["passed_sha"], m["state"],
+                     m["state_why"], m["ever_passed"], root_id, position))
+            self.bump_progress(root_id)
+        return True
 
     def milestones(self, root_id: str) -> list[Milestone]:
         rows = self.conn.execute(

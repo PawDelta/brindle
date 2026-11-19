@@ -53,7 +53,7 @@ from pathlib import Path
 
 from brindle import agents, config, git, procs, status_cache, tmux
 from brindle.config import CONFIG_DIR, WORKTREES_DIR, brindle_home, load_repo_config, worktrees_dir
-from brindle.db import DB, Agent, Workspace
+from brindle.db import DB, Agent, GoalArchiveError, Workspace
 from brindle.pro import route_health
 
 # An agent this new may not have its window recorded yet.
@@ -1530,6 +1530,11 @@ def prune_retired(db: DB, now: float | None = None, *, cautious: bool = False) -
             everyone = db.list_agents(ws.id)
             if cautious and (now - ws.created_at <= view.UNUSED_WORKTREE_GRACE
                              or any(a.id in alive for a in everyone)):
+                continue
+            try:
+                db.archive_goals(workspace_id=ws.id)
+            except GoalArchiveError:
+                done.append(f"kept the records of missing workspace {ws.id}: couldn't archive its goal")
                 continue
             if not history.archive(db, ws, everyone, "worktree missing"):
                 done.append(f"kept the records of missing workspace {ws.id}: couldn't archive them")

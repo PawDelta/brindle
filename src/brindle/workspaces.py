@@ -39,7 +39,7 @@ from brindle.config import (
     worktree_root,
     worktrees_dir,
 )
-from brindle.db import DB, Workspace
+from brindle.db import DB, GoalArchiveError, Workspace
 
 ROOT_NAME = "root"
 
@@ -725,6 +725,12 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
         for a in stop or ():
             agents._stop(db, a)
 
+    # Before anything is torn down: the goal file may sit in the worktree, and
+    # the branch may go. Deleting the rows (_forget) archives again.
+    try:
+        db.archive_goals(workspace_id=ws.id)
+    except GoalArchiveError as e:
+        raise WorkspaceError(f"{ws.name} is kept: {e}") from e
     if ws.kind == "main":
         from brindle import pipeline
 

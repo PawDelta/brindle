@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brindle import agents, bus, disk, git, history, knowledge, pool, scratch, tmux, workspaces
-from brindle.db import DB, Agent, Workspace
+from brindle.db import DB, Agent, GoalArchiveError, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
 # who wants more) can raise them without changing this module.
@@ -316,6 +316,10 @@ def _repoint_orphaned_tasks(db: DB, root_id: str) -> None:
 def _forget(db: DB, s: Session) -> None:
     """Drop a session: its records, and any of its worktrees that are clean and
     not used by anything else. Branches and dirty worktrees stay."""
+    try:   # its goal, with its goal file's text, before anything of it goes
+        db.archive_goals(root_id=s.root.id)
+    except GoalArchiveError:
+        return  # kept for a later try
     worktrees = {}
     panes = tmux.list_panes()
     owners = agents.pane_owners(db, panes)
@@ -350,7 +354,7 @@ def _forget(db: DB, s: Session) -> None:
                            "session dropped"):
         return  # kept for a later try
     from brindle import autopilot as pilot
-    pilot.remove_goals_file(db, s.root.id)   # the session's own goal file goes with it
+    pilot.remove_goals_file(db, s.root.id)   # the session's own goal file goes with it (archived above)
     knowledge.note(db, s.root.id, knowledge.END)
     for a in s.members:
         agents._note_reviewer_end(db, a)

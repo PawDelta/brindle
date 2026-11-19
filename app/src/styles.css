@@ -375,6 +375,7 @@ body {
 /* The sidebar's goal summary: the active step's stage colour (GoalPanel's st-<stage>), a thin bar, the activity line, short steps. */
 .st-working { --st: var(--group-1); }
 .st-resuming { --st: var(--branch); }
+.st-waiting { --st: var(--sap); }
 .st-checks { --st: var(--group-2); }
 .st-review { --st: var(--group-7); }
 .st-merging, .st-done { --st: var(--pass); }

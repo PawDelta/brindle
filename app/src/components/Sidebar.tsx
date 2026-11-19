@@ -431,23 +431,30 @@ const goalDone = (goal: GoalDTO | null | undefined) => !!goal && goalPhase(goal,
 
 /* The supervisor's live activity, even when its workers are folded away.
    A finished goal wins; a paused process cannot still be doing its last stage. */
-function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined) {
+function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined, supervisor?: AgentDTO | null, alive?: boolean) {
   if (session.status === "resuming") return "Resuming";
   if (goalDone(goal)) return "Done";
   if (session.status === "failed") return "Failed";
   if (isPaused(session)) return "Paused";
+  // The supervisor's own agent is the live feed (the snapshot); the session row only changes on the slower sessions feed.
+  const live = supervisor && alive !== false ? supervisor.status : null;
+  if (live === "waiting") return "Waiting";
+  if (live === "paused") return "Paused";
   switch (goal?.stage) {
     case "working": return "Working";
     case "checks": return "Checking";
     case "review": return "Reviewing";
     case "merging": return "Merging";
   }
-  return session.status === "processing" || session.status === "starting" ? "Working" : "Idle";
+  const busy = (s: string | null) => s === "processing" || s === "starting";
+  // A live status is authoritative over the session feed's, which may be stale.
+  return busy(live ?? session.status) ? "Working" : "Idle";
 }
 
 function sessionStageClass(word: string) {
   switch (word) {
     case "Resuming": return "st-resuming";
+    case "Waiting": return "st-waiting";
     case "Working": return "st-working";
     case "Checking": return "st-checks";
     case "Reviewing": return "st-review";
@@ -504,9 +511,9 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   const alive = useAppState((s) => s.alive);
   const { hidden } = useSessions();
   const goal = useRowGoal(repo, root);
-  const word = sessionStatusWord(session, goal);
   const resuming = session.status === "resuming";
   const tree = useMemo(() => sessionTree(workspaces, root, hidden), [workspaces, root, hidden]);
+  const word = sessionStatusWord(session, goal, tree?.agent, alive[root]);
   const members = useMemo(() => agentIds(tree), [tree]);
   const open = route.screen === "session" && route.root === root;
   const key = `session:${root}`;
@@ -522,6 +529,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
           type="button"
           className={`session-root-dot ${sessionStageClass(word)}${resuming ? " motion-safe:animate-pulse" : ""}`}
           data-tone={resuming ? "work" : undefined}
+          data-state={word.toLowerCase()}
           aria-label={folded ? `Show ${root}'s agents` : `Hide ${root}'s agents`}
           aria-expanded={!folded}
           onClick={toggle}
