@@ -537,12 +537,15 @@ class PlanGatePolicyDTO(_DTO):
 class PlanUnconfirmedDTO(_DTO):
     """Why the Library couldn't confirm a shared plan's review when the person
     tried to approve it. ``approval_held``: their Approve applies by itself
-    once it can; ``can_stop_sharing``: they may make it a personal doc instead."""
+    once it can; ``can_stop_sharing``: they may make it a personal doc instead;
+    ``can_edit_reviewers``: they may change who reviews it (the Library refused
+    the share, ``access_refused``, or the review can't be confirmed)."""
 
-    reason: Literal["offline", "sign_in", "key_unavailable", "library_error", "other_account"]
+    reason: Literal["offline", "sign_in", "key_unavailable", "library_error", "other_account", "access_refused"]
     message: str
     approval_held: bool = False
     can_stop_sharing: bool = False
+    can_edit_reviewers: bool = False
 
 
 class PlanGateDTO(_DTO):

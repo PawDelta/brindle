@@ -72,9 +72,11 @@ CONFLICT = "conflict"       # the plan and the Library's copy both changed since
 # The gate's states that keep a build from starting.
 GATE_SHUT = (WAITING, CHANGES, CONFLICT)
 # Why the Library couldn't confirm a shared plan's review (plan_shares.unconfirmed), in the person's words.
-OFFLINE, SIGN_IN, KEY_UNAVAILABLE, LIBRARY_ERROR, OTHER_ACCOUNT = (
-    "offline", "sign_in", "key_unavailable", "library_error", "other_account")
+OFFLINE, SIGN_IN, KEY_UNAVAILABLE, LIBRARY_ERROR, OTHER_ACCOUNT, ACCESS_REFUSED = (
+    "offline", "sign_in", "key_unavailable", "library_error", "other_account", "access_refused")
 UNCONFIRMED = {
+    ACCESS_REFUSED: "The Library refused this account access to the plan's shared doc, so its review can't be "
+                    "confirmed. Stop sharing, or edit the reviewers.",
     OFFLINE: "brindle can't reach the Library right now, so it can't confirm this plan's review.",
     SIGN_IN: "Your brindle sign-in has expired, so the Library can't confirm this plan's review.",
     KEY_UNAVAILABLE: "Your organization's encryption key isn't available, so the Library can't confirm this "
@@ -406,11 +408,14 @@ def _gate(c, p: dict) -> dict | None:
         state, reason = "ready", None
     is_open = p["state"] == "open"
     unconfirmed = None
-    if is_open and row["unconfirmed"] is not None:
-        unconfirmed = {"reason": row["unconfirmed"],
-                       "message": UNCONFIRMED.get(row["unconfirmed"], UNCONFIRMED[LIBRARY_ERROR]),
+    # A refusal of access is a way out too: the owner can stop sharing or edit the reviewers.
+    held = row["unconfirmed"] or (ACCESS_REFUSED if row["access_refused"] is not None else None)
+    if is_open and held is not None:
+        unconfirmed = {"reason": held,
+                       "message": UNCONFIRMED.get(held, UNCONFIRMED[LIBRARY_ERROR]),
                        "approval_held": row["approve_wanted"] is not None,
-                       "can_stop_sharing": shared_docs.may_stop(row, shared_docs.account())}
+                       "can_stop_sharing": shared_docs.may_stop(row, shared_docs.account()),
+                       "can_edit_reviewers": row["doc_id"] is not None}
     return {"state": state, "reason": reason, "required": len(required), "signed": met, "waiting_on": unmet,
             "reviewers": rows, "policies": policies, "unconfirmed": unconfirmed,
             "approval_refused": row["approve_refused"] if is_open else None}
