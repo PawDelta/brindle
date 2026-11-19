@@ -748,7 +748,7 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
     with db.tx() as c:
         visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
     bus.publish_agent(db, "autopilot.goal", root_id)
-    bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # the app opens it for the person
+    bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # listed already (visual.published); the person opens it
     return v["id"]
 
 

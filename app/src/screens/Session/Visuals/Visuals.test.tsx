@@ -12,7 +12,9 @@ import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
-import { PARKED, closeParkedVisuals } from "./NativeFrame";
+import { PARKED, closeParkedVisuals, themeMessage } from "./NativeFrame";
+// The page's side of the app theme, the very file the prelude embeds (visual_scheme.rs).
+import pageScript from "../../../../src-tauri/src/visual_theme.js?raw";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { KeptVisuals } from "../../Knowledge/KeptVisuals";
@@ -716,26 +718,6 @@ describe("visuals", () => {
     expect([cards(), badge()]).toEqual([[], null]);
   });
 
-  it("opens the plan the person asked for in the planning view, and not one asked before the screen showed", async () => {
-    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
-    const plan: VisualDTO = { ...visual, id: "v_plan", kind: "plan", title: "Plan", question: undefined, options: undefined, rev: 1 };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
-    const client = daemon.client();
-    vi.spyOn(client, "visuals").mockImplementation(async () => [plan]);
-    vi.spyOn(client, "markVisualRead").mockImplementation(async () => plan);
-    const draft: Plan = { id: "v_plan", session: "sup1", title: "Plan", rev: 0, state: "writing", markdown: "", lede: "", queued: 0, created_at: now, split: [], sections: [], decisions: [], threads: [] };
-    vi.spyOn(client, "plan").mockImplementation(async () => draft);
-    const store = createAppStore();
-    const asked = (id: number) => act(() => store.dispatch({ type: "stream", message: { type: "event", id, ts: now, kind: "plan.requested", repo_root: REPO, root_id: "sup1", agent_id: "sup1", workspace_id: "proj", task_id: null, payload: { visual: "v_plan" } } }));
-    await asked(5000);                                   // before the screen opens: not replayed
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-    await screen.findByTestId("terminal", {}, { timeout: 4000 });
-    expect(screen.queryByTestId("plan-decided")).toBeNull();
-    await asked(5001);
-    expect((await screen.findByTestId("plan-decided")).dataset.state).toBe("writing");
-  });
-
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
@@ -1285,12 +1267,12 @@ describe("visuals", () => {
     const latest = (p: Plan) => act(async () => reads[reads.length - 1](p));
     view.rerender(reader({ ...row, rev: 2 }));
     await latest(settled(2));
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign off" })));
+    await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
     view.rerender(reader({ ...row, rev: 3 }));
     await latest(settled(3));
     await act(async () => replies[1]({ ...plan, rev: 2, state: "approved", verdict: { approved: true, at: now, rev: 2 } }));
     expect(screen.getByTestId("plan-rev").textContent).toBe("rev 3");
-    expect(screen.getByRole("button", { name: "Sign off" })).toBeTruthy();
+    expect(screen.getByTestId("plan-build")).toBeTruthy();
     // Reopened later, a decided plan shows the alternative the person sent, not the supervisor's.
     view.unmount();
     render(reader(row));
@@ -1310,7 +1292,7 @@ describe("visuals", () => {
       ] }],
       split: [
         { id: "w1", title: "Remote launch", after: [], files: ["spawn.py", "tmux.py"], test: "test_remote_spawn" },
-        { id: "w2", title: "Pro gate", after: ["w1"], files: ["pro/account.py", "spawn.py"] },
+        { id: "w2", title: "Pro gate", after: [], files: ["pro/account.py", "spawn.py"] },
       ],
     };
     const sent: PlanVerdict[] = [];
@@ -1560,4 +1542,85 @@ describe("export snapshot", () => {
       fireEvent.click(screen.getByTestId("visual-zoom-reset"));
       await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_zoom", { label, zoom: 1 }));
     });
+});
+
+describe("visual theme", () => {
+  const DARK = "--canvas:#080d0b;--ink:#e8f0eb";
+  const LIGHT = "--canvas:#f4f6f6;--ink:#0e1716";
+  const shapes = {
+    darkFirst: `:root{${DARK};color-scheme:dark}
+      @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){${LIGHT};color-scheme:light}}
+      :root[data-theme="light"]{${LIGHT};color-scheme:light}`,
+    lightFirst: `:root{${LIGHT};color-scheme:light}
+      @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){${DARK};color-scheme:dark}}
+      :root[data-theme="dark"]{${DARK};color-scheme:dark}`,
+  };
+  // The root's --canvas as a browser cascades it (jsdom doesn't evaluate @media): later wins, and
+  // prefers-color-scheme answers the system's scheme unless the page rewrote it.
+  const canvas = (doc: Document, system: "light" | "dark") => {
+    let value = "";
+    const media = (text: string) => !/max-width:\s*0px/.test(text)
+      && Array.from(text.matchAll(/prefers-color-scheme\s*:\s*(light|dark)/gi)).every((m) => m[1] === system);
+    const visit = (rules: CSSRuleList) => {
+      for (const rule of Array.from(rules)) {
+        // The frame's rules are of its own realm: told apart by shape, not instanceof.
+        if ("media" in rule) { if (media((rule as CSSMediaRule).media.mediaText)) visit((rule as CSSMediaRule).cssRules); }
+        else if ("selectorText" in rule && doc.documentElement.matches((rule as CSSStyleRule).selectorText)) {
+          value = (rule as CSSStyleRule).style.getPropertyValue("--canvas").trim() || value;
+        }
+      }
+    };
+    for (const sheet of Array.from(doc.styleSheets)) visit(sheet.cssRules);
+    return value;
+  };
+
+  it.each(["darkFirst", "lightFirst"] as const)("a %s page follows the app's light and dark, live, whatever the system's", async (shape) => {
+    const frame = document.body.appendChild(document.createElement("iframe"));
+    const page = frame.contentWindow! as typeof globalThis & Window;
+    const doc = frame.contentDocument!;
+    doc.documentElement.innerHTML = `<head><style>${shapes[shape]}</style></head><body>board</body>`;
+    // The page's own matchMedia answers the system (jsdom has none): only the script may change that.
+    let systemNow: "light" | "dark" = "dark";
+    let widthNow = 900;
+    const live: (() => void)[] = [];
+    page.matchMedia = ((query: string) => {
+      const answer = () => Array.from(query.matchAll(/max-width:\s*(\d+)px/gi)).every((m) => widthNow <= Number(m[1]))
+        && Array.from(query.matchAll(/prefers-color-scheme\s*:\s*(light|dark)/gi)).every((m) => m[1] === systemNow);
+      const listeners: ((event: { matches: boolean }) => void)[] = [];
+      let last = answer();
+      live.push(() => { if (answer() !== last) { last = answer(); for (const fn of listeners) fn({ matches: last }); } });
+      return { media: query, get matches() { return answer(); }, addEventListener: (_: string, fn: (typeof listeners)[number]) => listeners.push(fn) };
+    }) as unknown as typeof page.matchMedia;
+    // The browser re-evaluates its lists, as on a resize.
+    const resize = (width: number) => { widthNow = width; for (const check of live) check(); };
+    new Function("window", "document", "MutationObserver", `(${pageScript.trim()})()`)(page, doc, page.MutationObserver);
+    const host = () => page.dispatchEvent(new page.MessageEvent("message", { data: themeMessage(), origin: "brindle://host" }));
+    // The system is the other scheme each time, as when the app is set apart from it.
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    // A script's own question, and the switches it hears, follow the app too.
+    const darkQuery = page.matchMedia("(prefers-color-scheme: dark)");
+    const heard: boolean[] = [];
+    darkQuery.addEventListener("change", (event) => heard.push(event.matches));
+    for (const [app, system] of [["light", "dark"], ["dark", "light"], ["light", "dark"]] as const) {
+      systemNow = system;
+      document.documentElement.dataset.theme = app;
+      host();
+      await Promise.resolve();
+      expect(canvas(doc, system)).toBe(app === "light" ? "#f4f6f6" : "#080d0b");
+      expect(darkQuery.matches).toBe(app === "dark");
+      expect(heard.at(-1)).toBe(app === "dark");
+      expect(doc.documentElement.dataset.theme).toBe(app);
+      expect(doc.documentElement.style.getPropertyValue("color-scheme")).toBe(app);
+    }
+    // With the app's scheme set, the rest of a compound query still changes it, and says so.
+    const narrowLight = page.matchMedia("(prefers-color-scheme: light) and (max-width: 600px)");
+    const narrowed: boolean[] = [];
+    narrowLight.addEventListener("change", (event) => narrowed.push(event.matches));
+    resize(500);
+    expect(narrowed).toEqual([true]);
+    expect(narrowLight.matches).toBe(true);
+    resize(900);
+    delete document.documentElement.dataset.theme;
+    frame.remove();
+  });
 });

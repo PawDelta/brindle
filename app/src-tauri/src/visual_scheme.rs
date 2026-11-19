@@ -262,6 +262,7 @@ pub fn request_allowed(url: &str) -> bool {
 pub fn prelude(own: &VisualRef) -> String {
     let message_url = serde_json::to_string(&format!("{}/message", own.url())).expect("a JSON string");
     let zoom_script = include_str!("visual_zoom.js").trim();
+    let theme_script = include_str!("visual_theme.js").trim();
     format!(
         r#"(() => {{
   "use strict";
@@ -290,6 +291,8 @@ pub fn prelude(own: &VisualRef) -> String {
   document.addEventListener("keydown", (event) => {{ if (event.key === "Escape") send({{ type: "brindle.esc" }}); }}, true);
   // Zoom: keys, wheel and pinch inside the page, and keeping the zoomed-around point in place (visual_zoom.js).
   ({zoom_script})(send);
+  // The app's light or dark, not the system's: the host's brindle.theme says which (visual_theme.js).
+  ({theme_script})();
   // The host asks for the rendered DOM; the daemon sanitises what comes back.
   window.addEventListener("message", (event) => {{
     if (event.origin !== "brindle://host" || !event.data || event.data.type !== "brindle.snapshot.request") return;

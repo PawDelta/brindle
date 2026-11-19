@@ -1,12 +1,14 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { FitAddon } from "@xterm/addon-fit";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
 import { DaemonClient } from "../api/client";
 import { startupStep } from "../api/startup";
 import { VisualLinkContext } from "../screens/Session/Visuals/link";
-import { ATTACH_WAIT, COPIED_SHOWN, COPY_OR_INTERRUPT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
+import { ATTACH_WAIT, COPIED_SHOWN, COPY_OR_INTERRUPT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn, shellTheme } from "./PtyTerminal";
 
 vi.mock("../api/startup", { spy: true });
 const files = vi.hoisted(() => ({ read: vi.fn(), listen: vi.fn(), drop: (_event: unknown) => {} }));
@@ -881,4 +883,27 @@ it("crops rows under the view's foot with a taller client, restores them, and sw
   // The same view throughout: the crop and theme change it, never reopen it.
   expect(xterms).toHaveLength(1);
   fits.mockRestore();
+});
+
+it("reads a light shell block from the stylesheet's light theme: a light ground, dark ink", () => {
+  // The light block of styles.css, as the page gets it under data-theme="light".
+  const css = readFileSync(resolve(import.meta.dirname, "../styles.css"), "utf8");
+  const start = css.indexOf(':root[data-theme="light"] {');
+  const style = document.createElement("style");
+  style.textContent = css.slice(start, css.indexOf("}", start) + 1);
+  document.head.append(style);
+  document.documentElement.dataset.theme = "light";
+  try {
+    // A hex colour's mean channel: above 128 is light.
+    const mean = (hex: string | undefined) => {
+      const n = parseInt((hex ?? "").replace("#", ""), 16);
+      return (((n >> 16) & 255) + ((n >> 8) & 255) + (n & 255)) / 3;
+    };
+    const theme = shellTheme();
+    expect(mean(theme.background)).toBeGreaterThan(128);
+    expect(mean(theme.foreground)).toBeLessThan(128);
+  } finally {
+    style.remove();
+    delete document.documentElement.dataset.theme;
+  }
 });

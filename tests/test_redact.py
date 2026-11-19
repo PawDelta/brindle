@@ -272,3 +272,15 @@ def test_masking_stream_holds_a_secret_split_across_writes_lines_and_flushes(mon
             stream.write(text)
         assert "AbCdEfGhIjKlMnOp" not in out.getvalue() and body not in out.getvalue()
         assert out.getvalue().endswith("ok\n")
+
+    class FlushClosed(io.StringIO):     # at exit: writes still land, flush finds it closed
+        def flush(self):
+            raise ValueError("I/O operation on closed file")
+    out = FlushClosed()
+    stream = redact.MaskingStream(out)
+    stream.write("last " + PAT)
+    stream.finish()
+    assert out.getvalue() == "last [redacted]"
+    out.close()
+    stream.write("more")
+    stream.finish()

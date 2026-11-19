@@ -393,7 +393,12 @@ def _loose_changed(db, judged: _Loose, base: str | None, now: float, saved: str 
 def sweep_loose(db, root: str, now: float) -> list[str]:
     base = _tmp_base()
     done = []
-    for wt in git.list_worktrees(root)[1:]:   # the first is the main checkout
+    try:
+        listed = git.list_worktrees(root)
+    except git.GitError as e:   # a repo that is gone (or no longer a repo): nothing to sweep
+        log.debug("brindle: skipping %s for leftover worktrees: %s", root, e)
+        return done
+    for wt in listed[1:]:   # the first is the main checkout
         try:
             judged = _loose_done(db, root, wt, base, now)
         except git.GitError:
@@ -436,8 +441,8 @@ def sweep(db, now: float | None = None) -> list[str]:
     for root in roots:   # 2. folders that are gone
         try:
             git.run(["worktree", "prune"], root, check=False)
-        except git.GitError as e:
-            log.info("brindle: couldn't prune %s's worktrees: %s", root, e)
+        except git.GitError as e:   # a root gone since it was listed: quiet, nothing to prune
+            log.debug("brindle: couldn't prune %s's worktrees: %s", root, e)
     try:
         done += sweep_workspaces(db, now)
     except Exception:  # noqa: BLE001

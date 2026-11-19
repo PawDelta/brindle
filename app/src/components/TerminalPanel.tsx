@@ -25,8 +25,10 @@ import { usePtyViews, type PtyViewTarget } from "../api/ptyView";
 import type { SessionDTO, WorkspaceDTO } from "../api/schema";
 import { plain } from "../api/wording";
 import { readLastSession, type Route } from "../routes";
+import { chatContrast, chatTheme } from "../screens/Session/Chat/ChatPane";
 import { PtyTerminal } from "./PtyTerminal";
 import { RECONNECTING } from "./ReconnectOverlay";
+import { useAppTheme } from "./useAppTheme";
 
 /* Where a shell opened now would start: the repo (its root and name), the
    folder, and that folder in words. */
@@ -452,6 +454,9 @@ export function ShellView({ tab, onEnded }: { tab: ShellTab; onEnded(): void }) 
   const views = usePtyViews();
   const [failed, setFailed] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  // In light the session pane's palette and contrast (chatTheme, chatContrast); in dark the shell block's own (shellTheme).
+  const appTheme = useAppTheme();
+  const paneTheme = useMemo(() => (appTheme === "light" ? chatTheme("light") : undefined), [appTheme]);
   if (!views) return <p className={NOTE}>The shell shows in the app.</p>;
   if (views.status.kind === "pending") return <p className={NOTE}>Getting the terminal ready…</p>;
   if (views.status.kind === "unusable") {
@@ -489,6 +494,8 @@ export function ShellView({ tab, onEnded }: { tab: ShellTab; onEnded(): void }) 
       open={views.open}
       copy={views.copy}
       paste={views.paste}
+      theme={paneTheme}
+      minimumContrastRatio={chatContrast(appTheme)}
       onView={(v) => {
         if (v.kind === "closed") onEnded();
         if (v.kind === "error") setFailed(plain(v.message));
