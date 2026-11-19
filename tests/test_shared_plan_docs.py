@@ -45,7 +45,7 @@ class Library:
         self.lose_answer, self.lose_create, self.list_status, self.plan = False, False, 200, None
         self.sign_offs, self.author, self.refuse_accept = [], "u_e", False
         self.answer_status, self.refuse_suggest = 200, False     # once committed, answer this; refuse before committing
-        self.refuse_vote, self.draft = False, None
+        self.refuse_vote, self.draft, self.reject_section = False, None, None
         remote.routes.update({
             f"GET {DESIGN}/draft": lambda f, h: (200, {"rev": self.rev, "frozen": None, "snapshot": base64.b64encode(
                 self.draft.export_snapshot()).decode()}),
@@ -138,9 +138,18 @@ class Library:
             t["status"], self.rev, self.votes = "accepted", self.rev + 1, {}
         return self.answer()
 
+    def _section_refusal(self, design):
+        if self.reject_section and any("section" in d for d in design.get("decisions") or []):
+            body = self.reject_section if isinstance(self.reject_section, dict) else {
+                "detail": [{"type": "extra_forbidden", "loc": ["body", "design", "decisions", 0, "section"]}]}
+            return 422, body
+        return None
+
     def create(self, form, headers):
         if self.create_status != 200:
             return self.create_status, {"error": "switch_off"}
+        if refused := self._section_refusal(form["design"]):
+            return refused
         self.rev, self.content, self.plan = 1, copy.deepcopy(dict(form["design"])), form["source"]["ref"]
         if self.lose_create:
             raise auth.AuthError("offline", code="network")
@@ -158,6 +167,8 @@ class Library:
     def revise(self, form, headers):
         if self.draft is not None:
             return 409, {"error": "live_draft"}
+        if refused := self._section_refusal(form):
+            return refused
         if form["rev"] != self.rev:
             return 409, {"error": "stale", "rev": self.rev}
         self.rev, self.content = self.rev + 1, {k: copy.deepcopy(v) for k, v in form.items() if k != "rev"}
@@ -1433,3 +1444,66 @@ def test_a_plan_with_no_sections_is_refused_before_anything_is_created(db, sessi
     with pytest.raises(RuntimeError):
         sd.share(db, pid, TEAM, client=auth.Client(None, backend), store=store)
     assert not sent(backend, "POST /analysis-docs") and sd.link(db, pid) is None
+
+
+def test_decision_section_round_trips_to_reader_and_falls_back_for_older_servers(db, parts, session, backend):
+    from brindle.pro import shared_reader
+
+    pid, lib, net = parts
+    # Newer server: the decision's section anchor goes up on share and revision and round-trips to the reader.
+    sd.share(db, pid, TEAM, **net)
+    assert sent(backend, "POST /analysis-docs")[0]["design"]["decisions"][0]["section"] == "summary"
+    assert shared_reader.read(DOC, **net)["decisions"][0]["section"] == "summary"
+    plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")
+    assert sd.sync(db, pid, **net)["pushed"] is True
+    assert sent(backend, f"POST {DESIGN}/revisions")[0]["decisions"][0]["section"] == "summary"
+    assert shared_reader.read(DOC, **net)["decisions"][0]["section"] == "summary"
+
+    # Older server rejecting extra fields (422): an unrelated field 422 is not resent,
+    # whereas an unknown-field 422 resends once without section and remembers for the session.
+    boss, _ = session
+    boss2 = dataclasses.replace(boss, id="boss2", tmux_window="%2")
+    db.add_agent(boss2)
+    visual_offers.person_spoke(db, boss2, "Make another planning doc.")
+    other = plans.propose(db, boss2, "# Older server", [{**DECISIONS[0], "section": "summary"}],
+                          sections=[{"id": "summary", "title": "Summary", "markdown": SUMMARY}])["id"]
+    lib.reject_section = {"error": "invalid_request", "fields": ["lede"]}
+    creates_before = len(sent(backend, "POST /analysis-docs"))
+    with pytest.raises(RuntimeError, match="invalid_request"):
+        sd.share(db, other, TEAM, **net)
+    assert len(sent(backend, "POST /analysis-docs")) == creates_before + 1
+    assert sd.link(db, other) is None
+
+    lib.reject_section = True
+    creates_before = len(sent(backend, "POST /analysis-docs"))
+    assert sd.share(db, other, TEAM, **net)["doc_id"] == DOC
+    creates = sent(backend, "POST /analysis-docs")[creates_before:]
+    assert len(creates) == 2
+    assert "section" in creates[0]["design"]["decisions"][0]
+    assert "section" not in creates[1]["design"]["decisions"][0]
+    assert shared_reader.read(DOC, **net)["decisions"][0]["section"] == plan_docs.OPEN_QUESTIONS
+
+    # Remembered for the session: the next revision omits section on the first try, and
+    # lost-answer recovery still recognizes the landed revision even though the Library omits section.
+    revs_before = len(sent(backend, f"POST {DESIGN}/revisions"))
+    plan_docs.edit(db, other, 1, "summary", 0, "Workers", "Hosts")
+    lib.lose_answer = True
+    with pytest.raises(auth.AuthError):
+        sd.sync(db, other, **net)
+    lib.lose_answer = False
+    assert sd.sync(db, other, **net)["pushed"] is True
+    revs = sent(backend, f"POST {DESIGN}/revisions")[revs_before:]
+    assert len(revs) == 1 and "section" not in revs[0]["decisions"][0]
+    assert (sd.link(db, other)["remote_rev"], sd.link(db, other)["local_rev"]) == (2, 2)
+
+    # Fresh session hitting 422 on a revision first: resends once without section and remembers.
+    license.clear_cache()
+    lib.reject_section = {"error": "invalid_request", "fields": ["<unknown>"]}
+    revs_before = len(sent(backend, f"POST {DESIGN}/revisions"))
+    plan_docs.edit(db, other, 2, "summary", 0, "Hosts", "Agents")
+    assert sd.sync(db, other, **net)["pushed"] is True
+    revs = sent(backend, f"POST {DESIGN}/revisions")[revs_before:]
+    assert len(revs) == 2 and "section" in revs[0]["decisions"][0] and "section" not in revs[1]["decisions"][0]
+    plan_docs.edit(db, other, 3, "summary", 0, "Agents", "Nodes")
+    assert sd.sync(db, other, **net)["pushed"] is True
+    assert len(sent(backend, f"POST {DESIGN}/revisions")[revs_before:]) == 3

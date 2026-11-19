@@ -77,7 +77,7 @@ from brindle.crdt import CrdtError
 from brindle.db import DB
 from brindle.plan_drafts import DraftReplica
 from brindle.pro import analysis_docs as ad
-from brindle.pro import review_policies
+from brindle.pro import license, review_policies
 from brindle.redact import mask, mask_data
 from brindle.service.errors import ServiceError
 
@@ -227,6 +227,14 @@ def _review_open(p: dict) -> None:
         raise ServiceError("review_closed", "this plan is building, so its review is closed", 409)
 
 
+_no_decision_section: set[str] = set()   # Library base URLs that refused Decision.section (422) this session
+license._clear_hooks.append(_no_decision_section.clear)
+
+
+def _server_key(client) -> str:
+    return getattr(client, "base", "") or ""
+
+
 def _content(rev: dict) -> dict:
     """A revision (or the Library's view of one) as the API's structured
     content: exactly its fields, because it refuses any others."""
@@ -235,7 +243,7 @@ def _content(rev: dict) -> dict:
     return {
         "lede": rev["lede"],
         "sections": [{k: s.get(k) for k in ("id", "title", "kind", "markdown", "caption")} for s in rev["sections"]],
-        "decisions": [{**{k: d.get(k) for k in ("id", "title", "mine", "challenge")},
+        "decisions": [{**{k: d.get(k) for k in ("id", "title", "mine", "challenge", "section")},
                        "options": [{"id": o["id"], "label": o["label"], "detail": o.get("detail"),
                                     "pros": o.get("pros") or [], "cons": o.get("cons") or [],
                                     "touches": o.get("touches") or []} for o in d["options"]]}
@@ -244,6 +252,42 @@ def _content(rev: dict) -> dict:
                    "test": w.get("test")} for w in rev["split"]],
         "ask": rev.get("ask"),
     }
+
+
+def _without_section(content: dict) -> dict:
+    return {**content, "decisions": [{k: v for k, v in d.items() if k != "section"} for d in content["decisions"]]}
+
+
+def _payload(content: dict, client) -> dict:
+    return _without_section(content) if _server_key(client) in _no_decision_section else content
+
+
+def _refused_section(status: int, resp: dict, content: dict) -> bool:
+    """Whether a 422 may be an older server rejecting Decision.section (extra='forbid')."""
+    if status != 422 or not any("section" in d for d in content["decisions"]):
+        return False
+    detail = resp.get("detail")
+    if isinstance(detail, list) and detail:
+        return any(isinstance(e, dict) and (e.get("type") == "extra_forbidden" or "section" in (e.get("loc") or ()))
+                   for e in detail)
+    fields = resp.get("fields")
+    if isinstance(fields, list) and fields:
+        return any(isinstance(f, str) and (f in ("<unknown>", "design", "decisions") or "section" in f)
+                   for f in fields)
+    return True
+
+
+def _comparable(view: dict) -> tuple[dict, bool]:
+    """``view``'s structured content and whether it carries decision sections:
+    an older Library omits ``section``, so comparisons ignore it too."""
+    has = any(isinstance(d, dict) and "section" in d for d in view.get("decisions") or ())
+    content = _content(view)
+    return (content, True) if has else (_without_section(content), False)
+
+
+def _same(rev: dict, theirs: dict, with_section: bool) -> bool:
+    ours = mask_data(_content(rev))
+    return (ours if with_section else _without_section(ours)) == theirs
 
 
 def _scope(raw: Any) -> dict:
@@ -415,11 +459,17 @@ def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool
     found = _find(owner, p, client, store) if resumed else None
     if found is not None:
         return _linked(db, p["id"], found, FIRST_REVISION, link(db, p["id"])["local_rev"])
+    sent = _payload(content, client)
     body = {"scope": {"kind": "user", "id": owner}, "files": [{"name": f"plan-{p['id']}.md", "md": cur["markdown"]}],
-            "source": {"kind": "goal", "ref": p["id"], "session": p["root_id"]}, "design": content}
+            "source": {"kind": "goal", "ref": p["id"], "session": p["root_id"]}, "design": sent}
     with db.tx() as c:
         c.execute("UPDATE plan_shares SET local_rev=? WHERE plan_id=?", (cur["rev"], p["id"]))
     status, made = ad._call("POST", "/analysis-docs", body, client=client, store=store)
+    if _refused_section(status, made, sent):
+        status, made = ad._call("POST", "/analysis-docs", {**body, "design": _without_section(sent)},
+                                client=client, store=store)
+        if status == 200:
+            _no_decision_section.add(_server_key(client))
     if status == 200:
         return _linked(db, p["id"], made["id"], made["version"], cur["rev"])
     if status < 500:
@@ -658,8 +708,8 @@ def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
 
 def _anchors(view: dict, ours: dict | None) -> dict[str, str]:
     """Each decision's section anchor: the Library's when it carries one,
-    else the one it has in ``ours`` (this plan's own revision), since the
-    Library's wire shape has no field for it yet."""
+    else the one it has in ``ours`` (this plan's own revision), for an older
+    Library that omits it."""
     out = {d["id"]: d["section"] for d in (ours or {}).get("decisions") or []
            if isinstance(d, dict) and isinstance(d.get("section"), str)}
     out.update({d["id"]: d["section"] for d in view.get("decisions") or []
@@ -698,7 +748,7 @@ def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
     if view.get("rev") == share_["remote_rev"] or share_["local_rev"] != p["rev"] or p["state"] != "open":
         return 0
     cur = plan_docs.revision(db, p["id"])
-    if _content(view) == mask_data(_content(cur)):       # moved, but the same text: nothing to read
+    if _same(cur, *_comparable(view)):       # moved, but the same text: nothing to read
         with db.tx() as c:
             c.execute("UPDATE plan_shares SET remote_rev=? WHERE plan_id=?", (view["rev"], p["id"]))
         return 0
@@ -760,9 +810,9 @@ class _Head:
 
 def _landed(db: DB, plan_id: str, since: int, newest: int, view: dict) -> int | None:
     """Which local revision after ``since`` the Library's head holds, or None."""
-    theirs = _content(view)
+    theirs, with_section = _comparable(view)
     return next((n for n in range(newest, since, -1)
-                 if mask_data(_content(plan_docs.revision(db, plan_id, n))) == theirs), None)
+                 if _same(plan_docs.revision(db, plan_id, n), theirs, with_section)), None)
 
 
 def _set_head(c, plan_id: str, remote_rev: int, local_rev: int) -> None:
@@ -825,7 +875,12 @@ def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict
 def _send_revision(db: DB, plan_id: str, head: _Head, rev: int) -> bool:
     """Put local revision ``rev`` on the Library's head. False if the head
     moved since it was read: a conflict for now, the next sync looks again."""
-    status, resp = head.write("/revisions", _content(plan_docs.revision(db, plan_id, rev)))
+    sent = _payload(_content(plan_docs.revision(db, plan_id, rev)), head.client)
+    status, resp = head.write("/revisions", sent)
+    if _refused_section(status, resp, sent):
+        status, resp = head.write("/revisions", _without_section(sent))
+        if status == 200:
+            _no_decision_section.add(_server_key(head.client))
     if status == 409 and resp.get("error") == "stale":
         head.view = {**head.view, "rev": resp.get("rev")}
         return False
