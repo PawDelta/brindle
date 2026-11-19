@@ -256,7 +256,10 @@ def test_complete_request_intent(db, session, text, scope):
 
 @pytest.mark.parametrize("text", [
     pytest.param("let's plan this. Actually, don't plan this.", marks=pytest.mark.variant("a cancel after a new flexible plan ask")),
-    pytest.param("cancel planning mode", marks=pytest.mark.variant("cancelling the planning-mode wording"))])
+    pytest.param("cancel planning mode", marks=pytest.mark.variant("cancelling the planning-mode wording")),
+    pytest.param("ok then cancel planning mode", marks=pytest.mark.variant("a conversational lead-in before a cancel was not read as one")),
+    pytest.param("now make a planning doc. now don't write a planning doc", marks=pytest.mark.variant("a prefixed cancel after a new plan ask in the same message still granted")),
+])
 def test_plan_activity_ask_can_be_cancelled(db, session, text):
     boss, _ = session
     agents.send_message(db, boss.id, "let's plan this", person=True)

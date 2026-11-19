@@ -188,7 +188,7 @@ _PLAN_REQUEST = re.compile(
     r"|plan\s+(?:it|this|that)(?:\s+please)?\W*$"
     r"|(?:(?:go|switch|move|get)\s+(?:in)?to|enter|start|use|open|turn on)\s+(?:the\s+)?plan(?:ning)?\s+(?:mode|view)\b"
     r"|plan(?:ning)?\s+(?:mode|view)(?:\s+(?:please|now|first))?\W*$))", re.I)
-_CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
+_CANCEL_LEAD = r"(?:(?:ok|okay|alright|so|then|fine|just|now|hey|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
 _CANCEL_ARTIFACT = (r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan docs?|"
                     r"plan document|plan(?:ning)?\s+(?:mode|view)s?|plans?|request)\b")
 # Names the artifact, or says not to make it: a cancel in any clause of a message.
