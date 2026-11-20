@@ -12,7 +12,7 @@ import brindle
 from brindle import cli
 from brindle import agents, bus, disk, gates, git, mcp_server, providers, services, workspaces
 from brindle.config import load_repo_config
-from brindle.db import Workspace
+from brindle.db import Task, Workspace
 
 from conftest import sh
 from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
@@ -246,16 +246,17 @@ def test_pr_footer_counts_come_from_the_db_and_skip_unknown_parts(db, repo, feat
     add(db, feature, "w2", "handoff")
     add(db, feature, "r1", "review", "reviewer")
     db.add_review(feature.id, "s1", "r1", True, "ok")
+    # No checks claim, even with every check passing on this revision: GitHub shows CI.
     head = workspaces.git.out(["rev-parse", feature.branch], feature.path)
-    db.set_check(feature.id, "oldsha", "a", True, "")
-    db.set_check(feature.id, "oldsha", "b", False, "")
-    db.set_check(feature.id, head, "b", True, "")   # a passed only on an older revision
-    partial = _sent_body(feature, monkeypatch, "x")
-    assert partial.endswith(workspaces.PR_FOOTER + " · 2 workers · 1 review")
     db.set_check(feature.id, head, "a", True, "")
-    assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · all checks passed")
-    db.set_check(feature.id, head, "b", False, "boom")
-    assert _sent_body(feature, monkeypatch, "x").endswith("2 workers · 1 review · checks failing")
+    db.set_check(feature.id, head, "b", True, "")
+    assert _sent_body(feature, monkeypatch, "x").endswith(workspaces.PR_FOOTER + " · 2 workers · 1 review")
+    # Workers whose workspaces were removed: their agent rows are gone, their tasks stay.
+    add(db, feature, "sup", "interactive", "supervisor")
+    for tid, aid, state in (("t1", "gone1", "merged"), ("t2", "gone2", "started"), ("t3", "gone3", "cancelled")):
+        db.add_task(Task(tid, feature.repo_root, aid, "sup", feature.id, "developer", "x", "assign", 1,
+                         None, None, None, None, state, 0.0, 0.0))
+    assert _sent_body(feature, monkeypatch, "x").endswith(workspaces.PR_FOOTER + " · 4 workers · 1 review")
 
 
 @pytest.mark.variant("a worker's session_root is the root agent id, which the counts test never links")
