@@ -134,10 +134,12 @@ export function chatTheme(theme: ChatTheme): ITheme {
 }
 
 /* Claude Code draws secondary text and accents in 256-colour greys and truecolour tuned for a dark terminal; on
-   the light ground they fade. In light xterm.js lifts any cell's text to WCAG AA (4.5:1) against its ground, so
-   every colour the CLI picks reads; dark keeps the CLI's colours as drawn. */
-export function chatContrast(theme: ChatTheme): number {
-  return theme === "light" ? 4.5 : 1;
+   the light ground they fade. In dark its own diff highlights fail too: under brindle's tmux it sends its dark
+   theme's diff grounds as 256-colour slots (rgb(34,92,43) as 65, the changed words' rgb(56,166,96) as 72), and
+   the default text measures 3.5:1 and 2.3:1 on them. So in both themes xterm.js lifts any cell's text to WCAG AA
+   (4.5:1) against its own ground; text that already reads (the CLI's greys on the dark field) is drawn as sent. */
+export function chatContrast(_theme: ChatTheme): number {
+  return 4.5;
 }
 
 // -- clipping: add rows to terminal geometry, clip the bottom, preserve output -

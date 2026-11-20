@@ -244,7 +244,7 @@ function FileView({ file, access, onSaved }: { file: FileDiff; access?: EditAcce
               }}
             >
               <span className="min-w-0 flex-1 truncate">{hunk.header}</span>
-              {canEdit && <span className="shrink-0 font-sans text-xs opacity-70">{editing === h ? "editing the new side · ⌘S save · esc discard" : "click or e to edit"}</span>}
+              {canEdit && <span className="shrink-0 font-sans text-xs opacity-[var(--dim)]">{editing === h ? "editing the new side · ⌘S save · esc discard" : "click or e to edit"}</span>}
             </button>
             {editing === h && access ? (
               <HunkEditor key={`${file.path}:${hunk.start}`} file={file} hunk={hunk} access={access} onSaved={onSaved} onDone={() => setEditing(null)} />

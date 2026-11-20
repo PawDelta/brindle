@@ -107,7 +107,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
     setReplying(false);
   };
   return (
-    <article className={`${card} ${open ? "" : "opacity-55"} ${active ? "bg-surface-2 shadow-[inset_2px_0_0_var(--sap)]" : ""}`} data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined}>
+    <article className={`${card} ${open ? "" : "opacity-[var(--dim)]"} ${active ? "bg-surface-2 shadow-[inset_2px_0_0_var(--sap)]" : ""}`} data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined}>
       <button type="button" className={`${onLine} cursor-pointer text-left hover:text-ink-2`} title="Show it in the doc" onClick={onShow}>
         <ThreadNumber n={t.id} />
         <span className="min-w-0 truncate">

@@ -696,7 +696,7 @@ function AdvancedView({ client, policy, busy, run, record, onEdit, onRemove }: {
           </thead>
           <tbody>
             {shown.map((r) => (
-              <tr key={r.id} data-rule={r.id} className={r.expired ? "opacity-60" : ""}>
+              <tr key={r.id} data-rule={r.id} className={r.expired ? "opacity-[var(--dim)]" : ""}>
                 <td className="border-b border-line py-s1 pr-s1 align-middle">
                   <span className="font-medium">{ruleAction(r)}</span>
                   {r.source !== "user" && <span className="ml-1 rounded-sm border border-line px-1 text-[11px] text-ink-3">{r.source}</span>}
@@ -1061,7 +1061,7 @@ function SavedTab({ saved, busy, onEdit, onDelete }: { saved: SavedActionDTO[]; 
         </thead>
         <tbody>
           {saved.map((s) => (
-            <tr key={s.id} data-saved={s.id} className={s.expired ? "opacity-60" : ""}>
+            <tr key={s.id} data-saved={s.id} className={s.expired ? "opacity-[var(--dim)]" : ""}>
               <td className="border-b border-line py-s1 pr-s1">
                 <span className="font-medium">{kindLabel(s.kind)}</span>
                 <small className={`mt-0.5 block break-all text-xs text-ink-3 ${mono}`}>

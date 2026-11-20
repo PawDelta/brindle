@@ -521,7 +521,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
   const before = useFor ? current[useFor].model : null;
   const reach = !draft.name.trim() || !draft.purpose.trim() ? 0 : !draft.model ? 1 : 4;
   const step = (i: number, body: ReactNode) => (
-    <div key={STEPS[i][0]} className={`grid gap-x-s3 gap-y-1 border-t border-line py-s1 md:grid-cols-[11rem_minmax(0,1fr)] ${i > reach ? "opacity-60" : ""}`} data-step={STEPS[i][0]}>
+    <div key={STEPS[i][0]} className={`grid gap-x-s3 gap-y-1 border-t border-line py-s1 md:grid-cols-[11rem_minmax(0,1fr)] ${i > reach ? "opacity-[var(--dim)]" : ""}`} data-step={STEPS[i][0]}>
       <span className="flex items-baseline gap-1 text-sm font-semibold">
         <span className="inline-flex size-4 items-center justify-center rounded-full bg-pass-soft text-[10px] text-pass">{i + 1}</span>
         {STEPS[i][1]}
@@ -557,7 +557,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
                 <button key={p} type="button" aria-pressed={draft.provider === p} className={`${chip} gap-1 border py-0.5 ${draft.provider === p ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink"}`} onClick={() => set({ provider: p, model: null })}>
                   <Mark provider={p} />
                   {productName(p)}
-                  <span className="text-ink-3">{modelsOf(p, profiles).length} models</span>
+                  <span className={draft.provider === p ? "text-ink-2" : "text-ink-3"}>{modelsOf(p, profiles).length} models</span>
                 </button>
               ) : (
                 <span key={p} className={`${chip} gap-1 border border-line py-0.5 text-ink-3`} data-provider-off={p}>
@@ -577,7 +577,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
               {models.map((m) => (
                 <button key={m.name} type="button" aria-pressed={draft.model === m.model} className={`flex flex-col items-start rounded-md border px-s1 py-0.5 text-left ${draft.model === m.model ? "border-pass/55 bg-pass-soft" : "border-line hover:bg-surface-2"}`} onClick={() => set({ model: m.model ?? null })}>
                   <span className="text-sm font-semibold">{prettyModel(m.model)}</span>
-                  <span className="text-xs text-ink-3">
+                  <span className={`text-xs ${draft.model === m.model ? "text-ink-2" : "text-ink-3"}`}>
                     {COST_MARK[m.cost_tier]} {COST_WORDS[m.cost_tier]} · {speedOf(m)}
                   </span>
                   <span className="text-xs text-ink-2">{info(m.name).good}</span>
