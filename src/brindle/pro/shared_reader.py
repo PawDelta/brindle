@@ -17,6 +17,8 @@ suggestion makes a new revision.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Any
 
 from brindle import plan_docs, plans
@@ -112,7 +114,7 @@ def _can_sign(view: dict, me: str, author: Any) -> bool:
     return me == author or bool(view.get("policy_reviewers")) or any(isinstance(r, dict) and r.get("sub") == me for r in people)
 
 
-def _dto(doc_id: str, view: dict, me: str) -> dict:
+def _dto(doc_id: str, view: dict, me: str, *, review: bool = True) -> dict:
     if not isinstance(view.get("rev"), int):
         raise RuntimeError("the Library's answer has no revision")
     content = sd._readable(view)                 # checked and masked as a supervisor's proposal is: it is drawn here
@@ -131,11 +133,12 @@ def _dto(doc_id: str, view: dict, me: str) -> dict:
         split=[], queued=0, created_at=_at(history[0].get("at")) if history else 0.0,
         revisions=[{"rev": r["rev"], "author": _who(r.get("author"), me), "source": r["source"],
                     "changed": r.get("changed") or [], "at": _at(r.get("at"))} for r in history],
-        threads=[t for t in (_thread(x, me) for x in view.get("threads") or []) if t], gate=_gate(view, me), me=me,
+        threads=[t for t in (_thread(x, me) for x in view.get("threads") or []) if t],
+        gate=_gate(view, me) if review else None, me=me,
         author=_who(author, me) if isinstance(author, str) else None,
         can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
         can_comment=_can(view, me, "can_comment"), can_suggest=_can(view, me, "can_suggest"),
-        can_sign_off=_can_sign(view, me, author),
+        can_sign_off=review and _can_sign(view, me, author),
         signed_off=any(isinstance(s, dict) and s.get("sub") == me and s.get("rev") == view["rev"]
                        for s in view.get("sign_offs") or [])).to_json()
 
@@ -237,3 +240,65 @@ def asked_thread(design: dict, text: str) -> int | None:
     the newest question of this account's with those words."""
     return max((t["id"] for t in design["threads"]
                 if t["question"] and t["author"] == plan_docs.PERSON and t["text"] == mask(text)), default=None)
+
+
+# -- a design opened from its share link (the app's brindle://plan/… deep link) -------------------------
+
+# A share link's token: dsl_ and 43 URL-safe characters (docs/share-links-api.md in pawdelta-web).
+LINK_TOKEN = re.compile(r"dsl_[A-Za-z0-9_-]{43}")
+LINK_REFUSALS = ("sign_in_required", "org_only", "team_only", "share_links_off", "sso_required")
+NO_LINK = "This link doesn't open a plan for this account. It may have been turned off or replaced."
+
+
+def link_id(token: str) -> str:
+    """What the app keys a link's design by: never the token itself, which is the link's whole secret."""
+    return "link_" + hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def _signed_in(store) -> str:
+    """This account's id, before anything is sent: a link opens for whoever is signed in, on any plan."""
+    from brindle import airgap
+    from brindle.pro import license
+
+    if airgap.enabled():
+        raise ServiceError("air_gapped", "air-gap mode is on: brindle sends nothing, so it can't open this link", 403)
+    try:
+        return license.current(refresh=False, store=store).sub
+    except Exception as e:  # noqa: BLE001
+        raise ServiceError("signed_out", "sign in to brindle to open this link", 402) from e
+
+
+def _link_refused(status: int, resp: dict) -> ServiceError:
+    code = resp.get("error") if isinstance(resp.get("error"), str) else None
+    why = resp.get("error_description") if isinstance(resp.get("error_description"), str) else None
+    if code in LINK_REFUSALS:
+        return ServiceError(code, mask(why or NO_LINK), 403)
+    if code == "key_unavailable":
+        return ServiceError(code, "the organization's key for this plan is unavailable", 503)
+    if status == 401:                 # still refused after a token refresh; a 401 would read as the daemon's own
+        return ServiceError("signed_out", "sign in to brindle again to open this link", 402)
+    if status == 429:
+        return ServiceError("rate_limited", "too many links opened at once: try again in a minute", 429)
+    if status in (403, 404):
+        return ServiceError("not_found", NO_LINK, 404)
+    return ServiceError("upstream", mask(why or code or f"HTTP {status}"), 502)
+
+
+def read_link(token: Any, *, client=None, store=None) -> dict:
+    """The design a share link opens, read through the link as the account
+    signed in now: the Library runs the link's own checks (revoked, the org's
+    policy, an org or team scope), the same as for the link's web page, so
+    this opens nothing the browser wouldn't. Read only: no comments, votes or
+    sign-offs from here, and nothing is kept."""
+    from brindle.pro import auth
+
+    if not isinstance(token, str) or not LINK_TOKEN.fullmatch(token):
+        raise ServiceError("invalid_link", "that isn't a brindle plan link", 400)
+    client, store = ad._session(client, store)
+    me = _signed_in(store)
+    status, resp = auth.authed(client, store, "GET", f"/share-links/{token}/design")
+    resp = resp if isinstance(resp, dict) else {}
+    if status != 200:
+        raise _link_refused(status, resp)
+    view = {**resp, "can_edit": False, "can_comment": False, "can_suggest": False}
+    return _dto(link_id(token), view, me, review=False)

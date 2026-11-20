@@ -3,7 +3,7 @@
    machine, and a design someone else shared, read from the Library by its doc id. */
 
 import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type SharedDesign } from "../../../api/client";
-import type { PlanDocClient, PlansClient, SharedDesignClient } from "./client";
+import type { PlanDocClient, PlansClient, ShareLinkDesignClient, SharedDesignClient } from "./client";
 import type { HistoryClient } from "./DocHistory";
 
 export interface DocSource<P extends Plan = Plan> {
@@ -40,6 +40,22 @@ export function planSource(client: PlansClient & PlanDocClient, id: string): Doc
 
 /* Refused outright, signed out, or the org's key revoked: the Library won't show it any more. */
 const accessGone = (e: unknown) => e instanceof DaemonError && ([401, 402, 403, 404].includes(e.status) || e.code === "key_unavailable");
+
+/* A design opened from its share link (lib/deeplink.ts): read through the link, as the web page reads it,
+   and read only. Its id is the daemon's (a hash of the token, never the token). */
+export function linkSource(client: ShareLinkDesignClient, token: string, id: string): DocSource<SharedDesign> {
+  const readOnly = () => Promise.reject(new Error("A plan opened from a link is read only here."));
+  return {
+    id,
+    read: () => client.shareLinkDesign(token),
+    comment: readOnly,
+    reply: readOnly,
+    resolve: readOnly,
+    suggest: readOnly,
+    vote: readOnly,
+    lost: accessGone,
+  };
+}
 
 export function sharedSource(client: SharedDesignClient, id: string, repo?: string): DocSource<SharedDesign> {
   const send = (tail: string, body: Record<string, unknown>) => client.writeSharedDesign(id, tail, repo ? { ...body, repo } : body);

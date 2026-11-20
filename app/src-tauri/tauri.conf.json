@@ -45,6 +45,9 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCNTQyMjdGRjgzMzNFNzUKUldSMVBqUDRmeUpVcTkzZ1dMSVVBbGJDY3VnOXNPYUt6V0VTMFBhWUhpRGlpaDlISGRLU0pYQ0cK",
       "endpoints": ["https://pawdelta.com/brindle/downloads/desktop/latest.json"]
+    },
+    "deep-link": {
+      "desktop": { "schemes": ["brindle"] }
     }
   }
 }

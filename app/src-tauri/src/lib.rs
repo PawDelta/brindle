@@ -21,6 +21,7 @@
 
 mod about;
 mod daemon;
+mod deep_links;
 mod engine;
 mod instance;
 mod oauth;
@@ -244,6 +245,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         updates::app_update_later,
         updates::app_update_now,
         about::about_read,
+        deep_links::deep_link_take,
         visual_scheme::visual_open,
         visual_scheme::visual_close,
         visual_scheme::visual_set_bounds,
@@ -286,7 +288,14 @@ pub fn run() {
     // app handle exists only once the app is built (setup fills it).
     let visuals_app: std::sync::Arc<std::sync::OnceLock<AppHandle>> = Default::default();
     let visuals_sink = visual_scheme::deliver_to_main(visuals_app.clone());
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // One brindle at a time on Windows and Linux too: a second launch (a brindle:// link clicked
+    // while the app runs) hands its link to this one and exits. First, as the plugin requires.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| show_main_window(app)));
+    let builder = builder
+        // brindle:// links from outside the app (deep_links).
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // The native folder picker (Knowledge's Add folder), from the front end.
@@ -299,6 +308,7 @@ pub fn run() {
         .manage(pty_view::PtyViews::default())
         .manage(updates::Installs::default())
         .manage(updates::Seen::default())
+        .manage(deep_links::DeepLinks::default())
         // The app's one webview starts a page (a reload, a web content process
         // that died and came back): the streams the last page opened go with it.
         .on_page_load(|webview, payload| {
@@ -334,6 +344,7 @@ pub fn run() {
             }
             tray.build(app)?;
             updates::check_in_background(app.handle(), &daemon::brindle_home());
+            deep_links::listen(app);
             Ok(())
         })
         .build(context)

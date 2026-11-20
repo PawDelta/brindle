@@ -6,6 +6,7 @@ import { DaemonError, type DaemonClient, type DocRevisionComparison, type Librar
 import { DaemonContext } from "../../../api/context";
 import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
+import { Avatar } from "./PlanCards";
 import { changeBetween } from "./DocText";
 import { PlanReader, REVIEW_COLLAPSED_KEY } from "./PlanReader";
 import { SharedDesignReader } from "./SharedDesignReader";
@@ -15,6 +16,21 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   localStorage.removeItem(REVIEW_COLLAPSED_KEY);
+});
+
+it("shows the signed-in person's initials from their name, and the email's first letter when there is no name", () => {
+  const store = createAppStore();
+  store.dispatch({ type: "account", account: { signed_in: true, name: "Hannah Lerner", email: "hannah@example.test" } });
+  const view = render(inTestStore(<Avatar who="person" />, store));
+  expect(screen.getByTitle("You").textContent).toBe("HL");
+  view.unmount();
+  store.dispatch({ type: "account", account: { signed_in: true, name: null, email: "hannah@example.test" } });
+  render(inTestStore(<Avatar who="person" />, store));
+  expect(screen.getByTitle("You").textContent).toBe("H");
+  // A teammate known only by an email gets that email's first letter; a named one, their initials.
+  render(inTestStore(<><Avatar who="maya.chen@example.test" /><Avatar who="Ravi Shah" /></>, store));
+  expect(screen.getByTitle("Maya Chen").textContent).toBe("M");
+  expect(screen.getByTitle("Ravi Shah").textContent).toBe("RS");
 });
 
 /* Who reviews the doc, and sharing it, open over the page from the toolbar's Share. */

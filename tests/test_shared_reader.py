@@ -162,6 +162,29 @@ def test_the_librarys_refusals_reach_the_app(lib, app):
     assert (signed_out.status_code, signed_out.json()["error"]["code"]) == (402, "signed_out")
 
 
+def test_a_share_link_opens_read_only_through_the_links_own_check(db, lib, app):
+    """The app's brindle://plan/… link: read through the link as the signed-in account, never by doc id."""
+    token = "dsl_" + "A" * 43
+    link = f"GET /share-links/{token}/design"
+    lib.calls.routes[link] = lambda f, h: ((200, {**CONTENT, "title": "Cloud workers", "rev": 3, "can_comment": True,
+                                                  "can_suggest": True, "threads": []})
+                                           if lib.calls._bearer(h) else (401, {"error": "invalid_token"}))
+    before = _home_files()
+    read = app.post("/v1/share-links/design", json={"token": token}).json()
+    assert (read["title"], read["rev"], read["sections"][0]["markdown"]) == ("Cloud workers", 3, SUMMARY)
+    assert not (read["can_comment"] or read["can_suggest"] or read["can_edit"] or read["can_sign_off"])
+    assert read["gate"] is None and token not in read["id"]
+    assert _home_files() == before and not db.conn.execute("SELECT 1 FROM plan_shares").fetchone()
+
+    lib.calls.routes[link] = lambda f, h: (404, {"error": "not_found"})        # revoked, replaced, or not for this account
+    gone = app.post("/v1/share-links/design", json={"token": token})
+    assert (gone.status_code, gone.json()["error"]["code"]) == (404, "not_found")
+
+    asked = len(lib.calls.calls)
+    bad = app.post("/v1/share-links/design", json={"token": "dsl_x/../../analysis-docs/doc_1"})
+    assert bad.status_code == 400 and len(lib.calls.calls) == asked
+
+
 def test_ask_the_supervisor_goes_by_doc_and_thread_after_the_reply(lib, app, monkeypatch):
     asked = []
     monkeypatch.setattr(doc_questions, "after_reply", lambda **kw: asked.append(kw))
