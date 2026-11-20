@@ -109,8 +109,10 @@ def test_one_message_grants_one_plan(db, session, monkeypatch):
 
 
 @pytest.mark.parametrize("newer", [
-    "never mind, drop the plan",                            # a cancel: the asking message is gone
-    "we really need no planning doc for this one",          # the asking message stays: only its turn has passed
+    pytest.param("never mind, drop the plan",
+                 marks=pytest.mark.variant("a cancel while the call is out: the asking message is gone")),
+    pytest.param("we really need no planning doc for this one",
+                 marks=pytest.mark.variant("the asking message stays: only the turn check refuses the old answer")),
 ])
 def test_a_message_sent_while_the_model_is_out_voids_its_answer(db, session, monkeypatch, newer):
     say(db, session, "ok so lets test the plan, please make a test one")
@@ -120,7 +122,8 @@ def test_a_message_sent_while_the_model_is_out_voids_its_answer(db, session, mon
 
 
 @pytest.mark.parametrize("cancel,closes", [
-    ("ignore", True),
+    pytest.param("ignore", True, marks=pytest.mark.variant(
+        "a bare cancel must close the standing plan draft, not only drop its grant")),
     pytest.param("drop the chart", False, marks=pytest.mark.variant("calling off a chart must spare the plan")),
 ])
 def test_a_cancel_calls_off_the_plan_it_finds_standing(db, session, cancel, closes):
