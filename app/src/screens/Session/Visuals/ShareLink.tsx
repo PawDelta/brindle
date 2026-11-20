@@ -77,6 +77,10 @@ export function ShareLinkPanel({ target, state, onState }: {
   const [copied, setCopied] = useState(false);
   const [scopes, setScopes] = useState<DocScope[] | null>(null);
   const [selection, setSelection] = useState("org");
+  const audience = state.link?.scope?.kind === "team" ? `team:${state.link.scope.team}` : "org";
+  // A changed authoritative audience invalidates the old choice. An unchanged
+  // refresh must leave a choice the person is still making intact.
+  useEffect(() => { setSelection(audience); }, [target.key, state.scoped, audience]);
   const latest = useRef(target);
   latest.current = target;
   useEffect(() => {
@@ -85,8 +89,6 @@ export function ShareLinkPanel({ target, state, onState }: {
     setError(null);
     setCopied(false);
     setBusy(false);
-    const scope = state.link?.scope;
-    setSelection(scope?.kind === "team" ? `team:${scope.team}` : "org");
     if (state.scoped) latest.current.scopes?.().then(
       (got) => { if (active) setScopes(got.scopes); },
       (e) => { if (active) setError(message(e)); },

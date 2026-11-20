@@ -67,6 +67,12 @@ def test_copy_makes_one_link_reuses_it_and_revoke_turns_it_off(parts, backend):
     assert share_links.copy(DOC, **kw)["link"]["url"] == first["url"]   # the same link: making one would replace it
     assert lib.made == 1
 
+    # A downgrade or an older caller omits scope; copying must keep the restricted link.
+    lib.create({"scope": "team", "team": "g_core"}, {})
+    restricted = share_links.read(DOC, **kw)["link"]
+    assert share_links.copy(DOC, **kw)["link"] == restricted
+    assert lib.made == 2
+
     assert share_links.revoke(DOC, **kw)["link"] is None
     assert lib.link is None and share_links.read(DOC, **kw)["link"] is None
     assert _link_calls(backend).count(f"DELETE {LINK}") == 1

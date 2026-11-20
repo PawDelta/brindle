@@ -54,6 +54,39 @@ function Menu({ target, fresh }: { target: ShareLinkTarget; fresh: number }) {
   return link.state?.available ? <ShareLinkPanel target={target} state={link.state} onState={link.setState} /> : null;
 }
 
+it("adopts a delayed audience refresh while retaining choices across unchanged audiences", async () => {
+  const reads: ((got: DesignShareLink) => void)[] = [];
+  const copied: string[] = [];
+  Object.assign(navigator, { clipboard: { writeText: async (url: string) => { copied.push(url); } } });
+  const org: DesignShareLink = { available: true, scoped: true, link: {
+    url: "https://plans.pawdelta.com/acme/plan/org-token", access: "org", created_at: 1,
+    scope: { kind: "org", org_id: "o", team: null },
+  } };
+  const team: DesignShareLink = { ...org, link: { ...org.link!,
+    url: "https://plans.pawdelta.com/acme/core/plan/team-token",
+    scope: { kind: "team", org_id: "o", team: "g" },
+  } };
+  const target: ShareLinkTarget = {
+    key: "plan:p1", read: () => new Promise((resolve) => { reads.push(resolve); }),
+    scopes: async () => ({ scopes: [{ kind: "org", id: "o" }, { kind: "group", id: "g" }] }),
+    copy: async (selection) => selection?.scope === "team" && selection.team === "g" ? team : org,
+    revoke: async () => ({ available: true, link: null }),
+  };
+  const { rerender } = render(<Menu target={target} fresh={0} />);
+  await act(async () => reads[0](org));
+  const picker = screen.getByRole("combobox") as HTMLSelectElement;
+  rerender(<Menu target={target} fresh={1} />);
+  fireEvent.change(picker, { target: { value: "team:g" } });
+  await act(async () => reads[1]({ ...org }));
+  expect(picker.value).toBe("team:g");
+  fireEvent.change(picker, { target: { value: "org" } });
+  rerender(<Menu target={target} fresh={2} />);
+  await act(async () => reads[2](team));
+  expect(picker.value).toBe("team:g");
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy link" })));
+  expect(copied).toEqual([team.link!.url]);
+});
+
 it("a read sent before a copy can't take the copied link back when it answers late", async () => {
   const url = "https://plans.pawdelta.com/b/dsl_x";
   const reads: ((got: DesignShareLink) => void)[] = [];

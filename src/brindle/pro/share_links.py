@@ -4,7 +4,7 @@ contract is docs/share-links-api.md in pawdelta-web.
 
 Keyed by the Library's document id, like :mod:`brindle.pro.shared_reader`:
 nothing is kept here, each call asks the Library. A design has at most one
-link. Copying reuses the one there is when its scope matches the requested scope,
+link. Copying reuses the one there is unless an explicit scope selection differs,
 because making one replaces the old link (which then stops working). Who may
 make or revoke a link, and whether an org's policy allows links at all, is the
 Library's to say; its refusal is passed on with its own reason.
@@ -159,7 +159,7 @@ def _access(client, store) -> tuple[str, str | None]:
 
 
 def copy(doc_id: str, *, scope=None, team=None, client=None, store=None) -> dict:
-    """The design's link to copy: reuse its matching scope, else make a new one. Asked again
+    """Reuse the design's link unless an explicit audience selection differs. Asked again
     in its turn, so copies that overlap all get the one link."""
     with TURNS.hold(doc_id):
         state = read(doc_id, client=client, store=store)
@@ -174,7 +174,7 @@ def copy(doc_id: str, *, scope=None, team=None, client=None, store=None) -> dict
             body["team"] = team
         link = state["link"]
         existing = (link or {}).get("scope") or {}
-        if not link or existing.get("kind") != scope or existing.get("team") != team:
+        if not link or (scope is not None and (existing.get("kind") != scope or existing.get("team") != team)):
             link = _ask("POST", doc_id, client, store, body)
     if link is None:
         raise ServiceError("upstream", "the Library made no link", 502)
