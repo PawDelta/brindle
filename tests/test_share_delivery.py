@@ -22,6 +22,7 @@ def _owner_shares(db, pid, net, monkeypatch):
         sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a", "required": True}])
 
 
+@pytest.mark.variant("a Library access refusal must not let the owner stop sharing around the required review")
 def test_a_share_the_library_refuses_offers_the_owner_a_way_out(db, parts, monkeypatch):
     pid, lib, net = parts
     lib.share_status = 404

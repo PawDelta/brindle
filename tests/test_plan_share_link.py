@@ -52,6 +52,7 @@ def _link_calls(backend):
     return [p for p in backend.paths() if p.endswith(LINK)]
 
 
+@pytest.mark.variant("the main path in sequence: a second copy reuses the link, and revoke deletes it once")
 def test_copy_makes_one_link_reuses_it_and_revoke_turns_it_off(parts, backend):
     lib, kw = Library(backend), parts(("analysis_docs",))
     assert share_links.read(DOC, **kw) == {"available": True, "link": None}

@@ -50,7 +50,10 @@ def _quiet_watch(monkeypatch):
     monkeypatch.setattr(ReadinessWatch, "sweep_safely", lambda self: None)
 
 
-@pytest.mark.parametrize("away", [0, 3 * HOUR], ids=["signed-in-just-now", "after-hours-away"])
+@pytest.mark.parametrize("away", [
+    pytest.param(0, id="signed-in-just-now", marks=pytest.mark.variant(
+        "a still-fresh sign-in, so no refresh runs: the watch must poll with the stored token as is")),
+    pytest.param(3 * HOUR, id="after-hours-away")])
 def test_a_request_on_the_library_becomes_an_inbox_card_within_a_minute(db, backend, monkeypatch, away):
     """``away``: how long ago the stored sign-in was last renewed. Past an hour both its
     access token and its entitlement have expired, as on a fresh daemon after a night."""

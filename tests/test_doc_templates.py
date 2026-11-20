@@ -255,7 +255,8 @@ def test_without_a_format_nothing_changes(db, session):
     assert doc_templates.of(db, pid) is None and "Reference" not in reply
 
 
-@pytest.mark.parametrize("template_has_open_questions", [False, True])
+@pytest.mark.parametrize("template_has_open_questions", [False, pytest.param(True, marks=pytest.mark.variant(
+    "a template's own required Open questions merges with the spine's, and stays missing until filled"))])
 def test_custom_template_keeps_spine_ids_and_a_real_decision_target(db, session, monkeypatch,
                                                                     template_has_open_questions):
     boss, _ = session
