@@ -79,8 +79,9 @@ def test_a_second_sidebar_for_a_session_does_not_start_while_one_runs(db, tmp_pa
         monkeypatch.setattr(agents, "sidebar_root", (lambda pane: tag[pane]) if tmux_up else tmux_down)
         monkeypatch.setattr(tmux, "get_pane_tag", (lambda pane, key: tag[pane]) if tmux_up else tmux_down)
         monkeypatch.setenv("TMUX_PANE", "%1")
-        assert watch.run("/repo", sidebar=True) is True
-        assert (started, second) == (["%1"], [False])
+        first = watch.run("/repo", sidebar=True)
+        assert started == ["%1"], "a second sidebar started while the first ran"
+        assert (first, second) == (True, [False])
         assert db.get_sidebar_pane("root") == ("%1" if tmux_up else "%2")
 
     # No root from the launcher and none from tmux: it doesn't start at all.
