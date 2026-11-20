@@ -335,15 +335,21 @@ def test_pr_footer_counts_only_workers_in_this_pr_range(db, repo, feature, monke
     assert _sent_body(feature, monkeypatch, "x").endswith(workspaces.PR_FOOTER + " · 1 worker")
 
 
-@pytest.mark.variant("a worker's session_root is the root agent id, which the counts test never links")
-def test_session_root_summary_counts_workers_linked_by_root_agent_id(db, feature):
+def test_session_root_summary_counts_a_worker_branch_in_the_pr_range(db, repo, feature):
     add(db, feature, "root", "interactive", "supervisor")
     worker_ws = Workspace("w-ws", feature.repo_root, "w", "worktree", feature.path + "-w", "main",
                           feature.path + "-w", None, "w", 0)
     db.add_workspace(worker_ws)
     db.set_workspace_session_root(worker_ws.id, "root")   # pilot.root_of gives an agent id
-    # A worker is represented only when its branch tip is in this PR range.
-    assert workspaces.footer_summary(db, feature, "sha") == []
+    sh("git checkout -qb linked-worker", repo)
+    Path(repo, "linked-worker.txt").write_text("worker\n")
+    sh("git add linked-worker.txt && git commit -qm linked-worker && git checkout -q main", repo)
+    sh("git merge -q --no-ff --no-edit linked-worker", feature.path)
+    db.add_task(Task("linked-task", feature.repo_root, "linked-agent", "root", feature.id,
+                     "developer", "work", "assign", 1, "linked-worker", None, None, None,
+                     "merged", 1.0, 1.0))
+    head = git.out(["rev-parse", feature.branch], feature.path)
+    assert workspaces.footer_summary(db, feature, head) == ["1 worker"]
 
 
 def test_pr_poll_adds_footer_to_a_gh_opened_pr_once(db, feature, monkeypatch):
