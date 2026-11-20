@@ -90,7 +90,8 @@ def _ask(prompt: str, budget: float) -> str | None:
         from brindle.native.client import Client, Endpoint
 
         endpoint = Endpoint(DEFAULT_BASE_URLS["anthropic"], pricing.ALIASES[MODEL], api="anthropic", api_key=key,
-                            max_tokens=8, timeout=budget, retries=0)
+                            max_tokens=8, retries=0,
+                            timeout=budget)
         return Client(endpoint).complete(None, [{"role": "user", "content": prompt}], []).text
     return model_access.ask(claude_binary(), MODEL, prompt, str(brindle_home()), os.environ, timeout=budget)
 
