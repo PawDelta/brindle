@@ -129,6 +129,7 @@ def _notice(v) -> dict | None:
     if nid is None or text is None:
         return None
     return {"id": nid, "text": text, "from_role": _str(v.get("from_role"), 32) or "admin",
+            "from_name": _str(v.get("from_name"), 256),
             "at": _num(v.get("at")), "scope": "org" if v.get("scope") == "org" else "member"}
 
 

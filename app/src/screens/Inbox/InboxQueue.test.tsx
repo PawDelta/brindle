@@ -49,6 +49,25 @@ const opened = async (kind: string) => {
 const posts = (daemon: FakeDaemon, path: string) => daemon.requests.filter((r) => r.method === "POST" && r.path === path);
 
 describe("the Inbox queue", () => {
+  it.each(["passed", "failed", "running", null])("renders the PR's actual checks state: %s", async (checks) => {
+    const pr = { kind: "pr_ready", reason: "PR ready", agent_id: "sup1", root_id: "sup1", workspace_id: "proj",
+      file_count: 14, checks_state: checks } as InboxItemDTO;
+    mount([pr]);
+    const ready = await opened("pr_ready");
+    expect(ready.querySelectorAll(".iq-ok")).toHaveLength(checks === "passed" ? 2 : 0);
+    const states = ready.querySelectorAll<HTMLElement>("[data-checks]");
+    expect([...states].map((s) => s.dataset.checks)).toEqual(checks ? [checks, checks] : []);
+    expect(ready.querySelector<HTMLElement>("[data-file-count]")?.dataset.fileCount).toBe("14");
+  });
+
+  it("shows the review's decision count and the notice's sender", async () => {
+    mount([{ ...review, decision_count: 3 } as InboxItemDTO,
+      { kind: "org_notice", reason: "Policy updated", notice_id: "n1", from_name: "Priya Nair" } as InboxItemDTO]);
+    await opened("review_requested");
+    expect(row("review_requested").querySelector<HTMLElement>("[data-decision-count]")?.dataset.decisionCount).toBe("3");
+    expect(row("org_notice").querySelector("[data-notice-sender]")?.textContent).toBe("Priya Nair");
+  });
+
   it("puts each row in its part, threads on one design in one row, sign-off progress as dots", async () => {
     mount([progress, comment(11, "u_chen", "c:11"), review, asked, comment(12, "u_sam", "c:12")]);
     const waiting = await screen.findByTestId("inbox-waiting");

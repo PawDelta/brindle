@@ -7,11 +7,12 @@ contract in the web repo's docs/shared-designs-api.md."""
 import hashlib
 import json
 import time
+from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import autopilot, bus, inbox_team, workspaces
+from brindle import autopilot, bus, git, inbox_team, workspaces
 from brindle.daemon import lifecycle
 from brindle.daemon.app import build_app
 from brindle.db import Agent
@@ -30,10 +31,10 @@ class Library:
 
     def __init__(self):
         self.queue = [{"doc_id": "ad_2", "title": "Ana's plan", "rev": 1, "author": "u_ana"},
-                      {"doc_id": "ad_3", "title": "Sam's plan", "rev": 1, "author": "u_sam"}]
+                      {"doc_id": "ad_3", "title": "Sam's plan", "rev": 1, "author": "u_sam", "decision_count": 0}]
         self.items = [
             {"item_key": "review:ad_2", "kind": "review_requested", "created_at": 30, "doc_id": "ad_2",
-             "title": "Ana's plan", "sender": ANA},
+             "title": "Ana's plan", "sender": ANA, "decision_count": 3},
             # Ana, then Chen, signed in the same second: the Library lists a tie by key, Ana's first.
             {"item_key": "signoff:ad_1:2:u_ana", "kind": "signed_off", "created_at": 20, "doc_id": "ad_1",
              "title": "Engine plan", "rev": 2, "signer": ANA, "signed": 1, "required": 3, "waiting": [BO, CHEN]},
@@ -93,8 +94,10 @@ def test_each_row_kind_carries_its_fields(db, library, daemon):
     assert (asked["doc"], asked["inbox_group"], asked["item_key"], asked["read"]) == (
         "ad_2", "needs_you", "review:ad_2", False)
     assert asked["from_person"] == {"sub": "u_ana", "name": "Ana"}
+    assert asked["decision_count"] == 3
     # A request the feed doesn't carry yet: the queue's author stands in for the sender.
     assert (fallback["doc"], fallback["from_person"]["sub"], fallback["item_key"]) == ("ad_3", "u_sam", None)
+    assert fallback["decision_count"] == 0
 
     # Sign-offs come one per signer; the Inbox shows one row per design, as of the newest.
     [progress] = _inbox(daemon, "signoff_progress")
@@ -107,6 +110,43 @@ def test_each_row_kind_carries_its_fields(db, library, daemon):
     assert (comment["item_key"], comment["thread_id"], comment["excerpt"], comment["from_person"]["sub"]) == (
         "thread:ad_1:7", 7, "Does a rented VM count?", "u_chen")
     assert (comment["reason"], comment["read"]) == ("2 comments", False)
+
+
+@pytest.mark.parametrize(("state", "kind", "checks", "opened"), [
+    ("passed", "pr_ready", "passed", False),
+    ("failed", "pr_failed", "failed", False),
+    ("checking", "pr_ready", "running", False),
+    ("failed", "pr_opened", "failed", True),
+    pytest.param("ci", "pr_opened", "running", True,
+                 marks=pytest.mark.variant("open PR CI in progress must override passed local preparation")),
+    pytest.param("unknown", "pr_opened", None, True,
+                 marks=pytest.mark.variant("unknown forge state must not fall back to passed preparation")),
+])
+def test_pr_rows_carry_preparation_results_and_changed_files(db, repo, library, monkeypatch, state, kind, checks, opened):
+    from brindle.daemon import session_review
+
+    ws = workspaces.create(db, str(repo), "feat/pr-facts").workspace
+    # A filename with a newline still counts as one file.
+    (Path(ws.path) / "one\nfile.txt").write_text("change\n")
+    git.run(["add", "."], ws.path)
+    git.run(["commit", "-m", "change"], ws.path)
+    sha = git.head(ws.path)
+    pr = {"url": "https://github.com/org/repo/pull/1", "number": 1, "title": "Feature"} if opened else None
+    monkeypatch.setattr(inbox, "_opened_pr", lambda *args: (sha, pr))
+    monkeypatch.setattr(session_review, "session_pr_state", lambda *args: {"state": state})
+    db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, title, prepared_at)"
+                    " VALUES (?, ?, ?, ?, 'Feature', 1)", ("r1", ws.branch, sha, "passed" if opened else state))
+    [item] = inbox._pr_items(db, "r1", ws.branch, ws, {})
+    assert (item.kind, item.to_json()["checks_state"], item.to_json()["file_count"]) == (kind, checks, 1)
+
+
+def test_admin_notice_keeps_its_sender_through_status_parsing(db, monkeypatch):
+    from brindle.pro import status
+
+    parsed = status.parse({"notices": [{"id": "n1", "text": "Policy changed", "from_name": "Priya Nair"}]})
+    monkeypatch.setattr(status, "load", lambda: status.Saved(status=parsed))
+    [item] = inbox._org_notices()
+    assert item.to_json()["from_name"] == "Priya Nair"
 
 
 def test_a_question_card_carries_the_question(db, repo, library, daemon):

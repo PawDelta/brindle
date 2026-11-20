@@ -79,6 +79,8 @@ def _rows(raw: object) -> list[dict]:
                "created_at": _int(r.get("created_at"))}
         if r["kind"] == REVIEW:
             row["sender"] = person(r.get("sender"))
+            count = r.get("decision_count")
+            row["decision_count"] = count if type(count) is int and count >= 0 else None
         elif r["kind"] == SIGNED:
             waiting = r.get("waiting")
             row.update(rev=_int(r.get("rev")), signer=person(r.get("signer")), signed=_int(r.get("signed")),

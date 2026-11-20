@@ -605,11 +605,15 @@ export interface InboxChoiceDTO {
 export interface InboxItemDTO {
   action?: InboxActionDTO | null;
   agent_id?: string | null;
+  checks_state?: ("passed" | "failed" | "running") | null;
   choices?: InboxChoiceDTO[] | null;
+  decision_count?: number | null;
   detail?: string | null;
   doc?: number | string | null;
   excerpt?: string | null;
+  file_count?: number | null;
   fix?: string | null;
+  from_name?: string | null;
   from_person?: PersonDTO | null;
   inbox_group?: string | null;
   item_key?: string | null;

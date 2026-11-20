@@ -144,6 +144,15 @@ function Pips({ signed, required }: { signed: number; required: number }) {
   </span>;
 }
 
+function decisionCount(item: InboxItemDTO) {
+  return item.decision_count != null && <span data-decision-count={item.decision_count}>{item.decision_count} {item.decision_count === 1 ? "decision" : "decisions"}</span>;
+}
+
+function prFacts(item: InboxItemDTO): ReactNode[] {
+  return [item.file_count != null && <span data-file-count={item.file_count}>{item.file_count} {item.file_count === 1 ? "file" : "files"}</span>,
+    item.checks_state && <span data-checks={item.checks_state} className={item.checks_state === "passed" ? "iq-ok" : item.checks_state === "failed" ? "iq-wait" : undefined}>checks {item.checks_state}</span>];
+}
+
 function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
   const item = row.items[0];
   const who = ctx.who(item);
@@ -155,7 +164,7 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
     case "waiting":
       return [<><b>{who ?? "An agent"}</b> waits at its prompt</>, session, branch && <span className="mono">{branch}</span>, <span className="iq-wait">paused until you answer</span>];
     case "review_requested":
-      return row.items.length > 1 ? row.items.map((i) => i.detail || "Design doc") : [<><b>{personName(item.from_person)}</b> asked for your review</>, "plan"];
+      return row.items.length > 1 ? row.items.map((i) => <>{i.detail || "Design doc"} {decisionCount(i)}</>) : [<><b>{personName(item.from_person)}</b> asked for your review</>, "plan", decisionCount(item)];
     case "signoff_progress": {
       const s = item.signoff;
       const waiting = (s?.waiting ?? []).map(personName);
@@ -168,12 +177,12 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
       return [<>{people(row).map((p, i, all) => <span key={p}>{i > 0 && (i === all.length - 1 ? " and " : ", ")}<b>{p}</b></span>)}</>, said, item.excerpt && `“${item.excerpt}”`];
     }
     case "org_notice":
-      return row.items.length > 1 ? row.items.map((i) => i.reason) : [<>From <b>your {item.detail || "admin"}</b></>];
+      return row.items.length > 1 ? row.items.map((i) => <>{i.reason}{i.from_name && <span data-notice-sender> · {i.from_name}</span>}</>) : [<>From <b>your {item.detail || "admin"}</b></>, item.from_name && <span data-notice-sender>{item.from_name}</span>];
     case "pr_ready":
-      return [<><b>PR ready</b> to open</>, ctx.repoName(item), branch && <span className="mono">{branch}</span>];
+      return [item.checks_state === "running" ? <b>Preparing PR</b> : <><b>PR ready</b> to open</>, ctx.repoName(item), ...prFacts(item), branch && <span className="mono">{branch}</span>];
     case "pr_opened":
     case "pr_failed":
-      return [<b>{item.reason}</b>, ctx.repoName(item)];
+      return [<b>{item.reason}</b>, ctx.repoName(item), ...prFacts(item)];
     case "changes_requested":
     case "signed_off":
       return [item.from_person ? <><b>{personName(item.from_person)}</b> · {kindLabel(item).toLowerCase()}</> : kindLabel(item)];
@@ -641,8 +650,8 @@ function RowBody(props: RowProps & { title: string }) {
     return (
       <div className="iq-body" data-testid="row-body">
         {row.items.length > 1
-          ? <div className="iq-people">{row.items.map((i) => <div key={itemKey(i)}><i>○</i>{i.detail || "Design doc"} <button type="button" className="btn btn-quiet text-xs" disabled={i.doc == null || !nav} onClick={open(i)}>Review</button></div>)}</div>
-          : <div className="iq-facts"><span>plan</span>{item.from_person && <span>from {personName(item.from_person)}</span>}</div>}
+          ? <div className="iq-people">{row.items.map((i) => <div key={itemKey(i)}><i>○</i>{i.detail || "Design doc"} {decisionCount(i)} <button type="button" className="btn btn-quiet text-xs" disabled={i.doc == null || !nav} onClick={open(i)}>Review</button></div>)}</div>
+          : <div className="iq-facts"><span>plan</span>{decisionCount(item)}{item.from_person && <span>from {personName(item.from_person)}</span>}</div>}
         <div className="iq-acts">
           {row.items.length === 1 && <button type="button" className="btn btn-primary text-xs" data-primary disabled={item.doc == null || !nav} onClick={open(item)}>Review <Kbd k="⏎" /></button>}
           {triage}
@@ -690,7 +699,7 @@ function RowBody(props: RowProps & { title: string }) {
     const review = ctx.review(item);
     return (
       <div className="iq-body" data-testid="row-body">
-        <div className="iq-facts">{branch && <span>{branch}</span>}{ctx.repoName(item) && <span>{ctx.repoName(item)}</span>}<span className="iq-ok">checks passed</span></div>
+        <div className="iq-facts">{branch && <span>{branch}</span>}{ctx.repoName(item) && <span>{ctx.repoName(item)}</span>}{joined(prFacts(item))}</div>
         <div className="iq-acts">
           <span data-primary-wrap><OpenPr item={item} actions={actions} onDone={() => void refresh()} openUrl={ctx.openUrl}
             onOpened={() => recordDone({ key: row.key, what: "Opened PR", text: title, where: ctx.repoName(item) ?? "", back: false, at: Date.now() })} /></span>

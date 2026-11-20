@@ -318,6 +318,7 @@ def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypat
     session_review._head_cache.clear()
     monkeypatch.setattr(session_review._pr_pool, "submit", lambda fn, *a: asked.append(a) or fn(*a) or _Done())
     monkeypatch.setattr(workspaces, "open_pull_request_for_commit", lambda sha, cwd: pr)
+    monkeypatch.setattr(session_review, "session_pr_state", lambda *args: None)
 
     def cards():
         return [i for i in inbox.items(db, ws.repo_root, panes={"@1": True}) if i.kind.startswith("pr_")]
