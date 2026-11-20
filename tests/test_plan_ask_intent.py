@@ -121,6 +121,44 @@ def test_a_message_sent_while_the_model_is_out_voids_its_answer(db, session, mon
     assert not proposed()
 
 
+class _AfterCandidates:
+    """The DB connection, with ``hook(conn)`` run once right after the candidate messages are read."""
+
+    def __init__(self, conn, hook):
+        self._conn, self._hook = conn, hook
+
+    def execute(self, sql, *args):
+        cursor = self._conn.execute(sql, *args)
+        if self._hook and sql.lstrip().startswith("SELECT id, words FROM visual_person_words"):
+            rows = cursor.fetchall()
+            hook, self._hook = self._hook, None
+            hook(self._conn)
+            return _Rows(rows)
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class _Rows(list):
+    def fetchall(self):
+        return list(self)
+
+
+def test_a_message_recorded_after_the_candidates_are_read_voids_the_answer(db, session, monkeypatch):
+    say(db, session, "ok so lets test the plan, please make a test one")
+
+    def newer_message(conn):
+        # Recorded the way person_spoke records one, after the call's messages were taken but before
+        # a turn read that follows them: the model never sees it, so its turn must still count.
+        visual_offers.take_turn(conn, "boss")
+        visual_offers._keep_words(conn, "boss", "we really need no planning doc for this one")
+
+    monkeypatch.setattr(intent, "_ask", model("1"))
+    monkeypatch.setattr(db, "conn", _AfterCandidates(db.conn, newer_message))
+    assert not intent.grant_from_recent(db, "boss", "plan")
+
+
 @pytest.mark.parametrize("cancel,closes", [
     pytest.param("ignore", True, marks=pytest.mark.variant(
         "a bare cancel must close the standing plan draft, not only drop its grant")),
