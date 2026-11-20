@@ -185,6 +185,20 @@ def deadline(seconds: float) -> Iterator[Deadline]:
         _deadline.reset(token)
 
 
+@contextlib.contextmanager
+def after_response() -> Iterator[None]:
+    """Run work a request hands off until its response is written (a
+    Starlette BackgroundTask) with no deadline. By then the response has
+    ended the request, so the Deadlines middleware has stopped its deadline,
+    and the task's thread copied that context: every process it starts would
+    be refused as Busy."""
+    token = _deadline.set(None)
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
 def current() -> Deadline | None:
     return _deadline.get()
 
