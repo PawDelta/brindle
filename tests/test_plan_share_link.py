@@ -118,7 +118,7 @@ def test_overlapping_copies_take_turns_and_get_one_link(parts, backend):
     assert lib.made == 1 and urls == [f"{URL}1", f"{URL}1"]
 
 
-@pytest.mark.parametrize("selection", [{}, {"scope": "org"}, {"scope": "team", "team": "g_core"}])
+@pytest.mark.parametrize("selection", [{}, pytest.param({"scope": "org"}, marks=pytest.mark.variant("org scope must be sent without a team field, which the Library refuses with 422")), {"scope": "team", "team": "g_core"}])
 def test_the_plan_reader_finds_its_link_by_plan_id_only_for_the_account_that_shared_it(
         db, session, tmp_path, backend, monkeypatch, selection, pro_env):
     boss, _ = session

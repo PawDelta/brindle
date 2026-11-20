@@ -53,6 +53,7 @@ async def _post_as_uvicorn_serves(app, path: str, body: dict) -> list[dict]:
     return sent
 
 
+@pytest.mark.variant("drives the real ASGI route with a client disconnect after the reply: the expired-deadline handoff only shows up served this way")
 def test_a_question_on_a_live_supervisors_plan_is_delivered_to_it(db, session, tmp_path, monkeypatch):
     """Regression (plan v_69a9d8236420): the question is delivered after the
     response is written, when the request's deadline is already stopped. The
