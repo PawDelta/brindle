@@ -26,21 +26,27 @@ afterEach(() => {
 });
 
 interface Core {
-  _themeService: { colors: { background: { css: string }; ansi: { css: string }[] } };
+  _themeService: { colors: { background: { css: string }; foreground: { css: string }; ansi: { css: string }[] } };
   _renderService: { _renderer: { value: { _rowFactory: { createRow(...args: unknown[]): HTMLSpanElement[] }; _widthCache: unknown } } };
 }
 
 /* The colour xterm's DOM renderer draws each span of a row in: its inline colour where it set one (truecolour, or
    adjusted for contrast), else the palette slot its xterm-fg-N class names. */
-function drawnColours(terminal: import("@xterm/xterm").Terminal, row: number): { text: string; css: string }[] {
+function drawnColours(terminal: import("@xterm/xterm").Terminal, row: number): { text: string; css: string; ground: string }[] {
   const core = (terminal as unknown as { _core: Core })._core;
   const renderer = core._renderService._renderer.value;
   const line = (terminal.buffer.active as unknown as { _buffer: { lines: { get(i: number): unknown } } })._buffer.lines.get(row);
   const spans = renderer._rowFactory.createRow(line, row, false, undefined, undefined, 0, false, 9, renderer._widthCache, -1, -1);
   return spans.filter(span => span.textContent!.trim()).map(span => {
-    const inline = /(?:^|;)\s*color:\s*([^;]+)/.exec(span.getAttribute("style") ?? "")?.[1].trim();
+    const style = span.getAttribute("style") ?? "";
+    const inline = /(?:^|;)\s*color:\s*([^;]+)/.exec(style)?.[1].trim();
     const slot = /xterm-fg-(\d+)/.exec(span.className)?.[1];
-    return { text: span.textContent!, css: inline ?? core._themeService.colors.ansi[Number(slot)].css };
+    const ground = /background-color:\s*([^;]+)/.exec(style)?.[1].trim() ?? /xterm-bg-(\d+)/.exec(span.className)?.[1];
+    return {
+      text: span.textContent!,
+      css: inline ?? (slot === undefined ? core._themeService.colors.foreground.css : core._themeService.colors.ansi[Number(slot)].css),
+      ground: ground === undefined ? core._themeService.colors.background.css : ground.startsWith("#") || ground.startsWith("rgb") ? ground : core._themeService.colors.ansi[Number(ground)].css,
+    };
   });
 }
 
@@ -70,7 +76,13 @@ it("draws Claude's faint 256-colour and truecolour greys readably on the light p
   const drawn = drawnColours(terminal, 0);
   expect(drawn.map(d => d.text)).toEqual(["faint", "grey"]);
   for (const { css } of drawn) expect(contrast(css, ground)).toBeGreaterThanOrEqual(4.5);
-  // Dark mode keeps the CLI's own colours untouched.
+  // Dark mode keeps the CLI's own colours where they already read.
   view.rerender(<ChatPane {...props} theme="dark" />);
   expect(drawnColours(terminal, 0).map(d => d.css)).toEqual(["#949494", "rgb(153, 153, 153)"]);
+  // Claude Code's dark diff, as it sends it in brindle's panes: an added line on slot 65 with its changed words on
+  // 72, a removed word on 174, in the default text colour. As sent these measure 3.5, 2.3 and 2.3 to 1.
+  await act(() => new Promise<void>(resolve => terminal.write("\r\n\x1b[48;5;65m const \x1b[48;5;72mhi\x1b[48;5;65m = 1;\x1b[48;5;174mlo\x1b[49m", resolve)));
+  const diff = drawnColours(terminal, 1);
+  expect(diff.map(d => d.text.trim())).toEqual(["const", "hi", "= 1;", "lo"]);
+  for (const { text, css, ground } of diff) expect(contrast(css, ground), text).toBeGreaterThanOrEqual(4.5);
 });

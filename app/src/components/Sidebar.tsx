@@ -625,7 +625,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
     <li className="group flex flex-wrap items-start gap-0.5 pr-[18px]">
       <button
         type="button"
-        className={`flex min-w-0 flex-1 items-start gap-s1 rounded-md px-s1 py-[5px] text-left opacity-70 hover:opacity-100 ${open ? "bg-branch-soft opacity-100" : ""} ${cursor === key ? CURSOR : ""}`}
+        className={`flex min-w-0 flex-1 items-start gap-s1 rounded-md px-s1 py-[5px] text-left opacity-[var(--dim)] hover:opacity-100 ${open ? "bg-branch-soft opacity-100" : ""} ${cursor === key ? CURSOR : ""}`}
         data-tree-session={root}
         data-row={key}
         title={`${root} · ${session.status}`}

@@ -32,6 +32,11 @@
   --branch: #a99be0; --branch-soft: rgba(169, 155, 224, 0.12);
   --fail: #f08c88; --fail-soft: rgba(240, 140, 136, 0.12);
   --on-fawn: #03160e; --on-branch: #15102a; --on-sap: #1a0f08;
+  /* How far a dimmed block (a step not reached yet, a paused row, an expired rule) fades: the lowest
+     opacity at which every text token still reaches 4.5:1 on every ground, and each accent and ink-2 on
+     the -soft tints (sap on sap-soft over surface-2 binds). Light's accents sit near 4.6:1 on their tints,
+     so light has no room to fade text: its --dim is 1. Secondary text on a tint is ink-2, not ink-3. */
+  --dim: 0.86;
   --thread-in: #d7af87; --thread-top: #e8875a; --thread-mid: #a99be0; --thread-out: #34d399;
   /* The knowledge map's groups: ten hues apart from each other, light on dark here and deeper in light. */
   --group-1: #6ea8fe; --group-2: #f2a65a; --group-3: #f07a7a; --group-4: #5ccfc4; --group-5: #7fd36a;
@@ -60,6 +65,7 @@
     --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
     --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
     --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
+    --dim: 1;
     --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #06744f;
     --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
     --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
@@ -81,6 +87,7 @@
   --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
   --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
   --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
+  --dim: 1;
   --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #06744f;
   --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
   --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
