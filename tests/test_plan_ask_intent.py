@@ -54,7 +54,8 @@ def test_plan_ask_intent(text, earlier, answer, expected):
 @pytest.mark.parametrize("failure,takes", [
     (subprocess.TimeoutExpired(["claude"], 1), 0.0),
     pytest.param("the plan, I think", 0.0, marks=pytest.mark.variant("a reply that isn't one of the four answers")),
-    ("plan_request", intent.BUDGET_S + 0.2),                # a right answer past the deadline
+    pytest.param("plan_request", intent.BUDGET_S + 0.2,
+                 marks=pytest.mark.variant("a right answer past the deadline must not count")),
 ])
 def test_a_failed_model_call_falls_back_to_the_regex_result_and_is_asked_again(failure, takes, monkeypatch):
     text, earlier = "please make a test one", ["ok so lets test the plan"]
@@ -110,7 +111,10 @@ def test_a_cancel_sent_while_the_model_is_out_wins_over_its_answer(db, session, 
     assert plan_grants(db) == 0 and plans.holding(db, "boss") is None
 
 
-@pytest.mark.parametrize("cancel,closes", [("ignore", True), ("ignore the chart", False)])
+@pytest.mark.parametrize("cancel,closes", [
+    ("ignore", True),
+    pytest.param("ignore the chart", False, marks=pytest.mark.variant("a cancel naming a chart must keep the plan draft")),
+])
 def test_a_model_cancel_calls_off_what_the_person_named(db, session, monkeypatch, cancel, closes):
     visual_offers.person_spoke(db, session, "Make a planning doc.")
     assert plans.holding(db, "boss")["state"] == "writing"
