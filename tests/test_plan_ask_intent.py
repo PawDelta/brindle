@@ -145,6 +145,7 @@ class _Rows(list):
         return list(self)
 
 
+@pytest.mark.variant("a race: a message between reading the candidates and the turn (fails on the pre-fix order)")
 def test_a_message_recorded_after_the_candidates_are_read_voids_the_answer(db, session, monkeypatch):
     say(db, session, "ok so lets test the plan, please make a test one")
 
