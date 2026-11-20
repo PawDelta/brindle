@@ -488,6 +488,7 @@ def create(
         if os.path.exists(path):
             raise WorkspaceError(f"{path} already exists; remove it or choose another branch")
         how = git.add_worktree(repo_root, path, branch, start_point)
+    git.install_attribution_hook(path)
     git.set_base(repo_root, branch, base)
 
     slug = _db_slug(db, repo_root)
