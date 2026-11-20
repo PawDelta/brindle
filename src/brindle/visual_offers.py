@@ -279,7 +279,9 @@ def _ask_starts(sentence: str) -> list[int]:
     if _CONDITIONAL.match(sentence):    # "When I approve, render it" defers the ask: no fresh start at the comma
         return [0]
     starts.update(m.end() for m in _RESTART.finditer(sentence))
-    starts.update(m.start() for m in _ASK_BEGIN.finditer(sentence))
+    # "do not give me a plan" keeps its negation: no fresh start right after one.
+    starts.update(m.start() for m in _ASK_BEGIN.finditer(sentence)
+                  if not _NEGATED.search(sentence[:m.start()].rstrip() + " "))
     return sorted(starts)
 
 

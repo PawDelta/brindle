@@ -245,6 +245,8 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
     pytest.param("we need a plan", "plan", marks=pytest.mark.variant("need wording at the sentence start")),
     pytest.param("ok, give me a quick plan", "plan", marks=pytest.mark.variant("give me + a clause after a comma")),
     pytest.param("I don't want a plan", None, marks=pytest.mark.variant("a negated want grants nothing")),
+    pytest.param("do not give me a plan", None,
+                 marks=pytest.mark.variant("a negation before give-me must survive the embedded restart")),
     pytest.param("no plan", None, marks=pytest.mark.variant("'no' before a bare plan grants nothing")),
     pytest.param("i said don't make a plan", None, marks=pytest.mark.variant("an 'i said' lead cannot revive a negation")),
     pytest.param("I want the plan to use X, the plan looks good", None,
