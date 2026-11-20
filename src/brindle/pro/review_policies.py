@@ -186,7 +186,7 @@ def ask(db: DB, p: dict, method: str, path: str, body: dict | None = None, *, cl
     if status != 200:
         refused(db, p, resp, status)
         code = resp.get("error") if isinstance(resp.get("error"), str) else None
-        raise ad.Refused(resp.get("error_description") or code or f"HTTP {status}", status, code)
+        raise ad.Refused(resp.get("error_description") or code or ad.why_refused(status, resp, body), status, code)
     seen(db, p, resp)
     return resp
 
