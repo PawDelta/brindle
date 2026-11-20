@@ -347,6 +347,17 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     if message_at is None:
         message_at = time.time()
     scope = request_intent(text)
+    model_cancel = False
+    if not fold_only and not carries_delivery:
+        from brindle import intent
+
+        # Wordings the regexes miss go to a small model call, with the person's own earlier
+        # messages as context. A prompt holding a brindle delivery is never fed to it.
+        if scope is None and not _cancels(text):
+            asked_for = intent.classify(text, intent.context(root.id, text))
+            scope = {intent.PLAN: "plan", intent.VISUAL: "visual"}.get(asked_for)
+            model_cancel = asked_for == intent.CANCEL
+        intent.remember(root.id, text)
     closed_prompts = []
     with db.tx() as c:
         if staged_only:
@@ -381,7 +392,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             closed_prompts = visuals.answered_in_chat(c, root.id, message_at, text)
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
-        cancelled = not fold_only and _cancels(text)
+        cancelled = not fold_only and (model_cancel or _cancels(text))
         if not fold_only and (scope or cancelled):
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
             _unlink(c, root.id, "grant")
@@ -634,6 +645,15 @@ def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = 
             return True
         if decision:
             return False
+    if kind == "plan" and supervisor and visual_id and c.execute(
+            "SELECT 1 FROM plans WHERE id=? AND root_id=? AND state IN ('open','redirected')",
+            (visual_id, root)).fetchone():
+        # A revision of the supervisor's own open plan is not a new doc: it needs no fresh ask.
+        # It still spends one the person left for it (a Redirect, or asking again).
+        if c.execute("UPDATE visual_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
+                     "AND scope='plan'", (root,)).rowcount:
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant'", (root,))
+        return True
     consume(c, root, kind)
     return True
 

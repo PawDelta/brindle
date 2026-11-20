@@ -526,6 +526,18 @@ def no_claude_usage_command(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_intent_model(monkeypatch):
+    """Person messages the request regexes miss are never sent to the real
+    model: the call answers nothing, so the regex result stands, and no
+    session's context or cache carries over (tests/test_plan_ask_intent.py
+    fakes the model)."""
+    from brindle import intent
+
+    intent.forget()
+    monkeypatch.setattr(intent, "_ask", lambda prompt, budget: None)
+
+
+@pytest.fixture(autouse=True)
 def no_signin_pause(monkeypatch):
     """The cull sweep and agent launches don't ask the real CLIs who is signed
     in: every provider reads as unverifiable (tests/test_signin_pause.py
