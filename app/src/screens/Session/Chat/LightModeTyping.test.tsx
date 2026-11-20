@@ -39,7 +39,7 @@ it("keeps the light cursor visible while typing in Claude's prompt", async () =>
   await act(() => new Promise<void>(resolve => terminal.write("", resolve)));
   expect(terminal.buffer.active.getLine(0)!.translateToString(true)).toBe("h");
   const colours = (terminal as unknown as { _core: { _themeService: { colors: { cursor: { css: string }; cursorAccent: { css: string } } } } })._core._themeService.colors;
-  expect(colours.cursor.css).toBe("#078a62");
+  expect(colours.cursor.css).toBe("#06744f");
   expect(colours.cursorAccent.css).toBe("#ffffff");
 });
 
