@@ -26,6 +26,9 @@ export function appUpdateItem(status: AppUpdateStatus | null): AppUpdateItem | n
    stops nothing (the Inbox's From the team) isn't waiting, so the count can reach zero; it shows as a dot. */
 export const waitingCount = (state: AppState): number => state.inbox.filter((i) => partOf(i) === "wait").length + (appUpdateItem(state.appUpdate) ? 1 : 0);
 
+/* Every item, waits and team rows alike: the count while the queue's switch (inbox_queue_v2) is off. */
+export const inboxCount = (state: AppState): number => state.inbox.length + (appUpdateItem(state.appUpdate) ? 1 : 0);
+
 /* A team row the person hasn't read: the sidebar's dot beside the count. */
 export const teamNews = (state: AppState): boolean => state.inbox.some((i) => partOf(i) === "team" && i.read === false);
 
