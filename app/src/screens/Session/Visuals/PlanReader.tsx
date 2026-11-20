@@ -36,7 +36,7 @@ import { DocReference } from "../../../components/DocReference";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { ago } from "../../../components/ProviderConnect";
 import { PaperclipIcon } from "../../../components/icons";
-import { button, field, label, main, quiet } from "../../../components/ui";
+import { button, danger, field, label, main, pill, quiet } from "../../../components/ui";
 import { CloudLoginStatus, useCloudLogin } from "../../Inbox/CloudSignIn";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
 import type { PlanDocClient, PlanShareLinkClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
@@ -46,7 +46,7 @@ import { Diagram } from "./DocDiagram";
 import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
 import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { DocMarkdown } from "./DocMarkdown";
-import { Review, ReviewStrip, SignOffSheet, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
+import { DraftCard, Review, ReviewStrip, SignOffSheet, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
 import type { LiveClient } from "./DocEditor";
 import { DocPresence, type LiveCapability } from "./DocPresence";
@@ -55,6 +55,7 @@ import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } f
 import { ExportButton } from "./ExportButton";
 import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
 import { Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
+import { Annotated, DecisionCard, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
@@ -79,7 +80,7 @@ export interface Writes {
 
 export type Mode = "viewing" | "suggesting" | "editing";
 export const MODES: { id: Mode; name: string; hint: string }[] = [
-  { id: "viewing", name: "Viewing", hint: "Read and comment" },
+  { id: "viewing", name: "Viewing", hint: "Read, comment and decide" },
   { id: "suggesting", name: "Suggesting", hint: "Your edits become suggestions to accept" },
   { id: "editing", name: "Editing", hint: "Your edits change the text, as a new revision" },
 ];
@@ -132,6 +133,8 @@ export interface ReaderChrome {
   modes: typeof MODES;
   allowed(mode: Mode): boolean;
   onMode(mode: Mode): void;
+  /* Back to where the doc was opened from (the planning doc's "Back to the session" once approved). */
+  onBack?: () => void;
 }
 
 /* The doc from its source, kept current, with its writes kept in order. `version` changing asks
@@ -269,7 +272,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
       {shown ? (
         <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
           shareLink={planLinkTarget(client, shown.id, repo)}
-          chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode }}
+          chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode, onBack }}
           top={shown.state === "approved" && (
             <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">
               <Tasks plan={shown} shared={overlaps(shown)} />
@@ -435,6 +438,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [followed, setFollowed] = useState<{ thread: string } | null>(null);
   const [tab, setTab] = useState<ReviewTab>("comments");
   const [collapsed, setCollapsed] = useState(storedCollapsed);
+  // The planning doc (PlanDesignDoc.tsx): the person's own plan on the design-doc spine, not yet
+  // shared for team review. Every other doc keeps the side column.
+  const designDoc = !receivedTeammate && !!author && !receivedPlan.gate && onSpine(receivedPlan);
+  const [hovered, setHovered] = useState<number | null>(null);
+  const [reading, setReading] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(false);
   const doc = useRef<HTMLDivElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const alive = useRef(true);
@@ -547,7 +558,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       const a = t.anchor;
       if (a.kind !== "text" || a.section !== section || a.state === "detached" || a.start == null || a.end == null) continue;
       // The engine's offsets count code points; the text on screen, UTF-16 units.
-      const range = { start: toUnits(body, a.start), end: toUnits(body, a.end), thread: t.id, ref: t.id, lit: followed?.thread === String(t.id) };
+      const lit = followed?.thread === String(t.id) || hovered === t.id;
+      // The planning doc's notes sit beside their words, so the words carry no number and no colour.
+      const range = designDoc ? { start: toUnits(body, a.start), end: toUnits(body, a.end), thread: t.id, lit, quiet: true }
+        : { start: toUnits(body, a.start), end: toUnits(body, a.end), thread: t.id, ref: t.id, lit };
       // On the live or frozen text a range is only drawn where its words still are.
       if (shownTexts?.has(section) && a.quote != null && body.slice(range.start, range.end) !== a.quote) continue;
       out.push(t.kind === "suggestion" ? { ...range, kind: "del", ins: t.after ?? "" } : { ...range, kind: "anchor" });
@@ -677,7 +691,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const followAnchor = (e: MouseEvent) => {
     const at = (e.target as HTMLElement).closest<HTMLElement>("[data-thread],[data-ref]");
     const thread = at?.dataset.thread ?? at?.dataset.ref;
-    if (!thread || collapsed) return;
+    if (!thread || (collapsed && !designDoc)) return;
     setTab("comments");
     setFollowed({ thread });
   };
@@ -918,6 +932,272 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={myName} onState={setLiveState} onCapability={setLiveCapability} onText={setLiveTexts} refreshes={refreshes}
       mode={mode} stripHost={stripHost} reviewers={reviewerNames} onHistory={() => { if (collapsed) collapse(false); setTab("history"); }} />
   );
+
+  // The bottom bar while a suggestion is typed, while editing live, and once the plan is decided.
+  const suggestingBar = (
+    <>
+      <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="suggesting">
+        <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
+          <span className={`${label} text-[11px]`}>Suggesting</span>
+          <span className="truncate">{suggestionReady ? "1 change not sent" : "Type your change in the doc"}</span>
+        </span>
+        <span className="text-xs text-ink-3">{teammate ? `Your edits are suggestions. ${authorName} accepts or rejects each one.` : "Your edits are suggestions. You accept or reject each one."}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button type="button" className={quiet} onClick={() => setDraft(null)}>Discard all</button>
+        <button type="button" className={main} disabled={busy || draftStale || !suggestionReady}
+          onClick={() => doc.current?.ownerDocument.querySelector<HTMLFormElement>('[data-testid="thread-draft"]')?.requestSubmit()}>Send 1 suggestion</button>
+      </div>
+    </>
+  );
+  const editingBar = (
+    <>
+      <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="editing">
+        <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
+          <span className={`${label} text-[11px]`}>Editing</span>
+          <span className="truncate">{raw ? "The Markdown" : editing ? partName(editing.section) : ""}</span>
+        </span>
+        <span className="text-xs text-ink-3">Sign-offs wait for a frozen version: nobody signs text that is still moving.</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button type="button" className={button} onClick={() => { setEditing(null); chrome?.onMode("viewing"); }}>Done editing</button>
+      </div>
+    </>
+  );
+  const decidedBar = (
+    <>
+      {/* A redirected plan stays open to cancel (never to approve): the person may close it instead of waiting for a revision. */}
+      {plan.state === "redirected" && client?.cancelPlan && (
+        <div className="col-span-full flex justify-end">
+          <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
+        </div>
+      )}
+      <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided" data-state={plan.state}>
+        {plan.state === "cancelled"
+          ? <p data-testid="plan-closed">This planning is closed without approval. The tasks it held wait for the supervisor's decision on each.</p>
+          : <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>}
+        {plan.verdict?.note && <p className="text-ink-2"><span className="text-ink-3">your note · </span>{plan.verdict.note}</p>}
+        {plan.verdict?.comments?.map((c, i) => (
+          <p key={i} className="text-ink-2">
+            <span className="text-ink-3">on {partName(c.section)} · </span>
+            {c.text}
+          </p>
+        ))}
+      </div>
+    </>
+  );
+  /* The planning doc (design: plan-doc-redesign.html): the outline, the serif page with each
+     decision inline at its section and the comments in the margin, and one bar along the bottom. */
+  function planningDoc() {
+    const parts = spineParts(textPlan.sections);
+    const placed = placeDecisions(parts, plan.decisions);
+    const ordered = decisionsInOrder(parts, placed);
+    const waiting = (d: PlanDecisionDTO) => open && !settled(d);
+    const left = ordered.filter(waiting);
+    const sectionIds = new Set(plan.sections.map((s) => s.id));
+    // Where a note sits: beside its words, its section, its decision's card, or the overview.
+    const home = (a: PlanAnchor | PlanThreadDTO["anchor"], thread?: number): { at: string; anchor: string | null } => {
+      const section = "section" in a ? a.section ?? "" : "";
+      if (a.kind === "decision") return { at: `decision:${a.decision}`, anchor: "[data-testid=plan-decision]" };
+      if (section.startsWith("decision:")) return { at: section, anchor: "[data-testid=plan-decision]" };
+      if (!sectionIds.has(section)) return { at: LEDE, anchor: null };
+      if (a.kind === "text" && !("state" in a && a.state === "detached")) return { at: section, anchor: thread === undefined ? "[data-sel]" : `[data-thread="${thread}"]` };
+      return { at: section, anchor: null };
+    };
+    const draftAt = draft ? (draft.kind === "suggest" ? { at: draft.section, anchor: null } : home(draft.anchor)) : null;
+    const notesFor = (at: string) => [
+      ...openThreads.map((t) => ({ t, h: home(t.anchor, t.id) })).filter(({ h }) => h.at === at).map(({ t, h }) => ({
+        key: `t${t.id}`, anchor: h.anchor,
+        node: <MarginNote thread={t} busy={busy} canJudge={plan.state === "open"} canReply={canComment} canResolve actions={actions} lit={followed?.thread === String(t.id) || hovered === t.id}
+          onHover={(on) => setHovered(on ? t.id : null)} />,
+      })),
+      ...(draft && draftAt?.at === at ? [{
+        key: "draft", anchor: draftAt.anchor,
+        node: <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={Math.max(0, ...threads.map((t) => t.id)) + 1} stale={draftStale} busy={busy}
+          onSend={(text) => void sendDraft(text)} onCancel={() => setDraft(null)} change={draftChange}
+          className="grid gap-1.5 border-l border-branch pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2" />,
+      }] : []),
+    ];
+    const noted = openThreads.length > 0 || !!draft;
+    const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
+    const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
+      <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
+        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} picked={open ? drafted(d) ?? null : chosen(d)}
+          onPick={(o) => setPicks((p) => ({ ...p, [d.id]: o }))} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
+      </Annotated>
+    ));
+    const titleAside = (s: PlanSectionDTO) => {
+      const here = editing?.section === s.id;
+      return (here || mode === "editing") && <span className={`${aside} ml-3`}>{here ? (live ? "You are writing here · live" : "You are editing") : s.kind !== "mermaid" && s.kind !== "svg" && editControl(s.id, s.title)}</span>;
+    };
+    // The outline marks the section being read.
+    const spy = () => {
+      const root = doc.current;
+      if (!root) return;
+      const top = root.getBoundingClientRect().top;
+      let at: string | null = null;
+      for (const el of root.querySelectorAll<HTMLElement>("[data-spine]")) if (el.getBoundingClientRect().top - top < 140) at = el.dataset.spine ?? null;
+      setReading(at);
+    };
+    const stillOpen = [openThreads.length - suggestions > 0 && plural(openThreads.length - suggestions, "comment"), suggestions > 0 && plural(suggestions, "suggestion")].filter(Boolean);
+    const lineFor = plan.state === "open" ? "Nothing is built until you approve" : plan.state === "approved" ? "brindle is building it" : statusLine;
+    const stageTone = plan.state === "open" ? "text-sap" : plan.state === "approved" ? "text-pass" : "text-ink-3";
+    const versionMenu = source.history ? (
+      <Menu label={<span data-testid="plan-rev">{`${versionLabel} · History`}</span>} buttonClass={`${quiet} px-[9px] text-xs !text-ink-3`} title="See earlier revisions and what changed"
+        place="down" panelClass="w-[380px] max-w-[86vw] max-h-[60vh] overflow-auto" open={historyOpen} onOpenChange={setHistoryOpen}>
+        <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
+          onCompare={(comparison, close) => { setHistorical(comparison ? { comparison, close } : null); if (comparison) setHistoryOpen(false); }} />
+      </Menu>
+    ) : <span className="whitespace-nowrap px-[9px] text-xs text-ink-3" data-testid="plan-rev">{versionLabel}</span>;
+    const approveBlocked = !!historical || busy || left.length > 0 || reviewBlocked || uploading > 0;
+    return (
+      <>
+        {chrome && (
+          <ReaderBar lead={chrome.lead} version={versionMenu} presence={presence}
+            modes={{ current: mode, picker: <ModeMenu modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} /> }}
+            share={!historical && shareMenu} />
+        )}
+        <div ref={setStripHost} className="contents" />
+        {typing && !historical && <FormatBar />}
+        <div className="flex min-h-0 flex-1 bg-canvas" data-testid="plan-design-doc">
+          <Outline parts={parts} placed={placed} isOpen={waiting} decided={ordered.length - left.length} total={ordered.length} current={reading} />
+          <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto border-l border-line max-[900px]:border-l-0" data-testid="plan-doc" data-mode={historical ? "viewing" : mode}
+            onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor} onScroll={spy}>
+            {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : (
+              <article className={`pb-[84px] pl-[68px] pt-12 max-[900px]:pb-16 max-[900px]:pl-[46px] max-[900px]:!pr-[22px] max-[900px]:pt-8 ${noted ? "pr-6 max-[1180px]:pr-[68px]" : "pr-[68px]"}`}>
+                <div className={`font-serif text-[15.5px] leading-[1.68] text-ink-2 ${noted ? "w-[min(660px,100%_-_292px)] max-[1180px]:mx-auto max-[1180px]:w-[min(660px,100%)]" : "mx-auto w-[min(660px,100%)]"}`}>
+                  <h1 className="m-0 font-serif text-[31px] font-semibold leading-[1.16] tracking-[-0.012em] text-ink [text-wrap:balance]">{plan.title}</h1>
+                  <div className="mt-3.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 font-sans text-[12.5px] leading-[1.4] text-ink-2" data-testid="plan-status" data-state={plan.state} data-presentation={closed ? "closed" : undefined}>
+                    <span className={`${pill} text-xs ${stageTone}`}>{stage}</span>
+                    <span>{lineFor}</span>
+                    {plan.reference && <span className="text-ink-3" data-testid="doc-reference">{plan.reference}</span>}
+                    <span className="text-ink-3">{byline}</span>
+                  </div>
+                  {plan.team_ended && <p className="m-0 mt-2 font-sans text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</p>}
+                  {textPlan.lede && (
+                    <Annotated notes={notesFor(LEDE)} className="mt-[26px]">
+                      <div id="plan-lede" className="grid gap-2.5 text-[18.5px] leading-[1.55] text-ink">
+                        {mode === "editing" && editing?.section !== LEDE && <span className={`${aside} justify-self-end`}>{editControl(LEDE, "the overview")}</span>}
+                        {textBody(LEDE, "the overview")}
+                      </div>
+                    </Annotated>
+                  )}
+                  {!textPlan.lede && notesFor(LEDE).length > 0 && <Annotated notes={notesFor(LEDE)} className="mt-[26px]"><span /></Annotated>}
+                  {parts.map((p) => (
+                    <section key={p.section.id} id={`plan-${p.section.id}`} data-spine={p.section.id} aria-labelledby={`plan-title-${p.section.id}`} className="mt-[46px] scroll-mt-14 border-t border-line pt-7">
+                      <h2 className="relative m-0 mb-3.5 flex items-baseline justify-between font-serif text-[21.5px] font-semibold leading-[1.25] tracking-[-0.005em] text-ink">
+                        <span aria-hidden className="absolute -left-9 top-[0.5em] font-mono text-[11.5px] font-normal leading-none text-ink-3 max-[900px]:-left-[26px]">{p.n}</span>
+                        <span id={`plan-title-${p.section.id}`}>{p.section.title}</span>
+                        {titleAside(p.section)}
+                      </h2>
+                      <Annotated notes={notesFor(p.section.id)}>{body(p.section)}</Annotated>
+                      {cards(p.section.id)}
+                      {p.subs.map((s) => (
+                        <div key={s.id} id={`plan-${s.id}`} role="region" aria-labelledby={`plan-title-${s.id}`}>
+                          <h3 className="m-0 mb-2 mt-7 flex items-baseline justify-between font-serif text-base font-semibold leading-[1.3] text-ink">
+                            <span id={`plan-title-${s.id}`}>{s.title}</span>
+                            {titleAside(s)}
+                          </h3>
+                          <Annotated notes={notesFor(s.id)}>{body(s)}</Annotated>
+                          {cards(s.id)}
+                        </div>
+                      ))}
+                    </section>
+                  ))}
+                  {cards("")}
+                </div>
+              </article>
+            )}
+            {picked && !historical && (
+              <div role="toolbar" aria-label="For the highlighted text" className="absolute z-10 inline-flex -translate-y-[calc(100%+6px)] gap-0.5 rounded-md border border-line-strong bg-canvas-2 p-[3px] font-sans text-xs shadow-lg" style={{ left: picked.x, top: picked.y }}
+                onMouseDown={(e) => e.preventDefault()} onMouseUp={(e) => e.stopPropagation()}>
+                {canComment && <button type="button" className="cursor-pointer rounded-[3px] bg-branch-soft px-[9px] py-0.5 font-medium text-branch" onClick={() => offer("comment")}>Comment</button>}
+                {picked.kind === "text" && plan.state !== "approved" && canSuggest && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("suggest")}>Suggest edit</button>}
+                {canComment && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("ask")}>Ask the supervisor</button>}
+              </div>
+            )}
+          </div>
+        </div>
+        <footer className="flex min-h-[60px] flex-wrap items-center justify-between gap-x-5 gap-y-3 border-t border-line-strong bg-canvas-2 px-4 py-2.5 font-sans" data-testid="plan-verdict">
+          {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : open ? (
+            <>
+              <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : "ready"} data-left={left.length}>
+                {left.length ? (
+                  <>
+                    <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><span className={`${pill} !text-[13.5px] !font-semibold text-sap`}>{`${left.length} left to decide`}</span></span>
+                    <span className="text-xs text-ink-3">
+                      {"Next: "}
+                      <a href={`#plan-decision-${left[0].id}`} data-testid="plan-next-decision" className="text-ink-2 no-underline hover:text-ink hover:underline" onClick={(e) => { e.preventDefault(); jump(left[0].id); }}>{`${left[0].title} ↓`}</a>
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><Tick className="!text-[13.5px] !font-semibold">Everything is decided</Tick></span>
+                    <span className="text-xs text-ink-3">{`Approve starts the build.${stillOpen.length ? ` ${stillOpen.join(" and ")} ${openThreads.length === 1 ? "is" : "are"} still open.` : ""}`}</span>
+                  </>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {client?.cancelPlan && (
+                  <Menu label="Cancel planning" buttonClass={quiet} place="up" open={cancelOpen} onOpenChange={setCancelOpen} testid="plan-cancel-menu">
+                    <h4 className={menuTitle}>Close this plan without approving?</h4>
+                    <p className="m-0">Nothing is built. The tasks waiting on this plan go back to your supervisor, who asks you what to do with each.</p>
+                    <div className={menuRow}>
+                      <button type="button" className={quiet} onClick={() => setCancelOpen(false)}>Keep planning</button>
+                      <LoadingButton className={danger} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
+                    </div>
+                  </Menu>
+                )}
+                <Menu label="Request changes" buttonClass={button} place="up" open={changesOpen} onOpenChange={setChangesOpen} testid="plan-changes-menu">
+                  <h4 className={menuTitle}>What should change?</h4>
+                  <textarea className={menuNote} aria-label="Note for the supervisor" placeholder="A note for the supervisor (optional if you have commented)" value={note} onChange={(e) => setNote(e.target.value)} />
+                  {(attached.length > 0 || uploading > 0) && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {attached.map((path, i) => (
+                        <span key={`${path}:${i}`} className="inline-flex items-center gap-1 whitespace-nowrap rounded-sm border border-line px-1.5 py-px font-mono text-[11px] text-ink-2">
+                          {fileName(path)}
+                          <button type="button" aria-label={`Remove ${fileName(path)}`} className="cursor-pointer text-ink-3 hover:text-ink" onClick={() => setAttached((list) => list.filter((_, j) => j !== i))}>×</button>
+                        </span>
+                      ))}
+                      {uploading > 0 && <span className="text-xs text-ink-3">Attaching…</span>}
+                    </div>
+                  )}
+                  <p className="m-0">Your comments, suggestions and picks go back with it. The supervisor writes a new revision and you are asked again.</p>
+                  <div className={menuRow}>
+                    {canAttach ? (
+                      <>
+                        <input ref={picker} type="file" multiple hidden data-testid="plan-attach-input" onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; if (files.length) void upload(files); }} />
+                        <button type="button" className={quiet} onClick={() => picker.current?.click()}>Attach a file</button>
+                      </>
+                    ) : <span />}
+                    <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
+                      title={canRequest ? undefined : "Comment, add a note or pick differently first"} data-testid="plan-send-back" onClick={() => void decide(false)}>
+                      Send back
+                    </LoadingButton>
+                  </div>
+                </Menu>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={approveBlocked} data-testid="plan-build"
+                  title={left.length ? "Pick an option in every decision first" : "Approve this plan and start building it"} onClick={() => void decide(true)}>
+                  Approve
+                </LoadingButton>
+              </div>
+            </>
+          ) : plan.state === "approved" ? (
+            <>
+              <div role="status" className="grid gap-px" data-testid="plan-next" data-state="approved">
+                <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><Tick className="!text-[13.5px] !font-semibold">Approved</Tick></span>
+                <span className="text-xs text-ink-3">brindle is splitting the work and starting it now.</span>
+              </div>
+              {chrome?.onBack && <button type="button" className={button} onClick={chrome.onBack}>Back to the session</button>}
+            </>
+          ) : <div className="grid w-full gap-2">{decidedBar}</div>}
+          {error && <p role="alert" className="m-0 basis-full text-xs text-sap">{error}</p>}
+        </footer>
+      </>
+    );
+  }
+  if (designDoc) return planningDoc();
+
   return (
     <>
       {chrome && (
@@ -1019,35 +1299,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         )}
       </div>
       <footer className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2.5 border-t border-line-strong bg-canvas-2 px-s2 py-3" data-testid="plan-verdict">
-        {draft?.kind === "suggest" ? (
-          <>
-            <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="suggesting">
-              <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
-                <span className={`${label} text-[11px]`}>Suggesting</span>
-                <span className="truncate">{suggestionReady ? "1 change not sent" : "Type your change in the doc"}</span>
-              </span>
-              <span className="text-xs text-ink-3">{teammate ? `Your edits are suggestions. ${authorName} accepts or rejects each one.` : "Your edits are suggestions. You accept or reject each one."}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button type="button" className={quiet} onClick={() => setDraft(null)}>Discard all</button>
-              <button type="button" className={main} disabled={busy || draftStale || !suggestionReady}
-                onClick={() => doc.current?.ownerDocument.querySelector<HTMLFormElement>('[data-testid="thread-draft"]')?.requestSubmit()}>Send 1 suggestion</button>
-            </div>
-          </>
-        ) : live && (editing || raw) ? (
-          <>
-            <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="editing">
-              <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
-                <span className={`${label} text-[11px]`}>Editing</span>
-                <span className="truncate">{raw ? "The Markdown" : editing ? partName(editing.section) : ""}</span>
-              </span>
-              <span className="text-xs text-ink-3">Sign-offs wait for a frozen version: nobody signs text that is still moving.</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button type="button" className={button} onClick={() => { setEditing(null); chrome?.onMode("viewing"); }}>Done editing</button>
-            </div>
-          </>
-        ) : teammate ? (
+        {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? (
           <>
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
@@ -1111,28 +1363,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               <span className="max-w-[44ch] text-right text-[11.5px] text-ink-3">"Request changes" sends it back to the supervisor for a new revision, with your notes.</span>
             </div>
           </>
-        ) : (
-          <>
-          {/* A redirected plan stays open to cancel (never to approve): the person may close it instead of waiting for a revision. */}
-          {plan.state === "redirected" && client?.cancelPlan && (
-            <div className="col-span-full flex justify-end">
-              <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
-            </div>
-          )}
-          <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided" data-state={plan.state}>
-            {plan.state === "cancelled"
-              ? <p data-testid="plan-closed">This planning is closed without approval. The tasks it held wait for the supervisor's decision on each.</p>
-              : <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>}
-            {plan.verdict?.note && <p className="text-ink-2"><span className="text-ink-3">your note · </span>{plan.verdict.note}</p>}
-            {plan.verdict?.comments?.map((c, i) => (
-              <p key={i} className="text-ink-2">
-                <span className="text-ink-3">on {partName(c.section)} · </span>
-                {c.text}
-              </p>
-            ))}
-          </div>
-          </>
-        )}
+        ) : decidedBar}
         {error && error !== gate?.unconfirmed?.message && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
       </footer>
     </>

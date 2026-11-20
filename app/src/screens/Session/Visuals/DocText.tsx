@@ -20,6 +20,8 @@ export interface Mark {
   ref?: number;
   /* The thread followed from its card: lit, as the card is. */
   lit?: boolean;
+  /* Drawn neutral (the planning doc's margin notes): an ink wash, branch only while lit. */
+  quiet?: boolean;
 }
 
 /* Rendered text and, for each of its characters, its offset in the source. */
@@ -47,7 +49,7 @@ function leaves(marks: Mark[]): Leaf {
       for (const m of marks) {
         if (m.ins === undefined || m.end > pos || shown.has(m)) continue;
         shown.add(m);
-        if (m.ins) out.push(<ins key={`${key}.i${m.thread ?? out.length}`} data-thread={m.thread} className={inserted}>{m.ins}</ins>);
+        if (m.ins) out.push(<ins key={`${key}.i${m.thread ?? out.length}`} data-thread={m.thread} className={m.quiet ? "border-b border-pass text-pass no-underline" : inserted}>{m.ins}</ins>);
       }
       for (const m of marks) {
         if (m.ref === undefined || m.end !== pos || refs.has(m)) continue;
@@ -62,13 +64,15 @@ function leaves(marks: Mark[]): Leaf {
       const here = marks.filter((m) => m.start <= o && o < m.end);
       const del = here.find((m) => m.kind === "del");
       const anchor = here.find((m) => m.kind === "anchor");
-      const tone = del ? "bg-fail-soft text-fail line-through"
-        : here.some((m) => m.kind === "sel") ? "rounded-sm bg-branch/30 text-ink"
-        : anchor?.lit ? "cursor-pointer rounded-[1px] border-b-[1.5px] border-branch bg-branch-soft"
+      const sel = here.some((m) => m.kind === "sel");
+      const tone = del ? (del.quiet ? "text-fail line-through decoration-1" : "bg-fail-soft text-fail line-through")
+        : sel ? "rounded-sm bg-branch/30 text-ink"
+        : anchor?.lit ? `cursor-pointer rounded-[1px] ${anchor.quiet ? "border-b" : "border-b-[1.5px]"} border-branch bg-branch-soft`
+        : anchor?.quiet ? "cursor-pointer rounded-[1px] border-b border-ink-3 bg-[color-mix(in_srgb,var(--ink)_9%,transparent)]"
         : anchor ? "cursor-pointer rounded-[1px] border-b-[1.5px] border-sap bg-sap-soft" : undefined;
       const Tag = del ? "del" : "span";
       insert(o);
-      out.push(<Tag key={`${key}.${from}`} data-o={o} data-thread={(del ?? anchor)?.thread} className={tone}>{text.slice(from, to)}</Tag>);
+      out.push(<Tag key={`${key}.${from}`} data-o={o} data-thread={(del ?? anchor)?.thread} data-sel={sel || undefined} className={tone}>{text.slice(from, to)}</Tag>);
       insert(at[to - 1] + 1);
       from = to;
     }

@@ -94,6 +94,53 @@ const changed = (change: PlanChange, source: "edit" | "suggestion") => {
   return (plan = { ...plan, rev: plan.rev + 1, lede: change.section === "lede" ? text : plan.lede, sections: plan.sections.map((s) => (s.id === change.section ? { ...s, markdown: text } : s)),
     revisions: [...plan.revisions!, { rev: plan.rev + 1, author: "person", source, at: Date.now() / 1000, changed: [change.section] }] });
 };
+// ?doc=spine: the same row as a plan on the design-doc spine (shots/plan-doc-shots.mjs), the
+// webhook example of the approved planning-doc design (plan-doc-redesign.html).
+if (params.get("doc") === "spine") {
+  const DESIGN = "Every state change writes an event row in the same transaction as the change itself, so a crash cannot drop one. A background dispatcher reads the rows that are due, signs each payload and POSTs it to the team's endpoint.";
+  const RETRIES = "Retries back off exponentially (10s, 1m, 5m, 30m, 2h) with jitter. 4xx responses except 429 fail immediately, since sending the same payload again will not help. After 6 attempts the row moves to `dead_letter`.";
+  const RISKS = "**Hard to undo:** the payload shape and the `X-Brindle-Sig` header. Once teams verify against them, changing either breaks their receivers. Both are versioned as `v1` from the first day.\n\n- A dead endpoint could flood the Inbox with failures. The decision below settles how loud that is.\n- The outbox table grows without bound unless it is pruned. Delivered rows are removed 7 days after delivery.";
+  const FLOW = `<svg viewBox="0 0 660 176" role="img" aria-label="A state change writes an outbox row; the dispatcher signs it and posts it to the team endpoint; failures are tried again, then go to the dead-letter log"><g fill="none" stroke="currentColor" opacity=".35"><rect x="8" y="14" width="124" height="46" rx="4"/><rect x="178" y="14" width="124" height="46" rx="4"/><rect x="348" y="14" width="124" height="46" rx="4"/><rect x="518" y="14" width="134" height="46" rx="4"/><rect x="348" y="118" width="124" height="46" rx="4"/><rect x="518" y="118" width="134" height="46" rx="4"/></g><g font-size="12" text-anchor="middle" fill="currentColor"><text x="70" y="41">Something changes</text><text x="240" y="41">Outbox row</text><text x="410" y="41">Dispatcher</text><text x="585" y="41">Team endpoint</text><text x="410" y="145">Retry schedule</text><text x="585" y="145">Dead-letter log</text></g><path d="M132 37H172M302 37H342M472 37H512M410 60V112M472 141H512" stroke="currentColor" fill="none" opacity=".6"/></svg>`;
+  plan = {
+    id: "v_31aa", session: "sup-42", title: "Webhook delivery with retries", rev: 2, state: "open", markdown: "…", created_at: now - 3600, queued: 3, can_edit: true, reference: "DES-0042",
+    lede: "Deliver signed workspace events to team webhook URLs, with exponential backoff and a dead-letter log, without blocking the daemon's event loop.",
+    sections: [
+      { id: "context", title: "Context", markdown: "Teams already wire brindle into chat and CI by polling `brindle status --json`. Polling misses short-lived states, such as a worker that fails and is retried within a minute, and it costs each team a cron job. Three customers have asked for push notifications instead." },
+      { id: "audience", title: "Audience", markdown: "Team admins who configure integrations in Settings, and the services that receive the events. Individual developers never see this feature directly." },
+      { id: "goals", title: "Goals and non-goals", markdown: "**Goals**\n\n- No event is lost if the daemon crashes.\n- Receivers can verify every payload.\n- A failing endpoint never slows the event loop.\n\n**Non-goals**\n\n- Exactly-once delivery. Receivers dedupe by event id.\n- Per-event filtering rules. That is a later plan." },
+      { id: "proposed-design", title: "Proposed design", markdown: `${DESIGN}\n\n${RETRIES}` },
+      { id: "architecture", title: "Architecture", kind: "svg", markdown: FLOW, caption: "The path of one event." },
+      { id: "tech-stack", title: "Tech stack", markdown: "| Part | Choice |\n| --- | --- |\n| Storage | The daemon's existing SQLite file, with one new table |\n| HTTP | The async `httpx` client brindle already ships |\n| Signing | HMAC-SHA256 from the standard library, secrets in the OS keychain |" },
+      { id: "alternatives", title: "Alternatives considered", markdown: "- **Keep polling, add a cursor.** Cheaper to build, but every team still runs a cron job.\n- **A third-party relay.** Event payloads would leave the machine.\n- **A server-sent events stream.** The receivers asked for here only take POSTs." },
+      { id: "risks", title: "Risks and what's hard to undo", markdown: RISKS },
+      { id: "rollout", title: "Rollout and tasks", markdown: "1. **Lands dark.** The outbox and signing ship first. Events are written but never sent.\n2. **Reaches teams.** The dispatcher and the Settings page ship, switched on the way you pick below.\n3. **Stable.** After a week with no dead-letter spikes, the payload is documented as stable `v1`." },
+      { id: "open-questions", title: "Open questions", markdown: "- Should a 429 honour the receiver's `Retry-After` before our own schedule?\n- Is 256 KB the right payload cap, or should large events send a link instead?" },
+    ],
+    decisions: [
+      { id: "store", title: "Where should delivery state live?", section: "proposed-design", mine: "db", challenge: "if an org emits more than 10k CI events a minute, database write locks could stall delivery.", options: [
+        { id: "db", label: "A table in the existing database", pros: ["Written together with the event, and no new service to run"], cons: ["Tops out near 200 deliveries a second on one machine"] },
+        { id: "redis", label: "A dedicated Redis queue", pros: ["Fans out across replicas"], cons: ["A new service to install and run on every machine"] },
+      ] },
+      { id: "loud", title: "How should failed deliveries show up?", section: "risks", mine: "one", challenge: "an admin who never opens Settings will not learn which events were lost.", options: [
+        { id: "one", label: "One Inbox notice per endpoint, details in a log", pros: ["One notice, however many events fail"], cons: ["Admins open Settings to see which events were lost"] },
+        { id: "every", label: "An Inbox notice for every failed event", pros: ["Nothing is hidden"], cons: ["Floods the Inbox during an outage"] },
+      ] },
+      { id: "reach", title: "How should it reach teams?", section: "rollout", mine: "off", challenge: "opt-in features often go untested until a customer finds the first bug.", options: [
+        { id: "off", label: "Off until an admin adds a URL", pros: ["Nothing changes for teams that don't opt in"], cons: ["Slower feedback from real endpoints"] },
+        { id: "staff", label: "Staff teams first, then everyone", pros: ["Real traffic before the release"], cons: ["Needs a staged switch and a second release"] },
+      ] },
+    ],
+    split: [],
+    revisions: [{ rev: 1, author: "supervisor", source: "proposal", at: now - 3600 }, { rev: 2, author: "supervisor", source: "proposal", at: now - 240 }],
+    threads: [
+      { id: 1, kind: "comment", rev: 2, author: "person", status: "open", at: now - 120, text: "Should a 429 honour Retry-After before falling back to our schedule?",
+        anchor: anchored("proposed-design", `${DESIGN}\n\n${RETRIES}`, "4xx responses except 429 fail immediately"),
+        replies: [{ id: 2, author: "person", from_supervisor: true, at: now - 60, text: "Yes, if it is under 2h. I've listed it under Open questions until you confirm." }] },
+      { id: 3, kind: "suggestion", rev: 2, author: "maya.chen@pawdelta.com", status: "open", at: now - 360, text: "Support asks for deliveries up to a month back.", before: "7 days", after: "30 days",
+        anchor: anchored("risks", RISKS, "7 days") },
+    ],
+  };
+}
 // Where each worker is once the plan is approved.
 const live: Partial<Plan["split"][number]>[] = [
   { task_id: "t_41", agent_id: "a7aaa807", state: "merged", test_state: "passing" },
