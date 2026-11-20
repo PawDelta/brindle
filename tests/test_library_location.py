@@ -140,7 +140,9 @@ def test_move_to_servers_keeps_a_plan_whose_server_copy_is_unconfirmed(status, r
         assert (got["left"], len(remote.uploads)) == (0, 1) and local_library.get(kept) is None
 
 
-@pytest.mark.parametrize("level", ["team", pytest.param("org", marks=pytest.mark.variant(
+@pytest.mark.parametrize("level", [pytest.param("team", marks=pytest.mark.variant(
+    "a team's enforced store beats the person's saved choice, learned by the daemon's own read")),
+                                   pytest.param("org", marks=pytest.mark.variant(
     "an Enterprise org's own enforced value applies when its team's switches are empty"))])
 def test_enforced_location_beats_the_persons_choice(level, tmp_path, remote):
     from brindle.daemon import routes_actions
@@ -153,6 +155,8 @@ def test_enforced_location_beats_the_persons_choice(level, tmp_path, remote):
     local_library.remember("local")
 
     assert routes_actions.library_on_this_mac() is False        # the daemon's own read learns the team
+    state = next(s for s in ad.switch_states() if s["name"] == "store")
+    assert state["locked"] and state["on"]                       # shown as locked on, not the person's choice
     with pytest.raises(ad.Locked):
         local_library.set_location("local")
     assert sent(remote) == []

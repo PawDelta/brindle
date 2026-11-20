@@ -10,7 +10,9 @@ from test_plan_share_link import DOC, LINK, Library, parts  # noqa: F401
 from test_pro_team import ORG, run, team  # noqa: F401
 
 
-@pytest.mark.parametrize("location,forced", [("local", "enforced_on"), pytest.param(
+# Forced server storage over a local choice is test_library_location's
+# test_enforced_location_beats_the_persons_choice.
+@pytest.mark.parametrize("location,forced", [pytest.param(
     "server", "enforced_off", marks=pytest.mark.variant("forced local storage prevents an opted-in upload"))])
 def test_forced_location_wins(location, forced, remote):
     sign_in(remote, features=("analysis_docs", "analysis_docs_team", "analysis_docs_enterprise"))

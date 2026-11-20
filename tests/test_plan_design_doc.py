@@ -16,6 +16,7 @@ def _propose(db, boss, sections, decisions=None):
     return plans.to_dto(db, plans.get(db, p["id"]))
 
 
+@pytest.mark.variant("an optional extra sent empty is never stored, and an empty Open questions reads None.")
 def test_extras_left_out_or_empty_are_not_present(db, session):
     boss, _ = session
     dto = _propose(db, boss, [
@@ -31,9 +32,11 @@ def test_extras_left_out_or_empty_are_not_present(db, session):
 
 
 @pytest.mark.parametrize("body, first", [
-    ("## Context\n\nWhy.\n\n## Open questions\n", []),
+    pytest.param("## Context\n\nWhy.\n\n## Open questions\n", [], marks=pytest.mark.variant(
+        "markdown-only spine headings, one left empty, land on the spine once each")),
     # No spine heading at all: a new plan still gets the whole spine, its own section first.
-    ("## Summary\n\nA small change.", ["s1"]),
+    pytest.param("## Summary\n\nA small change.", ["s1"], marks=pytest.mark.variant(
+        "markdown with no spine heading keeps its own section first and still gets the whole spine")),
 ])
 def test_markdown_only_proposal_maps_headings_to_the_spine(db, session, body, first):
     boss, _ = session
@@ -48,6 +51,7 @@ def test_markdown_only_proposal_maps_headings_to_the_spine(db, session, body, fi
     assert {d["section"] for d in dto["decisions"]} <= set(ids)
 
 
+@pytest.mark.variant("a decision naming a section that doesn't exist falls back to Open questions, never dangles")
 def test_decision_attaches_to_its_section_else_open_questions(db, session):
     boss, _ = session
     anchored = {**DECISIONS[0], "section": "proposed-design"}
@@ -60,6 +64,7 @@ def test_decision_attaches_to_its_section_else_open_questions(db, session):
     assert {d["section"] for d in dto["decisions"]} <= {s["id"] for s in dto["sections"]}
 
 
+@pytest.mark.variant("the worker split never shows on the person's doc, yet plan_worker ids still resolve")
 def test_split_is_off_the_persons_doc_but_still_links_workers(db, session):
     boss, _ = session
     dto = _propose(db, boss, [{"id": "rollout", "title": "Rollout", "markdown": "Phase one."}])

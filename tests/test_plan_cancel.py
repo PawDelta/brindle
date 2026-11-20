@@ -44,6 +44,7 @@ def test_cancelled_plan_keeps_its_held_tasks_queued_and_names_them(how, db, sess
     assert held.id in said and "feat/schema" in said and "build the schema" in said
 
 
+@pytest.mark.variant("race: a cancel landing between an assign queuing and its reply must still hold that task")
 def test_cancel_between_an_assign_queuing_and_its_reply_holds_that_task_too(db, session, monkeypatch):
     """An assign queued behind the plan, cancelled before its reply releases the task: the task
     is held, not started, and the supervisor's message names it."""

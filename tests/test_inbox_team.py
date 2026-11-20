@@ -86,6 +86,7 @@ def _inbox(daemon, kind=None):
     return [i for i in r.json() if kind is None or i["kind"] == kind]
 
 
+@pytest.mark.variant("the feature's main path: each team row's sender, group, key, counts and sign-off progress")
 def test_each_row_kind_carries_its_fields(db, repo, library, daemon):
     ws = workspaces.create(db, str(repo), "feat/review-plan").workspace
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
@@ -163,6 +164,7 @@ def test_admin_notice_keeps_its_sender_through_status_parsing(db, monkeypatch):
     assert item.to_json()["from_name"] == "Priya Nair"
 
 
+@pytest.mark.variant("other tests reach the question card, none checks it now shows the question itself")
 def test_a_question_card_carries_the_question(db, repo, library, daemon):
     ws = workspaces.create(db, str(repo), "feat/ask").workspace
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
@@ -212,6 +214,7 @@ def test_a_dismissal_stored_before_the_team_inbox_still_hides_its_card(db, libra
     assert _inbox(daemon, "shared_doc_comment") == []
 
 
+@pytest.mark.variant("a doc request's own section must not be overwritten by the Inbox group")
 def test_the_inbox_group_and_a_doc_requests_section_are_independent(db, repo, library, daemon):
     ws = workspaces.create(db, str(repo), "feat/read").workspace
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))

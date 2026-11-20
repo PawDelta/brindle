@@ -221,11 +221,13 @@ def test_person_message_closes_only_earlier_prompts_in_its_session(db, session, 
 
 
 @pytest.mark.parametrize("said,folds", [
-    ("a", True),
+    pytest.param("a", True, marks=pytest.mark.variant("a bare option id is a pick")),
     pytest.param("A.", True, marks=pytest.mark.variant("case and punctuation around a bare id are ignored")),
-    ("option b", True),
-    ("None, keep exploring", True),
-    ("i was answering", False),
+    pytest.param("option b", True, marks=pytest.mark.variant("\"option <id>\" is a pick")),
+    pytest.param("None, keep exploring", True, marks=pytest.mark.variant(
+        "a whole label with its comma is a pick, the boundary of the longer sentence below")),
+    pytest.param("i was answering", False, marks=pytest.mark.variant(
+        "the reported bug: an ordinary chat message folded the open decision")),
     pytest.param("IT STILL SAYS ANSWERED IN CHAT", False, marks=pytest.mark.variant(
         "a shouted complaint about the fold must not fold")),
     pytest.param("a combo of B and C", False, marks=pytest.mark.variant(
@@ -253,6 +255,7 @@ def test_chat_folds_an_open_decision_only_when_the_whole_message_picks_an_option
         == said
 
 
+@pytest.mark.variant("a prompt holding brindle's delivery isn't the person's words, even when it matches a label")
 def test_a_cli_prompt_carrying_a_brindle_delivery_never_folds_a_decision(db, session, monkeypatch):
     _, boss, worker = session
     monkeypatch.setattr(time, "time", lambda: 200.0)
@@ -276,6 +279,7 @@ def test_a_cli_prompt_carrying_a_brindle_delivery_never_folds_a_decision(db, ses
     assert visuals.to_dto(db, visuals.get(db, v["id"]))["answered_in_chat"] is True
 
 
+@pytest.mark.variant("the answer's own person-marked notification to the supervisor must not fold it as chat")
 def test_unrelated_chat_and_visual_answer_delivery_do_not_fold_open_decisions(db, session, monkeypatch):
     _, boss, worker = session
     monkeypatch.setattr(time, "time", lambda: 200.0)
