@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import autopilot, bus, git, inbox_team, workspaces
+from brindle import autopilot, bus, git, inbox_team, plans, workspaces
 from brindle.daemon import lifecycle
 from brindle.daemon.app import build_app
 from brindle.db import Agent
@@ -34,7 +34,7 @@ class Library:
                       {"doc_id": "ad_3", "title": "Sam's plan", "rev": 1, "author": "u_sam", "decision_count": 0}]
         self.items = [
             {"item_key": "review:ad_2", "kind": "review_requested", "created_at": 30, "doc_id": "ad_2",
-             "title": "Ana's plan", "sender": ANA, "decision_count": 3},
+             "title": "Ana's plan", "sender": ANA},
             # Ana, then Chen, signed in the same second: the Library lists a tie by key, Ana's first.
             {"item_key": "signoff:ad_1:2:u_ana", "kind": "signed_off", "created_at": 20, "doc_id": "ad_1",
              "title": "Engine plan", "rev": 2, "signer": ANA, "signed": 1, "required": 3, "waiting": [BO, CHEN]},
@@ -86,7 +86,17 @@ def _inbox(daemon, kind=None):
     return [i for i in r.json() if kind is None or i["kind"] == kind]
 
 
-def test_each_row_kind_carries_its_fields(db, library, daemon):
+def test_each_row_kind_carries_its_fields(db, repo, library, daemon):
+    ws = workspaces.create(db, str(repo), "feat/review-plan").workspace
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    decisions = plans._decisions([
+        {"id": did, "title": did, "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]}
+        for did in ("storage", "access", "retention")
+    ])
+    db.conn.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, state, created_at, updated_at)"
+                    " VALUES ('v_000000000001', 'r1', 1, '# Plan', ?, '[]', 'open', 1, 1)", (json.dumps(decisions),))
+    db.conn.execute("INSERT INTO plan_shares (plan_id, doc_id, owner, remote_rev, local_rev)"
+                    " VALUES ('v_000000000001', 'ad_2', 'u_ana', 1, 1)")
     lifecycle._poll_review_queue()
     assert bus.tail(db, 0, kinds=(inbox_team.CHANGED,))
 
