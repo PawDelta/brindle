@@ -490,6 +490,13 @@ def _queued(db: DB, root_id: str) -> int:
                if t.caller_id and autopilot.root_of(db, t.caller_id) == root_id and tasks.plan_holds(db, t))
 
 
+def holding_count(db: DB, root_id: str, plan_id: str) -> int:
+    """Queued tasks plan ``plan_id`` holds for session ``root_id``: 0 unless it
+    is the plan that :func:`holding` names (the one the tasks wait on)."""
+    held = holding(db, root_id)
+    return _queued(db, root_id) if held and held.get("id") == plan_id else 0
+
+
 def to_dto(db: DB, p: dict) -> dict:
     from brindle import plan_docs
     from brindle.service.dto import PlanDTO

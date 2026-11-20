@@ -1,10 +1,11 @@
-/* The session header's way in: an icon. It opens the session's list: the open ones first, newest
-   first, and the
-   decided ones folded under "Decided · N". Picking one opens it in the chat's place. No visuals (or
-   an engine without them): no button. */
+/* The session header's way in: "Docs" with an icon. It opens the session's list: a plan that holds
+   queued tasks pinned on top, then the open ones, newest first, and the decided ones folded under
+   "Decided · N". Picking one opens it in the chat's place. The dot stays while a plan holds work,
+   and otherwise shows an unread doc. No docs (or an engine without them): no button. */
 
 import { useEffect, useRef, useState } from "react";
 import type { VisualDTO } from "../../../api/client";
+import { FileIcon } from "../../../components/icons";
 import { button, panel } from "../../../components/ui";
 import { formatAge } from "../../../store/overview";
 import { decided } from "./useVisuals";
@@ -31,7 +32,8 @@ export function VisualsButton({ visuals, onOpen }: { visuals: VisualDTO[] | null
     };
   }, [open]);
   if (!visuals || visuals.length === 0) return null;
-  const pending = visuals.filter((v) => !decided(v));
+  const holding = visuals.find((v) => v.kind === "plan" && (v.holding ?? 0) > 0) ?? null;
+  const pending = visuals.filter((v) => !decided(v) && v !== holding);
   const done = visuals.filter(decided);
   const pick = (id: string) => {
     setOpen(false);
@@ -39,19 +41,17 @@ export function VisualsButton({ visuals, onOpen }: { visuals: VisualDTO[] | null
   };
   return (
     <div ref={box} className="relative">
-      <button type="button" className={`${button} relative !gap-0 p-1.5 text-ink-2 hover:bg-sap/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sap`} aria-label="Visuals" title="Visuals" aria-expanded={open} aria-haspopup="true" data-testid="visuals-button" onClick={() => setOpen((o) => !o)}>
-        <svg aria-hidden="true" viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-          <path d="M14 3v6h6" />
-          <path d="M8 17l3-4 2 2 3-4" />
-        </svg>
-        {visuals.some((v) => v.unread) && (
-          <span className="absolute -right-1 -top-1 size-2.5 rounded-full bg-sap ring-2 ring-canvas" aria-label="unread" />
+      <button type="button" className={`${button} relative gap-1.5 px-2 py-1 text-ink-2 hover:bg-sap/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sap`} aria-label="Docs" title="Docs" aria-expanded={open} aria-haspopup="true" data-testid="visuals-button" onClick={() => setOpen((o) => !o)}>
+        <FileIcon size={16} />
+        <span>Docs</span>
+        {(holding || visuals.some((v) => v.unread)) && (
+          <span data-testid="visuals-dot" className="absolute -right-1 -top-1 size-2.5 rounded-full bg-sap ring-2 ring-canvas" aria-label={holding ? "holding" : "unread"} />
         )}
       </button>
       {open && (
-        <div className={`${panel} absolute right-0 top-full z-20 mt-1 flex w-80 flex-col gap-px p-1`} role="group" aria-label="Visuals" data-testid="visuals-panel">
-          {pending.length === 0 && <p className="px-s1 py-1 text-xs text-ink-3">Nothing waits on you here.</p>}
+        <div className={`${panel} absolute right-0 top-full z-20 mt-1 flex w-80 flex-col gap-px p-1`} role="group" aria-label="Docs" data-testid="visuals-panel">
+          {holding && <Holding v={holding} onPick={pick} />}
+          {pending.length === 0 && !holding && <p className="px-s1 py-1 text-xs text-ink-3">Nothing waits on you here.</p>}
           {pending.map((v) => (
             <Row key={v.id} v={v} onPick={pick} />
           ))}
@@ -67,6 +67,21 @@ export function VisualsButton({ visuals, onOpen }: { visuals: VisualDTO[] | null
         </div>
       )}
     </div>
+  );
+}
+
+/* The plan that holds a session's queued tasks: pinned first, one click opens it. */
+function Holding({ v, onPick }: { v: VisualDTO; onPick(id: string): void }) {
+  const n = v.holding ?? 0;
+  return (
+    <button type="button" className="mb-1 flex min-w-0 flex-col gap-0.5 rounded-md border-l-2 border-sap bg-sap/10 px-s1 py-1.5 text-left hover:bg-sap/15" data-testid={`visual-holding-${v.id}`} onClick={() => onPick(v.id)}>
+      <span className="flex items-center justify-between gap-s1">
+        <span className="rounded-full bg-sap/15 px-1.5 text-[11px] font-medium text-sap">Holding {n} {n === 1 ? "task" : "tasks"}</span>
+        <span className="text-[11px] text-ink-3">{formatAge(Math.max(0, Date.now() / 1000 - v.created_at))}</span>
+      </span>
+      <span className="truncate text-sm font-semibold text-ink">{v.title}</span>
+      <span className="text-xs text-ink-3">The tasks start when you approve it.</span>
+    </button>
   );
 }
 

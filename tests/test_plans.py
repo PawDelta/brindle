@@ -283,6 +283,8 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
     with TestClient(build_app(TOKEN), headers=AUTH) as client:
         got = client.get(f"/v1/plans/{pid}").json()
         assert got["queued"] == 1 and [s["id"] for s in got["sections"]][:2] == ["s1", "s2"]
+        rows = {v["id"]: v for v in client.get(f"/v1/sessions/{boss.id}/visuals").json()}
+        assert rows[pid]["holding"] == 1
         assert got["ask"] == "Admins set presets once for their whole org."
         org, repo = got["decisions"][0]["options"]
         assert (org["pros"], org["cons"], org["touches"]) == (["One place"], ["Admins only"],
