@@ -637,6 +637,25 @@ describe("visuals", () => {
     expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_8f2c:r2" });
   });
 
+  it("pins a plan and lights its dot once tasks queue behind it, from the task event alone", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now };
+    const plan: VisualDTO = { ...visual, id: "v_plan", kind: "plan", title: "Bulk invite: plan", unread: false, answer: null, holding: 0 };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    let rows = [plan];
+    vi.spyOn(client, "visuals").mockImplementation(async () => rows);
+    const { store, sync } = connectDaemon(daemon, client);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    fireEvent.click(await screen.findByTestId("visuals-button"));
+    expect(screen.queryByTestId("visual-holding-v_plan")).toBeNull();
+    expect(screen.queryByTestId("visuals-dot")).toBeNull();
+    // The tasks queue on the engine; the event names only the caller, so the session reads its list again.
+    rows = [{ ...plan, holding: 2 }];
+    daemon.publish("task.queued", { repo_root: REPO, payload: { task_id: "t_1", caller_id: "sup1" } });
+    expect(await screen.findByTestId("visual-holding-v_plan")).toBeTruthy();
+    expect(screen.getByTestId("visuals-dot").getAttribute("aria-label")).toBe("holding");
+  });
+
   it("visuals unread dot clears on view while Inbox removes notices and keeps unanswered prompts", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now };
     const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_notice", reason: "visual is ready" };
@@ -805,9 +824,9 @@ describe("visuals", () => {
     expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
     expect(screen.getByTestId("terminal")).toBe(terminal);
 
-    // Library › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+    // Library › Kept docs: the kept copy opens in the same reader, read-only, on its own scheme path.
     fireEvent.click(within(sidebar()).getByRole("button", { name: /^Library/ }));
-    fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept visuals/ }));
+    fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept docs/ }));
     fireEvent.click(await screen.findByTestId("kept-k_1"));
     const kept = screen.getByTestId("kept-reader");
     expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");

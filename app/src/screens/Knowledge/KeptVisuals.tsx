@@ -45,7 +45,7 @@ export function KeptVisuals({ client, onOpenChange }: { client: KeptVisualsClien
           meta={`kept ${ago(open.kept_at)} ago · from ${open.from_session_name}`}
           bleed
           onBack={() => setOpen(null)}
-          backLabel="Kept visuals"
+          backLabel="Kept docs"
           footer={
             open.answer && (
               <p className="border-t border-line px-s2 py-s1 text-sm" role="status">
@@ -59,7 +59,7 @@ export function KeptVisuals({ client, onOpenChange }: { client: KeptVisualsClien
     );
   }
   return (
-    <section className="flex flex-col gap-s1" aria-label="Kept visuals" data-testid="kept-visuals">
+    <section className="flex flex-col gap-s1" aria-label="Kept docs" data-testid="kept-visuals">
       <p className="text-xs text-ink-3">Visuals you kept from a session. They stay after the session is removed.</p>
       {error && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>

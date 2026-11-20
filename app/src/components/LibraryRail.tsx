@@ -36,7 +36,7 @@ const SOURCES: { id: Exclude<KnowledgeView, "docs">; label: string; glyph: strin
   { id: "map", label: "Map", glyph: "⌗" },
   { id: "imported", label: "Imported docs", glyph: "⇩", count: "imported" },
   { id: "decisions", label: "Decisions", glyph: "✎", count: "decisions" },
-  { id: "kept", label: "Kept visuals", glyph: "▣", count: "kept" },
+  { id: "kept", label: "Kept docs", glyph: "▣", count: "kept" },
 ];
 
 const HEADING = "px-2 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-wider text-ink-3";
