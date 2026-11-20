@@ -64,6 +64,7 @@ import { BrindleSignIn, Onboarding, Permissions, Starting, markOnboarded, onboar
 import { AgentsScreen } from "./screens/Agents";
 import { SessionScreen } from "./screens/Session";
 import { SettingsScreen } from "./screens/Settings";
+import { LibraryDesign } from "./screens/Session/Visuals/LibraryDesign";
 import { SharedLinkReader } from "./screens/Session/Visuals/SharedLinkReader";
 import { useDeepLinks, type DeepLinkInbox } from "./lib/deeplink";
 import { isPaused } from "./store/overview";
@@ -194,7 +195,9 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
       return <OpenInLibrary navigate={navigate} to={{ screen: "knowledge", view: "docs", doc: route.doc, design: true, designRepo: route.repo }} />;
     case "plan-link":
       // A plan's brindle:// link (lib/deeplink.ts): read through the link, in the doc reader.
-      return <SharedLinkReader key={route.link?.token ?? ""} client={client} link={route.link} onBack={() => navigate(route.from ?? HOME)} />;
+      // A design also shared with this account opens as the Library opens it, with its own rights.
+      return <SharedLinkReader key={route.link?.token ?? ""} client={client} link={route.link} onBack={() => navigate(route.from ?? HOME)}
+        member={(design) => <LibraryDesign key={design.id} client={client} docId={design.id} title={design.title} onBack={() => navigate(route.from ?? HOME)} backLabel="Back" />} />;
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     /* One Settings, in tabs: the older Account and Project settings routes open it on their tab. */
