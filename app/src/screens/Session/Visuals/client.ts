@@ -22,9 +22,9 @@ export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeShare
 export type ShareLinkDesignClient = Pick<DaemonClient, "shareLinkDesign">;
 
 /* A design's share link, for its editors on Pro and up (brindle/pro/share_links.py). */
-export type ShareLinkClient = Pick<DaemonClient, "designShareLink" | "copyDesignShareLink" | "revokeDesignShareLink">;
+export type ShareLinkClient = Pick<DaemonClient, "designShareLink" | "copyDesignShareLink" | "revokeDesignShareLink"> & Partial<Pick<DaemonClient, "docScopes">>;
 /* The same, for the author's plan by its id. */
-export type PlanShareLinkClient = Pick<DaemonClient, "planShareLink" | "copyPlanShareLink" | "revokePlanShareLink">;
+export type PlanShareLinkClient = Pick<DaemonClient, "planShareLink" | "copyPlanShareLink" | "revokePlanShareLink"> & Partial<Pick<DaemonClient, "docScopes">>;
 
 export type KeptVisualsClient = Pick<DaemonClient, "keptVisuals">;
 

@@ -777,7 +777,7 @@ def share_link(db: DB, request: Request) -> Any:
 
 def share_link_copy(db: DB, params: dict, body: dict) -> Any:
     """The link to copy: the design's own, or a new one when it has none."""
-    return _share_link(_get(body, "repo"), lambda s: s.copy(params["id"]))
+    return _share_link(_get(body, "repo"), lambda s: s.copy(params["id"], scope=_get(body, "scope"), team=_get(body, "team")))
 
 
 def share_link_revoke(db: DB, params: dict, body: dict) -> Any:
@@ -805,7 +805,8 @@ def plan_share_link(db: DB, request: Request) -> Any:
 
 
 def plan_share_link_copy(db: DB, params: dict, body: dict) -> Any:
-    return _share_link(_get(body, "repo"), lambda s: s.copy(_plan_doc(db, params["id"])))
+    return _share_link(_get(body, "repo"), lambda s: s.copy(_plan_doc(db, params["id"]),
+                                                        scope=_get(body, "scope"), team=_get(body, "team")))
 
 
 def plan_share_link_revoke(db: DB, params: dict, body: dict) -> Any:

@@ -16,7 +16,7 @@ from test_pro_remote_learning import login_as
 
 DOC = "doc_1"
 LINK = f"/analysis-docs/{DOC}/design/share-link"
-URL = "https://pawdelta.com/api/brindle/v1/share-links/dsl_abc"
+URL = "https://plans.pawdelta.com/b/dsl_abc"
 
 
 class Library:
@@ -30,8 +30,13 @@ class Library:
 
     def create(self, form, headers):
         self.made += 1
+        self.selection = dict(form)
+        scope = form.get("scope")
+        url = (f"https://plans.pawdelta.com/acme/{'core/' if scope == 'team' else ''}cloud/dsl_abc{self.made}"
+               if scope else f"{URL}{self.made}")
         self.link = {"url": f"{URL}{self.made}", "token": f"dsl_abc{self.made}", "created_by": "user_1",
                      "created_at": 1793491200, "access": "anyone"}
+        self.link.update(url=url, scope={"kind": scope, "org_id": "o", "team": form.get("team")} if scope else None)
         return 200, {"link": self.link}
 
     def revoke(self, form, headers):
@@ -107,11 +112,14 @@ def test_overlapping_copies_take_turns_and_get_one_link(parts, backend):
     assert lib.made == 1 and urls == [f"{URL}1", f"{URL}1"]
 
 
+@pytest.mark.parametrize("selection", [{}, {"scope": "org"}, {"scope": "team", "team": "g_core"}])
 def test_the_plan_reader_finds_its_link_by_plan_id_only_for_the_account_that_shared_it(
-        db, session, tmp_path, backend, monkeypatch):
+        db, session, tmp_path, backend, monkeypatch, selection, pro_env):
     boss, _ = session
     store = credentials.FileStore(tmp_path / "pro")
-    login_as(backend, store, features=("analysis_docs",))
+    features = ("analysis_docs", "analysis_docs_enterprise") if selection else ("analysis_docs",)
+    login_as(backend, store, features=features)
+    backend.routes["GET /orgs/org_1/analysis-docs/policy"] = [(200, {"switches": {}, "groups": {}, "share_links": "org"})]
     monkeypatch.setattr(ad, "_session", lambda *a: (auth.Client(None, backend), store))
     lib = Library(backend)
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
@@ -126,7 +134,17 @@ def test_the_plan_reader_finds_its_link_by_plan_id_only_for_the_account_that_sha
         assert _link_calls(backend) == []
         with db.tx() as c:
             c.execute("UPDATE plan_shares SET owner='user_1' WHERE plan_id=?", (pid,))
-        assert app.post(route, json={}).json()["link"]["url"] == f"{URL}1"
+        got = app.post(route, json=selection).json()["link"]
+        assert lib.selection == selection
+        expected = (f"https://plans.pawdelta.com/acme/{'core/' if selection['scope'] == 'team' else ''}cloud/dsl_abc1"
+                    if selection else f"{URL}1")
+        assert got["url"] == expected
+        assert app.post(route, json=selection).json()["link"]["url"] == expected
+        assert lib.made == 1
+        if selection.get("scope") == "team":
+            changed = app.post(route, json={"scope": "org"}).json()["link"]
+            assert changed["url"] == "https://plans.pawdelta.com/acme/cloud/dsl_abc2"
+            assert changed["scope"]["kind"] == "org"
         assert app.delete(route).json()["link"] is None
     assert lib.link is None
 
