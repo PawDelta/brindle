@@ -86,6 +86,7 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
 
 @pytest.mark.variant("an upgraded sidebar must exec the current brindle invocation with its original arguments")
 def test_an_upgraded_sidebar_runs_again_in_its_pane(monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)     # not the pane of whoever runs the suite
     monkeypatch.setattr(watch, "_log_to_file", lambda: None)
     monkeypatch.setattr("brindle.spawn.exit_on_hangup", lambda: None)
     monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar, *_: watch.RESTART)
@@ -101,6 +102,7 @@ def test_an_upgraded_sidebar_runs_again_in_its_pane(monkeypatch):
 def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatch):
     """uv removes the old venv before the new one is in place: an exec in that
     window fails, and the sidebar must wait for it rather than die with its pane."""
+    monkeypatch.delenv("TMUX_PANE", raising=False)     # not the pane of whoever runs the suite
     monkeypatch.setattr(upgrade.sys, "argv", ["brindle", "watch", "--sidebar"])
     monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: ["/venv/bin/brindle"])
     monkeypatch.setattr("time.sleep", lambda s: None)

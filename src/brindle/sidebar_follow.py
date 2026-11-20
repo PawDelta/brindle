@@ -19,6 +19,8 @@ SIDEBAR_TAG = tmux.SIDEBAR_TAG
 # Stored in place of a pane id once the person quits the sidebar themselves;
 # sidebar_follow then leaves it gone instead of recreating it.
 SIDEBAR_DISMISSED = "dismissed"
+# The session root a sidebar pane was started for (_create_sidebar), in its environment.
+SIDEBAR_ROOT_ENV = "BRINDLE_SIDEBAR_ROOT"
 
 
 def root_of(db: DB, agent_id: str) -> str:
@@ -54,6 +56,51 @@ def _sidebar_lock(root_id: str, timeout: float | None = None):
             yield
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def running_sidebar(root_id: str, pane: str | None):
+    """Held by ``root_id``'s `brindle watch --sidebar` for as long as it runs:
+    one per session root, even when a launch made a second pane (tmux too slow
+    to answer, so its sidebar looked gone, see _valid_sidebar). Yields None
+    while this process holds it; else, at once, the pane the running one wrote
+    ("" when it wrote none): this one must not start, since each sidebar reads
+    its whole repo again on every database commit. The lock goes with the
+    process, however it ends."""
+    lock_dir = brindle_home() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / f"sidebar-running-{root_id}.lock", "a+") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            f.seek(0)
+            yield f.read().strip()
+            return
+        try:
+            f.seek(0)
+            f.truncate()
+            f.write(pane or "")
+            f.flush()
+            yield None
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def defer_to_running(db: DB, root_id: str, pane: str | None, running: str) -> None:
+    """A second sidebar for ``root_id`` is in ``pane`` while one already runs in
+    ``running`` (see running_sidebar): record the running one as the root's
+    sidebar where ``pane`` was, so the follow hooks move that one instead of
+    starting another as this pane closes."""
+    if not pane or not running:
+        return
+    try:
+        if tmux.get_pane_tag(running, SIDEBAR_TAG) != root_id:
+            return
+    except tmux.TmuxError:
+        return      # can't tell where it runs: leave the row; this pane closes all the same
+    with _sidebar_lock(root_id):
+        if db.get_sidebar_pane(root_id) == pane:
+            db.set_sidebar_pane(root_id, running)
 
 
 def _agent_for_window(db: DB, ws: Workspace, window: str) -> Agent | None:
@@ -129,8 +176,10 @@ def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> st
                            columns=SIDEBAR_COLUMNS, position=_sidebar_position(ws))
     tmux.set_pane_tag(pane, SIDEBAR_TAG, root_id)
     db.set_sidebar_pane(root_id, pane)
+    # The root rides in the pane's environment (its restarts too): the sidebar
+    # takes its root's lock (running_sidebar) without asking tmux whose it is.
     tmux.start_sidebar(pane, ws.path, [*brindle_invocation(), "watch", "--sidebar"],
-                       workspace_env(ws), brindle_home() / "sidebar.log")
+                       {**workspace_env(ws), SIDEBAR_ROOT_ENV: root_id}, brindle_home() / "sidebar.log")
     return pane
 
 

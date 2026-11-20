@@ -712,6 +712,24 @@ def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
     return _shared_design(_get(body, "repo"), lambda r: r.sign_off(params["doc_id"], body.get("rev")))
 
 
+def share_link_design(db: DB, params: dict, body: dict) -> Any:
+    """A plan opened from its share link (the app's brindle://plan/… deep link),
+    read through the link as the account signed in now. The token comes in the
+    body, never the path: a path can end up in a log, and the token is the
+    link's whole secret."""
+    from brindle import redact
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import auth, shared_reader
+
+    try:
+        return shared_reader.read_link(body.get("token"))
+    except auth.TransportError as e:                  # unreachable: says nothing about access
+        err = actions.upstream_error(e)
+        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
+    except auth.AuthError as e:                       # no sign-in to send, or its refresh refused
+        raise ServiceError("signed_out", "sign in to brindle to open this link", 402) from e
+
+
 @_json
 def library_design_plan(db: DB, request: Request) -> Any:
     """The plan a Library design was shared from, when it was shared from this
@@ -875,6 +893,7 @@ ROUTES = [
     Route("/v1/review-policies", _endpoint(review_policies_save), methods=["PUT"]),
     Route("/v1/review-policies/draft-impact", _endpoint(review_policies_impact), methods=["POST"]),
     Route("/v1/library/people", library_people),
+    Route("/v1/share-links/design", _endpoint(share_link_design), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}", shared_design),
     Route("/v1/shared-designs/{doc_id}/history", shared_design_history),
     Route("/v1/shared-designs/{doc_id}/revisions/{n:int}/changes", shared_design_comparison),

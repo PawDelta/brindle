@@ -244,7 +244,28 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
     new revision of one of that session's visuals. A new revision is a new
     question: an answer to an earlier one is cleared. ``extra(c, id, rev)``
     writes what goes with the row (a plan's own row) in its transaction.
-    ``asked``: the person's own words asking to see it (visual_offers.authorize)."""
+    ``asked``: the person's own words asking to see it (visual_offers.authorize).
+
+    A supervisor's publication nothing allows yet gets one more chance: a small
+    model reads the person's latest typed messages for an ask the regexes missed
+    (brindle.intent), and the one message it finds grants this publication."""
+    args = (db, caller, title, html, question, options, visual_id, kind, extra, asked)
+    try:
+        return _publish(*args)
+    except ServiceError as e:
+        if e.code != "visual_request_required":
+            raise
+        from brindle import intent
+
+        root, _ = _session(db, caller)
+        if caller.id != root.id or not intent.grant_from_recent(db, root.id, kind):
+            raise
+    return _publish(*args)
+
+
+def _publish(db: DB, caller: Agent | None, title: str, html: str, question: str | None,
+             options: list[dict] | None, visual_id: str | None, kind: str,
+             extra: Callable[[Any, str, int], None] | None, asked: str | None) -> dict:
     require_enabled()
     root, ws = _session(db, caller)
     title = _text(title, "title", MAX_TITLE, required=True)
