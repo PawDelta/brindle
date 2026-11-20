@@ -58,7 +58,8 @@ def proposed(plan=PLAN) -> bool:
 
 @pytest.mark.parametrize("said,answer,granted", [
     # The owner's refused asks: the regexes miss the first, so the model is asked when the plan is proposed.
-    (["ok so lets test the plan, please make a test one"], "1", True),
+    pytest.param(["ok so lets test the plan, please make a test one"], "1", True,
+                 marks=pytest.mark.variant("refused ask the owner reported: the regexes miss it, the model grants it")),
     pytest.param(["ok so lets test the plan", "please make a test one"], "2", True,
                  marks=pytest.mark.variant("the plan is named only in an earlier message")),
     pytest.param(["ok then build me a fucking planning doc"], "0", True,
@@ -93,6 +94,7 @@ def test_a_failed_model_call_refuses_and_the_next_publish_asks_again(db, session
     assert proposed() and len(working.calls) == 1
 
 
+@pytest.mark.variant("a message the model granted from must not grant a second plan")
 def test_one_message_grants_one_plan(db, session, monkeypatch):
     gullible = model("1")
     monkeypatch.setattr(intent, "_ask", gullible)
