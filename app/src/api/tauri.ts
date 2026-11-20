@@ -7,6 +7,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { DaemonClient } from "./client";
+import type { DeepLinkSource } from "../lib/deeplink";
 import type { WebSocketFactory, WebSocketLike } from "./events";
 
 /* Never fetched: only its path and query reach the shell. */
@@ -191,6 +192,14 @@ export const appUpdates: AppUpdates = {
   restart: () => invoke<void>("app_restart"),
   dismiss: () => invoke<void>("app_update_dismiss"),
   watch: (on) => listen<AppUpdateStatus>("app-update", (e) => on(e.payload)),
+};
+
+/* brindle:// links the app is opened with (src-tauri/src/deep_links.rs): the shell keeps them until
+   the page takes them, and its "deep-link" event only says some are waiting. */
+export const deepLinks: DeepLinkSource = {
+  take: () => invoke<string[]>("deep_link_take"),
+  // Listens for the page's lifetime: the app has one inbox (lib/deeplink.ts DeepLinkInbox).
+  subscribe: (nudge) => listen("deep-link", () => nudge()),
 };
 
 /* What's new in brindle `version`: its release notes on the site. */

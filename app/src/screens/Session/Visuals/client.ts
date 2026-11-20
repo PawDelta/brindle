@@ -18,6 +18,9 @@ export type PlanSharingClient = Pick<DaemonClient, "sharePlan" | "setPlanReviewe
 /* A design someone else shared, read and reviewed from the Library (brindle/pro/shared_reader.py). */
 export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "sharedDesignHistory" | "sharedDesignRevisionChanges">>;
 
+/* A design opened from its share link (lib/deeplink.ts): read only, through the link. */
+export type ShareLinkDesignClient = Pick<DaemonClient, "shareLinkDesign">;
+
 /* A design's share link, for its editors on Pro and up (brindle/pro/share_links.py). */
 export type ShareLinkClient = Pick<DaemonClient, "designShareLink" | "copyDesignShareLink" | "revokeDesignShareLink">;
 /* The same, for the author's plan by its id. */

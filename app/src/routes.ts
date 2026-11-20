@@ -13,6 +13,8 @@
    its tabs) are the pages behind the profile button's rail. There is
    no home board: the sidebar is the overview. */
 
+import type { PlanLink } from "./lib/deeplink";
+
 export interface SessionRef {
   /* The session's root agent id. */
   root: string;
@@ -64,6 +66,9 @@ export type Route =
   /* A design someone else shared, by its Library doc id (from the Inbox's "Review requested" card):
      `title`, the card's; `repo`, the local project a question to the supervisor should stay in. */
   | { screen: "shared-design"; doc: string; title?: string; repo?: string }
+  /* A plan opened from a brindle:// link (lib/deeplink.ts): `link`, null when it didn't parse;
+     `from`, where Back goes. */
+  | { screen: "plan-link"; link: PlanLink | null; from?: Route }
   | { screen: "agents" }
   /* Settings, one place with tabs (settingsTab below). `tab`: the tab to open on;
      `section`: the tab it lives on, scrolled to on opening (a provider's problem opens

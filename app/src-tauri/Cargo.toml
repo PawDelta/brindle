@@ -21,6 +21,8 @@ tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
+# brindle:// links from outside the app (deep_links.rs).
+tauri-plugin-deep-link = "2"
 arboard = "3.7"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -40,6 +42,11 @@ tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# One app at a time on Windows and Linux: a second launch hands its brindle:// link to the first
+# (deep_links.rs). macOS has its own (instance.rs), and sends links to the running app itself.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 # The visual sandbox's request blockers (visual_scheme.rs), on each platform's
 # webview: the same crates and versions wry uses, so one build of each.

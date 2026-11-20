@@ -2382,6 +2382,13 @@ export class DaemonClient {
     return this.get<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}`, { repo });
   }
 
+  /* A design opened from its share link (the app's brindle://plan/… deep link, lib/deeplink.ts), read
+     through the link as the account signed in now: read only, and held only in memory. The token goes
+     in the body, never a path. */
+  shareLinkDesign(token: string) {
+    return this.post<SharedDesign>("/share-links/design", { token });
+  }
+
   sharedDesignHistory(doc: string, repo?: string) {
     return this.get<{ events: DocHistoryEntry[] }>(`/shared-designs/${encodeURIComponent(doc)}/history`, { repo });
   }
