@@ -11,7 +11,7 @@ import hashlib
 import json
 import time
 
-from brindle import agents, identity_lock, plan_docs, plans
+from brindle import agents, identity_lock, plan_docs, plans, spawn
 from brindle.db import Agent, DB, Workspace
 from brindle.pro import analysis_docs as ad
 from brindle.pro import shared_docs as sd
@@ -57,10 +57,41 @@ def _question(view: dict, thread_id: int, owner: str) -> dict:
     return thread
 
 
+def _unreachable(agent: Agent | None) -> str | None:
+    """Why ``agent`` can't take a question now, in words for the person; None when it can."""
+    if agent is None or agent.status in ("done", "failed"):
+        return ("Your supervisor's session has ended, so it didn't get this question. "
+                "Ask again from a session that's running.")
+    if agent.status == "paused":
+        return "Your supervisor is paused, so it didn't get this question. Resume its session, then ask again."
+    who = identity_lock.locked_by(agent.id)
+    if who:
+        return f"Your supervisor didn't get this question. {identity_lock.message(who)}, then ask again."
+    if not agents.is_alive(agent):
+        return ("Your supervisor isn't running, so it didn't get this question. "
+                "Open its session, then ask again.")
+    return None
+
+
+def _undelivered(e: Exception) -> str:
+    """What the person reads when delivering a question raised ``e``. Only
+    brindle's own messages are quoted: a provider's output can hold credentials."""
+    from brindle import tmux
+
+    if isinstance(e, ServiceError):
+        why = e.message
+    elif isinstance(e, agents.AgentError):
+        why = str(e)
+    elif isinstance(e, tmux.TmuxError):
+        why = "its terminal didn't answer"
+    else:
+        why = f"an unexpected error on this machine ({type(e).__name__})"
+    return f"Your supervisor didn't get this question: {why}. Ask again once that's fixed."
+
+
 def _live(agent: Agent | None) -> bool:
     return bool(agent and agent.parent_id is None and agent.profile == "supervisor"
-                and agent.status not in ("paused", "done", "failed")
-                and not identity_lock.locked_by(agent.id) and agents.is_alive(agent))
+                and _unreachable(agent) is None)
 
 
 def _target(db: DB, doc_id: str, owner: str, view: dict, repo_root: str | None) -> Agent | None:
@@ -202,9 +233,11 @@ def ask_plan(db: DB, plan_id: str, thread_id: int) -> None:
             dispatch(db, shared["doc_id"], row["remote_id"], repo_root=p["visual"]["repo_root"])
             return
         raise ServiceError("unavailable", "the question could not be sent to the Library", 503)
+    # The plan's own session root: its supervisor is messaged, never replaced by a new one.
     root = db.get_agent(p["root_id"])
-    if not _live(root):
-        plan_docs.comment(db, plan_id, text=UNAVAILABLE, parent=thread_id, author="system")
+    why = _unreachable(root)
+    if why:
+        plan_docs.comment(db, plan_id, text=why, parent=thread_id, author="system")
         return
     thread = plan_docs._thread(db, p, thread_id)
     agents.send_message(db, root.id, f"Your person asks on plan {plan_id}, thread #{thread_id}: {thread['body']}\n"
@@ -217,16 +250,21 @@ def after_reply(*, thread_id: int, plan_id: str | None = None, doc_id: str | Non
 
     A blocked write or cancelled request never starts a helper. Startup and
     provider discovery happen off the response path, without a waiting worker.
+    The response has ended the request and stopped its deadline by now, so
+    this runs without it: under it every process (the liveness check's tmux
+    read, a helper's launch) would be refused, and a live supervisor would
+    look unreachable.
     """
     db = DB()
     try:
+        with spawn.after_response():
+            if plan_id:
+                ask_plan(db, plan_id, thread_id)
+            else:
+                dispatch(db, doc_id, thread_id, repo_root=repo_root, expected_owner=owner)
+    except Exception as e:  # the thread gets a safe error, never a provider's raw output
         if plan_id:
-            ask_plan(db, plan_id, thread_id)
-        else:
-            dispatch(db, doc_id, thread_id, repo_root=repo_root, expected_owner=owner)
-    except Exception:  # the thread gets a safe error, never a provider's raw output
-        if plan_id:
-            plan_docs.comment(db, plan_id, text=UNAVAILABLE, parent=thread_id, author="system")
+            plan_docs.comment(db, plan_id, text=_undelivered(e), parent=thread_id, author="system")
     finally:
         db.conn.close()
 

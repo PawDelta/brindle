@@ -4,17 +4,81 @@ and direct edits, votes, and attachments, with assigns still held until the
 person approves."""
 
 import asyncio
+import json
 
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import bus, mcp_server, plans, visual_offers
+from brindle import agents, bus, mcp_server, plans, spawn, visual_offers
 from brindle.daemon.app import build_app
 from brindle.service.errors import ServiceError
 from test_plans import AUTH, DECISIONS, PLAN, TOKEN, messages, session  # noqa: F401 - fixture
 
 SUMMARY = "Workers run on a machine the customer controls. Code never passes through PawDelta."
 QUOTE = "a machine the customer controls"
+REAL_IS_ALIVE = agents.is_alive   # the session fixture replaces it
+
+
+async def _post_as_uvicorn_serves(app, path: str, body: dict) -> list[dict]:
+    """One POST the way uvicorn serves it: once the response is complete,
+    ``receive`` answers http.disconnect, so the daemon's Deadlines middleware
+    has stopped the request's deadline before a background task runs."""
+    done = asyncio.Event()
+    received: list[int] = []
+    sent: list[dict] = []
+
+    async def receive():
+        received.append(1)
+        if len(received) == 1:
+            return {"type": "http.request", "body": json.dumps(body).encode(), "more_body": False}
+        await done.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            done.set()
+            loop = asyncio.get_running_loop()
+            turn = loop.create_future()
+            loop.call_soon(turn.set_result, None)
+            await turn   # the listener takes the disconnect first, as it does under uvicorn
+            assert spawn.current().stopped
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
+             "headers": [(b"authorization", AUTH["Authorization"].encode()),
+                         (b"content-type", b"application/json")],
+             "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 80)}
+    await app(scope, receive, send)
+    return sent
+
+
+def test_a_question_on_a_live_supervisors_plan_is_delivered_to_it(db, session, tmp_path, monkeypatch):
+    """Regression (plan v_69a9d8236420): the question is delivered after the
+    response is written, when the request's deadline is already stopped. The
+    liveness check's tmux read was refused under it, so a live supervisor's
+    plan got "couldn't start on this machine" and the supervisor nothing."""
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = plans.propose(db, boss, "# Cloud workers\n\nOne page.", sections=[
+        {"id": "arch", "title": "Architecture", "kind": "mermaid", "markdown": "graph LR; app-->daemon"}])["id"]
+    # The real liveness check, a tmux read through brindle.spawn, answered by a stand-in tmux: pane alive.
+    fake_tmux = tmp_path / "tmux"
+    fake_tmux.write_text("#!/bin/sh\necho 0\n")
+    fake_tmux.chmod(0o755)
+    monkeypatch.setenv("BRINDLE_TMUX_BIN", str(fake_tmux))
+    monkeypatch.setattr(agents, "is_alive", REAL_IS_ALIVE)
+    before = messages(db)
+
+    sent = asyncio.run(_post_as_uvicorn_serves(build_app(TOKEN), f"/v1/plans/{pid}/comments", {
+        "rev": 1, "anchor": {"kind": "section", "section": "arch"}, "text": "was this supposed to render",
+        "question": True}))
+
+    assert sent[0]["status"] == 200
+    delivered = messages(db)[len(before):]
+    assert delivered and "was this supposed to render" in delivered[-1]
+    thread = plans.to_dto(db, plans.get(db, pid))["threads"][0]
+    assert thread["question"] and not thread["replies"]
 
 
 @pytest.mark.variant("regression: a revision must publish an event to the open plan reader; failed on base")
