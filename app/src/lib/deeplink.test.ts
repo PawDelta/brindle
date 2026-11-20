@@ -160,3 +160,44 @@ it("signed out, or the sign-in lost while the plan is open, asks the person to s
     vi.useRealTimers();
   }
 });
+
+it("a late 402 from an obsolete read undoes neither a newer read nor a sign-in since", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const calls: { ok(): void; signedOut(): void }[] = [];
+  const read = vi.fn(() => new Promise<SharedDesign>((resolve, reject) => {
+    calls.push({ ok: () => resolve(plan), signedOut: () => reject(new DaemonError("signed_out", "sign in", 402)) });
+  }));
+  const { store, tree } = withApp(
+    createElement(SharedLinkReader, { client: { shareLinkDesign: read }, link: parseDeepLink(`brindle://plan/b/${TOKEN}`), onBack: () => {} }),
+    { accountLogin: async () => ({ job: "j1" }) as never },
+  );
+  const poll = () => act(async () => { vi.advanceTimersByTime(30_000); });
+  const shown = () => !!screen.queryByText("Workers run here.");
+  try {
+    await act(async () => { render(tree); });
+    await act(async () => calls[0].ok());                   // the first read: the reader opens, its own read goes out (1)
+    await poll();                                           // a newer read (2) answers first
+    await act(async () => calls[2].ok());
+    expect(shown()).toBe(true);
+    await act(async () => calls[1].signedOut());            // the older one's 402, late: the plan stays
+    expect(shown()).toBe(true);
+    expect(screen.queryByTestId("deep-link-sign-in")).toBeNull();
+
+    await poll();                                           // a read (3) left out ...
+    await poll();
+    await act(async () => calls[4].signedOut());            // ... while the newest (4) finds the sign-in gone
+    expect(screen.getByTestId("deep-link-sign-in")).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign in" })));
+    await act(async () => {
+      store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 0, kind: "job.done", repo_root: null, root_id: null, agent_id: null, workspace_id: null, task_id: null, payload: { job: "j1" } } });
+    });
+    await act(async () => calls[5].ok());
+    await act(async () => calls[6].ok());
+    expect(shown()).toBe(true);
+    await act(async () => calls[3].signedOut());            // from before the sign-in: the plan stays
+    expect(shown()).toBe(true);
+    expect(screen.queryByTestId("deep-link-sign-in")).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});

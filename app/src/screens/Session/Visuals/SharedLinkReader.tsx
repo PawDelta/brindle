@@ -108,13 +108,17 @@ function LinkDoc({ client, token, id, lead, signedOut }: {
   lead(title?: string): ReactNode;
   signedOut(): void;
 }) {
-  const source = useMemo(() => linkSource(client, token, id, signedOut), [client, token, id, signedOut]);
+  const source = useMemo(() => linkSource(client, token, id), [client, token, id]);
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => setTick((n) => n + 1), READ_EVERY_MS);
     return () => clearInterval(timer);
   }, []);
-  const { doc, error, writes } = useDoc<SharedDesign>(source, tick);
+  // Only a read that still counts (useDoc's say) can take the plan back to Sign in: a late 402 from
+  // a read a newer one has passed, or from before the last sign-in, can't.
+  const { doc, error, writes } = useDoc<SharedDesign>(source, tick, (e) => {
+    if (e instanceof DaemonError && e.status === 402) signedOut();
+  });
   const viewing = (m: Mode) => m === "viewing";
   const teammate: Teammate | undefined = doc ? {
     me: doc.me,
