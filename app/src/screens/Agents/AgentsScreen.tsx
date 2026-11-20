@@ -521,7 +521,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
   const before = useFor ? current[useFor].model : null;
   const reach = !draft.name.trim() || !draft.purpose.trim() ? 0 : !draft.model ? 1 : 4;
   const step = (i: number, body: ReactNode) => (
-    <div key={STEPS[i][0]} className={`grid gap-x-s3 gap-y-1 border-t border-line py-s1 md:grid-cols-[11rem_minmax(0,1fr)] ${i > reach ? "opacity-60" : ""}`} data-step={STEPS[i][0]}>
+    <div key={STEPS[i][0]} className={`grid gap-x-s3 gap-y-1 border-t border-line py-s1 md:grid-cols-[11rem_minmax(0,1fr)] ${i > reach ? "opacity-[var(--dim)]" : ""}`} data-step={STEPS[i][0]}>
       <span className="flex items-baseline gap-1 text-sm font-semibold">
         <span className="inline-flex size-4 items-center justify-center rounded-full bg-pass-soft text-[10px] text-pass">{i + 1}</span>
         {STEPS[i][1]}

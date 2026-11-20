@@ -109,7 +109,7 @@ export function SendButton({ client, repo, project, sessions, busy, disabled, on
           className={`inline-flex h-full items-center gap-2 pl-3 pr-2.5 text-[13px] font-medium tracking-[-0.005em] hover:bg-pass/10 focus-visible:relative focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-branch disabled:cursor-not-allowed disabled:opacity-45 ${others ? "rounded-l-[3px]" : "rounded-[3px]"}`}
         >
           Send
-          <kbd className="font-sans text-[11px] font-medium tracking-[0.06em] opacity-60" aria-hidden>
+          <kbd className="font-sans text-[11px] font-medium tracking-[0.06em] opacity-[var(--dim)]" aria-hidden>
             ⌘↵
           </kbd>
         </LoadingButton>
