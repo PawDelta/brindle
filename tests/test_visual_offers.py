@@ -236,6 +236,21 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
     pytest.param("I don't want to plan this", None, marks=pytest.mark.variant("a negated plan ask")),
     pytest.param("I want the plan to use X", None,
                  marks=pytest.mark.variant("a bare plan must not grant one when it only describes the plan")),
+    pytest.param("no i dont want a visual i want a plan...", "plan",
+                 marks=pytest.mark.variant("owner 2026-11-20: a not-a-visual contrast before 'i want a plan' was refused")),
+    pytest.param("i literally said lets make a plan", "plan",
+                 marks=pytest.mark.variant("owner 2026-11-20: an 'i literally said' lead was refused")),
+    pytest.param("MAKE A FUCKING PLAN", "plan",
+                 marks=pytest.mark.variant("owner 2026-11-20: a filler word before a bare plan was refused")),
+    pytest.param("we need a plan", "plan", marks=pytest.mark.variant("need wording at the sentence start")),
+    pytest.param("ok, give me a quick plan", "plan", marks=pytest.mark.variant("give me + a clause after a comma")),
+    pytest.param("I don't want a plan", None, marks=pytest.mark.variant("a negated want grants nothing")),
+    pytest.param("do not give me a plan", None,
+                 marks=pytest.mark.variant("a negation before give-me must survive the embedded restart")),
+    pytest.param("no plan", None, marks=pytest.mark.variant("'no' before a bare plan grants nothing")),
+    pytest.param("i said don't make a plan", None, marks=pytest.mark.variant("an 'i said' lead cannot revive a negation")),
+    pytest.param("I want the plan to use X, the plan looks good", None,
+                 marks=pytest.mark.variant("a clause after a comma that only remarks on the plan")),
     pytest.param("don't write a plan", None,
                  marks=pytest.mark.variant("the new verbs must still be cancellable")),
 ])
@@ -733,6 +748,16 @@ def test_question_form_is_not_a_negation(db, session, typed, asked, accepted):
     else:
         with pytest.raises(ServiceError):
             visuals.publish(db, boss, "Not asked", "<p>no</p>", asked=asked)
+
+
+def test_plan_ask_is_not_spent_on_a_visual(db, session):
+    boss, _ = session
+    said = "lets make a plan so i can view it and share with David to test"
+    typed_into_cli(db, boss, said)
+    with pytest.raises(ServiceError) as err:
+        visuals.publish(db, boss, "Wrong", "<p>no</p>", asked=said)
+    assert err.value.code == "plan_requested"
+    assert visuals.publish(db, boss, "Plan", "<p>yes</p>", kind="plan")["rev"] == 1
 
 
 @pytest.mark.variant("a bypass attempt: a worker or a plan can't spend the person's quote")
