@@ -108,7 +108,130 @@ function inline({ text, at }: Run, leaf: Leaf, key: string): ReactNode[] {
 
 const tableHead = "border-b border-line-strong py-[5px] pr-2 text-left text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3";
 
-export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) {
+/* How the planning doc (PlanDesignDoc.tsx) lays out a section's text: "doc" for any section (dot
+   lists, bold-only lines as small labels, headings as sub-headings), and per spine section the
+   approved design's shapes (plan-doc-redesign.html): Goals and non-goals in two columns, the
+   alternatives and the tech stack as rows, what's hard to undo under its own rule, the rollout's
+   phases as connected steps with what gets built as a plain list. Every word keeps its offset. */
+export type DocLayout = "doc" | "goals" | "alternatives" | "tech-stack" | "risks" | "rollout";
+
+/* A block of the text as written, for a layout to arrange. */
+interface Block {
+  key: string;
+  node: ReactNode;
+  kind: "p" | "list" | "table" | "heading" | "other";
+  run?: Run;
+  items?: Run[];
+  ordered?: boolean;
+  head?: Run[];
+  rows?: Run[][];
+}
+
+const cut = (run: Run, from: number, to = run.text.length): Run => ({ text: run.text.slice(from, to), at: run.at.slice(from, to) });
+/* "**Name.** The rest": the bold lead (its trailing . or : left out) and what follows it. */
+function boldLead(run: Run): { name: Run; rest: Run } | null {
+  const m = /^\*\*([^*]+?)\*\*/.exec(run.text);
+  if (!m) return null;
+  const name = m[1].replace(/[.:]\s*$/, "");
+  let after = m[0].length;
+  while (after < run.text.length && /[\s.:]/.test(run.text[after])) after++;
+  return { name: cut(run, 2, 2 + name.length), rest: cut(run, after) };
+}
+const labelOnly = (b: Block) => b.kind === "p" && !!b.run && /^\*\*[^*]+\*\*:?$/.test(b.run.text.trim());
+
+const docLabel = "mb-1.5 font-sans text-[11px] font-medium uppercase leading-[1.3] tracking-[0.08em] text-ink-3";
+const dot = "relative pl-4 before:absolute before:left-0.5 before:top-[0.72em] before:size-1 before:rounded-full before:bg-ink-3 before:content-['']";
+
+function arrange(blocks: Block[], layout: DocLayout, leaf: Leaf): ReactNode[] {
+  const show = (b: Block): ReactNode => {
+    if (labelOnly(b)) {
+      const lead = boldLead(b.run!)!;
+      return <p key={b.key} className={docLabel}>{inline(lead.name, leaf, b.key)}</p>;
+    }
+    if (b.kind === "p" && b.run?.text.trim() === "None.") return <p key={b.key} className="text-ink-3">{inline(b.run, leaf, b.key)}</p>;
+    if (b.kind === "heading") return <h3 key={b.key} className="mb-0 mt-4 font-serif text-base font-semibold leading-[1.3] text-ink">{inline(b.run!, leaf, b.key)}</h3>;
+    if (b.kind === "list" && !b.ordered) return <ul key={b.key} className="grid list-none gap-[5px] p-0">{b.items!.map((it, j) => <li key={j} className={dot}>{inline(it, leaf, `${b.key}.${j}`)}</li>)}</ul>;
+    return b.node;
+  };
+  // Rows: a name, then what it says (the alternatives, and the tech stack in its smaller type).
+  const rows = (b: Block, stack: boolean): ReactNode | null => {
+    const pairs = b.kind === "table" && b.rows && b.head && b.head.length > 1 ? b.rows.map((r) => ({ name: r[0], rest: r.slice(1) }))
+      : b.kind === "list" && !b.ordered && b.items?.every((it) => boldLead(it)) ? b.items.map((it) => { const l = boldLead(it)!; return { name: l.name, rest: [l.rest] }; })
+      : null;
+    if (!pairs) return null;
+    return (
+      <dl key={b.key} className="m-0 grid" data-layout="rows">
+        {pairs.map((p, j) => (
+          <div key={j} className={`grid gap-4 border-b border-line ${j === 0 ? "border-t" : ""} ${stack ? "grid-cols-[96px_minmax(0,1fr)] py-1.5" : "grid-cols-[188px_minmax(0,1fr)] py-[9px]"} max-[900px]:grid-cols-1 max-[900px]:gap-0.5`}>
+            <dt className={`pt-0.5 font-sans ${stack ? "text-[12.5px] text-ink-3" : "text-[13.5px] font-medium leading-[1.6] text-ink"}`}>{inline(p.name, leaf, `${b.key}.${j}.n`)}</dt>
+            <dd className={`m-0 ${stack ? "font-sans text-[13.5px] leading-[1.6]" : ""}`}>{p.rest.map((r, n) => <span key={n}>{n > 0 && " · "}{inline(r, leaf, `${b.key}.${j}.${n}`)}</span>)}</dd>
+          </div>
+        ))}
+      </dl>
+    );
+  };
+  if (layout === "goals") {
+    const first = blocks.findIndex(labelOnly);
+    const groups: Block[][] = [];
+    for (const b of blocks.slice(Math.max(first, 0))) {
+      if (labelOnly(b) || !groups.length) groups.push([b]);
+      else groups[groups.length - 1].push(b);
+    }
+    if (first >= 0 && groups.length >= 2) {
+      return [...blocks.slice(0, first).map(show), (
+        <div key="two" className="grid grid-cols-2 gap-7 max-[900px]:grid-cols-1 max-[900px]:gap-4" data-layout="two">
+          {groups.map((g, n) => <div key={n}>{g.map(show)}</div>)}
+        </div>
+      )];
+    }
+  }
+  return blocks.map((b) => {
+    if (layout === "alternatives" || layout === "tech-stack") return rows(b, layout === "tech-stack") ?? show(b);
+    if (layout === "risks" && b.kind === "p" && b.run && !labelOnly(b)) {
+      const lead = boldLead(b.run);
+      if (lead && /hard to undo/i.test(lead.name.text)) {
+        return (
+          <div key={b.key} className="mb-1.5 border-l-2 border-ink-3 py-0.5 pl-4" data-layout="undo">
+            <p className={`${docLabel} !text-ink-2`}>{inline(lead.name, leaf, `${b.key}.n`)}</p>
+            <p className="max-w-[68ch]">{inline(lead.rest, leaf, b.key)}</p>
+          </div>
+        );
+      }
+    }
+    if (layout === "rollout" && b.kind === "list" && b.ordered) {
+      return (
+        <ol key={b.key} className="grid list-none gap-3.5 p-0" data-layout="steps">
+          {b.items!.map((it, j) => {
+            const lead = boldLead(it);
+            return (
+              <li key={j} className={`relative pl-[34px] ${j < b.items!.length - 1 ? "after:absolute after:-bottom-[13px] after:left-[9.5px] after:top-[27px] after:w-px after:bg-line-strong after:content-['']" : ""}`}>
+                <span aria-hidden className="absolute left-0 top-[3px] grid size-5 place-items-center rounded-full font-mono text-[10.5px] leading-none text-ink-2 shadow-[inset_0_0_0_1px_var(--line-strong)]">{j + 1}</span>
+                {lead ? <><b className="block font-sans text-[13.5px] font-medium leading-[1.6] text-ink">{inline(lead.name, leaf, `${b.key}.${j}.n`)}</b>{inline(lead.rest, leaf, `${b.key}.${j}`)}</> : inline(it, leaf, `${b.key}.${j}`)}
+              </li>
+            );
+          })}
+        </ol>
+      );
+    }
+    if (layout === "rollout" && b.kind === "list" && !b.ordered) {
+      return (
+        <div key={b.key} className="grid gap-2.5">
+          <ul className="grid list-none border-t border-line p-0" data-layout="tasks">
+            {b.items!.map((it, j) => (
+              <li key={j} className="flex items-baseline gap-2.5 border-b border-line py-[7px] font-sans text-[13.5px] leading-normal text-ink before:size-[9px] before:flex-none before:translate-y-px before:rounded-[2px] before:shadow-[inset_0_0_0_1.5px_var(--line-strong)] before:content-['']">
+                <span>{inline(it, leaf, `${b.key}.${j}`)}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="font-sans text-[12.5px] leading-[1.55] text-ink-3">When you approve, brindle splits this into tasks, runs them and checks each one. You follow progress in the session.</p>
+        </div>
+      );
+    }
+    return show(b);
+  });
+}
+
+export function DocText({ body, marks = [], layout }: { body: string; marks?: Mark[]; layout?: DocLayout }) {
   const leaf = leaves(marks);
   const lines: { text: string; at: number }[] = [];
   let offset = 0;
@@ -141,7 +264,8 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
     return out;
   };
 
-  const blocks: ReactNode[] = [];
+  const blocks: Block[] = [];
+  const put = (node: ReactNode, data: Omit<Block, "key" | "node"> = { kind: "other" }) => blocks.push({ key: `b${blocks.length}`, node, ...data });
   const key = () => `b${blocks.length}`;
   let i = 0;
   while (i < lines.length) {
@@ -156,7 +280,7 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
       for (i++; i < lines.length && !text(i).trim().startsWith(fence[1]); i++) code.push(i);
       i++;
       const k = key();
-      blocks.push(
+      put(
         <pre key={k} className="overflow-x-auto rounded-md bg-surface-2 px-3.5 py-3 font-mono text-[12.5px] leading-[1.6] text-ink-2">
           {code.map((j, n) => leaf({ text: text(j) + (n < code.length - 1 ? "\n" : ""), at: span(lines[j].at, text(j).length + 1) }, `${k}.${n}`))}
         </pre>,
@@ -167,12 +291,13 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
     if (heading) {
       const k = key();
       const col = line.indexOf(heading[2], heading[1].length);
-      blocks.push(<h4 key={k} className="font-sans text-sm font-semibold text-ink">{inline({ text: heading[2], at: span(lines[i].at + col, heading[2].length) }, leaf, k)}</h4>);
+      const run = { text: heading[2], at: span(lines[i].at + col, heading[2].length) };
+      put(<h4 key={k} className="font-sans text-sm font-semibold text-ink">{inline(run, leaf, k)}</h4>, { kind: "heading", run });
       i++;
       continue;
     }
     if (RULE.test(line)) {
-      blocks.push(<hr key={key()} className="border-line" />);
+      put(<hr key={key()} className="border-line" />);
       i++;
       continue;
     }
@@ -181,7 +306,7 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
       const rows: Run[][] = [];
       for (i += 2; i < lines.length && text(i).includes("|") && text(i).trim(); i++) rows.push(cells(i));
       const k = key();
-      blocks.push(
+      put(
         <div key={k} className="overflow-x-auto">
           <table className="w-full border-collapse font-sans text-[13px]">
             <thead>
@@ -194,6 +319,7 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
             </tbody>
           </table>
         </div>,
+        { kind: "table", head, rows },
       );
       continue;
     }
@@ -203,7 +329,8 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
       for (; i < lines.length && list.test(text(i)); i++) items.push(tail(i, text(i).length - list.exec(text(i))![1].length));
       const k = key();
       const kids = items.map((it, j) => <li key={j}>{inline(it, leaf, `${k}.${j}`)}</li>);
-      blocks.push(list === BULLET ? <ul key={k} className="flex list-disc flex-col gap-0.5 pl-[18px]">{kids}</ul> : <ol key={k} className="flex list-decimal flex-col gap-0.5 pl-[18px]">{kids}</ol>);
+      put(list === BULLET ? <ul key={k} className="flex list-disc flex-col gap-0.5 pl-[18px]">{kids}</ul> : <ol key={k} className="flex list-decimal flex-col gap-0.5 pl-[18px]">{kids}</ol>,
+        { kind: "list", items, ordered: list === NUMBERED });
       continue;
     }
     if (line.trimStart().startsWith(">")) {
@@ -212,7 +339,7 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
         quoted.push({ i, run: tail(i, text(i).length - text(i).trimStart().replace(/^>\s?/, "").length) });
       }
       const k = key();
-      blocks.push(<blockquote key={k} className="border-l-2 border-sap px-3.5 py-1 font-sans text-[13.5px] leading-[1.55] text-ink-2">{inline(joined(quoted), leaf, k)}</blockquote>);
+      put(<blockquote key={k} className="border-l-2 border-sap px-3.5 py-1 font-sans text-[13.5px] leading-[1.55] text-ink-2">{inline(joined(quoted), leaf, k)}</blockquote>);
       continue;
     }
     const para: { i: number; run: Run }[] = [];
@@ -224,9 +351,12 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
       i++;
     }
     const k = key();
-    blocks.push(<p key={k} className="max-w-[68ch]">{inline(joined(para), leaf, k)}</p>);
+    const run = joined(para);
+    put(<p key={k} className="max-w-[68ch]">{inline(run, leaf, k)}</p>, { kind: "p", run });
   }
-  return <>{blocks}</>;
+  // A layout draws its blocks again: with leaves of their own, since a leaf inserts a suggestion's
+  // new text (and a thread's number) only the first time it reaches its place.
+  return <>{layout ? arrange(blocks, layout, leaves(marks)) : blocks.map((b) => b.node)}</>;
 }
 
 /* The engine counts a section's text in code points (brindle/plan_docs.py is Python); the DOM

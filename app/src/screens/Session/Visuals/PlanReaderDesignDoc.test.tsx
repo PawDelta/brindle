@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
-import type { Plan, VisualDTO } from "../../../api/client";
+import { afterEach, expect, it, vi } from "vitest";
+import type { DocRevisionComparison, Plan, VisualDTO } from "../../../api/client";
+import { Annotated, MarginNote } from "./PlanDesignDoc";
 import { PlanReader } from "./PlanReader";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
@@ -19,10 +20,12 @@ const spine = (more: Partial<Plan> = {}): Plan => ({
   id: visual.id, session: "boss", title: "Webhook delivery", rev: 1, state: "open", markdown: "…", lede: "Deliver signed events.", queued: 0, created_at: 1,
   sections: [
     { id: "context", title: "Context", markdown: "Teams poll today." },
-    { id: "goals", title: "Goals and non-goals", markdown: "No event is lost." },
+    { id: "goals", title: "Goals and non-goals", markdown: "**Goals**\n\n- No event is lost.\n\n**Non-goals**\n\n- Exactly-once delivery." },
     { id: "proposed-design", title: "Proposed design", markdown: "An outbox row per event." },
     { id: "architecture", title: "Architecture", markdown: "The dispatcher signs each payload." },
-    { id: "risks", title: "Risks and what's hard to undo", markdown: "The payload shape." },
+    { id: "alternatives", title: "Alternatives considered", markdown: "- **Keep polling.** Every team still runs a cron job.\n- **A relay.** Payloads leave the machine." },
+    { id: "risks", title: "Risks and what's hard to undo", markdown: "**Hard to undo:** the payload shape.\n\n- Dead endpoints flood the Inbox." },
+    { id: "rollout", title: "Rollout and tasks", markdown: "1. **Lands dark.** Events are written, never sent.\n2. **Reaches teams.** The dispatcher ships.\n\n### What gets built\n\n- The outbox" },
     { id: "open-questions", title: "Open questions", markdown: "None." },
   ],
   decisions: [
@@ -31,7 +34,11 @@ const spine = (more: Partial<Plan> = {}): Plan => ({
     { id: "reach", title: "How should it reach teams?", options },
   ],
   split: [{ id: "outbox", title: "Outbox", files: ["src/outbox.py"], test: "pytest outbox", state: "queued", test_state: "not run" }],
-  threads: [{ id: 1, kind: "comment", rev: 1, author: "person", text: "Retry-After?", status: "open", at: 1, anchor: { kind: "text", section: "proposed-design", start: 3, end: 9, quote: "outbox", state: "current" } }],
+  threads: [
+    { id: 1, kind: "comment", rev: 1, author: "person", text: "Retry-After?", status: "open", at: 1, anchor: { kind: "text", section: "proposed-design", start: 3, end: 9, quote: "outbox", state: "current" } },
+    { id: 2, kind: "comment", rev: 1, author: "person", text: "Which relay?", status: "open", at: 1, anchor: { kind: "text", section: "alternatives", start: 88, end: 95, quote: "machine", state: "current" } },
+    { id: 3, kind: "suggestion", rev: 1, author: "person", text: "", status: "open", at: 1, before: "Dead", after: "Failing", anchor: { kind: "text", section: "risks", start: 40, end: 44, quote: "Dead", state: "current" } },
+  ],
   ...more,
 });
 const writes = (plan: Plan): PlanDocClient => ({
@@ -47,7 +54,7 @@ it("reads a spine plan as the planning doc: the outline marks open decisions, ea
   const outline = await screen.findByTestId("plan-outline");
 
   // Numbered spine sections only (Architecture is inside Proposed design), each decision under its section.
-  expect(within(outline).getAllByTestId("outline-section").map((a) => a.dataset.section)).toEqual(["context", "goals", "proposed-design", "risks", "open-questions"]);
+  expect(within(outline).getAllByTestId("outline-section").map((a) => a.dataset.section)).toEqual(["context", "goals", "proposed-design", "alternatives", "risks", "rollout", "open-questions"]);
   const rows = () => within(outline).getAllByTestId("outline-decision");
   expect(rows().map((a) => [a.dataset.decision, a.dataset.state])).toEqual([["store", "open"], ["loud", "open"], ["reach", "open"]]);
 
@@ -76,6 +83,74 @@ it("reads a spine plan as the planning doc: the outline marks open decisions, ea
   await act(async () => fireEvent.click(approve()));
   expect(verdicts).toEqual([expect.objectContaining({ approved: true, picks: { store: "b", loud: "a", reach: "a" } })]);
   expect(screen.queryByTestId("task-outbox")).toBeNull();
+});
+
+it("lays out the spine sections as the design does, and their words stay anchorable", async () => {
+  const plan = spine();
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...writes(plan), plan: async () => plan, decidePlan: async () => plan };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const doc = await screen.findByTestId("plan-doc");
+  const region = (name: string) => within(doc).getByRole("region", { name });
+  expect(region("Goals and non-goals").querySelector("[data-layout=two]")?.children.length).toBe(2);
+  expect(region("Alternatives considered").querySelectorAll("[data-layout=rows] dt").length).toBe(2);
+  expect(region("Risks and what's hard to undo").querySelector("[data-layout=undo]")).toBeTruthy();
+  expect(region("Rollout and tasks").querySelectorAll("[data-layout=steps] li").length).toBe(2);
+  expect(region("Rollout and tasks").querySelectorAll("[data-layout=tasks] li").length).toBe(1);
+  // A suggestion in a laid-out list still shows its new words beside the struck ones.
+  expect(region("Risks and what's hard to undo").querySelector('del[data-thread="3"] + ins')?.textContent).toBe("Failing");
+  // A comment on an alternative's words is drawn on them inside its row.
+  expect(region("Alternatives considered").querySelector('[data-layout=rows] dd [data-thread="2"]')?.textContent).toBe("machine");
+});
+
+it("keeps a past revision on the page once the history menu closes, with Approve off until back at the latest", async () => {
+  const plan = spine({ decisions: [], threads: [], rev: 2 });
+  const comparison: DocRevisionComparison = {
+    revision: { ...plan, rev: 1, sections: [{ id: "context", title: "Context", markdown: "Teams polled." }] },
+    previous: { ...plan, rev: 1, sections: [{ id: "context", title: "Context", markdown: "Teams polled." }] },
+    changes: [],
+  };
+  const client = {
+    ...visuals, ...writes(plan), plan: async () => plan, decidePlan: async () => plan,
+    planHistory: async () => ({ events: [{ id: "r1", kind: "revision" as const, actor: "supervisor", at: 1, rev: 1, version: null }] }),
+    planRevisionChanges: async () => comparison,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await screen.findByTestId("plan-design-doc");
+  fireEvent.click(screen.getByTestId("plan-rev").closest("button")!);
+  await act(async () => {});
+  await act(async () => fireEvent.click(within(screen.getByTestId("doc-history")).getByRole("button")));
+  const pane = screen.getByTestId("plan-doc");
+  expect(screen.getByTestId("plan-history-menu").hidden).toBe(true);
+  const shown = within(pane).getByRole("region", { name: "Revision comparison" });
+  expect((screen.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(within(shown).getByRole("button", { name: "Back to the latest" }));
+  expect(within(pane).queryByRole("region", { name: "Revision comparison" })).toBeNull();
+  expect((screen.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("moves the notes below a margin note that grows when a reply opens", () => {
+  const observers: ResizeObserverCallback[] = [];
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(cb: ResizeObserverCallback) { observers.push(cb); }
+    observe() {}
+    disconnect() {}
+  });
+  const height = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight")!;
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get(this: HTMLElement) { return this.querySelector("form") ? 100 : 40; } });
+  try {
+    const actions = { reply: async () => true, resolve: async () => true, accept: async () => true, reject: async () => true };
+    const note = (id: number) => ({ id, kind: "comment" as const, rev: 1, author: "person", text: "Why?", status: "open" as const, at: 1, anchor: { kind: "section" as const, section: "context", state: "current" as const } });
+    const notes = [1, 2].map((id) => ({ key: `t${id}`, anchor: null, node: <MarginNote thread={note(id)} busy={false} canJudge canReply canResolve actions={actions} lit={false} onHover={() => {}} /> }));
+    render(<Annotated notes={notes}><p>Text</p></Annotated>);
+    const second = () => screen.getByTestId("thread-2").parentElement!;
+    expect(second().style.top).toBe("52px");
+    fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Reply" }));
+    act(() => observers.forEach((cb) => cb([], {} as ResizeObserver)));
+    expect(second().style.top).toBe("112px");
+  } finally {
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", height);
+    vi.unstubAllGlobals();
+  }
 });
 
 it("shows no worker split to the person once the plan is approved", async () => {

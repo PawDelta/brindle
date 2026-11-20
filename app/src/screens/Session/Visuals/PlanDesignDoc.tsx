@@ -15,6 +15,7 @@ import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../ap
 import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
 import type { ThreadActions } from "./DocReview";
+import type { DocLayout } from "./DocText";
 import { personName } from "./PlanCards";
 import type { Mode, MODES } from "./PlanReader";
 
@@ -22,6 +23,10 @@ import type { Mode, MODES } from "./PlanReader";
 const SPINE = new Set(["context", "audience", "goals", "proposed-design", "architecture", "tech-stack", "alternatives", "risks", "rollout", "open-questions"]);
 const NESTED: Record<string, string> = { audience: "context", architecture: "proposed-design", "tech-stack": "proposed-design" };
 const OPEN_QUESTIONS = "open-questions";
+
+/* How a section's text is laid out on the page (DocText.tsx). */
+const LAYOUTS: Record<string, DocLayout> = { goals: "goals", alternatives: "alternatives", "tech-stack": "tech-stack", risks: "risks", rollout: "rollout" };
+export const docLayout = (section: string): DocLayout => LAYOUTS[section] ?? "doc";
 
 /* Whether a plan follows the design-doc spine: every new plan does; an older free-form one doesn't. */
 export const onSpine = (plan: Plan) => plan.sections.some((s) => SPINE.has(s.id));
@@ -75,8 +80,10 @@ export function Tick({ children, className = "" }: { children: ReactNode; classN
 }
 
 /* A button with its panel under it (`down`) or over it (`up`). Escape or a click outside closes it. */
-export function Menu({ label, buttonClass, place, panelClass = "", open, onOpenChange, children, testid, title }: {
+export function Menu({ label, buttonClass, place, panelClass = "", open, onOpenChange, children, testid, title, keepMounted = false }: {
   label: ReactNode; buttonClass: string; place: "down" | "up"; panelClass?: string; open: boolean; onOpenChange(open: boolean): void; children: ReactNode; testid?: string; title?: string;
+  /* The panel stays mounted while closed, only hidden: what it holds (the history's comparison) outlives closing it. */
+  keepMounted?: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -99,8 +106,8 @@ export function Menu({ label, buttonClass, place, panelClass = "", open, onOpenC
   return (
     <div ref={box} className="relative">
       <button type="button" className={buttonClass} aria-expanded={open} title={title} onClick={() => onOpenChange(!open)}>{label}</button>
-      {open && (
-        <div data-testid={testid} className={`absolute right-0 z-30 grid gap-2.5 rounded-md border border-line-strong bg-canvas p-3.5 text-left font-sans text-[12.5px] font-normal leading-normal whitespace-normal text-ink-2 shadow-[0_18px_44px_-18px_rgba(0,0,0,0.75)] ${place === "down" ? "top-[calc(100%+6px)]" : "bottom-[calc(100%+12px)]"} ${panelClass || "w-[340px] max-w-[86vw]"}`}>
+      {(open || keepMounted) && (
+        <div data-testid={testid} hidden={!open} className={`absolute right-0 z-30 grid gap-2.5 rounded-md border border-line-strong bg-canvas p-3.5 text-left font-sans text-[12.5px] font-normal leading-normal whitespace-normal text-ink-2 shadow-[0_18px_44px_-18px_rgba(0,0,0,0.75)] ${place === "down" ? "top-[calc(100%+6px)]" : "bottom-[calc(100%+12px)]"} ${panelClass || "w-[340px] max-w-[86vw]"} ${open ? "" : "!hidden"}`}>
           {children}
         </div>
       )}
@@ -310,27 +317,34 @@ export function Annotated({ children, notes, className = "" }: { children: React
   const box = useRef<HTMLDivElement>(null);
   const els = useRef<(HTMLElement | null)[]>([]);
   const [tops, setTops] = useState<number[]>([]);
-  const [width, setWidth] = useState(0);
-  useEffect(() => {
-    const resized = () => setWidth(window.innerWidth);
-    window.addEventListener("resize", resized);
-    return () => window.removeEventListener("resize", resized);
-  }, []);
-  useLayoutEffect(() => {
+  const anchors = useRef(notes.map((n) => n.anchor));
+  anchors.current = notes.map((n) => n.anchor);
+  const measure = useRef(() => {});
+  measure.current = () => {
     const root = box.current;
     if (!root) return;
     const origin = root.getBoundingClientRect().top;
     let floor = 0;
-    const next = notes.map((n, i) => {
-      const at = n.anchor ? root.querySelector(n.anchor) : null;
+    const next = anchors.current.map((anchor, i) => {
+      const at = anchor ? root.querySelector(anchor) : null;
       const top = Math.max(at ? at.getBoundingClientRect().top - origin : 0, floor);
       floor = top + (els.current[i]?.offsetHeight ?? 0) + 12;
       return Math.round(top);
     });
-    if (next.join() !== tops.join()) setTops(next);
-  });
+    setTops((now) => (next.join() === now.join() ? now : next));
+  };
+  useLayoutEffect(() => measure.current());
+  // A note that grows (a reply opened under it) or text that reflows moves the notes below it.
+  const keys = notes.map((n) => n.key).join();
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined" || !box.current) return;
+    const watch = new ResizeObserver(() => measure.current());
+    watch.observe(box.current);
+    for (const el of els.current) if (el) watch.observe(el);
+    return () => watch.disconnect();
+  }, [keys]);
   return (
-    <div ref={box} className={`relative ${className}`} data-width={width || undefined}>
+    <div ref={box} className={`relative ${className}`}>
       {children}
       {notes.map((n, i) => (
         <aside key={n.key} ref={(el) => { els.current[i] = el; }} style={{ top: tops[i] ?? 0 }}

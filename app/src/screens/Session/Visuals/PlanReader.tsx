@@ -55,7 +55,7 @@ import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } f
 import { ExportButton } from "./ExportButton";
 import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
 import { Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
-import { Annotated, DecisionCard, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
+import { Annotated, DecisionCard, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
@@ -850,7 +850,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       </div>
     ) : (
       <div data-section={section} className="grid gap-2.5" onClick={() => opened(section)}>
-        <DocText body={bodyOf(section)} marks={marksOf(section)} />
+        <DocText body={bodyOf(section)} marks={marksOf(section)} layout={designDoc ? docLayout(section) : undefined} />
       </div>
     );
   // The section being edited live wears a blue rule in the margin.
@@ -1044,7 +1044,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const stageTone = plan.state === "open" ? "text-sap" : plan.state === "approved" ? "text-pass" : "text-ink-3";
     const versionMenu = source.history ? (
       <Menu label={<span data-testid="plan-rev">{`${versionLabel} · History`}</span>} buttonClass={`${quiet} px-[9px] text-xs !text-ink-3`} title="See earlier revisions and what changed"
-        place="down" panelClass="w-[380px] max-w-[86vw] max-h-[60vh] overflow-auto" open={historyOpen} onOpenChange={setHistoryOpen}>
+        place="down" panelClass="w-[380px] max-w-[86vw] max-h-[60vh] overflow-auto" open={historyOpen} onOpenChange={setHistoryOpen} keepMounted testid="plan-history-menu">
         <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
           onCompare={(comparison, close) => { setHistorical(comparison ? { comparison, close } : null); if (comparison) setHistoryOpen(false); }} />
       </Menu>

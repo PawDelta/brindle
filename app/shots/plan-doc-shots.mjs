@@ -46,6 +46,11 @@ try {
     for (const id of ["store", "loud", "reach"]) await page.click(`#plan-decision-${id} [data-testid="plan-option"]`);
     await page.evaluate(() => document.getElementById("plan-decision-loud").scrollIntoView({ block: "center" }));
     await shot("3-all-decided");
+    // The section shapes: Goals in two columns, Tech stack and Alternatives as rows, the rollout's steps.
+    for (const id of ["goals", "tech-stack", "alternatives", "rollout"]) {
+      await page.evaluate((s) => document.getElementById(`plan-${s}`).scrollIntoView({ block: "start" }), id);
+      await shot(`5-${id}`);
+    }
     await page.click('[data-testid="plan-build"]');
     await page.waitForSelector('[data-testid="plan-next"][data-state="approved"]');
     await shot("4-approved");
