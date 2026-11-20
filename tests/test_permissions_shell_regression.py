@@ -70,7 +70,8 @@ OWNER_COMMAND = ("W=~/Projects/pawdelta-web; git -C $W branch --show-current; "
 @pytest.mark.parametrize("command, decision, rule", [
     # Permission history, 2026-11-20: a worker's read-only command went to the
     # owner as a d-shell-syntax ask, since W's value started with ~.
-    (OWNER_COMMAND, "allow", None),
+    pytest.param(OWNER_COMMAND, "allow", None,
+                 marks=pytest.mark.variant("the owner's reported command: ~ in a value, redirect and && echo")),
     pytest.param("W=$HOME/p; git -C $W push origin HEAD:feature", "allow", None,
                  marks=pytest.mark.variant("$HOME in a value, where a push rule is in force")),
     pytest.param("D=~/p; rm -rf $D/build", "allow", None,
