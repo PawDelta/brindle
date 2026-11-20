@@ -60,17 +60,17 @@ export function KeptVisuals({ client, onOpenChange }: { client: KeptVisualsClien
   }
   return (
     <section className="flex flex-col gap-s1" aria-label="Kept docs" data-testid="kept-visuals">
-      <p className="text-xs text-ink-3">Visuals you kept from a session. They stay after the session is removed.</p>
+      <p className="text-xs text-ink-3">Docs you kept from a session. They stay after the session is removed.</p>
       {error && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
-          <span>Couldn't load the kept visuals: {error}</span>
+          <span>Couldn't load the kept docs: {error}</span>
           <button type="button" className={button} onClick={load}>
             Retry
           </button>
         </div>
       )}
       {kept === null && !error && <p className="text-sm text-ink-3">Loading…</p>}
-      {kept && kept.length === 0 && <p className="text-sm text-ink-2">Nothing kept yet. Open a visual in a session and press Keep.</p>}
+      {kept && kept.length === 0 && <p className="text-sm text-ink-2">Nothing kept yet. Open a doc in a session and press Keep.</p>}
       {kept && kept.length > 0 && (
         <ul className={`${card} flex flex-col divide-y divide-line`}>
           {kept.map((k) => (

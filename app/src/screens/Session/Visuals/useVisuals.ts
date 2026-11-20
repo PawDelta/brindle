@@ -28,8 +28,9 @@ const holdsChange = (e: BusEvent) => e.kind.startsWith("task.");
 export function useVisuals(client: VisualsClient, root: string): Visuals {
   const [got, setGot] = useState<{ root: string; visuals: VisualDTO[] } | null>(null);
   const seq = useRef(0);
-  // The last visual.* event about this session, or task event: a new one reads the list again.
-  const changed = useAppState((s) => s.recent.filter((e) => about(e, root) || holdsChange(e)).at(-1)?.id ?? 0);
+  // The last visual.* event about this session, or task event, and each snapshot applied (a recovery
+  // after missed events, which brings no event of its own): a new one reads the list again.
+  const changed = useAppState((s) => `${s.recent.filter((e) => about(e, root) || holdsChange(e)).at(-1)?.id ?? 0}:${s.snapshotVersion}`);
   const reload = useCallback(() => {
     const mine = ++seq.current;
     Promise.resolve()

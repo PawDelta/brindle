@@ -654,6 +654,12 @@ describe("visuals", () => {
     daemon.publish("task.queued", { repo_root: REPO, payload: { task_id: "t_1", caller_id: "sup1" } });
     expect(await screen.findByTestId("visual-holding-v_plan")).toBeTruthy();
     expect(screen.getByTestId("visuals-dot").getAttribute("aria-label")).toBe("holding");
+    // The plan is decided while the stream is down: the missed events can't be replayed, so the daemon asks
+    // for a resnapshot and no event names the change. The mounted entry still follows the list it reads.
+    rows = [{ ...plan, holding: 0, answer: { option: "A", note: "", at: now } }];
+    daemon.send({ type: "resnapshot", reason: "events_lost" });
+    await waitFor(() => expect(screen.queryByTestId("visual-holding-v_plan")).toBeNull());
+    expect(screen.queryByTestId("visuals-dot")).toBeNull();
   });
 
   it("visuals unread dot clears on view while Inbox removes notices and keeps unanswered prompts", async () => {
