@@ -60,3 +60,32 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
     permissions.add_rule("bash", "gh api blocked", "deny", "prefix")
     req = replace(req, command="bash -O nullglob -c 'gh api missing?match blocked'")
     assert permissions.decide(req).decision != "allow"
+
+
+OWNER_COMMAND = ("W=~/Projects/pawdelta-web; git -C $W branch --show-current; "
+                 "git -C $W log origin/main -1 --format='%h %ci' ; "
+                 "git -C $W show origin/main:backend/pro_api/analysis_share_links.py > /dev/null && echo exists-on-main")
+
+
+@pytest.mark.parametrize("command, decision, rule", [
+    # Permission history, 2026-11-20: a worker's read-only command went to the
+    # owner as a d-shell-syntax ask, since W's value started with ~.
+    (OWNER_COMMAND, "allow", None),
+    pytest.param("W=$HOME/p; git -C $W push origin HEAD:feature", "allow", None,
+                 marks=pytest.mark.variant("$HOME in a value, where a push rule is in force")),
+    pytest.param("D=~/p; rm -rf $D/build", "allow", None,
+                 marks=pytest.mark.variant("~ in a value, where the rm rule is in force")),
+    # What the substituted value names is still checked like the literal path.
+    pytest.param("H=~; rm -rf $H", "deny", "d-rm",
+                 marks=pytest.mark.variant("substitution of ~ reveals a destructive rm of the home")),
+    pytest.param("H=$HOME; rm -rf $H", "deny", "d-rm",
+                 marks=pytest.mark.variant("substitution of $HOME reveals a destructive rm of the home")),
+    # A quoted ~ is not the home: the value stays unknown, so a possible deny still holds it.
+    pytest.param("W='~'; rm -rf $W", "deny", "d-shell-syntax",
+                 marks=pytest.mark.variant("a quoted tilde is never resolved")),
+])
+def test_a_variable_assigned_a_home_path_is_checked_as_its_value(tmp_path, command, decision, rule):
+    here = str(tmp_path)
+    permissions.apply_preset("autonomous")
+    got = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
+    assert (got.decision, got.rule.id if got.rule else None) == (decision, rule), got.reason

@@ -4761,10 +4761,9 @@ class _Flattener:
         if _heredoc_readers(tokens) & self.runners:
             raise ValueError("a heredoc may be run as commands")
         nodes, _ = _script_tree(_script_items(tokens))
-        if self.credential_scan:
-            # The shell's $HOME is known before the run: a credential scan resolves it (and ~) to the
-            # real home in every word, so "$HOME"/.aws or d="$HOME"; cat "$d/.npmrc" names the store.
-            env.setdefault("HOME", ("lit", os.path.expanduser("~")))
+        # The shell's $HOME is known before the run (what the checker reads a word's ~ as): it is
+        # resolved in every word, so W=$HOME/x; git -C $W status and "$HOME"/.aws name real paths.
+        env.setdefault("HOME", ("lit", os.path.expanduser("~")))
         self.walk(nodes, env, True)
 
     def walk(self, nodes: list[tuple], env: dict, definite: bool, chains: bool = True, fed: bool = False) -> None:
@@ -4954,6 +4953,12 @@ class _Flattener:
                 for inner in word.substitutions:
                     self.substitution(inner, seen)
                 value = self.text(word, seen, assignment=True)[len(name) + 1:]
+                home = seen.get("HOME")
+                if re.match(r"~(?=/|$)", value) and home is not None and home[0] == "lit":
+                    # An unquoted leading ~ is the home, expanded once as the value is assigned
+                    # (W=~/x); a quoted one, ~user or another ~ in it stays unknown.
+                    value = f'"{_dq_escaped(home[1])}"{value[1:]}'
+                    self.changed = True
                 text = self.resolved(value)
                 if self.credential_scan:
                     self.named.append(text)
