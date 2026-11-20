@@ -56,6 +56,7 @@ export interface ApiSchema {
   PermissionPolicyDTO: PermissionPolicyDTO;
   PermissionPresetDTO: PermissionPresetDTO;
   PermissionRuleDTO: PermissionRuleDTO;
+  PersonDTO: PersonDTO;
   PlanAnchorDTO: PlanAnchorDTO;
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
@@ -97,6 +98,7 @@ export interface ApiSchema {
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
   SharedDesignDTO: SharedDesignDTO;
+  SignoffDTO: SignoffDTO;
   StoppedAgentDTO: StoppedAgentDTO;
   VisualAnswerDTO: VisualAnswerDTO;
   VisualDTO: VisualDTO;
@@ -603,21 +605,42 @@ export interface InboxChoiceDTO {
 export interface InboxItemDTO {
   action?: InboxActionDTO | null;
   agent_id?: string | null;
+  checks_state?: ("passed" | "failed" | "running") | null;
   choices?: InboxChoiceDTO[] | null;
+  decision_count?: number | null;
   detail?: string | null;
   doc?: number | string | null;
+  excerpt?: string | null;
+  file_count?: number | null;
   fix?: string | null;
+  from_name?: string | null;
+  from_person?: PersonDTO | null;
+  inbox_group?: string | null;
+  item_key?: string | null;
   kind: string;
   notice_id?: string | null;
   permission?: PermissionDTO | null;
   plan_offer?: PlanOfferDTO | null;
+  read?: boolean | null;
   reason: string;
   request_id?: string | null;
   root_id?: string | null;
   section?: string | null;
+  signoff?: SignoffDTO | null;
+  thread_id?: number | null;
   url?: string | null;
   visual_id?: string | null;
   workspace_id?: string | null;
+}
+/**
+ * A teammate: the Library's account id, and their profile name (None when they set none).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PersonDTO".
+ */
+export interface PersonDTO {
+  name?: string | null;
+  sub: string;
 }
 /**
  * A tool-permission request waiting on the person. ``via``: "hook"
@@ -677,6 +700,19 @@ export interface PlanOfferDTO {
 export interface PlanOfferMilestoneDTO {
   title: string;
   verified: boolean;
+}
+/**
+ * A design's sign-off progress, as of its newest sign-off: ``signed`` of
+ * ``required`` required reviewers on revision ``rev``, and who is still to sign.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "SignoffDTO".
+ */
+export interface SignoffDTO {
+  required: number;
+  rev: number;
+  signed: number;
+  waiting?: PersonDTO[];
 }
 /**
  * A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html.
@@ -973,7 +1009,7 @@ export interface PlanDTO {
   sections: PlanSectionDTO[];
   session: string;
   split: PlanWorkerDTO[];
-  state: "open" | "redirected" | "approved" | "writing" | "superseded";
+  state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled";
   team_ended?: boolean;
   threads?: PlanThreadDTO[];
   title: string;
@@ -991,6 +1027,7 @@ export interface PlanDecisionDTO {
   id: string;
   mine?: string | null;
   options: PlanOptionDTO[];
+  section?: string;
   title: string;
   votes?: {
     [k: string]: string[];
@@ -1119,16 +1156,19 @@ export interface PlanGateRowDTO {
 /**
  * Why the Library couldn't confirm a shared plan's review when the person
  * tried to approve it. ``approval_held``: their Approve applies by itself
- * once it can; ``can_stop_sharing``: they may make it a personal doc instead.
+ * once it can; ``can_stop_sharing``: they may make it a personal doc instead;
+ * ``can_edit_reviewers``: they may change who reviews it (the Library refused
+ * the share, ``access_refused``, or the review can't be confirmed).
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanUnconfirmedDTO".
  */
 export interface PlanUnconfirmedDTO {
   approval_held?: boolean;
+  can_edit_reviewers?: boolean;
   can_stop_sharing?: boolean;
   message: string;
-  reason: "offline" | "sign_in" | "key_unavailable" | "library_error" | "other_account";
+  reason: "offline" | "sign_in" | "key_unavailable" | "library_error" | "other_account" | "access_refused";
 }
 /**
  * One revision of a plan: the supervisor's proposal, the person's edit
@@ -1551,7 +1591,7 @@ export interface SharedDesignDTO {
   session: string;
   signed_off?: boolean;
   split: PlanWorkerDTO[];
-  state: "open" | "redirected" | "approved" | "writing" | "superseded";
+  state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled";
   team_ended?: boolean;
   threads?: PlanThreadDTO[];
   title: string;

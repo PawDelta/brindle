@@ -2839,6 +2839,13 @@ export class FakeDaemon {
         this.publish("visual.dismissed", { root_id: row.session, repo_root: session ? this.repoOf(session) : null, payload: { visual: row.id, rev: row.rev } });
         return json(row);
       }
+      if (path === "/inbox/read") {
+        // inbox_team.mark_read: team rows read for this person; the bus says the Inbox changed.
+        const keys = new Set(Array.isArray(fields.item_keys) ? fields.item_keys as string[] : []);
+        d.inbox = d.inbox.map((i) => (i.item_key && keys.has(i.item_key) ? { ...i, read: true } : i));
+        this.publish("inbox.changed", {});
+        return json({ read: [...keys] });
+      }
       if ((m = path.match(/^\/inbox\/([^/]+)\/permission$/))) return this.answerPermission(m[1], fields);
       if ((m = path.match(/^\/inbox\/([^/]+)\/([^/]+)$/))) {
         const [id, action] = [m[1], m[2]];

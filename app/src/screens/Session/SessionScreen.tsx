@@ -247,15 +247,8 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   const latest = useRef({ select, selected });
   latest.current = { select, selected };
   const openVisual = useCallback((id: string) => latest.current.select(latest.current.selected, { kind: "visual", id }), []);
-  // The person asked for a plan: it opens in the planning view at once, even while still being written.
-  // Events from before this screen showed are not replayed.
-  const planAsked = useAppState((s) => s.recent.filter((e) => e.kind === "plan.requested" && e.root_id === root).at(-1));
-  const seenPlanAsk = useRef(planAsked?.id ?? 0);
-  useEffect(() => {
-    const visual = planAsked?.payload.visual;    if (!planAsked || planAsked.id <= seenPlanAsk.current || typeof visual !== "string") return;
-    seenPlanAsk.current = planAsked.id;
-    openVisual(visual);
-  }, [planAsked, openVisual]);
+  // A plan the person asked for is not opened for them: the engine publishes its draft at once
+  // (visual.published), so it waits in the visuals list and the Inbox, and their view stays put.
   // What waits on the person when the visual opened, by identity and wording: one that wasn't there
   // (or left and came back) while it's open, and Back carries a sap badge until the next open. A
   // supervisor's question keeps one inbox row ("has a question") however often it asks, so each new

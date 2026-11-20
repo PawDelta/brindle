@@ -288,6 +288,8 @@ class PlanDecision(BaseModel):
     options: list[PlanOption] = Field(description="2-12 alternatives you weighed, yours among them")
     mine: str | None = Field(default=None, description="the option id you'd pick")
     challenge: str | None = Field(default=None, description="your own strongest argument against your pick")
+    section: str | None = Field(default=None, description="the id of the section where this question comes up; "
+                                "its card shows at the end of it (default: open-questions)")
 
 
 class PlanWorker(BaseModel):
@@ -318,11 +320,16 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     `sections` (each markdown, mermaid or svg; the person comments, suggests
     edits and confirms decisions on them) and then `markdown` is only the
     title and lede; or pass the whole doc as `markdown`, one ## heading per
-    section. Put the goal, the design with diagrams, what's hard to undo and
-    the open questions in sections; `decisions` carry options (pros, cons, the
-    files each touches), your pick (`mine`) and your strongest argument
-    against it (`challenge`); `split` has each worker's files and the one test
-    that proves it done. brindle renders it itself. While it's open, every
+    section. Sections follow a fixed design-doc spine with stable ids:
+    context, goals, proposed-design, alternatives, risks, rollout (plain-
+    language phases), open-questions ("None." when empty). Add audience,
+    architecture or tech-stack only when they apply; an empty one is dropped.
+    `decisions` carry options (pros, cons, the files each touches), your
+    pick (`mine`), your strongest argument against it (`challenge`) and a
+    `section` id where the question comes up (none: open-questions).
+    `split` has each worker's files and the one test that proves it done;
+    it is for plan_worker linking and the board only, the person never sees
+    it. brindle renders the doc itself. While it's open, every
     assign in this session is queued and starts only once the person
     approves. What they wrote since your last revision (each comment,
     suggestion and reply, naming its thread #N) arrives in one message when
@@ -373,6 +380,28 @@ def read_plan(plan_id: str) -> str:
         return json.dumps(plans.read_draft(db, caller, plan_id))
     except ServiceError as e:
         raise ToolError(e.message) from e
+
+
+@mcp.tool()
+def withdraw_plan(plan_id: str) -> str:
+    """Supervisors: withdraw your own plan while it is open or redirected,
+    without the person's approval, when it's no longer the plan to build
+    (for example, the person's request changed). The plan closes, nothing is
+    approved and it isn't sent to the Library; a shared plan's share is
+    stopped. Tasks it held stay queued and start on neither their own: the
+    person is told too. Decide each held task you're told of: start_now
+    starts it, cancel_task gives it up."""
+    from brindle import plans
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        p = plans.cancel(db, plan_id, None, person=False, caller=caller)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    return (f"Withdrew plan {p['id']} (r{p['rev']}). Tasks it held stay queued until you decide each one: "
+            "start_now or cancel_task. Their list is in your inbox.")
 
 
 @mcp.tool()
@@ -910,6 +939,8 @@ def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str, branch: str
         state = "queued by a request still being answered"
     elif t.state != "pending":
         state = "being started right now"
+    elif db.cancelled_hold(t.id) is not None:
+        state = "held behind a cancelled plan: start_now starts it, cancel_task gives it up"
     elif tasks.plan_holds(db, t):
         state = "waiting on the session's plan, or on brindle's offer to plan first"
     elif deps:

@@ -428,6 +428,21 @@ describe("SessionScreen", () => {
     }
   });
 
+  it("leaves the open view as it is when the person asks for a plan, the draft waiting in the visuals list", async () => {
+    const { daemon } = mount({ sup1: live });
+    await waitFor(() => expect(shownAgent()).toBe("sup1"));
+    const chat = screen.getByTestId("chat-area");
+    const shownClass = chat.className;
+    // The engine's begin(): the draft is published (and listed), then plan.requested names it.
+    daemon.visualRows.push({ id: "v_plan", session: "sup1", title: "Plan", by: "supervisor", kind: "plan", rev: 1, answer: null, kept: false, unread: true, created_at: 1 });
+    act(() => daemon.publish("visual.published", { repo_root: REPO, root_id: "sup1", agent_id: "sup1", payload: { visual: "v_plan" } }));
+    act(() => daemon.publish("plan.requested", { repo_root: REPO, root_id: "sup1", agent_id: "sup1", payload: { visual: "v_plan" } }));
+    fireEvent.click(await screen.findByTestId("visuals-button"));
+    expect(within(screen.getByTestId("visuals-panel")).getByTestId("visual-row-v_plan")).toBeTruthy();
+    await flush();
+    expect(chat.className).toBe(shownClass);
+  });
+
   it.each([true, false])("observes Codex input only with visuals available (%s), excluding output and permission replies", async (enabled) => {
     const submitted: string[] = [];
     let bytesAtRecording: string | null = null;

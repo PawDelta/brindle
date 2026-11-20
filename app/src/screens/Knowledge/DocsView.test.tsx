@@ -32,7 +32,11 @@ const SCOPES = [
 const RESULTS: DocResults = { days: 30, minimum: 5, enough: true, briefed: 6, large: 9, compared: 6, similar: 7, with_brief: 1.2, without_brief: 2.0 };
 
 function client(detail: (id: string) => object, results: DocResults = RESULTS, docs: object[] = DOCS) {
-  const fetch: typeof globalThis.fetch = (input) => {
+  return new DaemonClient({ baseUrl: "http://daemon.test", token: "t", fetch: libraryFetch(detail, results, docs) });
+}
+
+function libraryFetch(detail: (id: string) => object, results: DocResults = RESULTS, docs: object[] = DOCS): typeof globalThis.fetch {
+  return (input) => {
     const url = new URL(String(input));
     const path = url.pathname.replace(/^\/v1/, "");
     const session = url.searchParams.get("session");
@@ -48,7 +52,6 @@ function client(detail: (id: string) => object, results: DocResults = RESULTS, d
               : detail(decodeURIComponent(path.split("/").pop()!));
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } }));
   };
-  return new DaemonClient({ baseUrl: "http://daemon.test", token: "t", fetch });
 }
 
 const shown = () => [...screen.getByTestId("docs").querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"));
@@ -225,6 +228,32 @@ describe("docs view", () => {
     fireEvent.click(screen.getByRole("button", { name: "Back to list" }));
     expect((screen.getByRole("searchbox", { name: "Search the library" }) as HTMLInputElement).value).toBe("cloud");
     expect(shown()).toEqual(["d5"]);
+  });
+
+  it("deleting a doc an open plan is shared through keeps the delete card open to confirm, then deletes", async () => {
+    const library = libraryFetch(() => view(DOCS[0]));
+    const deletes: unknown[] = [];
+    const api = new DaemonClient({ baseUrl: "http://daemon.test", token: "t", fetch: async (input, init) => {
+      if (init?.method !== "DELETE") return library(input, init);
+      const body = JSON.parse(String(init.body || "{}"));
+      deletes.push(body);
+      return body.confirm
+        ? new Response(JSON.stringify({ deleted: "d1" }), { status: 200, headers: { "Content-Type": "application/json" } })
+        : new Response(JSON.stringify({ error: { code: "shared_plan", message: "Shared for review on an open plan." } }),
+          { status: 409, headers: { "Content-Type": "application/json" } });
+    } });
+    render(<DocsView client={api} doc="d1" />);
+    await screen.findByTestId("doc-body");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete for good" }));
+    const confirm = await waitFor(() => {
+      const b = document.querySelector<HTMLButtonElement>('button[data-state="shared-plan"]');
+      expect(b).not.toBeNull();
+      return b!;
+    });
+    expect(deletes).toEqual([{}]);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(deletes).toEqual([{}, { confirm: true }]));
   });
 
   it("reads a real doc: raw HTML and images stay text, mentions are listed, and Share offers every team of the person's", async () => {

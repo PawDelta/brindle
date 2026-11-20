@@ -46,7 +46,8 @@ from brindle import (
 )
 from brindle.daemon import session_review
 from brindle.daemon.routes_actions import (
-    doc_switches, docs_api, docs_everywhere, docs_org_api, docs_scopes, read_edit_target,
+    doc_switches, docs_api, docs_everywhere, docs_org_api, docs_scopes, library_on_this_mac, own_scope,
+    read_edit_target,
 )
 from brindle.db import DB
 from brindle.pro import license
@@ -1097,26 +1098,62 @@ def get_cost(db: DB, request: Request) -> Any:
             "by_model": {m: bucket(b) for m, b in s.by_model.items()}}
 
 
-def _all_docs(request: Request, query: dict[str, str]) -> list[dict]:
-    """The docs of every scope of docs_scopes, each doc once, newest first."""
-    seen: dict[str, dict] = {}
-    for got in docs_everywhere("/analysis-docs", _repo(request), query):
-        for d in got.get("docs") or []:
-            if isinstance(d, dict) and isinstance(d.get("doc_id"), str):
-                seen.setdefault(d["doc_id"], d)
+def _with_kept(request: Request, query: dict[str, str], ask: Callable[[], list[dict]]) -> list[dict]:
+    """The docs kept on this Mac (local_library) with the server's ``ask()``
+    answers, each doc once (a kept doc's shared server copy is the kept
+    one), newest first. With the library on this Mac, a server out of reach
+    leaves just the kept docs."""
+    from brindle.pro import local_library
+
+    repo = _repo(request)
+    kept = local_library.records()
+    seen: dict[str, dict] = {d["doc_id"]: d for d in local_library.listed(query, own_scope(repo))} if kept else {}
+    held = {r["server_id"] for r in kept if r.get("server_id")}
+    try:
+        got = ask()
+    except ServiceError:
+        if not library_on_this_mac(repo):
+            raise
+        got = []
+    for d in got:
+        if isinstance(d, dict) and isinstance(d.get("doc_id"), str) and d["doc_id"] not in held:
+            seen.setdefault(d["doc_id"], d)
     return sorted(seen.values(), key=lambda d: -float(d.get("created_at") or 0))
+
+
+def _own_docs(request: Request, query: dict[str, str]) -> list[dict]:
+    """The person's own docs: those kept on this Mac and those on the servers."""
+    return _with_kept(request, query, lambda: docs_api("GET", "/analysis-docs", repo=_repo(request), scope="user",
+                                                       query=query).get("docs") or [])
+
+
+def _all_docs(request: Request, query: dict[str, str]) -> list[dict]:
+    """The docs of every scope of docs_scopes and those kept on this Mac, each doc once, newest first."""
+    return _with_kept(request, query, lambda: [d for got in docs_everywhere("/analysis-docs", _repo(request), query)
+                                               for d in got.get("docs") or []])
 
 
 @_json
 def analysis_docs(db: DB, request: Request) -> Any:
     """The library's docs (``{"docs": [...]}``, each as the server lists it),
     filtered by ``scope`` (user, team:<id> or org:<id>; none: every scope the
-    person reads, see docs_scopes), ``topic``, ``kind`` and ``session``."""
+    person reads, see docs_scopes), ``topic``, ``kind`` and ``session``.
+    The person's own may be kept on this Mac (see _own_docs)."""
     q = request.query_params
     query = {k: q[k] for k in ("topic", "kind", "session") if q.get(k)}
+    if q.get("scope") == "user":
+        return {"docs": _own_docs(request, query)}
     if q.get("scope"):
         return docs_api("GET", "/analysis-docs", repo=_repo(request), scope=q["scope"], query=query)
     return {"docs": _all_docs(request, query)}
+
+
+def _topic_counts(docs: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for d in docs:
+        for t in d.get("topics") or []:
+            counts[t] = counts.get(t, 0) + 1
+    return {"topics": [{"topic": t, "count": n} for t, n in sorted(counts.items(), key=lambda x: (-x[1], x[0]))]}
 
 
 @_json
@@ -1155,7 +1192,11 @@ def analysis_doc_map(db: DB, request: Request) -> Any:
         raise ServiceError("bad_request", "choose a scope and optional code paths at depth 1", 400)
     scope = {"kind": q["scope_kind"], "id": q["scope_id"]}
     query = {"scope_kind": scope["kind"], "scope_id": scope["id"]}
-    listed = docs_api("GET", "/analysis-docs", repo=_repo(request), query=query)
+    if scope["kind"] == "user":         # the person's own: those kept on this Mac too
+        listed = {"docs": _with_kept(request, {}, lambda: docs_api("GET", "/analysis-docs", repo=_repo(request),
+                                                                   query=query).get("docs") or [])}
+    else:
+        listed = docs_api("GET", "/analysis-docs", repo=_repo(request), query=query)
     docs = {d["doc_id"]: {**d, "scope": d.get("scope") or scope}
             for d in listed.get("docs") or [] if isinstance(d, dict) and isinstance(d.get("doc_id"), str)}
     # Local documents belong to the repo on this device, never a shared scope.
@@ -1209,13 +1250,11 @@ def analysis_doc_topics(db: DB, request: Request) -> Any:
     """``{"topics": [{topic, count}, ...]}`` in one scope, or over every doc
     of :func:`_all_docs` without one."""
     scope = request.query_params.get("scope")
+    if scope == "user":
+        return _topic_counts(_own_docs(request, {}))
     if scope:
         return docs_api("GET", "/analysis-docs/topics", repo=_repo(request), scope=scope)
-    counts: dict[str, int] = {}
-    for d in _all_docs(request, {}):
-        for t in d.get("topics") or []:
-            counts[t] = counts.get(t, 0) + 1
-    return {"topics": [{"topic": t, "count": n} for t, n in sorted(counts.items(), key=lambda x: (-x[1], x[0]))]}
+    return _topic_counts(_all_docs(request, {}))
 
 
 @_json
@@ -1288,8 +1327,14 @@ def analysis_doc(db: DB, request: Request) -> Any:
     from urllib.parse import quote
 
     from brindle import plans
+    from brindle.pro import local_library
 
     doc_id = request.path_params["id"]
+    kept = local_library.get(doc_id)
+    if kept is not None:                 # kept on this Mac: nothing is asked of the server
+        got = local_library.view(kept, own_scope(_repo(request)))
+        tasks = plans.doc_tasks(db, kept.get("server_id") or doc_id)
+        return dict(got, tasks=tasks) if tasks is not None else got
     got = docs_api("GET", f"/analysis-docs/{quote(doc_id, safe='')}", repo=_repo(request))
     tasks = plans.doc_tasks(db, doc_id)
     return dict(got, tasks=tasks) if isinstance(got, dict) and tasks is not None else got

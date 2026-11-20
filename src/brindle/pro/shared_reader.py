@@ -128,7 +128,7 @@ def _dto(doc_id: str, view: dict, me: str) -> dict:
     return SharedDesignDTO(
         id=doc_id, session="", title=view.get("title") or UNTITLED, rev=view["rev"], state="open", ask=content["ask"],
         markdown=content["markdown"], lede=content["lede"], sections=content["sections"], decisions=decisions,
-        split=content["split"], queued=0, created_at=_at(history[0].get("at")) if history else 0.0,
+        split=[], queued=0, created_at=_at(history[0].get("at")) if history else 0.0,
         revisions=[{"rev": r["rev"], "author": _who(r.get("author"), me), "source": r["source"],
                     "changed": r.get("changed") or [], "at": _at(r.get("at"))} for r in history],
         threads=[t for t in (_thread(x, me) for x in view.get("threads") or []) if t], gate=_gate(view, me), me=me,

@@ -931,27 +931,31 @@ def _plural(n: int, noun: str) -> str:
 
 def footer_summary(db: DB, ws: Workspace, sha: str) -> list[str]:
     """What brindle knows of ``ws``'s work, as footer parts: its workers
-    (the session's, for a session root), its reviews and the repo's checks.
-    A part brindle has no record of is left out."""
+    (the session's, for a session root, removed ones included) and its
+    reviews. Not CI: GitHub shows that. A part brindle has no record of is
+    left out."""
     # A worker's ``session_root`` is its session's root *agent* id (pilot.root_of),
     # not a workspace id: match it against the agents living in ``ws``.
     roots = {ws.id} | {a.id for a in db.list_agents(ws.id)}
     ids = [ws.id] + [w.id for w in db.find_workspaces(ws.repo_root) if w.session_root in roots]
     workers = {a.id for i in ids for a in db.list_agents(i) if a.mode in ("assign", "handoff")}
+    # A removed worker's agent row is gone, but its task row stays: count every
+    # started task whose caller is in the session, following workers that
+    # started workers of their own.
+    started = [t for t in db.list_tasks(ws.repo_root) if t.agent_id and t.state in ("started", "merged")]
+    callers = set(roots) | workers
+    grew = True
+    while grew:
+        grew = False
+        for t in started:
+            if t.caller_id in callers and t.agent_id not in workers:
+                workers.add(t.agent_id)
+                callers.add(t.agent_id)
+                grew = True
     reviews = sum(len(db.workspace_reviews(i)) for i in ids)
     parts = [_plural(len(workers), "worker")] if workers else []
     if reviews:
         parts.append(_plural(reviews, "review"))
-    commands = load_repo_config(ws.repo_root).checks
-    latest = {}
-    for row in db.conn.execute("SELECT command, ok FROM check_cache WHERE workspace_id=? AND sha=? "
-                               "ORDER BY created_at", (ws.id, sha)):
-        latest[row["command"]] = bool(row["ok"])
-    results = [latest[c] for c in commands if c in latest]
-    if results and not all(results):
-        parts.append("checks failing")
-    elif results and len(results) == len(commands):
-        parts.append("all checks passed")
     return parts
 
 

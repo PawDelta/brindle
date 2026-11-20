@@ -273,9 +273,37 @@ class PlanOfferDTO(_DTO):
     reasons: list[str]
 
 
+class PersonDTO(_DTO):
+    """A teammate: the Library's account id, and their profile name (None when they set none)."""
+    sub: str
+    name: str | None = None
+
+
+class SignoffDTO(_DTO):
+    """A design's sign-off progress, as of its newest sign-off: ``signed`` of
+    ``required`` required reviewers on revision ``rev``, and who is still to sign."""
+    rev: int
+    signed: int
+    required: int
+    waiting: list[PersonDTO] = []
+
+
 class InboxItemDTO(_DTO):
     kind: str
     reason: str
+    # Which part of the Inbox the row belongs in: "needs_you" or "from_team".
+    # Unrelated to ``section``, a document request's heading.
+    inbox_group: str | None = None
+    from_person: PersonDTO | None = None   # a teammate's row: who asked for the review, signed or commented
+    read: bool | None = None       # a team row's read state, kept per person in the Library
+    item_key: str | None = None    # a team row's key: POST /v1/inbox/read marks it read
+    thread_id: int | None = None   # a shared-doc comment's thread in the design
+    excerpt: str | None = None     # a shared-doc comment's newest words
+    signoff: SignoffDTO | None = None
+    decision_count: int | None = None  # the requested plan's decisions, when known
+    from_name: str | None = None       # an org notice's sender, when supplied
+    file_count: int | None = None      # files changed against the session's PR base
+    checks_state: Literal["passed", "failed", "running"] | None = None
     # An org notice belongs to no agent or workspace.
     agent_id: str | None = None
     workspace_id: str | None = None
@@ -284,8 +312,8 @@ class InboxItemDTO(_DTO):
     notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
     request_id: str | None = None  # a doc request's id, or a recurring notification's source occurrence
     doc: int | str | None = None   # integer kb_docs id or opaque analysis-doc library id
-    section: str | None = None
-    fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
+    section: str | None = None     # a document request's heading in ``doc``
+    fix: str | None = None        # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
     choices: list[InboxChoiceDTO] | None = None   # a handover card's answers, each posted to ``action``
@@ -358,6 +386,8 @@ class PlanDecisionDTO(_DTO):
     options: list[PlanOptionDTO]
     mine: str | None = None
     challenge: str | None = None
+    # The section whose end shows this decision's card; older plans have none.
+    section: str = "open-questions"
     # Who voted for which option ({option: [voter]}), and the person's own
     # confirmed pick, which their verdict starts from.
     votes: dict[str, list[str]] = {}
@@ -537,12 +567,15 @@ class PlanGatePolicyDTO(_DTO):
 class PlanUnconfirmedDTO(_DTO):
     """Why the Library couldn't confirm a shared plan's review when the person
     tried to approve it. ``approval_held``: their Approve applies by itself
-    once it can; ``can_stop_sharing``: they may make it a personal doc instead."""
+    once it can; ``can_stop_sharing``: they may make it a personal doc instead;
+    ``can_edit_reviewers``: they may change who reviews it (the Library refused
+    the share, ``access_refused``, or the review can't be confirmed)."""
 
-    reason: Literal["offline", "sign_in", "key_unavailable", "library_error", "other_account"]
+    reason: Literal["offline", "sign_in", "key_unavailable", "library_error", "other_account", "access_refused"]
     message: str
     approval_held: bool = False
     can_stop_sharing: bool = False
+    can_edit_reviewers: bool = False
 
 
 class PlanGateDTO(_DTO):
@@ -590,7 +623,7 @@ class PlanDTO(_DTO):
     session: str
     title: str
     rev: int
-    state: Literal["open", "redirected", "approved", "writing", "superseded"]
+    state: Literal["open", "redirected", "approved", "writing", "superseded", "cancelled"]
     # The person's request as the supervisor restated it; a comment on it
     # names the section "ask".
     ask: str | None = None

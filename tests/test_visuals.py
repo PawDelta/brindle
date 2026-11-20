@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import time
@@ -196,23 +197,103 @@ def test_person_message_closes_only_earlier_prompts_in_its_session(db, session, 
     prompt = visuals.publish(db, worker, "Release", "<p>x</p>", "Which?", OPTIONS)
     untouched = visuals.publish(db, other, "Other", "<p>x</p>", "Which?", OPTIONS)
     clock[0] = 200.0
-    agents.send_message(db, boss.id, "Use the first approach", person=True)
+    agents.send_message(db, boss.id, "Tag first", person=True)
     closed = visuals.get(db, prompt["id"])
     assert closed["dismissed_rev"] == closed["rev"]
     assert closed["answer"] is None
     assert visuals.to_dto(db, closed)["answered_in_chat"] is True
+    events = db.conn.execute("SELECT payload FROM events WHERE kind='visual.dismissed' AND root_id=?",
+                             (boss.id,)).fetchall()
+    assert any(json.loads(event["payload"]) == {"visual": prompt["id"], "rev": closed["rev"]}
+               for event in events)
     assert [v["id"] for v in visuals.inbox_pending(db, None)] == [untouched["id"]]
     assert db.conn.execute("SELECT body FROM inbox WHERE agent_id=? ORDER BY id DESC", (boss.id,)).fetchone()[0] \
-        == "Use the first approach"
+        == "Tag first"
 
     clock[0] = 300.0
     later = visuals.publish(db, worker, "Release", "<p>new</p>", "Which now?", OPTIONS,
                             visual_id=prompt["id"] if revise else None)
     clock[0] = 400.0
     # A delayed CLI report of the same message must preserve the newer publication.
-    visual_offers.person_spoke(db, boss, "Use the first approach", cli_prompt=True, said_at=200.0)
+    visual_offers.person_spoke(db, boss, "Tag first", cli_prompt=True, said_at=200.0)
     assert {v["id"] for v in visuals.inbox_pending(db, None)} == {untouched["id"], later["id"]}
     assert visuals.to_dto(db, visuals.get(db, later["id"]))["answered_in_chat"] is False
+
+
+@pytest.mark.parametrize("said,folds", [
+    pytest.param("a", True, marks=pytest.mark.variant("a bare option id is a pick")),
+    pytest.param("A.", True, marks=pytest.mark.variant("case and punctuation around a bare id are ignored")),
+    pytest.param("option b", True, marks=pytest.mark.variant("\"option <id>\" is a pick")),
+    pytest.param("None, keep exploring", True, marks=pytest.mark.variant(
+        "a whole label with its comma is a pick, the boundary of the longer sentence below")),
+    pytest.param("i was answering", False, marks=pytest.mark.variant(
+        "the reported bug: an ordinary chat message folded the open decision")),
+    pytest.param("IT STILL SAYS ANSWERED IN CHAT", False, marks=pytest.mark.variant(
+        "a shouted complaint about the fold must not fold")),
+    pytest.param("a combo of B and C", False, marks=pytest.mark.variant(
+        "a sentence naming several option ids is not a pick")),
+    pytest.param("what about the inbox link", False, marks=pytest.mark.variant(
+        "label words in a question about the topic are not a pick")),
+    pytest.param("ignore", False, marks=pytest.mark.variant("a single unrelated word is not a pick")),
+    pytest.param("None, keep exploring for now", False, marks=pytest.mark.variant(
+        "a longer sentence holding a whole label is not a pick")),
+])
+def test_chat_folds_an_open_decision_only_when_the_whole_message_picks_an_option(db, session, monkeypatch,
+                                                                                said, folds):
+    _, boss, worker = session
+    monkeypatch.setattr(time, "time", lambda: 200.0)
+    options = [{"id": "a", "label": "Inbox + link A: readable path on pawdelta.com"},
+               {"id": "b", "label": "None, keep exploring"}, {"id": "c", "label": "Something else"}]
+    v = visuals.publish(db, worker, "Links", "<p>x</p>", "Which link?", options)
+    monkeypatch.setattr(time, "time", lambda: 300.0)
+
+    agents.send_message(db, boss.id, said, person=True)
+
+    assert visuals.to_dto(db, visuals.get(db, v["id"]))["answered_in_chat"] is folds
+    # Folded or not, the message itself reaches the supervisor.
+    assert db.conn.execute("SELECT body FROM inbox WHERE agent_id=? ORDER BY id DESC", (boss.id,)).fetchone()[0] \
+        == said
+
+
+@pytest.mark.variant("a prompt holding brindle's delivery isn't the person's words, even when it matches a label")
+def test_a_cli_prompt_carrying_a_brindle_delivery_never_folds_a_decision(db, session, monkeypatch):
+    _, boss, worker = session
+    monkeypatch.setattr(time, "time", lambda: 200.0)
+    body = "Worker w1 finished: tests pass."
+    prompt = f"{body} Ship it"
+    # A label the whole prompt matches exactly, brindle's delivery and the person's words together.
+    options = [{"id": "a", "label": prompt}, {"id": "b", "label": "None, keep exploring"}]
+    v = visuals.publish(db, worker, "Ship", "<p>x</p>", "Ship?", options)
+    monkeypatch.setattr(time, "time", lambda: 300.0)
+    mid = db.enqueue("boss", body, "w1")
+    db.record_pane_delivery(mid, "boss", json.dumps(
+        {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")),
+         "provider": "claude", "body": body, "lead": "brindle delivered this message:",
+         "stage": "body", "stopped": True}))
+
+    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
+    assert visuals.to_dto(db, visuals.get(db, v["id"]))["answered_in_chat"] is False
+
+    # The person's own exact pick through the same hook still folds it.
+    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "b"})
+    assert visuals.to_dto(db, visuals.get(db, v["id"]))["answered_in_chat"] is True
+
+
+@pytest.mark.variant("the answer's own person-marked notification to the supervisor must not fold it as chat")
+def test_unrelated_chat_and_visual_answer_delivery_do_not_fold_open_decisions(db, session, monkeypatch):
+    _, boss, worker = session
+    monkeypatch.setattr(time, "time", lambda: 200.0)
+    first = visuals.publish(db, worker, "Release", "<p>x</p>", "Which label?", OPTIONS)
+
+    visual_offers.person_spoke(db, boss, "I have a question", typed=True)
+    assert visuals.get(db, first["id"])["dismissed_rev"] == 0
+
+    # The answer notification is system generated, although send_message marks
+    # it as person-delivered so it reaches the waiting supervisor immediately.
+    visuals.answer(db, first["id"], 1, "A")
+    answered = visuals.get(db, first["id"])
+    assert answered["answered_in_chat_rev"] == 0
+    assert answered["answer"] is not None
 
 
 def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_again(db, session, client, monkeypatch):
