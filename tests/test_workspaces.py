@@ -54,6 +54,50 @@ def test_new_worktrees_go_under_the_repo_and_stay_out_of_git_status(db, repo, co
     assert providers._in_worktree(ws.path) and not providers._in_worktree(str(repo / "app.py"))
 
 
+@pytest.mark.variant("the commit-msg hook is a shell script, invisible to Python coverage: this is the only test that runs it on a real commit")
+def test_worker_commit_strips_model_attribution_and_keeps_human_coauthor(db, repo):
+    ws = workspaces.create(db, str(repo), "attribution").workspace
+    Path(ws.path, "worker.txt").write_text("worker\n")
+    sh("git add worker.txt", ws.path)
+    message = """Worker change
+
+Co-Authored-By: Jane Example <jane@example.com>
+Co-Authored-By: Claude <noreply@anthropic.com>
+Generated with Claude Code
+🤖 Generated with OpenAI
+"""
+    message_path = Path(ws.path, "message.txt")
+    message_path.write_text(message)
+    sh(f"git commit -F {message_path}", ws.path)
+    committed = sh("git log -1 --format=%B", ws.path)
+    assert "Jane Example <jane@example.com>" in committed
+    assert "noreply@anthropic.com" not in committed
+    assert "Generated with Claude Code" not in committed
+    assert "🤖 Generated with OpenAI" not in committed
+
+
+def test_brindle_merge_filters_message_and_forwards_repository_hooks(repo):
+    hooks = Path(sh("git rev-parse --git-path hooks", repo).strip())
+    if not hooks.is_absolute():
+        hooks = repo / hooks
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "prepare-commit-msg").write_text(
+        '#!/bin/sh\nprintf "\\nCo-Authored-By: Bot <noreply@openai.com>\\nGenerated with Claude Code\\n" >> "$1"\n'
+    )
+    (hooks / "commit-msg").write_text('#!/bin/sh\necho commit-msg >> hook-runs\n')
+    (hooks / "pre-commit").write_text('#!/bin/sh\necho pre-commit >> hook-runs\n')
+    for name in ("prepare-commit-msg", "commit-msg", "pre-commit"):
+        (hooks / name).chmod(0o755)
+    sh("git checkout -qb merge-source && git commit -q --allow-empty -m source && git checkout -q main", repo)
+
+    git.merge_into(str(repo), str(repo), "merge-source", squash=False)
+
+    message = sh("git log -1 --format=%B", repo)
+    assert "noreply@openai.com" not in message
+    assert "Generated with Claude Code" not in message
+    assert set(Path(repo, "hook-runs").read_text().splitlines()) == {"commit-msg", "pre-commit"}
+
+
 def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
     # The main checkout sits on another branch whose committed config differs
     # from the base the workspace is cut from: the base's config wins, for
