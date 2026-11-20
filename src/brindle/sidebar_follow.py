@@ -56,6 +56,46 @@ def _sidebar_lock(root_id: str, timeout: float | None = None):
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+@contextlib.contextmanager
+def running_sidebar(root_id: str, pane: str | None):
+    """Held by ``root_id``'s `brindle watch --sidebar` for as long as it runs:
+    one per session root, even when a launch made a second pane (tmux too slow
+    to answer, so its sidebar looked gone, see _valid_sidebar). Yields None
+    while this process holds it; else, at once, the pane the running one wrote
+    ("" when it wrote none): this one must not start, since each sidebar reads
+    its whole repo again on every database commit. The lock goes with the
+    process, however it ends."""
+    lock_dir = brindle_home() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / f"sidebar-running-{root_id}.lock", "a+") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            f.seek(0)
+            yield f.read().strip()
+            return
+        try:
+            f.seek(0)
+            f.truncate()
+            f.write(pane or "")
+            f.flush()
+            yield None
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def defer_to_running(db: DB, root_id: str, pane: str | None, running: str) -> None:
+    """A second sidebar for ``root_id`` is in ``pane`` while one already runs in
+    ``running`` (see running_sidebar): record the running one as the root's
+    sidebar where ``pane`` was, so the follow hooks move that one instead of
+    starting another as this pane closes."""
+    if not pane or not running or tmux.get_pane_tag(running, SIDEBAR_TAG) != root_id:
+        return
+    with _sidebar_lock(root_id):
+        if db.get_sidebar_pane(root_id) == pane:
+            db.set_sidebar_pane(root_id, running)
+
+
 def _agent_for_window(db: DB, ws: Workspace, window: str) -> Agent | None:
     # An old paused root can share the workspace (and a stale window id) with
     # the live one: while any agent here is live, only live ones count.

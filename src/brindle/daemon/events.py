@@ -26,14 +26,44 @@ log = logging.getLogger(__name__)
 TAIL_SECONDS = 0.25
 LIVENESS_SECONDS = 2.0
 GIT_SECONDS = 5.0
+# A checkout whose status can't be read (its folder or git files gone: a
+# benchmark's temp repo the OS cleaned up, say) is looked at again after twice
+# as long each time it fails, up to this, and at once when its .git changes.
+# Without it each sweep started git there again: on the owner's machine 24
+# such workspaces cost 46 failing git processes per sweep, every 5 s per app
+# client, each a fork of the whole daemon.
+GIT_BACKOFF_MAX = 300.0
 PAGE = 500
 connected = 0       # open /v1/events clients: with none, nobody is there to answer a held request
+
+
+@dataclasses.dataclass(frozen=True)
+class _Failing:
+    look_at: float      # the sweep clock's time of its next look
+    delay: float        # the wait that set look_at: doubled on the next failure
+    marker: tuple       # its .git as it was when the look failed (_checkout_marker)
+
+
+def _checkout_marker(path: str) -> tuple:
+    """``path``'s .git and the HEAD inside it, stat'ed (no git): a checkout
+    recreated or repaired since its status failed is looked at again at once."""
+    out = []
+    for p in (Path(path) / ".git", Path(path) / ".git" / "HEAD"):
+        try:
+            s = p.stat()
+            out.append((s.st_ino, s.st_mtime_ns, s.st_size))
+        except OSError:
+            out.append(None)
+    return tuple(out)
 
 
 class _SessionChanges:
     def __init__(self) -> None:
         self.lock = Lock()
         self.signatures: dict[str, tuple] = {}
+        # Workspaces whose status read failed, by id: shared by every feed on
+        # this database, so N clients don't each ask git about a broken checkout again.
+        self.failing: dict[str, _Failing] = {}
 
 
 _changes_lock = Lock()
@@ -105,7 +135,7 @@ class Feed:
             out += self._liveness()
         if now >= self._due["git"]:
             self._due["git"] = now + GIT_SECONDS
-            out += self._git_sweep()
+            out += self._git_sweep(now)
         out += self._status()
         return out
 
@@ -127,13 +157,30 @@ class Feed:
         ws = self.db.get_workspace(workspace_id)
         return ws.repo_root if ws else None
 
-    def _git_sweep(self) -> list[dict]:
+    def _git_sweep(self, now: float) -> list[dict]:
         # Serialize observation as well as publication: a feed must not compare
         # an older read after another feed has published a newer signature.
         with self._changes.lock:
-            return self._sweep_git()
+            return self._sweep_git(now)
 
-    def _sweep_git(self) -> list[dict]:
+    def _read_status(self, status, ws, now: float) -> dict | None:
+        """``ws``'s status as a dict, or None when it can't be read now: it
+        failed, or failed before and its next look isn't due (see GIT_BACKOFF_MAX)."""
+        failing = self._changes.failing
+        marker = _checkout_marker(ws.path)
+        held = failing.get(ws.id)
+        if held is not None and now < held.look_at and held.marker == marker:
+            return None
+        try:
+            st = dataclasses.asdict(status(ws.path, ws.base_branch))
+        except Exception:  # noqa: BLE001 - a vanished worktree is the liveness cull's business
+            delay = min(GIT_BACKOFF_MAX, 2 * (held.delay if held is not None else GIT_SECONDS))
+            failing[ws.id] = _Failing(now + delay, delay, marker)
+            return None
+        failing.pop(ws.id, None)
+        return st
+
+    def _sweep_git(self, now: float) -> list[dict]:
         from brindle import status_cache
 
         status = self._git_status or status_cache.cached_any_status    # no git for an unchanged checkout
@@ -146,9 +193,8 @@ class Feed:
         for ws in self.db.find_workspaces():
             if self.repo_root is not None and ws.repo_root != self.repo_root:
                 continue
-            try:
-                st = dataclasses.asdict(status(ws.path, ws.base_branch))
-            except Exception:  # noqa: BLE001 - a vanished worktree is the liveness cull's business
+            st = self._read_status(status, ws, now)
+            if st is None:
                 continue
             if self._git.get(ws.id) != st:
                 self._git[ws.id] = st
