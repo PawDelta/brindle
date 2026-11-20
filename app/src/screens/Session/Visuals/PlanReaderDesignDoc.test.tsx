@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { DocRevisionComparison, Plan, SharedDesign, VisualDTO } from "../../../api/client";
+import { DaemonError, type DocRevisionComparison, type Plan, type SharedDesign, type VisualDTO } from "../../../api/client";
 import { Annotated, MarginNote } from "./PlanDesignDoc";
 import { PlanReader } from "./PlanReader";
 import { SharedDesignReader } from "./SharedDesignReader";
@@ -110,6 +110,19 @@ it("reads a spine plan as the planning doc: the outline marks open decisions, ea
 /* Shared for team review, one required reviewer still to sign. */
 const inReview = { state: "waiting" as const, required: 1, signed: 0, waiting_on: ["u_dana"], reviewers: [{ sub: "u_dana", required: true, status: "waiting" as const }] };
 
+/* The spine plan as a teammate who must sign it reads it from the Library; `answer` settles each write. */
+function teammateDoc(answer: (tail: string) => Promise<void>) {
+  const design: SharedDesign = { ...spine({ gate: { ...inReview, waiting_on: ["u_me"], reviewers: [{ sub: "u_me", required: true, status: "waiting", you: true }] }, threads: [] }),
+    me: "u_me", author: "u_author", can_comment: true, can_suggest: true, can_sign_off: true, signed_off: false };
+  const sent: [string, Record<string, unknown>][] = [];
+  const client: SharedDesignClient = {
+    sharedDesign: async () => design,
+    writeSharedDesign: async (_doc, tail, body) => { sent.push([tail, body]); await answer(tail); return design; },
+    libraryPeople: async () => ({ people: [] }),
+  };
+  return { design, sent, client };
+}
+
 it.each([
   ["the author", async () => {
     const plan = spine({ gate: inReview, threads: [] });
@@ -123,14 +136,7 @@ it.each([
     };
   }],
   ["a teammate", async () => {
-    const design: SharedDesign = { ...spine({ gate: { ...inReview, waiting_on: ["u_me"], reviewers: [{ sub: "u_me", required: true, status: "waiting", you: true }] }, threads: [] }),
-      me: "u_me", author: "u_author", can_comment: true, can_suggest: true, can_sign_off: true, signed_off: false };
-    const sent: [string, Record<string, unknown>][] = [];
-    const client: SharedDesignClient = {
-      sharedDesign: async () => design,
-      writeSharedDesign: async (_doc, tail, body) => { sent.push([tail, body]); return design; },
-      libraryPeople: async () => ({ people: [] }),
-    };
+    const { design, sent, client } = teammateDoc(async () => {});
     render(<SharedDesignReader client={client} docId={design.id} onBack={() => {}} />);
     // Each pick went out as the teammate's vote, and their Sign off is the bar's action.
     return async () => {
@@ -152,6 +158,34 @@ it.each([
   }
   expect(within(outline).getAllByTestId("outline-decision").map((a) => a.dataset.state)).toEqual(["decided", "decided", "decided"]);
   await finish();
+});
+
+it("counts a teammate's pick as decided only once its vote is saved, and takes no second pick while one is out", async () => {
+  let settle!: () => void;
+  let answer: () => Promise<void> = () => new Promise<void>((resolve) => { settle = resolve; });
+  const { design, sent, client } = teammateDoc(() => answer());
+  render(<SharedDesignReader client={client} docId={design.id} onBack={() => {}} />);
+  const doc = await screen.findByTestId("plan-doc");
+  const card = (id: string) => doc.querySelector<HTMLElement>(`[data-testid=plan-decision][data-decision=${id}]`)!;
+  const pick = (id: string) => act(async () => fireEvent.click(within(card(id)).getAllByRole("radio")[0]));
+  const signOff = () => screen.getByTestId("plan-sign-off") as HTMLButtonElement;
+
+  // The first vote is still out: it isn't decided yet, and a second pick isn't taken (nor lost as a decided one).
+  await pick("store");
+  await pick("loud");
+  expect(sent.map(([, body]) => body.decision)).toEqual(["store"]);
+  expect([card("store").dataset.state, card("loud").dataset.state]).toEqual(["open", "open"]);
+  await act(async () => settle());
+  expect(card("store").dataset.state).toBe("decided");
+
+  // A vote the Library refuses leaves its decision open, and Sign off waits for it.
+  answer = async () => { throw new DaemonError("upstream", "offline", 502); };
+  await pick("loud");
+  expect(card("loud").dataset.state).toBe("open");
+  expect(screen.getByRole("alert")).toBeTruthy();
+  answer = async () => {};
+  await pick("reach");
+  expect(signOff().disabled).toBe(true);
 });
 
 it("lays out the spine sections as the design does, and their words stay anchorable", async () => {

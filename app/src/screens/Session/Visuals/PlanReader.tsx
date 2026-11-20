@@ -700,10 +700,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (followed) show(document.querySelector(`[data-testid="thread-${followed.thread}"]`), "nearest");
   }, [followed]);
   const jump = (decision: string) => show(document.getElementById(`plan-decision-${decision}`));
-  // A pick: the author's travels with their verdict; a teammate's is their vote, sent as they make it.
-  const pickOption = (decision: string, option: string) => {
-    setPicks((p) => ({ ...p, [decision]: option }));
-    if (teammate && !historical) void write(() => source.vote(plan.rev, decision, option));
+  // A pick: the author's travels with their verdict; a teammate's is their vote, and counts as
+  // decided only once the Library has it (one write at a time: the cards take no pick meanwhile).
+  const pickOption = async (decision: string, option: string) => {
+    if (!teammate) return setPicks((p) => ({ ...p, [decision]: option }));
+    if (historical || busy) return;
+    if ((await write(() => source.vote(plan.rev, decision, option))) && alive.current) setPicks((p) => ({ ...p, [decision]: option }));
   };
 
   // The bottom bar's actions.
@@ -1057,8 +1059,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
-        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} picked={open ? drafted(d) ?? null : chosen(d)}
-          onPick={(o) => pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
+        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={!!teammate && busy} picked={open ? drafted(d) ?? null : chosen(d)}
+          onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
       </Annotated>
     ));
     const titleAside = (s: PlanSectionDTO) => {

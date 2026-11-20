@@ -185,12 +185,14 @@ export function Outline({ parts, placed, isOpen, decided, total, current, footer
 
 /* A decision, where its question comes up: picking an option is the person's answer. Sap marks
    one that still needs them; once picked, the card goes quiet and a tick stays. */
-export function DecisionCard({ decision: d, n, of, open, picked, onPick, onComment }: {
+export function DecisionCard({ decision: d, n, of, open, disabled = false, picked, onPick, onComment }: {
   decision: PlanDecisionDTO;
   n: number;
   of: number;
   /* The plan still takes picks. */
   open: boolean;
+  /* No pick for now (a teammate's vote is still being saved). */
+  disabled?: boolean;
   /* The option chosen: the person's pick while open, the verdict's after. */
   picked: string | null;
   onPick(option: string): void;
@@ -215,7 +217,7 @@ export function DecisionCard({ decision: d, n, of, open, picked, onPick, onComme
           return (
             <label key={o.id} data-testid="plan-option" data-option={o.id} data-chosen={chosen || undefined}
               className={`relative grid grid-cols-[16px_minmax(0,1fr)] gap-x-3 border-t border-line px-4 pb-3 pt-[11px] transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-branch ${open ? "cursor-pointer hover:bg-[color-mix(in_srgb,var(--ink)_4%,transparent)]" : ""}`}>
-              <input type="radio" name={`decision-${d.id}`} value={o.id} checked={chosen} disabled={!open} onChange={() => onPick(o.id)} className="absolute m-0 size-px opacity-0" />
+              <input type="radio" name={`decision-${d.id}`} value={o.id} checked={chosen} disabled={!open || disabled} onChange={() => onPick(o.id)} className="absolute m-0 size-px opacity-0" />
               <span aria-hidden className={`relative mt-[3px] size-[15px] rounded-full ${chosen ? "bg-pass-soft" : "shadow-[inset_0_0_0_1.5px_var(--line-strong)]"}`}>
                 {chosen && <span className="absolute left-[5px] top-[2.5px] h-2 w-1 rotate-45 border-b-[1.75px] border-r-[1.75px] border-solid border-pass" />}
               </span>
