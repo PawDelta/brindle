@@ -49,7 +49,7 @@ export function FirstRun({ client, pickFolder, refresh, onStarted, onPicked, sta
         A supervisor splits the work, developers each take a branch in their own worktree, and a reviewer checks every branch before it merges. Try it on a practice repo first: it lives in brindle's own folder, so your projects stay as they are.
       </p>
       <div
-        className={`mt-7 grid grid-cols-[minmax(0,1fr)_264px] overflow-hidden rounded-[var(--r)] border border-line-strong transition-opacity ${cloning ? "opacity-55" : ""}`}
+        className={`mt-7 grid grid-cols-[minmax(0,1fr)_264px] overflow-hidden rounded-[var(--r)] border border-line-strong transition-opacity ${cloning ? "opacity-[var(--dim)]" : ""}`}
         data-testid="practice-hero"
         data-state={cloning ? "dimmed" : "lit"}
       >

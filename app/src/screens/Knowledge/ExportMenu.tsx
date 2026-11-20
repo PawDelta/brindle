@@ -272,7 +272,7 @@ function Item({ name, hint, icon, pro, disabled, running, expanded, onClick }: {
       onClick={onClick}
     >
       <span className={`flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-canvas text-ink-2 transition-colors duration-100 group-hover:border-line-strong group-hover:text-ink group-disabled:group-hover:border-line group-disabled:group-hover:text-ink-2 ${pro ? "opacity-55" : ""}`}>{icon}</span>
-      <span className={`flex min-w-0 flex-1 flex-col ${pro ? "opacity-70" : ""}`}>
+      <span className={`flex min-w-0 flex-1 flex-col ${pro ? "opacity-[var(--dim)]" : ""}`}>
         <span className="text-[13px] font-medium leading-5 text-ink">{name}</span>
         <span id={hintId} className="truncate text-xs leading-4 text-ink-3">
           {running ? "Working…" : hint}

@@ -486,7 +486,7 @@ function QueueChip({ message, busy, unanswered, onSendNow, onRemove }: { message
   const first = message.text.split("\n").find((line) => line.trim()) ?? "";
   const attached = message.attachments ?? [];
   return (
-    <li data-testid="queue-chip" data-lines={lines} className={`flex h-[30px] items-center gap-2.5 rounded-md border border-line bg-surface-2 pl-2.5 pr-1.5 ${busy ? "opacity-60" : ""}`}>
+    <li data-testid="queue-chip" data-lines={lines} className={`flex h-[30px] items-center gap-2.5 rounded-md border border-line bg-surface-2 pl-2.5 pr-1.5 ${busy ? "opacity-[var(--dim)]" : ""}`}>
       <ClockIcon size={14} className="shrink-0 text-ink-3" />
       <span data-testid="queue-preview" title={message.text} className="min-w-0 flex-1 text-[13.5px] text-ink" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
         {first || attached.join(", ")}

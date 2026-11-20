@@ -479,7 +479,7 @@ function FileView({ file, split, gone, pin, editable, why, client, root, drafts,
                   }}
                 >
                   <span className="min-w-0 flex-1 truncate">{hunk.header}</span>
-                  {(canStart || at === h) && <span className="shrink-0 font-sans text-xs opacity-70">{at === h ? "editing the new side · ⌘S save · esc discard" : "click or e to edit"}</span>}
+                  {(canStart || at === h) && <span className="shrink-0 font-sans text-xs opacity-[var(--dim)]">{at === h ? "editing the new side · ⌘S save · esc discard" : "click or e to edit"}</span>}
                 </button>
                 {at === h ? (
                   editor

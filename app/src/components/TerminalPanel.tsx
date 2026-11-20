@@ -454,7 +454,7 @@ export function ShellView({ tab, onEnded }: { tab: ShellTab; onEnded(): void }) 
   const views = usePtyViews();
   const [failed, setFailed] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  // In light the session pane's palette and contrast (chatTheme, chatContrast); in dark the shell block's own (shellTheme).
+  // In light the session pane's palette (chatTheme); in dark the shell block's own (shellTheme). Both lift text to AA (chatContrast).
   const appTheme = useAppTheme();
   const paneTheme = useMemo(() => (appTheme === "light" ? chatTheme("light") : undefined), [appTheme]);
   if (!views) return <p className={NOTE}>The shell shows in the app.</p>;
