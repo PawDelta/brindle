@@ -2360,10 +2360,12 @@ def upstream_error(e: Exception) -> ServiceError:
     """The Library's refusal as the daemon's answer: its own 4xx (a stale
     version stays a 409, a missing permission a 403) so the app can act on it;
     anything else, unreachable or unreadable, is a 502. A 401 is never passed
-    on: it would read as the daemon's own token being refused."""
+    on: it would read as the daemon's own token being refused, nor is a 403
+    without the Library's error code: that is its firewall, not a permission
+    (analysis_docs.why_refused)."""
     from brindle.pro.analysis_docs import Refused
 
-    if isinstance(e, Refused) and 400 <= e.status < 500 and e.status != 401:
+    if isinstance(e, Refused) and 400 <= e.status < 500 and e.status != 401 and (e.status != 403 or e.code):
         return ServiceError(e.code if e.code and e.code.isidentifier() else "upstream", str(e), e.status)
     return ServiceError("upstream", str(e), 502)
 

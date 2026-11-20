@@ -475,7 +475,7 @@ def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool
     if status < 500:
         with db.tx() as c:
             c.execute("DELETE FROM plan_shares WHERE plan_id=? AND doc_id IS NULL", (p["id"],))
-    raise RuntimeError(made.get("error") or f"HTTP {status}")
+    raise RuntimeError(made.get("error") or ad.why_refused(status, made, body))
 
 
 def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permissions: dict | None = None,
@@ -885,7 +885,7 @@ def _send_revision(db: DB, plan_id: str, head: _Head, rev: int) -> bool:
         head.view = {**head.view, "rev": resp.get("rev")}
         return False
     if status != 200:
-        raise RuntimeError(resp.get("error") or f"HTTP {status}")
+        raise RuntimeError(resp.get("error") or ad.why_refused(status, resp, {"rev": head.rev, **sent}))
     with db.tx() as c:
         _set_head(c, plan_id, head.rev, rev)
     return True
