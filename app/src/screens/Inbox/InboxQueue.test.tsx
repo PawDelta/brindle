@@ -192,6 +192,33 @@ describe("the Inbox queue", () => {
     expect(document.querySelector("[data-testid=inbox-line]")).toBeNull();
   });
 
+  it("a team row's Done is sent once however often it is pressed, and a late answer never hides a row put back since", async () => {
+    const { client } = mount([progress]);
+    const answers: ((v: { read: string[] }) => void)[] = [];
+    const read = vi.spyOn(client, "markInboxRead").mockImplementation(() => new Promise((resolve) => answers.push(resolve)));
+    await waitFor(() => expect(row("signoff_progress")).toBeTruthy());
+    const press = within(row("signoff_progress")).getByTestId("row-done");
+    // Both presses land before React commits anything: only the guard can stop the second.
+    act(() => {
+      fireEvent.click(press);
+      fireEvent.click(press);
+    });
+    expect(read).toHaveBeenCalledTimes(1);
+    await act(async () => answers[0]({ read: ["signoffs:ad_5"] }));
+    fireEvent.click(await screen.findByTestId("put-back"));
+    expect(row("signoff_progress")).toBeTruthy();
+
+    // Done again, then set aside and put back before the Library answers: its late answer clears nothing.
+    fireEvent.click(within(row("signoff_progress")).getByTestId("row-done"));
+    expect(read).toHaveBeenCalledTimes(2);
+    fireEvent.click(within(row("signoff_progress")).getByTestId("row-later"));
+    fireEvent.click(within(screen.getByTestId("later-menu")).getAllByRole("menuitem")[0]);
+    fireEvent.click(await screen.findByTestId("put-back"));
+    await act(async () => answers[1]({ read: ["signoffs:ad_5"] }));
+    expect(row("signoff_progress")).toBeTruthy();
+    expect(document.querySelector("[data-testid=inbox-line]")).toBeNull();
+  });
+
   it("Done on one teammate's requests settles only when every dismissal is taken; a refused one stays, with its reason", async () => {
     const second: InboxItemDTO = { ...review, doc: "ad_3", detail: "Audit log retention", item_key: "review:ad_3" };
     const { client } = mount([review, second]);

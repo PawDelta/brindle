@@ -250,11 +250,27 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
     setMenu(null);
   };
 
+  /* A team row's Done waiting for the Library, by row: a second press waits on the first, and a later triage
+     (Put back, Later) takes its place, so a late answer no longer clears the row. (A waiting row's dismissals
+     are deduplicated by useInboxActions.) */
+  const pending = useRef(new Map<string, object>());
+  const [doing, setDoing] = useState<ReadonlySet<string>>(new Set());
+  const supersede = (key: string) => {
+    if (!pending.current.delete(key)) return;
+    setDoing((d) => new Set([...d].filter((k) => k !== key)));
+  };
+
   const done = (row: Row) => {
     const title = titleOf(row);
     if (row.part === "team") {
+      if (pending.current.has(row.key)) return;
+      const token = {};
+      pending.current.set(row.key, token);
+      setDoing((d) => new Set(d).add(row.key));
       // Cleared only once the Library has it read; refused, the row stays with the reason.
       void markRead(row).then((ok) => {
+        if (pending.current.get(row.key) !== token) return;
+        supersede(row.key);
         if (!ok) return;
         clearRow(row.key, rowSig(row));
         settle(row, { what: "Done", text: title, where: "", back: true });
@@ -274,11 +290,13 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
   };
 
   const later = (row: Row, until: number, sig?: string) => {
+    supersede(row.key);
     setAside(row.key, until, sig);
     settle(row, { what: "Set aside", text: titleOf(row), where: ctx.sessionTitle(row.items[0]) ?? ctx.repoName(row.items[0]) ?? "", back: true });
   };
 
   const back = (key: string) => {
+    supersede(key);
     putBack(key);
     setLines((ls) => ls.filter((l) => l.key !== key));
   };
@@ -340,7 +358,7 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
     }
     return out.map((x) => ("row" in x
       ? <QueueRow key={x.row.key} row={x.row} open={openKey === x.row.key} menu={menu === x.row.key} isNew={isNew(x.row)}
-          ctx={ctx} actions={actions} client={client} refresh={refresh} onToggle={() => toggle(x.row)} onDone={canDone(x.row) ? () => done(x.row) : undefined}
+          ctx={ctx} actions={actions} client={client} refresh={refresh} onToggle={() => toggle(x.row)} onDone={canDone(x.row) ? () => done(x.row) : undefined} doing={doing.has(x.row.key)}
           onLater={() => setMenu((m) => (m === x.row.key ? null : x.row.key))} onLaterAt={(at, sig) => later(x.row, at, sig)} settle={(entry, meta) => settle(x.row, entry, meta)} markRead={() => markRead(x.row)} />
       : <DoneLine key={`line:${x.line.key}`} line={x.line} onBack={() => back(x.line.key)} />));
   };
@@ -474,6 +492,8 @@ interface RowProps {
   refresh(): Promise<void>;
   onToggle(): void;
   onDone?(): void;
+  /* Its Done is out, waiting for the Library: Done waits too. */
+  doing?: boolean;
   onLater(): void;
   onLaterAt(until: number, sig?: string): void;
   settle(entry: Omit<DoneEntry, "key" | "at">, meta?: string | null): void;
@@ -505,7 +525,7 @@ function QueueRow(props: RowProps) {
         <div className="iq-end">
           {!open && (
             <span className="iq-tri">
-              {onDone && <button type="button" className="iq-ib" title="Done (E)" aria-label="Done" data-testid="row-done" disabled={row.items.some((i) => actions.busy.has(itemKey(i)))} onClick={stop(onDone)}><CheckIcon /></button>}
+              {onDone && <button type="button" className="iq-ib" title="Done (E)" aria-label="Done" data-testid="row-done" disabled={props.doing || row.items.some((i) => actions.busy.has(itemKey(i)))} onClick={stop(onDone)}><CheckIcon /></button>}
               <button type="button" className={`iq-ib${menu ? " on" : ""}`} title="Later (H)" aria-label="Later" data-testid="row-later" aria-haspopup="menu" aria-expanded={menu} onClick={stop(onLater)}><ClockIcon /></button>
             </span>
           )}
@@ -602,7 +622,7 @@ function RowBody(props: RowProps & { title: string }) {
   const triage = (
     <>
       <span className="grow" />
-      {onDone && <button type="button" className="btn btn-quiet text-xs" data-testid="row-done" onClick={onDone}>Done <Kbd k="E" /></button>}
+      {onDone && <button type="button" className="btn btn-quiet text-xs" data-testid="row-done" disabled={props.doing} onClick={onDone}>Done <Kbd k="E" /></button>}
       <button type="button" className="btn btn-quiet text-xs" data-testid="row-later" aria-haspopup="menu" onClick={onLater}>Later <Kbd k="H" /></button>
     </>
   );
