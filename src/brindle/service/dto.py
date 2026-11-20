@@ -300,6 +300,10 @@ class InboxItemDTO(_DTO):
     thread_id: int | None = None   # a shared-doc comment's thread in the design
     excerpt: str | None = None     # a shared-doc comment's newest words
     signoff: SignoffDTO | None = None
+    decision_count: int | None = None  # the requested plan's decisions, when known
+    from_name: str | None = None       # an org notice's sender, when supplied
+    file_count: int | None = None      # files changed against the session's PR base
+    checks_state: Literal["passed", "failed", "running"] | None = None
     # An org notice belongs to no agent or workspace.
     agent_id: str | None = None
     workspace_id: str | None = None

@@ -27,7 +27,9 @@ def _items(raw: object) -> list[dict]:
     for r in rows if isinstance(rows, list) else []:
         if isinstance(r, dict) and isinstance(r.get("doc_id"), str) and r["doc_id"]:
             title, author = r.get("title"), r.get("author")
+            count = r.get("decision_count")
             out.append({"doc_id": r["doc_id"], "title": title if isinstance(title, str) and title else "Design doc",
+                        "decision_count": count if type(count) is int and count >= 0 else None,
                         "author": author if isinstance(author, str) and author else None})
     return out
 

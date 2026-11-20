@@ -3140,6 +3140,23 @@
           "default": null,
           "title": "Agent Id"
         },
+        "checks_state": {
+          "anyOf": [
+            {
+              "enum": [
+                "passed",
+                "failed",
+                "running"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checks State"
+        },
         "choices": {
           "anyOf": [
             {
@@ -3154,6 +3171,18 @@
           ],
           "default": null,
           "title": "Choices"
+        },
+        "decision_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decision Count"
         },
         "detail": {
           "anyOf": [
@@ -3194,6 +3223,18 @@
           "default": null,
           "title": "Excerpt"
         },
+        "file_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File Count"
+        },
         "fix": {
           "anyOf": [
             {
@@ -3205,6 +3246,18 @@
           ],
           "default": null,
           "title": "Fix"
+        },
+        "from_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Name"
         },
         "from_person": {
           "anyOf": [

@@ -125,7 +125,8 @@ def _org_notices() -> list[InboxItemDTO]:
         notices = status.unread(status.load())
     except Exception:  # noqa: BLE001 - notices are an extra: never break the inbox
         return []
-    return [InboxItemDTO(kind="org_notice", reason=n["text"], detail=n["from_role"], notice_id=n["id"])
+    return [InboxItemDTO(kind="org_notice", reason=n["text"], detail=n["from_role"], notice_id=n["id"],
+                         from_name=n.get("from_name"))
             for n in notices]
 
 
@@ -231,6 +232,27 @@ def dismiss_marker(db: DB, root_id: str, branch: str, path: str) -> str | None:
     return None
 
 
+def _pr_facts(db: DB, root_id: str, home: Workspace, sha: str | None, *,
+              state: str | None = None, url: str | None = None) -> dict:
+    from brindle.daemon import session_review
+
+    if url:
+        live = session_review.session_pr_state(db, root_id, url)
+        state = {"ready": "passed", "failed": "failed", "ci": "running"}.get((live or {}).get("state"))
+    count = None
+    if sha and home.base_branch:
+        try:
+            base = git.base_ref(home.path, home.base_branch)
+            refs = git.resolve(home.path, base, sha)
+            if refs:
+                mb = git.out_once(["merge-base", *refs], home.path)
+                changed = git.out_once(["diff", "--name-only", "-z", mb, refs[1]], home.path, raw=True)
+                count = len([p for p in changed.split("\0") if p])
+        except (git.GitError, OSError):
+            pass  # Missing refs leave the count unknown, without hiding the row.
+    return {"file_count": count, "checks_state": state}
+
+
 def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) -> list[InboxItemDTO]:
     """The session's PR as brindle prepared it (routes_actions.prepare_pr),
     until the person opens it: ready for their approval, or its checks failed.
@@ -248,13 +270,13 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
             return []
         url, detail = problem
         return [InboxItemDTO(kind="pr_failed", reason="PR needs attention", detail=detail,
-                             url=url, **link)]
+                             url=url, **_pr_facts(db, root_id, home, head, url=url), **link)]
     if opened:
         # Dismissed for this PR at any commit: a push to it doesn't bring the card back.
         if declined and declined["sha"].endswith(f"|{opened['url']}"):
             return []
         return [InboxItemDTO(kind="pr_opened", reason="PR opened", detail=f"#{opened.get('number')} {opened.get('title') or ''}".strip(),
-                             url=opened["url"], **link)]
+                             url=opened["url"], **_pr_facts(db, root_id, home, head, url=opened["url"]), **link)]
     rows = db.conn.execute(
         "SELECT sha, state, title, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
         " AND state IN ('passed', 'failed')", (root_id, branch)).fetchall()
@@ -271,9 +293,11 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
                 rows = [r for r in rows if r["state"] != "passed"]
         except (git.GitError, OSError):
             pass  # An unavailable checkout must not break the rest of the inbox.
-    return [InboxItemDTO(kind="pr_ready", reason="PR ready for your approval", detail=r["title"], **link)
+    return [InboxItemDTO(kind="pr_ready", reason="PR ready for your approval", detail=r["title"],
+                        **_pr_facts(db, root_id, home, r["sha"], state=r["state"]), **link)
             if r["state"] == "passed" else
-            InboxItemDTO(kind="pr_failed", reason=f"PR checks failed: {r['check_cmd']}", detail=r["output"], **link)
+            InboxItemDTO(kind="pr_failed", reason=f"PR checks failed: {r['check_cmd']}", detail=r["output"],
+                         **_pr_facts(db, root_id, home, r["sha"], state=r["state"]), **link)
             for r in rows]
 
 
@@ -285,6 +309,8 @@ def _dismiss_key(item: InboxItemDTO) -> str:
     if item.kind == "permission" and item.agent_id and item.permission and item.permission.request_id:
         return permission_dismiss_key(item.agent_id, item.permission.request_id)
     data = item.to_json()
+    for k in ("decision_count", "from_name", "file_count", "checks_state"):
+        data.pop(k, None)  # enrichment preserves existing dismissal keys
     if data.get("choices") is None:
         data.pop("choices", None)   # added later: an item without choices keeps the key it always had
     # Added with the team Inbox, so every kind that existed before keeps the key
@@ -519,6 +545,7 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
         return []
     out = []
     links: dict[str, dict] = {}     # a doc this machine has a live plan for: what enriches its queue card
+    decision_counts: dict[str, int] = {}
     for r in db.conn.execute("SELECT plan_id, doc_id, owner FROM plan_shares WHERE doc_id IS NOT NULL"):
         try:
             p = plans._row(db, r["plan_id"])
@@ -533,6 +560,7 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
         link = {"doc": r["doc_id"], "request_id": p["id"], "agent_id": root.id if root else None,
                 "workspace_id": ws.id if ws else None, "root_id": root.id if root else None}
         links[r["doc_id"]] = {**link, "title": plans._title(p["markdown"])}
+        decision_counts[r["doc_id"]] = len(p["decisions"])
         if r["owner"] == me:
             found = plans.gate(db, p)
             state = found and found["state"]
@@ -551,7 +579,13 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
         # Who asked, and whether it was read, is the team feed's; before the feed
         # has been read, the queue's design author stands in for the sender.
         fed = inbox_team.review_row(me, q["doc_id"]) or {}
+        count = fed.get("decision_count")
+        if count is None:
+            count = q.get("decision_count")
+        if count is None:
+            count = decision_counts.get(q["doc_id"])
         out.append(InboxItemDTO(kind="review_requested", reason="Review requested",
+                                decision_count=count,
                                 from_person=fed.get("sender") or inbox_team.person(q.get("author")),
                                 item_key=fed.get("key"), read=fed.get("read"),
                                 detail=link.get("title") or q["title"], **{k: v for k, v in link.items() if k != "title"}))
