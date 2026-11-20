@@ -442,7 +442,7 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     if references:
         message += "\n" + "\n".join(references)
     try:
-        agents.send_message(db, v["root_id"], message, person=True)
+        agents.send_message(db, v["root_id"], message, person=True, fold_visuals=False)
     except BaseException:
         with db.tx() as c:
             c.execute("UPDATE visuals SET answer=NULL WHERE id=? AND answer=?", (v["id"], record))
@@ -514,17 +514,48 @@ def has_approved_design(db: DB, root_id: str, goal: str) -> bool:
     return False
 
 
-def answered_in_chat(c, root_id: str, said_at: float) -> list:
-    """Fold only decision revisions already published when this person message was sent.
+def _chat_choice(text: str) -> str:
+    """``text`` trimmed, case-folded and stripped of punctuation, for comparing a
+    chat message with an option exactly."""
+    return " ".join(re.findall(r"\w+", text.casefold()))
+
+
+def _chat_answers(options: list) -> set[str]:
+    """The whole chat messages that pick one of ``options``: an option's id,
+    "option <id>", or its full label. Nothing shorter or longer counts."""
+    answers = set()
+    for option in options:
+        if oid := _chat_choice(str(option.get("id", ""))):
+            answers |= {oid, f"option {oid}"}
+        if label := _chat_choice(str(option.get("label", ""))):
+            answers.add(label)
+    return answers
+
+
+def answered_in_chat(c, root_id: str, said_at: float, text: str) -> list:
+    """Fold only decision revisions already published when this person message was sent,
+    and only when the whole message picks one of their options (_chat_answers): a
+    sentence that merely mentions an option or the topic leaves them open.
 
     The chat message itself reaches the supervisor; no option is inferred and
     no extra agent message is needed. Run in the input observation transaction.
+    Callers pass only the person's own words, never a brindle delivery.
     """
-    return c.execute(
-        "UPDATE visuals SET dismissed_rev=rev, answered_in_chat_rev=rev, read_rev=MAX(read_rev, rev) "
-        "WHERE root_id=? AND kind='visual' AND question IS NOT NULL AND options IS NOT NULL "
-        "AND answer IS NULL AND dismissed_rev < rev AND updated_at < ? RETURNING id, rev",
-        (root_id, said_at)).fetchall()
+    rows = c.execute(
+        "SELECT id, rev, question, options FROM visuals WHERE root_id=? AND kind='visual' "
+        "AND question IS NOT NULL AND options IS NOT NULL AND answer IS NULL "
+        "AND dismissed_rev < rev AND updated_at < ?", (root_id, said_at)).fetchall()
+    said = _chat_choice(text)
+    folded = []
+    for row in rows:
+        if not said or said not in _chat_answers(json.loads(row["options"])):
+            continue
+        cur = c.execute(
+            "UPDATE visuals SET dismissed_rev=rev, answered_in_chat_rev=rev, read_rev=MAX(read_rev, rev) "
+            "WHERE id=? AND rev=? AND answer IS NULL AND dismissed_rev < rev", (row["id"], row["rev"]))
+        if cur.rowcount:
+            folded.append((row["id"], row["rev"]))
+    return folded
 
 
 def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
@@ -554,7 +585,7 @@ def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
     text = (f"The person dismissed visual {v['id']} (r{rev}) without answering. "
             "Don't wait for an answer; carry on without one.")
     try:
-        agents.send_message(db, v["by_agent"], text, person=True)
+        agents.send_message(db, v["by_agent"], text, person=True, fold_visuals=False)
     except BaseException:
         with db.tx() as c:
             c.execute("UPDATE visuals SET dismissed_rev=0 WHERE id=? AND dismissed_rev=?", (v["id"], rev))
@@ -563,7 +594,7 @@ def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
         # The dismissal is delivered once the publisher has it; a supervisor that can't be told
         # (paused, say) must not undo that or make a repeat tell the publisher again.
         try:
-            agents.send_message(db, v["root_id"], text, person=True)
+            agents.send_message(db, v["root_id"], text, person=True, fold_visuals=False)
         except Exception:
             pass
     bus.publish(db, "visual.dismissed", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], rev=rev)

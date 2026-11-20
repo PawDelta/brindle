@@ -200,11 +200,27 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
                  marks=pytest.mark.variant("a named planning-document request retains plan scope")),
     pytest.param("Please render a planning document", "plan",
                  marks=pytest.mark.variant("render must preserve the named plan scope")),
+    pytest.param("ok then build me a fucking planning doc", "plan",
+                 marks=pytest.mark.variant("a conversational lead-in and a profanity filler before a planning doc was refused")),
+    pytest.param("alright so write a proper planning doc", "plan",
+                 marks=pytest.mark.variant("a two-word lead-in with an adjective filler before write + planning doc")),
+    pytest.param("make a detailed visual of the flow", "visual",
+                 marks=pytest.mark.variant("the filler also reaches a visual artifact")),
+    pytest.param("ok then don't write a planning doc", None,
+                 marks=pytest.mark.variant("a negation after a lead-in must still grant nothing")),
+    pytest.param("write a summary of planning doc", None,
+                 marks=pytest.mark.variant("a function word is not filler, so the write is not a planning-doc ask")),
+    pytest.param("make sure the chart is right", None,
+                 marks=pytest.mark.variant("make sure is not a chart request")),
     pytest.param("write the plan, dont do that 9 run test though yet", "plan",
                  marks=pytest.mark.variant("write + a bare plan was refused, blocking a plain planning ask")),
     pytest.param("plan it first", "plan",
                  marks=pytest.mark.variant("plan it first named no artifact and was refused")),
     pytest.param("let's plan this", "plan", marks=pytest.mark.variant("let's + plan had no verb phrase")),
+    pytest.param("now lets make a plan to execute all these fixes", "plan",
+                 marks=pytest.mark.variant("a lead-in, lets without an apostrophe, and make a plan after let's was refused")),
+    pytest.param("let's draft a plan for the migration", "plan",
+                 marks=pytest.mark.variant("let's + a writing verb + a plan with its article")),
     pytest.param("can we plan first", "plan", marks=pytest.mark.variant("a question form of the plan ask")),
     pytest.param("I want to plan the X feature", "plan", marks=pytest.mark.variant("I want to + plan + an object")),
     pytest.param("let's think through the design before building", "plan",
@@ -240,7 +256,10 @@ def test_complete_request_intent(db, session, text, scope):
 
 @pytest.mark.parametrize("text", [
     pytest.param("let's plan this. Actually, don't plan this.", marks=pytest.mark.variant("a cancel after a new flexible plan ask")),
-    pytest.param("cancel planning mode", marks=pytest.mark.variant("cancelling the planning-mode wording"))])
+    pytest.param("cancel planning mode", marks=pytest.mark.variant("cancelling the planning-mode wording")),
+    pytest.param("ok then cancel planning mode", marks=pytest.mark.variant("a conversational lead-in before a cancel was not read as one")),
+    pytest.param("now make a planning doc. now don't write a planning doc", marks=pytest.mark.variant("a prefixed cancel after a new plan ask in the same message still granted")),
+])
 def test_plan_activity_ask_can_be_cancelled(db, session, text):
     boss, _ = session
     agents.send_message(db, boss.id, "let's plan this", person=True)
@@ -403,7 +422,7 @@ def typed_into_cli(db, boss, text, vouched=True):
                  marks=pytest.mark.variant("a whole one-word message authorizes one visual")),
     pytest.param("the status is ready", "status", False,
                  marks=pytest.mark.variant("one word excerpted from a longer message does not authorize a visual")),
-    pytest.param("then render first", "render first", False,
+    pytest.param("well render first", "render first", False,
                  marks=pytest.mark.variant("the person's own quoted words authorize one visual without an intent grammar match")),
     pytest.param("please send me updated renders", "please send me updated renders", False,
                  marks=pytest.mark.variant("reported refusal")),
@@ -448,7 +467,7 @@ def test_accepted_suggestion_backs_a_visual(db, session, tmp_path):
     """Real incident: Claude Code sends its own suggestion when the person accepts it (Tab, or Enter
     on an empty box), so the app saw their keys but not the words. The prompt's hook says what they were."""
     boss, _ = session
-    ask = "make a separate visual for stage 3"
+    ask = "make visuals for stage 3"
     assert app_saw_enter(boss).status_code == 200
     agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": ask})
     assert visuals.publish(db, boss, "Stage 3", "<p>yes</p>", asked=ask)["rev"] == 1
@@ -475,7 +494,7 @@ def test_accepted_suggestion_backs_a_visual(db, session, tmp_path):
         visuals.publish(db, boss, "Still delivered", "<p>no</p>", asked=ask)
 
 
-PASTE, SUGGESTION = "put the pasted plan in a separate visual", "make a separate visual for stage 3"
+PASTE, SUGGESTION = "put the pasted plan in a separate visual", "make visuals for stage 3"
 
 
 @pytest.mark.parametrize("texts,reported,sent,suggestion_backed", [
@@ -620,15 +639,15 @@ def test_mid_turn_message_backs_a_visual(db, session, tmp_path):
 
 
 def _report_came_late(db, boss, worker):
-    assert app_vouches(boss, "then render first", offers.time.time() - 1).status_code == 409
-    typed_into_cli(db, boss, "then render first", vouched=False)
+    assert app_vouches(boss, "well render first", offers.time.time() - 1).status_code == 409
+    typed_into_cli(db, boss, "well render first", vouched=False)
 
 
 def _report_lands_after_a_newer_cancel(db, boss, worker):
     submitted_at = offers.time.time()
     agents.send_message(db, boss.id, "Don't make a visual", person=True)
-    assert app_vouches(boss, "then render first", offers.time.time() + 60, submitted_at).status_code == 409
-    typed_into_cli(db, boss, "then render first", vouched=False)
+    assert app_vouches(boss, "well render first", offers.time.time() + 60, submitted_at).status_code == 409
+    typed_into_cli(db, boss, "well render first", vouched=False)
 
 
 def _report_with_no_prompt_yet(db, boss, worker):
@@ -636,20 +655,20 @@ def _report_with_no_prompt_yet(db, boss, worker):
 
 
 def _direct_message_cannot_stand_in_for_the_prompt(db, boss, worker):
-    assert app_vouches(boss, "then render first", offers.time.time() + 60).status_code == 200
-    agents.send_message(db, boss.id, "then render first", person=True)
+    assert app_vouches(boss, "well render first", offers.time.time() + 60).status_code == 200
+    agents.send_message(db, boss.id, "well render first", person=True)
 
 
 def _terminal(**fields):
     def send(db, boss, worker):
         token = "t" * 43
         with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
-            terminal_input(client, boss.id)("then render first", **fields)
+            terminal_input(client, boss.id)("well render first", **fields)
     return send
 
 
 def _expired(db, boss, worker):
-    typed_into_cli(db, boss, "then render first")
+    typed_into_cli(db, boss, "well render first")
     db.conn.execute("UPDATE visual_person_words SET created_at=created_at-?", (offers.FOLD + 1,))
 
 
@@ -669,7 +688,7 @@ def _says(*texts):
     # Use a lead-in outside request_intent's grammar so these exercise asked-word
     # provenance without a separate automatic grant masking a refused quote.
     # A hook prompt nobody vouched for: a paste, a failed report, a terminal outside the app.
-    pytest.param(lambda db, boss, worker: typed_into_cli(db, boss, "then render first", vouched=False), "render first",
+    pytest.param(lambda db, boss, worker: typed_into_cli(db, boss, "well render first", vouched=False), "render first",
                  marks=pytest.mark.variant("an unvouched CLI prompt cannot prove the person typed the quote")),
     (_report_came_late, "render first"),
     pytest.param(_report_lands_after_a_newer_cancel, "render first", marks=pytest.mark.variant("a late app report cannot revive consent after a newer cancellation")),
@@ -677,10 +696,10 @@ def _says(*texts):
     pytest.param(_direct_message_cannot_stand_in_for_the_prompt, "render first", marks=pytest.mark.variant("a direct message cannot stand in for the correlated terminal prompt")),
     pytest.param(_terminal(typed=False), "render first", marks=pytest.mark.variant("pasted terminal content cannot count as the person's typed request")),
     pytest.param(_terminal(), "render first", marks=pytest.mark.variant("raw terminal keystrokes without a correlated prompt cannot authorize publication")),
-    pytest.param(lambda db, boss, worker: agents.send_message(db, boss.id, "then render first", person=True), "render first",
+    pytest.param(lambda db, boss, worker: agents.send_message(db, boss.id, "well render first", person=True), "render first",
                  marks=pytest.mark.variant("a direct send marked person cannot replace app-vouched typed provenance")),
     pytest.param(_says("surrender first please"), "render first", marks=pytest.mark.variant("asked words cannot match inside another word")),
-    pytest.param(_says("then render first"), "render", marks=pytest.mark.variant("a one-word quote cannot authorize publication")),
+    pytest.param(_says("well render first"), "render", marks=pytest.mark.variant("a one-word quote cannot authorize publication")),
     pytest.param(_says("please don't render it"), "render it", marks=pytest.mark.variant("a quote from a refusal cannot authorize publication")),
     pytest.param(_says("render first", "Don't make a visual"), "render first", marks=pytest.mark.variant("a later refusal must revoke the earlier request")),
     pytest.param(_expired, "render first", marks=pytest.mark.variant("asked words older than the consent window cannot authorize publication")),
@@ -719,7 +738,7 @@ def test_question_form_is_not_a_negation(db, session, typed, asked, accepted):
 @pytest.mark.variant("a bypass attempt: a worker or a plan can't spend the person's quote")
 def test_asked_quote_is_not_for_workers_or_plans(db, session):
     boss, worker = session
-    typed_into_cli(db, boss, "then render first")
+    typed_into_cli(db, boss, "well render first")
     with pytest.raises(ServiceError):
         visuals.publish(db, worker, "From a worker", "<p>no</p>", asked="render first")
     with pytest.raises(ServiceError):
@@ -730,8 +749,8 @@ def test_asked_quote_is_not_for_workers_or_plans(db, session):
 @pytest.mark.variant("a typed message's automatic grant and asked quote must share one publication allowance")
 def test_asked_quote_allows_one_publication_per_message(db, session):
     boss, _ = session
-    typed_into_cli(db, boss, "then render first")
-    typed_into_cli(db, boss, "then render first")
+    typed_into_cli(db, boss, "well render first")
+    typed_into_cli(db, boss, "well render first")
     for title in ("One", "Two"):   # each message is its own ask
         visuals.publish(db, boss, title, "<p>yes</p>", asked="render first")
     with pytest.raises(ServiceError):
@@ -840,7 +859,7 @@ def _stress(why, *row):
 
 FIRST = "render first"
 # Exercise the quote path independently of request_intent's automatic grants.
-QUOTE_ONLY = "then render first"
+QUOTE_ONLY = "well render first"
 LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in range(110))
 
 

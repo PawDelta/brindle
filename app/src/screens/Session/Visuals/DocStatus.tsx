@@ -19,7 +19,7 @@ export interface StatusReviewer {
 
 const sep = <span aria-hidden className="h-3.5 w-px bg-line-strong" />;
 
-export function DocStatus({ stage, tone, line, reviewers, frozen, byline, workItem, brief, briefOpen, onBrief, testid = "plan-status", state, held }: {
+export function DocStatus({ stage, tone, line, reviewers, frozen, byline, workItem, brief, briefOpen, onBrief, testid = "plan-status", state, held, presentation }: {
   /* "In team review", "Locked for sign-off", "Needs your sign-off"… */
   stage: string;
   tone: "sap" | "pass" | "branch";
@@ -37,6 +37,8 @@ export function DocStatus({ stage, tone, line, reviewers, frozen, byline, workIt
   testid?: string;
   state?: string;
   held?: string;
+  /* The presentation the stage was chosen for ("closed": planning closed without approval). */
+  presentation?: string;
 }) {
   const faces: ReactNode = frozen ? reviewers.map((r) => (
     <span key={r.key} className={`inline-flex items-center gap-1.5 ${r.required ? "" : "text-ink-3"}`} title={r.required ? (r.signed ? `${r.name} signed` : `${r.name}'s sign-off is required`) : "Optional reviewer"}>
@@ -53,7 +55,7 @@ export function DocStatus({ stage, tone, line, reviewers, frozen, byline, workIt
     </span>
   );
   return (
-    <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 font-sans text-[12.5px] text-ink-2" data-testid={testid} data-state={state} data-held={held}>
+    <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 font-sans text-[12.5px] text-ink-2" data-testid={testid} data-state={state} data-held={held} data-presentation={presentation}>
       <span className={`${pill} ${tone === "pass" ? "text-pass" : tone === "branch" ? "text-branch" : "text-sap"}`}>{stage}</span>
       <span>{line}</span>
       {(frozen || reviewers.length > 0) && sep}

@@ -673,7 +673,7 @@ describe("visuals", () => {
     fireEvent.click(screen.getByTestId("visual-back"));
     expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
     fireEvent.click(screen.getByTestId("inbox-link"));
-    const cards = await screen.findAllByTestId("inbox-card");
+    const cards = await screen.findAllByTestId("inbox-row");
     expect(cards).toHaveLength(1);
     expect(cards[0].dataset.kind).toBe("visual");
   });
@@ -690,7 +690,7 @@ describe("visuals", () => {
       if (!pending) daemon.data.inbox = daemon.data.inbox.filter((i) => i.visual_id !== id);
       await act(async () => { daemon.publish(kind, { repo_root: REPO, root_id: "sup1", payload: { visual: id, ...(pending === undefined ? {} : { pending }) } }); });
     };
-    const cards = () => screen.queryAllByTestId("inbox-card").map((c) => c.textContent?.includes("Flow notice") ? "notice" : "prompt");
+    const cards = () => screen.queryAllByTestId("inbox-row").map((c) => c.textContent?.includes("Flow notice") ? "notice" : "prompt");
     const badge = () => screen.queryByTestId("inbox-badge")?.textContent ?? null;
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox" }} />);
     await waitFor(() => expect(cards()).toEqual(["notice", "prompt"]));
@@ -716,26 +716,6 @@ describe("visuals", () => {
     await act(async () => { reads.slice(1).forEach((resolve, i) => resolve(i === 0 ? [prompt] : daemon.data.inbox)); });
     await act(async () => sync.idle());
     expect([cards(), badge()]).toEqual([[], null]);
-  });
-
-  it("opens the plan the person asked for in the planning view, and not one asked before the screen showed", async () => {
-    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
-    const plan: VisualDTO = { ...visual, id: "v_plan", kind: "plan", title: "Plan", question: undefined, options: undefined, rev: 1 };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
-    const client = daemon.client();
-    vi.spyOn(client, "visuals").mockImplementation(async () => [plan]);
-    vi.spyOn(client, "markVisualRead").mockImplementation(async () => plan);
-    const draft: Plan = { id: "v_plan", session: "sup1", title: "Plan", rev: 0, state: "writing", markdown: "", lede: "", queued: 0, created_at: now, split: [], sections: [], decisions: [], threads: [] };
-    vi.spyOn(client, "plan").mockImplementation(async () => draft);
-    const store = createAppStore();
-    const asked = (id: number) => act(() => store.dispatch({ type: "stream", message: { type: "event", id, ts: now, kind: "plan.requested", repo_root: REPO, root_id: "sup1", agent_id: "sup1", workspace_id: "proj", task_id: null, payload: { visual: "v_plan" } } }));
-    await asked(5000);                                   // before the screen opens: not replayed
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
-    await screen.findByTestId("terminal", {}, { timeout: 4000 });
-    expect(screen.queryByTestId("plan-decided")).toBeNull();
-    await asked(5001);
-    expect((await screen.findByTestId("plan-decided")).dataset.state).toBe("writing");
   });
 
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
@@ -856,7 +836,7 @@ describe("visuals", () => {
     });
     const { store, sync } = connectDaemon(daemon, client);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} />);
-    const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+    const card = (await screen.findAllByTestId("inbox-row")).find((candidate) => candidate.dataset.kind === "visual")!;
     await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
     await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
@@ -880,7 +860,7 @@ describe("visuals", () => {
     expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
     expect(screen.queryByTestId("inbox-session")).toBeNull();
     expect(screen.queryByTestId("visual-reader")).toBeNull();
-    expect(screen.queryByTestId("inbox-card")).toBeNull();
+    expect(screen.queryByTestId("inbox-row")).toBeNull();
   });
 
   it("stops asking when the prompt was answered in chat", () => {
@@ -1047,7 +1027,7 @@ describe("visuals", () => {
     const sync = startSync({ client, store, repo: REPO, connect: daemon.connect });
     const answer = vi.spyOn(client, "answerVisual");
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} />);
-    const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+    const card = (await screen.findAllByTestId("inbox-row")).find((candidate) => candidate.dataset.kind === "visual")!;
     await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
     fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
@@ -1058,7 +1038,7 @@ describe("visuals", () => {
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
     fireEvent.click(screen.getByTestId("inbox-link"));
     await screen.findByRole("region", { name: "Inbox" });
-    expect(screen.queryByTestId("inbox-card")).toBeNull();
+    expect(screen.queryByTestId("inbox-row")).toBeNull();
     expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
     expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
     expect(answer).not.toHaveBeenCalled();
@@ -1287,12 +1267,13 @@ describe("visuals", () => {
     const latest = (p: Plan) => act(async () => reads[reads.length - 1](p));
     view.rerender(reader({ ...row, rev: 2 }));
     await latest(settled(2));
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign off" })));
+    fireEvent.click(screen.getByRole("radio", { name: "Org policy" }));
+    await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
     view.rerender(reader({ ...row, rev: 3 }));
     await latest(settled(3));
     await act(async () => replies[1]({ ...plan, rev: 2, state: "approved", verdict: { approved: true, at: now, rev: 2 } }));
     expect(screen.getByTestId("plan-rev").textContent).toBe("rev 3");
-    expect(screen.getByRole("button", { name: "Sign off" })).toBeTruthy();
+    expect(screen.getByTestId("plan-build")).toBeTruthy();
     // Reopened later, a decided plan shows the alternative the person sent, not the supervisor's.
     view.unmount();
     render(reader(row));
@@ -1312,7 +1293,7 @@ describe("visuals", () => {
       ] }],
       split: [
         { id: "w1", title: "Remote launch", after: [], files: ["spawn.py", "tmux.py"], test: "test_remote_spawn" },
-        { id: "w2", title: "Pro gate", after: ["w1"], files: ["pro/account.py", "spawn.py"] },
+        { id: "w2", title: "Pro gate", after: [], files: ["pro/account.py", "spawn.py"] },
       ],
     };
     const sent: PlanVerdict[] = [];

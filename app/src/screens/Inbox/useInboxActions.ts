@@ -25,8 +25,8 @@ export interface Note {
 }
 
 export interface InboxActions {
-  /* Send the action now. */
-  run(item: InboxItemDTO, action: InboxAction, body?: Record<string, unknown>): void;
+  /* Send the action now; `acked` hears whether the engine took it (the Inbox row then settles to its done line). */
+  run(item: InboxItemDTO, action: InboxAction, body?: Record<string, unknown>, acked?: (ok: boolean) => void): void;
   /* The same (kept for the callers that say so). */
   now(item: InboxItemDTO, action: InboxAction, body?: Record<string, unknown>): void;
   /* Keys of items acted on, to leave out of the list until the next inbox. */
@@ -72,7 +72,7 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
   }, [inbox]);
 
   const run = useCallback<InboxActions["run"]>(
-    (item, action, body = {}) => {
+    (item, action, body = {}, acked) => {
       const key = itemKey(item);
       const chosen = decision(item);
       if (inFlight.current.has(key)) return;
@@ -85,6 +85,7 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
       const now = latest.current.find((i) => itemKey(i) === key);
       if (!now || decision(now) !== chosen) {
         setNotes((n) => ({ ...n, [key]: { text: "This changed while you decided; have another look.", failed: true } }));
+        acked?.(false);
         return;
       }
       inFlight.current.add(key);
@@ -96,9 +97,11 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
         .inboxAction(actionId(item) || "item", action, body)
         .then(() => {
           setSettled((s) => new Map(s).set(key, chosen));
+          acked?.(true);
           void refresh();
         })
         .catch((e: unknown) => {
+          acked?.(false);
           // The engine has moved on from the snapshot the card came from: drop it and fetch the truth.
           if (e instanceof DaemonError && e.status === 409 && NO_LONGER.test(e.message)) {
             setSettled((s) => new Map(s).set(key, chosen));

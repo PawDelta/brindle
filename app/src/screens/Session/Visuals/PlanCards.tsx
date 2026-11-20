@@ -37,18 +37,42 @@ export function Avatar({ who, small, ring }: { who: string; small?: boolean; rin
   );
 }
 
-/* Files more than one worker of the split expects to change, with the workers that do. */
+/* Whether two workers can run concurrently: neither is ordered after the other, directly or through a chain. */
+function unorderedCheck(plan: Plan): (a: string, b: string) => boolean {
+  const direct = new Map(plan.split.map((w) => [w.id, w.after ?? []]));
+  const before = new Map<string, Set<string>>();
+  for (const w of plan.split) {
+    const seen = new Set<string>();
+    const stack = [...(direct.get(w.id) ?? [])];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (id === w.id || seen.has(id)) continue;
+      seen.add(id);
+      for (const prev of direct.get(id) ?? []) stack.push(prev);
+    }
+    before.set(w.id, seen);
+  }
+  return (a, b) => a !== b && !before.get(a)?.has(b) && !before.get(b)?.has(a);
+}
+
+/* Files more than one unordered worker of the split expects to change, with those workers. */
 export function overlaps(plan: Plan): Map<string, string[]> {
   const by = new Map<string, string[]>();
   for (const w of plan.split) for (const f of new Set(w.files ?? [])) by.set(f, [...(by.get(f) ?? []), w.id]);
-  return new Map([...by].filter(([, ws]) => ws.length > 1));
+  const unordered = unorderedCheck(plan);
+  const out = new Map<string, string[]>();
+  for (const [f, ws] of by) {
+    const clash = ws.filter((a) => ws.some((b) => unordered(a, b)));
+    if (clash.length > 1) out.set(f, clash);
+  }
+  return out;
 }
 
 const optionRow = "grid grid-cols-[14px_minmax(0,1.15fr)_minmax(0,1.5fr)_minmax(0,.8fr)_60px] items-start gap-3 border-b px-2.5";
 
 /* A decision's alternatives as a table: one row each, the picked one marked, the supervisor's pick
    "recommended", the trade-offs as + and − lines, the files it would touch, and who voted for it.
-   A row is a radio: picking one is the person's draft until they confirm it in the bottom bar. */
+   A row is a radio: the person's selection is sent with their verdict. */
 export function Decision({ decision: d, chosen, open, onPick }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void }) {
   return (
     <div role="radiogroup" aria-label={d.title} className="-mx-2.5 grid font-sans text-[13px] leading-normal">
@@ -117,6 +141,7 @@ const stateTone: Partial<Record<NonNullable<PlanWorkerDTO["state"]>, string>> = 
    is, and its test's last result. */
 export function Tasks({ plan, shared }: { plan: Plan; shared: Map<string, string[]> }) {
   const live = plan.state === "approved";
+  const unordered = unorderedCheck(plan);
   return (
     <>
       {shared.size > 0 && (
@@ -145,8 +170,8 @@ export function Tasks({ plan, shared }: { plan: Plan; shared: Map<string, string
               {!!w.files?.length && (
                 <span className="flex flex-wrap gap-1">
                   {w.files.map((f) => {
-                    const others = shared.get(f)?.filter((id) => id !== w.id);
-                    return others ? (
+                    const others = shared.get(f)?.filter((id) => unordered(w.id, id));
+                    return others?.length ? (
                       <code key={f} className="rounded-sm border border-sap/60 bg-sap-soft px-1 font-mono text-[10.5px] leading-[18px] text-sap" title={`also in ${others.join(", ")}`} data-overlap="true">
                         {`${f} ⚠ also ${others.join(", ")}`}
                       </code>

@@ -145,11 +145,18 @@ def _grant(c, root: str, scope: str = "visual") -> None:
               "ON CONFLICT(root_id) DO UPDATE SET remaining=1, scope=excluded.scope", (root, scope))
 
 
+# Conversational lead-ins before an ask: "ok then", "alright so", "hey, just".
+_LEAD_IN = r"(?:(?:ok|okay|alright|so|then|fine|just|now|hey)\W+)*"
+# Up to two filler words between an article and the named artifact ("a fucking planning doc"). Negations,
+# "make sure" and function words ("a summary of planning doc") are not filler, so they still stop the match.
+_FILLER = (r"(?:(?!(?:not|no|nor|never|sure|dont|don|do|won|cant|cannot|of|for|about|on|to|from|with|in|and|or|"
+           r"that|which)\b)\w+\s+){0,2}")
 _REQUEST = re.compile(
-    r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
+    _LEAD_IN + r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
     r"(?:visualize\b|(?:(?:make|create|show|draw|build|generate|render)\s+(?:(?:me|us)\s+)?|"
     r"(?:I want|I'd like|I would like)\s+)"
     r"(?:(?:a|an|the|this|that)\s+)?(?:(?:simple|interactive|quick|small|new)\s+)*"
+    + _FILLER +
     r"(?P<artifact>visual(?:ization)?|diagram|chart|mockup|planning doc(?:ument)?|plan document)\b|render\b)", re.I)
 # "show me the flow visually": a plain object phrase, no joining word that could add a second instruction.
 _SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?show\s+(?:me|us)"
@@ -157,11 +164,18 @@ _SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?
 # Plan wordings: a writing verb plus the plan, or "plan it first". A bare "plan" needs the verb, so
 # "I want the plan to use X" and "the plan looks good" grant nothing; a purpose clause is fine.
 _PLAN_REQUEST = re.compile(
+    _LEAD_IN + r"(?:"  # one group, so the lead-in reaches every alternative
     r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
     r"(?:(?:write|draft|prepare|put together|draw up|do|make|create|build)\s+(?:(?:me|us)\s+)?(?:up\s+)?"
-    r"(?:(?:a|an|the|my|our)\s+)?(?:(?:simple|quick|short|small|new|first)\s+)*"
-    r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
+    r"(?:(?:a|an|the|my|our)\s+)?"
+    # A bare "plan" takes only the listed adjectives; a named planning doc may have filler words before it.
+    r"(?:(?:(?:simple|quick|short|small|new|first)\s+)*plan\b"
+    r"|" + _FILLER + r"(?:planning doc(?:ument)?|plan doc(?:ument)?)\b)"
     r"|plan\s+(?:it|this|that)\s+first\b)"
+    # "let's make a plan", "lets draft a planning doc": the verb takes a named plan with its article.
+    r"|(?:let['’]?s|let us)\s+(?:(?:first|now|just|please)\s+)*"
+    r"(?:make|write|draft|prepare|draw up|create|put together)\s+(?:up\s+)?(?:a|an|my|our)\s+"
+    r"" + _FILLER + r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
     # Planning as the activity: "let's plan this", "can we plan first", "I want to plan the X feature",
     # "let's think through the design", "plan this out", "go into planning mode". The sentence must open
     # with the ask, so "the plan looks good" and "I don't want to plan" grant nothing.
@@ -173,8 +187,8 @@ _PLAN_REQUEST = re.compile(
     r"plan\s+(?:it|this|that|things|everything)\s+out\b"
     r"|plan\s+(?:it|this|that)(?:\s+please)?\W*$"
     r"|(?:(?:go|switch|move|get)\s+(?:in)?to|enter|start|use|open|turn on)\s+(?:the\s+)?plan(?:ning)?\s+(?:mode|view)\b"
-    r"|plan(?:ning)?\s+(?:mode|view)(?:\s+(?:please|now|first))?\W*$)", re.I)
-_CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
+    r"|plan(?:ning)?\s+(?:mode|view)(?:\s+(?:please|now|first))?\W*$))", re.I)
+_CANCEL_LEAD = r"(?:(?:ok|okay|alright|so|then|fine|just|now|hey|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
 _CANCEL_ARTIFACT = (r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan docs?|"
                     r"plan document|plan(?:ning)?\s+(?:mode|view)s?|plans?|request)\b")
 # Names the artifact, or says not to make it: a cancel in any clause of a message.
@@ -283,7 +297,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
                  fold_only: bool = False, typed: bool = False, cli_prompt: bool = False,
                  said_at: float | None = None, mid_turn: bool = False, carries_delivery: bool = False,
-                 staged_only: bool = False) -> None:
+                 staged_only: bool = False, fold_visuals: bool = True) -> None:
     """Called only for authenticated person input, never for agent messages.
 
     ``typed``: the app watched the person key in all of ``text`` themselves.
@@ -307,6 +321,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     if message_at is None:
         message_at = time.time()
     scope = request_intent(text)
+    closed_prompts = []
     with db.tx() as c:
         if staged_only:
             if message_at <= time.time() - FOLD:
@@ -336,7 +351,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         if not mid_turn:
             c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                       (time.time(), root.id))
-        closed_prompts = visuals.answered_in_chat(c, root.id, message_at)
+        if fold_visuals:
+            closed_prompts = visuals.answered_in_chat(c, root.id, message_at, text)
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
@@ -364,9 +380,9 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         if not fold_only and scope and not cancelled:
             _grant(c, root.id, scope)
             _link(c, root.id, text, "grant")
-    for prompt in closed_prompts:
+    for visual_id, rev in closed_prompts:
         bus.publish(db, "visual.dismissed", repo_root=ws.repo_root, root_id=root.id,
-                    visual=prompt["id"], rev=prompt["rev"])
+                    visual=visual_id, rev=rev)
     bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
     if not fold_only and (scope == "plan" or cancelled):
         from brindle import plans

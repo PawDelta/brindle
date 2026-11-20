@@ -2982,6 +2982,32 @@
           "title": "PermissionDTO",
           "type": "object"
         },
+        "PersonDTO": {
+          "description": "A teammate: the Library's account id, and their profile name (None when they set none).",
+          "properties": {
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PersonDTO",
+          "type": "object"
+        },
         "PlanOfferDTO": {
           "description": "Current session context for deciding whether to plan the goal first.",
           "properties": {
@@ -3056,6 +3082,38 @@
           ],
           "title": "PlanOfferMilestoneDTO",
           "type": "object"
+        },
+        "SignoffDTO": {
+          "description": "A design's sign-off progress, as of its newest sign-off: ``signed`` of\n``required`` required reviewers on revision ``rev``, and who is still to sign.",
+          "properties": {
+            "required": {
+              "title": "Required",
+              "type": "integer"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "signed": {
+              "title": "Signed",
+              "type": "integer"
+            },
+            "waiting": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PersonDTO"
+              },
+              "title": "Waiting",
+              "type": "array"
+            }
+          },
+          "required": [
+            "rev",
+            "signed",
+            "required"
+          ],
+          "title": "SignoffDTO",
+          "type": "object"
         }
       },
       "properties": {
@@ -3082,6 +3140,23 @@
           "default": null,
           "title": "Agent Id"
         },
+        "checks_state": {
+          "anyOf": [
+            {
+              "enum": [
+                "passed",
+                "failed",
+                "running"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checks State"
+        },
         "choices": {
           "anyOf": [
             {
@@ -3096,6 +3171,18 @@
           ],
           "default": null,
           "title": "Choices"
+        },
+        "decision_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decision Count"
         },
         "detail": {
           "anyOf": [
@@ -3124,6 +3211,30 @@
           "default": null,
           "title": "Doc"
         },
+        "excerpt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excerpt"
+        },
+        "file_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File Count"
+        },
         "fix": {
           "anyOf": [
             {
@@ -3135,6 +3246,53 @@
           ],
           "default": null,
           "title": "Fix"
+        },
+        "from_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Name"
+        },
+        "from_person": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PersonDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "inbox_group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inbox Group"
+        },
+        "item_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Key"
         },
         "kind": {
           "title": "Kind",
@@ -3173,6 +3331,18 @@
             }
           ],
           "default": null
+        },
+        "read": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Read"
         },
         "reason": {
           "title": "Reason",
@@ -3213,6 +3383,29 @@
           ],
           "default": null,
           "title": "Section"
+        },
+        "signoff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignoffDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
         },
         "url": {
           "anyOf": [
@@ -5819,6 +6012,32 @@
       "title": "PermissionRuleDTO",
       "type": "object"
     },
+    "PersonDTO": {
+      "description": "A teammate: the Library's account id, and their profile name (None when they set none).",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sub"
+      ],
+      "title": "PersonDTO",
+      "type": "object"
+    },
     "PlanAnchorDTO": {
       "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
       "properties": {
@@ -6110,6 +6329,11 @@
               },
               "title": "Options",
               "type": "array"
+            },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
             },
             "title": {
               "title": "Title",
@@ -6908,11 +7132,16 @@
           "type": "object"
         },
         "PlanUnconfirmedDTO": {
-          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead;\n``can_edit_reviewers``: they may change who reviews it (the Library refused\nthe share, ``access_refused``, or the review can't be confirmed).",
           "properties": {
             "approval_held": {
               "default": false,
               "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_edit_reviewers": {
+              "default": false,
+              "title": "Can Edit Reviewers",
               "type": "boolean"
             },
             "can_stop_sharing": {
@@ -6930,7 +7159,8 @@
                 "sign_in",
                 "key_unavailable",
                 "library_error",
-                "other_account"
+                "other_account",
+                "access_refused"
               ],
               "title": "Reason",
               "type": "string"
@@ -7201,7 +7431,8 @@
             "redirected",
             "approved",
             "writing",
-            "superseded"
+            "superseded",
+            "cancelled"
           ],
           "title": "State",
           "type": "string"
@@ -7358,6 +7589,11 @@
           },
           "title": "Options",
           "type": "array"
+        },
+        "section": {
+          "default": "open-questions",
+          "title": "Section",
+          "type": "string"
         },
         "title": {
           "title": "Title",
@@ -7771,11 +8007,16 @@
           "type": "object"
         },
         "PlanUnconfirmedDTO": {
-          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead;\n``can_edit_reviewers``: they may change who reviews it (the Library refused\nthe share, ``access_refused``, or the review can't be confirmed).",
           "properties": {
             "approval_held": {
               "default": false,
               "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_edit_reviewers": {
+              "default": false,
+              "title": "Can Edit Reviewers",
               "type": "boolean"
             },
             "can_stop_sharing": {
@@ -7793,7 +8034,8 @@
                 "sign_in",
                 "key_unavailable",
                 "library_error",
-                "other_account"
+                "other_account",
+                "access_refused"
               ],
               "title": "Reason",
               "type": "string"
@@ -8673,6 +8915,11 @@
               "title": "Options",
               "type": "array"
             },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
+            },
             "title": {
               "title": "Title",
               "type": "string"
@@ -9284,11 +9531,16 @@
       "type": "object"
     },
     "PlanUnconfirmedDTO": {
-      "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+      "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead;\n``can_edit_reviewers``: they may change who reviews it (the Library refused\nthe share, ``access_refused``, or the review can't be confirmed).",
       "properties": {
         "approval_held": {
           "default": false,
           "title": "Approval Held",
+          "type": "boolean"
+        },
+        "can_edit_reviewers": {
+          "default": false,
+          "title": "Can Edit Reviewers",
           "type": "boolean"
         },
         "can_stop_sharing": {
@@ -9306,7 +9558,8 @@
             "sign_in",
             "key_unavailable",
             "library_error",
-            "other_account"
+            "other_account",
+            "access_refused"
           ],
           "title": "Reason",
           "type": "string"
@@ -11423,6 +11676,11 @@
               "title": "Options",
               "type": "array"
             },
+            "section": {
+              "default": "open-questions",
+              "title": "Section",
+              "type": "string"
+            },
             "title": {
               "title": "Title",
               "type": "string"
@@ -12220,11 +12478,16 @@
           "type": "object"
         },
         "PlanUnconfirmedDTO": {
-          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead.",
+          "description": "Why the Library couldn't confirm a shared plan's review when the person\ntried to approve it. ``approval_held``: their Approve applies by itself\nonce it can; ``can_stop_sharing``: they may make it a personal doc instead;\n``can_edit_reviewers``: they may change who reviews it (the Library refused\nthe share, ``access_refused``, or the review can't be confirmed).",
           "properties": {
             "approval_held": {
               "default": false,
               "title": "Approval Held",
+              "type": "boolean"
+            },
+            "can_edit_reviewers": {
+              "default": false,
+              "title": "Can Edit Reviewers",
               "type": "boolean"
             },
             "can_stop_sharing": {
@@ -12242,7 +12505,8 @@
                 "sign_in",
                 "key_unavailable",
                 "library_error",
-                "other_account"
+                "other_account",
+                "access_refused"
               ],
               "title": "Reason",
               "type": "string"
@@ -12549,7 +12813,8 @@
             "redirected",
             "approved",
             "writing",
-            "superseded"
+            "superseded",
+            "cancelled"
           ],
           "title": "State",
           "type": "string"
@@ -12599,6 +12864,66 @@
         "me"
       ],
       "title": "SharedDesignDTO",
+      "type": "object"
+    },
+    "SignoffDTO": {
+      "$defs": {
+        "PersonDTO": {
+          "description": "A teammate: the Library's account id, and their profile name (None when they set none).",
+          "properties": {
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub"
+          ],
+          "title": "PersonDTO",
+          "type": "object"
+        }
+      },
+      "description": "A design's sign-off progress, as of its newest sign-off: ``signed`` of\n``required`` required reviewers on revision ``rev``, and who is still to sign.",
+      "properties": {
+        "required": {
+          "title": "Required",
+          "type": "integer"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "signed": {
+          "title": "Signed",
+          "type": "integer"
+        },
+        "waiting": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PersonDTO"
+          },
+          "title": "Waiting",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rev",
+        "signed",
+        "required"
+      ],
+      "title": "SignoffDTO",
       "type": "object"
     },
     "StoppedAgentDTO": {
@@ -13595,6 +13920,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/inbox/read"
+    },
+    {
+      "method": "POST",
       "path": "/v1/inbox/{id}/{action}"
     },
     {
@@ -13688,6 +14017,18 @@
     {
       "method": "POST",
       "path": "/v1/library/designs/{id}/question"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/library/designs/{id}/share-link"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/library/designs/{id}/share-link"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/designs/{id}/share-link"
     },
     {
       "method": "GET",
@@ -13815,6 +14156,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/cancel"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/comments"
     },
     {
@@ -13860,6 +14205,18 @@
     {
       "method": "POST",
       "path": "/v1/plans/{id}/share"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/plans/{id}/share-link"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}/share-link"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/share-link"
     },
     {
       "method": "POST",

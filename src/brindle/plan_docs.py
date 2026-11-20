@@ -72,6 +72,13 @@ MAX_BASES = 5                # draft texts handed to the supervisor kept per pla
 SUPERVISED = "From the supervisor's revision: these words changed here since it read them."
 # Section ids the comment anchors already use for something else.
 RESERVED = {"ask", "lede", "split"}
+# The design-doc spine: stable section ids, in reading order. The extras are
+# kept only when they have something to say; architecture and tech-stack sit
+# inside Proposed design, audience right after Context.
+SPINE = ("context", "audience", "goals", "proposed-design", "architecture", "tech-stack", "alternatives", "risks",
+         "rollout", "open-questions")
+EXTRAS = frozenset({"audience", "architecture", "tech-stack"})
+OPEN_QUESTIONS = "open-questions"
 # What an SVG diagram may hold: drawing elements and presentation attributes
 # only. Nothing that runs (scripts, event handlers, animation that can set an
 # attribute), styles (CSS can load) or loads (images, links, foreign content).
@@ -218,6 +225,75 @@ def parse_sections(raw: Any) -> list[dict]:
                     "kind": kind, "markdown": body,
                     "caption": visuals._text(s.get("caption"), "a diagram's caption", visuals.MAX_DETAIL)})
     return out
+
+
+TITLES = {"context": "Context", "audience": "Audience", "goals": "Goals and non-goals",
+          "proposed-design": "Proposed design", "architecture": "Architecture", "tech-stack": "Tech stack",
+          "alternatives": "Alternatives considered", "risks": "Risks and what's hard to undo",
+          "rollout": "Rollout and tasks", "open-questions": "Open questions"}
+def _heading(text: str) -> str:
+    return re.sub(r"[^a-z ]", "", text.lower().replace("-", " ")).strip()
+
+
+_HEADINGS = {**{_heading(t): i for i, t in TITLES.items()}, **{_heading(i): i for i in TITLES},
+             "goals": "goals", "alternatives": "alternatives", "risks": "risks", "rollout": "rollout"}
+
+
+def canonical_ids(parts: list[dict], only: set[str]) -> list[dict]:
+    """``parts`` with the sections whose ids are in ``only`` renamed to their spine id,
+    when their title is a spine heading and no other section has it."""
+    taken = {s["id"] for s in parts}
+    out = []
+    for s in parts:
+        key = _HEADINGS.get(_heading(s["title"])) if s["id"] in only else None
+        if key and key not in taken:
+            taken.add(key)
+            s = {**s, "id": key}
+        out.append(s)
+    return out
+
+
+def design_doc(parts: list[dict], force: bool = False, map_only: bool = False) -> list[dict]:
+    """A proposal as the design-doc spine: sections with a spine id, or
+    (markdown headings) a spine title, take the canonical id; every required
+    spine section is present, in order. Sections naming none of the spine are
+    a free-form doc and stay as written, unless ``force`` (a new plan, or a
+    revision of one already on the spine). ``map_only``: just the canonical ids,
+    for a doc laid out by a custom template (its headings and order win)."""
+    parts = [dict(s) for s in parts]
+    taken = {s["id"] for s in parts}
+    for s in parts:
+        key = _HEADINGS.get(_heading(s["title"]))
+        if s["id"] not in SPINE and re.fullmatch(r"s\d+", s["id"]) and key and key not in taken:
+            taken.discard(s["id"])
+            taken.add(key)
+            s["id"] = key
+    if map_only or (not force and not any(s["id"] in SPINE for s in parts)):
+        return parts
+    for sid in SPINE:
+        if sid not in EXTRAS and sid not in taken:
+            parts.append({"id": sid, "title": TITLES[sid], "kind": "markdown", "markdown": "", "caption": None})
+    return _spine(parts)
+
+
+def empty_extra(s: dict) -> bool:
+    """An optional spine extra (by id or heading) with nothing in it."""
+    extra = s["id"] in EXTRAS or _HEADINGS.get(_heading(s["title"])) in EXTRAS
+    return extra and s["kind"] == "markdown" and not (s["markdown"] or "").strip()
+
+
+def _spine(parts: list[dict]) -> list[dict]:
+    """Spine sections in reading order; an extra with nothing in it is never
+    stored, and a spine heading with nothing to say gets one line. Sections
+    with other ids keep their place after whatever precedes them."""
+    parts = [s for s in parts if s["id"] not in EXTRAS or s["markdown"] or s["kind"] != "markdown"]
+    rank, keyed = -1, []
+    for n, s in enumerate(parts):
+        rank = SPINE.index(s["id"]) if s["id"] in SPINE else rank
+        keyed.append((rank, n, s))
+    out = [s for _, _, s in sorted(keyed, key=lambda k: k[:2])]
+    return [dict(s, markdown="None.") if s["id"] in SPINE and s["kind"] == "markdown" and not s["markdown"] else s
+            for s in out]
 
 
 def insert_revision(c, plan_id: str, rev: int, author: str, source: str, lede: str, sections: list[dict],
@@ -1041,12 +1117,6 @@ def compare_revisions(current: dict, previous: dict | None) -> dict:
                           *(f"− {p}" for p in option.get("cons", [])),
                           *option.get("touches", [])]
             out[f"decision:{d['id']}"] = {"title": d["title"], "markdown": "\n".join(filter(None, lines))}
-        if r["split"]:
-            out["split"] = {"title": "Tasks", "markdown": "\n\n".join(
-                "\n".join(filter(None, [w["title"], w.get("test"),
-                                       ", ".join(w.get("files") or []),
-                                       "After: " + ", ".join(w["after"]) if w.get("after") else ""]))
-                for w in r["split"])}
         if r.get("ask"):
             out["ask"] = {"title": "Question", "markdown": r["ask"]}
         return out
@@ -1079,7 +1149,7 @@ def revision_dto(db: DB, plan_id: str, rev: Any) -> dict:
     if r is None:
         raise ServiceError("not_found", "no such revision", 404)
     return PlanRevisionDetailDTO(**_revision_dto(r), lede=r["lede"], sections=r["sections"], markdown=r["markdown"],
-                                 decisions=r["decisions"], split=r["split"], ask=r["ask"]).to_json()
+                                 decisions=r["decisions"], split=[], ask=r["ask"]).to_json()
 
 
 def fields(db: DB, p: dict) -> dict:

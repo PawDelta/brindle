@@ -64,6 +64,9 @@ HOLDING = ("open", "redirected", "writing")
 # first proposal fills it. "superseded": a draft the person called off before it was written; closed, not approvable.
 WRITING = "writing"
 SUPERSEDED = "superseded"
+# Withdrawn without approval (cancel): closed, not approvable, holds nothing. The tasks it held wait on each
+# one's decision (tasks.plan_holds, plan_cancel_holds), not on the plan.
+CANCELLED = "cancelled"
 # A row of the build gate.
 SIGNED, CHANGES, WAITING, WAIVED = "signed_off", "changes_requested", "waiting", "waived"
 _MET = (SIGNED, WAIVED)
@@ -72,9 +75,11 @@ CONFLICT = "conflict"       # the plan and the Library's copy both changed since
 # The gate's states that keep a build from starting.
 GATE_SHUT = (WAITING, CHANGES, CONFLICT)
 # Why the Library couldn't confirm a shared plan's review (plan_shares.unconfirmed), in the person's words.
-OFFLINE, SIGN_IN, KEY_UNAVAILABLE, LIBRARY_ERROR, OTHER_ACCOUNT = (
-    "offline", "sign_in", "key_unavailable", "library_error", "other_account")
+OFFLINE, SIGN_IN, KEY_UNAVAILABLE, LIBRARY_ERROR, OTHER_ACCOUNT, ACCESS_REFUSED = (
+    "offline", "sign_in", "key_unavailable", "library_error", "other_account", "access_refused")
 UNCONFIRMED = {
+    ACCESS_REFUSED: "The Library refused this account access to the plan's shared doc, so its review can't be "
+                    "confirmed. Stop sharing, or edit the reviewers.",
     OFFLINE: "brindle can't reach the Library right now, so it can't confirm this plan's review.",
     SIGN_IN: "Your brindle sign-in has expired, so the Library can't confirm this plan's review.",
     KEY_UNAVAILABLE: "Your organization's encryption key isn't available, so the Library can't confirm this "
@@ -171,7 +176,11 @@ def _option_extras(raw: list, options: list[dict]) -> list[dict]:
     return options
 
 
-def _decisions(raw: Any) -> list[dict]:
+def _decisions(raw: Any, known: set[str] | None = None) -> list[dict]:
+    """``known``: the revision's section ids; a decision's ``section`` anchor
+    must name one, else (or with none given) it falls to open-questions."""
+    from brindle import plan_docs
+
     if raw is None:
         return []
     if not isinstance(raw, list) or len(raw) > MAX_DECISIONS:
@@ -190,7 +199,11 @@ def _decisions(raw: Any) -> list[dict]:
         mine = d.get("mine")
         if mine is not None and mine not in {o["id"] for o in options}:
             raise ServiceError("invalid", f"decision {did}'s pick isn't one of its options", 400)
+        anchor = d.get("section")
+        if not isinstance(anchor, str) or (known is not None and anchor not in known):
+            anchor = plan_docs.OPEN_QUESTIONS
         out.append({"id": did, "title": visuals._text(d.get("title"), "a decision's title", visuals.MAX_QUESTION, True),
+                    "section": anchor,
                     "options": _option_extras(d["options"], options), "mine": mine,
                     "challenge": visuals._text(d.get("challenge"), "a decision's challenge", visuals.MAX_DETAIL)})
     return out
@@ -406,11 +419,14 @@ def _gate(c, p: dict) -> dict | None:
         state, reason = "ready", None
     is_open = p["state"] == "open"
     unconfirmed = None
-    if is_open and row["unconfirmed"] is not None:
-        unconfirmed = {"reason": row["unconfirmed"],
-                       "message": UNCONFIRMED.get(row["unconfirmed"], UNCONFIRMED[LIBRARY_ERROR]),
+    # A refusal of access is a way out too: the owner can stop sharing or edit the reviewers.
+    held = row["unconfirmed"] or (ACCESS_REFUSED if row["access_refused"] is not None else None)
+    if is_open and held is not None:
+        unconfirmed = {"reason": held,
+                       "message": UNCONFIRMED.get(held, UNCONFIRMED[LIBRARY_ERROR]),
                        "approval_held": row["approve_wanted"] is not None,
-                       "can_stop_sharing": shared_docs.may_stop(row, shared_docs.account())}
+                       "can_stop_sharing": shared_docs.may_stop(row, shared_docs.account()),
+                       "can_edit_reviewers": row["doc_id"] is not None}
     return {"state": state, "reason": reason, "required": len(required), "signed": met, "waiting_on": unmet,
             "reviewers": rows, "policies": policies, "unconfirmed": unconfirmed,
             "approval_refused": row["approve_refused"] if is_open else None}
@@ -479,7 +495,7 @@ def to_dto(db: DB, p: dict) -> dict:
     from brindle.service.dto import PlanDTO
 
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
-                   state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=_board(db, p),
+                   state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=[],
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
                    reference=doc_templates.reference_of(db, p["id"]), **plan_docs.fields(db, p)).to_json()
@@ -596,13 +612,39 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     where = doc_templates.store()
     fmt = None if plan_id else doc_templates.resolve(where=where)
     template = doc_templates.default_template(fmt) if fmt else (doc_templates.of(db, plan_id) or {}).get("template")
+    # With no custom template, a new plan or a revision of one already on the spine follows the
+    # design-doc spine (an older free-form plan keeps its sections as they are).
+    on_spine = plan_id is not None and any(
+        s["id"] in plan_docs.SPINE for s in plan_docs.revision(db, plan_id)["sections"])
+    if plan_id is None or on_spine:
+        parts = plan_docs.design_doc(parts, force=not template, map_only=bool(template))
+        markdown = plan_docs.render(lede, parts)
+    own = {s["id"] for s in parts}
     parts, added = doc_templates.apply(template, parts)
+    if added:
+        # A heading the template brought in empty takes its spine id too (Open questions stays one section).
+        parts = plan_docs.canonical_ids(parts, {s["id"] for s in parts} - own)
+    if template:
+        # An optional extra (audience, architecture, tech stack) with nothing in it is never stored,
+        # whether the supervisor left it empty or the template brought it in; a required one stays,
+        # empty, for sign-off to ask for.
+        required = {doc_templates._key(t["title"]) for t in template["sections"] if t.get("required")}
+        kept = [s for s in parts if not plan_docs.empty_extra(s) or doc_templates._key(s["title"]) in required]
+        added = added or len(kept) != len(parts)
+        parts = kept
     if added:
         markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     given = [name for name, raw in (("decisions", decisions), ("split", split), ("ask", ask)) if raw]
-    decisions, split = _decisions(decisions), _split(split)
+    decisions, split = _decisions(decisions, {s["id"] for s in parts}), _split(split)
+    if any(d["section"] == plan_docs.OPEN_QUESTIONS for d in decisions) and not any(
+            s["id"] == plan_docs.OPEN_QUESTIONS for s in parts):
+        # A custom template or an older free-form plan may have no Open questions: unanchored
+        # decisions still need a target.
+        parts = [*parts, {"id": plan_docs.OPEN_QUESTIONS, "title": plan_docs.TITLES[plan_docs.OPEN_QUESTIONS],
+                          "kind": "markdown", "markdown": "None.", "caption": None}]
+        markdown = plan_docs.render(lede, parts)
     ask = visuals._text(ask, "ask", visuals.MAX_NOTE)
     title = visuals._text(title, "title", visuals.MAX_TITLE) or _title(markdown) or "Plan"
     visuals._refuse_secrets([
@@ -622,6 +664,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             raise ServiceError("not_found", "no such plan in this session", 404)
         if current["state"] == SUPERSEDED:
             raise ServiceError("superseded", "the person asked for a newer plan; that one is closed", 409)
+        if current["state"] == CANCELLED:
+            raise ServiceError("cancelled", "that plan was cancelled; propose a new plan instead", 409)
         if current["state"] not in HOLDING:
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
     replaced = plan_docs.revision(db, plan_id) if plan_id else None
@@ -743,7 +787,7 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
     with db.tx() as c:
         visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
     bus.publish_agent(db, "autopilot.goal", root_id)
-    bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # the app opens it for the person
+    bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # listed already (visual.published); the person opens it
     return v["id"]
 
 
@@ -837,8 +881,6 @@ def anchors(p: dict) -> dict[str, str]:
         out[ASK] = "What I understood (your restated ask)"
     if lede:
         out[LEDE] = "The overview"
-    if p["split"]:
-        out[SPLIT] = "The split"
     out.update({DECISION + d["id"]: f"Decision {d['id']} ({d['title']})" for d in p["decisions"]})
     return out
 
@@ -1076,6 +1118,79 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     return get(db, p["id"])
 
 
+def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None = None) -> dict:
+    """Close an open or redirected plan as cancelled, approving nothing: the
+    person's Cancel (``person``, with the revision on screen as ``rev``), or the
+    session's supervisor withdrawing its own (``caller``; ``rev`` optional).
+    Whatever the review state, a shared plan's share is dropped
+    (shared_docs.drop_share), so its Library doc is unshared at the next pass
+    that reaches the Library. It is never sent to the Library (_to_library).
+
+    The tasks it held stay queued, each marked with the plan
+    (plan_cancel_holds): they neither start nor get dropped until the
+    supervisor decides each one, with start_now or cancel_task. One message
+    to the supervisor names them."""
+    from brindle import agents, autopilot, plan_docs, tasks
+    from brindle.pro import shared_docs
+
+    visuals.require_enabled()
+    p = get(db, plan_id)
+    if person:
+        visuals._unlocked(p["root_id"])
+        if not isinstance(rev, int) or isinstance(rev, bool):
+            raise ServiceError("invalid", "rev (the revision on screen) is required", 400)
+    elif caller is None or caller.id != p["root_id"]:
+        raise ServiceError("forbidden", "only the session's supervisor withdraws its plan", 403)
+    if rev is not None and rev != p["rev"]:
+        raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
+    if p["state"] == WRITING:
+        raise ServiceError("writing", "the supervisor is still writing this plan", 409)
+    if p["state"] not in ("open", "redirected"):
+        raise ServiceError("decided", "this plan is already decided", 409)
+    root = p["root_id"]
+    at = time.time()
+    with db.tx() as c:
+        # Selected before the plan's state changes, in the same write transaction: a task queued
+        # by an assign whose reply is still going out (unanswered) is held too, and nothing
+        # committed after this read can slip past the cancel.
+        held = [t for t in db.list_tasks(state="pending") + db.list_tasks(state=tasks.UNANSWERED)
+                if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.open_plan_holds(db, t)]
+        if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=? AND state IN ('open','redirected')",
+                         (CANCELLED, at, p["id"], p["rev"])).rowcount:
+            raise ServiceError("decided", "this plan is already decided", 409)
+        row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+        if row is not None:
+            shared_docs.drop_share(c, row)
+        for t in held:
+            c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at)"
+                      " SELECT id, ?, ? FROM tasks WHERE id=? AND state IN ('pending', ?)",
+                      (p["id"], at, t.id, tasks.UNANSWERED))
+        queued = _queue_message(c, root, _cancelled_message(p, held, person))
+    bus.publish_agent(db, "message.queued", root, message_id=queued, sender_id=None)
+    try:
+        agents.flush(db, root)
+    except Exception:  # noqa: BLE001 - it stays queued: the supervisor gets it at its next turn
+        log.warning("brindle: couldn't push plan %s's cancellation to %s now; it stays queued", p["id"], root,
+                    exc_info=True)
+    bus.publish_agent(db, "autopilot.goal", root)
+    p = get(db, p["id"])
+    plan_docs._changed(db, p, p["rev"])
+    return p
+
+
+def _cancelled_message(p: dict, held: list, person: bool) -> str:
+    lines = [f"{'The person cancelled' if person else 'You withdrew'} plan {p['id']} (r{p['rev']}): it is closed, "
+             "nothing was approved, and it won't go to the Library."]
+    if not held:
+        return "\n".join([*lines, "It held no queued tasks."])
+    lines.append(f"{len(held)} task(s) it held stay queued: none starts or is dropped on its own. Decide each one: "
+                 "start_now(task_id) starts it, cancel_task(task_id) gives it up.")
+    for t in held:
+        brief = next((ln.strip() for ln in t.task_text.splitlines() if ln.strip()), "")[:120]
+        lines.append(f"- {t.id} (branch {t.branch or 'none'}): {brief}")
+    return "\n".join(lines)
+
+
 def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
             doc: list[str] = ()) -> str:
     """The approved revision with what the person decided under it."""
@@ -1101,15 +1216,16 @@ def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles
 
 def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
                 doc: list[str] = ()) -> None:
-    """Store the approved plan in the person's plan library. Entitlement, the
-    store switch and the network are the uploader's to judge; nothing here
+    """Store the approved plan in the person's plan library, on brindle's
+    servers or on this Mac (Settings › Library location). Entitlement, the
+    location and the network are the uploader's to judge; nothing here
     blocks or fails an approval."""
     try:
         from brindle.pro import analysis_docs
 
         md = _record(p, picks, comments, note, titles, doc)
         doc = analysis_docs.Doc(files=[{"name": f"plan-{p['id']}.md", "md": md}],
-                                source={"kind": "goal", "ref": p["id"], "session": p["root_id"]})
+                                source={"kind": "goal", "ref": p["id"], "session": p["root_id"]}, plan=True)
         analysis_docs.on_merged(p["visual"]["repo_root"], [doc])
     except Exception:  # noqa: BLE001 - the approval stands
         log.info("brindle: plan %s not queued for the library", p["id"], exc_info=True)

@@ -57,13 +57,14 @@ const textarea = () => screen.getByRole("textbox", { name: "Terminal input" });
 
 async function openInboxItem(agent: string) {
   const inbox = await screen.findByRole("region", { name: "Inbox" });
-  // The button comes once the sessions feed says which session the card is in.
-  const go = await waitFor(() => {
-    const cards = inbox.querySelectorAll('[data-kind="question"]');
-    expect(cards.length).toBe(2);
-    return within(cards[agent === "sup1" ? 0 : 1] as HTMLElement).getByRole("button", { name: "Go to session ›" });
+  // The question's row, open; its way to the session comes once the sessions feed says which session it is in.
+  const row = await waitFor(() => {
+    const rows = inbox.querySelectorAll<HTMLElement>('[data-testid="inbox-row"][data-kind="question"]');
+    expect(rows.length).toBe(2);
+    return rows[agent === "sup1" ? 0 : 1];
   });
-  fireEvent.click(go);
+  if (!row.dataset.open) fireEvent.click(within(row).getByTestId("row-summary"));
+  fireEvent.click(await within(row).findByTestId("open-session"));
 }
 
 it.each(["sup1", "w1"])("focus from inbox: opens the item's agent %s with keyboard focus in its terminal", async (agent) => {
@@ -73,11 +74,11 @@ it.each(["sup1", "w1"])("focus from inbox: opens the item's agent %s with keyboa
   expect(screen.getByTestId("terminal").getAttribute("data-target")).toContain(`:${agent}`);
 });
 
-it("focus from inbox: the session heading link focuses a textarea that mounts later", async () => {
+it("focus from inbox: the way to the session focuses a textarea that mounts later", async () => {
   let ready!: () => void;
   terminal.mount = new Promise<void>((resolve) => { ready = resolve; });
   mount();
-  fireEvent.click(await screen.findByRole("button", { name: "Open the session ›" }));
+  await openInboxItem("sup1");
   await screen.findByTestId("terminal");
   expect(screen.queryByRole("textbox", { name: "Terminal input" })).toBeNull();
   await act(async () => ready());

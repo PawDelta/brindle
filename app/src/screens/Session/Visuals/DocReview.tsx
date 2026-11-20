@@ -163,8 +163,10 @@ const draftWords = {
   suggest: { name: "Why (optional)", placeholder: "Why (optional)", send: "Send suggestion" },
 };
 
-function DraftCard({ draft, number, stale, busy, onSend, onCancel, change }: {
+export function DraftCard({ draft, number, stale, busy, onSend, onCancel, change, className = `${card} bg-canvas-2` }: {
   draft: Draft; number: number; stale: boolean; busy: boolean;
+  /* Its box: a card in the column, or (the planning doc) a note in the margin. */
+  className?: string;
   onSend(text: string): void; onCancel(): void;
   /* A suggestion's change as it is typed on the page (null: nothing changed yet). */
   change?: { before: string; after: string } | null;
@@ -178,7 +180,7 @@ function DraftCard({ draft, number, stale, busy, onSend, onCancel, change }: {
     if (ready && !busy) onSend(text.trim());
   };
   return (
-    <form className={`${card} bg-canvas-2`} aria-label={draft.kind === "suggest" ? "New suggestion" : "New comment"} data-testid="thread-draft" data-stale={stale || undefined}
+    <form className={className} aria-label={draft.kind === "suggest" ? "New suggestion" : "New comment"} data-testid="thread-draft" data-stale={stale || undefined}
       onSubmit={(e) => { e.preventDefault(); send(); }}
       onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }}>
       <span className={onLine}>

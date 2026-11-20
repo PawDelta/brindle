@@ -72,10 +72,11 @@ it.each(["inbox", "sidebar"] as const)("opens the ready session's diff from the 
   renderApp(<App client={client} store={store} refresh={sync.refresh} initialRoute={entry === "inbox" ? { screen: "inbox" } : { screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
 
   if (entry === "sidebar") await screen.findByTestId("goal-phase");
+  // The Inbox's PR row (open first, as what waits) offers "Review changes first": the same sheet.
   const source = entry === "inbox"
-    ? await screen.findByTestId("inbox-card")
+    ? await screen.findByTestId("inbox-row")
     : await screen.findByRole("region", { name: "Session context" });
-  fireEvent.click(await within(source).findByRole("button", { name: /Review & open PR/ }));
+  fireEvent.click(await within(source).findByRole("button", { name: entry === "inbox" ? /Review changes first/ : /Review & open PR/ }));
   const sheet = await screen.findByRole("dialog", { name: "Review & open PR" });
   fireEvent.click(within(sheet).getByTestId("review-changes"));
   const files = await within(sheet).findByRole("navigation", { name: "Changed files" });

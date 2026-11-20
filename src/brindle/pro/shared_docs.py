@@ -77,7 +77,7 @@ from brindle.crdt import CrdtError
 from brindle.db import DB
 from brindle.plan_drafts import DraftReplica
 from brindle.pro import analysis_docs as ad
-from brindle.pro import review_policies
+from brindle.pro import license, review_policies
 from brindle.redact import mask, mask_data
 from brindle.service.errors import ServiceError
 
@@ -88,6 +88,7 @@ NO_FEATURE = "entitlement_required"     # the Library's refusal when the plan la
 LAPSE_GOOD_FOR = 300.0       # seconds the server's word that a Team plan ended lets work go with no gate
 LAPSE_CHECK_AFTER = 120.0    # the background pass asks again once that word is this old
 SCOPE_KINDS = ("group", "org")
+NOT_FOUND = "not_found"      # the Library's answer when the share's document is gone (plan_shares.access_refused)
 CLAIM_FOR = 60.0             # seconds a create or push in flight holds the plan; then it is presumed dead
 FIRST_REVISION = 1           # what the Library numbers a new document's head
 REVIEW = ("rev", "reviewers", "sign_offs", "pending_reviewers", "ready", "policy_reviewers", "pending_policies")
@@ -226,6 +227,14 @@ def _review_open(p: dict) -> None:
         raise ServiceError("review_closed", "this plan is building, so its review is closed", 409)
 
 
+_no_decision_section: set[str] = set()   # Library base URLs that refused Decision.section (422) this session
+license._clear_hooks.append(_no_decision_section.clear)
+
+
+def _server_key(client) -> str:
+    return getattr(client, "base", "") or ""
+
+
 def _content(rev: dict) -> dict:
     """A revision (or the Library's view of one) as the API's structured
     content: exactly its fields, because it refuses any others."""
@@ -234,7 +243,7 @@ def _content(rev: dict) -> dict:
     return {
         "lede": rev["lede"],
         "sections": [{k: s.get(k) for k in ("id", "title", "kind", "markdown", "caption")} for s in rev["sections"]],
-        "decisions": [{**{k: d.get(k) for k in ("id", "title", "mine", "challenge")},
+        "decisions": [{**{k: d.get(k) for k in ("id", "title", "mine", "challenge", "section")},
                        "options": [{"id": o["id"], "label": o["label"], "detail": o.get("detail"),
                                     "pros": o.get("pros") or [], "cons": o.get("cons") or [],
                                     "touches": o.get("touches") or []} for o in d["options"]]}
@@ -243,6 +252,42 @@ def _content(rev: dict) -> dict:
                    "test": w.get("test")} for w in rev["split"]],
         "ask": rev.get("ask"),
     }
+
+
+def _without_section(content: dict) -> dict:
+    return {**content, "decisions": [{k: v for k, v in d.items() if k != "section"} for d in content["decisions"]]}
+
+
+def _payload(content: dict, client) -> dict:
+    return _without_section(content) if _server_key(client) in _no_decision_section else content
+
+
+def _refused_section(status: int, resp: dict, content: dict) -> bool:
+    """Whether a 422 may be an older server rejecting Decision.section (extra='forbid')."""
+    if status != 422 or not any("section" in d for d in content["decisions"]):
+        return False
+    detail = resp.get("detail")
+    if isinstance(detail, list) and detail:
+        return any(isinstance(e, dict) and (e.get("type") == "extra_forbidden" or "section" in (e.get("loc") or ()))
+                   for e in detail)
+    fields = resp.get("fields")
+    if isinstance(fields, list) and fields:
+        return any(isinstance(f, str) and (f in ("<unknown>", "design", "decisions") or "section" in f)
+                   for f in fields)
+    return True
+
+
+def _comparable(view: dict) -> tuple[dict, bool]:
+    """``view``'s structured content and whether it carries decision sections:
+    an older Library omits ``section``, so comparisons ignore it too."""
+    has = any(isinstance(d, dict) and "section" in d for d in view.get("decisions") or ())
+    content = _content(view)
+    return (content, True) if has else (_without_section(content), False)
+
+
+def _same(rev: dict, theirs: dict, with_section: bool) -> bool:
+    ours = mask_data(_content(rev))
+    return (ours if with_section else _without_section(ours)) == theirs
 
 
 def _scope(raw: Any) -> dict:
@@ -414,11 +459,17 @@ def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool
     found = _find(owner, p, client, store) if resumed else None
     if found is not None:
         return _linked(db, p["id"], found, FIRST_REVISION, link(db, p["id"])["local_rev"])
+    sent = _payload(content, client)
     body = {"scope": {"kind": "user", "id": owner}, "files": [{"name": f"plan-{p['id']}.md", "md": cur["markdown"]}],
-            "source": {"kind": "goal", "ref": p["id"], "session": p["root_id"]}, "design": content}
+            "source": {"kind": "goal", "ref": p["id"], "session": p["root_id"]}, "design": sent}
     with db.tx() as c:
         c.execute("UPDATE plan_shares SET local_rev=? WHERE plan_id=?", (cur["rev"], p["id"]))
     status, made = ad._call("POST", "/analysis-docs", body, client=client, store=store)
+    if _refused_section(status, made, sent):
+        status, made = ad._call("POST", "/analysis-docs", {**body, "design": _without_section(sent)},
+                                client=client, store=store)
+        if status == 200:
+            _no_decision_section.add(_server_key(client))
     if status == 200:
         return _linked(db, p["id"], made["id"], made["version"], cur["rev"])
     if status < 500:
@@ -469,6 +520,9 @@ def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=No
     _review_open(p)
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
+    if share_["access_refused"] == NOT_FOUND:
+        raise ServiceError("share_not_found", "the Library has no document for this plan's share, so its reviewers "
+                           "can't be changed. Stop sharing and build, then share it again.", 409)
     people = _reviewers(reviewers)
     _grant(db, p, share_["doc_id"], people, None, client, store)
     if _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(share_["doc_id"], "/reviewers"),
@@ -652,15 +706,30 @@ def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
     return changes
 
 
-def _readable(view: dict) -> dict:
+def _anchors(view: dict, ours: dict | None) -> dict[str, str]:
+    """Each decision's section anchor: the Library's when it carries one,
+    else the one it has in ``ours`` (this plan's own revision), for an older
+    Library that omits it."""
+    out = {d["id"]: d["section"] for d in (ours or {}).get("decisions") or []
+           if isinstance(d, dict) and isinstance(d.get("section"), str)}
+    out.update({d["id"]: d["section"] for d in view.get("decisions") or []
+                if isinstance(d, dict) and isinstance(d.get("id"), str) and isinstance(d.get("section"), str)})
+    return out
+
+
+def _readable(view: dict, ours: dict | None = None) -> dict:
     """The Library's head as a revision of this plan: held to what a
     supervisor's proposal must be, because it is drawn and shown here, and
-    with secrets masked. Raises ``RuntimeError`` if it can't be one."""
+    with secrets masked. Each decision keeps its section anchor (from the
+    view, else from ``ours``). Raises ``RuntimeError`` if it can't be one."""
     try:
         content = mask_data(_content(view))
         sections = plan_docs.parse_sections(content["sections"])
         lede = plan_docs._body_text(content["lede"], "the overview", plans.MAX_MARKDOWN).strip()
-        out = {"lede": lede, "sections": sections, "decisions": plans._decisions(content["decisions"]),
+        anchors = _anchors(view, ours)
+        decisions = plans._decisions([{**d, "section": anchors.get(d.get("id"))} for d in content["decisions"]],
+                                     {s["id"] for s in sections})
+        out = {"lede": lede, "sections": sections, "decisions": decisions,
                "split": plans._split(content["split"]), "ask": visuals._text(content["ask"], "ask", visuals.MAX_NOTE),
                "markdown": plan_docs.render(lede, sections)}
     except (ServiceError, KeyError, TypeError, AttributeError) as e:
@@ -679,11 +748,11 @@ def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
     if view.get("rev") == share_["remote_rev"] or share_["local_rev"] != p["rev"] or p["state"] != "open":
         return 0
     cur = plan_docs.revision(db, p["id"])
-    if _content(view) == mask_data(_content(cur)):       # moved, but the same text: nothing to read
+    if _same(cur, *_comparable(view)):       # moved, but the same text: nothing to read
         with db.tx() as c:
             c.execute("UPDATE plan_shares SET remote_rev=? WHERE plan_id=?", (view["rev"], p["id"]))
         return 0
-    new = _readable(view)
+    new = _readable(view, cur)
     before = {s["id"]: s for s in cur["sections"]}
     after = {s["id"]: s for s in new["sections"]}
     changed = [sid for sid in dict.fromkeys([*before, *after]) if before.get(sid) != after.get(sid)]
@@ -741,9 +810,9 @@ class _Head:
 
 def _landed(db: DB, plan_id: str, since: int, newest: int, view: dict) -> int | None:
     """Which local revision after ``since`` the Library's head holds, or None."""
-    theirs = _content(view)
+    theirs, with_section = _comparable(view)
     return next((n for n in range(newest, since, -1)
-                 if mask_data(_content(plan_docs.revision(db, plan_id, n))) == theirs), None)
+                 if _same(plan_docs.revision(db, plan_id, n), theirs, with_section)), None)
 
 
 def _set_head(c, plan_id: str, remote_rev: int, local_rev: int) -> None:
@@ -806,7 +875,12 @@ def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict
 def _send_revision(db: DB, plan_id: str, head: _Head, rev: int) -> bool:
     """Put local revision ``rev`` on the Library's head. False if the head
     moved since it was read: a conflict for now, the next sync looks again."""
-    status, resp = head.write("/revisions", _content(plan_docs.revision(db, plan_id, rev)))
+    sent = _payload(_content(plan_docs.revision(db, plan_id, rev)), head.client)
+    status, resp = head.write("/revisions", sent)
+    if _refused_section(status, resp, sent):
+        status, resp = head.write("/revisions", _without_section(sent))
+        if status == 200:
+            _no_decision_section.add(_server_key(head.client))
     if status == 409 and resp.get("error") == "stale":
         head.view = {**head.view, "rev": resp.get("rev")}
         return False
@@ -1095,7 +1169,8 @@ def _carry_over(db: DB, p: dict, share_: dict, view: dict, replica: DraftReplica
     the revision read here, in one transaction. Returns 1 if it ran."""
     if replica is None or p["state"] != "open" or share_["local_rev"] == p["rev"]:
         return 0
-    ours, new = plan_docs.revision(db, p["id"]), _readable(view)
+    ours = plan_docs.revision(db, p["id"])
+    new = _readable(view, ours)
     authors = {r["author"] for r in db.conn.execute(
         "SELECT author FROM plan_revisions WHERE plan_id=? AND rev>?", (p["id"], share_["local_rev"]))}
     by = plan_docs.SUPERVISOR if authors == {plan_docs.SUPERVISOR} else plan_docs.PERSON
@@ -1297,9 +1372,23 @@ def may_stop(row, who: str | None) -> bool:
     refusal (of access or by a rule) nor unreadable. No answer yet can't show
     there are no rules."""
     review = json.loads(row["review"])
+    if row["access_refused"] == NOT_FOUND:
+        # The Library has no document for the owner's share, so no review is left to bypass.
+        return who == row["owner"]
     return (row["unconfirmed"] is not None and who == row["owner"] and not row["review_asked"]
             and row["access_refused"] is None and not review.get(review_policies.REFUSED)
             and not plans.demands_review(review))
+
+
+def drop_share(c, row) -> None:
+    """Take a plan's share out in ``c``'s transaction (the caller's): its Library doc
+    is queued to be unshared (:func:`_send_unshares`, at the next pass that reaches
+    the Library), and its threads and link go. Whatever the review state."""
+    if row["doc_id"] is not None:
+        c.execute("INSERT OR REPLACE INTO plan_unshares (doc_id, owner, created_at) VALUES (?,?,?)",
+                  (row["doc_id"], row["owner"], time.time()))
+    c.execute("DELETE FROM plan_share_threads WHERE plan_id=?", (row["plan_id"],))
+    c.execute("DELETE FROM plan_shares WHERE plan_id=?", (row["plan_id"],))
 
 
 def stop_sharing(db: DB, plan_id: str, rev: Any, *, store=None) -> None:
@@ -1314,14 +1403,43 @@ def stop_sharing(db: DB, plan_id: str, rev: Any, *, store=None) -> None:
         row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         allowed = p["state"] == "open" and row is not None and row["doc_id"] is not None and may_stop(row, who)
         if allowed:
-            c.execute("INSERT OR REPLACE INTO plan_unshares (doc_id, owner, created_at) VALUES (?,?,?)",
-                      (row["doc_id"], row["owner"], time.time()))
-            c.execute("DELETE FROM plan_share_threads WHERE plan_id=?", (p["id"],))
-            c.execute("DELETE FROM plan_shares WHERE plan_id=?", (p["id"],))
+            drop_share(c, row)
     if not allowed:
         raise ServiceError("stop_sharing_refused", "This plan's sharing can't be stopped from here: its review has "
                            "to be confirmed by the Library.", 409)
     plan_docs._changed(db, p, p["rev"])
+
+
+def open_shares_of(db: DB, doc_ids: list[str]) -> list[dict]:
+    """The open plans shared for review through any of these Library
+    documents, as ``{plan_id, title}``: what deleting the document would strand."""
+    ids = [d for d in doc_ids if d]
+    if not ids:
+        return []
+    rows = db.conn.execute(
+        f"SELECT p.id, p.markdown FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
+        f" WHERE p.state='open' AND s.doc_id IN ({','.join('?' * len(ids))})", ids).fetchall()
+    return [{"plan_id": r["id"], "title": plans._title(r["markdown"]) or r["id"]} for r in rows]
+
+
+def release_deleted(db: DB, doc_ids: list[str]) -> list[str]:
+    """Unshare, here, the open plans whose Library document was deleted, as
+    :func:`stop_sharing` does, so each becomes a personal doc again instead of
+    syncing against a document that is gone. Nothing is left to unshare on the
+    Library. Returns the plans released."""
+    ids = [d for d in doc_ids if d]
+    released = []
+    for share_ in open_shares_of(db, ids):
+        with db.tx() as c:
+            gone = c.execute(f"DELETE FROM plan_shares WHERE plan_id=? AND doc_id IN ({','.join('?' * len(ids))})",
+                             (share_["plan_id"], *ids)).rowcount
+            if gone:
+                c.execute("DELETE FROM plan_share_threads WHERE plan_id=?", (share_["plan_id"],))
+        if gone:
+            p = plans.get(db, share_["plan_id"])
+            plan_docs._changed(db, p, p["rev"])
+            released.append(p["id"])
+    return released
 
 
 def _gone(e: Exception) -> bool:

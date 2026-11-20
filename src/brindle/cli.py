@@ -2376,9 +2376,23 @@ def docs_show(doc_id: str = typer.Argument(..., help="Document id.")) -> None:
 
 
 @docs_app.command("delete")
-def docs_delete(doc_id: str = typer.Argument(..., help="Document id.")) -> None:
-    """Delete a document from your library."""
+def docs_delete(doc_id: str = typer.Argument(..., help="Document id."),
+                yes: bool = typer.Option(False, "--yes", "-y", help="Delete without asking, even a doc an open plan is shared through.")) -> None:
+    """Delete a document from your library. A doc an open plan is shared for
+    review through asks first; the plan then stops being shared and becomes a
+    personal doc again."""
+    from brindle.pro import shared_docs
+
+    db = DB()
+    stranded = shared_docs.open_shares_of(db, [doc_id])
+    if stranded and not yes:
+        names = ", ".join(f"“{s['title']}”" for s in stranded)
+        typer.echo(f"{doc_id} is shared for review on an open plan ({names}). Deleting it stops sharing "
+                   "that plan: it becomes a personal doc again.")
+        typer.confirm("Delete it anyway?", abort=True)
     _docs_call("DELETE", f"/analysis-docs/{doc_id}")
+    if stranded:
+        shared_docs.release_deleted(db, [doc_id])
     typer.echo(f"deleted {doc_id}")
 
 
@@ -2426,11 +2440,15 @@ def _docs_switch(on: bool, name: str) -> None:
 
     _docs_arm()
     try:
-        analysis_docs.set_switch(on, name=name)
+        got = analysis_docs.set_switch(on, name=name)
     except (auth.AuthError, RuntimeError) as e:
         _fail(f"library: {e}")
-    state = "on" if on else "off"
-    typer.echo(f"storing library items is {state}" if name == "store" else f"library: {name} is {state}")
+    if name == "store":
+        left = got.get("left", 0) if isinstance(got, dict) else 0
+        typer.echo(f"library location: {'brindle servers' if on else 'this Mac'}"
+                   + (f" ({left} plans not moved yet: run this again to move them)" if left else ""))
+        return
+    typer.echo(f"library: {name} is {'on' if on else 'off'}")
 
 
 _SWITCH_HELP = ("Which of your own switches: store (the default), share, assist, prompt_analysis "
@@ -2439,13 +2457,13 @@ _SWITCH_HELP = ("Which of your own switches: store (the default), share, assist,
 
 @docs_app.command("on")
 def docs_on(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
-    """Turn one of your switches on; without --switch, store approved plans in the Library after they merge."""
+    """Turn one of your switches on; without --switch, keep your Library of approved plans on brindle servers."""
     _docs_switch(True, switch)
 
 
 @docs_app.command("off")
 def docs_off(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
-    """Turn one of your switches off; without --switch, stop storing approved plans in the Library."""
+    """Turn one of your switches off; without --switch, keep your Library of approved plans on this Mac."""
     _docs_switch(False, switch)
 
 

@@ -46,10 +46,13 @@ session in its goal), `chat-empty` / `chat-typing` / `chat-long` /
 empty, a draft with two files and a screenshot, a 25-line draft at the
 box's tallest, a 412-line paste as a chip with its preview open, two
 messages queued behind a working Claude, and a screenshot dragged over
-the session), `inbox` (the Inbox page:
-every decision across sessions as banner cards, permissions, sign-ins,
-plans, checks and notices acted on in the card, the rest going to the
-session), `agent-supervisor` / `agent-working` / `agent-waiting` /
+the session), `inbox` (the Inbox page as a queue, `shots/inbox.ts`:
+Waiting on you with the first question open on its answer box, From the
+team with a design's threads, a notice and sign-off dots, Done today
+folded), and, not in the default list, `inbox-thread` (the thread open
+with its reply box), `inbox-news` (nothing waiting, news only),
+`inbox-clear` (all clear, Done today open), `inbox-loading` and
+`inbox-many` (tabs by kind, one teammate's requests as one row), `agent-supervisor` / `agent-working` / `agent-waiting` /
 `agent-done` / `agent-reviewer` / `agent-failed` (one scene per agent of
 the session, each pane its provider's own in the state its row shows),
 `agents` (how a task gets run, and a row per kind of work under the

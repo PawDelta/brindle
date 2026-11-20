@@ -18,6 +18,11 @@ export type PlanSharingClient = Pick<DaemonClient, "sharePlan" | "setPlanReviewe
 /* A design someone else shared, read and reviewed from the Library (brindle/pro/shared_reader.py). */
 export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "sharedDesignHistory" | "sharedDesignRevisionChanges">>;
 
+/* A design's share link, for its editors on Pro and up (brindle/pro/share_links.py). */
+export type ShareLinkClient = Pick<DaemonClient, "designShareLink" | "copyDesignShareLink" | "revokeDesignShareLink">;
+/* The same, for the author's plan by its id. */
+export type PlanShareLinkClient = Pick<DaemonClient, "planShareLink" | "copyPlanShareLink" | "revokePlanShareLink">;
+
 export type KeptVisualsClient = Pick<DaemonClient, "keptVisuals">;
 
 /* An id as the engine makes them (v_8f2c): letters, digits, _ and -, nothing a path could use. */

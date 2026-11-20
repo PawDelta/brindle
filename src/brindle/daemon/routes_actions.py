@@ -543,6 +543,17 @@ def handover_choice(db: DB, params: dict, body: Body) -> Any:
 # -- inbox -----------------------------------------------------------------------
 
 
+def inbox_read(db: DB, params: dict, body: Body) -> Any:
+    """Mark team Inbox rows read by their ``item_key``s, for the signed-in
+    person on every machine (the Library keeps read state per person)."""
+    from brindle import inbox_team
+
+    keys = _get(body, "item_keys", list, required=True)
+    if not keys or len(keys) > inbox_team.MAX_KEYS or not all(isinstance(k, str) and k for k in keys):
+        raise ServiceError("invalid", f"item_keys must be 1 to {inbox_team.MAX_KEYS} keys")
+    return {"read": inbox_team.mark_read(db, keys)}
+
+
 def inbox_action(db: DB, params: dict, body: Body) -> Any:
     """``id`` is the item's agent (an org notice's ``notice_id`` for "read")."""
     item, action = params["id"], params["action"]
@@ -2284,6 +2295,9 @@ def account_login(db: DB, params: dict, body: Body) -> Any:
                 flow.ended = True
                 if _SIGN_IN and _SIGN_IN[0] is flow:
                     _SIGN_IN.clear()
+        from brindle.daemon import lifecycle
+
+        lifecycle._poll_review_queue()
         return {"signed_in": True}
 
     return start_job("account.login", work, job=flow.job)
@@ -2383,6 +2397,20 @@ def delete_doc_destination(db: DB, params: dict, body: Body) -> Any:
     return docs_org_api("DELETE", "destination", repo=_get(body, "repo"), admin=True)
 
 
+def library_on_this_mac(repo: str | None = None) -> bool:
+    """Whether the person's plans are kept on this Mac (local_library.location;
+    the server is asked only while their choice is unknown here)."""
+    from brindle.pro import analysis_docs, local_library
+
+    _docs_entitlement(repo)
+    return local_library.location(fetch=analysis_docs.fetch_switches,
+                                  learn=local_library.learn_group) == local_library.LOCAL
+
+
+def own_scope(repo: str | None = None) -> dict:
+    return {"kind": "user", "id": _docs_entitlement(repo).sub}
+
+
 def doc_switches(repo: str | None = None) -> dict:
     """``{"switches": [{name, on, choice, locked, org}]}``: the person's own
     switches (analysis_docs.switch_states). 402 when not entitled, 502 when
@@ -2405,12 +2433,13 @@ def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", f"name is one of {', '.join(analysis_policy.SWITCHES)}")
     _docs_entitlement(repo)
     try:
-        analysis_docs.set_switch(on, name=name)
+        got = analysis_docs.set_switch(on, name=name)
     except analysis_docs.Locked as e:
         raise ServiceError("forbidden", str(e), 403) from e
     except (RuntimeError, auth.TransportError) as e:
         raise ServiceError("upstream", str(e), 502) from e
-    return doc_switches(repo)
+    moved = {k: got[k] for k in ("moved", "left") if k in got} if name == "store" and isinstance(got, dict) else {}
+    return {**doc_switches(repo), **moved}
 
 
 def put_doc_format(db: DB, params: dict, body: Body) -> Any:
@@ -2478,16 +2507,46 @@ def _doc_path(params: dict, *rest: str) -> str:
 
 
 def share_doc(db: DB, params: dict, body: Body) -> Any:
-    """Share a doc with ``scope`` (team:<id> or org:<id>; never ``user``)."""
+    """Share a doc with ``scope`` (team:<id> or org:<id>; never ``user``). A
+    doc kept on this Mac is put on the server first: only that one doc."""
+    from brindle.pro import auth, local_library
+
     kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
-    return docs_api("POST", _doc_path(params, "share"), {"scope": {"kind": kind, "id": scope_id}},
-                    repo=params.get("repo"))
+    repo = params.get("repo")
+    kept = local_library.get(params["id"])
+    if kept is None:
+        return docs_api("POST", _doc_path(params, "share"), {"scope": {"kind": kind, "id": scope_id}}, repo=repo)
+    _docs_entitlement(repo)
+    try:
+        server_id = local_library.server_copy(params["id"])
+    except (RuntimeError, auth.AuthError, auth.TransportError) as e:
+        raise ServiceError("upstream", str(e), 502) from e
+    got = docs_api("POST", _doc_path({"id": server_id}, "share"), {"scope": {"kind": kind, "id": scope_id}},
+                   repo=repo)
+    shared = [s for s in kept.get("shared") or [] if s != {"kind": kind, "id": scope_id}]
+    local_library.update(params["id"], shared=[*shared, {"kind": kind, "id": scope_id}])
+    return got
 
 
 def unshare_doc(db: DB, params: dict, body: Body) -> Any:
-    """Stop sharing a doc with ``scope`` (team:<id> or org:<id>)."""
+    """Stop sharing a doc with ``scope`` (team:<id> or org:<id>). The server
+    copy of a doc kept on this Mac goes once it is shared nowhere, while the
+    library is on this Mac."""
+    from brindle.pro import local_library
+
     kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
-    return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=params.get("repo"))
+    repo = params.get("repo")
+    kept = local_library.get(params["id"])
+    if kept is None or not kept.get("server_id"):
+        return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=repo)
+    server = {"id": kept["server_id"]}
+    got = docs_api("DELETE", _doc_path(server, "share", kind, scope_id), repo=repo)
+    shared = [s for s in kept.get("shared") or [] if s != {"kind": kind, "id": scope_id}]
+    local_library.update(params["id"], shared=shared)
+    if not shared and library_on_this_mac(repo):
+        docs_api("DELETE", _doc_path(server), repo=repo)
+        local_library.update(params["id"], server_id=None)
+    return got
 
 
 def _folder_call(body: Body, run: Callable) -> Any:
@@ -2622,7 +2681,34 @@ def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
 
 
 def delete_doc(db: DB, params: dict, body: Body) -> Any:
-    return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+    """Delete a doc; one kept on this Mac goes from here, and its server copy
+    (while shared) first.
+
+    A doc an open plan is shared for review through is refused (409
+    ``shared_plan``, with the ``plans``) unless ``confirm`` is true; on
+    confirm, those plans are unshared here (shared_docs.release_deleted) and
+    become personal docs again, so no sync is left pointing at a deleted doc."""
+    from brindle.pro import local_library
+    from brindle.pro import shared_docs as sd
+
+    kept = local_library.get(params["id"])
+    ids = [params["id"], *([kept["server_id"]] if kept and kept.get("server_id") else [])]
+    stranded = sd.open_shares_of(db, ids)
+    if stranded and not _get(body, "confirm", bool, default=False):
+        names = ", ".join(f"“{s['title']}”" for s in stranded)
+        raise ServiceError("shared_plan", f"This doc is shared for review on an open plan ({names}). Deleting it "
+                           "stops sharing that plan: it becomes a personal doc again.", 409, plans=stranded)
+    if kept is None:
+        got = docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+    else:
+        _docs_entitlement(params.get("repo"))
+        if kept.get("server_id"):
+            docs_api("DELETE", _doc_path({"id": kept["server_id"]}), repo=params.get("repo"))
+        local_library.remove(params["id"])
+        got = {"deleted": params["id"]}
+    if stranded:
+        sd.release_deleted(db, ids)
+    return got
 
 
 def export_doc(db: DB, params: dict, body: Body) -> Any:
@@ -3283,6 +3369,7 @@ ROUTES = [
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
     _post("/sessions/{root:path}/pr/push", push_session_pr),
     _post("/sessions/{root:path}/pr", open_session_pr),
+    _post("/inbox/read", inbox_read),
     _post("/inbox/{id}/{action}", inbox_action),
     _post("/agents/{id}/message", message_agent),
     _post("/agents/{id}/chat/send", chat_send),

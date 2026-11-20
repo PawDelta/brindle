@@ -854,6 +854,14 @@ export interface TrackerLink {
   read_at?: number | null;
 }
 
+/* A design's share link: who it opens for under the org's policy now (`off`: the org turned links off). */
+export interface DesignShareLink {
+  available: boolean;
+  access?: "anyone" | "org" | "off";
+  reason?: string;
+  link: { url: string; created_at: number | null; access: "anyone" | "org" | "off" } | null;
+}
+
 export interface DesignWorkItems {
   items: TrackerLink[];
   connected: Partial<Record<TrackerName, boolean>>;
@@ -995,6 +1003,15 @@ export interface DocSwitch {
   choice: "on" | "off" | null;
   locked: boolean;
   org: "enforced_on" | "enforced_off" | null;
+  reason?: string | null;
+}
+
+/* PUT /analysis-docs/switches: the switches after the change, and for `store` (the library
+   location) how many plans moved and how many are left where they were. */
+export interface DocSwitchesSet {
+  switches: DocSwitch[];
+  moved?: number;
+  left?: number;
 }
 
 /* Settings › Doc format (brindle.doc_templates): a template's sections in
@@ -1913,6 +1930,11 @@ export class DaemonClient {
     );
   }
 
+  /* POST /inbox/read (routes_actions.inbox_read): team rows read by their item_keys, for this person on every machine. */
+  markInboxRead(keys: string[]) {
+    return this.postInbox<{ read: string[] }>("/inbox/read", { item_keys: keys });
+  }
+
   agent(id: string) {
     return this.get<AgentDTO>(`/agents/${encodeURIComponent(id)}`);
   }
@@ -2272,6 +2294,11 @@ export class DaemonClient {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 
+  /* Cancel an open or redirected plan without approving it (brindle/plans.py cancel): a 409 once decided. */
+  cancelPlan(id: string, rev: number) {
+    return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/cancel`, { rev });
+  }
+
   /* The design doc's writes (brindle/plan_docs.py). Each names the revision on screen where the
      engine checks it (a newer one is a 409) and answers with the plan as it is now. */
   commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string, question = false) {
@@ -2367,6 +2394,35 @@ export class DaemonClient {
      the author's own design, opened in the author's reader. A 404 for anyone else's. */
   libraryDesignPlan(doc: string) {
     return this.get<VisualDTO>(`/library/designs/${encodeURIComponent(doc)}/plan`);
+  }
+
+  /* A design's share link (brindle/pro/share_links.py): `available` is false below Pro (nothing asked of
+     the Library). Copying answers the design's link, made only when it has none; revoking turns it off. A
+     refusal by an org's link policy keeps the Library's own reason as the error's message. */
+  designShareLink(doc: string, repo?: string) {
+    return this.get<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, { repo });
+  }
+
+  copyDesignShareLink(doc: string, repo?: string) {
+    return this.post<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, repo ? { repo } : {});
+  }
+
+  revokeDesignShareLink(doc: string, repo?: string) {
+    return this.delete<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
+  /* The same link for a plan, by its id: its Library doc when this account shared it from here
+     (`available` false for a plan that isn't in the Library). */
+  planShareLink(id: string, repo?: string) {
+    return this.get<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, { repo });
+  }
+
+  copyPlanShareLink(id: string, repo?: string) {
+    return this.post<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, repo ? { repo } : {});
+  }
+
+  revokePlanShareLink(id: string, repo?: string) {
+    return this.delete<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
   }
 
   /* Work items (Jira, Azure DevOps) on a design. Reads answer the last read with `unreachable` when the
@@ -2514,8 +2570,9 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
   }
 
-  deleteDoc(id: string) {
-    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, {});
+  /* A doc an open plan is shared through is refused (409 shared_plan) unless `confirm`; on confirm the plan stops being shared. */
+  deleteDoc(id: string, confirm = false) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, confirm ? { confirm } : {});
   }
 
   /* With `dir` the daemon writes the file there; without, it comes back as base64. */
@@ -2533,9 +2590,11 @@ export class DaemonClient {
     return (await this.get<{ switches: DocSwitch[] }>("/analysis-docs/switches", { repo })).switches;
   }
 
-  /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked. */
+  /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked.
+     `store` is the library location (on: brindle servers, off: this Mac); setting it moves
+     the plans, and `left` counts those not moved yet. */
   async setDocSwitch(name: DocSwitchName, on: boolean) {
-    return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
+    return this.put<DocSwitchesSet>("/analysis-docs/switches", { name, on });
   }
 
   /* Settings › Doc format for one level (org, or team:<id>). */
