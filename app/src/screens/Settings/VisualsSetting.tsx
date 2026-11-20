@@ -5,8 +5,8 @@ type Field = "visuals" | "visuals_enabled";
 type Client = Pick<DaemonClient, "userSettings" | "patchUserSettings">;
 
 const COPY: Record<Field, { label: string; text: string }> = {
-  visuals_enabled: { label: "Visuals feature", text: "Let agents make visuals and plans. Changes take effect in running sessions at once." },
-  visuals: { label: "Visuals", text: "Offer “Make a visual?” for choices that are hard to read. Visuals are made only when you accept or ask." },
+  visuals_enabled: { label: "Docs feature", text: "Let agents make docs and plans. Changes take effect in running sessions at once." },
+  visuals: { label: "Docs", text: "Offer “Make a visual?” for choices that are hard to read. Docs are made only when you accept or ask." },
 };
 
 export function VisualsSetting({ client, field = "visuals" }: { client: Client; field?: Field }) {

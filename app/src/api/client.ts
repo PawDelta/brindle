@@ -475,6 +475,8 @@ export interface VisualDTO {
   kept: boolean;
   unread: boolean;
   created_at: number;
+  /* A plan: the queued tasks it holds, 0 once it stops holding them. */
+  holding?: number;
 }
 
 /* Knowledge › Kept visuals: a copy kept from a session, readable after the session is gone. */

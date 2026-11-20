@@ -365,7 +365,7 @@ describe("visuals", () => {
     await act(async () => fireEvent.click(chip));
     expect(accepted).toEqual([true]);
     expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
-    await act(async () => fireEvent.click(screen.getByRole("switch", { name: "Visuals" })));
+    await act(async () => fireEvent.click(screen.getByRole("switch", { name: "Docs" })));
     expect(mode).toBe("on");
     expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
   });
@@ -741,10 +741,10 @@ describe("visuals", () => {
     const aside = sidebar();
     // The person folds the open session's agents away; Back must find them still folded.
     fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
-    // The header uses an icon with an unread dot and no count text.
+    // The header uses an icon with an unread dot, named Docs.
     const entry = await screen.findByTestId("visuals-button");
     expect(entry.querySelector("svg")).toBeTruthy();
-    expect(entry.textContent).toBe("");
+    expect(entry.textContent).toBe("Docs");
     expect(within(entry).getByLabelText("unread")).toBeTruthy();
     needUser(1, "Which database should the cache use?");
     ask(supervisorAsks);
@@ -763,11 +763,11 @@ describe("visuals", () => {
     expect(screen.getByTestId("chat-area").className).toContain("hidden");
     expect(screen.getByTestId("terminal")).toBe(terminal);
     expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Visuals/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Docs/ })).toBeNull();
     // Opening marks it read, though the header remains icon-only either way.
     await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
     expect(screen.getByTestId("visuals-button").querySelector("svg")).toBeTruthy();
-    expect(screen.getByTestId("visuals-button").textContent).toBe("");
+    expect(screen.getByTestId("visuals-button").textContent).toBe("Docs");
     expect(read).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledWith("v_8f2c", 2);
     // The ask there at opening badges nothing, read again or not; the supervisor asking anew (the same row) does.
