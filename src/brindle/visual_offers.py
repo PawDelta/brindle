@@ -204,7 +204,9 @@ _CANCEL_REQUEST = re.compile(
 # Says only "stop", or "never mind I found it": it cancels unless a new ask follows, as in "never mind, render it".
 _CANCEL_BARE = re.compile(_CANCEL_LEAD + r"(?:(?:never\s*mind|nvm)\s+(?:i|i['’]m|i['’]ve|we|we['’]re|it['’]s|its|got|found|figured|all)\b"
                           r"|(?:never\s*mind|nvm|forget\s+(?:it|that|about\s+it)|scratch\s+that|"
-                          r"cancel\s+(?:it|that)|don['’]?t(?:\s+bother)?|stop)(?:\s+(?:it|that|this))?\W*$)", re.I)
+                          r"cancel\s+(?:it|that)|don['’]?t(?:\s+bother)?|stop|ignore)(?:\s+(?:it|that|this))?\W*$)", re.I)
+# What a cancel names when it isn't the plan: calling those off leaves the plan alone.
+_NOT_THE_PLAN = re.compile(r"\b(?:visual\w*|diagrams?|charts?|mockups?|renders?|drawings?|sketch\w*)\b", re.I)
 _ASKS_AGAIN = re.compile(r"(?:(?:please|just|then|instead|but|and|so|ok|okay|now|(?:can|could|would|will) you)\W+)*"
                          r"(?:render|draw|visuali[sz]e|mock|display|show\s+(?:me|us|it|that|this)|(?:can|could) i see|let me see"
                          r"|(?:make|create|build|generate)\s+(?:(?:me|us|a|an|the|this|that)\s+)*" + _CANCEL_ARTIFACT + r")\b", re.I)
@@ -384,7 +386,14 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
-        if not fold_only and (scope or cancelled):
+        # What a cancel calls off: the plan when it says so, or when it names nothing ("ignore",
+        # "stop") and the plan is the request still standing. Calling off a chart spares the plan.
+        held = c.execute("SELECT scope FROM visual_grants WHERE root_id=? AND remaining>0", (root.id,)).fetchone()
+        plan_held = held is not None and held["scope"] == "plan"
+        names_plan = bool(re.search(r"\bplan|think\b", text, re.I))
+        spares_plan = cancelled and plan_held and not names_plan and bool(_NOT_THE_PLAN.search(text))
+        cancels_plan = cancelled and (names_plan or (plan_held and not spares_plan))
+        if not fold_only and (scope or (cancelled and not spares_plan)):
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
             _unlink(c, root.id, "grant")
         if cancelled:
@@ -416,7 +425,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         from brindle import plans
 
         if cancelled:
-            if re.search(r"\bplan|think\b", text, re.I):     # calling off a chart leaves the plan alone
+            if cancels_plan:
                 plans.cancel_draft(db, root.id)
         else:
             # The ask opens its plan at once, an empty draft the supervisor fills (or shows the

@@ -70,6 +70,8 @@ def proposed(plan=PLAN) -> bool:
     # A cancel or a negation wins, whatever the model says.
     pytest.param(["don't write a plan"], "1", False, marks=pytest.mark.variant("a regex cancel keeps no words to grant")),
     (["we really need no planning doc for this one"], "1", False),
+    pytest.param(["ok so lets test the plan, please make a test one with no external dependencies"], "1", True,
+                 marks=pytest.mark.variant("a constraint in the ask is not a negation of it")),
     pytest.param(["ignore"], "1", False, marks=pytest.mark.variant("nothing named: no call, so no wrong grant")),
 ])
 def test_plan_ask_intent(db, session, monkeypatch, said, answer, granted):
@@ -106,11 +108,27 @@ def test_one_message_grants_one_plan(db, session, monkeypatch):
     assert len(gullible.calls) == 1
 
 
-def test_a_message_sent_while_the_model_is_out_voids_its_answer(db, session, monkeypatch):
+@pytest.mark.parametrize("newer", [
+    "never mind, drop the plan",                            # a cancel: the asking message is gone
+    "we really need no planning doc for this one",          # the asking message stays: only its turn has passed
+])
+def test_a_message_sent_while_the_model_is_out_voids_its_answer(db, session, monkeypatch, newer):
     say(db, session, "ok so lets test the plan, please make a test one")
-    # The person calls it off while the model is still reading their ask.
-    monkeypatch.setattr(intent, "_ask", model("1", meanwhile=lambda: say(db, session, "never mind, drop the plan")))
+    # The person writes again while the model is still reading their ask.
+    monkeypatch.setattr(intent, "_ask", model("1", meanwhile=lambda: say(db, session, newer)))
     assert not proposed()
+
+
+@pytest.mark.parametrize("cancel,closes", [
+    ("ignore", True),
+    pytest.param("drop the chart", False, marks=pytest.mark.variant("calling off a chart must spare the plan")),
+])
+def test_a_cancel_calls_off_the_plan_it_finds_standing(db, session, cancel, closes):
+    say(db, session, "Make a planning doc.")
+    assert plans.holding(db, "boss")["state"] == "writing"
+    say(db, session, cancel)
+    assert (plans.holding(db, "boss") is None) is closes    # its draft no longer holds work
+    assert proposed() is not closes                         # and a proposal needs a new ask
 
 
 @pytest.mark.variant("non-person text must never reach the model")

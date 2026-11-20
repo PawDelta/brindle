@@ -47,9 +47,11 @@ _clock = time.monotonic
 # A word naming what an ask is about. With none in the messages there is nothing to find, and no call.
 _ARTIFACT = re.compile(r"\b(?:plan\w*|docs?|documents?|visual\w*|diagrams?|charts?|mock\w*|render\w*|draw\w*|"
                        r"sketch\w*|layouts?)\b", re.I)
-# The picked message says not to make it: no model answer turns that into an ask.
+# The picked message says not to make it (a negation within a few words before the artifact): no
+# model answer turns that into an ask. A constraint elsewhere ("with no external dependencies") is fine.
 _NEGATED = re.compile(r"\b(?:(?:do|does|did|should|would|could|wo|ca|must|need)n['’]?t|do not|never|no|not|"
-                      r"nothing|without|stop|cancel|skip|forget|ignore)\b", re.I)
+                      r"nothing|without|stop|cancel|skip|forget|ignore)\s+(?:\S+\s+){0,3}?"
+                      + _ARTIFACT.pattern, re.I)
 
 WHAT = {"plan": "a planning doc (a written plan) to be made", "visual": "a visual (a diagram, chart, mockup or "
         "other rendered page) to be shown"}
@@ -141,13 +143,15 @@ def grant_from_recent(db: DB, root: str, kind: str, *, ask: Ask | None = None) -
 
     if kind not in WHAT:
         return False
-    conn = db.conn
-    since = conn.execute("SELECT MAX(created_at) FROM visuals WHERE root_id=?", (root,)).fetchone()[0] or 0
-    rows = conn.execute(
-        "SELECT id, words FROM visual_person_words WHERE root_id=? AND staged=0 AND words!='' AND source IS NULL "
-        "AND created_at>? AND created_at>? ORDER BY id DESC LIMIT ?",
-        (root, since, time.time() - visual_offers.FOLD, RECENT)).fetchall()[::-1]
-    turn = conn.execute("SELECT turn FROM visual_person_turns WHERE root_id=?", (root,)).fetchone()
+    # The turn and the messages it counts are read together: a message that comes in after is
+    # both missing from the call and a newer turn, so the answer is refused.
+    with db.tx() as c:
+        turn = c.execute("SELECT turn FROM visual_person_turns WHERE root_id=?", (root,)).fetchone()
+        since = c.execute("SELECT MAX(created_at) FROM visuals WHERE root_id=?", (root,)).fetchone()[0] or 0
+        rows = c.execute(
+            "SELECT id, words FROM visual_person_words WHERE root_id=? AND staged=0 AND words!='' AND source IS NULL "
+            "AND created_at>? AND created_at>? ORDER BY id DESC LIMIT ?",
+            (root, since, time.time() - visual_offers.FOLD, RECENT)).fetchall()[::-1]
     index = pick([r["words"] for r in rows], kind, ask=ask)
     if index is None:
         return False
