@@ -59,10 +59,10 @@ def test_theme_ansi_brindle_seeded_moves_to_the_builtin_theme_on_an_existing_own
 
 
 @pytest.mark.parametrize("app,before,after", [
-    ("light", "dark-ansi", "light"),
-    ("dark", "light-ansi", "dark"),
-    ("light", "dark", "light"),
-    ("light", "solarized", "solarized"),    # a person's own pick is kept
+    pytest.param("light", "dark-ansi", "light", marks=pytest.mark.variant("an ANSI theme brindle seeded moves to the built-in light")),
+    pytest.param("dark", "light-ansi", "dark", marks=pytest.mark.variant("flipping back to dark replaces what light wrote")),
+    pytest.param("light", "dark", "light", marks=pytest.mark.variant("the first seed value is also brindle's")),
+    pytest.param("light", "solarized", "solarized", marks=pytest.mark.variant("a person's own pick is kept")),
 ])
 def test_app_theme_sets_brindles_claude_theme_and_is_remembered(tmp_path, monkeypatch, app, before, after):
     config, work = _brindle_folder(tmp_path, monkeypatch)
