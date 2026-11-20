@@ -286,6 +286,13 @@ def test_pr_footer_counts_come_from_the_db_and_skip_unknown_parts(db, repo, feat
     write_config(repo, checks=["a", "b"])
     bare = _sent_body(feature, monkeypatch, "x")
     assert bare.endswith(workspaces.PR_FOOTER)   # nothing recorded: nothing claimed
+    add(db, feature, "sup", "interactive", "supervisor")
+    worker_branches = ("w1", "w2", "gone1", "gone2")
+    for branch in worker_branches:
+        sh(f"git checkout -qb {branch}", repo)
+        Path(repo, f"{branch}.txt").write_text(branch + "\n")
+        sh(f"git add {branch}.txt && git commit -qm {branch} && git checkout -q main", repo)
+        sh(f"git merge -q --no-ff --no-edit {branch}", feature.path)
     add(db, feature, "w1", "assign")
     add(db, feature, "w2", "handoff")
     add(db, feature, "r1", "review", "reviewer")
@@ -294,13 +301,38 @@ def test_pr_footer_counts_come_from_the_db_and_skip_unknown_parts(db, repo, feat
     head = workspaces.git.out(["rev-parse", feature.branch], feature.path)
     db.set_check(feature.id, head, "a", True, "")
     db.set_check(feature.id, head, "b", True, "")
-    assert _sent_body(feature, monkeypatch, "x").endswith(workspaces.PR_FOOTER + " · 2 workers · 1 review")
     # Workers whose workspaces were removed: their agent rows are gone, their tasks stay.
-    add(db, feature, "sup", "interactive", "supervisor")
-    for tid, aid, state in (("t1", "gone1", "merged"), ("t2", "gone2", "started"), ("t3", "gone3", "cancelled")):
+    for aid, branch in (("w1", "w1"), ("w2", "w2"), ("gone1", "gone1"), ("gone2", "gone2")):
+        tid = "task-" + aid
+        db.add_task(Task(tid, feature.repo_root, aid, "sup", feature.id, "developer", "x", "assign", 1,
+                         branch, None, None, None, "merged" if aid != "gone2" else "started", 0.0, 0.0))
+    for tid, aid, state in (("t3", "gone3", "cancelled"),):
         db.add_task(Task(tid, feature.repo_root, aid, "sup", feature.id, "developer", "x", "assign", 1,
                          None, None, None, None, state, 0.0, 0.0))
     assert _sent_body(feature, monkeypatch, "x").endswith(workspaces.PR_FOOTER + " · 4 workers · 1 review")
+
+
+def test_pr_footer_counts_only_workers_in_this_pr_range(db, repo, feature, monkeypatch):
+    # One worker was already merged into the PR base; the second is merged
+    # into this session branch and is the only worker in base..head.
+    sh("git checkout -qb old-worker", repo)
+    Path(repo, "old-worker.txt").write_text("old\n")
+    sh("git add old-worker.txt && git commit -qm old-worker", repo)
+    sh("git checkout -q main && git merge -q --no-ff old-worker -m 'Merge old worker'", repo)
+    sh("git merge -q main", feature.path)
+    sh("git checkout -qb new-worker", repo)
+    Path(repo, "new-worker.txt").write_text("new\n")
+    sh("git add new-worker.txt && git commit -qm new-worker", repo)
+    sh("git checkout -q main", repo)
+    sh("git merge -q --no-ff new-worker -m 'Merge new worker'", feature.path)
+
+    add(db, feature, "session-root", "interactive", "supervisor")
+    for task_id, agent_id, branch in (("old-task", "old-agent", "old-worker"),
+                                      ("new-task", "new-agent", "new-worker")):
+        db.add_task(Task(task_id, feature.repo_root, agent_id, "session-root", feature.id,
+                         "developer", "work", "assign", 1, branch, None, None, None,
+                         "merged", 1.0, 1.0))
+    assert _sent_body(feature, monkeypatch, "x").endswith(workspaces.PR_FOOTER + " · 1 worker")
 
 
 @pytest.mark.variant("a worker's session_root is the root agent id, which the counts test never links")
@@ -310,8 +342,8 @@ def test_session_root_summary_counts_workers_linked_by_root_agent_id(db, feature
                           feature.path + "-w", None, "w", 0)
     db.add_workspace(worker_ws)
     db.set_workspace_session_root(worker_ws.id, "root")   # pilot.root_of gives an agent id
-    add(db, worker_ws, "wk", "assign")
-    assert workspaces.footer_summary(db, feature, "sha") == ["1 worker"]
+    # A worker is represented only when its branch tip is in this PR range.
+    assert workspaces.footer_summary(db, feature, "sha") == []
 
 
 def test_pr_poll_adds_footer_to_a_gh_opened_pr_once(db, feature, monkeypatch):
