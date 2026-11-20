@@ -857,11 +857,15 @@ export interface TrackerLink {
 }
 
 /* A design's share link: who it opens for under the org's policy now (`off`: the org turned links off). */
+export type ShareLinkScope = { scope: "org" } | { scope: "team"; team: string };
+
 export interface DesignShareLink {
   available: boolean;
+  scoped?: boolean;
   access?: "anyone" | "org" | "off";
   reason?: string;
-  link: { url: string; created_at: number | null; access: "anyone" | "org" | "off" } | null;
+  link: { url: string; created_at: number | null; access: "anyone" | "org" | "off";
+    scope?: { kind: "org" | "team"; org_id: string; team: string | null } | null } | null;
 }
 
 export interface DesignWorkItems {
@@ -2412,8 +2416,8 @@ export class DaemonClient {
     return this.get<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, { repo });
   }
 
-  copyDesignShareLink(doc: string, repo?: string) {
-    return this.post<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, repo ? { repo } : {});
+  copyDesignShareLink(doc: string, repo?: string, scope?: ShareLinkScope) {
+    return this.post<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, { ...(repo ? { repo } : {}), ...scope });
   }
 
   revokeDesignShareLink(doc: string, repo?: string) {
@@ -2426,8 +2430,8 @@ export class DaemonClient {
     return this.get<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, { repo });
   }
 
-  copyPlanShareLink(id: string, repo?: string) {
-    return this.post<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, repo ? { repo } : {});
+  copyPlanShareLink(id: string, repo?: string, scope?: ShareLinkScope) {
+    return this.post<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, { ...(repo ? { repo } : {}), ...scope });
   }
 
   revokePlanShareLink(id: string, repo?: string) {

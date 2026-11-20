@@ -4,7 +4,7 @@ contract is docs/share-links-api.md in pawdelta-web.
 
 Keyed by the Library's document id, like :mod:`brindle.pro.shared_reader`:
 nothing is kept here, each call asks the Library. A design has at most one
-link. Copying reuses the one there is and makes one only when there is none,
+link. Copying reuses the one there is unless an explicit scope selection differs,
 because making one replaces the old link (which then stops working). Who may
 make or revoke a link, and whether an org's policy allows links at all, is the
 Library's to say; its refusal is passed on with its own reason.
@@ -89,7 +89,8 @@ def _link(raw: Any) -> dict | None:
     at = raw.get("created_at")
     return {"url": raw["url"],
             "created_at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
-            "access": raw["access"] if raw.get("access") in ACCESS else "anyone"}
+            "access": raw["access"] if raw.get("access") in ACCESS else "anyone",
+            "scope": raw.get("scope") if isinstance(raw.get("scope"), dict) else None}
 
 
 def _refused(status: int, resp: dict) -> ServiceError:
@@ -107,13 +108,13 @@ def _refused(status: int, resp: dict) -> ServiceError:
     return ServiceError("upstream", mask(why or code or f"HTTP {status}"), 502)
 
 
-def _ask(method: str, doc_id: str, client, store) -> dict | None:
+def _ask(method: str, doc_id: str, client, store, body=None) -> dict | None:
     client, store = ad._session(client, store)
     try:
         ad.require_entitlement(store)             # Free, signed out or air-gapped: nothing is sent
     except RuntimeError as e:
         raise ServiceError("not_entitled", NO_PLAN, 402) from e
-    status, resp = ad._call(method, _path(doc_id), client=client, store=store)
+    status, resp = ad._call(method, _path(doc_id), body, client=client, store=store)
     if status != 200:
         raise _refused(status, resp)
     return _link(resp.get("link"))
@@ -139,12 +140,12 @@ def read(doc_id: str, *, client=None, store=None) -> dict:
         return {"available": False, "link": None}
     access, org = _access(client, store)
     if access == "off":
-        return {"available": True, "link": None, "access": access, "reason": f"{LINKS_OFF} ({org})"}
+        return {"available": True, "scoped": True, "link": None, "access": access, "reason": f"{LINKS_OFF} ({org})"}
     link = _ask("GET", doc_id, client, store)
     if link and link["access"] == "off":
         return {"available": True, "link": link, "access": "off", "reason": LINKS_OFF}
     if org is not None:
-        return {"available": True, "link": link, "access": link["access"] if link else access,
+        return {"available": True, "scoped": True, "link": link, "access": link["access"] if link else access,
                 "reason": f"Set by your organization's admin ({org})."}
     return {"available": True, "link": link}
 
@@ -157,8 +158,8 @@ def _access(client, store) -> tuple[str, str | None]:
     return policy.get("share_links", "org"), ent.org_id
 
 
-def copy(doc_id: str, *, client=None, store=None) -> dict:
-    """The design's link to copy: the one it has, else a new one. Asked again
+def copy(doc_id: str, *, scope=None, team=None, client=None, store=None) -> dict:
+    """Reuse the design's link unless an explicit audience selection differs. Asked again
     in its turn, so copies that overlap all get the one link."""
     with TURNS.hold(doc_id):
         state = read(doc_id, client=client, store=store)
@@ -166,10 +167,18 @@ def copy(doc_id: str, *, client=None, store=None) -> dict:
             raise ServiceError("not_entitled", NO_PLAN, 402)
         if state.get("access") == "off":
             raise ServiceError("share_links_off", state["reason"], 403)
-        link = state["link"] or _ask("POST", doc_id, client, store)
+        if scope not in (None, "org", "team") or (scope == "team" and not team) or (scope != "team" and team):
+            raise ServiceError("invalid_request", "choose an organization or a team for this link", 422)
+        body = {"scope": scope} if scope else None
+        if team:
+            body["team"] = team
+        link = state["link"]
+        existing = (link or {}).get("scope") or {}
+        if not link or (scope is not None and (existing.get("kind") != scope or existing.get("team") != team)):
+            link = _ask("POST", doc_id, client, store, body)
     if link is None:
         raise ServiceError("upstream", "the Library made no link", 502)
-    return {"available": True, "link": link}
+    return {**state, "link": link}
 
 
 def revoke(doc_id: str, *, client=None, store=None) -> dict:
