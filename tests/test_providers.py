@@ -14,11 +14,11 @@ from brindle import provider_homes, providers
 def test_theme_a_person_chose_is_kept_by_the_seed_and_the_onboarding(tmp_path, monkeypatch):
     config, work = _brindle_folder(tmp_path, monkeypatch)
     settings = config.with_name("settings.json")
-    settings.write_text(json.dumps({"theme": "light", "env": {"EXAMPLE": "kept"}}))
+    settings.write_text(json.dumps({"theme": "dark-daltonized", "env": {"EXAMPLE": "kept"}}))
     providers.seed_ci_config([])
     providers.record_claude_onboarding()
     assert providers.trust_folder(work)
-    assert json.loads(settings.read_text()) == {"theme": "light", "env": {"EXAMPLE": "kept"}}
+    assert json.loads(settings.read_text()) == {"theme": "dark-daltonized", "env": {"EXAMPLE": "kept"}}
     assert "theme" not in json.loads(config.read_text())
 
 
@@ -37,9 +37,9 @@ def _brindle_folder(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("entry", ["trust", "seed", "onboarding"])
-@pytest.mark.parametrize("theme", ["dark", None])
+@pytest.mark.parametrize("theme", ["dark-ansi", None])
 @pytest.mark.variant("each launch/first-run entry must migrate settings, including an absent theme")
-def test_theme_dark_brindle_seeded_moves_to_the_ansi_theme_on_an_existing_owned_launch(tmp_path, monkeypatch, entry, theme):
+def test_theme_ansi_brindle_seeded_moves_to_the_builtin_theme_on_an_existing_owned_launch(tmp_path, monkeypatch, entry, theme):
     # An already-onboarded brindle folder (no onboarding again) whose theme brindle seeded as "dark".
     config, work = _brindle_folder(tmp_path, monkeypatch)
     config.write_text(json.dumps({"hasCompletedOnboarding": True, "projects": {work: {"hasTrustDialogAccepted": True}}}))
@@ -54,14 +54,14 @@ def test_theme_dark_brindle_seeded_moves_to_the_ansi_theme_on_an_existing_owned_
         providers.seed_ci_config([])
     else:
         providers.record_claude_onboarding()
-    assert json.loads(settings.read_text()) == {"theme": "dark-ansi", "env": {"EXAMPLE": "kept"}}
+    assert json.loads(settings.read_text()) == {"theme": "dark", "env": {"EXAMPLE": "kept"}}
     assert "theme" not in json.loads(config.read_text())
 
 
 @pytest.mark.parametrize("app,before,after", [
-    ("light", "dark-ansi", "light-ansi"),
-    ("dark", "light-ansi", "dark-ansi"),
-    ("light", "dark", "light-ansi"),
+    ("light", "dark-ansi", "light"),
+    ("dark", "light-ansi", "dark"),
+    ("light", "dark", "light"),
     ("light", "solarized", "solarized"),    # a person's own pick is kept
 ])
 def test_app_theme_sets_brindles_claude_theme_and_is_remembered(tmp_path, monkeypatch, app, before, after):

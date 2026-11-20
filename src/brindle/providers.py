@@ -521,14 +521,13 @@ def trust_folder(path: str) -> bool:
 
 
 # The first-run answers a person gives Claude Code once on their own machine.
-# Claude Code's ANSI theme ("dark-ansi"): its diff and code colours come from
-# the terminal's 16-colour palette, so they follow the app's light or dark
-# theme instead of a fixed dark background.
-CLAUDE_THEMES = {"light": "light-ansi", "dark": "dark-ansi"}
-# The values brindle itself ever wrote into its own config folder's settings.json
-# ("dark" was the first seed): only these are replaced to follow the app's theme.
-# Anything else is the person's own pick and is kept.
-OWNED_THEMES = ("dark", "dark-ansi", "light-ansi")
+# Claude Code's built-in truecolor themes (its ANSI themes draw the input box and
+# messages with the terminal's own grey slots, wrong in both of the app's themes).
+CLAUDE_THEMES = {"light": "light", "dark": "dark"}
+# The values brindle itself ever wrote into its own config folder's settings.json:
+# only these are replaced to follow the app's theme. Anything else is the
+# person's own pick and is kept.
+OWNED_THEMES = ("dark", "light", "dark-ansi", "light-ansi")
 APP_THEME_SETTING = "app_theme"   # ~/.brindle/config.json: the app's last reported theme
 API_KEY_SUFFIX = 20   # Claude Code records an approved key by its last 20 characters
 
