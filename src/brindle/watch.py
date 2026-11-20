@@ -1213,10 +1213,12 @@ def run(repo_root: str | None, sidebar: bool = False) -> bool:
     session root already has one running (sidebar_follow.running_sidebar):
     it didn't start, so it wasn't quit either."""
     pane = os.environ.get("TMUX_PANE")
-    try:
-        own_root = agents.sidebar_root(pane) if sidebar else None
-    except tmux.TmuxError:
-        own_root = None     # tmux can't say whose sidebar this is: run as before, unguarded
+    own_root = None
+    if sidebar:
+        # The root the launcher started this pane for; a pane started before
+        # it said so asks its tag, and a tmux that can't answer ends this start
+        # (the pane's hook starts it again) rather than letting it run unguarded.
+        own_root = os.environ.get(sidebar_follow.SIDEBAR_ROOT_ENV) or agents.sidebar_root(pane)
     if not own_root:
         _run(repo_root, sidebar)
         return True

@@ -44,25 +44,48 @@ def test_a_failing_status_backs_off_instead_of_running_git_every_sweep(db, tmp_p
 def test_a_second_sidebar_for_a_session_does_not_start_while_one_runs(db, tmp_path, monkeypatch):
     """One `brindle watch --sidebar` per session root: a second (a launch that
     found tmux too slow to say the first was there) closes at once, and the
-    root's sidebar row points at the one still running."""
-    from brindle import agents, sidebar_follow, watch
+    root's sidebar row points at the one still running. A tmux that can't say
+    whose sidebar a pane is never lets one run unguarded."""
+    import os
+
+    import pytest
+
+    from brindle import agents, tmux, watch
 
     db.add_workspace(Workspace("w", "/repo", "s", "worktree", "s", "main", str(tmp_path), None, "s", 0))
     db.add_agent(Agent("root", "w", "supervisor", "claude", None, "interactive", "idle", "", None, 0))
-    db.set_sidebar_pane("root", "%2")           # the launch recorded the second pane
-    monkeypatch.setenv("TMUX_PANE", "%2")
-    monkeypatch.setattr(agents, "sidebar_root", lambda pane: "root")
-    monkeypatch.setattr(sidebar_follow.tmux, "get_pane_tag", lambda pane, tag: "root")
     monkeypatch.setattr(watch, "_log_to_file", lambda: None)
     monkeypatch.setattr("brindle.spawn.exit_on_hangup", lambda: None)
-    started = []
-    monkeypatch.setattr(watch.curses, "wrapper", lambda *a: started.append(a))
+    monkeypatch.delenv("BRINDLE_SIDEBAR_ROOT", raising=False)
+    started, second = [], []
 
-    with sidebar_follow.running_sidebar("root", "%1"):     # the first sidebar, alive
-        assert watch.run("/repo", sidebar=True) is False
+    def dashboard(*a):
+        """The first sidebar's screen: while it shows, the launch starts a second pane."""
+        started.append(os.environ["TMUX_PANE"])
+        if len(started) == 1:
+            monkeypatch.setenv("TMUX_PANE", "%2")
+            second.append(watch.run("/repo", sidebar=True))
+
+    def tmux_down(*a):
+        raise tmux.TmuxError("tmux: timed out")
+
+    monkeypatch.setattr(watch.curses, "wrapper", dashboard)
+    tag = {"%1": "root", "%2": "root"}
+    for launcher_says_root, tmux_up in ((False, True), (True, False)):
+        started.clear(), second.clear()
+        db.set_sidebar_pane("root", "%2")           # the launch recorded the second pane
+        if launcher_says_root:
+            monkeypatch.setenv("BRINDLE_SIDEBAR_ROOT", "root")
+        monkeypatch.setattr(agents, "sidebar_root", (lambda pane: tag[pane]) if tmux_up else tmux_down)
+        monkeypatch.setattr(tmux, "get_pane_tag", (lambda pane, key: tag[pane]) if tmux_up else tmux_down)
+        monkeypatch.setenv("TMUX_PANE", "%1")
+        assert watch.run("/repo", sidebar=True) is True
+        assert (started, second) == (["%1"], [False])
+        assert db.get_sidebar_pane("root") == ("%1" if tmux_up else "%2")
+
+    # No root from the launcher and none from tmux: it doesn't start at all.
+    monkeypatch.delenv("BRINDLE_SIDEBAR_ROOT")
+    started.clear()
+    with pytest.raises(tmux.TmuxError):
+        watch.run("/repo", sidebar=True)
     assert started == []
-    assert db.get_sidebar_pane("root") == "%1"
-
-    # Once the first has gone, a sidebar starts as before.
-    assert watch.run("/repo", sidebar=True) is True
-    assert len(started) == 1
