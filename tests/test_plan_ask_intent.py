@@ -10,12 +10,15 @@ from brindle.db import Agent, Workspace
 PLAN = "# Fixes\n\nOne page.\n\n## Goal\n\nFix them all.\n\n## Split\n\nTwo workers."
 
 
-def model(answer):
-    """A fake model client that answers ``answer`` (or raises it) and records each prompt."""
+def model(answer, meanwhile=None):
+    """A fake model client that answers ``answer`` (or raises it) and records each prompt.
+    ``meanwhile()`` runs while the call is out, before it answers."""
     calls = []
 
     def ask(prompt, budget):
         calls.append(prompt)
+        if meanwhile:
+            meanwhile()
         if isinstance(answer, BaseException):
             raise answer
         return answer
@@ -48,13 +51,17 @@ def test_plan_ask_intent(text, earlier, answer, expected):
     assert intent.classify(text, earlier, ask=model(answer)) == expected
 
 
-@pytest.mark.parametrize("failure", [
-    subprocess.TimeoutExpired(["claude"], 1),
-    pytest.param("the plan, I think", marks=pytest.mark.variant("a reply that isn't one of the four answers")),
+@pytest.mark.parametrize("failure,takes", [
+    (subprocess.TimeoutExpired(["claude"], 1), 0.0),
+    pytest.param("the plan, I think", 0.0, marks=pytest.mark.variant("a reply that isn't one of the four answers")),
+    ("plan_request", intent.BUDGET_S + 0.2),                # a right answer past the deadline
 ])
-def test_a_failed_model_call_falls_back_to_the_regex_result_and_is_asked_again(failure):
+def test_a_failed_model_call_falls_back_to_the_regex_result_and_is_asked_again(failure, takes, monkeypatch):
     text, earlier = "please make a test one", ["ok so lets test the plan"]
-    assert intent.classify(text, earlier, ask=model(failure)) == intent.regex_intent(text) == intent.NONE
+    clock = [100.0]
+    monkeypatch.setattr(intent, "_clock", lambda: clock[0])
+    slow = model(failure, meanwhile=lambda: clock.__setitem__(0, clock[0] + takes))
+    assert intent.classify(text, earlier, ask=slow) == intent.regex_intent(text) == intent.NONE
     working = model("plan_request")
     assert intent.classify(text, earlier, ask=working) == intent.PLAN
     assert intent.classify(text, earlier, ask=working) == intent.PLAN
@@ -87,6 +94,29 @@ def test_follow_up_ask_opens_the_plan_and_deliveries_never_reach_the_model(db, s
     visual_offers.person_spoke(db, session, "please make a test one")
     assert plans.holding(db, "boss") is not None            # the ask opened its plan
     assert "ok so lets test the plan" in fake.calls[-1] and "worker" not in fake.calls[-1]
+
+
+def plan_grants(db):
+    return db.conn.execute("SELECT COUNT(*) FROM visual_grants WHERE root_id='boss' AND remaining>0 "
+                           "AND scope='plan'").fetchone()[0]
+
+
+def test_a_cancel_sent_while_the_model_is_out_wins_over_its_answer(db, session, monkeypatch):
+    visual_offers.person_spoke(db, session, "ok so lets test the plan")
+    # The person calls it off while the model is still reading their earlier ask.
+    monkeypatch.setattr(intent, "_ask", model("plan_request", meanwhile=lambda: visual_offers.person_spoke(
+        db, session, "never mind, drop the plan")))
+    visual_offers.person_spoke(db, session, "please make a test one")
+    assert plan_grants(db) == 0 and plans.holding(db, "boss") is None
+
+
+@pytest.mark.parametrize("cancel,closes", [("ignore", True), ("ignore the chart", False)])
+def test_a_model_cancel_calls_off_what_the_person_named(db, session, monkeypatch, cancel, closes):
+    visual_offers.person_spoke(db, session, "Make a planning doc.")
+    assert plans.holding(db, "boss")["state"] == "writing"
+    monkeypatch.setattr(intent, "_ask", model("cancel"))
+    visual_offers.person_spoke(db, session, cancel)
+    assert (plans.holding(db, "boss") is None) is closes     # a chart cancel leaves the draft alone
 
 
 def test_supervisor_revises_its_open_plan_without_a_new_ask(db, session):

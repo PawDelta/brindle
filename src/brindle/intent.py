@@ -28,10 +28,13 @@ log = logging.getLogger(__name__)
 
 PLAN, VISUAL, CANCEL, NONE = "plan_request", "visual_request", "cancel", "none"
 INTENTS = (PLAN, VISUAL, CANCEL, NONE)
-MODEL = "haiku"          # Claude's cheapest model, through the claude CLI (see model_access.ask)
-# The model call's budget, in seconds. The API answers in about half a second; the claude CLI's own
-# start-up adds about a second and a half, so this is the least that lets a call finish.
-BUDGET_S = 2.5
+MODEL = "haiku"          # Claude's cheapest model
+# The whole classification's deadline, in seconds: past it the regex result stands. Through an
+# Anthropic API key the Messages API answers in about half a second. Without one the call goes
+# through the claude CLI, whose start-up alone takes about as long, so it rarely makes it.
+BUDGET_S = 1.0
+API_KEY_ENV = "ANTHROPIC_API_KEY"
+_clock = time.monotonic
 CONTEXT_TURNS = 3        # the person's earlier messages the model sees
 CONTEXT_WINDOW = 30 * 60  # how long an earlier message stays context
 MAX_CHARS = 2000         # of the message, and of each earlier one, sent to the model
@@ -119,20 +122,42 @@ def forget(root: str | None = None) -> None:
             _history.pop(root, None)
 
 
-def _worth_asking(text: str, earlier: list[str]) -> bool:
+def worth_asking(text: str, earlier: list[str]) -> bool:
+    """Whether the message, read with the person's earlier ones, could be an ask or a cancel at all."""
     if _ARTIFACT.search(text):
         return True
     return bool(_ACTION.search(text)) and any(_ARTIFACT.search(t) for t in earlier)
 
 
+_PLANNED = re.compile(r"\b(?:plan\w*|think\w*|docs?|documents?)\b", re.I)
+
+
+def cancel_names_plan(text: str, earlier: list[str]) -> bool:
+    """What a cancel calls off: the artifact the message names, else the one the person's latest
+    earlier message named. Whether that is the plan ("ignore" after "make a plan", not "drop the chart")."""
+    for said in (text, *reversed(earlier)):
+        if _ARTIFACT.search(said):
+            return bool(_PLANNED.search(said))
+    return False
+
+
 def _ask(prompt: str, budget: float) -> str | None:
-    """The real model call: one no-tools claude CLI call to the cheapest model."""
-    from brindle import airgap, model_access
+    """The real model call to the cheapest Claude model: the Messages API when an Anthropic key is
+    set (about half a second), else one no-tools claude CLI call."""
+    from brindle import airgap, model_access, pricing
     from brindle.config import brindle_home
     from brindle.providers import claude_binary
 
     if airgap.enabled():
         return None
+    key = os.environ.get(API_KEY_ENV)
+    if key:
+        from brindle.native.catalog import DEFAULT_BASE_URLS
+        from brindle.native.client import Client, Endpoint
+
+        endpoint = Endpoint(DEFAULT_BASE_URLS["anthropic"], pricing.ALIASES[MODEL], api="anthropic", api_key=key,
+                            max_tokens=8, timeout=budget, retries=0)
+        return Client(endpoint).complete(None, [{"role": "user", "content": prompt}], []).text
     return model_access.ask(claude_binary(), MODEL, prompt, str(brindle_home()), os.environ, timeout=budget)
 
 
@@ -149,7 +174,7 @@ def classify(text: str, earlier: list[str] | None = None, *, ask: Ask | None = N
     if fallback != NONE:
         return fallback
     earlier = [t[:MAX_CHARS] for t in (earlier or [])][-CONTEXT_TURNS:]
-    if not _worth_asking(text, earlier):
+    if not worth_asking(text, earlier):
         return fallback
     key = hashlib.sha256("\x00".join([_norm(text), *map(_norm, earlier)]).encode()).hexdigest()
     with _lock:
@@ -157,13 +182,13 @@ def classify(text: str, earlier: list[str] | None = None, *, ask: Ask | None = N
             _cache.move_to_end(key)
             return _cache[key]
     prompt = PROMPT.format(context="\n".join(earlier) or "(none)", message=text[:MAX_CHARS])
-    started = time.monotonic()
+    started = _clock()
     try:
         answer = parse((ask or _ask)(prompt, budget))
     except Exception as e:  # noqa: BLE001 -- any failure leaves the regex result
         log.info("intent call failed: %s", type(e).__name__)
         return fallback
-    if answer is None or time.monotonic() - started > budget:
+    if answer is None or _clock() - started > budget:
         return fallback     # no usable answer in time: not cached, the next report may get one
     if answer in (PLAN, VISUAL) and _NEGATED_ASK.search(text):
         answer = NONE       # it says not to make it: a negation wins over the model

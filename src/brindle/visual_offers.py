@@ -347,15 +347,20 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     if message_at is None:
         message_at = time.time()
     scope = request_intent(text)
-    model_cancel = False
+    model_scope, model_cancel, model_turn, earlier = None, False, None, []
     if not fold_only and not carries_delivery:
         from brindle import intent
 
         # Wordings the regexes miss go to a small model call, with the person's own earlier
         # messages as context. A prompt holding a brindle delivery is never fed to it.
-        if scope is None and not _cancels(text):
-            asked_for = intent.classify(text, intent.context(root.id, text))
-            scope = {intent.PLAN: "plan", intent.VISUAL: "visual"}.get(asked_for)
+        earlier = intent.context(root.id, text)
+        if scope is None and not _cancels(text) and intent.worth_asking(text, earlier):
+            # The message takes its turn before the call: one the person sends while it is out
+            # takes the next, and this answer no longer counts (it can't undo a newer cancel).
+            with db.tx() as c:
+                model_turn = _take_turn(c, root.id)
+            asked_for = intent.classify(text, earlier)
+            model_scope = {intent.PLAN: "plan", intent.VISUAL: "visual"}.get(asked_for)
             model_cancel = asked_for == intent.CANCEL
         intent.remember(root.id, text)
     closed_prompts = []
@@ -385,6 +390,12 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                       "VALUES (?,1,0,0,?) ON CONFLICT(root_id) DO UPDATE SET "
                       "generation=generation+1, invalidated_at=MAX(invalidated_at,excluded.invalidated_at)",
                       (root.id, time.time()))
+        if model_turn is None:
+            if not fold_only:
+                _take_turn(c, root.id)
+        elif c.execute("SELECT turn FROM visual_person_turns WHERE root_id=?", (root.id,)).fetchone()[0] != model_turn:
+            model_scope, model_cancel = None, False     # a newer message came in while the model was out
+        scope = scope or model_scope
         if not mid_turn:
             c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                       (time.time(), root.id))
@@ -425,12 +436,19 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         from brindle import plans
 
         if cancelled:
-            if re.search(r"\bplan|think\b", text, re.I):     # calling off a chart leaves the plan alone
+            # Calling off a chart leaves the plan alone. A cancel the model found ("ignore") calls off
+            # what the person's earlier messages named.
+            if re.search(r"\bplan|think\b", text, re.I) or (model_cancel and intent.cancel_names_plan(text, earlier)):
                 plans.cancel_draft(db, root.id)
         else:
             # The ask opens its plan at once, an empty draft the supervisor fills (or shows the
             # session's open plan again).
             plans.begin(db, root.id, asked_at=message_at)
+
+
+def _take_turn(c, root: str) -> int:
+    return c.execute("INSERT INTO visual_person_turns (root_id, turn) VALUES (?,1) ON CONFLICT(root_id) "
+                     "DO UPDATE SET turn=turn+1 RETURNING turn", (root,)).fetchone()[0]
 
 
 def keep_typed(db: DB, agent: Agent, text: str | None, expires_at: float, submitted_at: float,
