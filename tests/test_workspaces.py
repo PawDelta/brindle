@@ -335,16 +335,14 @@ def test_pr_footer_counts_only_workers_in_this_pr_range(db, repo, feature, monke
     assert _sent_body(feature, monkeypatch, "x").endswith(workspaces.PR_FOOTER + " · 1 worker")
 
 
-def test_session_root_summary_counts_a_worker_branch_in_the_pr_range(db, repo, feature):
-    add(db, feature, "root", "interactive", "supervisor")
-    worker_ws = Workspace("w-ws", feature.repo_root, "w", "worktree", feature.path + "-w", "main",
-                          feature.path + "-w", None, "w", 0)
-    db.add_workspace(worker_ws)
-    db.set_workspace_session_root(worker_ws.id, "root")   # pilot.root_of gives an agent id
+@pytest.mark.variant("merged worker refs can be deleted before the PR footer is generated")
+@pytest.mark.slow("real git merge and deleted-ref path")
+def test_pr_footer_counts_deleted_worker_branch_from_merge_subject(db, repo, feature):
     sh("git checkout -qb linked-worker", repo)
     Path(repo, "linked-worker.txt").write_text("worker\n")
     sh("git add linked-worker.txt && git commit -qm linked-worker && git checkout -q main", repo)
     sh("git merge -q --no-ff --no-edit linked-worker", feature.path)
+    sh("git branch -D linked-worker", repo)
     db.add_task(Task("linked-task", feature.repo_root, "linked-agent", "root", feature.id,
                      "developer", "work", "assign", 1, "linked-worker", None, None, None,
                      "merged", 1.0, 1.0))
