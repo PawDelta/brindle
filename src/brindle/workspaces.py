@@ -931,29 +931,34 @@ def _plural(n: int, noun: str) -> str:
 
 
 def footer_summary(db: DB, ws: Workspace, sha: str) -> list[str]:
-    """What brindle knows of ``ws``'s work, as footer parts: its workers
-    (the session's, for a session root, removed ones included) and its
-    reviews. Not CI: GitHub shows that. A part brindle has no record of is
+    """What brindle knows of ``ws``'s PR range, as footer parts: workers whose
+    branch tips or merge commits are in that range, and reviews of those
+    branches. Not CI: GitHub shows that. A part brindle has no record of is
     left out."""
-    # A worker's ``session_root`` is its session's root *agent* id (pilot.root_of),
-    # not a workspace id: match it against the agents living in ``ws``.
-    roots = {ws.id} | {a.id for a in db.list_agents(ws.id)}
-    ids = [ws.id] + [w.id for w in db.find_workspaces(ws.repo_root) if w.session_root in roots]
-    workers = {a.id for i in ids for a in db.list_agents(i) if a.mode in ("assign", "handoff")}
-    # A removed worker's agent row is gone, but its task row stays: count every
-    # started task whose caller is in the session, following workers that
-    # started workers of their own.
-    started = [t for t in db.list_tasks(ws.repo_root) if t.agent_id and t.state in ("started", "merged")]
-    callers = set(roots) | workers
-    grew = True
-    while grew:
-        grew = False
-        for t in started:
-            if t.caller_id in callers and t.agent_id not in workers:
-                workers.add(t.agent_id)
-                callers.add(t.agent_id)
-                grew = True
-    reviews = sum(len(db.workspace_reviews(i)) for i in ids)
+    base = git.base_ref(ws.path, ws.base_branch) if ws.base_branch else ""
+    merge_subjects = (git.out(["log", "--merges", "--format=%s", f"{base}..{sha}"], ws.path).splitlines()
+                      if base else [])
+    in_range = []
+    for task in db.list_tasks(ws.repo_root):
+        if not task.agent_id or not task.branch or task.state not in ("started", "merged"):
+            continue
+        tip = git.run(["rev-parse", "--verify", f"refs/heads/{task.branch}"], ws.path, check=False)
+        branch_tip_in_range = False
+        if tip.returncode == 0:
+            tip = tip.stdout.strip()
+            branch_tip_in_range = (git.ok(["merge-base", "--is-ancestor", tip, sha], ws.path)
+                                   and (not base or not git.ok(["merge-base", "--is-ancestor", tip, base], ws.path)))
+        # Brindle removes merged worker refs when configured to do so. Its
+        # no-ff merge subject retains the worker branch name in that case.
+        merged_branch_in_range = any(f"'{task.branch}'" in subject for subject in merge_subjects)
+        if branch_tip_in_range or merged_branch_in_range:
+            in_range.append(task)
+    workers = {task.agent_id for task in in_range}
+    # Include reviews attached to worker workspaces represented in this PR,
+    # along with reviews of the session branch itself.
+    branch_ids = {task.branch for task in in_range}
+    review_ids = {ws.id} | {w.id for w in db.find_workspaces(ws.repo_root) if w.branch in branch_ids}
+    reviews = sum(len(db.workspace_reviews(i)) for i in review_ids)
     parts = [_plural(len(workers), "worker")] if workers else []
     if reviews:
         parts.append(_plural(reviews, "review"))
