@@ -21,12 +21,16 @@ export interface Visuals {
 }
 
 const about = (e: BusEvent, root: string) => e.kind.startsWith("visual.") && (e.root_id === root || e.payload.session === root);
+// A task's queueing or start changes the holding count of a plan. task.* events carry the caller, not
+// the session, so every one reads the list again: a read is one GET, and only while this session is open.
+const holdsChange = (e: BusEvent) => e.kind.startsWith("task.");
 
 export function useVisuals(client: VisualsClient, root: string): Visuals {
   const [got, setGot] = useState<{ root: string; visuals: VisualDTO[] } | null>(null);
   const seq = useRef(0);
-  // The last visual.* event about this session: a new one reads the list again.
-  const changed = useAppState((s) => s.recent.filter((e) => about(e, root)).at(-1)?.id ?? 0);
+  // The last visual.* event about this session, or task event, and each snapshot applied (a recovery
+  // after missed events, which brings no event of its own): a new one reads the list again.
+  const changed = useAppState((s) => `${s.recent.filter((e) => about(e, root) || holdsChange(e)).at(-1)?.id ?? 0}:${s.snapshotVersion}`);
   const reload = useCallback(() => {
     const mine = ++seq.current;
     Promise.resolve()

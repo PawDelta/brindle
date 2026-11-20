@@ -365,7 +365,7 @@ describe("visuals", () => {
     await act(async () => fireEvent.click(chip));
     expect(accepted).toEqual([true]);
     expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
-    await act(async () => fireEvent.click(screen.getByRole("switch", { name: "Visuals" })));
+    await act(async () => fireEvent.click(screen.getByRole("switch", { name: "Docs" })));
     expect(mode).toBe("on");
     expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
   });
@@ -637,6 +637,31 @@ describe("visuals", () => {
     expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_8f2c:r2" });
   });
 
+  it("pins a plan and lights its dot once tasks queue behind it, from the task event alone", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now };
+    const plan: VisualDTO = { ...visual, id: "v_plan", kind: "plan", title: "Bulk invite: plan", unread: false, answer: null, holding: 0 };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    let rows = [plan];
+    vi.spyOn(client, "visuals").mockImplementation(async () => rows);
+    const { store, sync } = connectDaemon(daemon, client);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    fireEvent.click(await screen.findByTestId("visuals-button"));
+    expect(screen.queryByTestId("visual-holding-v_plan")).toBeNull();
+    expect(screen.queryByTestId("visuals-dot")).toBeNull();
+    // The tasks queue on the engine; the event names only the caller, so the session reads its list again.
+    rows = [{ ...plan, holding: 2 }];
+    daemon.publish("task.queued", { repo_root: REPO, payload: { task_id: "t_1", caller_id: "sup1" } });
+    expect(await screen.findByTestId("visual-holding-v_plan")).toBeTruthy();
+    expect(screen.getByTestId("visuals-dot").getAttribute("aria-label")).toBe("holding");
+    // The plan is decided while the stream is down: the missed events can't be replayed, so the daemon asks
+    // for a resnapshot and no event names the change. The mounted entry still follows the list it reads.
+    rows = [{ ...plan, holding: 0, answer: { option: "A", note: "", at: now } }];
+    daemon.send({ type: "resnapshot", reason: "events_lost" });
+    await waitFor(() => expect(screen.queryByTestId("visual-holding-v_plan")).toBeNull());
+    expect(screen.queryByTestId("visuals-dot")).toBeNull();
+  });
+
   it("visuals unread dot clears on view while Inbox removes notices and keeps unanswered prompts", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now };
     const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_notice", reason: "visual is ready" };
@@ -741,10 +766,10 @@ describe("visuals", () => {
     const aside = sidebar();
     // The person folds the open session's agents away; Back must find them still folded.
     fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
-    // The header uses an icon with an unread dot and no count text.
+    // The header uses an icon with an unread dot, named Docs.
     const entry = await screen.findByTestId("visuals-button");
     expect(entry.querySelector("svg")).toBeTruthy();
-    expect(entry.textContent).toBe("");
+    expect(entry.textContent).toBe("Docs");
     expect(within(entry).getByLabelText("unread")).toBeTruthy();
     needUser(1, "Which database should the cache use?");
     ask(supervisorAsks);
@@ -763,11 +788,11 @@ describe("visuals", () => {
     expect(screen.getByTestId("chat-area").className).toContain("hidden");
     expect(screen.getByTestId("terminal")).toBe(terminal);
     expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Visuals/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Docs/ })).toBeNull();
     // Opening marks it read, though the header remains icon-only either way.
     await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
     expect(screen.getByTestId("visuals-button").querySelector("svg")).toBeTruthy();
-    expect(screen.getByTestId("visuals-button").textContent).toBe("");
+    expect(screen.getByTestId("visuals-button").textContent).toBe("Docs");
     expect(read).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledWith("v_8f2c", 2);
     // The ask there at opening badges nothing, read again or not; the supervisor asking anew (the same row) does.
@@ -805,9 +830,9 @@ describe("visuals", () => {
     expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
     expect(screen.getByTestId("terminal")).toBe(terminal);
 
-    // Library › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+    // Library › Kept docs: the kept copy opens in the same reader, read-only, on its own scheme path.
     fireEvent.click(within(sidebar()).getByRole("button", { name: /^Library/ }));
-    fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept visuals/ }));
+    fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept docs/ }));
     fireEvent.click(await screen.findByTestId("kept-k_1"));
     const kept = screen.getByTestId("kept-reader");
     expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");

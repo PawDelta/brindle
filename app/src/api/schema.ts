@@ -1600,7 +1600,8 @@ export interface SharedDesignDTO {
 /**
  * A visual in a session (brindle.visuals). ``rev``: its current revision,
  * served at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.
- * ``unread``: a revision the person hasn't opened yet.
+ * ``unread``: a revision the person hasn't opened yet. ``holding``: the queued
+ * tasks a plan holds (0 for any other row, and once the plan is decided).
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "VisualDTO".
@@ -1612,6 +1613,7 @@ export interface VisualDTO {
   answered_in_chat?: boolean;
   by: string;
   created_at: number;
+  holding?: number;
   id: string;
   kept: boolean;
   kind: "visual" | "plan";
