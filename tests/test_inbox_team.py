@@ -115,7 +115,7 @@ def test_each_row_kind_carries_its_fields(db, library, daemon):
 @pytest.mark.parametrize(("state", "kind", "checks", "opened"), [
     ("passed", "pr_ready", "passed", False),
     ("failed", "pr_failed", "failed", False),
-    ("checking", "pr_ready", "running", False),
+    ("checking", None, None, False),
     ("failed", "pr_opened", "failed", True),
     pytest.param("ci", "pr_opened", "running", True,
                  marks=pytest.mark.variant("open PR CI in progress must override passed local preparation")),
@@ -136,7 +136,11 @@ def test_pr_rows_carry_preparation_results_and_changed_files(db, repo, library, 
     monkeypatch.setattr(session_review, "session_pr_state", lambda *args: {"state": state})
     db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, title, prepared_at)"
                     " VALUES (?, ?, ?, ?, 'Feature', 1)", ("r1", ws.branch, sha, "passed" if opened else state))
-    [item] = inbox._pr_items(db, "r1", ws.branch, ws, {})
+    items = inbox._pr_items(db, "r1", ws.branch, ws, {})
+    if kind is None:
+        assert items == []  # Preparation must finish before the person can approve a PR.
+        return
+    [item] = items
     assert (item.kind, item.to_json()["checks_state"], item.to_json()["file_count"]) == (kind, checks, 1)
 
 

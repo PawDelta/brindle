@@ -1760,7 +1760,7 @@ def session_pr_forge(db, tmp_path, monkeypatch, real_github_lookups):
     })
     monkeypatch.setattr(session_review, "_head_flights", set())
     monkeypatch.setattr(session_review, "_head_roots", {})
-    monkeypatch.setattr(git, "out", lambda *args, **kwargs: forge.local_head)
+    monkeypatch.setattr(git, "out", lambda args, *a, **kwargs: "0" if args[0] == "rev-list" else forge.local_head)
     forge.items = lambda: inbox._pr_items(db, "lead", "sess", ws, {"root_id": "lead"})
     return forge
 

@@ -239,8 +239,6 @@ def _pr_facts(db: DB, root_id: str, home: Workspace, sha: str | None, *,
     if url:
         live = session_review.session_pr_state(db, root_id, url)
         state = {"ready": "passed", "failed": "failed", "ci": "running"}.get((live or {}).get("state"))
-    elif state == "checking":
-        state = "running"
     count = None
     if sha and home.base_branch:
         try:
@@ -281,7 +279,7 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
                              url=opened["url"], **_pr_facts(db, root_id, home, head, url=opened["url"]), **link)]
     rows = db.conn.execute(
         "SELECT sha, state, title, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
-        " AND state IN ('checking', 'passed', 'failed')", (root_id, branch)).fetchall()
+        " AND state IN ('passed', 'failed')", (root_id, branch)).fetchall()
     merged = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ? AND url IS NOT NULL"
                              " AND merged_at IS NOT NULL", (root_id, branch)).fetchone()
     if rows and merged and not session_review.new_since_merge(db, home,merged["pushed_sha"]):
@@ -297,7 +295,7 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
             pass  # An unavailable checkout must not break the rest of the inbox.
     return [InboxItemDTO(kind="pr_ready", reason="PR ready for your approval", detail=r["title"],
                         **_pr_facts(db, root_id, home, r["sha"], state=r["state"]), **link)
-            if r["state"] != "failed" else
+            if r["state"] == "passed" else
             InboxItemDTO(kind="pr_failed", reason=f"PR checks failed: {r['check_cmd']}", detail=r["output"],
                          **_pr_facts(db, root_id, home, r["sha"], state=r["state"]), **link)
             for r in rows]
