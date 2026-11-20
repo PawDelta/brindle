@@ -1010,7 +1010,7 @@ def install_attribution_hook(path: str | Path) -> None:
         original_path = Path(original)
         if not original_path.is_absolute():
             original_path = path / original_path
-    if original_path.exists() and original_path.name != "commit-msg-filter":
+    if original_path.exists():
         chained = str(original_path.resolve())
     else:
         chained = ""
@@ -1019,6 +1019,14 @@ def install_attribution_hook(path: str | Path) -> None:
         git_dir = path / git_dir
     hook_dir = git_dir / "brindle-hooks"
     hook_dir.mkdir(parents=True, exist_ok=True)
+    original_dir = original_path.parent
+    if original_dir.is_dir():
+        for existing_hook in original_dir.iterdir():
+            if existing_hook.name == "commit-msg":
+                continue
+            forwarded = hook_dir / existing_hook.name
+            if not os.path.lexists(forwarded):
+                forwarded.symlink_to(existing_hook.resolve())
     hook = hook_dir / "commit-msg"
     hook.write_text(
         "#!/bin/sh\n# brindle attribution filter\n"

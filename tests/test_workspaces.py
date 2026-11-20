@@ -75,6 +75,28 @@ Generated with Claude Code
     assert "🤖 Generated with OpenAI" not in committed
 
 
+def test_brindle_merge_filters_message_and_forwards_repository_hooks(repo):
+    hooks = Path(sh("git rev-parse --git-path hooks", repo).strip())
+    if not hooks.is_absolute():
+        hooks = repo / hooks
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "prepare-commit-msg").write_text(
+        '#!/bin/sh\nprintf "\\nCo-Authored-By: Bot <noreply@openai.com>\\nGenerated with Claude Code\\n" >> "$1"\n'
+    )
+    (hooks / "commit-msg").write_text('#!/bin/sh\necho commit-msg >> hook-runs\n')
+    (hooks / "pre-commit").write_text('#!/bin/sh\necho pre-commit >> hook-runs\n')
+    for name in ("prepare-commit-msg", "commit-msg", "pre-commit"):
+        (hooks / name).chmod(0o755)
+    sh("git checkout -qb merge-source && git commit -q --allow-empty -m source && git checkout -q main", repo)
+
+    git.merge_into(str(repo), str(repo), "merge-source", squash=False)
+
+    message = sh("git log -1 --format=%B", repo)
+    assert "noreply@openai.com" not in message
+    assert "Generated with Claude Code" not in message
+    assert set(Path(repo, "hook-runs").read_text().splitlines()) == {"commit-msg", "pre-commit"}
+
+
 def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
     # The main checkout sits on another branch whose committed config differs
     # from the base the workspace is cut from: the base's config wins, for
