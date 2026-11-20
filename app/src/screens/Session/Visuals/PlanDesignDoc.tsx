@@ -1,6 +1,7 @@
 /* The planning doc as the owner approved it (design: plan-doc-redesign.html), for a plan on the
-   design-doc spine (brindle/plan_docs.py SPINE) read by the person who decides it. PlanReader.tsx
-   keeps the state and the writes; this file is its parts:
+   design-doc spine (brindle/plan_docs.py SPINE), in every view of it: the author's own plan,
+   the same plan shared for team review (live, or frozen for sign-off), and a teammate reading
+   it. PlanReader.tsx keeps the state and the writes; this file is its parts:
    - the outline on the left ("On this page"): each numbered spine section, with the decisions
      anchored in it listed under it, a dot on the ones still open and a tick on the decided;
    - each decision as a card inline at the end of its section: "Decision N of M", its options as
@@ -16,7 +17,7 @@ import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
 import type { ThreadActions } from "./DocReview";
 import type { DocLayout } from "./DocText";
-import { personName } from "./PlanCards";
+import { Avatar, personName } from "./PlanCards";
 import type { Mode, MODES } from "./PlanReader";
 
 /* The spine's ids in reading order; the extras sit inside the section before them. */
@@ -139,8 +140,10 @@ export function ModeMenu({ modes, current, allowed, onPick }: { modes: typeof MO
 
 /* "On this page": the numbered sections, each decision under its section with a dot while it
    waits for the person's pick and a tick once picked. */
-export function Outline({ parts, placed, isOpen, decided, total, current }: {
+export function Outline({ parts, placed, isOpen, decided, total, current, footer }: {
   parts: SpinePart[]; placed: Map<string, PlanDecisionDTO[]>; isOpen(d: PlanDecisionDTO): boolean; decided: number; total: number; current: string | null;
+  /* Under the sections: a shared doc's sign-off sheet. */
+  footer?: ReactNode;
 }) {
   const row = "flex items-baseline gap-2 rounded-md px-2 py-[3px] text-[12.5px] leading-[1.4] no-underline hover:bg-surface-2 hover:text-ink";
   const go = (id: string) => (e: { preventDefault(): void }) => {
@@ -175,6 +178,7 @@ export function Outline({ parts, placed, isOpen, decided, total, current }: {
         ))}
         {(placed.get("") ?? []).map(decisionRow)}
       </div>
+      {footer && <div className="mt-5 grid border-t border-line text-[12.5px]">{footer}</div>}
     </nav>
   );
 }
@@ -219,6 +223,12 @@ export function DecisionCard({ decision: d, n, of, open, picked, onPick, onComme
                 <span className={`flex flex-wrap items-center gap-[9px] text-sm leading-[1.45] ${done && !chosen ? "font-medium text-ink-3" : done ? "font-semibold text-ink" : "font-medium text-ink"}`}>
                   {o.label}
                   {d.mine === o.id && <span className="rounded-sm px-1.5 text-[11px] font-normal leading-[17px] text-ink-2 shadow-[inset_0_0_0_1px_var(--line-strong)]" data-testid="plan-recommended">Recommended</span>}
+                  {/* A shared doc's votes: who picked this option. */}
+                  {(d.votes?.[o.id]?.length ?? 0) > 0 && (
+                    <span className="ml-auto inline-flex items-center gap-1" data-votes={d.votes![o.id].length} title={`Voted for by ${d.votes![o.id].map(personName).join(", ")}`}>
+                      {d.votes![o.id].map((v) => <Avatar key={v} who={v} small />)}
+                    </span>
+                  )}
                 </span>
                 {(pros.length > 0 || cons.length > 0 || o.detail) && (
                   <span className={`mt-[3px] grid gap-px text-[13px] leading-normal ${done && !chosen ? "text-ink-3" : "text-ink-2"}`}>

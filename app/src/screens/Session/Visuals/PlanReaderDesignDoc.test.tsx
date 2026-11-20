@@ -1,9 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { DocRevisionComparison, Plan, VisualDTO } from "../../../api/client";
+import type { DocRevisionComparison, Plan, SharedDesign, VisualDTO } from "../../../api/client";
 import { Annotated, MarginNote } from "./PlanDesignDoc";
 import { PlanReader } from "./PlanReader";
-import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
+import { SharedDesignReader } from "./SharedDesignReader";
+import type { PlanDocClient, PlansClient, SharedDesignClient, VisualsClient } from "./client";
 
 afterEach(cleanup);
 
@@ -104,6 +105,53 @@ it("reads a spine plan as the planning doc: the outline marks open decisions, ea
   await act(async () => fireEvent.click(approve()));
   expect(verdicts).toEqual([expect.objectContaining({ approved: true, picks: { store: "b", loud: "a", reach: "a" } })]);
   expect(screen.queryByTestId("task-outbox")).toBeNull();
+});
+
+/* Shared for team review, one required reviewer still to sign. */
+const inReview = { state: "waiting" as const, required: 1, signed: 0, waiting_on: ["u_dana"], reviewers: [{ sub: "u_dana", required: true, status: "waiting" as const }] };
+
+it.each([
+  ["the author", async () => {
+    const plan = spine({ gate: inReview, threads: [] });
+    const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...writes(plan), plan: async () => plan, decidePlan: async () => plan };
+    render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+    // Every pick made, Approve still waits on the reviewer's sign-off, and the sheet says who.
+    return async () => {
+      expect(within(screen.getByTestId("plan-outline")).getByTestId("plan-signoffs")).toBeTruthy();
+      const approve = screen.getByTestId("plan-build") as HTMLButtonElement;
+      expect([approve.dataset.gate, approve.disabled]).toEqual(["waiting", true]);
+    };
+  }],
+  ["a teammate", async () => {
+    const design: SharedDesign = { ...spine({ gate: { ...inReview, waiting_on: ["u_me"], reviewers: [{ sub: "u_me", required: true, status: "waiting", you: true }] }, threads: [] }),
+      me: "u_me", author: "u_author", can_comment: true, can_suggest: true, can_sign_off: true, signed_off: false };
+    const sent: [string, Record<string, unknown>][] = [];
+    const client: SharedDesignClient = {
+      sharedDesign: async () => design,
+      writeSharedDesign: async (_doc, tail, body) => { sent.push([tail, body]); return design; },
+      libraryPeople: async () => ({ people: [] }),
+    };
+    render(<SharedDesignReader client={client} docId={design.id} onBack={() => {}} />);
+    // Each pick went out as the teammate's vote, and their Sign off is the bar's action.
+    return async () => {
+      expect(sent.map(([tail, body]) => [tail, body.decision])).toEqual([["votes", "store"], ["votes", "loud"], ["votes", "reach"]]);
+      expect((screen.getByTestId("plan-sign-off") as HTMLButtonElement).disabled).toBe(false);
+    };
+  }],
+])("reads a shared spine plan, as %s, in the planning doc's layout", async (_who, open) => {
+  const finish = await open();
+  const outline = await screen.findByTestId("plan-outline");
+  expect(within(outline).getAllByTestId("outline-decision").map((a) => a.dataset.state)).toEqual(["open", "open", "open"]);
+  const doc = screen.getByTestId("plan-doc");
+  expect([...within(doc).getByRole("region", { name: "Open questions" }).querySelectorAll<HTMLElement>("[data-testid=plan-decision]")].map((d) => d.dataset.decision)).toEqual(["reach"]);
+  // Not the older reader: no review column, collapsed or open.
+  expect(screen.queryByTestId("plan-review")).toBeNull();
+  expect(screen.queryByTestId("plan-review-strip")).toBeNull();
+  for (const id of ["store", "loud", "reach"]) {
+    await act(async () => fireEvent.click(within(doc.querySelector<HTMLElement>(`[data-testid=plan-decision][data-decision=${id}]`)!).getAllByRole("radio")[0]));
+  }
+  expect(within(outline).getAllByTestId("outline-decision").map((a) => a.dataset.state)).toEqual(["decided", "decided", "decided"]);
+  await finish();
 });
 
 it("lays out the spine sections as the design does, and their words stay anchorable", async () => {
