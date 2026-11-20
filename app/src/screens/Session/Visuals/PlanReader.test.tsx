@@ -27,6 +27,10 @@ it("shows the signed-in person's initials from their name, and the email's first
   store.dispatch({ type: "account", account: { signed_in: true, name: null, email: "hannah@example.test" } });
   render(inTestStore(<Avatar who="person" />, store));
   expect(screen.getByTitle("You").textContent).toBe("H");
+  // A teammate known only by an email gets that email's first letter; a named one, their initials.
+  render(inTestStore(<><Avatar who="maya.chen@example.test" /><Avatar who="Ravi Shah" /></>, store));
+  expect(screen.getByTitle("Maya Chen").textContent).toBe("M");
+  expect(screen.getByTitle("Ravi Shah").textContent).toBe("RS");
 });
 
 /* Who reviews the doc, and sharing it, open over the page from the toolbar's Share. */

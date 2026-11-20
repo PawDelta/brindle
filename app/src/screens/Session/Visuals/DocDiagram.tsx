@@ -75,9 +75,17 @@ function MermaidDrawing({ source, onFail }: { source: string; onFail(): void }) 
     const draw = async () => {
       try {
         const mermaid = await loadMermaid();
-        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", htmlLabels: false, flowchart: { htmlLabels: false }, theme: "base", themeVariables: mermaidTheme() });
-        const { svg: out } = await mermaid.render(`doc-mermaid-${++drawings}`, source);
-        if (current) setSvg(out);
+        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true, htmlLabels: false, flowchart: { htmlLabels: false }, theme: "base", themeVariables: mermaidTheme() });
+        const id = `doc-mermaid-${++drawings}`;
+        try {
+          const { svg: out } = await mermaid.render(id, source);
+          if (current) setSvg(out);
+        } catch (error) {
+          // mermaid's temporary container is in the page body, not the figure: take it out if it's still there.
+          document.getElementById(`d${id}`)?.remove();
+          document.getElementById(id)?.remove();
+          throw error;
+        }
       } catch {
         if (current) onFail();
       }

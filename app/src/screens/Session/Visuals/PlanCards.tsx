@@ -40,10 +40,11 @@ export function Avatar({ who, small, ring }: { who: string; small?: boolean; rin
   const account = useAccount();
   const colour = who === "person" ? "var(--branch)" : who === "supervisor" ? "var(--pass)" : `var(--group-${Number(peerClass(who).slice("loro-peer-".length)) + 2})`;
   const rings = ring === "wait" ? "shadow-[0_0_0_1.5px_var(--canvas),0_0_0_3px_var(--sap)]" : ring === "done" ? "shadow-[0_0_0_1.5px_var(--canvas),0_0_0_3px_var(--pass)]" : ring === "dim" ? "opacity-45" : "";
-  /* The signed-in person's initials come from the account name; their email's first letter only when there's no name. */
+  /* A name's initials ("Maya Chen" → MC). An email with no name behind it gives its first letter only. */
   const name = account?.signed_in ? account.name?.trim() : "";
   const email = account?.signed_in ? account.email?.trim() : "";
-  const letters = who === "person" ? (name ? initials(name) : email ? email[0].toUpperCase() : "Y") : who === "supervisor" ? "S" : initials(who);
+  const letters = who === "person" ? (name ? initials(name) : email ? email[0].toUpperCase() : "Y")
+    : who === "supervisor" ? "S" : who.includes("@") ? who[0].toUpperCase() : initials(who);
   return (
     <span title={personName(who)} style={{ backgroundColor: colour }} className={`inline-grid flex-none place-items-center rounded-full font-mono font-semibold leading-none text-canvas ${small ? "size-4 text-[7.5px]" : "size-5 text-[9px]"} ${rings}`}>
       {letters}

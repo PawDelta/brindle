@@ -7,16 +7,25 @@ import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
 afterEach(cleanup);
 
-/* mermaid draws in the browser; here it returns a fixed drawing, or fails on a source it can't parse. */
-vi.mock("mermaid", () => ({
-  default: {
-    initialize: () => {},
-    render: async (_id: string, source: string) => {
-      if (source.includes("broken")) throw new Error("Parse error");
-      return { svg: `<svg data-mermaid="1"><g></g></svg>` };
+/* mermaid draws in the browser; here it returns a fixed drawing. On a source it can't parse it works as
+   mermaid does: its temporary container is left in the page body, and an error drawing is added to it
+   unless error rendering is suppressed. */
+vi.mock("mermaid", () => {
+  let suppressed = false;
+  return {
+    default: {
+      initialize: (config: { suppressErrorRendering?: boolean }) => { suppressed = !!config.suppressErrorRendering; },
+      render: async (id: string, source: string) => {
+        if (!source.includes("broken")) return { svg: `<svg data-mermaid="1"><g></g></svg>` };
+        const temp = document.createElement("div");
+        temp.id = `d${id}`;
+        temp.innerHTML = suppressed ? "" : `<svg data-error="1"></svg>`;
+        document.body.append(temp);
+        throw new Error("Parse error");
+      },
     },
-  },
-}));
+  };
+});
 
 const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Webhooks", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
 const visuals: VisualsClient = {
@@ -186,6 +195,9 @@ it("draws a mermaid section as an svg, and shows its source when it can't be dra
   const failedDoc = await screen.findByTestId("plan-doc");
   await waitFor(() => expect(figure(failedDoc).querySelector("pre")?.textContent).toContain("broken -->"));
   expect(figure(failedDoc).querySelector("svg")).toBeNull();
+  // Nothing mermaid left in the page outside the figure.
+  expect(document.querySelector("[data-error]")).toBeNull();
+  expect(document.querySelector('[id*="doc-mermaid"]')).toBeNull();
 });
 
 it("shows no worker split to the person once the plan is approved", async () => {
