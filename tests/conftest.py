@@ -527,9 +527,9 @@ def no_claude_usage_command(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_intent_model(monkeypatch):
-    """Person messages the request regexes miss are never sent to the real
-    model: the call answers nothing, so the regex result stands, and no
-    session's context or cache carries over (tests/test_plan_ask_intent.py
+    """A publication nothing allows never asks the real model about the
+    person's recent messages: the call answers nothing, so it is refused as
+    before, and no cached answer carries over (tests/test_plan_ask_intent.py
     fakes the model)."""
     from brindle import intent
 
