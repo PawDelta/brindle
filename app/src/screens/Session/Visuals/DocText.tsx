@@ -118,7 +118,8 @@ export type DocLayout = "doc" | "goals" | "alternatives" | "tech-stack" | "risks
 /* A block of the text as written, for a layout to arrange. */
 interface Block {
   key: string;
-  node: ReactNode;
+  /* The block as written, drawn through the leaf it is given. */
+  node(leaf: Leaf): ReactNode;
   kind: "p" | "list" | "table" | "heading" | "other";
   run?: Run;
   items?: Run[];
@@ -151,7 +152,7 @@ function arrange(blocks: Block[], layout: DocLayout, leaf: Leaf): ReactNode[] {
     if (b.kind === "p" && b.run?.text.trim() === "None.") return <p key={b.key} className="text-ink-3">{inline(b.run, leaf, b.key)}</p>;
     if (b.kind === "heading") return <h3 key={b.key} className="mb-0 mt-4 font-serif text-base font-semibold leading-[1.3] text-ink">{inline(b.run!, leaf, b.key)}</h3>;
     if (b.kind === "list" && !b.ordered) return <ul key={b.key} className="grid list-none gap-[5px] p-0">{b.items!.map((it, j) => <li key={j} className={dot}>{inline(it, leaf, `${b.key}.${j}`)}</li>)}</ul>;
-    return b.node;
+    return b.node(leaf);
   };
   // Rows: a name, then what it says (the alternatives, and the tech stack in its smaller type).
   const rows = (b: Block, stack: boolean): ReactNode | null => {
@@ -265,7 +266,10 @@ export function DocText({ body, marks = [], layout }: { body: string; marks?: Ma
   };
 
   const blocks: Block[] = [];
-  const put = (node: ReactNode, data: Omit<Block, "key" | "node"> = { kind: "other" }) => blocks.push({ key: `b${blocks.length}`, node, ...data });
+  // Blocks are read first and drawn after, once, through one leaf: a leaf inserts a suggestion's
+  // new text (and a thread's number) the first time it reaches its place, so drawing a block
+  // twice, or with two leaves, would show it twice.
+  const put = (node: (leaf: Leaf) => ReactNode, data: Omit<Block, "key" | "node"> = { kind: "other" }) => blocks.push({ key: `b${blocks.length}`, node, ...data });
   const key = () => `b${blocks.length}`;
   let i = 0;
   while (i < lines.length) {
@@ -280,7 +284,7 @@ export function DocText({ body, marks = [], layout }: { body: string; marks?: Ma
       for (i++; i < lines.length && !text(i).trim().startsWith(fence[1]); i++) code.push(i);
       i++;
       const k = key();
-      put(
+      put((leaf) =>
         <pre key={k} className="overflow-x-auto rounded-md bg-surface-2 px-3.5 py-3 font-mono text-[12.5px] leading-[1.6] text-ink-2">
           {code.map((j, n) => leaf({ text: text(j) + (n < code.length - 1 ? "\n" : ""), at: span(lines[j].at, text(j).length + 1) }, `${k}.${n}`))}
         </pre>,
@@ -292,12 +296,13 @@ export function DocText({ body, marks = [], layout }: { body: string; marks?: Ma
       const k = key();
       const col = line.indexOf(heading[2], heading[1].length);
       const run = { text: heading[2], at: span(lines[i].at + col, heading[2].length) };
-      put(<h4 key={k} className="font-sans text-sm font-semibold text-ink">{inline(run, leaf, k)}</h4>, { kind: "heading", run });
+      put((leaf) => <h4 key={k} className="font-sans text-sm font-semibold text-ink">{inline(run, leaf, k)}</h4>, { kind: "heading", run });
       i++;
       continue;
     }
     if (RULE.test(line)) {
-      put(<hr key={key()} className="border-line" />);
+      const k = key();
+      put(() => <hr key={k} className="border-line" />);
       i++;
       continue;
     }
@@ -306,7 +311,7 @@ export function DocText({ body, marks = [], layout }: { body: string; marks?: Ma
       const rows: Run[][] = [];
       for (i += 2; i < lines.length && text(i).includes("|") && text(i).trim(); i++) rows.push(cells(i));
       const k = key();
-      put(
+      put((leaf) =>
         <div key={k} className="overflow-x-auto">
           <table className="w-full border-collapse font-sans text-[13px]">
             <thead>
@@ -328,8 +333,9 @@ export function DocText({ body, marks = [], layout }: { body: string; marks?: Ma
       const items: Run[] = [];
       for (; i < lines.length && list.test(text(i)); i++) items.push(tail(i, text(i).length - list.exec(text(i))![1].length));
       const k = key();
-      const kids = items.map((it, j) => <li key={j}>{inline(it, leaf, `${k}.${j}`)}</li>);
-      put(list === BULLET ? <ul key={k} className="flex list-disc flex-col gap-0.5 pl-[18px]">{kids}</ul> : <ol key={k} className="flex list-decimal flex-col gap-0.5 pl-[18px]">{kids}</ol>,
+      const kids = (leaf: Leaf) => items.map((it, j) => <li key={j}>{inline(it, leaf, `${k}.${j}`)}</li>);
+      const ordered = list === NUMBERED;
+      put((leaf) => (ordered ? <ol key={k} className="flex list-decimal flex-col gap-0.5 pl-[18px]">{kids(leaf)}</ol> : <ul key={k} className="flex list-disc flex-col gap-0.5 pl-[18px]">{kids(leaf)}</ul>),
         { kind: "list", items, ordered: list === NUMBERED });
       continue;
     }
@@ -339,7 +345,7 @@ export function DocText({ body, marks = [], layout }: { body: string; marks?: Ma
         quoted.push({ i, run: tail(i, text(i).length - text(i).trimStart().replace(/^>\s?/, "").length) });
       }
       const k = key();
-      put(<blockquote key={k} className="border-l-2 border-sap px-3.5 py-1 font-sans text-[13.5px] leading-[1.55] text-ink-2">{inline(joined(quoted), leaf, k)}</blockquote>);
+      put((leaf) => <blockquote key={k} className="border-l-2 border-sap px-3.5 py-1 font-sans text-[13.5px] leading-[1.55] text-ink-2">{inline(joined(quoted), leaf, k)}</blockquote>);
       continue;
     }
     const para: { i: number; run: Run }[] = [];
@@ -352,11 +358,9 @@ export function DocText({ body, marks = [], layout }: { body: string; marks?: Ma
     }
     const k = key();
     const run = joined(para);
-    put(<p key={k} className="max-w-[68ch]">{inline(run, leaf, k)}</p>, { kind: "p", run });
+    put((leaf) => <p key={k} className="max-w-[68ch]">{inline(run, leaf, k)}</p>, { kind: "p", run });
   }
-  // A layout draws its blocks again: with leaves of their own, since a leaf inserts a suggestion's
-  // new text (and a thread's number) only the first time it reaches its place.
-  return <>{layout ? arrange(blocks, layout, leaves(marks)) : blocks.map((b) => b.node)}</>;
+  return <>{layout ? arrange(blocks, layout, leaf) : blocks.map((b) => b.node(leaf))}</>;
 }
 
 /* The engine counts a section's text in code points (brindle/plan_docs.py is Python); the DOM

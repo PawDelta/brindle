@@ -19,7 +19,7 @@ const options = [{ id: "a", label: "A table", pros: ["No new service"], cons: ["
 const spine = (more: Partial<Plan> = {}): Plan => ({
   id: visual.id, session: "boss", title: "Webhook delivery", rev: 1, state: "open", markdown: "…", lede: "Deliver signed events.", queued: 0, created_at: 1,
   sections: [
-    { id: "context", title: "Context", markdown: "Teams poll today." },
+    { id: "context", title: "Context", markdown: "Teams poll today.\n\n- Polling misses short states." },
     { id: "goals", title: "Goals and non-goals", markdown: "**Goals**\n\n- No event is lost.\n\n**Non-goals**\n\n- Exactly-once delivery." },
     { id: "proposed-design", title: "Proposed design", markdown: "An outbox row per event." },
     { id: "architecture", title: "Architecture", markdown: "The dispatcher signs each payload." },
@@ -38,6 +38,7 @@ const spine = (more: Partial<Plan> = {}): Plan => ({
     { id: 1, kind: "comment", rev: 1, author: "person", text: "Retry-After?", status: "open", at: 1, anchor: { kind: "text", section: "proposed-design", start: 3, end: 9, quote: "outbox", state: "current" } },
     { id: 2, kind: "comment", rev: 1, author: "person", text: "Which relay?", status: "open", at: 1, anchor: { kind: "text", section: "alternatives", start: 88, end: 95, quote: "machine", state: "current" } },
     { id: 3, kind: "suggestion", rev: 1, author: "person", text: "", status: "open", at: 1, before: "Dead", after: "Failing", anchor: { kind: "text", section: "risks", start: 40, end: 44, quote: "Dead", state: "current" } },
+    { id: 4, kind: "suggestion", rev: 1, author: "person", text: "", status: "open", at: 1, before: "Teams", after: "Admins", anchor: { kind: "text", section: "context", start: 0, end: 5, quote: "Teams", state: "current" } },
   ],
   ...more,
 });
@@ -98,6 +99,9 @@ it("lays out the spine sections as the design does, and their words stay anchora
   expect(region("Rollout and tasks").querySelectorAll("[data-layout=tasks] li").length).toBe(1);
   // A suggestion in a laid-out list still shows its new words beside the struck ones.
   expect(region("Risks and what's hard to undo").querySelector('del[data-thread="3"] + ins')?.textContent).toBe("Failing");
+  // A suggestion in a paragraph, with a laid-out list after it: its new words once, at its range.
+  const context = region("Context");
+  expect([...context.querySelectorAll('ins[data-thread="4"]')].map((el) => [el.previousElementSibling?.getAttribute("data-thread"), el.textContent])).toEqual([["4", "Admins"]]);
   // A comment on an alternative's words is drawn on them inside its row.
   expect(region("Alternatives considered").querySelector('[data-layout=rows] dd [data-thread="2"]')?.textContent).toBe("machine");
 });
