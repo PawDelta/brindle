@@ -64,6 +64,8 @@ import { BrindleSignIn, Onboarding, Permissions, Starting, markOnboarded, onboar
 import { AgentsScreen } from "./screens/Agents";
 import { SessionScreen } from "./screens/Session";
 import { SettingsScreen } from "./screens/Settings";
+import { SharedLinkReader } from "./screens/Session/Visuals/SharedLinkReader";
+import { useDeepLinks, type DeepLinkSource } from "./lib/deeplink";
 import { isPaused } from "./store/overview";
 import { SessionsProvider, useCloseSession, useSessions } from "./store/sessions";
 import { OpenSessionContext, PanesReadyContext, type PanesReady } from "./store/panes";
@@ -99,6 +101,8 @@ export interface AppProps {
   releaseBuildUpdater?: ReleaseBuildUpdater;
   /* Settings' About license files: the shell's in the app, none in a browser tab. */
   readAbout?: () => Promise<About>;
+  /* brindle:// links the app is opened with (lib/deeplink.ts): the shell's in the app, none in a browser tab. */
+  deepLinks?: DeepLinkSource;
 }
 
 const NO_CLIENT: EngineStatus = {
@@ -188,6 +192,9 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
     case "shared-design":
       // A shared design opens in the Library's reader, with the Library around it.
       return <OpenInLibrary navigate={navigate} to={{ screen: "knowledge", view: "docs", doc: route.doc, design: true, designRepo: route.repo }} />;
+    case "plan-link":
+      // A plan's brindle:// link (lib/deeplink.ts): read through the link, in the doc reader.
+      return <SharedLinkReader key={route.link?.token ?? ""} client={client} link={route.link} onBack={() => navigate(route.from ?? HOME)} />;
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     /* One Settings, in tabs: the older Account and Project settings routes open it on their tab. */
@@ -270,7 +277,7 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
 }
 
 /* `firstRun`: the app opens right after the first launch's setup, so the walkthrough offers itself. */
-function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, firstRun = false }: AppProps & { firstRun?: boolean }) {
+function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, deepLinks, firstRun = false }: AppProps & { firstRun?: boolean }) {
   useEffect(() => {
     // The second frame runs after the browser has had a paint opportunity.
     let painted = 0;
@@ -309,6 +316,8 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
     setVisit((n) => n + 1);
     setRoute(to);
   }, []);
+  // A brindle:// link opens here, once the app is signed in: one that came first waits in the shell.
+  useDeepLinks(deepLinks, navigate, () => routeNow.current);
   const backFromSettings = useCallback(() => {
     restoreScroll.current = settingsFrom?.scroll ?? 0;
     navigate(settingsFrom?.route ?? HOME);
@@ -392,7 +401,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   // sheet lies over it); the pages scroll.
   const shown = route ?? HOME;
   // The Library's designs fill it too: their table header and results line stay put while the rows scroll.
-  const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox" || (shown.screen === "knowledge" && libraryView(shown) === "docs") || (shown.screen === "knowledge" && libraryReading);
+  const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox" || shown.screen === "plan-link" || (shown.screen === "knowledge" && libraryView(shown) === "docs") || (shown.screen === "knowledge" && libraryReading);
   // A visual open in the session takes the whole window (design/visualizer-build-plan-amendments.md
   // item 1): the sidebar hides, still mounted, so Back finds it as it was (folds, scroll, split).
   const reading = shown.screen === "session" && shown.sheet?.kind === "visual";

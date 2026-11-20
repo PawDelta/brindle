@@ -8,7 +8,7 @@ import { watchDebug } from "./api/debug";
 import { AppPtyViews } from "./api/ptyView";
 import { watchAppTheme } from "./api/theme";
 import { tauriSetup } from "./api/setup";
-import { appUpdater, appUpdates, installCli, readAbout, releaseBuildUpdater, tauriClient, tauriSocket } from "./api/tauri";
+import { appUpdater, appUpdates, deepLinks, installCli, readAbout, releaseBuildUpdater, tauriClient, tauriSocket } from "./api/tauri";
 import { applyTheme, readTheme } from "./components/ThemeToggle";
 import type { Route } from "./routes";
 import { watchAppUpdates } from "./store/appUpdates";
@@ -58,6 +58,8 @@ const about = isTauri() ? readAbout : undefined;
 // The app's own updates (the Inbox's Restart to update, About's Check now): the shell's, whichever daemon.
 const updates = isTauri() ? appUpdates : undefined;
 if (updates) watchAppUpdates(store, updates);
+// brindle:// links (a shared plan's Open in brindle): the shell's, whichever daemon.
+const links = isTauri() ? deepLinks : undefined;
 
 // The store syncs from the moment the app shows, once; and the app asks
 // then whether staff debug logging is on (api/debug.ts).
@@ -68,7 +70,7 @@ function app() {
     watchDebug(client);
     watchAppTheme(client);
   }
-  return <App store={store} client={client} refresh={sync?.refresh} onAgentRefused={() => sync?.stop()} initialRoute={initialRoute} installCli={cli} appUpdater={updater} appUpdates={updates} releaseBuildUpdater={releaseUpdater} readAbout={about} />;
+  return <App store={store} client={client} refresh={sync?.refresh} onAgentRefused={() => sync?.stop()} initialRoute={initialRoute} installCli={cli} appUpdater={updater} appUpdates={updates} releaseBuildUpdater={releaseUpdater} readAbout={about} deepLinks={links} />;
 }
 
 // In the app, the daemon is found (or started) first; when it can't be, the

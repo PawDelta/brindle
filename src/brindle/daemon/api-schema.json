@@ -14475,6 +14475,10 @@
       "path": "/v1/setup/codex-hook"
     },
     {
+      "method": "POST",
+      "path": "/v1/share-links/design"
+    },
+    {
       "method": "GET",
       "path": "/v1/shared-designs/{doc_id}"
     },
