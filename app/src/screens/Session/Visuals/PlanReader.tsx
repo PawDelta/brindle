@@ -139,8 +139,17 @@ export interface ReaderChrome {
 
 /* The doc from its source, kept current, with its writes kept in order. `version` changing asks
    for one more read. */
-export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown) {
+/* `failed`: told of a failed read that counts (the latest read, while this reader is still open);
+   never of one a newer read or a closed reader has made obsolete. */
+export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown, failed?: (e: unknown) => void) {
   const [doc, setDoc] = useState<P | null>(null);
+  const onFailed = useRef(failed);
+  onFailed.current = failed;
+  const open = useRef(true);
+  useEffect(() => {
+    open.current = true;
+    return () => { open.current = false; };
+  }, []);
   const [error, setError] = useState<string | null>(null);
   // Every write to the doc is followed by one more read of it.
   const [again, setAgain] = useState(0);
@@ -198,6 +207,7 @@ export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown) {
           latest.current = null;
           setDoc(null);
         }
+        if (open.current) onFailed.current?.(e);
       },
     );
   }, [source, place, version, again]);

@@ -574,8 +574,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             title: str | None = None, plan_id: str | None = None, ask: Any = None,
             sections: Any = None, base: Any = None) -> dict:
     """The session's supervisor proposes a plan, or (``plan_id``) a new
-    revision of its open or redirected one. Each publication spends the
-    person's request: their ask for a planning doc, or their Redirect.
+    revision of its open or redirected one. A new plan spends the person's
+    request (their ask for a planning doc); a revision of the open one needs
+    none, and spends a Redirect's if there is one.
     ``ask``: the person's request restated in the supervisor's words, shown
     on every step of the reader for them to correct. ``sections``: the doc
     as sections, markdown or diagrams (brindle.plan_docs.parse_sections);
