@@ -168,10 +168,13 @@ _PLAN_REQUEST = re.compile(
     r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
     r"(?:(?:write|draft|prepare|put together|draw up|do|make|create|build)\s+(?:(?:me|us)\s+)?(?:up\s+)?"
     r"(?:(?:a|an|the|my|our)\s+)?"
-    # A bare "plan" takes only the listed adjectives; a named planning doc may have filler words before it.
-    r"(?:(?:(?:simple|quick|short|small|new|first)\s+)*plan\b"
-    r"|" + _FILLER + r"(?:planning doc(?:ument)?|plan doc(?:ument)?)\b)"
+    # Up to two filler words ("a fucking plan", "a quick simple plan") may come before the plan.
+    r"" + _FILLER + r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
     r"|plan\s+(?:it|this|that)\s+first\b)"
+    # "I want / I need / I'd like / we need / give me a plan": the article is required, so "I want the plan to
+    # use X" grants nothing.
+    r"|(?:i(?:['’]?d| would)?\s+(?:want|need|like)|we\s+need|give\s+(?:me|us))\s+(?:a|an|my|our)\s+"
+    r"" + _FILLER + r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
     # "let's make a plan", "lets draft a planning doc": the verb takes a named plan with its article.
     r"|(?:let['’]?s|let us)\s+(?:(?:first|now|just|please)\s+)*"
     r"(?:make|write|draft|prepare|draw up|create|put together)\s+(?:up\s+)?(?:a|an|my|our)\s+"
@@ -249,14 +252,37 @@ def request_intent(text: str) -> str | None:
     """
     scope = None
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", text.strip()):
-        match = _REQUEST.match(sentence)
-        if match:
-            scope = "plan" if (match["artifact"] or "").lower().startswith(("planning", "plan ")) else "visual"
-        elif _PLAN_REQUEST.match(sentence):
-            scope = "plan"
-        elif _SHOW_VISUALLY.fullmatch(sentence):
-            scope = "visual"
+        for start in _ask_starts(sentence):
+            part = sentence[start:]
+            match = _REQUEST.match(part)
+            if match:
+                scope = "plan" if (match["artifact"] or "").lower().startswith(("planning", "plan ")) else "visual"
+            elif _PLAN_REQUEST.match(part):
+                scope = "plan"
+            elif _SHOW_VISUALLY.fullmatch(part):
+                scope = "visual"
     return scope
+
+
+# Where a fresh ask can begin inside a sentence: after a comma, "no", "I said", "I literally said", or
+# "but"; and at "I want / I need / I'd like", so "no i dont want a visual i want a plan" finds the plan.
+_RESTART = re.compile(r"(?:[,;:]\s*|\b(?:(?:i|we)\s+(?:(?:just|literally|already|clearly|really|only)\s+)*(?:said|asked|meant)\W+"
+                      r"|(?:no|nope|but|instead|rather)\W+))", re.I)
+_ASK_BEGIN = re.compile(r"\b(?=(?:i(?:['’]?d| would)?\s+(?:want|need|like)|we\s+need|give\s+(?:me|us))\b)", re.I)
+
+
+_CONDITIONAL = re.compile(r"\W*(?:when|once|if|after|until|before|unless|as soon as|whenever)\b", re.I)
+
+
+def _ask_starts(sentence: str) -> list[int]:
+    starts = {0}
+    if _CONDITIONAL.match(sentence):    # "When I approve, render it" defers the ask: no fresh start at the comma
+        return [0]
+    starts.update(m.end() for m in _RESTART.finditer(sentence))
+    # "do not give me a plan" keeps its negation: no fresh start right after one.
+    starts.update(m.start() for m in _ASK_BEGIN.finditer(sentence)
+                  if not _NEGATED.search(sentence[:m.start()].rstrip() + " "))
+    return sorted(starts)
 
 
 def begin_input(db: DB, agent: Agent, expires_at: float | None = None) -> int:
@@ -532,6 +558,13 @@ def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple
         not holds_a_mention or _ASKS_FOR.match(own[0]) is not None)
 
 
+def _refuse_plan_ask(words: str) -> None:
+    """A message that asks for a plan is not spent on a visual: the plan still needs it."""
+    if request_intent(words) == "plan":
+        raise ServiceError("plan_requested", "the person asked for a plan, not a visual: call propose_plan "
+                           "(their request is still unspent)", 409)
+
+
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
     """Whether ``asked`` is the person's recent words; the message backing it is used up."""
     quote = _words(asked)
@@ -546,6 +579,7 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
             mentioned = [q.span() for q in _QUOTED.finditer(words)]
             if mentioned or _NEGATED.search(words) or not _says_it_themselves(words, (0, len(words)), mentioned):
                 continue
+            _refuse_plan_ask(words)
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
             if row["source"] == "grant":
                 c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
@@ -556,6 +590,7 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
         if any(not _NEGATED.search(words[max(0, m.start() - _NEGATION_REACH):m.start()])
                and _says_it_themselves(words, m.span(), mentioned)
                for m in pattern.finditer(words)):
+            _refuse_plan_ask(words)
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
             if row["source"] == "grant":
                 c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
@@ -607,6 +642,10 @@ def consume(c, root: str, kind: str = "visual") -> None:
     changed = c.execute("UPDATE visual_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
                         "AND scope=?", (root, kind)).rowcount
     if not changed:
+        if kind == "visual" and c.execute("SELECT 1 FROM visual_grants WHERE root_id=? AND remaining>0 AND scope='plan'",
+                                          (root,)).fetchone():
+            raise ServiceError("plan_requested", "the person asked for a plan, not a visual: call propose_plan "
+                               "(their request is still unspent)", 409)
         if kind == "plan":
             raise ServiceError("visual_request_required", "a planning doc needs the person to ask for one, "
                                "or to accept an offer", 403)
