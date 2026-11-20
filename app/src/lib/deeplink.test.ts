@@ -5,6 +5,7 @@ import { DaemonError, type DaemonClient, type SharedDesign } from "../api/client
 import { DaemonContext } from "../api/context";
 import type { Route } from "../routes";
 import type { ShareLinkDesignClient } from "../screens/Session/Visuals/client";
+import { LibraryDesign } from "../screens/Session/Visuals/LibraryDesign";
 import { SharedLinkReader } from "../screens/Session/Visuals/SharedLinkReader";
 import { createAppStore } from "../store/store";
 import { StoreContext } from "../store/useStore";
@@ -125,6 +126,39 @@ it("opens a plan link through the link, read only, and Back goes to where the pe
   expect(screen.queryByRole("button", { name: "Comment" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /Back/ }));
   expect(back).toHaveBeenCalled();
+});
+
+it("a link to a design shared with this account opens it as the Library does, with its rights; a refused one opens nothing", async () => {
+  // The daemon answers with the Library's own doc id only for someone the design is shared with.
+  const design: SharedDesign = {
+    ...plan, id: "doc_1", author: "u_author", can_edit: true, can_comment: true, can_suggest: true, can_sign_off: true,
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["u_me"], reviewers: [{ sub: "u_me", required: true, status: "waiting", you: true }] },
+  };
+  let read: () => Promise<SharedDesign> = async () => design;
+  const sharedDesign = vi.fn(async () => ({ ...design, title: "Design doc" }));
+  const client = {
+    shareLinkDesign: () => read(),
+    libraryDesignPlan: async () => { throw new DaemonError("not_found", "not shared from here", 404); },
+    designWorkItems: async () => { throw new DaemonError("not_found", "none", 404); },
+    sharedDesign, writeSharedDesign: async () => design, libraryPeople: async () => ({ people: [] }),
+    designShareLink: async () => ({ available: true, link: null }), copyDesignShareLink: async () => ({ available: true, link: null }),
+    revokeDesignShareLink: async () => ({ available: true, link: null }),
+  } as unknown as DaemonClient;
+  const open = () => createElement(SharedLinkReader, {
+    client, link: parseDeepLink(`brindle://plan/acme/payments/cloud-workers/${TOKEN}`), onBack: () => {},
+    member: (d: { id: string; title: string }) => createElement(LibraryDesign, { client, docId: d.id, title: d.title, onBack: () => {} }),
+  });
+  await act(async () => { render(open()); });
+  expect(sharedDesign).toHaveBeenCalledWith("doc_1", undefined);
+  expect(screen.getByRole("heading", { level: 1, name: "Cloud workers" })).toBeTruthy();       // the link's name for it
+  expect((screen.getByRole("radio", { name: /Suggesting/ }) as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.getByRole("button", { name: "Share" })).toBeTruthy();                         // an editor's
+  cleanup();
+
+  read = async () => { throw new DaemonError("not_found", "This link doesn't open a plan for this account.", 404); };
+  await act(async () => { render(open()); });
+  expect(screen.getByTestId("deep-link-failed")).toBeTruthy();
+  expect(screen.queryByText("Workers run here.")).toBeNull();
 });
 
 it("signed out, or the sign-in lost while the plan is open, asks the person to sign in, then opens the plan", async () => {

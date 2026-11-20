@@ -85,6 +85,7 @@ log = logging.getLogger(__name__)
 
 TEAM_FEATURE = "analysis_docs_team"
 NO_FEATURE = "entitlement_required"     # the Library's refusal when the plan lacks a feature
+TITLE_MAX = 200                         # the longest title the Library takes
 LAPSE_GOOD_FOR = 300.0       # seconds the server's word that a Team plan ended lets work go with no gate
 LAPSE_CHECK_AFTER = 120.0    # the background pass asks again once that word is this old
 SCOPE_KINDS = ("group", "org")
@@ -460,7 +461,11 @@ def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool
     if found is not None:
         return _linked(db, p["id"], found, FIRST_REVISION, link(db, p["id"])["local_rev"])
     sent = _payload(content, client)
+    # The plan's own title: without it the Library names the doc by the text's first # heading, which a
+    # plan's text (its lede and ## sections) seldom has, else by the plan's id.
+    title = p["visual"].get("title") if isinstance(p.get("visual"), dict) else None
     body = {"scope": {"kind": "user", "id": owner}, "files": [{"name": f"plan-{p['id']}.md", "md": cur["markdown"]}],
+            **({"title": title.strip()[:TITLE_MAX]} if isinstance(title, str) and title.strip() else {}),
             "source": {"kind": "goal", "ref": p["id"], "session": p["root_id"]}, "design": sent}
     with db.tx() as c:
         c.execute("UPDATE plan_shares SET local_rev=? WHERE plan_id=?", (cur["rev"], p["id"]))
