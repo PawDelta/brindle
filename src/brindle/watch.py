@@ -1208,7 +1208,47 @@ def _paint(stdscr, h: int, w: int, styles: dict[str, int], braid: int, page: lis
     stdscr.refresh()
 
 
-def run(repo_root: str | None, sidebar: bool = False) -> None:
+def run(repo_root: str | None, sidebar: bool = False) -> bool:
+    """The dashboard, until it is quit. False, at once, for a sidebar whose
+    session root already has one running (sidebar_follow.running_sidebar):
+    it didn't start, so it wasn't quit either."""
+    pane = os.environ.get("TMUX_PANE")
+    own_root = None
+    if sidebar:
+        # The root the launcher started this pane for; a pane started before
+        # it said so asks its tag, and a tmux that can't answer ends this start
+        # (the pane's hook starts it again) rather than letting it run unguarded.
+        own_root = os.environ.get(sidebar_follow.SIDEBAR_ROOT_ENV) or agents.sidebar_root(pane)
+    if not own_root:
+        _run(repo_root, sidebar)
+        return True
+    with sidebar_follow.running_sidebar(own_root, pane) as running:
+        if running is None:
+            restart = _run(repo_root, sidebar, reexec=False)
+    if running is not None:
+        _log_note(f"sidebar for {own_root} already runs in {running or 'another pane'}; "
+                  f"{pane} closes instead of starting a second")
+        sidebar_follow.defer_to_running(DB(), own_root, pane, running)
+        return False
+    if restart:
+        upgrade.reexec()     # after the lock is let go: the upgraded sidebar takes it again
+    return True
+
+
+def _log_note(what: str) -> None:
+    from brindle.config import brindle_home
+
+    try:
+        brindle_home().mkdir(parents=True, exist_ok=True)
+        with open(brindle_home() / "sidebar.log", "a", encoding="utf-8") as f:
+            f.write(redact.mask(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {what}\n"))
+    except OSError:
+        pass
+
+
+def _run(repo_root: str | None, sidebar: bool, reexec: bool = True) -> bool:
+    """The dashboard itself. With ``reexec`` False, True instead of re-running
+    from an upgraded install, for the caller to do once it has let go of what it holds."""
     # Esc clears the filter; don't make it wait curses' default second to
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
@@ -1234,7 +1274,10 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     if result == RESTART:
         # Run again from the upgraded install, in this same pane (curses.wrapper
         # has put the terminal back); returning would count as quitting the sidebar.
+        if not reexec:
+            return True
         upgrade.reexec()
+    return False
 
 
 def _log_error(what: str) -> None:
