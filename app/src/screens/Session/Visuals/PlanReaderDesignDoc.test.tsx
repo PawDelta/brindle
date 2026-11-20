@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { DocRevisionComparison, Plan, VisualDTO } from "../../../api/client";
 import { Annotated, MarginNote } from "./PlanDesignDoc";
@@ -6,6 +6,17 @@ import { PlanReader } from "./PlanReader";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
 afterEach(cleanup);
+
+/* mermaid draws in the browser; here it returns a fixed drawing, or fails on a source it can't parse. */
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: () => {},
+    render: async (_id: string, source: string) => {
+      if (source.includes("broken")) throw new Error("Parse error");
+      return { svg: `<svg data-mermaid="1"><g></g></svg>` };
+    },
+  },
+}));
 
 const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Webhooks", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
 const visuals: VisualsClient = {
@@ -155,6 +166,26 @@ it("moves the notes below a margin note that grows when a reply opens", () => {
     Object.defineProperty(HTMLElement.prototype, "offsetHeight", height);
     vi.unstubAllGlobals();
   }
+});
+
+it("draws a mermaid section as an svg, and shows its source when it can't be drawn", async () => {
+  const withFigure = (markdown: string) => spine({ sections: spine().sections.map((s) => (s.id === "architecture" ? { ...s, kind: "mermaid" as const, markdown, caption: "Flow" } : s)) });
+  const drawn = withFigure("flowchart LR\n  A-->B");
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...writes(drawn), plan: async () => drawn, decidePlan: async () => drawn };
+  const view = render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const figure = (doc: HTMLElement) => doc.querySelector<HTMLElement>("[data-diagram=architecture]")!;
+  const doc = await screen.findByTestId("plan-doc");
+  await waitFor(() => expect(figure(doc).querySelector("svg")).toBeTruthy());
+  expect(figure(doc).querySelector("pre, code")).toBeNull();
+  expect(figure(doc).querySelector("figcaption")?.textContent).toContain("Flow");
+  view.unmount();
+
+  const broken = withFigure("flowchart LR\n  broken -->");
+  const failing: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...writes(broken), plan: async () => broken, decidePlan: async () => broken };
+  render(<PlanReader client={failing} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const failedDoc = await screen.findByTestId("plan-doc");
+  await waitFor(() => expect(figure(failedDoc).querySelector("pre")?.textContent).toContain("broken -->"));
+  expect(figure(failedDoc).querySelector("svg")).toBeNull();
 });
 
 it("shows no worker split to the person once the plan is approved", async () => {
