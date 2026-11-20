@@ -18,7 +18,7 @@
    an unread team row has a dot and a bolder title, and opening it, or Done,
    marks it read on every machine. */
 
-import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type { DaemonClient } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
 import type { InboxItemDTO, PersonDTO, PlanThreadDTO, SharedDesignDTO } from "../../api/schema";
@@ -75,6 +75,8 @@ const PR_KINDS = ["pr_ready", "pr_failed", "pr_opened"];
 /* A grey line where an acted-on row stood, until the person leaves the Inbox; `after` is the row that followed it. */
 interface Line {
   key: string;
+  /* The row as it read when acted on (queue.ts rowSig): the line stands for that, not for whatever comes next under the key. */
+  sig: string;
   part: Part;
   entry: DoneEntry;
   meta: string | null;
@@ -199,21 +201,41 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
   const total = items.length + waitingExtraCount;
   const tabs = total > TABS_FROM;
   const kinds = tabs && tab !== "all" ? TABS.find((t) => t.key === tab)?.kinds ?? null : null;
-  const lineKeys = useMemo(() => new Set(lines.map((l) => l.key)), [lines]);
-  const shown = (row: Row) => !lineKeys.has(row.key) && !hiddenByTriage(row, now) && !row.items.every((i) => actions.hidden.has(itemKey(i))) && (!kinds || kinds.includes(row.kind));
+  /* A grey line stands in for its row only while the row reads as it did when acted on: a new question from the
+     same agent, a thread with new comments, is a row again (a line set aside defers to Later's own clock). */
+  const settledAs = (row: Row) => lines.some((l) => l.key === row.key && l.sig === rowSig(row) && l.entry.what !== "Set aside");
+  const shown = (row: Row) => !settledAs(row) && !hiddenByTriage(row, now) && !row.items.every((i) => actions.hidden.has(itemKey(i))) && (!kinds || kinds.includes(row.kind));
   const waitRows = rowsOf(items, "wait").filter(shown);
   const teamRows = rowsOf(items, "team").filter(shown);
   const order = [...waitRows, ...teamRows];
   const extraHere = !kinds || kinds.includes("permission");
+  // A row that is back drops its line.
+  const rowKeys = new Set(order.map((r) => r.key));
+  const drawnLines = lines.filter((l) => !rowKeys.has(l.key));
 
   useEffect(() => {
     if (synced && openKey === undefined) setOpenKey(waitRows[0]?.key ?? null);
   }, [synced, openKey, waitRows]);
 
-  const markRead = (row: Row) => {
+  /* What was set aside comes back when its time is up: drawn again at the next one due. */
+  const due = Math.min(...Object.values(triageState().later).filter((l) => l.sig === undefined && l.until > now).map((l) => l.until));
+  useEffect(() => {
+    if (!Number.isFinite(due)) return;
+    const timer = window.setTimeout(redraw, Math.min(due - Date.now() + 1, 2 ** 31 - 1));
+    return () => window.clearTimeout(timer);
+  }, [due]);
+
+  /* Read for this person in the Library; false, with the reason on the row, when the Library didn't take it. */
+  const markRead = (row: Row): Promise<boolean> => {
     const keys = teamKeys(row);
-    if (keys.length === 0) return;
-    void client.markInboxRead(keys).then(() => void refresh(), (e: unknown) => actions.report(row.items[0], e instanceof Error ? e.message : String(e)));
+    if (keys.length === 0) return Promise.resolve(true);
+    return client.markInboxRead(keys).then(() => {
+      void refresh();
+      return true;
+    }, (e: unknown) => {
+      actions.report(row.items[0], e instanceof Error ? e.message : String(e));
+      return false;
+    });
   };
 
   /* The row settles to its grey line where it stood; an open row hands the open to the row after it. */
@@ -223,7 +245,7 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
     const after = at >= 0 ? part[at + 1]?.key ?? null : null;
     const done: DoneEntry = { ...entry, key: row.key, at: Date.now() };
     recordDone(done);
-    setLines((ls) => [...ls.filter((l) => l.key !== row.key), { key: row.key, part: row.part, entry: done, meta, after }]);
+    setLines((ls) => [...ls.filter((l) => l.key !== row.key), { key: row.key, sig: rowSig(row), part: row.part, entry: done, meta, after }]);
     setOpenKey((k) => (k === row.key ? after : k));
     setMenu(null);
   };
@@ -231,18 +253,22 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
   const done = (row: Row) => {
     const title = titleOf(row);
     if (row.part === "team") {
-      clearRow(row.key, rowSig(row));
-      markRead(row);
-      settle(row, { what: "Done", text: title, where: "", back: true });
+      // Cleared only once the Library has it read; refused, the row stays with the reason.
+      void markRead(row).then((ok) => {
+        if (!ok) return;
+        clearRow(row.key, rowSig(row));
+        settle(row, { what: "Done", text: title, where: "", back: true });
+      });
       return;
     }
-    let settled = false;
+    // A row of several items settles once every dismissal is taken; one refused keeps its item, and its reason, in the row.
+    let waiting = row.items.length;
+    let refused = false;
     for (const item of row.items) {
       const pr = PR_KINDS.includes(item.kind);
       actions.run(item, pr ? "pr-not-now" : "dismiss", pr || item.kind === "doc" ? {} : { item }, (ok) => {
-        if (!ok || settled) return;
-        settled = true;
-        settle(row, { what: "Done", text: title, where: ctx.sessionTitle(item) ?? "", back: false });
+        refused ||= !ok;
+        if (--waiting === 0 && !refused) settle(row, { what: "Done", text: title, where: ctx.sessionTitle(item) ?? "", back: false });
       });
     }
   };
@@ -261,7 +287,7 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
     const opening = openKey !== row.key;
     setOpenKey(opening ? row.key : null);
     setMenu(null);
-    if (opening && row.part === "team" && unread(row)) markRead(row);
+    if (opening && row.part === "team" && unread(row)) void markRead(row);
   };
 
   /* The keyboard: J/K move, E done, H later, U put back, Enter sends or opens. Not while typing. */
@@ -270,6 +296,8 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
     const target = e.target as HTMLElement | null;
     if (target && (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable)) return;
+    // Enter on a focused control is that control's own (Later opens its menu); only elsewhere is it the open row's action.
+    if (e.key === "Enter" && target?.closest?.("button, a, summary, [role=menuitem], [role=tab]")) return;
     const at = order.findIndex((r) => r.key === openKey);
     const row = at >= 0 ? order[at] : undefined;
     const key = e.key.toLowerCase();
@@ -305,7 +333,7 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
   /* Rows and the grey lines of rows acted on, each line where its row stood. */
   const withLines = (rows: Row[], part: Part) => {
     const out: ({ row: Row } | { line: Line })[] = rows.map((row) => ({ row }));
-    for (const l of [...lines].reverse().filter((x) => x.part === part)) {
+    for (const l of [...drawnLines].reverse().filter((x) => x.part === part)) {
       const at = l.after ? out.findIndex((x) => ("row" in x ? x.row.key : x.line.key) === l.after) : -1;
       if (at < 0) out.push({ line: l });
       else out.splice(at, 0, { line: l });
@@ -320,9 +348,9 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
   const waitCount = waitRows.length + (extraHere ? waitingExtraCount : 0);
   const newTeam = teamRows.filter(isNew);
   const unreadTeam = teamRows.filter(unread);
-  const teamLines = lines.some((l) => l.part === "team");
-  const doneToday = triageState().done.filter((d) => !lines.some((l) => l.key === d.key && l.entry.what === d.what));
-  const clear = synced && waitCount === 0 && teamRows.length === 0 && lines.length === 0;
+  const teamLines = drawnLines.some((l) => l.part === "team");
+  const doneToday = triageState().done.filter((d) => !drawnLines.some((l) => l.key === d.key && l.entry.what === d.what));
+  const clear = synced && waitCount === 0 && teamRows.length === 0 && drawnLines.length === 0;
 
   if (!synced) {
     return (
@@ -367,7 +395,7 @@ export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx
               <h2 className="iq-sec-h"><i className={`iq-dot ${waitCount > 0 ? "wait" : ""}`} />Waiting on you <span className="n" data-testid="waiting-count">{waitCount}</span>
                 {waitCount > 0 && <span className="aside">what's stopped comes first</span>}</h2>
               {extraHere && waitingExtra}
-              {waitCount === 0 && !lines.some((l) => l.part === "wait") && (
+              {waitCount === 0 && !drawnLines.some((l) => l.part === "wait") && (
                 <div className="iq-calm" data-testid="inbox-calm"><CheckIcon />Nothing is waiting on you.{ctx.working.agents > 0 && <span>{ctx.working.agents} agent{ctx.working.agents === 1 ? " is" : "s are"} working.</span>}</div>
               )}
               {withLines(waitRows, "wait")}

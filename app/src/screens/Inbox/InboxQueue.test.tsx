@@ -227,6 +227,67 @@ describe("the Inbox queue", () => {
     await waitFor(() => expect(within(row("proposed_checks")).getByRole("alert")).toBeTruthy());
   });
 
+  it("Enter on a focused control is that control's, never the open row's action (no PR opened from Later)", async () => {
+    const prReady: InboxItemDTO = { kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
+    const { client } = mount([prReady], { workspaces: [root] });
+    const draft = vi.spyOn(client, "prDraft");
+    const later = within(await opened("pr_ready")).getByTestId("row-later");
+    later.focus();
+    expect(fireEvent.keyDown(later, { key: "Enter" })).toBe(true);
+    expect(draft).not.toHaveBeenCalled();
+  });
+
+  it("a new question from the agent just answered shows on the same screen", async () => {
+    const { daemon, sync } = mount([asked]);
+    const box = within(await opened("question")).getByTestId("answer-box");
+    fireEvent.change(box, { target: { value: "Use Redis." } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(document.querySelector<HTMLElement>("[data-testid=inbox-line]")?.dataset.what).toBe("Answered"));
+    expect(row("question")).toBeNull();
+    // The same worker asks again (same agent, so the same row key): a row again, not hidden behind the line.
+    daemon.data.inbox = [{ ...asked, detail: "And how long should entries live?", request_id: "2" }];
+    await act(async () => sync.refresh());
+    await waitFor(() => expect(row("question")?.textContent).toContain("And how long should entries live?"));
+    sync.stop();
+  });
+
+  it("a row set aside comes back when its time is up", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mount([progress]);
+      await waitFor(() => expect(row("signoff_progress")).toBeTruthy());
+      fireEvent.click(within(row("signoff_progress")).getByTestId("row-later"));
+      fireEvent.click(within(screen.getByTestId("later-menu")).getAllByRole("menuitem")[0]);   // In an hour
+      expect(row("signoff_progress")).toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(61 * 60 * 1000);
+      });
+      await waitFor(() => expect(row("signoff_progress")).toBeTruthy());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Done on a team row the Library refuses to mark read keeps the row, with the reason", async () => {
+    const { client } = mount([progress]);
+    vi.spyOn(client, "markInboxRead").mockRejectedValue(new Error("sign in to brindle Pro to mark Inbox rows read"));
+    await waitFor(() => expect(row("signoff_progress")).toBeTruthy());
+    fireEvent.click(within(row("signoff_progress")).getByTestId("row-done"));
+    await waitFor(() => expect(within(row("signoff_progress")).getByRole("alert").textContent).toContain("sign in to brindle Pro"));
+    expect(document.querySelector("[data-testid=inbox-line]")).toBeNull();
+  });
+
+  it("Done on one teammate's requests settles only when every dismissal is taken; a refused one stays, with its reason", async () => {
+    const second: InboxItemDTO = { ...review, doc: "ad_3", detail: "Audit log retention", item_key: "review:ad_3" };
+    const { client } = mount([review, second]);
+    const real = client.inboxAction.bind(client);
+    vi.spyOn(client, "inboxAction").mockImplementation((id, action, body) => (id === "ad_3" ? Promise.reject(new Error("refused by the engine")) : real(id, action, body)));
+    fireEvent.click(within(await opened("review_requested")).getByTestId("row-done"));
+    await waitFor(() => expect(within(row("review_requested")).getByRole("alert").textContent).toContain("refused by the engine"));
+    expect(row("review_requested").textContent).toContain("Audit log retention");
+    expect(document.querySelector("[data-testid=inbox-line]")).toBeNull();
+  });
+
   it("a lapsed sign-in starts the provider's own login from its row", async () => {
     const codexWorker = { ...worker, agents: [{ ...worker.agents![0], provider: "codex", profile: "developer-codex" }] };
     const credentials: InboxItemDTO = { kind: "credentials", reason: "credentials need attention", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: null, action: { method: "POST", path: "/v1/providers/codex/login" } };
