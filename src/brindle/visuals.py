@@ -211,6 +211,8 @@ def for_session(db: DB, root_id: str) -> list[dict]:
 def to_dto(db: DB, v: dict) -> dict:
     from brindle.service.dto import VisualDTO
 
+    from brindle import plans
+
     answer = v["answer"]
     receiver = db.get_agent(v["root_id"])
     provider = providers.PROVIDERS.get(receiver.provider, providers.Provider()) if receiver else providers.Provider()
@@ -223,6 +225,7 @@ def to_dto(db: DB, v: dict) -> dict:
         answered_in_chat=v["answered_in_chat_rev"] == v["rev"],
         answer={k: answer[k] for k in ("option", "note", "at", "attachments") if k in answer} if answer else None,
         kept=v["kept_at"] is not None, unread=v["read_rev"] < v["rev"], created_at=v["created_at"],
+        holding=plans.holding_count(db, v["root_id"], v["id"]) if v["kind"] == "plan" else 0,
     ).to_json()
 
 

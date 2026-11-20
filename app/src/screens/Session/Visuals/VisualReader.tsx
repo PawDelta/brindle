@@ -104,7 +104,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
               {source && <ZoomControls zoom={zoom} onZoom={step} />}
             </span>
           </div>
-          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} zoom={zoom} zoomAnchor={anchor} onMessage={posted} snapshotRequest={snapshotRequest} covered={exporting} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
+          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} zoom={zoom} zoomAnchor={anchor} onMessage={posted} snapshotRequest={snapshotRequest} covered={exporting} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This doc isn't here any more."}</p>}
         </div>
       </div>
       {footer}
@@ -151,7 +151,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   }
   return (
     <ReaderChrome
-      title={visual?.title ?? "Visual"}
+      title={visual?.title ?? "Doc"}
       source={source}
       missing={loading ? "Loading…" : undefined}
       meta={visual ? `${visual.id} · r${visual.rev} · ${visual.by}` : ""}

@@ -338,7 +338,8 @@ class VisualAnswerDTO(_DTO):
 class VisualDTO(_DTO):
     """A visual in a session (brindle.visuals). ``rev``: its current revision,
     served at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.
-    ``unread``: a revision the person hasn't opened yet."""
+    ``unread``: a revision the person hasn't opened yet. ``holding``: the queued
+    tasks a plan holds (0 for any other row, and once the plan is decided)."""
 
     id: str
     session: str
@@ -355,6 +356,7 @@ class VisualDTO(_DTO):
     kept: bool
     unread: bool
     created_at: float
+    holding: int = 0
 
 
 class PlanSectionDTO(_DTO):
