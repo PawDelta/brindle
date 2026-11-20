@@ -42,12 +42,16 @@ export function planSource(client: PlansClient & PlanDocClient, id: string): Doc
 const accessGone = (e: unknown) => e instanceof DaemonError && ([401, 402, 403, 404].includes(e.status) || e.code === "key_unavailable");
 
 /* A design opened from its share link (lib/deeplink.ts): read through the link, as the web page reads it,
-   and read only. Its id is the daemon's (a hash of the token, never the token). */
-export function linkSource(client: ShareLinkDesignClient, token: string, id: string): DocSource<SharedDesign> {
+   and read only. Its id is the daemon's (a hash of the token, never the token). `signedOut`: a read
+   found the sign-in gone (a 402), so the screen can ask for it again. */
+export function linkSource(client: ShareLinkDesignClient, token: string, id: string, signedOut?: () => void): DocSource<SharedDesign> {
   const readOnly = () => Promise.reject(new Error("A plan opened from a link is read only here."));
   return {
     id,
-    read: () => client.shareLinkDesign(token),
+    read: () => client.shareLinkDesign(token).catch((e: unknown) => {
+      if (e instanceof DaemonError && e.status === 402) signedOut?.();
+      throw e;
+    }),
     comment: readOnly,
     reply: readOnly,
     resolve: readOnly,

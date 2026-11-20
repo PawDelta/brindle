@@ -198,10 +198,8 @@ export const appUpdates: AppUpdates = {
    the page takes them, and its "deep-link" event only says some are waiting. */
 export const deepLinks: DeepLinkSource = {
   take: () => invoke<string[]>("deep_link_take"),
-  subscribe: (nudge) => {
-    const stop = listen("deep-link", () => nudge());
-    return () => void stop.then((unlisten) => unlisten(), () => {});
-  },
+  // Listens for the page's lifetime: the app has one inbox (lib/deeplink.ts DeepLinkInbox).
+  subscribe: (nudge) => listen("deep-link", () => nudge()),
 };
 
 /* What's new in brindle `version`: its release notes on the site. */

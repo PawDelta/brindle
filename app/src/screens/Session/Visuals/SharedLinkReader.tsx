@@ -7,7 +7,7 @@
    A link that didn't parse, or one the link's checks refuse, says so calmly. Signed out (or the
    sign-in expired), the screen asks the person to sign in and opens the plan once they have. */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type SharedDesign } from "../../../api/client";
 import { button } from "../../../components/ui";
 import { CloudLoginStatus, useCloudLogin } from "../../Inbox/CloudSignIn";
@@ -58,7 +58,9 @@ export function SharedLinkReader({ client, link, onBack, backLabel }: {
       <h2 className="min-w-0 truncate text-[13px] font-semibold">{title ?? "Shared plan"}</h2>
     </>
   );
-  if (token && first.kind === "open") return <LinkDoc client={client} token={token} id={first.id} lead={lead} />;
+  // A sign-in lost while the plan is open: ask for it again, keeping the link.
+  const signedOut = useCallback(() => setFirst({ kind: "signed-out" }), []);
+  if (token && first.kind === "open") return <LinkDoc client={client} token={token} id={first.id} lead={lead} signedOut={signedOut} />;
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="shared-link-reader">
       <ReaderBar lead={lead()} />
@@ -99,8 +101,14 @@ function SignInFirst({ onSignedIn }: { onSignedIn(): void }) {
   );
 }
 
-function LinkDoc({ client, token, id, lead }: { client: ShareLinkDesignClient; token: string; id: string; lead(title?: string): ReactNode }) {
-  const source = useMemo(() => linkSource(client, token, id), [client, token, id]);
+function LinkDoc({ client, token, id, lead, signedOut }: {
+  client: ShareLinkDesignClient;
+  token: string;
+  id: string;
+  lead(title?: string): ReactNode;
+  signedOut(): void;
+}) {
+  const source = useMemo(() => linkSource(client, token, id, signedOut), [client, token, id, signedOut]);
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => setTick((n) => n + 1), READ_EVERY_MS);

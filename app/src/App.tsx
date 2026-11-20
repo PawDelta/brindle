@@ -65,7 +65,7 @@ import { AgentsScreen } from "./screens/Agents";
 import { SessionScreen } from "./screens/Session";
 import { SettingsScreen } from "./screens/Settings";
 import { SharedLinkReader } from "./screens/Session/Visuals/SharedLinkReader";
-import { useDeepLinks, type DeepLinkSource } from "./lib/deeplink";
+import { useDeepLinks, type DeepLinkInbox } from "./lib/deeplink";
 import { isPaused } from "./store/overview";
 import { SessionsProvider, useCloseSession, useSessions } from "./store/sessions";
 import { OpenSessionContext, PanesReadyContext, type PanesReady } from "./store/panes";
@@ -102,7 +102,7 @@ export interface AppProps {
   /* Settings' About license files: the shell's in the app, none in a browser tab. */
   readAbout?: () => Promise<About>;
   /* brindle:// links the app is opened with (lib/deeplink.ts): the shell's in the app, none in a browser tab. */
-  deepLinks?: DeepLinkSource;
+  deepLinks?: DeepLinkInbox;
 }
 
 const NO_CLIENT: EngineStatus = {

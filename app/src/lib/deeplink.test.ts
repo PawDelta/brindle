@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { createElement, type ReactNode } from "react";
+import { StrictMode, createElement, type ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { DaemonError, type DaemonClient, type SharedDesign } from "../api/client";
 import { DaemonContext } from "../api/context";
@@ -8,7 +8,7 @@ import type { ShareLinkDesignClient } from "../screens/Session/Visuals/client";
 import { SharedLinkReader } from "../screens/Session/Visuals/SharedLinkReader";
 import { createAppStore } from "../store/store";
 import { StoreContext } from "../store/useStore";
-import { deepLinkRoute, parseDeepLink, useDeepLinks, type DeepLinkSource } from "./deeplink";
+import { DeepLinkInbox, deepLinkRoute, parseDeepLink, useDeepLinks, type DeepLinkSource } from "./deeplink";
 
 afterEach(() => {
   cleanup();
@@ -47,20 +47,40 @@ it.each([
   expect(parseDeepLink(raw)).toBeNull();
 });
 
-/* The shell's queue, as api/tauri.ts reads it: links waiting, and a nudge for the next ones. */
-function shell(waiting: string[]) {
+/* The shell's queue, as api/tauri.ts reads it: links waiting, and a nudge for the next ones once
+   it listens (`listening`: when that registration finishes; at once by default). */
+function shell(waiting: string[], listening: Promise<void> = Promise.resolve()) {
   let nudge = () => {};
   const source: DeepLinkSource = {
     take: async () => waiting.splice(0),
-    subscribe: (on) => { nudge = on; return () => { nudge = () => {}; }; },
+    subscribe: (on) => listening.then(() => { nudge = on; }),
   };
-  return { source, arrive: (raw: string) => act(async () => { waiting.push(raw); nudge(); }) };
+  return { inbox: new DeepLinkInbox(source), waiting, arrive: (raw: string) => act(async () => { waiting.push(raw); nudge(); }) };
 }
 
-function Opener({ source, onRoute }: { source: DeepLinkSource; onRoute(r: Route): void }) {
-  useDeepLinks(source, onRoute, () => ({ screen: "inbox" }));
+function Opener({ inbox, onRoute }: { inbox: DeepLinkInbox; onRoute(r: Route): void }) {
+  useDeepLinks(inbox, onRoute, () => ({ screen: "inbox" }));
   return null;
 }
+
+it("a link waiting at start opens once, though React runs the effect twice", async () => {
+  const routes: Route[] = [];
+  const { inbox, waiting } = shell([`brindle://plan/b/${TOKEN}`]);
+  await act(async () => { render(createElement(StrictMode, null, createElement(Opener, { inbox, onRoute: (r: Route) => routes.push(r) }))); });
+  expect(routes.map((r) => r.screen === "plan-link" && r.link?.token)).toEqual([TOKEN]);
+  expect(waiting).toEqual([]);
+});
+
+it("a link that comes while the app starts listening still opens", async () => {
+  let ready!: () => void;
+  const routes: Route[] = [];
+  const { inbox, waiting } = shell([], new Promise<void>((resolve) => { ready = resolve; }));
+  await act(async () => { render(createElement(Opener, { inbox, onRoute: (r: Route) => routes.push(r) })); });
+  // Queued by the shell before anything listened: no nudge reaches the page.
+  waiting.push(`brindle://plan/b/${TOKEN}`);
+  await act(async () => ready());
+  expect(routes).toHaveLength(1);
+});
 
 function withApp(children: ReactNode, client: Partial<DaemonClient> = {}) {
   const store = createAppStore();
@@ -73,8 +93,8 @@ it("rejects an invalid link without side effects: the calm page, and nothing rea
   const fetching = vi.spyOn(globalThis, "fetch");
   const opening = vi.spyOn(window, "open").mockReturnValue(null);
   const routes: Route[] = [];
-  const { source, arrive } = shell([]);
-  await act(async () => { render(createElement(Opener, { source, onRoute: (r: Route) => routes.push(r) })); });
+  const { inbox, arrive } = shell([]);
+  await act(async () => { render(createElement(Opener, { inbox, onRoute: (r: Route) => routes.push(r) })); });
   await arrive("brindle://visual/../../v1/agents?kill=1");
   expect(routes).toEqual([{ screen: "plan-link", link: null, from: { screen: "inbox" } }]);
 
@@ -89,8 +109,8 @@ it("rejects an invalid link without side effects: the calm page, and nothing rea
 
 it("opens a plan link through the link, read only, and Back goes to where the person was", async () => {
   const routes: Route[] = [];
-  const { source } = shell([`brindle://plan/acme/cloud-workers/${TOKEN}`]);
-  await act(async () => { render(createElement(Opener, { source, onRoute: (r: Route) => routes.push(r) })); });
+  const { inbox } = shell([`brindle://plan/acme/cloud-workers/${TOKEN}`]);
+  await act(async () => { render(createElement(Opener, { inbox, onRoute: (r: Route) => routes.push(r) })); });
   const route = routes[0] as Extract<Route, { screen: "plan-link" }>;
   expect(route.link?.token).toBe(TOKEN);
   // From one link's page to the next, Back still goes to where the person was before either.
@@ -107,23 +127,36 @@ it("opens a plan link through the link, read only, and Back goes to where the pe
   expect(back).toHaveBeenCalled();
 });
 
-it("signed out, asks the person to sign in, then opens the plan", async () => {
+it("signed out, or the sign-in lost while the plan is open, asks the person to sign in, then opens the plan", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   let signedIn = false;
   const read = vi.fn(async () => {
     if (!signedIn) throw new DaemonError("signed_out", "sign in to brindle to open this link", 402);
     return plan;
   });
+  let jobs = 0;
   const { store, tree } = withApp(
     createElement(SharedLinkReader, { client: { shareLinkDesign: read }, link: parseDeepLink(`brindle://plan/b/${TOKEN}`), onBack: () => {} }),
-    { accountLogin: async () => ({ job: "j1" }) as never },
+    { accountLogin: async () => ({ job: `j${++jobs}` }) as never },
   );
-  await act(async () => { render(tree); });
-  expect(screen.getByTestId("deep-link-sign-in")).toBeTruthy();
-  expect(screen.queryByText("Workers run here.")).toBeNull();
-  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign in" })));
-  signedIn = true;
-  await act(async () => {
-    store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 0, kind: "job.done", repo_root: null, root_id: null, agent_id: null, workspace_id: null, task_id: null, payload: { job: "j1" } } });
-  });
-  expect(screen.getByText("Workers run here.")).toBeTruthy();
+  const signIn = async () => {
+    expect(screen.getByTestId("deep-link-sign-in")).toBeTruthy();
+    expect(screen.queryByText("Workers run here.")).toBeNull();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign in" })));
+    signedIn = true;
+    await act(async () => {
+      store.dispatch({ type: "stream", message: { type: "event", id: jobs, ts: 0, kind: "job.done", repo_root: null, root_id: null, agent_id: null, workspace_id: null, task_id: null, payload: { job: `j${jobs}` } } });
+    });
+    expect(screen.getByText("Workers run here.")).toBeTruthy();
+  };
+  try {
+    await act(async () => { render(tree); });
+    await signIn();
+    // Open, then a later read finds the sign-in gone: the same sign-in, and the plan again after it.
+    signedIn = false;
+    await act(async () => { vi.advanceTimersByTime(30_000); });
+    await signIn();
+  } finally {
+    vi.useRealTimers();
+  }
 });

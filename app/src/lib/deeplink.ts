@@ -59,31 +59,58 @@ export function deepLinkRoute(raw: unknown, from: Route | null): Route {
   return { screen: "plan-link", link: parseDeepLink(raw), from: back };
 }
 
-/* The shell's links (api/tauri.ts): `take` empties its queue; `subscribe` hears that links are waiting. */
+/* The shell's links (api/tauri.ts): `take` empties its queue; `subscribe` hears that links are
+   waiting, and resolves once it is listening. */
 export interface DeepLinkSource {
   take(): Promise<string[]>;
-  subscribe(nudge: () => void): () => void;
+  subscribe(nudge: () => void): Promise<unknown>;
 }
 
-/* Open every link the shell has, now and as they come: one for a cold start or a sign-in that came
-   first waits in the shell's queue until this runs. */
-export function useDeepLinks(source: DeepLinkSource | undefined, navigate: (to: Route) => void, current: () => Route | null) {
+/* The app's one owner of the shell's links, for as long as the page lives: it listens once, and
+   only then takes what is queued (a link that came while it was starting to listen is in that
+   take). What it takes waits here until a screen can open it, so a screen that goes and comes
+   back (a sign-out, React running an effect twice) loses none. */
+export class DeepLinkInbox {
+  private waiting: string[] = [];
+  private consumer: ((raw: string) => void) | null = null;
+  private started = false;
+
+  constructor(private readonly source: DeepLinkSource) {}
+
+  /* `open` gets every link waiting and each one after, until the returned function detaches it. */
+  attach(open: (raw: string) => void): () => void {
+    this.consumer = open;
+    if (!this.started) {
+      this.started = true;
+      const drain = () => void this.take();
+      this.source.subscribe(drain).then(drain, drain);
+    }
+    this.flush();
+    return () => {
+      if (this.consumer === open) this.consumer = null;
+    };
+  }
+
+  private async take() {
+    let links: string[];
+    try {
+      links = await this.source.take();
+    } catch {
+      return;
+    }
+    this.waiting.push(...links);
+    this.flush();
+  }
+
+  private flush() {
+    while (this.consumer && this.waiting.length > 0) this.consumer(this.waiting.shift()!);
+  }
+}
+
+/* Open every link the app is given, now and as they come: one from a cold start or from before a
+   sign-in waits until this runs. */
+export function useDeepLinks(inbox: DeepLinkInbox | undefined, navigate: (to: Route) => void, current: () => Route | null) {
   const latest = useRef({ navigate, current });
   latest.current = { navigate, current };
-  useEffect(() => {
-    if (!source) return;
-    let live = true;
-    const drain = () => {
-      source.take().then((links) => {
-        if (!live) return;
-        for (const raw of links) latest.current.navigate(deepLinkRoute(raw, latest.current.current()));
-      }, () => {});
-    };
-    const stop = source.subscribe(drain);
-    drain();
-    return () => {
-      live = false;
-      stop();
-    };
-  }, [source]);
+  useEffect(() => inbox?.attach((raw) => latest.current.navigate(deepLinkRoute(raw, latest.current.current()))), [inbox]);
 }

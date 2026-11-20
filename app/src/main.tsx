@@ -16,6 +16,7 @@ import { createAppStore } from "./store/store";
 import { startSync, type Sync } from "./store/sync";
 import { Launch } from "./screens/FirstRun";
 import { tauriSink, watchInbox } from "./screens/Inbox";
+import { DeepLinkInbox } from "./lib/deeplink";
 import "./styles.css";
 import { startupStep } from "./api/startup";
 
@@ -59,7 +60,7 @@ const about = isTauri() ? readAbout : undefined;
 const updates = isTauri() ? appUpdates : undefined;
 if (updates) watchAppUpdates(store, updates);
 // brindle:// links (a shared plan's Open in brindle): the shell's, whichever daemon.
-const links = isTauri() ? deepLinks : undefined;
+const links = isTauri() ? new DeepLinkInbox(deepLinks) : undefined;
 
 // The store syncs from the moment the app shows, once; and the app asks
 // then whether staff debug logging is on (api/debug.ts).
