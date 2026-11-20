@@ -45,8 +45,7 @@ import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
-import { inboxCount, teamNews, waitingCount } from "../store/appUpdates";
-import { useSwitch } from "../store/switches";
+import { teamNews, waitingCount } from "../store/appUpdates";
 import { cliStatus, formatAge, isPastWorker, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
@@ -168,7 +167,7 @@ function LibraryButton({ open, waiting, onToggle }: { open: boolean; waiting: nu
 const RAIL_BUTTON = "relative flex size-9 items-center justify-center rounded-md text-ink-3 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-branch";
 
 function SlimRail({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
-  const total = useAppState(useSwitch("inbox_queue_v2") ? waitingCount : inboxCount);
+  const total = useAppState(waitingCount);
   const terminals = useTerminals();
   return (
     <aside className="side flex w-16 shrink-0 flex-col items-center gap-[10px] border-r border-line bg-canvas-2 pb-3.5 pt-[18px]" aria-label="Sidebar" data-testid="slim-rail">
@@ -657,10 +656,9 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
    the Inbox page's. "empty" when nothing waits. The app's own update item
    counts too (store/appUpdates.ts). */
 function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
-  // The queue (switch inbox_queue_v2) counts only waits, team news a dot; the earlier cards count everything.
-  const queue = useSwitch("inbox_queue_v2");
-  const total = useAppState(queue ? waitingCount : inboxCount);
-  const news = useAppState(teamNews) && queue;
+  // Only waits count; what the team did that stops nothing is a dot beside the count.
+  const total = useAppState(waitingCount);
+  const news = useAppState(teamNews);
   const on = route.screen === "inbox";
   // A count that rose since last drawn: the pill glows once (a new key restarts the animation).
   // The sidebar is always there: an item that leaves the inbox while the page is closed is new when it returns.

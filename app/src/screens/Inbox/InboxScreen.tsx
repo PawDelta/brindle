@@ -6,9 +6,6 @@
    (POST /inbox/{id}/{action}); the engine's refusal, if any, comes back as
    one line on the row.
 
-   The queue is behind the inbox_queue_v2 switch (store/switches.tsx), on by
-   default; off, the earlier cards by session (InboxCards.tsx).
-
    Permissions are one card (PermissionAsks.tsx), whoever holds them, first
    under Waiting on you: Deny, Allow once, Allow ▾ for a request brindle's
    hook holds, a note and a way to the agent's window for a prompt only that
@@ -31,12 +28,10 @@ import type { SheetRef } from "../../routes";
 import { alert, button, quiet } from "../../components/ui";
 import { agentName, rootOf } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
-import { useSwitch } from "../../store/switches";
 import { useAppState } from "../../store/useStore";
 import type { Route } from "../../routes";
 import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
-import { InboxCards } from "./InboxCards";
 import { InboxQueue, type QueueContext } from "./InboxQueue";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { StorageNudge } from "./StorageNudge";
@@ -63,11 +58,7 @@ export interface InboxScreenProps {
   openUrl?: OpenUrl;
 }
 
-export function InboxScreen(props: InboxScreenProps) {
-  return useSwitch("inbox_queue_v2") ? <InboxQueueScreen {...props} /> : <InboxCards {...props} />;
-}
-
-function InboxQueueScreen({ client, refresh, onOpen, onNavigate, session = null, onShowAll, onOpenRule, appUpdates, openUrl = openExternal }: InboxScreenProps) {
+export function InboxScreen({ client, refresh, onOpen, onNavigate, session = null, onShowAll, onOpenRule, appUpdates, openUrl = openExternal }: InboxScreenProps) {
   const updateStatus = useAppState((s) => s.appUpdate);
   // The app's own item belongs to no session: shown on the whole Inbox only.
   const update = session === null && appUpdates ? appUpdateItem(updateStatus) : null;
