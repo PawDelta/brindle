@@ -354,6 +354,25 @@ def _call(method: str, path: str, body: dict | None = None, *, client=None, stor
     return status, resp if isinstance(resp, dict) else {}
 
 
+FIREWALL_BODY_LIMIT = 8 * 1024   # bytes: pawdelta.com's firewall refused larger request bodies (measured 2026-11-20)
+
+
+def why_refused(status: int, resp: dict, body: dict | None = None) -> str:
+    """The reason for a non-200 answer that carries no Library error code. The
+    Library always names its own refusals, so a 403 without one came from the
+    firewall in front of it, before the Library read the request: it says so,
+    and gives the request's size (as :func:`_call` sends it) when that is over
+    the size the firewall lets through."""
+    if status != 403:
+        return f"HTTP {status}"
+    size = len(json.dumps(mask_data(body), separators=(",", ":")).encode()) if body is not None else 0
+    why = "pawdelta.com's firewall refused the request before the Library read it"
+    if size > FIREWALL_BODY_LIMIT:
+        return (f"{why}: it was {-(-size // 1024)} KB, over the {FIREWALL_BODY_LIMIT // 1024} KB the firewall "
+                "lets through (HTTP 403)")
+    return f"{why} (HTTP 403)"
+
+
 class Refused(RuntimeError):
     """The Library answered with a non-200 status. ``status`` and ``code`` let a
     route pass a 4xx on (a stale version stays a 409) instead of calling it a 502."""
@@ -373,7 +392,7 @@ def api(method: str, path: str, body: dict | None = None, *, client=None, store=
     status, resp = _call(method, path, body, client=client, store=store)
     if status != 200:
         code = resp.get("error") if isinstance(resp, dict) and isinstance(resp.get("error"), str) else None
-        raise Refused(code or f"HTTP {status}", status, code)
+        raise Refused(code or why_refused(status, resp, body), status, code)
     if isinstance(resp, dict) and auth.BINARY_KEY in resp:
         return resp
     return resp if isinstance(resp, dict) else {}
