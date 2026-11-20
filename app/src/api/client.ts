@@ -2822,6 +2822,11 @@ export class DaemonClient {
     return this.put<RoutingGoalDTO>("/routing/goal", body);
   }
 
+  /* The app's effective theme, so Claude Code panes launch in the matching ANSI theme. */
+  putAppTheme(theme: "light" | "dark") {
+    return this.put<{ theme: string }>("/app/theme", { theme });
+  }
+
   doctor(repo?: string) {
     return this.get<DoctorCheck[]>("/doctor", { repo });
   }

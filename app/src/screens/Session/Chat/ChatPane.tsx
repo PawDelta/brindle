@@ -109,9 +109,9 @@ const PALETTES: Record<ChatTheme, ITheme> = {
     brightBlack: "#889a90", brightRed: "#f08c88", brightGreen: "#34d399", brightYellow: "#e8875a", brightBlue: "#6ea8fe", brightMagenta: "#a99be0", brightCyan: "#5ccfc4", brightWhite: "#e8f0eb",
   },
   light: {
-    background: "#ffffff", foreground: "#0e1716", cursor: "#078a62", cursorAccent: "#ffffff", selectionBackground: "#dcebe5", selectionInactiveBackground: "#dcebe5",
-    black: "#0e1716", red: "#a63e3a", green: "#078a62", yellow: "#86572a", blue: "#2d69b5", magenta: "#6350b3", cyan: "#1a756d", white: "#556b68",
-    brightBlack: "#4c615e", brightRed: "#a63e3a", brightGreen: "#078a62", brightYellow: "#9b4724", brightBlue: "#2d69b5", brightMagenta: "#6350b3", brightCyan: "#1a756d", brightWhite: "#3a4d4a",
+    background: "#ffffff", foreground: "#0e1716", cursor: "#06744f", cursorAccent: "#ffffff", selectionBackground: "#dcebe5", selectionInactiveBackground: "#dcebe5",
+    black: "#0e1716", red: "#a63e3a", green: "#06744f", yellow: "#86572a", blue: "#2d69b5", magenta: "#6350b3", cyan: "#1a756d", white: "#556b68",
+    brightBlack: "#4c615e", brightRed: "#a63e3a", brightGreen: "#06744f", brightYellow: "#9b4724", brightBlue: "#2d69b5", brightMagenta: "#6350b3", brightCyan: "#1a756d", brightWhite: "#3a4d4a",
   },
 };
 
