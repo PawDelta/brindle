@@ -6,6 +6,7 @@ import { watchFileDrops } from "./api/attachments";
 import { DaemonClient } from "./api/client";
 import { watchDebug } from "./api/debug";
 import { AppPtyViews } from "./api/ptyView";
+import { watchAppTheme } from "./api/theme";
 import { tauriSetup } from "./api/setup";
 import { appUpdater, appUpdates, installCli, readAbout, releaseBuildUpdater, tauriClient, tauriSocket } from "./api/tauri";
 import { applyTheme, readTheme } from "./components/ThemeToggle";
@@ -65,6 +66,7 @@ function app() {
   if (client && !sync) {
     sync = startSync({ client, store, connect });
     watchDebug(client);
+    watchAppTheme(client);
   }
   return <App store={store} client={client} refresh={sync?.refresh} onAgentRefused={() => sync?.stop()} initialRoute={initialRoute} installCli={cli} appUpdater={updater} appUpdates={updates} releaseBuildUpdater={releaseUpdater} readAbout={about} />;
 }

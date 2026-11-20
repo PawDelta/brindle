@@ -77,7 +77,7 @@ ROUTES = [Route("/v1/meta", meta), Route("/v1/recovery/prioritize", prioritize_r
           Route("/v1/recovery/viewed", viewed_session, methods=["POST"]),
           *routes_read.ROUTES,
           WebSocketRoute("/v1/events", events), WebSocketRoute("/v1/pty_view", pty_view),
-          *GOAL_ROUTES, *ACTIONS, *HOLD_ROUTES, *LAUNCH_ENV_ROUTES, *ORG_PERMISSION_ROUTES, *VISUAL_ROUTES]
+          *__import__("brindle.daemon.routes_theme", fromlist=["ROUTES"]).ROUTES, *GOAL_ROUTES, *ACTIONS, *HOLD_ROUTES, *LAUNCH_ENV_ROUTES, *ORG_PERMISSION_ROUTES, *VISUAL_ROUTES]
 
 
 class Deadlines:
