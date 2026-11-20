@@ -54,6 +54,7 @@ def test_new_worktrees_go_under_the_repo_and_stay_out_of_git_status(db, repo, co
     assert providers._in_worktree(ws.path) and not providers._in_worktree(str(repo / "app.py"))
 
 
+@pytest.mark.variant("the commit-msg hook is a shell script, invisible to Python coverage: this is the only test that runs it on a real commit")
 def test_worker_commit_strips_model_attribution_and_keeps_human_coauthor(db, repo):
     ws = workspaces.create(db, str(repo), "attribution").workspace
     Path(ws.path, "worker.txt").write_text("worker\n")
