@@ -673,7 +673,7 @@ describe("visuals", () => {
     fireEvent.click(screen.getByTestId("visual-back"));
     expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
     fireEvent.click(screen.getByTestId("inbox-link"));
-    const cards = await screen.findAllByTestId("inbox-card");
+    const cards = await screen.findAllByTestId("inbox-row");
     expect(cards).toHaveLength(1);
     expect(cards[0].dataset.kind).toBe("visual");
   });
@@ -690,7 +690,7 @@ describe("visuals", () => {
       if (!pending) daemon.data.inbox = daemon.data.inbox.filter((i) => i.visual_id !== id);
       await act(async () => { daemon.publish(kind, { repo_root: REPO, root_id: "sup1", payload: { visual: id, ...(pending === undefined ? {} : { pending }) } }); });
     };
-    const cards = () => screen.queryAllByTestId("inbox-card").map((c) => c.textContent?.includes("Flow notice") ? "notice" : "prompt");
+    const cards = () => screen.queryAllByTestId("inbox-row").map((c) => c.textContent?.includes("Flow notice") ? "notice" : "prompt");
     const badge = () => screen.queryByTestId("inbox-badge")?.textContent ?? null;
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox" }} />);
     await waitFor(() => expect(cards()).toEqual(["notice", "prompt"]));
@@ -836,7 +836,7 @@ describe("visuals", () => {
     });
     const { store, sync } = connectDaemon(daemon, client);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} />);
-    const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+    const card = (await screen.findAllByTestId("inbox-row")).find((candidate) => candidate.dataset.kind === "visual")!;
     await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
     await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
@@ -860,7 +860,7 @@ describe("visuals", () => {
     expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
     expect(screen.queryByTestId("inbox-session")).toBeNull();
     expect(screen.queryByTestId("visual-reader")).toBeNull();
-    expect(screen.queryByTestId("inbox-card")).toBeNull();
+    expect(screen.queryByTestId("inbox-row")).toBeNull();
   });
 
   it("stops asking when the prompt was answered in chat", () => {
@@ -1027,7 +1027,7 @@ describe("visuals", () => {
     const sync = startSync({ client, store, repo: REPO, connect: daemon.connect });
     const answer = vi.spyOn(client, "answerVisual");
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} />);
-    const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+    const card = (await screen.findAllByTestId("inbox-row")).find((candidate) => candidate.dataset.kind === "visual")!;
     await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
     fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
@@ -1038,7 +1038,7 @@ describe("visuals", () => {
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
     fireEvent.click(screen.getByTestId("inbox-link"));
     await screen.findByRole("region", { name: "Inbox" });
-    expect(screen.queryByTestId("inbox-card")).toBeNull();
+    expect(screen.queryByTestId("inbox-row")).toBeNull();
     expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
     expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
     expect(answer).not.toHaveBeenCalled();

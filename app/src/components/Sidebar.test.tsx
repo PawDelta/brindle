@@ -450,8 +450,11 @@ describe("Sidebar", () => {
   });
 
   it("leads with one Inbox · N entry at the very top, the only thing about attention in the sidebar, which opens the Inbox page", async () => {
-    const { daemon, navigate } = mount({ workspaces: [root, worker], inbox: [question, waiting, permission] }, { screen: "new" });
+    // A teammate's unread sign-off waits on no one: not counted, a dot beside the count instead.
+    const signoff: InboxItemDTO = { kind: "signoff_progress", reason: "1 of 2 signed off", inbox_group: "from_team", doc: "d1", item_key: "signoffs:d1", read: false };
+    const { daemon, navigate } = mount({ workspaces: [root, worker], inbox: [question, waiting, permission, signoff] }, { screen: "new" });
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("3"));
+    expect(screen.getByTestId("inbox-news")).toBeTruthy();
     const inbox = screen.getByTestId("inbox-link");
     // As C2b has it: the entry right under the logo, above the session's context, the handle and the tree.
     const side = screen.getByRole("complementary", { name: "Sidebar" });
@@ -470,6 +473,7 @@ describe("Sidebar", () => {
     daemon.data.inbox = [];
     daemon.publish("message.queued", { agent_id: "sup1" });
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
+    expect(screen.queryByTestId("inbox-news")).toBeNull();
   });
 
   it("shows the session's changes in one coloured line that toggles them in the chat's place", async () => {

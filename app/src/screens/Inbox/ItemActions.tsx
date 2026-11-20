@@ -29,6 +29,8 @@ export interface ItemActionsProps {
   onDone?(): void;
   /* Smaller controls, for the sidebar. */
   compact?: boolean;
+  /* Leave Dismiss out: the Inbox row has its own Done. */
+  hideDismiss?: boolean;
 }
 
 /* The provider a credentials item signs in to: the engine's route, its
@@ -38,7 +40,7 @@ export function useLoginProvider(item: InboxItemDTO) {
   return loginProvider(item, provider);
 }
 
-export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, compact = false }: ItemActionsProps) {
+export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, compact = false, hideDismiss = false }: ItemActionsProps) {
   const client = useDaemon();
   const provider = useLoginProvider(item);
   const cloud = useCloudLogin();
@@ -79,7 +81,7 @@ export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, com
             Go to it ↗
           </button>
         )}
-        <DismissAction item={item} actions={actions} compact={compact} />
+        {!hideDismiss && <DismissAction item={item} actions={actions} compact={compact} />}
       </div>
       {item.kind === "login" && <CloudLoginStatus job={cloud.job} compact={compact} />}
       {note && (

@@ -20,6 +20,7 @@ import { usageScenario } from "../src/test/usage";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
 import { ORGS, REPO, data } from "./fixtures";
 import { installLibrary, libraryInbox } from "./library";
+import { inboxMain, inboxMany, inboxNews, installThreads, seedDoneToday } from "./inbox";
 import { wideCheckout, wideDiff } from "./wideDiff";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
 import { ChatPaneScene } from "./chatPane";
@@ -68,6 +69,11 @@ const SCENES: Record<string, Route> = {
   "new-conflict": { screen: "new" },
   "new-codex-only": { screen: "new" },
   inbox: { screen: "inbox" },
+  "inbox-news": { screen: "inbox" },
+  "inbox-clear": { screen: "inbox" },
+  "inbox-loading": { screen: "inbox" },
+  "inbox-many": { screen: "inbox" },
+  "inbox-thread": { screen: "inbox" },
   "session-failed": { screen: "session", root: "sup-42", repo: REPO, agent: "e9a0b6c3" },
   "settings-key": { screen: "settings" },
   "settings-signin": { screen: "settings" },
@@ -394,8 +400,18 @@ if (libraryScene) {
   daemon.data.inbox = [...libraryInbox, ...daemon.data.inbox];
   localStorage.setItem("brindle.library.view", scene === "library-board" ? "board" : "list");
 }
+// The Inbox's frames (shots/inbox.ts): the queue, news only, all clear, loading, many items.
+const inboxScene = scene.startsWith("inbox");
+if (inboxScene) {
+  daemon.data.inbox = scene === "inbox-clear" ? [] : scene === "inbox-news" ? inboxNews : scene === "inbox-many" ? inboxMany : inboxMain;
+  if (scene === "inbox" || scene === "inbox-clear" || scene === "inbox-thread") seedDoneToday();
+  else localStorage.removeItem("brindle.inbox.triage");
+}
 const client = daemon.client();
 if (libraryScene) installLibrary(client);
+if (inboxScene) installThreads(client);
+// Loading: the first inbox never arrives.
+if (scene === "inbox-loading") Object.assign(client, { inbox: () => new Promise(() => {}) });
 const sync = startSync({ client, store, connect: daemon.connect });
 
 // No StrictMode here: its second mount trips an xterm.js timer on the disposed
@@ -464,6 +480,8 @@ const THEN: Record<string, () => void> = {
     void screenshot().then((shot) =>
       document.querySelector('[data-testid="terminal-surface"]')?.dispatchEvent(new DragEvent("dragenter", { dataTransfer: carrying(shot), bubbles: true, cancelable: true }))),
   "settings-key": () => press('css:button[aria-label="Set GEMINI_API_KEY"]'),
+  // The Inbox with the comment thread open: read it and reply without leaving.
+  "inbox-thread": () => document.querySelector<HTMLElement>('[data-testid="inbox-row"][data-kind="shared_doc_comment"] [data-testid="row-summary"]')?.click(),
   "agents-make": () => [...document.querySelectorAll("button")].find((b) => b.textContent?.startsWith("+ Make a custom agent"))?.click(),
   // The settings page scrolled to its foot: the engine's health list.
   "settings-health": () => document.getElementById("engine")?.scrollIntoView({ block: "end" }),

@@ -1930,6 +1930,11 @@ export class DaemonClient {
     );
   }
 
+  /* POST /inbox/read (routes_actions.inbox_read): team rows read by their item_keys, for this person on every machine. */
+  markInboxRead(keys: string[]) {
+    return this.postInbox<{ read: string[] }>("/inbox/read", { item_keys: keys });
+  }
+
   agent(id: string) {
     return this.get<AgentDTO>(`/agents/${encodeURIComponent(id)}`);
   }

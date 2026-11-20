@@ -6,6 +6,7 @@
    `automatic`) has one. */
 
 import type { AppUpdateStatus, AppUpdates } from "../api/tauri";
+import { partOf } from "../screens/Inbox/queue";
 import type { AppState, AppStore } from "./store";
 
 export interface AppUpdateItem {
@@ -21,8 +22,12 @@ export function appUpdateItem(status: AppUpdateStatus | null): AppUpdateItem | n
   return null;
 }
 
-/* Everything waiting on the person: the engine's inbox and the app's own item. */
-export const waitingCount = (state: AppState): number => state.inbox.length + (appUpdateItem(state.appUpdate) ? 1 : 0);
+/* Everything waiting on the person: the engine's inbox and the app's own item. What the team did that
+   stops nothing (the Inbox's From the team) isn't waiting, so the count can reach zero; it shows as a dot. */
+export const waitingCount = (state: AppState): number => state.inbox.filter((i) => partOf(i) === "wait").length + (appUpdateItem(state.appUpdate) ? 1 : 0);
+
+/* A team row the person hasn't read: the sidebar's dot beside the count. */
+export const teamNews = (state: AppState): boolean => state.inbox.some((i) => partOf(i) === "team" && i.read === false);
 
 /* Keep the store's status current. The shell is listened to first, and only
    then asked for the status now, which counts only when no announcement came
