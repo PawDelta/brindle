@@ -58,6 +58,26 @@ def test_theme_dark_brindle_seeded_moves_to_the_ansi_theme_on_an_existing_owned_
     assert "theme" not in json.loads(config.read_text())
 
 
+@pytest.mark.parametrize("app,before,after", [
+    ("light", "dark-ansi", "light-ansi"),
+    ("dark", "light-ansi", "dark-ansi"),
+    ("light", "dark", "light-ansi"),
+    ("light", "solarized", "solarized"),    # a person's own pick is kept
+])
+def test_app_theme_sets_brindles_claude_theme_and_is_remembered(tmp_path, monkeypatch, app, before, after):
+    config, work = _brindle_folder(tmp_path, monkeypatch)
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home"))
+    settings = config.with_name("settings.json")
+    settings.write_text(json.dumps({"theme": before}))
+    providers.set_app_theme(app)
+    assert json.loads(settings.read_text())["theme"] == after
+    assert providers.app_theme() == app
+    # A later launch seeds from the remembered theme, not a fixed one.
+    settings.write_text(json.dumps({}))
+    providers.seed_ci_config([])
+    assert json.loads(settings.read_text())["theme"] == providers.CLAUDE_THEMES[app]
+
+
 @pytest.mark.variant("the migration must never rewrite the person's own ~/.claude.json, only brindle's folder")
 def test_theme_dark_in_the_persons_own_config_is_kept_on_a_launch(tmp_path, monkeypatch):
     person = tmp_path / "person"

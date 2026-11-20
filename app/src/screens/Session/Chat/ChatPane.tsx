@@ -100,8 +100,9 @@ export function TerminalFrame({ ground, children, ...rest }: { ground?: string; 
    magenta branch, blue group-1, yellow thread-in, cyan group-4. The slots the
    table leaves open follow the same tokens: their bright twins the same hue, and
    black/white the ground and text ends of each theme (black the ground's in dark,
-   the text's in light; white the reverse). In light white is a grey that still reads on the field, since
-   SGR 37/97 text is drawn with it, so a program's default text in either ANSI-only theme lands on ink. */
+   the text's in light; white the reverse). In light white and brightWhite are light greys: Claude Code's
+   light-ansi theme uses them as backgrounds (message box, user message, bash and memory blocks), so they
+   must stay light. SGR 37/97 text drawn with them on the white ground is lifted to AA by chatContrast. */
 const PALETTES: Record<ChatTheme, ITheme> = {
   dark: {
     background: "#070b09", foreground: "#e8f0eb", cursor: "#afbfb6", cursorAccent: "#070b09", selectionBackground: "#889a9040",
@@ -110,8 +111,8 @@ const PALETTES: Record<ChatTheme, ITheme> = {
   },
   light: {
     background: "#ffffff", foreground: "#0e1716", cursor: "#06744f", cursorAccent: "#ffffff", selectionBackground: "#dcebe5", selectionInactiveBackground: "#dcebe5",
-    black: "#0e1716", red: "#a63e3a", green: "#06744f", yellow: "#86572a", blue: "#2d69b5", magenta: "#6350b3", cyan: "#1a756d", white: "#556b68",
-    brightBlack: "#4c615e", brightRed: "#a63e3a", brightGreen: "#06744f", brightYellow: "#9b4724", brightBlue: "#2d69b5", brightMagenta: "#6350b3", brightCyan: "#1a756d", brightWhite: "#3a4d4a",
+    black: "#0e1716", red: "#a63e3a", green: "#06744f", yellow: "#86572a", blue: "#2d69b5", magenta: "#6350b3", cyan: "#1a756d", white: "#e9eded",
+    brightBlack: "#4c615e", brightRed: "#a63e3a", brightGreen: "#06744f", brightYellow: "#9b4724", brightBlue: "#2d69b5", brightMagenta: "#6350b3", brightCyan: "#1a756d", brightWhite: "#f4f6f6",
   },
 };
 

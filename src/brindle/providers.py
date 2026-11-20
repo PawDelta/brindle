@@ -524,17 +524,39 @@ def trust_folder(path: str) -> bool:
 # Claude Code's ANSI theme ("dark-ansi"): its diff and code colours come from
 # the terminal's 16-colour palette, so they follow the app's light or dark
 # theme instead of a fixed dark background.
-CI_THEME = "dark-ansi"
-# The theme brindle seeded before CI_THEME. Only brindle's own config folder
-# (provider_homes) is migrated to CI_THEME: the person's own settings.json
-# keeps the theme they chose.
-OLD_THEME = "dark"
+CLAUDE_THEMES = {"light": "light-ansi", "dark": "dark-ansi"}
+# The values brindle itself ever wrote into its own config folder's settings.json
+# ("dark" was the first seed): only these are replaced to follow the app's theme.
+# Anything else is the person's own pick and is kept.
+OWNED_THEMES = ("dark", "dark-ansi", "light-ansi")
+APP_THEME_SETTING = "app_theme"   # ~/.brindle/config.json: the app's last reported theme
 API_KEY_SUFFIX = 20   # Claude Code records an approved key by its last 20 characters
 
 
-def _seed_claude_theme() -> None:
-    """Seed or migrate settings only in brindle's own Claude config folder.
-    Keep every other setting and theme."""
+def app_theme() -> str:
+    """The app's theme the engine last heard ("light" or "dark"; dark until told)."""
+    from brindle import config
+
+    got = config.user_settings().get(APP_THEME_SETTING)
+    return got if got in CLAUDE_THEMES else "dark"
+
+
+def set_app_theme(theme: str) -> None:
+    """Remember the app's theme across restarts and bring brindle's Claude
+    config folder's theme in line. Panes already running keep the theme they
+    started with; the next launch picks this one up."""
+    from brindle import config
+
+    if theme not in CLAUDE_THEMES:
+        raise ValueError(f"theme must be one of {', '.join(CLAUDE_THEMES)}")
+    config.set_user(APP_THEME_SETTING, theme)
+    _seed_claude_theme(theme)
+
+
+def _seed_claude_theme(app: str | None = None) -> None:
+    """Seed or follow the app's theme only in brindle's own Claude config
+    folder, replacing only a value brindle owns. Keep every other setting
+    and any theme the person picked; never touches ~/.claude."""
     from brindle import provider_homes
 
     folder = provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR")
@@ -542,10 +564,11 @@ def _seed_claude_theme() -> None:
         return
     config = os.path.realpath(os.path.join(folder, "settings.json"))
     os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
+    wanted = CLAUDE_THEMES[app or app_theme()]
 
     def theme(data: dict) -> None:
-        if "theme" not in data or data["theme"] == OLD_THEME:
-            data["theme"] = CI_THEME
+        if "theme" not in data or data["theme"] in OWNED_THEMES:
+            data["theme"] = wanted
 
     with _config_lock():
         _update_config(config, theme, create=True, lock_path=config)

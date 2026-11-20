@@ -64,8 +64,8 @@
     --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
     --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
     --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #06744f; --shell-cursor: #06744f; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
-    --shell-black: #0e1716; --shell-red: #a63e3a; --shell-green: #067a55; --shell-yellow: #86572a; --shell-blue: #2d69b5; --shell-magenta: #6350b3; --shell-cyan: #1a756d; --shell-white: #556b68;
-    --shell-bright-black: #4c615e; --shell-bright-red: #a63e3a; --shell-bright-green: #067a55; --shell-bright-yellow: #9b4724; --shell-bright-blue: #2d69b5; --shell-bright-magenta: #6350b3; --shell-bright-cyan: #1a756d; --shell-bright-white: #3a4d4a;
+    --shell-black: #0e1716; --shell-red: #a63e3a; --shell-green: #067a55; --shell-yellow: #86572a; --shell-blue: #2d69b5; --shell-magenta: #6350b3; --shell-cyan: #1a756d; --shell-white: #e9eded;
+    --shell-bright-black: #4c615e; --shell-bright-red: #a63e3a; --shell-bright-green: #067a55; --shell-bright-yellow: #9b4724; --shell-bright-blue: #2d69b5; --shell-bright-magenta: #6350b3; --shell-bright-cyan: #1a756d; --shell-bright-white: #f4f6f6;
     color-scheme: light;
   }
   :root:not([data-theme="dark"]) ::selection { background: #dcebe5; color: #0e1716; }
@@ -85,8 +85,8 @@
   --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
   --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
   --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #06744f; --shell-cursor: #06744f; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
-  --shell-black: #0e1716; --shell-red: #a63e3a; --shell-green: #067a55; --shell-yellow: #86572a; --shell-blue: #2d69b5; --shell-magenta: #6350b3; --shell-cyan: #1a756d; --shell-white: #556b68;
-  --shell-bright-black: #4c615e; --shell-bright-red: #a63e3a; --shell-bright-green: #067a55; --shell-bright-yellow: #9b4724; --shell-bright-blue: #2d69b5; --shell-bright-magenta: #6350b3; --shell-bright-cyan: #1a756d; --shell-bright-white: #3a4d4a;
+  --shell-black: #0e1716; --shell-red: #a63e3a; --shell-green: #067a55; --shell-yellow: #86572a; --shell-blue: #2d69b5; --shell-magenta: #6350b3; --shell-cyan: #1a756d; --shell-white: #e9eded;
+  --shell-bright-black: #4c615e; --shell-bright-red: #a63e3a; --shell-bright-green: #067a55; --shell-bright-yellow: #9b4724; --shell-bright-blue: #2d69b5; --shell-bright-magenta: #6350b3; --shell-bright-cyan: #1a756d; --shell-bright-white: #f4f6f6;
   color-scheme: light;
 }
 :root[data-theme="light"] ::selection { background: #dcebe5; color: #0e1716; }

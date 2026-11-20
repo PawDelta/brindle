@@ -114,14 +114,22 @@ describe("light theme tokens", () => {
 describe("light terminal palette", () => {
   const palette = chatTheme("light");
   const ground = parse(palette.background as string);
-  // Every ANSI slot a program can draw text in (SGR 30-37 and 90-97), white and black included.
+  // Every ANSI slot a program draws text in on the field. White and brightWhite are Claude Code's light-ansi
+  // backgrounds (message box, user message), so they are light and checked as grounds below; text drawn in
+  // them is lifted by chatContrast.
   const ansi = [
-    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
-    "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan",
+    "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan",
   ] as const;
 
   it.each(ansi)("terminal %s text reaches its contrast on the message box's field", (slot) => {
     const fg = parse(palette[slot] as string);
     expect(contrast(fg, ground)).toBeGreaterThanOrEqual(GREEN.has(slot) ? 3 : 4.5);
+  });
+
+  it.each(["white", "brightWhite"] as const)("terminal %s stays a light ground for ink and dim text", (slot) => {
+    const field = parse(palette[slot] as string);
+    expect(contrast(parse(palette.foreground as string), field)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(parse(palette.brightBlack as string), field)).toBeGreaterThanOrEqual(4.5);
   });
 });
