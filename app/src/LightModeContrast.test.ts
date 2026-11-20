@@ -164,6 +164,15 @@ describe("dark theme tokens", () => {
           expect(contrast(fade(parse(tokens[`--${on}`]), ground), face), `${on} on ${fill} dimmed`).toBeGreaterThanOrEqual(need(fill));
         }
       }
+      // A selected control in a dimmed block: its -soft tint, with the accent or ink-2 (secondary text on a tint) over it.
+      for (const ground of (["canvas", "surface-2"] as const).map((g) => parse(tokens[`--${g}`]))) {
+        for (const accent of ["sap", "pass", "branch", "fail"] as const) {
+          const tint = fade(over(parse(tokens[`--${accent}-soft`]), ground), ground);
+          for (const text of [accent, "ink-2"] as const) {
+            expect(contrast(fade(parse(tokens[`--${text}`]), ground), tint), `${text} on ${accent}-soft dimmed`).toBeGreaterThanOrEqual(need(text));
+          }
+        }
+      }
     },
   );
 });
