@@ -1152,6 +1152,12 @@ CREATE TABLE IF NOT EXISTS visual_input_state (
     observer INTEGER NOT NULL,
     invalidated_at REAL NOT NULL DEFAULT 0
 );
+-- The order person messages were taken in, per session: a message whose model call
+-- (brindle.intent) is still out holds its turn, and a newer message's takes it over.
+CREATE TABLE IF NOT EXISTS visual_person_turns (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    turn INTEGER NOT NULL
+);
 -- What the person typed lately, for publish_visual's `asked` to be checked
 -- against. A row is spent by the one publication it allows; the rest go after
 -- visual_offers.FOLD. source: 'grant' when this same message raised the
