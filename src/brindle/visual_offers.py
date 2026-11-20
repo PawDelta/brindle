@@ -204,7 +204,9 @@ _CANCEL_REQUEST = re.compile(
 # Says only "stop", or "never mind I found it": it cancels unless a new ask follows, as in "never mind, render it".
 _CANCEL_BARE = re.compile(_CANCEL_LEAD + r"(?:(?:never\s*mind|nvm)\s+(?:i|i['’]m|i['’]ve|we|we['’]re|it['’]s|its|got|found|figured|all)\b"
                           r"|(?:never\s*mind|nvm|forget\s+(?:it|that|about\s+it)|scratch\s+that|"
-                          r"cancel\s+(?:it|that)|don['’]?t(?:\s+bother)?|stop)(?:\s+(?:it|that|this))?\W*$)", re.I)
+                          r"cancel\s+(?:it|that)|don['’]?t(?:\s+bother)?|stop|ignore)(?:\s+(?:it|that|this))?\W*$)", re.I)
+# What a cancel names when it isn't the plan: calling those off leaves the plan alone.
+_NOT_THE_PLAN = re.compile(r"\b(?:visual\w*|diagrams?|charts?|mockups?|renders?|drawings?|sketch\w*)\b", re.I)
 _ASKS_AGAIN = re.compile(r"(?:(?:please|just|then|instead|but|and|so|ok|okay|now|(?:can|could|would|will) you)\W+)*"
                          r"(?:render|draw|visuali[sz]e|mock|display|show\s+(?:me|us|it|that|this)|(?:can|could) i see|let me see"
                          r"|(?:make|create|build|generate)\s+(?:(?:me|us|a|an|the|this|that)\s+)*" + _CANCEL_ARTIFACT + r")\b", re.I)
@@ -374,6 +376,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                       "VALUES (?,1,0,0,?) ON CONFLICT(root_id) DO UPDATE SET "
                       "generation=generation+1, invalidated_at=MAX(invalidated_at,excluded.invalidated_at)",
                       (root.id, time.time()))
+        if not fold_only:
+            take_turn(c, root.id)   # a model call reading earlier messages (intent) sees it came in
         if not mid_turn:
             c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                       (time.time(), root.id))
@@ -382,7 +386,14 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
-        if not fold_only and (scope or cancelled):
+        # What a cancel calls off: the plan when it says so, or when it names nothing ("ignore",
+        # "stop") and the plan is the request still standing. Calling off a chart spares the plan.
+        held = c.execute("SELECT scope FROM visual_grants WHERE root_id=? AND remaining>0", (root.id,)).fetchone()
+        plan_held = held is not None and held["scope"] == "plan"
+        names_plan = bool(re.search(r"\bplan|think\b", text, re.I))
+        spares_plan = cancelled and plan_held and not names_plan and bool(_NOT_THE_PLAN.search(text))
+        cancels_plan = cancelled and (names_plan or (plan_held and not spares_plan))
+        if not fold_only and (scope or (cancelled and not spares_plan)):
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
             _unlink(c, root.id, "grant")
         if cancelled:
@@ -414,12 +425,18 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         from brindle import plans
 
         if cancelled:
-            if re.search(r"\bplan|think\b", text, re.I):     # calling off a chart leaves the plan alone
+            if cancels_plan:
                 plans.cancel_draft(db, root.id)
         else:
             # The ask opens its plan at once, an empty draft the supervisor fills (or shows the
             # session's open plan again).
             plans.begin(db, root.id, asked_at=message_at)
+
+
+def take_turn(c, root: str) -> int:
+    """Count a person message in: the session's turn, one more each message."""
+    return c.execute("INSERT INTO visual_person_turns (root_id, turn) VALUES (?,1) ON CONFLICT(root_id) "
+                     "DO UPDATE SET turn=turn+1 RETURNING turn", (root,)).fetchone()[0]
 
 
 def keep_typed(db: DB, agent: Agent, text: str | None, expires_at: float, submitted_at: float,
@@ -634,6 +651,15 @@ def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = 
             return True
         if decision:
             return False
+    if kind == "plan" and supervisor and visual_id and c.execute(
+            "SELECT 1 FROM plans WHERE id=? AND root_id=? AND state IN ('open','redirected')",
+            (visual_id, root)).fetchone():
+        # A revision of the supervisor's own open plan is not a new doc: it needs no fresh ask.
+        # It still spends one the person left for it (a Redirect, or asking again).
+        if c.execute("UPDATE visual_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
+                     "AND scope='plan'", (root,)).rowcount:
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant'", (root,))
+        return True
     consume(c, root, kind)
     return True
 

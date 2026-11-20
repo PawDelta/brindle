@@ -2687,10 +2687,11 @@ def watch(
     if once or not sys.stdout.isatty():
         typer.echo(watch_mod.print_once(DB(), repo_root, color=sys.stdout.isatty()))
         return
-    watch_mod.run(repo_root, sidebar=sidebar)
-    if sidebar:
+    started = watch_mod.run(repo_root, sidebar=sidebar)
+    if sidebar and started:
         # Quit on purpose (a crash raises instead): keep it gone, so switching
         # windows doesn't bring it back. `brindle continue` starts a fresh one.
+        # One that didn't start (its root's sidebar already runs) wasn't quit.
         agents.dismiss_sidebar(DB(), os.environ.get("TMUX_PANE"))
 
 

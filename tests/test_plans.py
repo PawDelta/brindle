@@ -304,10 +304,10 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
         assert 'On "Decision d1 (Where presets live)": Policy needs Pro.' in said
         assert started == [] and tasks.sweep(db) == 0
 
-        # The redirect allows exactly the one revision it asked for.
+        # The revision the redirect asked for spends its grant: none is left to hold a later visual back.
         mcp_server.propose_plan(PLAN + "\n\nRevised.", DECISIONS, plan_id=pid)
-        with pytest.raises(ToolError):
-            mcp_server.propose_plan(PLAN, DECISIONS, plan_id=pid)
+        assert db.conn.execute("SELECT COUNT(*) FROM visual_grants WHERE root_id='boss' AND remaining>0"
+                               ).fetchone()[0] == 0
 
         assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True}).status_code == 409
 

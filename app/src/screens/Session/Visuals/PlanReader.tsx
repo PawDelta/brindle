@@ -139,8 +139,17 @@ export interface ReaderChrome {
 
 /* The doc from its source, kept current, with its writes kept in order. `version` changing asks
    for one more read. */
-export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown) {
+/* `failed`: told of a failed read that counts (the latest read, while this reader is still open);
+   never of one a newer read or a closed reader has made obsolete. */
+export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown, failed?: (e: unknown) => void) {
   const [doc, setDoc] = useState<P | null>(null);
+  const onFailed = useRef(failed);
+  onFailed.current = failed;
+  const open = useRef(true);
+  useEffect(() => {
+    open.current = true;
+    return () => { open.current = false; };
+  }, []);
   const [error, setError] = useState<string | null>(null);
   // Every write to the doc is followed by one more read of it.
   const [again, setAgain] = useState(0);
@@ -198,6 +207,7 @@ export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown) {
           latest.current = null;
           setDoc(null);
         }
+        if (open.current) onFailed.current?.(e);
       },
     );
   }, [source, place, version, again]);
@@ -438,9 +448,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [followed, setFollowed] = useState<{ thread: string } | null>(null);
   const [tab, setTab] = useState<ReviewTab>("comments");
   const [collapsed, setCollapsed] = useState(storedCollapsed);
-  // The planning doc (PlanDesignDoc.tsx): the person's own plan on the design-doc spine, not yet
-  // shared for team review. Every other doc keeps the side column.
-  const designDoc = !receivedTeammate && !!author && !receivedPlan.gate && onSpine(receivedPlan);
+  // The planning doc (PlanDesignDoc.tsx): any plan on the design-doc spine, in every view of it
+  // (solo, shared with reviewers, live, frozen for sign-off, or a teammate's). Only an older
+  // free-form doc keeps the side column.
+  const designDoc = onSpine(receivedPlan);
   const [hovered, setHovered] = useState<number | null>(null);
   const [reading, setReading] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -699,6 +710,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (followed) show(document.querySelector(`[data-testid="thread-${followed.thread}"]`), "nearest");
   }, [followed]);
   const jump = (decision: string) => show(document.getElementById(`plan-decision-${decision}`));
+  // A pick: the author's travels with their verdict; a teammate's is their vote, and counts as
+  // decided only once the Library has it (one write at a time: the cards take no pick meanwhile).
+  const pickOption = async (decision: string, option: string) => {
+    if (!teammate) return setPicks((p) => ({ ...p, [decision]: option }));
+    if (historical || busy) return;
+    if ((await write(() => source.vote(plan.rev, decision, option))) && alive.current) setPicks((p) => ({ ...p, [decision]: option }));
+  };
 
   // The bottom bar's actions.
   const target = visual?.answer_agent_id;
@@ -930,7 +948,35 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   );
   const presence = docLive && (
     <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={myName} onState={setLiveState} onCapability={setLiveCapability} onText={setLiveTexts} refreshes={refreshes}
-      mode={mode} stripHost={stripHost} reviewers={reviewerNames} onHistory={() => { if (collapsed) collapse(false); setTab("history"); }} />
+      mode={mode} stripHost={stripHost} reviewers={reviewerNames} onHistory={designDoc ? () => setHistoryOpen(true) : () => { if (collapsed) collapse(false); setTab("history"); }} />
+  );
+  // What the Library has yet to confirm about a shared plan, under its status line.
+  const gateNotes = (
+    <>
+      {open && gate?.unconfirmed && (
+        <div className="grid gap-1 font-sans text-[12.5px] text-ink-2" data-testid="plan-unconfirmed" data-reason={gate.unconfirmed.reason} data-held={gate.unconfirmed.approval_held || undefined}>
+          <span>{gate.unconfirmed.message}</span>
+          {gate.unconfirmed.approval_held && <span>Your approval is saved. The build starts by itself once the Library confirms this revision is ready.</span>}
+          {(gate.unconfirmed.reason === "sign_in" || gate.unconfirmed.reason === "other_account") && <LibrarySignIn />}
+          {gate.unconfirmed.can_stop_sharing && !next && sharing?.stopSharingPlan && (
+            <span>
+              <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this doc the next time brindle reaches the Library" onClick={() => void stopSharing()}>Stop sharing and build</button>
+            </span>
+          )}
+        </div>
+      )}
+      {open && gate?.approval_refused && <p className="m-0 font-sans text-[12.5px] text-sap" data-testid="plan-approval-refused">{gate.approval_refused}</p>}
+    </>
+  );
+  // What a highlight offers, over the words.
+  const highlightBar = picked && !historical && (
+    <div role="toolbar" aria-label="For the highlighted text" className="absolute z-10 inline-flex -translate-y-[calc(100%+6px)] gap-0.5 rounded-md border border-line-strong bg-canvas-2 p-[3px] font-sans text-xs shadow-lg" style={{ left: picked.x, top: picked.y }}
+      onMouseDown={(e) => e.preventDefault()} onMouseUp={(e) => e.stopPropagation()}>
+      {canComment && <button type="button" className="cursor-pointer rounded-[3px] bg-branch-soft px-[9px] py-0.5 font-medium text-branch" onClick={() => offer("comment")}>Comment</button>}
+      {picked.kind === "text" && plan.state !== "approved" && canSuggest && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("suggest")}>Suggest edit</button>}
+      {canComment && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("ask")}>{teammate?.author ? `Ask ${authorName}` : "Ask the supervisor"}</button>}
+      {picked.kind === "text" && work && Object.values(work.state?.connected ?? {}).some(Boolean) && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink hover:bg-surface-2" onClick={createFromPassage}>Create work item</button>}
+    </div>
   );
 
   // The bottom bar while a suggestion is typed, while editing live, and once the plan is decided.
@@ -1008,7 +1054,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const notesFor = (at: string) => [
       ...openThreads.map((t) => ({ t, h: home(t.anchor, t.id) })).filter(({ h }) => h.at === at).map(({ t, h }) => ({
         key: `t${t.id}`, anchor: h.anchor,
-        node: <MarginNote thread={t} busy={busy} canJudge={plan.state === "open"} canReply={canComment} canResolve actions={actions} lit={followed?.thread === String(t.id) || hovered === t.id}
+        // A teammate's suggestions are the author's to judge, and a teammate resolves only their own comments.
+        node: <MarginNote thread={t} busy={busy} canJudge={!teammate && plan.state === "open"} canReply={canComment} canResolve={!teammate || (canComment && t.author === "person")} actions={actions} lit={followed?.thread === String(t.id) || hovered === t.id}
           onHover={(on) => setHovered(on ? t.id : null)} />,
       })),
       ...(draft && draftAt?.at === at ? [{
@@ -1022,8 +1069,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
-        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} picked={open ? drafted(d) ?? null : chosen(d)}
-          onPick={(o) => setPicks((p) => ({ ...p, [d.id]: o }))} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
+        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={!!teammate && busy} picked={open ? drafted(d) ?? null : chosen(d)}
+          onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
       </Annotated>
     ));
     const titleAside = (s: PlanSectionDTO) => {
@@ -1042,6 +1089,56 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const stillOpen = [openThreads.length - suggestions > 0 && plural(openThreads.length - suggestions, "comment"), suggestions > 0 && plural(suggestions, "suggestion")].filter(Boolean);
     const lineFor = plan.state === "open" ? "Nothing is built until you approve" : plan.state === "approved" ? "brindle is building it" : statusLine;
     const stageTone = plan.state === "open" ? "text-sap" : plan.state === "approved" ? "text-pass" : "text-ink-3";
+    // The bottom bar while decisions are open: how many, and the next one.
+    const nextUp = left.length > 0 && (
+      <>
+        <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><span className={`${pill} !text-[13.5px] !font-semibold text-sap`}>{`${left.length} left to decide`}</span></span>
+        <span className="text-xs text-ink-3">
+          {"Next: "}
+          <a href={`#plan-decision-${left[0].id}`} data-testid="plan-next-decision" className="text-ink-2 no-underline hover:text-ink hover:underline" onClick={(e) => { e.preventDefault(); jump(left[0].id); }}>{`${left[0].title} ↓`}</a>
+        </span>
+      </>
+    );
+    // In team review the status line also says who signs and where each stands.
+    const reviewed = !!gate || !!teammate;
+    const status = reviewed ? (
+      <div className="mt-3.5 grid gap-1.5">
+        <DocStatus stage={stage} presentation={closed ? "closed" : undefined} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
+          reviewers={statusReviewers} frozen={!!frozen} byline={byline} workItem={workItem} state={plan.state} held={policyHeld ? "policy" : undefined} />
+        {gateNotes}
+      </div>
+    ) : (
+      <div className="mt-3.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 font-sans text-[12.5px] leading-[1.4] text-ink-2" data-testid="plan-status" data-state={plan.state} data-presentation={closed ? "closed" : undefined}>
+        <span className={`${pill} text-xs ${stageTone}`}>{stage}</span>
+        <span>{lineFor}</span>
+        {plan.reference && <span className="text-ink-3" data-testid="doc-reference">{plan.reference}</span>}
+        <span className="text-ink-3">{byline}</span>
+      </div>
+    );
+    // The sign-off sheet under the outline: once a version is frozen (or for a doc reviewed without live text).
+    const signOffs = gate && (frozen || !useLiveReview) && (
+      <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} since={sinceRevs && lastRead !== null ? { from: lastRead, changes: sinceRevs } : null}
+        onShowChanges={source.history ? () => setHistoryOpen(true) : undefined} />
+    );
+    const teammateBar = teammate && (
+      <>
+        <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : teammate.signedOff ? "signed" : "ready"} data-left={left.length}>
+          {left.length ? nextUp : (
+            <>
+              <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink">
+                {teammate.signedOff ? <Tick className="!text-[13.5px] !font-semibold">{frozen ? `You signed off version ${frozen.id}` : `You signed off r${plan.rev}`}</Tick>
+                  : teammate.rights.signOff ? (frozen ? signName : "Ready for your sign-off") : gateWhy || "Read and comment"}
+              </span>
+              {summary && <span className="text-xs text-ink-3">{summary}</span>}
+            </>
+          )}
+        </div>
+        {teammate.rights.signOff && !teammate.signedOff && (
+          <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || left.length > 0} data-testid="plan-sign-off"
+            title={left.length ? "Pick an option in every decision first" : undefined} onClick={() => void signOff()}>{signName}</LoadingButton>
+        )}
+      </>
+    );
     const versionMenu = source.history ? (
       <Menu label={<span data-testid="plan-rev">{`${versionLabel} · History`}</span>} buttonClass={`${quiet} px-[9px] text-xs !text-ink-3`} title="See earlier revisions and what changed"
         place="down" panelClass="w-[380px] max-w-[86vw] max-h-[60vh] overflow-auto" open={historyOpen} onOpenChange={setHistoryOpen} keepMounted testid="plan-history-menu">
@@ -1049,7 +1146,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           onCompare={(comparison, close) => { setHistorical(comparison ? { comparison, close } : null); if (comparison) setHistoryOpen(false); }} />
       </Menu>
     ) : <span className="whitespace-nowrap px-[9px] text-xs text-ink-3" data-testid="plan-rev">{versionLabel}</span>;
-    const approveBlocked = !!historical || busy || left.length > 0 || reviewBlocked || uploading > 0;
+    // A shared plan builds only once every required reviewer has signed.
+    const gateHolds = !!gate && gate.state !== "ready";
+    const approveBlocked = !!historical || busy || left.length > 0 || reviewBlocked || uploading > 0 || gateHolds;
     return (
       <>
         {chrome && (
@@ -1057,22 +1156,18 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             modes={{ current: mode, picker: <ModeMenu modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} /> }}
             share={!historical && shareMenu} />
         )}
+        {!chrome && presence && <div className="hidden">{presence}</div>}
         <div ref={setStripHost} className="contents" />
         {typing && !historical && <FormatBar />}
         <div className="flex min-h-0 flex-1 bg-canvas" data-testid="plan-design-doc">
-          <Outline parts={parts} placed={placed} isOpen={waiting} decided={ordered.length - left.length} total={ordered.length} current={reading} />
+          <Outline parts={parts} placed={placed} isOpen={waiting} decided={ordered.length - left.length} total={ordered.length} current={reading} footer={signOffs || undefined} />
           <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto border-l border-line max-[900px]:border-l-0" data-testid="plan-doc" data-mode={historical ? "viewing" : mode}
             onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor} onScroll={spy}>
             {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : (
               <article className={`pb-[84px] pl-[68px] pt-12 max-[900px]:pb-16 max-[900px]:pl-[46px] max-[900px]:!pr-[22px] max-[900px]:pt-8 ${noted ? "pr-6 max-[1180px]:pr-[68px]" : "pr-[68px]"}`}>
                 <div className={`font-serif text-[15.5px] leading-[1.68] text-ink-2 ${noted ? "w-[min(660px,100%_-_292px)] max-[1180px]:mx-auto max-[1180px]:w-[min(660px,100%)]" : "mx-auto w-[min(660px,100%)]"}`}>
                   <h1 className="m-0 font-serif text-[31px] font-semibold leading-[1.16] tracking-[-0.012em] text-ink [text-wrap:balance]">{plan.title}</h1>
-                  <div className="mt-3.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 font-sans text-[12.5px] leading-[1.4] text-ink-2" data-testid="plan-status" data-state={plan.state} data-presentation={closed ? "closed" : undefined}>
-                    <span className={`${pill} text-xs ${stageTone}`}>{stage}</span>
-                    <span>{lineFor}</span>
-                    {plan.reference && <span className="text-ink-3" data-testid="doc-reference">{plan.reference}</span>}
-                    <span className="text-ink-3">{byline}</span>
-                  </div>
+                  {status}
                   {plan.team_ended && <p className="m-0 mt-2 font-sans text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</p>}
                   {textPlan.lede && (
                     <Annotated notes={notesFor(LEDE)} className="mt-[26px]">
@@ -1108,32 +1203,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 </div>
               </article>
             )}
-            {picked && !historical && (
-              <div role="toolbar" aria-label="For the highlighted text" className="absolute z-10 inline-flex -translate-y-[calc(100%+6px)] gap-0.5 rounded-md border border-line-strong bg-canvas-2 p-[3px] font-sans text-xs shadow-lg" style={{ left: picked.x, top: picked.y }}
-                onMouseDown={(e) => e.preventDefault()} onMouseUp={(e) => e.stopPropagation()}>
-                {canComment && <button type="button" className="cursor-pointer rounded-[3px] bg-branch-soft px-[9px] py-0.5 font-medium text-branch" onClick={() => offer("comment")}>Comment</button>}
-                {picked.kind === "text" && plan.state !== "approved" && canSuggest && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("suggest")}>Suggest edit</button>}
-                {canComment && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("ask")}>Ask the supervisor</button>}
-              </div>
-            )}
+            {highlightBar}
           </div>
         </div>
         <footer className="flex min-h-[60px] flex-wrap items-center justify-between gap-x-5 gap-y-3 border-t border-line-strong bg-canvas-2 px-4 py-2.5 font-sans" data-testid="plan-verdict">
-          {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : open ? (
+          {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? teammateBar : open ? (
             <>
               <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : "ready"} data-left={left.length}>
-                {left.length ? (
-                  <>
-                    <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><span className={`${pill} !text-[13.5px] !font-semibold text-sap`}>{`${left.length} left to decide`}</span></span>
-                    <span className="text-xs text-ink-3">
-                      {"Next: "}
-                      <a href={`#plan-decision-${left[0].id}`} data-testid="plan-next-decision" className="text-ink-2 no-underline hover:text-ink hover:underline" onClick={(e) => { e.preventDefault(); jump(left[0].id); }}>{`${left[0].title} ↓`}</a>
-                    </span>
-                  </>
-                ) : (
+                {left.length ? nextUp : (
                   <>
                     <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><Tick className="!text-[13.5px] !font-semibold">Everything is decided</Tick></span>
-                    <span className="text-xs text-ink-3">{`Approve starts the build.${stillOpen.length ? ` ${stillOpen.join(" and ")} ${openThreads.length === 1 ? "is" : "are"} still open.` : ""}`}</span>
+                    <span className="text-xs text-ink-3">{gateHolds ? summary || gateWhy : `Approve starts the build.${stillOpen.length ? ` ${stillOpen.join(" and ")} ${openThreads.length === 1 ? "is" : "are"} still open.` : ""}`}</span>
                   </>
                 )}
               </div>
@@ -1176,8 +1256,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     </LoadingButton>
                   </div>
                 </Menu>
-                <LoadingButton className={main} busy={sending === "approve"} disabled={approveBlocked} data-testid="plan-build"
-                  title={left.length ? "Pick an option in every decision first" : "Approve this plan and start building it"} onClick={() => void decide(true)}>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={approveBlocked} data-testid="plan-build" data-gate={gate?.state}
+                  title={left.length ? "Pick an option in every decision first" : gateHolds ? gateWhy : "Approve this plan and start building it"} onClick={() => void decide(true)}>
                   Approve
                 </LoadingButton>
               </div>
@@ -1224,19 +1304,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 brief={!!plan.ask} briefOpen={briefOpen} onBrief={() => setBriefOpen((o) => !o)}
                 state={plan.state} held={policyHeld ? "policy" : undefined} />
               {plan.team_ended && <p className="m-0 text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</p>}
-              {open && gate?.unconfirmed && (
-                <div className="grid gap-1 text-[12.5px] text-ink-2" data-testid="plan-unconfirmed" data-reason={gate.unconfirmed.reason} data-held={gate.unconfirmed.approval_held || undefined}>
-                  <span>{gate.unconfirmed.message}</span>
-                  {gate.unconfirmed.approval_held && <span>Your approval is saved. The build starts by itself once the Library confirms this revision is ready.</span>}
-                  {(gate.unconfirmed.reason === "sign_in" || gate.unconfirmed.reason === "other_account") && <LibrarySignIn />}
-                  {gate.unconfirmed.can_stop_sharing && !next && sharing?.stopSharingPlan && (
-                    <span>
-                      <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this doc the next time brindle reaches the Library" onClick={() => void stopSharing()}>Stop sharing and build</button>
-                    </span>
-                  )}
-                </div>
-              )}
-              {open && gate?.approval_refused && <p className="m-0 text-[12.5px] text-sap" data-testid="plan-approval-refused">{gate.approval_refused}</p>}
+              {gateNotes}
               {!chrome && reviewersPanel}
               {plan.ask && briefOpen && (
                 <p id="plan-ask" className="m-0 flex flex-wrap items-baseline gap-x-2 border-l-2 border-line-strong pl-3 text-[12.5px] text-ink-2" data-testid="plan-ask">
@@ -1276,15 +1344,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             })}
             </>}
           </article>}
-          {picked && !historical && (
-            <div role="toolbar" aria-label="For the highlighted text" className="absolute z-10 inline-flex -translate-y-[calc(100%+6px)] gap-0.5 rounded-md border border-line-strong bg-canvas-2 p-[3px] font-sans text-xs shadow-lg" style={{ left: picked.x, top: picked.y }}
-              onMouseDown={(e) => e.preventDefault()} onMouseUp={(e) => e.stopPropagation()}>
-              {canComment && <button type="button" className="cursor-pointer rounded-[3px] bg-branch-soft px-[9px] py-0.5 font-medium text-branch" onClick={() => offer("comment")}>Comment</button>}
-              {picked.kind === "text" && plan.state !== "approved" && canSuggest && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("suggest")}>Suggest edit</button>}
-              {canComment && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink-2 hover:bg-surface-2" onClick={() => offer("ask")}>{teammate?.author ? `Ask ${authorName}` : "Ask the supervisor"}</button>}
-              {picked.kind === "text" && work && Object.values(work.state?.connected ?? {}).some(Boolean) && <button type="button" className="cursor-pointer rounded-[3px] px-[9px] py-0.5 text-ink hover:bg-surface-2" onClick={createFromPassage}>Create work item</button>}
-            </div>
-          )}
+          {highlightBar}
         </div>
         {columnOpen ? (
           <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
