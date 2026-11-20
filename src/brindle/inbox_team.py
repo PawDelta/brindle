@@ -34,8 +34,10 @@ REVIEW, SIGNED, COMMENT = "review_requested", "signed_off", "shared_doc_comment"
 PROGRESS = "signoff_progress"       # the Inbox's own kind for a design's sign-offs ("signed_off" is the
                                     # author's local card once every sign-off is in)
 NEW_KINDS = (PROGRESS, COMMENT)     # Inbox kinds that only exist with the team Inbox
-# Rows a teammate's action put in the Inbox; every other kind waits on the person.
-TEAM_KINDS = (REVIEW, PROGRESS, COMMENT, SIGNED, "changes_requested")
+# Rows that ask nothing of the person: a teammate's action, or an admin's notice
+# (the owner-approved Inbox lists notices under From the team). Every other kind
+# waits on them, a review request among them: the plan can't go on until they review it.
+TEAM_KINDS = (PROGRESS, COMMENT, SIGNED, "changes_requested", "org_notice")
 MAX_KEYS = 200                      # per POST /me/inbox/read
 
 _lock = threading.Lock()

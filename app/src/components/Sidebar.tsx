@@ -45,7 +45,7 @@ import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
-import { waitingCount } from "../store/appUpdates";
+import { teamNews, waitingCount } from "../store/appUpdates";
 import { cliStatus, formatAge, isPastWorker, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
@@ -657,6 +657,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
    counts too (store/appUpdates.ts). */
 function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
   const total = useAppState(waitingCount);
+  const news = useAppState(teamNews);
   const on = route.screen === "inbox";
   // A count that rose since last drawn: the pill glows once (a new key restarts the animation).
   // The sidebar is always there: an item that leaves the inbox while the page is closed is new when it returns.
@@ -681,6 +682,7 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
       onClick={() => navigate({ screen: "inbox" })}
     >
       <span className="flex-1">Inbox</span>
+      {news && <span className="side-new" title="New from the team" data-testid="inbox-news" />}
       {total > 0 ? (
         <span key={pulse} className="side-nb" data-pulse={pulse > 0 || undefined} data-testid="inbox-badge" aria-label={`${total} needing you`}>
           {total}

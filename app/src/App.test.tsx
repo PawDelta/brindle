@@ -110,7 +110,7 @@ describe("App", () => {
     expect(startControls()).toHaveLength(0);
     expect(screen.queryByTestId("agent-menu")).toBeNull();
     fireEvent.click(screen.getByTestId("inbox-link"));
-    await screen.findByTestId("inbox-card");
+    await screen.findAllByTestId("inbox-row");
     expect(startControls()).toHaveLength(0);
     fireEvent.click(treeSession("sup1"));
     await waitFor(() => expect(states()).toEqual(["resuming", "resuming"]));
@@ -1094,20 +1094,20 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", REPO));
   });
 
-  it("inbox: a notice is marked read right on its card, at once; Go to session opens the session with nothing over it", async () => {
+  it("inbox: a notice is marked read right on its row, at once; Open session opens the session with nothing over it", async () => {
     const notice = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [notice, question], goal });
     const { client, store, sync } = connectDaemon(daemon);
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox" }} />);
-    await screen.findByRole("region", { name: "Ship ls --json" });
+    const row = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-row"][data-kind="${kind}"]`);
+    await waitFor(() => expect(row("org_notice")).toBeTruthy());
     const posts = () => daemon.requests.filter((r) => r.method === "POST").map((r) => r.path);
-    // Mark read, on the notice's card: the request goes at once, no moment to undo, and the card is gone.
-    const org = screen.getByRole("region", { name: "Your org" });
-    fireEvent.click(within(org).getByRole("button", { name: "Mark read" }));
+    // Mark read, on the notice's row: the request goes at once, no moment to undo, and the row is gone.
+    fireEvent.click(within(row("org_notice")!).getByTestId("row-go"));
     await waitFor(() => expect(posts()).toEqual(["/inbox/n-18/read"]));
-    await waitFor(() => expect(screen.queryByRole("region", { name: "Your org" })).toBeNull());
-    // Go to session on the question's card: the supervisor's pane, and nothing over it.
-    fireEvent.click(within(screen.getByRole("region", { name: "Ship ls --json" })).getByRole("button", { name: "Go to session ›" }));
+    await waitFor(() => expect(row("org_notice")).toBeNull());
+    // Open session on the question's row (open first, as what waits): the supervisor's pane, and nothing over it.
+    fireEvent.click(await within(row("question")!).findByTestId("open-session"));
     expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
     expect(screen.queryByRole("dialog")).toBeNull();

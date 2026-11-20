@@ -220,6 +220,9 @@ export const itemKey = (item: InboxItemDTO) => {
     id = item.fix ?? "";
   } else if (item.kind === "org_blocked") {
     id = item.reason;
+  } else if ((item.kind === "signoff_progress" || item.kind === "shared_doc_comment") && item.item_key) {
+    // A team row belongs to no agent: its Library key tells one design's progress, or one thread, from the next.
+    id = item.item_key;
   }
   return `${item.kind}:${id}:${item.workspace_id ?? ""}`;
 };

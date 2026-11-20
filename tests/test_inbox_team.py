@@ -91,7 +91,7 @@ def test_each_row_kind_carries_its_fields(db, library, daemon):
 
     asked, fallback = _inbox(daemon, "review_requested")
     assert (asked["doc"], asked["inbox_group"], asked["item_key"], asked["read"]) == (
-        "ad_2", "from_team", "review:ad_2", False)
+        "ad_2", "needs_you", "review:ad_2", False)
     assert asked["from_person"] == {"sub": "u_ana", "name": "Ana"}
     # A request the feed doesn't carry yet: the queue's author stands in for the sender.
     assert (fallback["doc"], fallback["from_person"]["sub"], fallback["item_key"]) == ("ad_3", "u_sam", None)
