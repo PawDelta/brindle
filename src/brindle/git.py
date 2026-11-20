@@ -989,6 +989,53 @@ def add_worktree(root: str | Path, path: str | Path, branch: str, start: str) ->
     return "new"
 
 
+def install_attribution_hook(path: str | Path) -> None:
+    """Install a per-worktree commit-msg filter, preserving the repository hook."""
+    run(["config", "extensions.worktreeConfig", "true"], path)
+    path = Path(path)
+    current_hooks = run(["config", "--worktree", "--get", "core.hooksPath"], path, check=False)
+    if current_hooks.returncode == 0:
+        current_dir = Path(current_hooks.stdout.strip())
+        if not current_dir.is_absolute():
+            current_dir = Path(path) / current_dir
+        existing_filter = current_dir / "commit-msg"
+        if existing_filter.exists() and "brindle attribution filter" in existing_filter.read_text():
+            return
+    if current_hooks.returncode == 0:
+        original_path = Path(current_hooks.stdout.strip()) / "commit-msg"
+        if not original_path.is_absolute():
+            original_path = path / original_path
+    else:
+        original = out(["rev-parse", "--git-path", "hooks/commit-msg"], path)
+        original_path = Path(original)
+        if not original_path.is_absolute():
+            original_path = path / original_path
+    if original_path.exists() and original_path.name != "commit-msg-filter":
+        chained = str(original_path.resolve())
+    else:
+        chained = ""
+    git_dir = Path(out(["rev-parse", "--git-dir"], path))
+    if not git_dir.is_absolute():
+        git_dir = path / git_dir
+    hook_dir = git_dir / "brindle-hooks"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    hook = hook_dir / "commit-msg"
+    hook.write_text(
+        "#!/bin/sh\n# brindle attribution filter\n"
+        + (f'"{chained}" "$1" || exit $?\n' if chained else "")
+        + f'''"{sys.executable}" -c 'import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); lines=p.read_text().splitlines()
+bad=re.compile(r"(?i)^Co-Authored-By:.*(?:noreply@anthropic\\.com|noreply@openai\\.com|(?:\\d+\\+)?[^ <>]*noreply@google\\.com|google.*noreply)")
+lines=[x for x in lines if not bad.match(x) and not re.match(r"(?i)^\\s*(?:Generated with \\[Claude Code\\]|Generated with Claude Code|🤖 Generated with)",x)]
+p.write_text("\\n".join(lines)+"\\n")' "$1"
+''',
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    # Git stores this in the per-worktree config, leaving sibling worktrees alone.
+    run(["config", "--worktree", "core.hooksPath", str(hook_dir)], path)
+
+
 def exclude(root: str | Path, path: str | Path) -> None:
     """Keep ``path`` (a folder inside the checkout at ``root``) out of ``git
     status`` through the repo's ``info/exclude``. A path outside ``root`` is
@@ -1353,6 +1400,7 @@ def merge_local_base(path: str | Path, base: str, no_ff: bool = False) -> tuple[
     raised as a GitError, since there's nothing sensible to report as a sync
     or a conflict. ``no_ff``: always a merge commit, even where HEAD could
     fast-forward."""
+    install_attribution_hook(path)
     before = out(["rev-parse", "HEAD"], path)
     proc = run([*identity_args(path), "merge", "--no-edit", *(["--no-ff"] if no_ff else []), base],
                path, check=False)
@@ -1382,6 +1430,7 @@ def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: b
     merge. If the merge would actually overwrite one, git itself refuses and
     that failure surfaces below as a GitError."""
     with checkout_lock(target_path):
+        install_attribution_hook(target_path)
         if dirty_files(target_path, tracked_only=True):
             raise GitError(f"{target_path} has uncommitted changes; commit or stash them first")
         if squash:
