@@ -25,23 +25,33 @@ def model(answer):
 
 
 @pytest.mark.parametrize("text,earlier,answer,expected", [
-    # The model reads the person's earlier words: "one" is the plan they just named.
-    ("ok so lets test the plan, please make a test one", [], "plan_request", intent.PLAN),
-    ("please make a test one", ["ok so lets test the plan"], "plan_request", intent.PLAN),
-    ("ok then build me a fucking planning doc", [], "none", intent.PLAN),
-    ("now lets make a plan to execute all these fixes", [], "none", intent.PLAN),
-    ("the plan looks good", [], "none", intent.NONE),
+    # The owner's refused asks. The model reads the person's earlier words: "one" is the plan they just named.
+    pytest.param("ok so lets test the plan, please make a test one", [], "plan_request", intent.PLAN,
+                 marks=pytest.mark.variant("refused ask the owner reported: the regexes miss it, the model finds it")),
+    pytest.param("please make a test one", ["ok so lets test the plan"], "plan_request", intent.PLAN,
+                 marks=pytest.mark.variant("the plan is named only in an earlier message: context must reach the call")),
+    pytest.param("ok then build me a fucking planning doc", [], "none", intent.PLAN,
+                 marks=pytest.mark.variant("refused ask the owner reported: the regex must win over a model saying none")),
+    pytest.param("now lets make a plan to execute all these fixes", [], "none", intent.PLAN,
+                 marks=pytest.mark.variant("refused ask the owner reported, with a purpose clause after the plan")),
+    pytest.param("the plan looks good", [], "none", intent.NONE,
+                 marks=pytest.mark.variant("a comment on the plan is not an ask")),
     # A cancel or negation wins, whatever the model says.
     ("don't write a plan", [], "plan_request", intent.CANCEL),
     ("we really need no planning doc for this one", [], "plan_request", intent.NONE),
-    ("ignore", ["make a plan for the fixes"], "cancel", intent.CANCEL),
-    ("ignore", [], "plan_request", intent.NONE),            # nothing named, no call
+    pytest.param("ignore", ["make a plan for the fixes"], "cancel", intent.CANCEL,
+                 marks=pytest.mark.variant("a bare cancel word only the model recognizes, after a plan was named")),
+    pytest.param("ignore", [], "plan_request", intent.NONE,
+                 marks=pytest.mark.variant("nothing named in the message or its context: no call, so no wrong ask")),
 ])
 def test_plan_ask_intent(text, earlier, answer, expected):
     assert intent.classify(text, earlier, ask=model(answer)) == expected
 
 
-@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["claude"], 1), None, "the plan, I think"])
+@pytest.mark.parametrize("failure", [
+    subprocess.TimeoutExpired(["claude"], 1),
+    pytest.param("the plan, I think", marks=pytest.mark.variant("a reply that isn't one of the four answers")),
+])
 def test_a_failed_model_call_falls_back_to_the_regex_result_and_is_asked_again(failure):
     text, earlier = "please make a test one", ["ok so lets test the plan"]
     assert intent.classify(text, earlier, ask=model(failure)) == intent.regex_intent(text) == intent.NONE
@@ -65,6 +75,7 @@ def session(db, tmp_path, monkeypatch):
     return boss
 
 
+@pytest.mark.variant("end to end: a model-found ask opens the plan, and non-person text never reaches the model")
 def test_follow_up_ask_opens_the_plan_and_deliveries_never_reach_the_model(db, session, monkeypatch):
     fake = model("plan_request")
     monkeypatch.setattr(intent, "_ask", fake)
