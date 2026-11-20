@@ -124,10 +124,14 @@ def test_each_row_kind_carries_its_fields(db, repo, library, daemon):
 
 
 @pytest.mark.parametrize(("state", "kind", "checks", "opened"), [
-    ("passed", "pr_ready", "passed", False),
-    ("failed", "pr_failed", "failed", False),
-    ("checking", None, None, False),
-    ("failed", "pr_opened", "failed", True),
+    pytest.param("passed", "pr_ready", "passed", False, marks=pytest.mark.variant(
+        "other tests check only the card's kind: passed prep shows passed checks, a newline name counts one file")),
+    pytest.param("failed", "pr_failed", "failed", False, marks=pytest.mark.variant(
+        "failed local preparation carries failed checks onto its card")),
+    pytest.param("checking", None, None, False, marks=pytest.mark.variant(
+        "the reported bug: preparation still running showed a card the person could approve")),
+    pytest.param("failed", "pr_opened", "failed", True, marks=pytest.mark.variant(
+        "an open PR's own failed CI overrides the passed local preparation")),
     pytest.param("ci", "pr_opened", "running", True,
                  marks=pytest.mark.variant("open PR CI in progress must override passed local preparation")),
     pytest.param("unknown", "pr_opened", None, True,
