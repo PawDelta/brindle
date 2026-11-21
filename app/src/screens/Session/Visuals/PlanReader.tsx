@@ -924,12 +924,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const reviewerNames = signers.filter((r) => r.required).map((r) => (r.sub ? firstName(r.sub) : r.name ?? "")).filter(Boolean);
 
   // The status line.
-  const closed = plan.state === "cancelled";
-  const stage = plan.state === "writing" ? "Being written" : plan.state === "superseded" ? "Superseded" : closed ? "Cancelled"
+  const closed = plan.state === "cancelled" || plan.state === "closed";
+  const stage = plan.state === "closed" ? "Closed" : plan.state === "writing" ? "Being written" : plan.state === "superseded" ? "Superseded" : closed ? "Cancelled"
     : !open && !teammate ?(plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
     : frozen ? "Locked for sign-off"
     : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off";
   const statusLine = plan.state === "writing" ? "The supervisor is writing this plan"
+    : plan.state === "closed" ? "Closed: its session ended"
     : plan.state === "superseded" ? "You asked for a newer plan; this one is closed"
     : plan.state === "cancelled" ? "Closed without approval; the tasks it held wait for the supervisor"
     : teammate?.signedOff ? `You signed off ${frozen ? `version ${frozen.id}` : `r${plan.rev}`}`
@@ -1045,7 +1046,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         </div>
       )}
       <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided" data-state={plan.state}>
-        {plan.state === "cancelled"
+        {plan.state === "closed"
+          ? <p data-testid="plan-closed">Closed: its session ended</p>
+          : plan.state === "cancelled"
           ? <p data-testid="plan-closed">This planning is closed without approval. The tasks it held wait for the supervisor's decision on each.</p>
           : <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>}
         {plan.verdict?.note && <p className="text-ink-2"><span className="text-ink-3">your note · </span>{plan.verdict.note}</p>}
