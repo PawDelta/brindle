@@ -60,7 +60,7 @@ it("preserves HTTP review and build controls when the document has no live text"
   const reviewer = render(<SharedDesignReader client={reviewerClient} docId="http-doc" onBack={() => {}} />);
   await settle();
   fireEvent.click(within(author.container).getByRole("button", { name: "Share" }));
-  expect(within(author.container).getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
+  expect(within(author.container).getByTestId("share-person-Bo").dataset.state).toBe("signed_off");
   expect((within(author.container).getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   expect(within(reviewer.container).queryByTestId("plan-sign-off")).toBeNull();
   expect(screen.queryByRole("region", { name: "Live document" })).toBeNull();
@@ -127,7 +127,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   const authorUI = within(author.container);
   await settle();
   fireEvent.click(authorUI.getByRole("button", { name: "Share" }));
-  const ownSignOff = () => within(authorUI.getByTestId("share-reviewer-Bo")).getByRole<HTMLButtonElement>("button", { name: "Sign off" });
+  const ownSignOff = () => within(authorUI.getByTestId("share-person-Bo")).getByRole<HTMLButtonElement>("button", { name: "Sign off" });
   expect(ownSignOff().disabled).toBe(true);
   fireEvent.click(authorUI.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
@@ -137,7 +137,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   fireEvent.click(ownSignOff());
   await settle();
   expect(daemon.liveRefreshes).toBe(authorRefreshes + 1);
-  expect(authorUI.getByTestId("share-reviewer-Bo").dataset.state).toBe("signed_off");
+  expect(authorUI.getByTestId("share-person-Bo").dataset.state).toBe("signed_off");
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   // Losing a confirmed live channel cannot restore the HTTP gate, even for a 4404 close.
   const beforeDisconnect = daemon.liveSockets.length;
@@ -154,7 +154,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   expect(reviewerUI.queryByTestId("plan-sign-off")).toBeNull();
   fireEvent.click(authorUI.getByRole("button", { name: "Reopen" }));
   await settle();
-  expect(authorUI.getByTestId("share-reviewer-Bo").dataset.state).toBe("invited");
+  expect(authorUI.getByTestId("share-person-Bo").dataset.state).toBe("waiting");
   expect(ownSignOff().disabled).toBe(true);
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(true);
   expect((reviewerUI.getByTestId("plan-sign-off") as HTMLButtonElement).disabled).toBe(true);
@@ -170,7 +170,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   await settle();
   expect(reviewerUI.queryByTestId("plan-sign-off")).toBeNull();
   expect(daemon.liveRefreshes).toBe(asked + 1);   // the frozen version asked for again, its sign-offs the review's now
-  expect(authorUI.getByTestId("share-reviewer-Bo").dataset.state).toBe("signed_off");
+  expect(authorUI.getByTestId("share-person-Bo").dataset.state).toBe("signed_off");
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(authorUI.getByTestId("plan-build"));
   await settle();

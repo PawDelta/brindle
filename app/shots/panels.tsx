@@ -1,16 +1,14 @@
 /* Standalone production panels over in-memory shell and sharing services. */
 import { useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { DaemonClient, type DesignShareLink, type DocScope, type Plan, type SharePerson } from "../src/api/client";
+import { DaemonClient, type DesignShareLink, type DocScope, type Plan, type ShareAccess, type SharePerson } from "../src/api/client";
 import { PtyViewsProvider, type PtyViews } from "../src/api/ptyView";
 import { TerminalPanel, TerminalProvider, TerminalToggle, useTerminals } from "../src/components/TerminalPanel";
 import { applyTheme, THEME_KEY } from "../src/components/ThemeToggle";
 import { DesignDoc, type Writes } from "../src/screens/Session/Visuals/PlanReader";
-import { Reviewers } from "../src/screens/Session/Visuals/DocReviewers";
 import { SharePanel, type SharePeopleTarget } from "../src/screens/Session/Visuals/SharePanel";
 import { ShareLinkPanel, type ShareLinkTarget } from "../src/screens/Session/Visuals/ShareLink";
 import type { DocSource } from "../src/screens/Session/Visuals/docSource";
-import type { PlanSharingClient } from "../src/screens/Session/Visuals/client";
 import "../src/styles.css";
 
 const params = new URLSearchParams(location.search);
@@ -40,12 +38,15 @@ const plan: Plan = {
 };
 const writes: Writes = { begin: () => true, end: () => {} };
 const directory = people.map((p) => ({ sub: p.id, email: p.email, display_name: p.display_name }));
-const sharing: PlanSharingClient = {
-  sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan,
-  signOffPlan: async () => plan, overridePlanPolicy: async () => plan,
-  libraryPeople: async () => ({ people: directory }), docScopes: async () => ({ scopes }),
-};
-const target: SharePeopleTarget = { search: async () => ({ people }), put: async () => plan, remove: async () => plan };
+const access: ShareAccess = { shared: true, kept_here: null, scopes: [{ kind: "group", id: "platform" }], people: [
+  { sub: "alex", name: null, access: "edit", sign_off: "required" },
+  { sub: "sam", name: null, access: "comment", sign_off: "optional" },
+] };
+const target = (shared: boolean): SharePeopleTarget => ({
+  search: async () => ({ people }), access: async () => (shared ? access : { shared: false, kept_here: true, scopes: [], people: [] }),
+  invite: async () => plan, change: async () => plan, signOff: async () => plan, revoke: async () => plan, revokeScope: async () => plan,
+  shareScope: async () => plan, stopAll: async () => plan,
+});
 const link: DesignShareLink = { available: true, scoped: true, link: { access: "org", url: "https://pawdelta.com/share/terminal-and-sharing-design", permission: "view", scope: { kind: "team", org_id: "pawdelta", team: "platform" } } };
 const links: ShareLinkTarget = { key: plan.id, read: async () => link, copy: async () => link, revoke: async () => ({ available: true, scoped: true }), scopes: async () => ({ scopes }) };
 const readOnly = async (): Promise<Plan> => { throw new Error("Read only reviewer"); };
@@ -81,11 +82,11 @@ function Panels() {
   if (params.get("panel") === "terminal") return <PtyViewsProvider value={bridge}><TerminalProvider client={shell} here={{ repo: "/Users/hannah/Projects/brindle", name: "brindle", cwd: "/Users/hannah/Projects/brindle", why: "started at the repo root" }}><main className="flex h-screen flex-col justify-end bg-canvas"><OpenTerminal /></main></TerminalProvider></PtyViewsProvider>;
   const state = params.get("state") ?? "people";
   if (state === "reviewer") return <main className="flex h-screen flex-col bg-canvas"><DesignDoc source={source} plan={{ ...plan, can_edit: false }} mode="viewing" writes={writes} teammate={{ me: "sam", author: "alex", rights: { comment: false, suggest: false, signOff: false }, signedOff: false, directory }} /></main>;
-  // A plan not yet shared, as the reader hands it to the panel (PlanReader's reviewersPanel): no link until it is in the Library.
-  if (state === "first") return <main className="flex h-screen justify-end bg-canvas"><SharePanel plan={{ ...plan, gate: null }} nameOf={nameOf} writes={writes} onBusy={() => {}} visible onClose={() => {}}
-    fallback={<dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2"><Reviewers plan={{ ...plan, gate: null }} client={sharing} directory={directory} adminOrg={null} me="alex" scopes={scopes} busy={false} nameOf={nameOf} write={async () => true} /></dl>} /></main>;
-  return <main className="flex h-screen justify-end bg-canvas"><SharePanel plan={state === "scopes" ? { ...plan, gate: null } : plan} target={state === "scopes" ? undefined : target} nameOf={nameOf} writes={writes} onBusy={() => {}} visible onClose={() => {}}
-    fallback={<dl><Reviewers plan={{ ...plan, gate: null }} client={sharing} directory={directory} adminOrg={null} me="alex" scopes={scopes} busy={false} nameOf={nameOf} write={async () => true} /></dl>}>
+  // A plan not yet shared: the same panel, with your teams and what sharing uploads; no link until it is in the Library.
+  if (state === "first" || state === "scopes") return <main className="flex h-screen justify-end bg-canvas"><SharePanel plan={{ ...plan, gate: null }} target={target(false)} nameOf={nameOf} writes={writes} onBusy={() => {}} visible onClose={() => {}}
+    teams={scopes} directory={directory} owned /></main>;
+  return <main className="flex h-screen justify-end bg-canvas"><SharePanel plan={plan} target={target(true)} nameOf={nameOf} writes={writes} onBusy={() => {}} visible onClose={() => {}}
+    teams={scopes} directory={directory} owned>
     <ShareLinkPanel target={links} state={link} onState={() => {}} />
   </SharePanel></main>;
 }

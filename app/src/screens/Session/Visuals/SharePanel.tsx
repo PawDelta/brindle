@@ -1,14 +1,40 @@
+/* The share panel (owner-approved "sharing option A"): what each person may do (view, comment or
+   edit) and, separately, whether the build waits for their sign-off. "Who has access" lists the
+   people, teams and the org with their access and a plain Stop sharing, each row and the whole
+   plan. A plan nobody has yet is shared from here too: adding its first person or team shares it.
+   Every write changes one person or scope (brindle/pro/share_access.py), never the whole list. */
+
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import type { PeopleQuery, Plan, SharePerson } from "../../../api/client";
+import type { DocScope, LibraryPerson, PeopleQuery, Plan, PolicyPreviewRow, ShareAccess, ShareAccessLevel, SharePerson } from "../../../api/client";
+import type { PlanGateRowDTO } from "../../../api/schema";
 import type { Writes } from "./PlanReader";
 import { initials } from "./PlanCards";
+import { PolicyPreview } from "./DocPolicies";
 import "./SharePanel.css";
 
+type Scope = { kind: string; id: string };
+
 export interface SharePeopleTarget {
+  /* People in the org, by the Library's search: only once the plan is shared. */
   search(query: PeopleQuery): Promise<{ people: SharePerson[] }>;
-  put(sub: string, required: boolean): Promise<Plan>;
-  remove(sub: string): Promise<Plan>;
+  access(): Promise<ShareAccess>;
+  /* Give one person the plan; for a plan nobody has yet, this is its first share. */
+  invite(sub: string, access: ShareAccessLevel, signOff: boolean): Promise<Plan>;
+  change(sub: string, access: ShareAccessLevel, signOff: boolean): Promise<Plan>;
+  signOff(sub: string, must: boolean): Promise<Plan>;
+  revoke(sub: string): Promise<Plan>;
+  revokeScope(scope: Scope): Promise<Plan>;
+  /* The author's plan only: share with a team or the org, and stop sharing with everyone. */
+  shareScope?(scope: Scope): Promise<Plan>;
+  stopAll?(): Promise<Plan>;
 }
+
+const LEVELS: { id: ShareAccessLevel; name: string; hint: string }[] = [
+  { id: "view", name: "View", hint: "read it" },
+  { id: "comment", name: "Comment", hint: "comment on it" },
+  { id: "edit", name: "Edit", hint: "write in the draft" },
+];
+const CAN: Record<ShareAccessLevel, string> = { view: "Can view", comment: "Can comment", edit: "Can edit" };
 
 export function ShareChevron() {
   return <svg className="ic sm" viewBox="0 0 16 16" aria-hidden><path d="M4.5 6.5L8 10l3.5-3.5" /></svg>;
@@ -17,33 +43,54 @@ function ShareCheck() {
   return <svg className="ic sm" viewBox="0 0 16 16" aria-hidden><path d="M3.5 8.5l3 3 6-7" /></svg>;
 }
 const personLabel = (p: SharePerson) => p.display_name.trim() || p.email;
-type Row = { sub: string; required: boolean; name: string; state: "signed_off" | "invited" | "inviting" | "failed"; action?: boolean | null };
+const firstWord = (name: string) => name.split("@")[0].split(/[\s._-]+/)[0] || name;
+const scopeKey = (s: Scope) => `${s.kind}:${s.id}`;
+const fromDirectory = (p: LibraryPerson): SharePerson => ({ id: p.sub, display_name: p.display_name || p.name || "", email: p.email, teams: [], role: "", on_plan: false });
+const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 
-export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, fallback, signOff }: {
+type Person = { sub: string; name: string; access: ShareAccessLevel | null; signOff: "required" | "optional" | null };
+type Work = { key: string; label: string; run(): Promise<Plan> };
+type Busy = Record<string, { state: "saving" | "failed"; retry?: Work }>;
+
+export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, signOff, teams = [], directory = [], owned = false, previewRules }: {
   plan: Plan; target?: SharePeopleTarget; nameOf(sub: string): string; writes: Writes;
-  onBusy(busy: boolean): void; visible: boolean; onClose(): void; children?: ReactNode; fallback?: ReactNode;
+  onBusy(busy: boolean): void; visible: boolean; onClose(): void; children?: ReactNode;
   signOff?: { sub: string; disabled: boolean; run(): void };
+  /* The teams and org this person may share into, with their names. */
+  teams?: DocScope[];
+  /* The org's people, to pick a plan's first person from before the Library can search for it. */
+  directory?: LibraryPerson[];
+  /* The author's own plan: an owner row, and Stop sharing for everyone. */
+  owned?: boolean;
+  /* The org rules a first share will meet, for the revision on screen. */
+  previewRules?: () => Promise<PolicyPreviewRow[]>;
 }) {
+  const shared = !!plan.gate;
+  const [access, setAccess] = useState<ShareAccess | null>(null);
+  const [reload, setReload] = useState(0);
   const [typed, setTyped] = useState("");
   const [team, setTeam] = useState("");
-  const [role, setRole] = useState("");
-  const [pasted, setPasted] = useState<string[]>([]);
-  const [menu, setMenu] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
+  const [menu, setMenu] = useState<string | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [found, setFound] = useState<SharePerson[]>([]);
-  const [directory, setDirectory] = useState<SharePerson[]>([]);
-  const [searchState, setSearchState] = useState<"loading" | "ready" | "error">("loading");
+  const [searchState, setSearchState] = useState<"loading" | "ready" | "error">("ready");
   const [again, setAgain] = useState(0);
-  const [pending, setPending] = useState<Record<string, Row>>({});
-  const [removed, setRemoved] = useState<Set<string>>(new Set());
-  const flight = useRef(new Set<string>());
+  const [adding, setAdding] = useState<{ sub: string; name: string; email: string; access: ShareAccessLevel; signOff: boolean } | null>(null);
+  const [busy, setBusy] = useState<Busy>({});
+  const [added, setAdded] = useState<Record<string, Person>>({});
+  const [stopping, setStopping] = useState(false);
+  const [rules, setRules] = useState<{ plan: string; rev: number; rows: PolicyPreviewRow[] } | null>(null);
   const queue = useRef(Promise.resolve());
-  const latest = useRef({ target, plan, writes, onBusy, nameOf });
-  latest.current = { target, plan, writes, onBusy, nameOf };
+  const out = useRef(0);
+  const flight = useRef(new Set<string>());
+  const answered = useRef<Plan | null>(null);
   const mounted = useRef(true);
+  const accessGeneration = useRef(0);
   const searchGeneration = useRef(0);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; searchGeneration.current++; }; }, []);
+  const latest = useRef({ target, writes, onBusy });
+  latest.current = { target, writes, onBusy };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; searchGeneration.current++; }; }, []);
   useEffect(() => {
     if (!visible) return;
     const escape = (e: KeyboardEvent) => {
@@ -52,143 +99,249 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     window.addEventListener("keydown", escape, true);
     return () => window.removeEventListener("keydown", escape, true);
   }, [visible, onClose]);
-  // Catalogue for filter names; search results themselves always come from the server.
+  // Who has it, from the Library: when the panel opens and after each change made here. An answer
+  // asked for before a later change is dropped, so it never paints over newer rows.
   useEffect(() => {
-    let active = true;
-    if (target && plan.gate) target.search({}).then((r) => { if (active) setDirectory(r.people); }, () => {});
-    return () => { active = false; };
-  }, [target, !!plan.gate]);
-  const searching = !!target && !!plan.gate && (focused || !!typed || !!team || !!role || pasted.length > 0);
+    if (!visible || !target) return;
+    const generation = ++accessGeneration.current;
+    target.access().then((got) => { if (accessGeneration.current === generation) setAccess(got); }, () => {});
+  }, [visible, target, reload, shared]);
+  // The rules a first share would meet, for the plan and revision they were asked for.
+  useEffect(() => {
+    if (!visible || shared || !previewRules) return;
+    let live = true;
+    const [id, rev] = [plan.id, plan.rev];
+    previewRules().then((rows) => { if (live) setRules({ plan: id, rev, rows }); }, () => {});
+    return () => { live = false; };
+  }, [visible, shared, previewRules, plan.id, plan.rev]);
+  const searching = !!target && (focused || !!typed || !!team);
+  // Once shared, the Library searches the org; before, the people this Mac knows are filtered here.
   useEffect(() => {
     const generation = ++searchGeneration.current;
-    if (!searching) return;
+    if (!searching || !shared) return;
     setSearchState("loading");
-    const t = latest.current.target!;
-    const queries = pasted.length ? pasted.map((q) => ({ q, team, role })) : [{ q: typed, team, role }];
-    void Promise.all(queries.map((q) => t.search(q))).then((answers) => {
+    latest.current.target!.search({ q: typed, team, include_unshared: "true" }).then((r) => {
       if (searchGeneration.current !== generation) return;
-      const people = [...new Map(answers.flatMap((r) => r.people).map((p) => [p.id, p])).values()];
-      setFound(pasted.length ? people.filter((p) => pasted.includes(p.email.toLowerCase())) : people);
+      setFound(r.people);
       setHighlight(0);
       setSearchState("ready");
     }, () => { if (searchGeneration.current === generation) setSearchState("error"); });
-    return () => { searchGeneration.current++; };
-  }, [searching, typed, team, role, pasted, again]);
-  const teams = [...new Map(directory.flatMap((p) => p.teams).map((t) => [t.id, t])).values()];
-  const roles = [...new Set(["admin", "member", ...directory.map((p) => p.role)])];
-  const teamName = teams.find((t) => t.id === team)?.name ?? team;
-  const names = new Map([...directory, ...found].map((p) => [p.id, personLabel(p)]));
-  const committed: Row[] = (plan.gate?.reviewers ?? []).flatMap((r) => r.sub ? [{ sub: r.sub, required: r.required,
-    name: names.get(r.sub) ?? nameOf(r.sub), state: r.status === "signed_off" ? "signed_off" : "invited" }] : []);
-  const rows = [...committed.filter((r) => !pending[r.sub] && !removed.has(r.sub)), ...Object.values(pending)];
-  const onPlan = (p: SharePerson) => p.on_plan || rows.some((r) => r.sub === p.id);
-  const available = found.filter((p) => !onPlan(p));
-  const send = (sub: string, required: boolean | null, name: string) => {
-    name = name.trim() || names.get(sub) || nameOf(sub);
+  }, [searching, shared, typed, team, again]);
+  const local = directory.map(fromDirectory).filter((p) => !typed.trim() || `${p.display_name} ${p.email}`.toLowerCase().includes(typed.trim().toLowerCase()));
+  const results = shared ? found : local;
+
+  const gateRows = (plan.gate?.reviewers ?? []).filter((r): r is PlanGateRowDTO & { sub: string } => !!r.sub);
+  const reviewerOf = (sub: string) => gateRows.find((r) => r.sub === sub);
+  const names = new Map([...directory.map(fromDirectory), ...found].map((p) => [p.id, personLabel(p)]));
+  const nameFor = (sub: string, given?: string | null) => names.get(sub) || given || nameOf(sub);
+  // The Library's list, with anyone the gate names it hasn't been read for yet.
+  const people: Person[] = [
+    ...(access?.people ?? []).map((p) => ({ sub: p.sub, name: nameFor(p.sub, p.name), access: p.access, signOff: p.sign_off })),
+    ...gateRows.filter((r) => !access?.people.some((p) => p.sub === r.sub))
+      .map((r) => ({ sub: r.sub, name: nameFor(r.sub), access: null, signOff: r.required ? "required" as const : "optional" as const })),
+  ];
+  people.push(...Object.values(added).filter((a) => !people.some((p) => p.sub === a.sub)));
+  const scopes = access?.scopes ?? [];
+  const scopeName = (s: Scope) => teams.find((t) => t.kind === s.kind && t.id === s.id)?.name ?? (s.kind === "org" ? "Your organization" : "A team");
+  const offered = teams.filter((t) => (t.kind === "group" || t.kind === "org") && t.can_share !== false && !scopes.some((s) => scopeKey(s) === scopeKey(t)));
+  const teamHits = offered.filter((t) => typed.trim() && (t.name ?? "").toLowerCase().includes(typed.trim().toLowerCase()));
+  const onPlan = (p: SharePerson) => people.some((r) => r.sub === p.id);
+  const org = teams.find((t) => t.kind === "org")?.name ?? "Your organization";
+
+  // One write at a time to the doc: the first opens the reader's write, the last closes it with
+  // the plan it answered. The access list is read again once they are all done.
+  const run = (work: Work) => {
     const current = latest.current;
-    if (!current.target || flight.current.has(sub)) return;
-    if (flight.current.size === 0) {
+    // A second change to the same person or scope while one is out would race it: it waits its turn.
+    if (!current.target || flight.current.has(work.key)) return;
+    if (out.current === 0) {
       if (!current.writes.begin()) return;
       current.onBusy(true);
     }
-    // A completed invite can still be local while another person's write is queued.
-    // Its confirmed role, rather than the reader's older snapshot, is the rollback target.
-    const before = pending[sub] ?? committed.find((r) => r.sub === sub);
-    flight.current.add(sub);
-    setPending((old) => ({ ...old, [sub]: { sub, name, required: required ?? before?.required ?? true, state: "inviting", action: required } }));
+    out.current++;
+    flight.current.add(work.key);
+    setBusy((old) => ({ ...old, [work.key]: { state: "saving" } }));
     setMenu(null);
-    // Queue just the writes; every selected person appears immediately. This avoids our own
-    // per-person head conflicts and lets the reader adopt one authoritative final snapshot.
     queue.current = queue.current.then(async () => {
-      let got: Plan | null = null;
       try {
-        got = required === null ? await current.target!.remove(sub) : await current.target!.put(sub, required);
-        if (mounted.current) setRemoved((old) => {
-          const next = new Set(old);
-          if (required === null) next.add(sub);
-          else next.delete(sub);
-          return next;
-        });
-        if (mounted.current) setPending((old) => {
-          const next = { ...old };
-          if (required === null) delete next[sub];
-          else next[sub] = { sub, name, required, state: got!.gate?.reviewers?.find((r) => r.sub === sub)?.status === "signed_off" ? "signed_off" : "invited" };
-          return next;
-        });
+        answered.current = await work.run();
+        if (mounted.current) setBusy((old) => { const next = { ...old }; delete next[work.key]; return next; });
       } catch {
-        if (mounted.current) setPending((old) => ({ ...old, [sub]: { sub, name, required: before?.required ?? required ?? true, state: "failed", action: required } }));
+        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", retry: work } }));
       } finally {
-        flight.current.delete(sub);
-        if (flight.current.size === 0) {
-          current.writes.end(got);
-          if (mounted.current) { current.onBusy(false); setAgain((n) => n + 1); }
+        flight.current.delete(work.key);
+        out.current--;
+        if (out.current === 0) {
+          // The last answer the Library gave, whichever write it came from.
+          current.writes.end(answered.current);
+          answered.current = null;
+          if (mounted.current) { current.onBusy(false); setReload((n) => n + 1); }
         }
       }
     });
   };
-  // Once the reader has accepted the server's rows, their sign-off state follows live reads.
-  useEffect(() => {
-    setPending((old) => Object.fromEntries(Object.entries(old).filter(([sub, row]) => row.state === "inviting" || row.state === "failed"
-      || !(plan.gate?.reviewers ?? []).some((r) => r.sub === sub && r.required === row.required))));
-    setRemoved((old) => new Set([...old].filter((sub) => (plan.gate?.reviewers ?? []).some((r) => r.sub === sub))));
-  }, [plan]);
-  const changeText = (value: string) => {
-    const filter = /^(team|role):([^\s]+)\s$/i.exec(value);
-    if (filter) {
-      if (filter[1].toLowerCase() === "team") setTeam(teams.find((t) => t.name.toLowerCase() === filter[2].toLowerCase() || t.id === filter[2])?.id ?? filter[2]);
-      else setRole(filter[2].toLowerCase());
-      setTyped("");
-    } else setTyped(value);
+  const personWork = (sub: string, label: string, call: (t: SharePeopleTarget) => Promise<Plan>): Work =>
+    ({ key: `person:${sub}`, label, run: () => call(latest.current.target!) });
+  const scopeWork = (s: Scope, label: string, call: (t: SharePeopleTarget) => Promise<Plan>): Work =>
+    ({ key: `scope:${scopeKey(s)}`, label, run: () => call(latest.current.target!) });
+
+  const open = (p: SharePerson) => {
+    if (onPlan(p)) { setMenu(`person:${p.id}`); return; }
+    setAdding({ sub: p.id, name: personLabel(p), email: p.email, access: "comment", signOff: false });
   };
+  // The person's row shows at once, saving; it stays (with Try again) if the Library refuses.
+  const add = () => {
+    if (!adding) return;
+    const { sub, access: level, signOff: must, name } = adding;
+    setAdded((old) => ({ ...old, [sub]: { sub, name, access: level, signOff: must ? "required" : null } }));
+    run(personWork(sub, "Couldn't add", (t) => t.invite(sub, level, must)));
+    setAdding(null);
+    setTyped("");
+    setFocused(false);
+  };
+  // Once the Library lists them, its row is the one shown.
+  useEffect(() => {
+    setAdded((old) => Object.fromEntries(Object.entries(old).filter(([sub]) => !access?.people.some((p) => p.sub === sub))));
+  }, [access]);
+
+  const signNote = (p: Person): { text: string; tone: "ok" | "wait" | "" } | null => {
+    const r = reviewerOf(p.sub);
+    const must = p.signOff ?? (r ? (r.required ? "required" : "optional") : null);
+    if (!must) return null;
+    if (r?.status === "signed_off") return { text: `Signed off r${plan.rev}`, tone: "ok" };
+    if (r?.status === "changes_requested") return { text: "Asked for changes", tone: "wait" };
+    if (r?.status === "waived") return { text: "Sign-off waived", tone: "" };
+    return must === "required" ? { text: "Must sign off · not yet", tone: "wait" } : { text: "May sign off", tone: "" };
+  };
+  const waiting = people.filter((p) => (p.signOff ?? (reviewerOf(p.sub)?.required ? "required" : null)) === "required");
+  const unsigned = waiting.filter((p) => reviewerOf(p.sub)?.status !== "signed_off").map((p) => firstWord(p.name));
+  const signed = waiting.filter((p) => reviewerOf(p.sub)?.status === "signed_off").map((p) => firstWord(p.name));
+  const buildNote = unsigned.length ? `The build starts when ${list(unsigned)} sign${unsigned.length > 1 ? "" : "s"} off.${signed.length ? ` ${list(signed)} already ${signed.length > 1 ? "have" : "has"}.` : ""}` : null;
+
+  const status = (key: string, label: string) => {
+    const b = busy[key];
+    if (!b) return null;
+    return b.state === "saving" ? <span className="st"><i className="spin" />Saving…</span>
+      : <><span className="st bad">{b.retry?.label ?? label}</span><button className="sp-btn q end" data-testid={`share-try-${key}`} onClick={() => b.retry && run(b.retry)}>Try again</button></>;
+  };
+
+  const personRow = (p: Person) => {
+    const key = `person:${p.sub}`;
+    const note = signNote(p);
+    const r = reviewerOf(p.sub);
+    const must = (p.signOff ?? (r?.required ? "required" : null)) === "required";
+    const state = busy[key]?.state ?? (r?.status === "signed_off" ? "signed_off" : "waiting");
+    const level = p.access;
+    return <Fragment key={key}>
+      <div className={`r who ${menu === key ? "act" : ""}`} data-testid={`share-person-${p.sub}`} data-state={state} data-access={level ?? ""} data-sign-off={p.signOff ?? (r ? (r.required ? "required" : "optional") : "none")}>
+        <i className="av">{initials(p.name)}</i>
+        <span className="grid grow"><span className="nm" title={p.name}>{p.name}</span>
+          {note && <span className={`note ${note.tone}`}>{note.tone === "ok" && <ShareCheck />}{note.text}</span>}</span>
+        {status(key, "Couldn't save") ?? (signOff?.sub === p.sub && r?.status !== "signed_off"
+          ? <button className="sp-btn q end" disabled={signOff.disabled} onClick={signOff.run}>Sign off</button> : null)}
+        {target && level ? <button className="sel" aria-haspopup="menu" aria-expanded={menu === key} aria-label={`What ${p.name} can do`} disabled={busy[key]?.state === "saving"} onClick={() => setMenu(menu === key ? null : key)}>{CAN[level]}<ShareChevron /></button>
+          : level && <span className="st">{CAN[level]}</span>}
+      </div>
+      {menu === key && target && level && <div className="menu" role="menu" data-testid={`share-menu-${p.sub}`}>
+        <div className="ml">{firstWord(p.name)} can</div>
+        {LEVELS.map((l) => <button key={l.id} className="mi" role="menuitemradio" aria-checked={level === l.id}
+          onClick={() => level !== l.id && run(personWork(p.sub, "Couldn't change", (t) => t.change(p.sub, l.id, must)))}>{l.name}<span className="mx">{l.hint}{level === l.id && <ShareCheck />}</span></button>)}
+        <button className="mi box" role="menuitemcheckbox" aria-checked={must} onClick={() => run(personWork(p.sub, "Couldn't change", (t) => t.signOff(p.sub, !must)))}>
+          <i className={`bx ${must ? "on" : ""}`} aria-hidden>{must && <ShareCheck />}</i><span className="grow">Must sign off<span className="mx"> · the build waits for {firstWord(p.name)}</span></span></button>
+        <button className="mi sep" role="menuitem" onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Stop sharing</button>
+      </div>}
+    </Fragment>;
+  };
+
+  const scopeRow = (s: Scope) => {
+    const key = `scope:${scopeKey(s)}`;
+    const name = scopeName(s);
+    return <Fragment key={key}>
+      <div className={`r who ${menu === key ? "act" : ""}`} data-testid={`share-scope-${s.kind}-${s.id}`} data-state={busy[key]?.state ?? "shared"}>
+        <i className="av team">{initials(name)}</i>
+        <span className="grid grow"><span className="nm" title={name}>{name}</span><span className="note">{s.kind === "org" ? "everyone in the organization" : "everyone in the team"}</span></span>
+        {status(key, "Couldn't stop sharing")}
+        {target ? <button className="sel" aria-haspopup="menu" aria-expanded={menu === key} aria-label={`What ${name} can do`} onClick={() => setMenu(menu === key ? null : key)}>{CAN.view}<ShareChevron /></button>
+          : <span className="st">{CAN.view}</span>}
+      </div>
+      {menu === key && <div className="menu" role="menu" data-testid={`share-menu-${s.kind}-${s.id}`}>
+        <div className="mh">A team or the organization can view it. Add a person to let them comment or edit.</div>
+        <button className="mi sep" role="menuitem" onClick={() => run(scopeWork(s, "Couldn't stop sharing", (t) => t.revokeScope(s)))}>Stop sharing</button>
+      </div>}
+    </Fragment>;
+  };
+
+  const teamRow = (t: DocScope, filtered: boolean) => {
+    const key = `scope:${scopeKey(t)}`;
+    return <div className="r who" key={key} data-testid={`share-team-${t.kind}-${t.id}`}>
+      <i className="av team">{initials(t.name ?? t.id)}</i>
+      <span className="grid grow"><span className="nm" title={t.name ?? t.id}>{t.name ?? t.id}</span>{!filtered && <span className="note">{t.kind === "org" ? "everyone" : "everyone in the team"}</span>}</span>
+      {status(key, "Couldn't share") ?? (target?.shareScope && <button className="sp-btn s" onClick={() => run(scopeWork(t, "Couldn't share", (x) => x.shareScope!({ kind: t.kind, id: t.id })))}>Share</button>)}
+    </div>;
+  };
+
+  const count = people.length + (owned ? 1 : 0);
+  const listed = !!access?.shared || shared;
   return <aside className="share-panel" hidden={!visible} aria-label="Share" data-testid="plan-share">
     <div className="sph"><b>Share</b><button className="sp-btn q" aria-label="Close share" onClick={onClose}><svg className="ic" viewBox="0 0 16 16" aria-hidden><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" /></svg></button></div>
-    {target && plan.gate ? <>
-      <section className="sec">
-        <div className="fld">
-          {team && <button className="tok" onClick={() => setTeam("")}>Team: {teamName}<span>×</span></button>}
-          {role && <button className="tok" onClick={() => setRole("")}>Role: {role}<span>×</span></button>}
-          {pasted.length > 0 && <button className="tok" onClick={() => setPasted([])}>{pasted.length} pasted addresses<span>×</span></button>}
-          <input data-testid="share-search" aria-label="Add people by name, email or team" placeholder={team || role || pasted.length ? "" : "Add people by name, email or team"} value={typed}
-            onFocus={() => setFocused(true)} onChange={(e) => changeText(e.target.value)}
-            onPaste={(e) => { const emails = [...new Set(e.clipboardData.getData("text").split(/[\s,;]+/).filter((s) => s.includes("@")).map((s) => s.toLowerCase()))]; if (emails.length > 1) { e.preventDefault(); setPasted(emails); setTyped(""); } }}
-            onKeyDown={(e) => { if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setHighlight((n) => Math.max(0, Math.min(found.length - 1, n + (e.key === "ArrowDown" ? 1 : -1)))); } if (e.key === "Enter" && found[highlight] && !onPlan(found[highlight])) send(found[highlight].id, true, found[highlight].display_name); }} />
-          <button className={`sp-btn q end ${menu === "filter" ? "on" : ""}`} aria-expanded={menu === "filter"} onClick={() => setMenu(menu === "filter" ? null : "filter")}>Filter<ShareChevron /></button>
+    {target && <section className="sec">
+      <div className="fld">
+        {team && <button className="tok" onClick={() => setTeam("")}>Team: {teams.find((t) => t.id === team)?.name ?? team}<span>×</span></button>}
+        <input data-testid="share-search" aria-label="Add people or teams" placeholder={team ? "" : "Add people or teams"} value={typed}
+          onFocus={() => setFocused(true)} onChange={(e) => { setTyped(e.target.value); setAdding(null); }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setHighlight((n) => Math.max(0, Math.min(results.length - 1, n + (e.key === "ArrowDown" ? 1 : -1)))); }
+            if (e.key === "Enter" && results[highlight]) open(results[highlight]);
+          }} />
+        {shared && teams.some((t) => t.kind === "group") && <button className={`sp-btn q end ${menu === "filter" ? "on" : ""}`} aria-expanded={menu === "filter"} onClick={() => setMenu(menu === "filter" ? null : "filter")}>Filter<ShareChevron /></button>}
+      </div>
+      {menu === "filter" && <div className="menu" role="menu" data-testid="share-filter">
+        <div className="ml">Team</div>{teams.filter((t) => t.kind === "group").map((t) => <button className="mi" role="menuitemcheckbox" aria-checked={team === t.id} key={t.id} onClick={() => { setTeam(team === t.id ? "" : t.id); setMenu(null); }}>{t.name ?? t.id}{team === t.id && <ShareCheck />}</button>)}
+      </div>}
+      {adding ? <div data-testid="share-add">
+        <div className="rows"><div className="r act"><i className="av">{initials(adding.name)}</i><span className="nm" title={adding.email}>{adding.name}<em>{adding.email}</em></span></div></div>
+        <div className="menu add" role="group" aria-label={`What ${firstWord(adding.name)} can do`}>
+          <div className="ml">{firstWord(adding.name)} can</div>
+          {LEVELS.map((l) => <button key={l.id} className="mi" role="menuitemradio" aria-checked={adding.access === l.id} onClick={() => setAdding({ ...adding, access: l.id })}>{l.name}<span className="mx">{l.hint}{adding.access === l.id && <ShareCheck />}</span></button>)}
+          <button className="mi box sep" role="menuitemcheckbox" aria-checked={adding.signOff} onClick={() => setAdding({ ...adding, signOff: !adding.signOff })}>
+            <i className={`bx ${adding.signOff ? "on" : ""}`} aria-hidden>{adding.signOff && <ShareCheck />}</i><span className="grow">Must sign off<span className="mx"> · the build waits for {firstWord(adding.name)}</span></span></button>
+          {!listed && <p className="hint up">{access?.kept_here === false ? "Adding them shares this plan: it is saved to your Library on brindle servers." : "Adding them shares this plan: it is uploaded from this Mac to brindle servers. Your other plans stay here."}</p>}
+          <div className="acts"><button className="sp-btn q" onClick={() => setAdding(null)}>Cancel</button>
+            <button className="sp-btn main" data-testid="share-add-confirm" disabled={busy[`person:${adding.sub}`]?.state === "saving"} onClick={add}>Add {firstWord(adding.name)}</button></div>
         </div>
-        {menu === "filter" && <div className="menu" role="menu" data-testid="share-filter">
-          <div className="ml">Team</div>{teams.map((t) => <button className="mi" role="menuitemcheckbox" aria-checked={team === t.id} key={t.id} onClick={() => { setTeam(team === t.id ? "" : t.id); setMenu(null); }}>{t.name}{team === t.id && <ShareCheck />}</button>)}
-          <div className="ml">Role</div>{roles.map((r) => <button className="mi" role="menuitemcheckbox" aria-checked={role === r} key={r} onClick={() => { setRole(role === r ? "" : r); setMenu(null); }}>{r.charAt(0).toUpperCase() + r.slice(1)}{role === r && <ShareCheck />}</button>)}
-          <div className="mh">or type team: or role:</div>
+      </div>
+        : !searching ? (!listed && <p className="hint">Only you can open this plan. Add a person or a team to share it.</p>)
+        : searchState === "loading" && shared ? <div data-testid="share-search-loading"><div className="sweep" /><div className="rows">{[96, 132, 78].map((w) => <div className="r" key={w}><i className="av skv" /><i className="sk" style={{ width: w }} /></div>)}</div></div>
+        : searchState === "error" && shared ? <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grow">Couldn't search people.</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>
+        : <div className="rows">
+          {teamHits.map((t) => teamRow(t, true))}
+          {results.map((p, i) => <div key={p.id} className={`r ${onPlan(p) ? "dim" : i === highlight ? "act" : ""}`} onMouseEnter={() => setHighlight(i)} data-testid={`share-result-${p.id}`}>
+            <i className="av">{initials(personLabel(p))}</i><button className="nm truncate text-left" title={`${personLabel(p)} · ${p.email}`} onClick={() => open(p)}>{personLabel(p)}<em>{p.email}</em></button>
+            {onPlan(p) && <span className="st">Has access</span>}
+          </div>)}
+          {!results.length && !teamHits.length && <div className="msg" data-testid="share-search-empty"><span className="grow">{typed.trim() ? "Nobody matches." : "Type a name or an email."}</span></div>}
         </div>}
-        {!searching ? <p className="hint">Paste a list of emails to add several at once.</p> : searchState === "loading" ? <div data-testid="share-search-loading"><div className="sweep" /><div className="rows">{[96, 132, 78].map((w) => <div className="r" key={w}><i className="av skv" /><i className="sk" style={{ width: w }} /></div>)}</div><div className="foot">Searching {teamName || "your organization"}…</div></div>
-          : searchState === "error" ? <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grow">Couldn't search people.</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>
-          : <>
-            <div className="rows">{found.map((p, i) => <div key={p.id} className={`r ${onPlan(p) ? "dim" : i === highlight ? "act" : ""}`} onMouseEnter={() => setHighlight(i)} data-testid={`share-result-${p.id}`}>
-              <i className="av">{initials(personLabel(p))}</i><button className="nm truncate text-left" title={`${personLabel(p)} · ${p.email}`} onFocus={() => setHighlight(i)} onClick={() => { if (rows.some((r) => r.sub === p.id)) setMenu(p.id); else if (!onPlan(p)) send(p.id, true, personLabel(p)); }}>{personLabel(p)}{i !== highlight && !onPlan(p) && <em>{p.email}</em>}</button>
-              {onPlan(p) ? <span className="st">On this plan</span> : i === highlight && <><button className="sp-btn s" data-testid={`share-required-${p.id}`} onClick={() => send(p.id, true, p.display_name)}>+ Required</button><button className="sp-btn q end" data-testid={`share-optional-${p.id}`} onClick={() => send(p.id, false, p.display_name)}>+ Optional</button></>}
-            </div>)}{pasted.filter((email) => !found.some((p) => p.email.toLowerCase() === email)).map((email) => <div className="r dim" key={email}><i className="av">?</i><span className="nm" title={email}>{email}</span><span className="st">Not in your organization</span></div>)}</div>
-            {!found.length && !pasted.length ? <div className="msg" data-testid="share-search-empty"><span className="grow">{team ? `Nobody in ${teamName} matches.` : "Nobody matches."}</span>{(team || role) && <button className="sp-btn q end" onClick={() => { setTeam(""); setRole(""); }}>Search everyone</button>}</div>
-              : <div className="foot"><span>{pasted.length ? `${found.length} of ${pasted.length} found` : `${found.length} people`}</span>{available.length > 0 && <button className="sp-btn q end" data-testid="share-add-all" onClick={() => setMenu(menu === "all" ? null : "all")}>Add all {available.length}<ShareChevron /></button>}</div>}
-            {menu === "all" && <div className="menu" style={{ width: 150 }}><button className="mi" onClick={() => available.forEach((p) => send(p.id, true, p.display_name))}>As required</button><button className="mi" onClick={() => available.forEach((p) => send(p.id, false, p.display_name))}>As optional</button></div>}
-          </>}
-      </section>
-      <section className="sec fill" data-testid="share-reviewers">
-        {!rows.length ? <><div className="lab"><b>On this plan</b></div><p className="hint" style={{ marginTop: 2 }}>Nobody yet. Required reviewers sign off before the build starts. Optional reviewers never hold it.</p></> : [true, false].map((required) => {
-          const group = rows.filter((r) => r.required === required);
-          if (!group.length) return null;
-          const failed = group.filter((r) => r.state === "failed");
-          return <Fragment key={String(required)}><div className="lab"><b>{required ? "Required" : "Optional"}</b><span>{group.filter((r) => r.state === "signed_off").length} of {group.length} signed off</span></div>
-            {failed.length > 1 && <button className="sp-btn q end" onClick={() => failed.forEach((r) => send(r.sub, r.action!, r.name))}>Try {failed.length === 2 ? "both" : "all"} again</button>}
-            {group.map((r) => <Fragment key={r.sub}><div className={`r ${menu === r.sub ? "act" : ""}`} data-testid={`share-reviewer-${r.sub}`} data-state={r.state} data-required={r.required}>
-              <i className="av">{initials(r.name)}</i><button className="nm truncate text-left" title={r.name} disabled={r.state === "inviting"} onClick={() => setMenu(menu === r.sub ? null : r.sub)}>{r.name}</button>
-              <span className={`st ${r.state === "signed_off" ? "ok" : r.state === "failed" ? "bad" : ""}`}>
-                {r.state === "inviting" && <i className="spin" />}{r.state === "signed_off" ? <><ShareCheck />Signed off</> : r.state === "inviting" ? "Inviting…" : r.state === "failed" ? r.action === null ? "Couldn't remove" : "Couldn't invite" : "Invited"}
-              </span>{r.state === "failed" && <button className="sp-btn q end" data-testid={`share-try-${r.sub}`} onClick={() => send(r.sub, r.action!, r.name)}>Try again</button>}
-              {signOff?.sub === r.sub && r.state !== "signed_off" && <button className="sp-btn q end" disabled={signOff.disabled} onClick={signOff.run}>Sign off</button>}
-            </div>{menu === r.sub && <div className="menu" style={{ width: 170, marginLeft: 28, marginRight: "auto" }}><button className="mi" onClick={() => send(r.sub, !r.required, r.name)}>Make {r.required ? "optional" : "required"}</button><button className="mi" onClick={() => send(r.sub, null, r.name)}>Remove from plan</button></div>}</Fragment>)}
-          </Fragment>;
-        })}
-      </section>
-    </> : <section className="sec fill">{fallback}</section>}
+    </section>}
+    <section className="sec fill" data-testid="share-access">
+      {listed ? <>
+        <div className="lab"><b>Who has access</b><span>{[count && `${count} ${count === 1 ? "person" : "people"}`, scopes.length && `${scopes.length} ${scopes.length === 1 ? "team" : "teams"}`].filter(Boolean).join(" · ")}</span></div>
+        {owned && <div className="r who" data-testid="share-owner"><i className="av">{initials("You")}</i><span className="grid grow"><span className="nm">You</span><span className="note">Author</span></span><span className="st">Owner</span></div>}
+        {people.map(personRow)}
+        {scopes.map(scopeRow)}
+        {buildNote && <p className="hint">{buildNote}</p>}
+        {target?.stopAll && (people.length > 0 || scopes.length > 0) && (stopping
+          ? <div className="msg" data-testid="share-stop-confirm"><span className="grow">Stop sharing with everyone? Only you will be able to open it.</span>
+            <button className="sp-btn s" onClick={() => { setStopping(false); run({ key: "all", label: "Couldn't stop sharing", run: () => latest.current.target!.stopAll!() }); }}>Stop sharing</button>
+            <button className="sp-btn q end" onClick={() => setStopping(false)}>Cancel</button></div>
+          : <div className="line">{status("all", "Couldn't stop sharing") ?? <button className="sp-btn q stop" data-testid="share-stop-all" onClick={() => setStopping(true)}>Stop sharing</button>}</div>)}
+      </> : <>
+        {target?.shareScope && offered.length > 0 && <><div className="lab"><b>Your teams</b></div>{offered.map((t) => teamRow(t, false))}</>}
+        {rules?.plan === plan.id && rules.rev === plan.rev && rules.rows.length > 0 && <><div className="lab"><b>{org} asks for</b></div><PolicyPreview rows={rules.rows} /></>}
+        {target && <p className="hint" data-testid="share-upload">{access?.kept_here === false
+          ? "Sharing saves this plan to your Library on brindle servers."
+          : "This plan is kept on this Mac. Sharing uploads this one plan to brindle servers; your other plans stay here."}</p>}
+      </>}
+    </section>
     {children}
   </aside>;
 }

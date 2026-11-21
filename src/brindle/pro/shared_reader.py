@@ -190,10 +190,11 @@ def read(doc_id: str, *, client=None, store=None) -> dict:
 
 
 def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
-    """Search only people the Library says can already read this design."""
+    """Search people the Library says can already read this design, or with
+    ``include_unshared`` also the org's members who could be given it."""
     client, store = ad._session(client, store)
     ad.require_entitlement(store)
-    query = urlencode({k: v for k, v in filters.items() if k in ("q", "team", "role", "on_plan")})
+    query = urlencode({k: v for k, v in filters.items() if k in ("q", "team", "role", "on_plan", "include_unshared")})
     got = ad.api("GET", sd._path(doc_id, "/people") + (f"?{query}" if query else ""), client=client, store=store)
     return SharePeopleDTO.model_validate(got).model_dump()
 

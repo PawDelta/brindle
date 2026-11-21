@@ -483,6 +483,20 @@ def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool
     raise RuntimeError(made.get("error") or ad.why_refused(status, made, body))
 
 
+def ensure_doc(db: DB, p: dict, team: str | None, folder: Any, *, client, store, now: float | None = None) -> str:
+    """The plan's Library document, saved there first if it has none: the
+    upload a first share makes. ``team`` and ``folder`` choose the format
+    the plan must meet (doc_templates.SHARE)."""
+    doc_templates.require(db, p["id"], doc_templates.SHARE, plan_docs.current(db, p)["sections"], team,
+                          folder if isinstance(folder, dict) else None)
+    ent = _require_team(store)
+    cur = plan_docs.revision(db, p["id"])
+    content = _content(cur)          # a plan the API would refuse takes no claim
+    row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
+    _own(row, ent)
+    return row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
+
+
 def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permissions: dict | None = None,
           folder: dict | None = None, client=None, store=None, now: float | None = None) -> dict:
     """Save the plan to the Library and share it with ``scope`` (a team or
@@ -496,16 +510,9 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
         _review_open(p)
     scope = _scope(scope)
     team = scope["id"] if scope["kind"] == "group" else None
-    doc_templates.require(db, p["id"], doc_templates.SHARE, plan_docs.current(db, p)["sections"], team,
-                          folder if isinstance(folder, dict) else None)
     client, store = ad._session(client, store)
-    ent = _require_team(store)
     people = None if reviewers is None else _reviewers(reviewers)
-    cur = plan_docs.revision(db, p["id"])
-    content = _content(cur)          # a plan the API would refuse takes no claim
-    row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
-    _own(row, ent)
-    doc_id = row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
+    doc_id = ensure_doc(db, p, team, folder, client=client, store=store, now=now)
     review_policies.ask(db, p, "POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
     doc_templates.set_team(db, p["id"], team)       # its gates follow that team's format from now on
     if people or permissions:

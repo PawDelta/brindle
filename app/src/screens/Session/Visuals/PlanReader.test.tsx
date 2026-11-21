@@ -77,14 +77,14 @@ it("uses the signed-in account for a read-only reviewer's own avatar without a d
   store.dispatch({ type: "account", account });
   render(inTestStore(<SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />, store));
   await openShare();
-  const row = screen.getByTestId(`plan-reviewer-${me}`);
-  expect(row.querySelector("span[style]")?.textContent).toBe("DJ");
-  expect(row.dataset.status).toBe("waiting");
+  const row = screen.getByTestId(`share-person-${me}`);
+  expect(row.querySelector(".av")?.textContent).toBe("DJ");
+  expect(row.dataset.state).toBe("waiting");
   expect(within(screen.getByTestId("plan-share")).queryByTestId("share-search")).toBeNull();
   act(() => store.dispatch({ type: "account", account: { signed_in: true, name: "Maya Chen", email: account.email } }));
-  expect(row.querySelector("span[style]")?.textContent).toBe("MC");
+  expect(row.querySelector(".av")?.textContent).toBe("MC");
   act(() => store.dispatch({ type: "account", account: { signed_in: true, email: account.email } }));
-  expect(row.querySelector("span[style]")?.textContent).toBe("D");
+  expect(row.querySelector(".av")?.textContent).toBe("D");
 });
 
 const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Presets", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
@@ -510,7 +510,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   const client: PlansClient & PlanDocClient & VisualsClient & PlanSharingClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
     sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, overridePlanPolicy: async () => plan,
     libraryPeople: async () => ({ people: [], me: "u_a" }), docScopes: async () => ({ scopes: [] }),
-    planPeople: async () => ({ people: [] }), setPlanReviewer: async () => plan, removePlanReviewer: async () => plan,
+    planPeople: async () => ({ people: [] }),
     signOffPlan: async (id, rev) => {
       if (id !== plan.id || rev !== plan.rev) throw new Error("stale sign-off");
       return (plan = { ...plan, gate: { ...plan.gate!, state: "ready", reason: null, signed: 2, waiting_on: [],
@@ -523,10 +523,10 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(build.disabled).toBe(true);
   expect(build.title).not.toContain("u_a");
   await openShare();
-  expect(screen.getByTestId("share-reviewer-u_a").dataset.state).toBe("invited");
-  expect(screen.getByTestId("share-reviewer-u_c").dataset.required).toBe("false");
-  await act(async () => fireEvent.click(within(screen.getByTestId("share-reviewer-u_a")).getByRole("button", { name: "Sign off" })));
-  expect(screen.getByTestId("share-reviewer-u_a").dataset.state).toBe("signed_off");
+  expect(screen.getByTestId("share-person-u_a").dataset.state).toBe("waiting");
+  expect(screen.getByTestId("share-person-u_c").dataset.signOff).toBe("optional");
+  await act(async () => fireEvent.click(within(screen.getByTestId("share-person-u_a")).getByRole("button", { name: "Sign off" })));
+  expect(screen.getByTestId("share-person-u_a").dataset.state).toBe("signed_off");
   expect(screen.getByTestId("plan-build").dataset.gate).toBe("ready");
   await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
   expect(decided).toEqual([true]);
@@ -646,7 +646,7 @@ it("org policies are locked rows that show a waiver, and only an admin of that o
   await openShare();
   const row = await screen.findByTestId("plan-policy-security");
   expect(screen.getByTestId("plan-status").dataset.held).toBe("policy");
-  expect(screen.queryByTestId("plan-reviewer-security")).toBeNull();
+  expect(screen.queryByTestId("share-person-security")).toBeNull();
   expect(screen.getByTestId("plan-policy-staff").dataset.status).toBe("waived");
   expect(screen.getByTestId("plan-policy-staff").textContent).toContain("Offsite");
   await act(async () => {});
@@ -753,11 +753,12 @@ it("the policies shown before a first share are those of the revision on screen,
   const client = { ...visuals, ...docWrites(() => now), plan: async () => now, decidePlan: async () => now,
     sharePlan: async () => now, setPlanReviewers: async () => now, syncPlan: async () => now, signOffPlan: async () => now, overridePlanPolicy: async () => now,
     docScopes: async () => ({ scopes: [{ kind: "group", id: "g", name: "Core", can_share: true }] }), libraryPeople: async () => ({ people: [] }),
+    planPeople: async () => ({ people: [] }), planAccess: async () => ({ shared: false, kept_here: true, scopes: [], people: [] }),
+    invitePlanPerson: async () => now, setPlanPersonAccess: async () => now, setPlanPersonSignOff: async () => now, removePlanPerson: async () => now, removePlanScope: async () => now,
     previewPlanPolicies: () => new Promise<{ policies: ReturnType<typeof row>[] }>((resolve) => { asked.push({ rev: now.rev, reply: (names) => resolve({ policies: names.map(row) }) }); }) };
   const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
   const view = render(reader(visual));
   await openShare();
-  fireEvent.click(await screen.findByRole("button", { name: "Share for review" }));
   await waitFor(() => expect(asked).toHaveLength(1));
 
   now = doc(2, "Workers run on a machine the customer controls.");
