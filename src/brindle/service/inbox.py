@@ -467,7 +467,7 @@ def _visual_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
         root = db.get_agent(v["root_id"])
         if root is None or identity_lock.locked_by(root.id):
             continue
-        reason = refused.get(v["id"]) or ("asks you to choose" if v["options"] else "visual is ready")
+        reason = refused.get(v["id"]) or ("asks you to choose" if v["options"] or v.get("choices") else "visual is ready")
         out.append(InboxItemDTO(kind="visual", reason=reason, detail=v["title"],
                                 visual_id=v["id"], agent_id=root.id, workspace_id=root.workspace_id,
                                 root_id=root.id))

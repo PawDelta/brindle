@@ -973,10 +973,11 @@ def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any,
 # -- the person decides -----------------------------------------------------------------
 
 
-def _picks(raw: Any, decisions: list[dict]) -> dict[str, str]:
+def _picks(raw: Any, decisions: list[dict], allowed: dict[str, set[str]] | None = None) -> dict[str, str]:
+    """``allowed``: what each decision's pick may name, own answers included (plan_answers.choices)."""
     if raw is None:
         return {}
-    by_id = {d["id"]: {o["id"] for o in d["options"]} for d in decisions}
+    by_id = allowed if allowed is not None else {d["id"]: {o["id"] for o in d["options"]} for d in decisions}
     if not isinstance(raw, dict) or any(k not in by_id or v not in by_id[k] for k, v in raw.items()):
         raise ServiceError("invalid", "a pick names one of this revision's decisions and one of its options", 400)
     return dict(raw)
@@ -1011,13 +1012,27 @@ def _comments(raw: Any, section_ids: set[str]) -> list[dict]:
     return out
 
 
+def _own_answer(a: dict, teammates: dict[str, str]) -> str:
+    """How the supervisor reads a picked own answer: whose, and its words."""
+    from brindle.plan_docs import PERSON
+
+    author = a["author"]
+    whose = "their own answer" if author == PERSON else \
+        f"{teammates.get(author.removeprefix('teammate:'), 'a teammate')}'s own answer"
+    return f"{whose}, \"{a['text']}\""
+
+
 def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: str | None, titles: dict,
-             doc: list[str] = (), files: list[str] = (), drafting: bool = False) -> str:
+             doc: list[str] = (), files: list[str] = (), drafting: bool = False, answers: dict | None = None,
+             teammates: dict[str, str] | None = None) -> str:
     verb = "approved" if approved else "redirected"
     lines = [f"The person {verb} plan {p['id']} (r{p['rev']})."]
     for d in p["decisions"]:
         pick = picks.get(d["id"])
-        if pick and pick != d["mine"]:
+        if pick and (answers or {}).get(d["id"]):
+            lines.append(f"Decision {d['id']} ({d['title']}): they chose {_own_answer(answers[d['id']], teammates or {})}"
+                         " over your options.")
+        elif pick and pick != d["mine"]:
             label = next(o["label"] for o in d["options"] if o["id"] == pick)
             lines.append(f"Decision {d['id']} ({d['title']}): they chose {pick} ({label}) over yours.")
     for c in comments:
@@ -1168,7 +1183,10 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         was_ready = before is not None and before["state"] == "ready"
         unconfirmed = _check_with_library(db, p)
     titles = anchors(p)
-    picks = {**plan_docs.confirmed(db, p), **_picks(picks, p["decisions"])}
+    from brindle import plan_answers
+
+    picks = {**plan_docs.confirmed(db, p), **_picks(picks, p["decisions"], plan_answers.choices(db.conn, p))}
+    own = plan_answers.chosen(db.conn, p, picks)     # picks that name an own answer: the verdict quotes its words
     comments = _comments(comments, set(titles))
     note = visuals._text(note, "note", visuals.MAX_NOTE)
     doc, doc_record, threads = plan_docs.pending(db, p)
@@ -1184,12 +1202,13 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     files = plan_docs._attachments(db, p, attachments)
     at = time.time()
     verdict = {"approved": bool(approved), "picks": picks, "comments": comments, "note": note, "at": at, "rev": rev,
-               "attachments": [f["name"] for f in files]}
+               "attachments": [f["name"] for f in files], "answers": {d: a["text"] for d, a in own.items()}}
     record = json.dumps(verdict)
     answer = json.dumps({"option": "approve" if approved else "redirect", "note": note, "at": at, "rev": rev})
     state = "approved" if approved else "redirected"
     text = _message(p, approved, picks, comments, note, titles, doc, [f["ref"] for f in files],
-                    drafting=not approved and plan_docs.draft(db, p) is not None)
+                    drafting=not approved and plan_docs.draft(db, p) is not None, answers=own,
+                    teammates=plan_docs.teammate_names(db, p["id"]))
     with db.tx() as c:
         if approved:
             # In the verdict's own transaction: a sync landing a new reviewer can't slip in between.
@@ -1224,7 +1243,7 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
                 rev=rev, option=state)
     if approved:
         if gate(db, p) is None:             # a shared plan's one Library entry is its document
-            _to_library(p, picks, comments, note, titles, doc_record)
+            _to_library(p, picks, comments, note, titles, doc_record, answers=own)
         tasks.on_resumed(db, p["root_id"], why="the person's approval of the plan")
     return get(db, p["id"])
 
@@ -1303,12 +1322,14 @@ def _cancelled_message(p: dict, held: list, person: bool) -> str:
 
 
 def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
-            doc: list[str] = ()) -> str:
+            doc: list[str] = (), answers: dict | None = None) -> str:
     """The approved revision with what the person decided under it."""
     out = [p["markdown"].rstrip(), "", f"## What the person approved (r{p['rev']})", ""]
     for d in p["decisions"]:
         pick = picks.get(d["id"]) or d["mine"]
         label = next((o["label"] for o in d["options"] if o["id"] == pick), pick)
+        if (answers or {}).get(d["id"]):
+            label = f"Own answer: \"{answers[d['id']]['text']}\""
         out.append(f"- Decision {d['id']} ({d['title']}): {label}")
     for s in p["split"] or []:
         out.append(f"- Worker {s['id']}: {s['title']}")
@@ -1326,7 +1347,7 @@ def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles
 
 
 def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
-                doc: list[str] = ()) -> None:
+                doc: list[str] = (), answers: dict | None = None) -> None:
     """Store the approved plan in the person's plan library, on brindle's
     servers or on this Mac (Settings › Library location). Entitlement, the
     location and the network are the uploader's to judge; nothing here
@@ -1334,7 +1355,7 @@ def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, ti
     try:
         from brindle.pro import analysis_docs
 
-        md = _record(p, picks, comments, note, titles, doc)
+        md = _record(p, picks, comments, note, titles, doc, answers)
         doc = analysis_docs.Doc(files=[{"name": f"plan-{p['id']}.md", "md": md}],
                                 source={"kind": "goal", "ref": p["id"], "session": p["root_id"]}, plan=True)
         analysis_docs.on_merged(p["visual"]["repo_root"], [doc])

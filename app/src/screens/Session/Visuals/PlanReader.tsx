@@ -57,7 +57,7 @@ import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } f
 import { ExportButton } from "./ExportButton";
 import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
 import { Alongside, Decision, Tasks, displayName, overlaps, passChip, personName, shortName, useAccount } from "./PlanCards";
-import { Annotated, DecisionCard, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
+import { Annotated, DecisionCard, type OwnAnswers, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
@@ -555,7 +555,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // recommendation is displayed, but does not count as the person's choice. A pick is saved as it
   // is made (`confirmed`), so one made before the doc was last closed still counts; `picks` holds
   // a pick on its way there.
-  const valid = (d: PlanDecisionDTO, option: string | null | undefined) => (option && d.options.some((o) => o.id === option) ? option : undefined);
+  const valid = (d: PlanDecisionDTO, option: string | null | undefined) => (option && (d.options.some((o) => o.id === option) || d.answers?.some((a) => a.id === option)) ? option : undefined);
   const drafted = (d: PlanDecisionDTO) => valid(d, picks[d.id]) ?? valid(d, d.confirmed);
   const chosen = (d: PlanDecisionDTO) => (open ? drafted(d) : plan.verdict?.picks?.[d.id]) ?? d.confirmed ?? d.mine ?? null;
   const settled = (d: PlanDecisionDTO) => !open || !!drafted(d);
@@ -624,6 +624,22 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     }
   };
   const write = async (work: () => Promise<Plan>) => (await send(work)) !== null;
+  // Own answers on a decision card (brindle/plan_answers.py). Adding one picks it and removing one
+  // drops its pick, so the engine's `confirmed` speaks for the card from then on.
+  const ownAnswers = (decision: string): OwnAnswers | undefined => {
+    const own = source.answers;
+    if (!own || historical || !canComment) return undefined;
+    const repick = async (work: () => Promise<Plan>) => {
+      const saved = await write(work);
+      if (saved && alive.current) setPicks((p) => Object.fromEntries(Object.entries(p).filter(([k]) => k !== decision)));
+      return saved;
+    };
+    return {
+      add: (text) => repick(() => own.add(plan.rev, decision, text)),
+      edit: (answer, text) => write(() => own.edit(plan.rev, answer, text)),
+      remove: (answer) => repick(() => own.remove(plan.rev, answer)),
+    };
+  };
   const actions: ThreadActions = {
     reply: (thread, text) => write(() => source.reply(plan.rev, thread, text)),
     resolve: (thread, resolved) => write(() => source.resolve(plan.rev, thread, resolved)),
@@ -1105,7 +1121,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
         <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={(who) => who === "person" ? "You" : nameOf(who)}
-          onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
+          onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined}
+          answers={open ? ownAnswers(d.id) : undefined} />
       </Annotated>
     ));
     const titleAside = (s: PlanSectionDTO) => {

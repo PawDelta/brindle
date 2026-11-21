@@ -454,6 +454,7 @@ export interface VisualOption {
 }
 
 export interface VisualAnswer {
+  picks?: Record<string, string> | null;
   option: string | null;
   note: string;
   at: number;
@@ -462,6 +463,8 @@ export interface VisualAnswer {
 }
 
 export interface VisualDTO {
+  choices?: { id: string; question: string; options: { id: string; label: string; detail?: string | null }[] }[] | null;
+  inline_html?: string | null;
   id: string;
   session: string;
   /* The agent that receives the answer, and whether its provider takes files. */
@@ -2161,8 +2164,8 @@ export class DaemonClient {
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
-  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
-    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
+  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[], picks?: Record<string, string>) {
+    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}), ...(picks ? { picks } : {}) });
   }
 
   /* The person won't answer the revision on screen; the agent is told, the Inbox card clears. */
@@ -2353,6 +2356,16 @@ export class DaemonClient {
   /* The person's pick on one decision (Confirm A); the verdict starts from these. */
   confirmPlan(id: string, rev: number, decision: string, option: string) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
+  }
+
+  /* The person's own answer on a decision (brindle/plan_answers.py), picked as it is added. */
+  addPlanAnswer(id: string, rev: number, decision: string, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers`, { rev, decision, text });
+  }
+
+  /* Reword the person's own answer ({ text }) or take it back ({ remove: true }), until someone else picks it. */
+  changePlanAnswer(id: string, rev: number, answer: string, change: { text: string } | { remove: true }) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers/${encodeURIComponent(answer)}`, { rev, ...change });
   }
 
   /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */

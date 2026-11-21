@@ -168,3 +168,36 @@ it("an editor on Pro copies the design's link, revokes it, and sees an org polic
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Share" })));   // its review is shared: reviewers only
   expect(screen.queryByTestId("share-link")).toBeNull();
 });
+
+it("a teammate adds an own answer beside the author's, and the card counts it as their pick", async () => {
+  const theirs = { id: "own-author1", text: "only on federal holidays", author: "u_author", at: 1, locked: false };
+  const decision = { id: "skip", title: "When should the cleanup skip a night?", section: "proposed-design", mine: "a",
+    options: [{ id: "a", label: "A · Skip on weekends" }, { id: "b", label: "B · Never skip" }], answers: [theirs], votes: { "own-author1": ["u_author"] } };
+  let doc: SharedDesign = { ...design, teammate_names: { u_author: "David" }, decisions: [decision],
+    sections: [{ id: "context", title: "Context", markdown: "Nightly cleanup." }, { id: "proposed-design", title: "Proposed design", markdown: "It prunes worktrees." }] };
+  const sent: [string, Record<string, unknown>][] = [];
+  const client: SharedDesignClient = {
+    sharedDesign: async () => doc,
+    writeSharedDesign: async (_doc, tail, body) => {
+      sent.push([tail, body]);
+      const mine = { id: "own-me1", text: String(body.text), author: "person", at: 2, locked: false };
+      doc = { ...doc, decisions: [{ ...decision, answers: [theirs, mine], votes: { ...decision.votes, "own-me1": ["person"] }, confirmed: "own-me1" }] };
+      return doc;
+    },
+    libraryPeople: async () => ({ people: [] }),
+  };
+  await act(async () => { render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />); });
+  expect(screen.getAllByTestId("plan-answer").map((a) => a.dataset.answer)).toEqual(["own-author1"]);
+
+  await act(async () => fireEvent.click(screen.getByTestId("plan-add-answer")));
+  fireEvent.change(screen.getByRole("textbox", { name: "Your own answer" }), { target: { value: "  when the repo is idle " } });
+  await act(async () => fireEvent.submit(screen.getByTestId("plan-answer-field")));
+
+  expect(sent).toEqual([["answers", { rev: 1, decision: "skip", text: "when the repo is idle" }]]);
+  expect(screen.queryByTestId("plan-answer-field")).toBeNull();
+  const rows = screen.getAllByTestId("plan-answer");
+  expect(rows.map((a) => [a.dataset.answer, a.dataset.author, !!a.dataset.chosen])).toEqual([["own-author1", "u_author", false], ["own-me1", "person", true]]);
+  expect(screen.getByTestId("plan-decision").dataset.state).toBe("decided");
+  expect(within(rows[0]).queryByRole("button", { name: "Edit" })).toBeNull();     // only an author rewords their own
+  expect(within(rows[1]).getByRole("button", { name: "Edit" })).toBeTruthy();
+});

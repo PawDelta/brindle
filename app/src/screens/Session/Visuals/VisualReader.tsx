@@ -20,9 +20,11 @@ import { PlanReader } from "./PlanReader";
 import { VisualFrame, ZoomControls, frameMessage, sameSource, useZoom, zoomKey, zoomWheel, type VisualFrameProps, type VisualSource } from "./frame";
 import { ExportButton } from "./ExportButton";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
+import { InlineChoices } from "./InlineChoices";
 
 /* The reader's frame and chrome, the session's and Knowledge's (read-only) alike. */
-export function ReaderChrome({ title, source, missing, meta, actions, onBack, backLabel = "Back", asking, onChoice, footer, Frame = VisualFrame, exportClient, repo, bleed }: {
+export function ReaderChrome({ title, source, missing, meta, actions, onBack, backLabel = "Back", asking, onChoice, footer, Frame = VisualFrame, exportClient, repo, bleed, inline }: {
+  inline?: (zoom: number, snapshotRequest: number, onSnapshot: (html: string) => void) => ReactNode;
   /* The frame takes the whole area under the toolbar: no padding, border or rounding. */
   bleed?: boolean;
   exportClient?: ExportClient;
@@ -104,7 +106,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
               {source && <ZoomControls zoom={zoom} onZoom={step} />}
             </span>
           </div>
-          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} zoom={zoom} zoomAnchor={anchor} onMessage={posted} snapshotRequest={snapshotRequest} covered={exporting} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This doc isn't here any more."}</p>}
+          {inline ? inline(zoom, snapshotRequest, html => { if (source) setSnapshot({ source, html }); }) : source ? <Frame key={JSON.stringify(source)} source={source} title={title} zoom={zoom} zoomAnchor={anchor} onMessage={posted} snapshotRequest={snapshotRequest} covered={exporting} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This doc isn't here any more."}</p>}
         </div>
       </div>
       {footer}
@@ -138,6 +140,8 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   }, [client, id, rev, unread]);
   const [picked, setPicked] = useState<{ key: string; option: string } | null>(null);
   const key = visual ? `${visual.id}:${visual.rev}` : "";
+  const [groupPicks, setGroupPicks] = useState<{ key: string; picks: Record<string, string> }>({ key: "", picks: {} });
+  const picks = groupPicks.key === key ? groupPicks.picks : {};
   const options = visual?.options ?? [];
   const choose = (option: string) => {
     if (visual && !visual.answer && !visual.answered_in_chat && (option === "" || options.some((o) => o.id === option))) {
@@ -159,12 +163,13 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
       asking={asking}
       onChoice={(option) => { if (options.some((o) => o.id === option)) choose(option); }}
       Frame={Frame}
+      inline={visual?.choices?.length ? (zoom, snapshotRequest, onSnapshot) => <InlineChoices key={key} visual={visual} zoom={zoom} snapshotRequest={snapshotRequest} onSnapshot={onSnapshot} onBack={onBack} picks={visual.answer?.picks ?? picks} onPick={(group, option) => setGroupPicks(current => ({ key, picks: { ...(current.key === key ? current.picks : {}), [group]: option } }))} /> : undefined}
       repo={repo}
       exportClient={client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? client as ExportClient : undefined}
       actions={
         visual && <KeepButton client={client} visual={visual} onKept={onAnswered} />
       }
-      footer={visual && options.length > 0 && <AnswerBar key={key} client={client} visual={visual} picked={picked?.key === key ? picked.option : null} onPick={choose} onAnswered={(answered) => {
+      footer={visual && (options.length > 0 || !!visual.choices?.length) && <AnswerBar key={key} client={client} visual={visual} picks={picks} picked={picked?.key === key ? picked.option : null} onPick={choose} onAnswered={(answered) => {
         onAnswered(answered);
         onBack();
       }} />}
@@ -173,7 +178,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
 }
 
 /* The question, the options as host buttons, a note, and Send. Answered: what was picked. */
-function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: VisualsClient & Partial<Pick<DaemonClient, "attach">>; visual: VisualDTO; picked: string | null; onPick(option: string): void; onAnswered(v: VisualDTO): void }) {
+function AnswerBar({ client, visual, picked, picks, onPick, onAnswered }: { client: VisualsClient & Partial<Pick<DaemonClient, "attach">>; visual: VisualDTO; picked: string | null; picks: Record<string, string>; onPick(option: string): void; onAnswered(v: VisualDTO): void }) {
   const [note, setNote] = useState("");
   // Insert text immediately so later edits and pastes keep their normal order.
   // Tag only the inserted characters: a native file result removes its filename,
@@ -250,7 +255,8 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   }, [canAttach]);
   // Empty ids cannot be published; this host-only choice carries no option to the engine.
   const ownWords = picked === "";
-  const canSend = picked !== null && (!ownWords || !!note.trim()) && uploading === 0;
+  const grouped = !!visual.choices?.length;
+  const canSend = (grouped ? visual.choices!.every(g => !!picks[g.id]) : picked !== null && (!ownWords || !!note.trim())) && uploading === 0;
   const answered = visual.answer ? options.find((o) => o.id === visual.answer!.option) : null;
   const dismiss = async () => {
     if (sending) return;
@@ -273,7 +279,9 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
     setError(null);
     try {
       // The revision on screen: the bar is keyed by it, so a newer one is a new bar.
-      const result = await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim(), ...(attached.length ? [attached] : []));
+      const result = grouped
+        ? await client.answerVisual(visual.id, visual.rev, undefined, note.trim(), attached.length ? attached : undefined, picks)
+        : await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim(), ...(attached.length ? [attached] : []));
       // A late response must not update or navigate away from the person's current screen.
       if (!active.current) return;
       onAnswered(result);
@@ -300,7 +308,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
         return;
       }
       const index = /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : -1;
-      const option = options[index];
+      const option = grouped ? undefined : options[index];
       if (!option || sending) return;
       event.preventDefault();
       if (picked !== option.id) onPick(option.id);
@@ -330,7 +338,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           e.preventDefault();
           void send();
         }}>
-          <div role="radiogroup" aria-label="Options" className="flex flex-wrap gap-1">
+          {!grouped && <div role="radiogroup" aria-label="Options" className="flex flex-wrap gap-1">
             {options.map((o, index) => (
               <button key={o.id} type="button" role="radio" aria-checked={picked === o.id} title={o.detail} className={`${button} ${picked === o.id ? "border-branch bg-branch-soft" : ""}`} onClick={() => onPick(o.id)}>
                 {index < 9 && <kbd aria-hidden="true" className="mr-1 rounded-[3px] border border-line bg-surface-2 px-1 font-mono text-[10px] font-medium leading-4 text-ink-3">{index + 1}</kbd>}
@@ -340,7 +348,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
             <button type="button" role="radio" aria-checked={ownWords} className={`${button} ${ownWords ? "border-branch bg-branch-soft" : ""}`} onClick={() => { onPick(""); noteInput.current?.focus(); }}>
               Something else…
             </button>
-          </div>
+          </div>}
           <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => editNote(e.target.value)}
             onPaste={(e) => {
               if (!canAttach) return;
