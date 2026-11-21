@@ -552,6 +552,32 @@ def _cause(line: str):
     return None
 
 
+# A CLI that couldn't read its account, sign in or find its route. Not a
+# refusal of the profile's model: never recorded by ``model_access.refuse``.
+UNREACHABLE = model_access.Cause(
+    "launch_unreachable", "", "the provider's CLI couldn't sign in or reach its service",
+    "sign in to the provider again, or check its network and routing")
+_UNREACHABLE = re.compile(
+    r"account/read failed|\bbootstrap\b.*\bfailed|routing discovery failed|not (?:logged|signed) in"
+    r"|(?:log|sign) ?in (?:again|required|to continue)|login required|re-?authenticate"
+    r"|command not found|could not resolve host|connection refused|network is unreachable"
+    r"|\benotfound\b|\beconnrefused\b|failed to (?:refresh|load) (?:the )?(?:token|credentials|auth)",
+    re.I)
+
+
+def provider_failure(text: str | None):
+    """The cause when ``text`` (a dead pane's last error) is its provider's own
+    failure (the CLI, account, login, routing, quota or capacity), so the same
+    profile would fail again; None for any other death. A rejected model is
+    the profile's own failure, not its provider's."""
+    if not text:
+        return None
+    cause = _cause(text)
+    if cause is not None and cause is not MODEL:
+        return cause
+    return model_access.expired_login(text) or (UNREACHABLE if _UNREACHABLE.search(text) else None)
+
+
 def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -> str | None:
     """Run in a detached helper, five seconds after actual delivery."""
     from brindle import agents, prompt_answer
