@@ -519,6 +519,22 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     return link(db, p["id"])
 
 
+def set_reviewer(db: DB, plan_id: str, sub: str, required: bool | None, *, client=None, store=None) -> dict:
+    """Update one reviewer and retain the Library's authoritative review state."""
+    from urllib.parse import quote
+
+    p = plan_docs._plan(db, plan_id)
+    _review_open(p)
+    client, store = ad._session(client, store)
+    share_ = _shared(db, p["id"], store)
+    view = review_policies.ask(db, p, "DELETE" if required is None else "PUT",
+                               _path(share_["doc_id"], f"/reviewers/{quote(sub, safe='')}"),
+                               None if required is None else {"required": required}, client=client, store=store)
+    if _remember(db, p["id"], view):
+        plan_docs._changed(db, p, p["rev"])
+    return link(db, p["id"])
+
+
 def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=None) -> dict:
     """Replace the required and optional reviewers of a shared plan. Returns the link."""
     p = plan_docs._plan(db, plan_id)
