@@ -13,6 +13,23 @@ const empty: Plan = { id: "p1", rev: 1, title: "Design", state: "open", decision
   session: "boss", created_at: 1, lede: "", markdown: "", queued: 0,
   gate: { state: "ready", required: 0, signed: 0, waiting_on: [], reviewers: [] } };
 
+it("uses display names and email fallbacks for bounded people rows and retains sign-off state", async () => {
+  const named = { ...people[0], id: "63a34f9d", display_name: `David ${"Longsurname".repeat(12)} Jones` };
+  const emailOnly = { ...people[1], display_name: "", email: "lena.long@example.com" };
+  const plan = { ...empty, gate: { ...empty.gate!, reviewers: [{ sub: named.id, required: true, status: "signed_off" as const }] } };
+  const target = { search: async () => ({ people: [named, emailOnly] }), put: async () => plan, remove: async () => plan };
+  await act(async () => render(<SharePanel plan={plan} target={target} nameOf={(s) => s} writes={{ begin: () => true, end: () => {} }} onBusy={() => {}} visible onClose={() => {}} />));
+  const row = screen.getByTestId(`share-reviewer-${named.id}`);
+  expect(row.dataset.state).toBe("signed_off");
+  expect(row.querySelector(".av")?.textContent).toBe("DJ");
+  expect(row.querySelector(".nm")?.getAttribute("title")).toBe(named.display_name);
+  expect(row.querySelector(".nm")?.className).toContain("truncate");
+  await act(async () => fireEvent.focus(screen.getByTestId("share-search")));
+  const result = screen.getByTestId("share-result-lena");
+  expect(result.querySelector(".av")?.textContent).toBe("L");
+  expect(result.querySelector(".nm")?.getAttribute("title")).toContain(emailOnly.email);
+});
+
 it("keeps two invitations visible, isolates a failure, and sends that person again without replacing the other", async () => {
   let remote = empty;
   const complete: (() => void)[] = [];

@@ -647,6 +647,9 @@ export interface LibraryPerson {
   sub: string;
   email: string;
   display_name?: string;
+  first_name?: string;
+  last_name?: string;
+  name?: string;
 }
 
 /* An org admin's waiver of a review rule for one revision, or a stand-in for it until `until` (Unix seconds). */

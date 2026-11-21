@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import type { PeopleQuery, Plan, SharePerson } from "../../../api/client";
 import type { Writes } from "./PlanReader";
+import { initials } from "./PlanCards";
 import "./SharePanel.css";
 
 export interface SharePeopleTarget {
@@ -15,7 +16,7 @@ export function ShareChevron() {
 function ShareCheck() {
   return <svg className="ic sm" viewBox="0 0 16 16" aria-hidden><path d="M3.5 8.5l3 3 6-7" /></svg>;
 }
-const initials = (name: string) => name.split(/[\s@._-]+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase();
+const personLabel = (p: SharePerson) => p.display_name.trim() || p.email;
 type Row = { sub: string; required: boolean; name: string; state: "signed_off" | "invited" | "inviting" | "failed"; action?: boolean | null };
 
 export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, fallback, signOff }: {
@@ -76,13 +77,14 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const teams = [...new Map(directory.flatMap((p) => p.teams).map((t) => [t.id, t])).values()];
   const roles = [...new Set(["admin", "member", ...directory.map((p) => p.role)])];
   const teamName = teams.find((t) => t.id === team)?.name ?? team;
-  const names = new Map([...directory, ...found].map((p) => [p.id, p.display_name]));
+  const names = new Map([...directory, ...found].map((p) => [p.id, personLabel(p)]));
   const committed: Row[] = (plan.gate?.reviewers ?? []).flatMap((r) => r.sub ? [{ sub: r.sub, required: r.required,
     name: names.get(r.sub) ?? nameOf(r.sub), state: r.status === "signed_off" ? "signed_off" : "invited" }] : []);
   const rows = [...committed.filter((r) => !pending[r.sub] && !removed.has(r.sub)), ...Object.values(pending)];
   const onPlan = (p: SharePerson) => p.on_plan || rows.some((r) => r.sub === p.id);
   const available = found.filter((p) => !onPlan(p));
   const send = (sub: string, required: boolean | null, name: string) => {
+    name = name.trim() || names.get(sub) || nameOf(sub);
     const current = latest.current;
     if (!current.target || flight.current.has(sub)) return;
     if (flight.current.size === 0) {
@@ -161,9 +163,9 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
           : searchState === "error" ? <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grow">Couldn't search people.</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>
           : <>
             <div className="rows">{found.map((p, i) => <div key={p.id} className={`r ${onPlan(p) ? "dim" : i === highlight ? "act" : ""}`} onMouseEnter={() => setHighlight(i)} data-testid={`share-result-${p.id}`}>
-              <i className="av">{initials(p.display_name)}</i><button className="nm text-left" onFocus={() => setHighlight(i)} onClick={() => { if (rows.some((r) => r.sub === p.id)) setMenu(p.id); else if (!onPlan(p)) send(p.id, true, p.display_name); }}>{p.display_name}{i !== highlight && !onPlan(p) && <em>{p.email}</em>}</button>
+              <i className="av">{initials(personLabel(p))}</i><button className="nm truncate text-left" title={`${personLabel(p)} · ${p.email}`} onFocus={() => setHighlight(i)} onClick={() => { if (rows.some((r) => r.sub === p.id)) setMenu(p.id); else if (!onPlan(p)) send(p.id, true, personLabel(p)); }}>{personLabel(p)}{i !== highlight && !onPlan(p) && <em>{p.email}</em>}</button>
               {onPlan(p) ? <span className="st">On this plan</span> : i === highlight && <><button className="sp-btn s" data-testid={`share-required-${p.id}`} onClick={() => send(p.id, true, p.display_name)}>+ Required</button><button className="sp-btn q end" data-testid={`share-optional-${p.id}`} onClick={() => send(p.id, false, p.display_name)}>+ Optional</button></>}
-            </div>)}{pasted.filter((email) => !found.some((p) => p.email.toLowerCase() === email)).map((email) => <div className="r dim" key={email}><i className="av">?</i><span className="nm">{email}</span><span className="st">Not in your organization</span></div>)}</div>
+            </div>)}{pasted.filter((email) => !found.some((p) => p.email.toLowerCase() === email)).map((email) => <div className="r dim" key={email}><i className="av">?</i><span className="nm" title={email}>{email}</span><span className="st">Not in your organization</span></div>)}</div>
             {!found.length && !pasted.length ? <div className="msg" data-testid="share-search-empty"><span className="grow">{team ? `Nobody in ${teamName} matches.` : "Nobody matches."}</span>{(team || role) && <button className="sp-btn q end" onClick={() => { setTeam(""); setRole(""); }}>Search everyone</button>}</div>
               : <div className="foot"><span>{pasted.length ? `${found.length} of ${pasted.length} found` : `${found.length} people`}</span>{available.length > 0 && <button className="sp-btn q end" data-testid="share-add-all" onClick={() => setMenu(menu === "all" ? null : "all")}>Add all {available.length}<ShareChevron /></button>}</div>}
             {menu === "all" && <div className="menu" style={{ width: 150 }}><button className="mi" onClick={() => available.forEach((p) => send(p.id, true, p.display_name))}>As required</button><button className="mi" onClick={() => available.forEach((p) => send(p.id, false, p.display_name))}>As optional</button></div>}
@@ -177,7 +179,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
           return <Fragment key={String(required)}><div className="lab"><b>{required ? "Required" : "Optional"}</b><span>{group.filter((r) => r.state === "signed_off").length} of {group.length} signed off</span></div>
             {failed.length > 1 && <button className="sp-btn q end" onClick={() => failed.forEach((r) => send(r.sub, r.action!, r.name))}>Try {failed.length === 2 ? "both" : "all"} again</button>}
             {group.map((r) => <Fragment key={r.sub}><div className={`r ${menu === r.sub ? "act" : ""}`} data-testid={`share-reviewer-${r.sub}`} data-state={r.state} data-required={r.required}>
-              <i className="av">{initials(r.name)}</i><button className="nm text-left" disabled={r.state === "inviting"} onClick={() => setMenu(menu === r.sub ? null : r.sub)}>{r.name}</button>
+              <i className="av">{initials(r.name)}</i><button className="nm truncate text-left" title={r.name} disabled={r.state === "inviting"} onClick={() => setMenu(menu === r.sub ? null : r.sub)}>{r.name}</button>
               <span className={`st ${r.state === "signed_off" ? "ok" : r.state === "failed" ? "bad" : ""}`}>
                 {r.state === "inviting" && <i className="spin" />}{r.state === "signed_off" ? <><ShareCheck />Signed off</> : r.state === "inviting" ? "Inviting…" : r.state === "failed" ? r.action === null ? "Couldn't remove" : "Couldn't invite" : "Invited"}
               </span>{r.state === "failed" && <button className="sp-btn q end" data-testid={`share-try-${r.sub}`} onClick={() => send(r.sub, r.action!, r.name)}>Try again</button>}

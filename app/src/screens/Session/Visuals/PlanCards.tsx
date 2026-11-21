@@ -35,15 +35,22 @@ export function picksLine(d: PlanDecisionDTO, name: (who: string) => string = pe
   return picks.map((p) => `${name(p.who.replace(/^teammate:/, ""))}: ${label(p.option)}`).join(" · ");
 }
 
-/* Two letters for a person: "Maya Chen" → MC, "dana.okafor@…" → DO, "ravi@…" → RA. */
+export const displayName = (person?: { first_name?: string | null; last_name?: string | null; display_name?: string | null; name?: string | null; email?: string | null }) =>
+  (person?.first_name?.trim() && person?.last_name?.trim() ? `${person.first_name.trim()} ${person.last_name.trim()}` : "")
+  || person?.display_name?.trim() || person?.name?.trim() || person?.email?.trim() || "";
+
+/* First and last name, or the email's first letter. Unknown account IDs get no initials. */
 export const initials = (who: string) => {
-  const words = who.split("@")[0].split(/[\s._-]+/).filter(Boolean);
-  return (words.length > 1 ? `${words[0][0]}${words[1][0]}` : (words[0] ?? who).slice(0, 2)).toUpperCase();
+  const name = who.trim();
+  if (!name || (/\d/.test(name) && !name.includes("@"))) return "?";
+  if (name.includes("@")) return /^\p{L}/u.test(name) ? name[0].toUpperCase() : "?";
+  const words = name.split(/\s+/).filter(Boolean);
+  return (words.length > 1 ? `${words[0][0]}${words.at(-1)![0]}` : words[0][0]).toUpperCase();
 };
 
 const noSubscribe = () => () => {};
 /* The signed-in account; a reader rendered without the app's store (a test, a preview) has none. */
-function useAccount() {
+export function useAccount() {
   const store = useContext(StoreContext);
   return useSyncExternalStore(store?.subscribe ?? noSubscribe, () => store?.getState().account ?? null);
 }
@@ -54,10 +61,9 @@ export function Avatar({ who, small, ring }: { who: string; small?: boolean; rin
   const colour = who === "person" ? "var(--branch)" : who === "supervisor" ? "var(--pass)" : `var(--group-${Number(peerClass(who).slice("loro-peer-".length)) + 2})`;
   const rings = ring === "wait" ? "shadow-[0_0_0_1.5px_var(--canvas),0_0_0_3px_var(--sap)]" : ring === "done" ? "shadow-[0_0_0_1.5px_var(--canvas),0_0_0_3px_var(--pass)]" : ring === "dim" ? "opacity-[var(--dim)]" : "";
   /* A name's initials ("Maya Chen" → MC). An email with no name behind it gives its first letter only. */
-  const name = account?.signed_in ? account.name?.trim() : "";
-  const email = account?.signed_in ? account.email?.trim() : "";
-  const letters = who === "person" ? (name ? initials(name) : email ? email[0].toUpperCase() : "Y")
-    : who === "supervisor" ? "S" : who.includes("@") ? who[0].toUpperCase() : initials(who);
+  const name = account?.signed_in ? displayName(account) : "";
+  const letters = who === "person" ? (name ? initials(name) : "Y")
+    : who === "supervisor" ? "S" : initials(who);
   return (
     <span title={personName(who)} style={{ backgroundColor: colour }} className={`inline-grid flex-none place-items-center rounded-full font-mono font-semibold leading-none text-canvas ${small ? "size-4 text-[7.5px]" : "size-5 text-[9px]"} ${rings}`}>
       {letters}
@@ -103,7 +109,7 @@ const optionRow = "grid grid-cols-[14px_minmax(0,1.15fr)_minmax(0,1.5fr)_minmax(
    A row is a radio: the person's selection is sent with their verdict. */
 export function Decision({ decision: d, chosen, open, onPick, nameOf }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void; nameOf?(who: string): string }) {
   return (
-    <div role="radiogroup" aria-label={d.title} className="-mx-2.5 grid font-sans text-[13px] leading-normal">
+    <div role="radiogroup" aria-label={d.title} className="-mx-2.5 grid min-w-0 [overflow-wrap:anywhere] font-sans text-[13px] leading-normal">
       <div aria-hidden className={`${optionRow} border-line-strong pb-1.5 pt-1 text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3`}>
         <span />
         <span>Option</span>
@@ -124,20 +130,20 @@ export function Decision({ decision: d, chosen, open, onPick, nameOf }: { decisi
               onPick(o.id);
             }}>
             <span aria-hidden className={`mt-1 size-3 rounded-full ${picked ? "border-4 border-branch" : "border-[1.5px] border-line-strong"}`} />
-            <span className="grid justify-items-start gap-0.5">
+            <span className="grid min-w-0 justify-items-start gap-0.5">
               <b className="font-medium text-ink">{o.label}</b>
-              {o.id === d.mine && <span className={`${pill} text-pass`}>recommended</span>}
+              {o.id === d.mine && <span className={`${pill} max-w-full whitespace-normal text-pass`}>recommended</span>}
               {o.detail && <span>{o.detail}</span>}
             </span>
             <span className="grid gap-px">
               {o.pros?.map((t, i) => (
-                <span key={`p${i}`} data-tradeoff="pro" className="grid grid-cols-[auto_1fr] gap-x-1.5">
+                <span key={`p${i}`} data-tradeoff="pro" className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-1.5">
                   <span className="font-mono text-pass">+</span>
                   {t}
                 </span>
               ))}
               {o.cons?.map((t, i) => (
-                <span key={`c${i}`} data-tradeoff="con" className="grid grid-cols-[auto_1fr] gap-x-1.5">
+                <span key={`c${i}`} data-tradeoff="con" className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-1.5">
                   <span className="font-mono text-sap">−</span>
                   {t}
                 </span>
@@ -146,7 +152,7 @@ export function Decision({ decision: d, chosen, open, onPick, nameOf }: { decisi
             <span className="flex flex-wrap gap-1">
               {o.touches?.map((f) => <code key={f} className="rounded-sm bg-surface-2 px-1 font-mono text-[11.5px] text-ink-2">{f}</code>)}
             </span>
-            <span className="flex min-h-5 items-center gap-1 text-ink-3" data-votes={votes.length}>
+            <span className="flex min-h-5 flex-wrap items-center gap-1 text-ink-3" data-votes={votes.length}>
               {votes.length ? votes.map((v) => <Avatar key={v} who={v === "person" ? "person" : nameOf?.(v) ?? "A teammate"} small />) : "none"}
             </span>
           </div>
