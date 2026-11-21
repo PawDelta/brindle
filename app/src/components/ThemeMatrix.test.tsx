@@ -105,6 +105,8 @@ const ROWS: Record<string, Row> = {
 async function ptyCell(live: Pty, start: Theme, to: Theme | null) {
   const { term, written, fromTmux } = live;
   await fromTmux(ATTACH);
+  // Text already on screen in the start theme, drawn in a grey (slot 246).
+  await fromTmux("\x1b[2J\x1b[H\x1b[38;5;246mfaint");
   const mark = written.length;
   if (to) {
     document.documentElement.dataset.theme = to;
@@ -116,11 +118,12 @@ async function ptyCell(live: Pty, start: Theme, to: Theme | null) {
   expect(term.options.theme).toMatchObject({ background: ground.ground, foreground: ground.ink });
   expect(term.options.minimumContrastRatio).toBe(ground.floor);
   expect(written.slice(mark)).toEqual([...(to ? [REPORT[to]] : []), asGround(ground.ground)]);
-  // Text the pane draws in a faint grey reaches 4.5:1 on the ground it ends up with (lifted in light by the stream,
-  // by xterm.js's floor in dark).
-  await fromTmux("\x1b[2J\x1b[H\x1b[38;5;246mfaint");
-  const [faint] = drawnColours(term, 0);
-  expect(contrast(faint.css, faint.ground)).toBeGreaterThanOrEqual(4.5);
+  // The text on screen before the switch, and text continued after it with no SGR of its own, both reach 4.5:1 on the
+  // ground the pane ends up with (lifted in light by the stream, by xterm.js's floor in dark).
+  await fromTmux(" more");
+  const drawn = drawnColours(term, 0);
+  expect(drawn.map(d => d.text).join("")).toBe("faint more");
+  for (const d of drawn) expect(contrast(d.css, d.ground), d.text).toBeGreaterThanOrEqual(4.5);
 }
 
 /* The colour a tint (an rgba) lies over a ground to, as the page shows it. */
