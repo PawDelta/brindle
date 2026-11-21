@@ -333,6 +333,13 @@ class VisualAnswerDTO(_DTO):
     note: str | None = None
     at: float
     attachments: list[str] = []
+    picks: dict[str, str] | None = None
+
+
+class VisualChoiceDTO(_DTO):
+    id: str
+    question: str
+    options: list[VisualOptionDTO]
 
 
 class VisualDTO(_DTO):
@@ -351,6 +358,8 @@ class VisualDTO(_DTO):
     rev: int
     question: str | None = None
     options: list[VisualOptionDTO] | None = None
+    choices: list[VisualChoiceDTO] | None = None
+    inline_html: str | None = None
     answer: VisualAnswerDTO | None = None
     answered_in_chat: bool = False
     kept: bool

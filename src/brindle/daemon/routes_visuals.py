@@ -357,7 +357,7 @@ def answer(db: DB, params: dict, body: dict) -> Any:
     visuals.require_enabled()
     rev = body.get("rev")
     return visuals.to_dto(db, visuals.answer(db, params["id"], rev, _get(body, "option"),
-                                             _get(body, "note"), _get(body, "attachments", list)))
+                                             _get(body, "note"), _get(body, "attachments", list), body.get("picks")))
 
 
 def dismiss(db: DB, params: dict, body: dict) -> Any:

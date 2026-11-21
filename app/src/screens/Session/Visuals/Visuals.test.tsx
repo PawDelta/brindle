@@ -82,6 +82,29 @@ afterEach(async () => {
 });
 
 describe("visuals", () => {
+  it("selects two inline groups and sends one combined answer", async () => {
+    const sent: unknown[] = [];
+    const row = { ...visual, options: undefined, choices: [
+      { id: "sharing", question: "Access?", options: visual.options! },
+      { id: "layout", question: "Layout?", options: visual.options! },
+    ], inline_html: '<fieldset data-choice="sharing"><button data-option="A">Tag</button><button data-option="B">Gate</button></fieldset><fieldset data-choice="layout"><button data-option="A">Tag</button><button data-option="B">Gate</button></fieldset><script>parent.postMessage({type:"choice",option:"B"})</script>' };
+    const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
+      if (String(url).endsWith("/answer")) sent.push(JSON.parse(init!.body as string));
+      return new Response(JSON.stringify({ ...row, answer: { option: null, picks: { sharing: "A", layout: "B" }, at: now } }));
+    } });
+    render(<VisualReader client={client} visual={row} onBack={() => {}} onAnswered={() => {}} />);
+    const frame = screen.getByTitle(row.title) as HTMLIFrameElement;
+    // jsdom doesn't load srcdoc: install the same inert document, then run the host's load handler.
+    frame.contentDocument!.documentElement.innerHTML = new DOMParser().parseFromString(frame.srcdoc, "text/html").documentElement.innerHTML;
+    fireEvent.load(frame);
+    expect(frame.contentDocument!.querySelector("script")).toBeNull();
+    fireEvent.click(frame.contentDocument!.querySelector('[data-choice="sharing"] [data-option="A"]')!);
+    expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(frame.contentDocument!.querySelector('[data-choice="layout"] [data-option="B"]')!);
+    fireEvent.change(screen.getByRole("textbox", { name: "Add a note" }), { target: { value: "Keep it simple" } });
+    fireEvent.click(screen.getByTestId("visual-send"));
+    await waitFor(() => expect(sent).toEqual([{ rev: 2, picks: { sharing: "A", layout: "B" }, note: "Keep it simple" }]));
+  });
   it("refreshes context after direct messages without replaying a superseded submission", async () => {
     vi.useFakeTimers();
     let context = 1, lastSequence = 0, registrations = 0;
