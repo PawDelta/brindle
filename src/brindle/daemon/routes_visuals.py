@@ -553,16 +553,20 @@ def plan_answer_change(db: DB, params: dict, body: dict) -> Any:
 # the plan as it is now, its build gate included.
 
 
-def _library(db: DB, plan_id: str, work: Callable[[Any], Any]) -> Any:
+def _library_call(work: Callable[[Any], Any]) -> Any:
     from brindle import redact
     from brindle.daemon import routes_actions as actions
     from brindle.pro import auth, shared_docs
 
     try:
-        work(shared_docs)
+        return work(shared_docs)
     except (RuntimeError, auth.TransportError) as e:    # unreachable or refused: not signed out
         err = actions.upstream_error(e)
         raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
+
+
+def _library(db: DB, plan_id: str, work: Callable[[Any], Any]) -> Any:
+    _library_call(work)
     return _plan_now(db, plan_id)
 
 
@@ -583,6 +587,72 @@ def plan_reviewer_put(db: DB, params: dict, body: dict) -> Any:
 
 def plan_reviewer_delete(db: DB, params: dict, body: dict) -> Any:
     return _library(db, params["id"], lambda sd: sd.set_reviewer(db, params["id"], params["sub"], None))
+
+
+def _kept_here() -> bool | None:
+    """Whether the person's plans are kept on this Mac, so a first share uploads
+    one; None when that can't be said now."""
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import auth
+
+    try:
+        return actions.library_on_this_mac()
+    except (ServiceError, RuntimeError, auth.AuthError, auth.TransportError):
+        return None
+
+
+@_json
+def plan_access(db: DB, request: Request) -> Any:
+    """Who has the plan and what each may do (pro/share_access.py)."""
+    from brindle.pro import share_access
+
+    got = _library_call(lambda sd: share_access.plan_access(db, request.path_params["id"]))
+    return {**got, "kept_here": None if got["shared"] else _kept_here()}
+
+
+def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], first: bool = False) -> Any:
+    from brindle.pro import share_access
+
+    return _library(db, plan_id, lambda sd: share_access.plan_write(db, plan_id, work, first=first))
+
+
+def plan_person_invite(db: DB, params: dict, body: dict) -> Any:
+    """Give one person the plan: its first share, if nobody has it yet."""
+    from brindle.pro import share_access as sa
+
+    return _access_write(db, params["id"], lambda call: sa.invite(
+        call, body.get("sub"), body.get("access"), _get(body, "sign_off", bool, default=False)), first=True)
+
+
+def plan_person_put(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _access_write(db, params["id"], lambda call: sa.change(call, params["sub"], body.get("access")))
+
+
+def plan_person_sign_off(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _access_write(db, params["id"], lambda call: sa.sign_off(call, params["sub"], body.get("must")))
+
+
+def plan_person_delete(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _access_write(db, params["id"], lambda call: sa.revoke(call, params["sub"]))
+
+
+def plan_scope_delete(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _access_write(db, params["id"], lambda call: sa.revoke_scope(call, params["kind"], params["scope"]))
+
+
+def plan_unshare(db: DB, params: dict, body: dict) -> Any:
+    """Stop sharing the plan with everyone it was shared with."""
+    from brindle.pro import share_access as sa
+
+    return _access_write(db, params["id"], sa.stop)
 
 
 @_json
@@ -707,6 +777,54 @@ def shared_design(db: DB, request: Request) -> Any:
 def design_people(db: DB, request: Request) -> Any:
     return _shared_design(request.query_params.get("repo") or None,
                           lambda r: r.people(request.path_params["id"], dict(request.query_params)))
+
+
+@_json
+def design_access(db: DB, request: Request) -> Any:
+    from brindle.pro import share_access
+
+    return {**_shared_design(request.query_params.get("repo") or None,
+                             lambda r: share_access.design_access(request.path_params["id"])), "kept_here": None}
+
+
+def _design_access_write(doc_id: str, repo: str | None, work: Callable[[Any], Any]) -> Any:
+    from brindle.pro import share_access
+
+    return _shared_design(repo, lambda r: (share_access.design_write(doc_id, work), r.read(doc_id))[1])
+
+
+def design_person_invite(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _design_access_write(params["id"], _get(body, "repo"), lambda call: sa.invite(
+        call, body.get("sub"), body.get("access"), _get(body, "sign_off", bool, default=False)))
+
+
+def design_person_put(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _design_access_write(params["id"], _get(body, "repo"),
+                                lambda call: sa.change(call, params["sub"], body.get("access")))
+
+
+def design_person_sign_off(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _design_access_write(params["id"], _get(body, "repo"),
+                                lambda call: sa.sign_off(call, params["sub"], body.get("must")))
+
+
+def design_person_delete(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _design_access_write(params["id"], params.get("repo") or None, lambda call: sa.revoke(call, params["sub"]))
+
+
+def design_scope_delete(db: DB, params: dict, body: dict) -> Any:
+    from brindle.pro import share_access as sa
+
+    return _design_access_write(params["id"], params.get("repo") or None,
+                                lambda call: sa.revoke_scope(call, params["kind"], params["scope"]))
 
 
 def design_reviewer_put(db: DB, params: dict, body: dict) -> Any:
@@ -945,7 +1063,20 @@ ROUTES = [
     Route("/v1/library/designs/{id}/reviewers/{sub}", _endpoint(design_reviewer_put), methods=["PUT"]),
     Route("/v1/library/designs/{id}/reviewers/{sub}", _endpoint(design_reviewer_delete), methods=["DELETE"]),
     Route("/v1/library/designs/{id}/share-link", _endpoint(share_link_update), methods=["PUT"]),
+    Route("/v1/library/designs/{id}/access", design_access),
+    Route("/v1/library/designs/{id}/people", _endpoint(design_person_invite), methods=["POST"]),
+    Route("/v1/library/designs/{id}/people/{sub}", _endpoint(design_person_put), methods=["PUT"]),
+    Route("/v1/library/designs/{id}/people/{sub}", _endpoint(design_person_delete), methods=["DELETE"]),
+    Route("/v1/library/designs/{id}/people/{sub}/sign-off", _endpoint(design_person_sign_off), methods=["PUT"]),
+    Route("/v1/library/designs/{id}/scopes/{kind}/{scope}", _endpoint(design_scope_delete), methods=["DELETE"]),
+    Route("/v1/plans/{id}/access", plan_access),
+    Route("/v1/plans/{id}/access", _endpoint(plan_unshare), methods=["DELETE"]),
     Route("/v1/plans/{id}/people", plan_people),
+    Route("/v1/plans/{id}/people", _endpoint(plan_person_invite), methods=["POST"]),
+    Route("/v1/plans/{id}/people/{sub}", _endpoint(plan_person_put), methods=["PUT"]),
+    Route("/v1/plans/{id}/people/{sub}", _endpoint(plan_person_delete), methods=["DELETE"]),
+    Route("/v1/plans/{id}/people/{sub}/sign-off", _endpoint(plan_person_sign_off), methods=["PUT"]),
+    Route("/v1/plans/{id}/scopes/{kind}/{scope}", _endpoint(plan_scope_delete), methods=["DELETE"]),
     Route("/v1/plans/{id}/reviewers/{sub}", _endpoint(plan_reviewer_put), methods=["PUT"]),
     Route("/v1/plans/{id}/reviewers/{sub}", _endpoint(plan_reviewer_delete), methods=["DELETE"]),
     Route("/v1/plans/{id}/share-link", _endpoint(plan_share_link_update), methods=["PUT"]),

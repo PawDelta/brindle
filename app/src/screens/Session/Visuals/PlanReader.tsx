@@ -47,7 +47,6 @@ import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./Do
 import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { DocMarkdown } from "./DocMarkdown";
 import { DraftCard, Review, ReviewStrip, SignOffSheet, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
-import { Reviewers } from "./DocReviewers";
 import { SharePanel } from "./SharePanel";
 import { Policies } from "./DocPolicies";
 import type { LiveClient } from "./DocEditor";
@@ -420,8 +419,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [refreshes, setRefreshes] = useState(0);
   const [raw, setRaw] = useState(false);
   const [sharingOpen, setSharingOpen] = useState(false);
-  // Asked again as the menu opens and once the plan is shared: sharing is what puts it in the Library.
-  const link = useShareLink(shareLink, `${sharingOpen}:${!!receivedPlan.gate}`);
+  // Asked again as the menu opens, once the plan is shared (sharing is what puts it in the Library),
+  // and after Stop sharing for everyone, which turns the link off.
+  const [unshared, setUnshared] = useState(0);
+  const link = useShareLink(shareLink, `${sharingOpen}:${!!receivedPlan.gate}:${unshared}`);
   const [briefOpen, setBriefOpen] = useState(false);
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
   // A suggestion's section text as it is being typed on the page (SuggestEditor).
@@ -975,24 +976,23 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} since={sinceRevs && lastRead !== null ? { from: lastRead, changes: sinceRevs } : null} onShowChanges={() => setTab("history")} />
   ) : undefined;
 
-  // Before its first Library share, retain the scope choice and policy preview.
-  const reviewersPanel = (
-    <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
-      <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={reviewWrite} reviewVersion={reviewVersion} reviewBlocked={reviewBlocked} />
-    </dl>
-  );
-  const canShare = !!gate || (!!sharing && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
+  const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
+  // The first share happens in the panel too: adding a person or a team shares the plan.
+  const canShare = !!gate || (!!sharing && !!sharePeople && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
+  const previewRules = useMemo(() => sharing?.previewPlanPolicies && (() => sharing.previewPlanPolicies!(plan.id).then((r) => r.policies)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the client is fixed for this doc
+    [plan.id]);
   // The link: Pro and up (the daemon says `available`), for whoever may edit the design.
   const linked = shareLink && link.state?.available ? { target: shareLink, state: link.state } : null;
   const shareMenu = (canShare || linked) && <button type="button" aria-label="Share" title="Share" className={`${button} size-7 shrink-0 !p-1.5 ${sharingOpen ? "!border-transparent bg-branch-soft text-branch" : ""}`}
     aria-expanded={sharingOpen} onClick={() => setSharingOpen((o) => !o)}><svg className="size-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden><circle cx="6" cy="5" r="2.5" /><path d="M1.5 14v-2a4.5 4.5 0 019 0v2M11 3a2.5 2.5 0 010 5m2 6v-2a4 4 0 00-1-2.5" /></svg></button>;
-  const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
   const ownReviewer = signers.find((r) => r.you && r.status !== "signed_off");
   const sharePanel = (canShare || linked) && <SharePanel plan={plan} target={sharePeople}
     signOff={sharing && ownReviewer && plan.state !== "approved" ? { sub: ownReviewer.sub!, disabled: busy || reviewBlocked,
       run: () => void reviewWrite(() => sharing.signOffPlan(plan.id, plan.rev, reviewVersion)) } : undefined}
-    nameOf={nameOf} writes={writes} onBusy={setBusy} visible={sharingOpen && !historical} onClose={() => setSharingOpen(false)} fallback={canShare && reviewersPanel}>
-    {sharePeople && !!gate?.policies?.length && <section className="sec"><Policies plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} busy={busy} nameOf={nameOf} write={reviewWrite} /></section>}
+    nameOf={nameOf} writes={writes} onBusy={setBusy} visible={sharingOpen && !historical} onClose={() => setSharingOpen(false)}
+    teams={scopes} directory={directory} owned={!teammate} previewRules={gate ? undefined : previewRules} onStopAll={() => setUnshared((n) => n + 1)}>
+    {!!gate?.policies?.length && <section className="sec"><Policies plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} busy={busy} nameOf={nameOf} write={reviewWrite} /></section>}
     {linked && <ShareLinkPanel target={linked.target} state={linked.state} onState={link.setState} />}
   </SharePanel>;
   const presence = docLive && (

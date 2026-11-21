@@ -201,6 +201,10 @@ if (params.get("share") === "1") {
     libraryPeople: async () => ({ people: people.map((p) => ({ sub: p.id, email: p.email, display_name: p.display_name })), me: "person" }),
     planPeople: async (_id: string, query: { q?: string } = {}) =>
       ({ people: people.filter((p) => !query.q || p.display_name.toLowerCase().includes(query.q.toLowerCase())) }),
+    planAccess: async () => ({ shared: true, kept_here: null, scopes: [{ kind: "group", id: team.id }], people: [
+      { sub: "maya", name: null, access: "comment", sign_off: "required" }, { sub: "jonas", name: null, access: "edit", sign_off: "optional" }] }),
+    invitePlanPerson: async () => plan, setPlanPersonAccess: async () => plan, setPlanPersonSignOff: async () => plan,
+    removePlanPerson: async () => plan, removePlanScope: async () => plan, unsharePlan: async () => plan,
   });
 }
 

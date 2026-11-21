@@ -874,7 +874,19 @@ export interface TrackerLink {
 export type ShareLinkScope = ShareLinkSettingsDTO;
 export type DesignShareLink = DesignShareLinkDTO;
 export type SharePerson = SharePersonDTO;
-export type PeopleQuery = { q?: string; team?: string; role?: string; on_plan?: string };
+export type PeopleQuery = { q?: string; team?: string; role?: string; on_plan?: string; include_unshared?: string };
+
+/* What one person may do with a shared plan. Whether the build waits for their sign-off is separate. */
+export type ShareAccessLevel = "view" | "comment" | "edit";
+/* Who has a plan (brindle/pro/share_access.py): the teams and org it is shared into, each person
+   given it or asked to sign off (never its owner), and, before its first share, whether that share
+   uploads a plan kept on this Mac (null: can't be said). */
+export interface ShareAccess {
+  shared: boolean;
+  kept_here: boolean | null;
+  scopes: { kind: string; id: string }[];
+  people: { sub: string; name: string | null; access: ShareAccessLevel; sign_off: "required" | "optional" | null }[];
+}
 
 export interface DesignWorkItems {
   items: TrackerLink[];
@@ -2384,7 +2396,7 @@ export class DaemonClient {
   }
 
   /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */
-  sharePlan(id: string, scope: { kind: string; id: string }, reviewers: PlanReviewerChoice[]) {
+  sharePlan(id: string, scope: { kind: string; id: string }, reviewers?: PlanReviewerChoice[]) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/share`, { scope, reviewers });
   }
 
@@ -2402,6 +2414,62 @@ export class DaemonClient {
 
   removePlanReviewer(id: string, sub: string) {
     return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/reviewers/${encodeURIComponent(sub)}`, {});
+  }
+
+  /* The share panel (brindle/pro/share_access.py): who has the plan, and one person or scope at a time.
+     Adding the first person uploads the plan and shares it. */
+  planAccess(id: string) {
+    return this.get<ShareAccess>(`/plans/${encodeURIComponent(id)}/access`);
+  }
+
+  invitePlanPerson(id: string, sub: string, access: ShareAccessLevel, signOff: boolean) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff });
+  }
+
+  /* One person's access; the Library keeps their sign-off as it is, in the same write. */
+  setPlanPersonAccess(id: string, sub: string, access: ShareAccessLevel) {
+    return this.put<Plan>(`/plans/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, { access });
+  }
+
+  setPlanPersonSignOff(id: string, sub: string, must: boolean) {
+    return this.put<Plan>(`/plans/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}/sign-off`, { must });
+  }
+
+  removePlanPerson(id: string, sub: string) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, {});
+  }
+
+  removePlanScope(id: string, scope: { kind: string; id: string }) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/scopes/${encodeURIComponent(scope.kind)}/${encodeURIComponent(scope.id)}`, {});
+  }
+
+  /* Stop sharing with every person and scope; the owner keeps it. */
+  unsharePlan(id: string) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/access`, {});
+  }
+
+  designAccess(id: string, repo?: string) {
+    return this.get<ShareAccess>(`/library/designs/${encodeURIComponent(id)}/access`, { repo });
+  }
+
+  inviteDesignPerson(id: string, sub: string, access: ShareAccessLevel, signOff: boolean, repo?: string) {
+    return this.post<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff, ...(repo ? { repo } : {}) });
+  }
+
+  setDesignPersonAccess(id: string, sub: string, access: ShareAccessLevel, repo?: string) {
+    return this.put<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, { access, ...(repo ? { repo } : {}) });
+  }
+
+  setDesignPersonSignOff(id: string, sub: string, must: boolean, repo?: string) {
+    return this.put<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}/sign-off`, { must, ...(repo ? { repo } : {}) });
+  }
+
+  removeDesignPerson(id: string, sub: string, repo?: string) {
+    return this.delete<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
+  removeDesignScope(id: string, scope: { kind: string; id: string }, repo?: string) {
+    return this.delete<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/scopes/${encodeURIComponent(scope.kind)}/${encodeURIComponent(scope.id)}${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
   }
 
   designPeople(id: string, query: PeopleQuery = {}, repo?: string) {

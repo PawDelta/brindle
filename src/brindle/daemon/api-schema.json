@@ -15234,7 +15234,27 @@
     },
     {
       "method": "GET",
+      "path": "/v1/library/designs/{id}/access"
+    },
+    {
+      "method": "GET",
       "path": "/v1/library/designs/{id}/people"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/designs/{id}/people"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/library/designs/{id}/people/{sub}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/library/designs/{id}/people/{sub}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/library/designs/{id}/people/{sub}/sign-off"
     },
     {
       "method": "GET",
@@ -15251,6 +15271,10 @@
     {
       "method": "PUT",
       "path": "/v1/library/designs/{id}/reviewers/{sub}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/library/designs/{id}/scopes/{kind}/{scope}"
     },
     {
       "method": "DELETE",
@@ -15401,6 +15425,14 @@
       "path": "/v1/plans/{id}"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/plans/{id}/access"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}/access"
+    },
+    {
       "method": "POST",
       "path": "/v1/plans/{id}/alongside/{task}/stop"
     },
@@ -15442,6 +15474,22 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/people"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/plans/{id}/people/{sub}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/plans/{id}/people/{sub}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/plans/{id}/people/{sub}/sign-off"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/policy-ask"
     },
     {
@@ -15471,6 +15519,10 @@
     {
       "method": "GET",
       "path": "/v1/plans/{id}/revisions/{n}/changes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/plans/{id}/scopes/{kind}/{scope}"
     },
     {
       "method": "POST",

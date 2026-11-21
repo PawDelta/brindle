@@ -62,3 +62,23 @@
 .share-panel .foot{height:auto;min-height:28px;flex-wrap:wrap;overflow-wrap:anywhere}
 .share-panel .ic{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 .share-panel .ic.sm{width:11px;height:11px}
+/* Option A's access list: a name with a line under it about sign-off, and what they may do. */
+.share-panel .r.who{flex-wrap:nowrap;align-items:flex-start}
+.share-panel .r.who>.av{margin-top:2px}
+.share-panel .r.who>.sel,.share-panel .r.who>.st,.share-panel .r.who>.sp-btn{flex:none;margin-top:1px}
+.share-panel .r.who .sel{padding:2px 1px 2px 2px;font-size:12px}
+.share-panel .av.team{border-radius:5px}
+.share-panel .note{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;line-height:1.45;color:var(--ink-3)}
+.share-panel .note.ok{color:var(--pass)}
+.share-panel .note.wait{color:var(--sap)}
+.share-panel .note.bad{color:var(--fail)}
+.share-panel .mx{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-3)}
+.share-panel .mi.box{justify-content:flex-start;gap:8px;padding-top:6px;padding-bottom:6px}
+.share-panel .mi.sep{border-top:1px solid var(--line);border-radius:0 0 4px 4px;margin-top:4px}
+.share-panel .bx{display:grid;place-items:center;flex:none;width:15px;height:15px;border-radius:3px;box-shadow:inset 0 0 0 1.5px var(--line-strong);color:var(--on-branch)}
+.share-panel .bx.on{background:var(--branch);box-shadow:none}
+.share-panel .menu.add{width:auto;margin:6px 0 2px}
+.share-panel .menu .hint.up{padding:0 8px}
+.share-panel .acts{display:flex;justify-content:flex-end;gap:6px;padding:6px 4px 4px}
+.share-panel .sp-btn.main{background:var(--branch);border-color:var(--branch);color:var(--on-branch)}
+.share-panel .sp-btn.stop{padding-left:0;color:var(--ink-2);margin-top:8px}
