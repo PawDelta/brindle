@@ -46,6 +46,8 @@ it("typed_words_reach_the_engine", async () => {
   // The gate is no wider: what's pasted is still not the person's typing (reported as not typed, no words).
   act(() => { term.paste("render it now"); term.input("\r", true); });
   await waitFor(() => expect(vouched).toEqual([["test it now", true], [null, false]]));
+  shown.unmount();
+  vi.unstubAllGlobals();
 });
 
 // A pane follows a theme switch made while it is live, both ways: xterm.js draws in the new colours and contrast,
@@ -60,6 +62,7 @@ it.each(["claude", "codex"])("a live %s pane follows the app theme light to dark
   style.textContent = block(":root") + block(':root[data-theme="light"]');
   document.head.append(style);
   document.documentElement.dataset.theme = "light";
+  let shown: ReturnType<typeof render> | undefined;
   try {
     const agent = { id: "sup1", provider, status: "idle", window: "s:@1", tmux_server: "brindle" } as AgentDTO;
     const client = { meta: async () => ({ visuals: true }), agent: async () => agent, transcript: async () => ({ cursor: "", reset: true, messages: [] }) } as unknown as DaemonClient;
@@ -68,7 +71,7 @@ it.each(["claude", "codex"])("a live %s pane follows the app theme light to dark
     const views = { status: { kind: "ready", tmux: "tmux 3.8" }, recheck() {}, copy: async () => {}, paste: async () => "",
       open: (_at, _size, given) => { handlers = given; return { write: (d: string) => written.push(d), resize() {}, focus() {}, close() {} }; } } as PtyViews;
     const recovery = { resume: async () => {}, busy: false, notice: null, preflight: null, setPreflight() {}, attempt: 0 };
-    render(<DaemonContext.Provider value={client}><PtyViewsProvider value={views}><ProviderSurface repo="/repo" root="sup1" agent={agent} alive sessionStatus="idle" recovery={recovery} /></PtyViewsProvider></DaemonContext.Provider>);
+    shown = render(<DaemonContext.Provider value={client}><PtyViewsProvider value={views}><ProviderSurface repo="/repo" root="sup1" agent={agent} alive sessionStatus="idle" recovery={recovery} /></PtyViewsProvider></DaemonContext.Provider>);
     await waitFor(() => expect(handlers).toBeTruthy());
     const term = xterms.at(-1)!;
     // tmux sends these, and reads xterm's answers to the colour query.
@@ -92,6 +95,8 @@ it.each(["claude", "codex"])("a live %s pane follows the app theme light to dark
     }
     expect(shellBg()).toBe("#ffffff");
   } finally {
+    // Unmounted before the globals go: no React work of this pane may outlive the test.
+    shown?.unmount();
     style.remove();
     delete document.documentElement.dataset.theme;
     vi.unstubAllGlobals();
