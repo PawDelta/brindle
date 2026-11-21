@@ -34,7 +34,7 @@ REVIEW, SIGNED, COMMENT = "review_requested", "signed_off", "shared_doc_comment"
 SHARED, ACCESS = "shared_with_you", "access_requested"
 PROGRESS = "signoff_progress"       # the Inbox's own kind for a design's sign-offs ("signed_off" is the
                                     # author's local card once every sign-off is in)
-NEW_KINDS = (PROGRESS, COMMENT)     # Inbox kinds that only exist with the team Inbox
+NEW_KINDS = (PROGRESS, COMMENT, SHARED, ACCESS)     # Inbox kinds that only exist with the team Inbox
 # Rows that ask nothing of the person: a teammate's action, or an admin's notice
 # (the owner-approved Inbox lists notices under From the team). Every other kind
 # waits on them, a review request among them: the plan can't go on until they review it.

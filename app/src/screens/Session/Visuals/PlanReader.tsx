@@ -1158,6 +1158,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const teammateBar = teammate && (
       <>
         <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : teammate.signedOff ? "signed" : "ready"} data-left={left.length}>
+          {(teammate.rights.signOff || teammate.signedOff || left.length > 0) && <span className="text-xs text-ink-3">{accessLine}</span>}
           {left.length ? nextUp : (
             <>
               <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink">
@@ -1398,6 +1399,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? (
           <>
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
+              {(teammate.rights.signOff || teammate.signedOff || next) && <span className="text-xs text-ink-3">{accessLine}</span>}
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Next</span>
                 <span className="truncate">{next ? next.title : teammate.signedOff ? (frozen ? `You signed off version ${frozen.id}` : `You signed off r${plan.rev}`) : teammate.rights.signOff ? (frozen ? signName : "Sign off this revision") : accessLine}</span>

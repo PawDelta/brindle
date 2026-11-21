@@ -91,7 +91,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
           top={<AccessRequest key={docId} client={client} doc={shown} repo={repo} />}
           shareLink={shown.can_edit ? designLinkTarget(client, docId, repo) : undefined}
           liveClient={client.visualLive ? client as LiveClient : undefined}
-          chrome={{ lead, modes: client.visualLive ? MODES : COLUMN_MODES, allowed, onMode: setMode }} />
+          chrome={{ lead, modes: (client.visualLive ? MODES : COLUMN_MODES).map((m) => m.id === "viewing" && !shown.can_comment ? { ...m, hint: "Read this plan" } : m), allowed, onMode: setMode }} />
       ) : (
         <>
           <ReaderBar lead={lead} />
