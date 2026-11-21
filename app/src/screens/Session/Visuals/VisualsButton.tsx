@@ -41,9 +41,8 @@ export function VisualsButton({ visuals, onOpen }: { visuals: VisualDTO[] | null
   };
   return (
     <div ref={box} className="relative">
-      <button type="button" className={`${button} relative gap-1.5 px-2 py-1 text-ink-2 hover:bg-sap/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sap`} aria-label="Docs" title="Docs" aria-expanded={open} aria-haspopup="true" data-testid="visuals-button" onClick={() => setOpen((o) => !o)}>
+      <button type="button" className={`${button} relative px-2 py-1 text-ink-2 hover:bg-sap/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sap`} aria-label="Documents" title="Documents" aria-expanded={open} aria-haspopup="true" data-testid="visuals-button" onClick={() => setOpen((o) => !o)}>
         <FileIcon size={16} />
-        <span>Docs</span>
         {(holding || visuals.some((v) => v.unread)) && (
           <span data-testid="visuals-dot" className="absolute -right-1 -top-1 size-2.5 rounded-full bg-sap ring-2 ring-canvas" aria-label={holding ? "holding" : "unread"} />
         )}
