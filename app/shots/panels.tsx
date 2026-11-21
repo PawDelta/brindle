@@ -81,6 +81,9 @@ function Panels() {
   if (params.get("panel") === "terminal") return <PtyViewsProvider value={bridge}><TerminalProvider client={shell} here={{ repo: "/Users/hannah/Projects/brindle", name: "brindle", cwd: "/Users/hannah/Projects/brindle", why: "started at the repo root" }}><main className="flex h-screen flex-col justify-end bg-canvas"><OpenTerminal /></main></TerminalProvider></PtyViewsProvider>;
   const state = params.get("state") ?? "people";
   if (state === "reviewer") return <main className="flex h-screen flex-col bg-canvas"><DesignDoc source={source} plan={{ ...plan, can_edit: false }} mode="viewing" writes={writes} teammate={{ me: "sam", author: "alex", rights: { comment: false, suggest: false, signOff: false }, signedOff: false, directory }} /></main>;
+  // A plan not yet shared, as the reader hands it to the panel (PlanReader's reviewersPanel): no link until it is in the Library.
+  if (state === "first") return <main className="flex h-screen justify-end bg-canvas"><SharePanel plan={{ ...plan, gate: null }} nameOf={nameOf} writes={writes} onBusy={() => {}} visible onClose={() => {}}
+    fallback={<dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2"><Reviewers plan={{ ...plan, gate: null }} client={sharing} directory={directory} adminOrg={null} me="alex" scopes={scopes} busy={false} nameOf={nameOf} write={async () => true} /></dl>} /></main>;
   return <main className="flex h-screen justify-end bg-canvas"><SharePanel plan={state === "scopes" ? { ...plan, gate: null } : plan} target={state === "scopes" ? undefined : target} nameOf={nameOf} writes={writes} onBusy={() => {}} visible onClose={() => {}}
     fallback={<dl><Reviewers plan={{ ...plan, gate: null }} client={sharing} directory={directory} adminOrg={null} me="alex" scopes={scopes} busy={false} nameOf={nameOf} write={async () => true} /></dl>}>
     <ShareLinkPanel target={links} state={link} onState={() => {}} />

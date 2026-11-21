@@ -100,6 +100,15 @@ review column open, the next decision's table, a highlight with its comment bar,
 the column, the column collapsed to its strip, Suggesting with a tracked
 change on the page, and signed off under its live board, in both themes.
 
+## The Library and sharing review
+
+`node shots/library-ux-shots.mjs [--out <dir>] [--only current|mockups] [--channel chrome]`
+takes today's Settings › Library (the `settings-library*` scenes, `libraryUx.ts`: the defaults,
+the location just switched, an org's enforced switches, an admin), the share panel's states and
+a teammate's reader (`panels.tsx`), the Library and the Inbox into `<dir>/current`, and the
+improved flows drawn in `library-ux.tsx` into `<dir>/mockups`, each in both themes. `<dir>`
+defaults to `~/Documents/brindle-design-docs/library-ux`.
+
 ## Timing the wheel over a live Claude Code
 
 `npm run test:e2e -- --grep smooth` swipes a live Claude Code (the `pty`
