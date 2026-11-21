@@ -8,7 +8,7 @@ import App from "../src/App";
 import { PtyViewsProvider } from "../src/api/ptyView";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import { markOnboarded } from "../src/api/providers";
-import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type PlanVerdict, type VisualDTO } from "../src/api/client";
+import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type PlanVerdict, type SharePerson, type VisualDTO } from "../src/api/client";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
 import { FakeDaemon } from "../src/test/fakeDaemon";
@@ -184,6 +184,25 @@ Object.assign(client, {
   exportDoc: async () => ({ filename: "doc.md", mime: "text/markdown" }),
   exportVisual: async () => ({ filename: "visual.html", mime: "text/html", content_b64: "" }),
 });
+
+// ?share=1: a team to share into and its people, so the plan's Share panel opens (plan-shots' and the theme audit's
+// share panel): two people already on the plan, three to add.
+if (params.get("share") === "1") {
+  const team = { id: "t-platform", name: "Platform" };
+  const person = (id: string, display_name: string, role: string, on_plan_role: SharePerson["on_plan_role"] = null): SharePerson =>
+    ({ id, display_name, email: `${id}@example.com`, role, teams: [team], on_plan: on_plan_role !== null, on_plan_role });
+  const people = [person("maya", "Maya Okafor", "Engineering lead", "required"), person("jonas", "Jonas Berg", "Backend", "optional"),
+    person("priya", "Priya Raman", "Security"), person("tom", "Tom Alvarez", "Design"), person("ana", "Ana Silva", "Platform")];
+  // Shared already: its gate holds the two on the plan.
+  plan = { ...plan, gate: { state: "ready", required: 1, signed: 0, waiting_on: ["maya"], reviewers: [
+    { sub: "maya", required: true, status: "waiting" }, { sub: "jonas", required: false, status: "signed_off" }] } };
+  Object.assign(client, {
+    docScopes: async () => ({ scopes: [{ kind: "team", id: team.id, name: team.name, can_share: true }] }),
+    libraryPeople: async () => ({ people: people.map((p) => ({ sub: p.id, email: p.email, display_name: p.display_name })), me: "person" }),
+    planPeople: async (_id: string, query: { q?: string } = {}) =>
+      ({ people: people.filter((p) => !query.q || p.display_name.toLowerCase().includes(query.q.toLowerCase())) }),
+  });
+}
 
 Object.assign(window, { fake: daemon });
 const store = createAppStore();

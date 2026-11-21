@@ -311,7 +311,7 @@ export function TerminalToggle() {
         &gt;_
       </span>
       Terminal
-      <span className="font-mono text-[10px] opacity-80" aria-hidden>
+      <span className="font-mono text-[10px] opacity-[var(--dim)]" aria-hidden>
         ⌃`
       </span>
     </button>
@@ -495,7 +495,7 @@ export function ShellView({ tab, onEnded }: { tab: ShellTab; onEnded(): void }) 
       copy={views.copy}
       paste={views.paste}
       theme={paneTheme}
-      minimumContrastRatio={chatContrast(appTheme)}
+      {...chatContrast(appTheme)}
       onView={(v) => {
         if (v.kind === "closed") onEnded();
         if (v.kind === "error") setFailed(plain(v.message));

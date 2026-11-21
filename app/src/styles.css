@@ -59,9 +59,9 @@
     --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
     --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
     --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
-    --fawn: #06744f;
+    --fawn: #066f4c;
     --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
-    --pass: #06744f; --pass-soft: rgba(6, 116, 79, 0.1);
+    --pass: #066f4c; --pass-soft: rgba(6, 111, 76, 0.1);
     --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
     --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
     --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
@@ -81,9 +81,9 @@
   --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
   --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
   --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
-  --fawn: #06744f;
+  --fawn: #066f4c;
   --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
-  --pass: #06744f; --pass-soft: rgba(6, 116, 79, 0.1);
+  --pass: #066f4c; --pass-soft: rgba(6, 111, 76, 0.1);
   --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
   --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
   --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;

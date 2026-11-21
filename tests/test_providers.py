@@ -39,7 +39,7 @@ def _brindle_folder(tmp_path, monkeypatch):
 @pytest.mark.parametrize("entry", ["trust", "seed", "onboarding"])
 @pytest.mark.parametrize("theme", ["dark-ansi", None])
 @pytest.mark.variant("each launch/first-run entry must migrate settings, including an absent theme")
-def test_theme_ansi_brindle_seeded_moves_to_the_builtin_theme_on_an_existing_owned_launch(tmp_path, monkeypatch, entry, theme):
+def test_theme_ansi_brindle_seeded_moves_to_auto_on_an_existing_owned_launch(tmp_path, monkeypatch, entry, theme):
     # An already-onboarded brindle folder (no onboarding again) whose theme brindle seeded as "dark".
     config, work = _brindle_folder(tmp_path, monkeypatch)
     config.write_text(json.dumps({"hasCompletedOnboarding": True, "projects": {work: {"hasTrustDialogAccepted": True}}}))
@@ -54,14 +54,14 @@ def test_theme_ansi_brindle_seeded_moves_to_the_builtin_theme_on_an_existing_own
         providers.seed_ci_config([])
     else:
         providers.record_claude_onboarding()
-    assert json.loads(settings.read_text()) == {"theme": "dark", "env": {"EXAMPLE": "kept"}}
+    assert json.loads(settings.read_text()) == {"theme": "auto", "env": {"EXAMPLE": "kept"}}
     assert "theme" not in json.loads(config.read_text())
 
 
 @pytest.mark.parametrize("app,before,after", [
-    pytest.param("light", "dark-ansi", "light", marks=pytest.mark.variant("an ANSI theme brindle seeded moves to the built-in light")),
-    pytest.param("dark", "light-ansi", "dark", marks=pytest.mark.variant("flipping back to dark replaces what light wrote")),
-    pytest.param("light", "dark", "light", marks=pytest.mark.variant("the first seed value is also brindle's")),
+    pytest.param("light", "dark-ansi", "auto", marks=pytest.mark.variant("an ANSI theme brindle seeded moves to auto")),
+    pytest.param("dark", "light", "auto", marks=pytest.mark.variant("a fixed theme an earlier release seeded moves to auto")),
+    pytest.param("light", "auto", "auto", marks=pytest.mark.variant("auto stays auto whichever way the app flips")),
     pytest.param("light", "solarized", "solarized", marks=pytest.mark.variant("a person's own pick is kept")),
 ])
 def test_app_theme_sets_brindles_claude_theme_and_is_remembered(tmp_path, monkeypatch, app, before, after):

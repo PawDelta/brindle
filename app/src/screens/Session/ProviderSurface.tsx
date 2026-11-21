@@ -118,7 +118,8 @@ interface PaneCheck {
 export function ProviderSurface({ repo, root, agent: listedAgent, alive, sessionStatus, restarting = false, sessionName, credentials, recovery, hidePrompt = false, onComposeText }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
   // Light: the light palette and ground; dark keeps the shell block's own colours (PtyTerminal's default). Both
-  // lift text to AA against its cell's ground (chatContrast): Claude Code's diff highlights fail it in dark too.
+  // lift text (chatContrast): in dark to AA against every cell's ground; in light to AA on the pane's own field and
+  // to 3:1 on grounds the program drew, so Claude Code's light diffs keep their colours.
   const appTheme = useAppTheme();
   const paneTheme = useMemo(() => appTheme === "light" ? chatTheme("light") : undefined, [appTheme]);
   // The pane's foot as last read, for the agent it was read from: another agent's view starts with nothing cropped.
@@ -254,7 +255,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
       {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
           that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}
       {agent && (live || card?.kind === "starting") && ready && target && (
-        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} attachments={attachments} theme={paneTheme} minimumContrastRatio={chatContrast(appTheme)} onView={setView} cropRows={cropRows} cropFrom={cropFrom} onRows={readPrompt} typeElsewhere={cropRows ? onComposeText : undefined} />
+        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} attachments={attachments} theme={paneTheme} {...chatContrast(appTheme)} onView={setView} cropRows={cropRows} cropFrom={cropFrom} onRows={readPrompt} typeElsewhere={cropRows ? onComposeText : undefined} />
       )}
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
           worker's pane (the supervisor's chat is what the continue brings back) as a strip, else as the surface. */}
@@ -338,7 +339,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
             </p>
           )}
           {leftView?.kind !== "error" && leftView?.kind !== "closed" && (
-            <PtyTerminal key={`${agent.id}:left:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} theme={paneTheme} minimumContrastRatio={chatContrast(appTheme)} onView={setLeftView} />
+            <PtyTerminal key={`${agent.id}:left:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} theme={paneTheme} {...chatContrast(appTheme)} onView={setLeftView} />
           )}
         </>
       )}
