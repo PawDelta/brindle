@@ -3630,11 +3630,22 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
     if syntax and alone and unchecked == "allow" and unread and not any(isinstance(e, _DenyMayCover) for e in unread):
         return Decision("allow", f"brindle can't check it, and the {permission_groups.UNVERIFIABLE} setting runs "
                                  f"such commands", ruled.rule if ruled else None)
-    if syntax and not _opaque_code_only(req):
-        # A syntax ask is work for the agent, before any real approval can be
-        # requested. Keep the marker internal until all parts and settings
-        # have been checked, so readable commands retain their normal rules.
-        return Decision("deny", SHELL_SYNTAX_GUIDANCE, ruled.rule if ruled else None, asks)
+    if syntax:
+        opaque_parts = _opaque_code_parts(req)
+        if opaque_parts is None:
+            # A syntax ask is work for the agent, before any real approval can be
+            # requested. Keep the marker internal until all parts and settings
+            # have been checked, so readable commands retain their normal rules.
+            return Decision("deny", SHELL_SYNTAX_GUIDANCE, ruled.rule if ruled else None, asks)
+        # Runtime code stays with the person, but its readable redirects still
+        # obey path restrictions even though the ordinary reader stopped early.
+        for part in opaque_parts:
+            for kind, paths in (("read", part.reads), ("write", part.writes)):
+                for path in paths:
+                    redirected = replace(req, kind=kind, command=None, path=path, cwd=part.cwd or req.cwd)
+                    denied = _rule_decision(redirected, rules, checks)
+                    if denied is not None and denied.decision == "deny":
+                        return denied
     if ruled is not None:
         return Decision("ask", ruled.reason + "; asking the user", ruled.rule, ruled.asks)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
@@ -5715,12 +5726,20 @@ class _PartReader:
             self.read(" ".join(part.words[2 if part.words[1:2] == ["--"] else 1:]), definite, chains=False)
             return
         if program == "eval":
-            if not (part.globs or part.writes or part.reads):
+            if not (part.globs or part.redirect_glob
+                    or any(path in part.unresolved for path in (*part.reads, *part.writes))):
+                if self.code_input:
+                    part.unknown = False
+                    part.unresolved.clear()    # only eval's code words remain unknown
+                    self.parts.append(part)
                 raise _OpaqueCode("eval runs what only the run knows")
             raise _Unverifiable("eval runs what only the run knows")
         if (program in ("source", ".") and self.code_input and len(part.words) >= 2
                 and part.words[1].startswith("<(") and part.unresolved == [part.words[1]]
-                and not (part.globs or part.writes or part.reads)):
+                and not (part.globs or part.redirect_glob)):
+            part.unknown = False
+            part.unresolved.clear()
+            self.parts.append(part)
             raise _OpaqueCode("source runs process output")
         if program in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
@@ -5775,9 +5794,15 @@ class _PartReader:
                 if (self.code_input and source is not None and source.startswith("<(")
                         and part.unresolved == [source]):
                     part.unknown = False    # only this process output is left to the person
+                    part.unresolved.clear()
                     raise _OpaqueCode(f"{name} runs process output")
                 raise _Unverifiable(f"{name} runs what only the run knows")
             if source is None and fed:
+                if self.code_input:
+                    for path in part.reads:
+                        if path.startswith("<(") and path in part.unresolved:
+                            # Exempt the code input, keeping any unresolved output target.
+                            part.unresolved.remove(path)
                 raise _OpaqueCode(f"{name} runs what it is fed")
             if code:
                 # nullglob drops unmatched words instead of passing them literally.
@@ -5909,8 +5934,8 @@ def shell_parts(req: Request, why: list[ValueError] | None = None, *,
     return reader.parts or None
 
 
-def _opaque_code_only(req: Request) -> bool:
-    """Whether runtime code input is the only obstacle to reading the command.
+def _opaque_code_parts(req: Request) -> list[ShellPart] | None:
+    """Parts when only runtime code input is unreadable, else None.
 
     This second pass classifies an unresolved ask; it never approves a command.
     Continue past opaque code so a later expansion or unsupported construct
@@ -5920,8 +5945,11 @@ def _opaque_code_only(req: Request) -> bool:
     try:
         reader.read(req.command)
     except ValueError:
-        return False
-    return reader.opaque and all(not (part.unknown or part.globs or part.redirect_glob) for part in reader.parts)
+        return None
+    if reader.opaque and all(not (part.unknown or part.unresolved or part.globs or part.redirect_glob)
+                             for part in reader.parts):
+        return reader.parts
+    return None
 
 
 
