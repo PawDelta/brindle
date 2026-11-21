@@ -1064,12 +1064,14 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
         claimed = db.conn.execute("INSERT OR IGNORE INTO review_death_restarts (workspace_id, sha) "
                                   "VALUES (?,?)", (ws.id, sha)).rowcount
         if claimed:
-            profile: str | None = reviewer.profile
+            candidates = [reviewer.profile]
             if cause is not None:
-                profile, skipped = _other_provider_reviewer(db, cfg, reviewer, ws, sha)
-            if profile is not None:
+                candidates, skipped = _other_provider_reviewers(db, cfg, reviewer, ws, sha)
+            if candidates:
                 parent = db.get_agent(worker.parent_id) if worker.parent_id else None
                 db.update_agent(reviewer.id, unreported_noted=int(time.time()))
+            # One recovery per commit, which goes down the list until one starts.
+            for profile in candidates:
                 try:
                     replacement = agents.request_review(
                         db, parent, ws, profile, cfg=cfg,
@@ -1087,7 +1089,7 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
                 except agents.ReviewHeadMoved:
                     return True
                 except (agents.AgentError, tmux.TmuxError, OSError) as exc:
-                    error += " Replacement could not start: " + redact.mask(str(exc))[:1000]
+                    error += f" Replacement {profile} could not start: " + redact.mask(str(exc))[:1000]
         from brindle import quota
 
         name = quota.NAMES.get(reviewer.provider or "", reviewer.provider or "the reviewer's provider")
@@ -1114,14 +1116,15 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
         return True
 
 
-def _other_provider_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Workspace,
-                             sha: str) -> tuple[str | None, str]:
-    """A reviewer profile on a provider other than dead ``reviewer``'s that
-    can run now and the repo allows, cascading the way review routing does
-    (``agents._review_choice``): the repo's reviewer and fallbacks, then the
-    built-in reviewers unless the owner locked the reviewer list. A profile
-    another live reviewer of ``sha`` runs is left to it. (None, why each
-    candidate was skipped) when none can run."""
+def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Workspace,
+                              sha: str) -> tuple[list[str], str]:
+    """The reviewer profiles on providers other than dead ``reviewer``'s that
+    can run now and the repo allows, best first, cascading the way review
+    routing does (``agents._review_choice``): the repo's reviewer and
+    fallbacks, then the built-in reviewers unless the owner locked the
+    reviewer list. A profile another live reviewer of ``sha`` runs is left to
+    it. Also why each candidate was skipped (the list is empty when none can
+    run)."""
     from brindle import cascade
     from brindle.profiles import load_profile
 
@@ -1148,7 +1151,7 @@ def _other_provider_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Works
 
     found = cascade.run("reviewer", pool, why_not, repo_root=ws.repo_root,
                         after=[reviewer.profile], pinned=locked)
-    return found.first, "; ".join(why for _, why in found.skipped)
+    return found.order, "; ".join(why for _, why in found.skipped)
 
 
 def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:

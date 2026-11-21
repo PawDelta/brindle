@@ -163,7 +163,7 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
         assert db.get_agent(row.id).failed_why is None
 
 
-@pytest.mark.parametrize("other_provider", [True, False])
+@pytest.mark.parametrize("other_provider", [True, False, "first-fails"])
 def test_reviewer_dead_of_provider_failure_moves_to_another_provider(db, repo, monkeypatch, other_provider):
     """A Codex reviewer whose CLI can't read its account at startup would die
     the same way on a plain restart: the restart goes to another provider, and
@@ -196,14 +196,19 @@ def test_reviewer_dead_of_provider_failure_moves_to_another_provider(db, repo, m
 
     def launch(db_, a, ws_, **kw):
         launched.append(a)
+        if other_provider == "first-fails" and len(launched) == 1:
+            raise OSError("new-window failed")   # the best fallback can't start; the next one must
         db.update_agent(a.id, tmux_window="%3", status="processing")
 
     monkeypatch.setattr(agents, "_launch_resolved", launch)
 
     assert pipeline.on_reviewer_dead(db, db.get_agent("rev0"), ws)
     if other_provider:
-        assert [(a.review_sha, a.provider != "codex") for a in launched] == [(sha, True)]
-        assert db.get_agent(launched[0].id).review_slot == ""
+        started = launched[-1]
+        assert [(a.review_sha, a.provider != "codex") for a in launched] == (
+            [(sha, True)] * (2 if other_provider == "first-fails" else 1))
+        assert len({a.profile for a in launched}) == len(launched)
+        assert db.get_agent(started.id).review_slot == ""
         assert db.get_agent("w1").pipeline == "reviewing"
         assert db.get_agent("rev0").failed_why is None
         assert drain(db) == []
