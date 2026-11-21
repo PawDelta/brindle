@@ -174,7 +174,7 @@ def test_shell_forms(tmp_path, command, expected):
     pytest.param('grep x secrets/*', "ask", marks=pytest.mark.variant("bypass: search operands still reach read denies")),
     pytest.param('grep x -- --include=*.env', "ask", marks=pytest.mark.variant("bypass: after -- this is a file operand")),
     pytest.param('grep -f --include=*.env README.md', "ask", marks=pytest.mark.variant("bypass: a pattern-file argument")),
-    pytest.param('grep x README.md --include=blocked*.env', "ask", marks=pytest.mark.variant("bypass: shell expansion can match a bash deny")),
+    pytest.param('grep x README.md --include=blocked*.env', "deny", marks=pytest.mark.variant("bypass: shell expansion can match a bash deny")),
     pytest.param('grep "$(blocked)" . --include=*.py', "deny", marks=pytest.mark.variant("bypass: live substitution")),
     pytest.param('grep "`blocked`" .', "deny", marks=pytest.mark.variant("bypass: live backticks")),
     pytest.param('grep "x|y" . >out', "ask", marks=pytest.mark.variant("bypass: output redirect")),

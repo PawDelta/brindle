@@ -54,12 +54,110 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
     permissions.add_rule("bash", "gh api blocked", "deny", "prefix")
     assert permissions.decide(replace(req, command="gh api blocked")).decision == "deny"
     assert permissions.decide(replace(req, command="gh api **/blocked")).decision == "ask"
+    permissions.add_rule("read", str(tmp_path / "blocked"), "deny", "exact")
+    assert permissions.decide(replace(req, command="pytest **/blocked")).decision != "allow"
 
     # nullglob removes an unmatched argument, bringing a denied prefix together.
     permissions.apply_preset("autonomous")
     permissions.add_rule("bash", "gh api blocked", "deny", "prefix")
     req = replace(req, command="bash -O nullglob -c 'gh api missing?match blocked'")
     assert permissions.decide(req).decision != "allow"
+
+
+@pytest.mark.parametrize("command, protected, expected", [
+    pytest.param(
+        '.venv/bin/python -m brindle baseline --base HEAD -- python -m pytest '
+        'tests/test_efficiency_review.py::test_review_stall_stops_only_repeated_findings_past_cap[True] -q',
+        False, "allow", id="pytest-selector",
+        marks=pytest.mark.variant("a literal pytest selector has a bounded bracket class")),
+    pytest.param("uv run pytest tests/test_*.py -q", False, "allow", id="pytest-files",
+                 marks=pytest.mark.variant("replayed pytest file globs use their bounded matches")),
+    pytest.param("uv run pytest tests/test_*.py -q", True, "deny", id="pytest-denied-file",
+                 marks=pytest.mark.variant("a resolved pytest filename still matches a bash deny")),
+    pytest.param("strings {root}/app/*", False, "allow", id="strings-files",
+                 marks=pytest.mark.variant("replayed strings over application binaries uses a read snapshot")),
+    pytest.param("file renders/*.png", False, "allow", id="file-glob",
+                 marks=pytest.mark.variant("replayed file inspection uses a read snapshot")),
+    pytest.param('for f in tests/*.py; do echo "$f"; head "$f"; done', False, "allow", id="read-loop",
+                 marks=pytest.mark.variant("a glob loop can snapshot when every body command only reads")),
+    pytest.param('for f in tests/*.py; do strings "$f"; done', False, "deny", id="loop-iteration-deny",
+                 marks=pytest.mark.variant("a deny on the second glob iteration sees its individual invocation")),
+    pytest.param('for f in renders/*.png; do file "$f" "$f"; done', False, "deny", id="loop-repeated-binding",
+                 marks=pytest.mark.variant("each quoted reference keeps the same individual filename with spaces")),
+    pytest.param('for f in tests/*.py; do echo "$f"; touch marker; done', False, "restricted", id="write-loop",
+                 marks=pytest.mark.variant("a write anywhere in the loop prevents its read snapshot")),
+    pytest.param("cp tests/test_*.py output/", False, "restricted", id="writer",
+                 marks=pytest.mark.variant("filesystem snapshot proof is restricted to reads and test runs")),
+    pytest.param("gh api bl[ox]cked", False, "restricted", id="bracket-overlap",
+                 marks=pytest.mark.variant("a finite bracket class may still form a denied argument")),
+    pytest.param("git status && D=/tmp/example; git worktree add $D main", False, "restricted", id="chain-escape",
+                 marks=pytest.mark.variant("a conditional assignment is unknown after its success chain ends")),
+    pytest.param("git status && D=$(pwd) && git worktree add $D main", False, "restricted", id="chain-computed",
+                 marks=pytest.mark.variant("a success chain never guesses substitution output")),
+    pytest.param("git fetch -q origin main && D=/tmp/example && git worktree add -q --detach $D origin/main",
+                 False, "allow", id="chain-literal",
+                 marks=pytest.mark.variant("a literal assignment is known along its success chain")),
+    pytest.param("git status && D=~/.aws && cat $D/credentials", False, "deny", id="chain-credential",
+                 marks=pytest.mark.variant("a success chain still denies a resolved credential path")),
+    pytest.param("git status && D=blocked && gh api $D", False, "deny", id="chain-rule",
+                 marks=pytest.mark.variant("a normal bash deny sees the resolved success-path value")),
+    pytest.param('git status && D=allowed && N=D && read "$N" && gh api $D', False, "restricted", id="chain-setter",
+                 marks=pytest.mark.variant("an indirect variable setter invalidates success-path literals")),
+    pytest.param("git status && D=allowed && D=blocked : && gh api $D", False, "restricted", id="chain-prefix",
+                 marks=pytest.mark.variant("a special builtin may retain its leading environment assignment")),
+    pytest.param('git status && D= && echo "${D:=blocked}" && gh api $D', False, "restricted", id="chain-parameter",
+                 marks=pytest.mark.variant("a parameter operator can set a value even as a plain command argument")),
+])
+def test_replayed_shell_constructs_keep_restrictions(tmp_path, command, protected, expected):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / ("test_daemon.json.py" if protected else "test_public.py")).touch()
+    (tmp_path / "tests" / "test_second.py").touch()
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "binary").touch()
+    (tmp_path / "renders").mkdir()
+    (tmp_path / "renders" / "one.png").touch()
+    (tmp_path / "renders" / "two words.png").touch()
+    here = str(tmp_path)
+    command = command.replace("{root}", here)
+    req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
+    rules = [*permissions.preset_rules("autonomous"), permissions.Rule("bash", "gh api blocked", "exact", "deny"),
+             permissions.Rule("bash", "strings tests/test_second.py", "exact", "deny"),
+             permissions.Rule("bash", "file renders/two words.png renders/two words.png", "exact", "deny")]
+    got = permissions.decide(req, rules=rules, unmatched="allow", saved=[], groups={})
+    assert got.decision in (("ask", "deny") if expected == "restricted" else (expected,)), got.reason
+
+
+def test_shell_replay_recovers_full_source_without_guessing_truncated_requests(tmp_path):
+    import importlib.util
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "replay_shell_syntax", Path(__file__).resolve().parent.parent / "scripts/replay_shell_syntax.py")
+    replay = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(replay)
+
+    command = "printf 'first\nsecond'"
+    req = permissions.Request("claude", "bash", "Bash", command=command)
+    rows = [{"id": 1, "request_id": "tool-1", "summary": "Bash: printf…"},
+            {"id": 2, "request_id": "missing", "summary": "Bash: missing…"},
+            {"id": 3, "request_id": "ambiguous", "summary": req.summary()}]
+    folder = tmp_path / "project"
+    folder.mkdir()
+    entries = [{"type": "assistant", "timestamp": "2026-11-20T12:00:00Z", "cwd": cwd,
+                "message": {"content": [{"type": "tool_use", "id": tool_id, "name": "Bash",
+                                          "input": {"command": command}}]}}
+               for tool_id, cwd in [("tool-1", "/one"), ("tool-2", "/two")]]
+    (folder / "session.jsonl").write_text("\n".join(map(json.dumps, entries)))
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE permission_requests (agent_id TEXT, tool_use_id TEXT, request TEXT)")
+    try:
+        found = replay.recover(db, rows, [tmp_path], 0, float("inf"))
+    finally:
+        db.close()
+    assert list(found) == [1]
+    assert (found[1].command, found[1].cwd) == (command, "/one")
 
 
 OWNER_COMMAND = ("W=~/Projects/pawdelta-web; git -C $W branch --show-current; "
