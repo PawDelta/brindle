@@ -44,16 +44,16 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
                               command="gh api commits?per_page=5")
     permissions.apply_preset("standard")
     (tmp_path / "commitsXper_page=5").touch()
-    assert permissions.decide(req).decision == "ask"
+    assert permissions.decide(req).decision == "deny"
 
     # A preceding command may create a match that does not exist at check time.
-    assert permissions.decide(replace(req, command="touch new; gh api missing?match")).decision == "ask"
+    assert permissions.decide(replace(req, command="touch new; gh api missing?match")).decision == "deny"
 
     # zsh's recursive glob can match zero directories, unlike the bounded matcher.
     (tmp_path / "blocked").touch()
     permissions.add_rule("bash", "gh api blocked", "deny", "prefix")
     assert permissions.decide(replace(req, command="gh api blocked")).decision == "deny"
-    assert permissions.decide(replace(req, command="gh api **/blocked")).decision == "ask"
+    assert permissions.decide(replace(req, command="gh api **/blocked")).decision == "deny"
     permissions.add_rule("read", str(tmp_path / "blocked"), "deny", "exact")
     assert permissions.decide(replace(req, command="pytest **/blocked")).decision != "allow"
 

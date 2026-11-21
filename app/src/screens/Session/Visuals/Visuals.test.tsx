@@ -1,7 +1,7 @@
 import { connectDaemon, renderApp, inTestStore, trackedSync as startSync } from "../../../test/harness";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { Profiler, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import App from "../../../App";
 import { DaemonClient, type Plan, type PlanVerdict, type VisualDTO } from "../../../api/client";
@@ -17,6 +17,7 @@ import { PARKED, closeParkedVisuals, themeMessage } from "./NativeFrame";
 import pageScript from "../../../../src-tauri/src/visual_theme.js?raw";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
+import { LibraryDesign } from "./LibraryDesign";
 import { KeptVisuals } from "../../Knowledge/KeptVisuals";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
@@ -1251,6 +1252,43 @@ describe("visuals", () => {
     await act(async () => held.forEach((answer) => answer()));
     expect(screen.getByTestId("visual-answered")).toBeTruthy();
     expect(screen.queryByTestId("visual-send")).toBeNull();
+  });
+
+  it("never commits the previous plan while opening another Library document", async () => {
+    const a: Plan = {
+      id: "v_a", session: "sup1", title: "A", rev: 1, state: "open", markdown: "A", created_at: now, queued: 0,
+      lede: "", split: [], decisions: [], sections: [{ id: "only-a", title: "A section", markdown: "A content" }],
+    };
+    const b: Plan = { ...a, id: "v_b", title: "B", sections: [{ id: "only-b", title: "B section", markdown: "B content" }] };
+    const row = (plan: Plan): VisualDTO => ({ ...visual, id: plan.id, kind: "plan", title: plan.title, unread: false });
+    const client = new FakeDaemon().client();
+    let identify!: (v: VisualDTO) => void;
+    let read!: (p: Plan) => void;
+    vi.spyOn(client, "libraryDesignPlan").mockImplementation((id) => id === "doc_a" ? Promise.resolve(row(a)) : new Promise((resolve) => { identify = resolve; }));
+    vi.spyOn(client, "plan").mockImplementation((id) => id === a.id ? Promise.resolve(a) : new Promise((resolve) => { read = resolve; }));
+    vi.spyOn(client, "designWorkItems").mockResolvedValue({ items: [], epic: null, connected: {}, done: 0, total: 0 });
+    // Inspect every commit: an effect can clear the wrong doc before rerender() returns,
+    // hiding the flash from an assertion on only the final DOM.
+    const commits: { id: string; old: boolean; current: boolean }[] = [];
+    const reader = (id: string) => <Profiler id={id} onRender={(selected) => commits.push({
+      id: selected,
+      old: !!document.querySelector("#plan-only-a"),
+      current: !!document.querySelector("#plan-only-b"),
+    })}><LibraryDesign client={client} docId={id} onBack={() => {}} /></Profiler>;
+    const view = render(reader("doc_a"));
+    await act(async () => {});
+    expect(document.querySelector("#plan-only-a")).not.toBeNull();
+    view.rerender(reader("doc_b"));
+    expect(screen.queryByTestId("plan-doc")).toBeNull();
+    expect(screen.getByRole("status")).toBeTruthy();
+    await act(async () => identify(row(b)));
+    expect(screen.queryByTestId("plan-doc")).toBeNull();
+    await act(async () => read(b));
+    expect(document.querySelector("#plan-only-b")).not.toBeNull();
+    const openingB = commits.filter((commit) => commit.id === "doc_b");
+    expect(openingB.length).toBeGreaterThan(0);
+    expect(openingB.every((commit) => !commit.old)).toBe(true);
+    expect(openingB.at(-1)?.current).toBe(true);
   });
 
   it("renders a plan itself, sends the note and picks on Request changes, and drops a read older than the verdict", async () => {
