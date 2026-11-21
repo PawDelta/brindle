@@ -1066,8 +1066,11 @@ export interface PlanDTO {
   sections: PlanSectionDTO[];
   session: string;
   split: PlanWorkerDTO[];
-  state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled";
+  state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled" | "closed";
   team_ended?: boolean;
+  teammate_names?: {
+    [k: string]: string;
+  };
   threads?: PlanThreadDTO[];
   title: string;
   verdict?: PlanVerdictDTO | null;
@@ -1288,6 +1291,7 @@ export interface PlanThreadDTO {
   at: number;
   attachments?: string[];
   author: string;
+  author_name?: string | null;
   before?: string | null;
   id: number;
   kind: "comment" | "suggestion";
@@ -1306,6 +1310,7 @@ export interface PlanReplyDTO {
   at: number;
   attachments?: string[];
   author: string;
+  author_name?: string | null;
   from_supervisor?: boolean;
   id: number;
   sent?: boolean;
@@ -1686,8 +1691,11 @@ export interface SharedDesignDTO {
   session: string;
   signed_off?: boolean;
   split: PlanWorkerDTO[];
-  state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled";
+  state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled" | "closed";
   team_ended?: boolean;
+  teammate_names?: {
+    [k: string]: string;
+  };
   threads?: PlanThreadDTO[];
   title: string;
   verdict?: PlanVerdictDTO | null;

@@ -115,7 +115,7 @@ def _can_sign(view: dict, me: str, author: Any) -> bool:
     return me == author or bool(view.get("policy_reviewers")) or any(isinstance(r, dict) and r.get("sub") == me for r in people)
 
 
-def _dto(doc_id: str, view: dict, me: str, *, review: bool = True) -> dict:
+def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict | None = None) -> dict:
     if not isinstance(view.get("rev"), int):
         raise RuntimeError("the Library's answer has no revision")
     content = sd._readable(view)                 # checked and masked as a supervisor's proposal is: it is drawn here
@@ -128,13 +128,17 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True) -> dict:
     history = [r for r in view.get("revisions") or [] if isinstance(r, dict) and isinstance(r.get("rev"), int)
                and r.get("source") in REVISION_SOURCES]
     author = history[0].get("author") if history else view.get("author")
+    threads = [t for t in (_thread(x, me) for x in view.get("threads") or []) if t]
+    for thread in threads:
+        for row in [thread, *thread["replies"]]:
+            row["author_name"] = (names or {}).get(row["author"], "A teammate") if row["author"] != plan_docs.PERSON else None
     return SharedDesignDTO(
         id=doc_id, session="", title=view.get("title") or UNTITLED, rev=view["rev"], state="open", ask=content["ask"],
         markdown=content["markdown"], lede=content["lede"], sections=content["sections"], decisions=decisions,
         split=[], queued=0, created_at=_at(history[0].get("at")) if history else 0.0,
         revisions=[{"rev": r["rev"], "author": _who(r.get("author"), me), "source": r["source"],
                     "changed": r.get("changed") or [], "at": _at(r.get("at"))} for r in history],
-        threads=[t for t in (_thread(x, me) for x in view.get("threads") or []) if t],
+        threads=threads, teammate_names=names or {},
         gate=_gate(view, me) if review else None, me=me,
         author=_who(author, me) if isinstance(author, str) else None,
         can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
@@ -164,7 +168,8 @@ def _ask(doc_id: str, method: str, tail: str, body: dict | None, client, store) 
     client, store = ad._session(client, store)
     me = ad.require_entitlement(store).sub
     view = ad.api(method, sd._path(doc_id, tail), body, client=client, store=store)
-    return _dto(doc_id, _titled(doc_id, view, client, store), me)
+    return _dto(doc_id, _titled(doc_id, view, client, store), me,
+                names=sd.member_names(doc_id, client=client, store=store))
 
 
 def _rev(rev: Any) -> int:
@@ -370,4 +375,5 @@ def _as_member(doc_id: str, title: Any, client, store) -> dict | None:
             raise ServiceError(e.code, "the organization's key for this plan is unavailable", 503) from e
         raise ServiceError("upstream", mask(str(e)), 502) from e
     named = {**view, "title": title} if isinstance(title, str) and title.strip() else view
-    return _dto(doc_id, _titled(doc_id, named, client, store), me)
+    return _dto(doc_id, _titled(doc_id, named, client, store), me,
+                names=sd.member_names(doc_id, client=client, store=store))

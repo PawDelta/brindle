@@ -996,9 +996,9 @@ def pending(db: DB, p: dict) -> tuple[list[str], list[str], list[int]]:
         " ORDER BY id", (p["id"], SUPERVISOR))]
     for t in rows:
         files = json.loads(t["attachments"])
-        teammate = t["author"][len(TEAMMATE):] if t["author"].startswith(TEAMMATE) else None
+        teammate = (t.get("author_name") or "A teammate") if t["author"].startswith(TEAMMATE) else None
         if t["kind"] == "reply":
-            who = f"Teammate {teammate}'s" if teammate else "Their"
+            who = f"{teammate}'s" if teammate else "Their"
             line = f"{who} reply on thread #{t['parent_id']}: {t['body']}"
         else:
             where = _where(cur, json.loads(t["anchor"]))
@@ -1006,7 +1006,7 @@ def pending(db: DB, p: dict) -> tuple[list[str], list[str], list[int]]:
             if where["kind"] == "text":
                 head += f" at \"{_snip(where['quote'])}\""
             if teammate:
-                head += f" (from teammate {teammate})"
+                head += f" (from {teammate})"
             if t["kind"] == "suggestion":
                 line = f"{head}: they suggest \"{_snip(t['after'])}\"" + (f" ({t['body']})" if t["body"] else "")
             else:
@@ -1022,7 +1022,7 @@ def pending(db: DB, p: dict) -> tuple[list[str], list[str], list[int]]:
                              (p["id"], PERSON, TEAMMATE + "%", last)):
         titles = [_title(p, cur, {"kind": "text", "section": s}) for s in json.loads(r["changed"])]
         how = "accepted a suggestion in" if r["source"] == "suggestion" else "edited"
-        who = "They" if r["author"] == PERSON else f"Teammate {r['author'][len(TEAMMATE):]}"
+        who = "They" if r["author"] == PERSON else teammate_names(db, p["id"]).get(r["author"][len(TEAMMATE):], "A teammate")
         line = f"{who} {how} {', '.join(titles)} (r{r['rev']}); revise from the current text."
         message.append(line)
         record.append(line)
@@ -1041,11 +1041,13 @@ def mark_sent(c, ids: list[int], rev: int) -> None:
 
 def _thread_dto(t: dict, cur: dict, replies: list[dict], replica=None) -> dict:
     out = {"id": t["id"], "kind": t["kind"], "rev": t["rev"], "author": t["author"], "text": t["body"],
+           "author_name": t.get("author_name") or ("A teammate" if t["author"].startswith(TEAMMATE) else None),
            "anchor": _where(cur, _followed(replica, json.loads(t["anchor"]), span=True)), "attachments": [f["name"] for f in
                                                                           json.loads(t["attachments"])],
            "status": t["status"], "sent": t["sent_rev"] is not None, "at": t["created_at"],
            "question": bool(t["question"]),
            "replies": [{"id": r["id"], "author": r["author"], "text": r["body"], "at": r["created_at"],
+                        "author_name": r.get("author_name") or ("A teammate" if r["author"].startswith(TEAMMATE) else None),
                         "sent": r["sent_rev"] is not None, "from_supervisor": bool(r["from_supervisor"]),
                         "attachments": [f["name"] for f in json.loads(r["attachments"])]} for r in replies]}
     if t["kind"] == "suggestion":
@@ -1152,6 +1154,11 @@ def revision_dto(db: DB, plan_id: str, rev: Any) -> dict:
                                  decisions=r["decisions"], split=[], ask=r["ask"]).to_json()
 
 
+def teammate_names(db: DB, plan_id: str) -> dict[str, str]:
+    return {r["sub"]: r["name"] for r in db.conn.execute(
+        "SELECT sub, name FROM plan_teammate_names WHERE plan_id=?", (plan_id,))}
+
+
 def fields(db: DB, p: dict) -> dict:
     """The doc's part of a plan's DTO: the current revision's lede and
     sections (the live draft's text, when it has one), its decisions with
@@ -1172,6 +1179,7 @@ def fields(db: DB, p: dict) -> dict:
         if r["parent_id"] is not None:
             replies.setdefault(r["parent_id"], []).append(r)
     return {"lede": cur["lede"], "sections": cur["sections"], "decisions": decisions,
+            "teammate_names": teammate_names(db, p["id"]),
             "revisions": [_revision_dto(r) for r in _history(db, p)],
             "threads": [_thread_dto(t, cur, replies.get(t["id"], []), replica) for t in rows
                         if t["parent_id"] is None],

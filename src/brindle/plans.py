@@ -67,6 +67,8 @@ SUPERSEDED = "superseded"
 # Withdrawn without approval (cancel): closed, not approvable, holds nothing. The tasks it held wait on each
 # one's decision (tasks.plan_holds, plan_cancel_holds), not on the plan.
 CANCELLED = "cancelled"
+# The session ended without approving the plan; its document and shares stay readable.
+CLOSED = "closed"
 # A row of the build gate.
 SIGNED, CHANGES, WAITING, WAIVED = "signed_off", "changes_requested", "waiting", "waived"
 _MET = (SIGNED, WAIVED)
@@ -243,6 +245,11 @@ def _row(db: DB, plan_id: str) -> dict:
     if row is None:
         raise ServiceError("not_found", "no such plan", 404)
     p = dict(row)
+    # Older sessions may have closed before plans were closed with them. Present those
+    # documents as closed too, without rewriting their contents or shared copies.
+    root = db.get_agent(p["root_id"])
+    if p["state"] in HOLDING and (root is None or root.dismissed_at is not None or root.status == "done"):
+        p["state"] = CLOSED
     p["decisions"] = json.loads(p["decisions"])
     p["split"] = json.loads(p["split"])
     p["decision"] = json.loads(p["decision"]) if p["decision"] else None
@@ -266,11 +273,24 @@ def open_offer_id(offer: str | None) -> str | None:
     return offer[len(OFFER_OPEN):] if offer and offer.startswith(OFFER_OPEN) else None
 
 
+def close_with_session(db: DB, root_id: str) -> None:
+    """Close unfinished plans without approving work or withdrawing shared copies."""
+    from brindle import plan_docs
+
+    with db.tx() as c:
+        changed = c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=?"
+                            " AND state IN ('open','redirected','writing') RETURNING id, rev",
+                            (CLOSED, time.time(), root_id)).fetchall()
+    for row in changed:
+        plan_docs._changed(db, get(db, row["id"]), row["rev"])
+
+
 def open_plan(db: DB, root_id: str) -> dict | None:
     """Session ``root_id``'s plan the person hasn't approved yet, if any."""
     row = db.conn.execute(f"SELECT id FROM plans WHERE root_id=? AND state IN ({','.join('?' * len(HOLDING))}) "
                           "ORDER BY created_at LIMIT 1", (root_id, *HOLDING)).fetchone()
-    return _row(db, row["id"]) if row else None
+    plan = _row(db, row["id"]) if row else None
+    return plan if plan and plan["state"] in HOLDING else None
 
 
 def _review_rows(review: dict) -> tuple[dict[str, bool], list[dict]] | None:
@@ -395,6 +415,8 @@ def _gate(c, p: dict) -> dict | None:
     rows, policies, required, met, unmet, changes = tally(people, rules, signed, asked, current, row["owner"])
     if p["state"] == "approved":
         state, reason = "closed", "The review is closed: this plan is building."
+    elif p["state"] == CLOSED:
+        state, reason = "closed", "Closed: its session ended"
     elif p["state"] == "redirected":
         state, reason = CHANGES, "Changes were requested: the build waits for the supervisor's next revision."
     elif (row["doc_id"] is not None and row["local_rev"] != p["rev"] and isinstance(review.get("rev"), int)
@@ -747,6 +769,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             raise ServiceError("superseded", "the person asked for a newer plan; that one is closed", 409)
         if current["state"] == CANCELLED:
             raise ServiceError("cancelled", "that plan was cancelled; propose a new plan instead", 409)
+        if current["state"] == CLOSED:
+            raise ServiceError("closed", "that plan closed with its session; propose a new plan instead", 409)
         if current["state"] not in HOLDING:
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
     replaced = plan_docs.revision(db, plan_id) if plan_id else None
@@ -918,8 +942,13 @@ def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any,
     if caller.id != root.id or p["root_id"] != root.id:
         raise ServiceError("forbidden", "only the session's supervisor answers on its plan", 403)
     thread = plan_docs._thread(db, p, thread_id)
-    if thread["question"]:
-        from brindle.pro import doc_questions, shared_docs
+    from brindle.pro import doc_questions
+
+    # A question asked here is answered here, shared or not; on a shared plan
+    # the answer goes up as the asker's supervisor's with the next sync. One
+    # asked in the Library is answered there, by the supervisor it was given to.
+    if thread["question"] and thread["author"] != plan_docs.PERSON:
+        from brindle.pro import shared_docs
 
         shared = shared_docs.link(db, plan_id)
         remote = db.conn.execute("SELECT remote_id FROM plan_share_threads WHERE plan_id=? AND local_id=?"
@@ -927,8 +956,7 @@ def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any,
         if shared and remote:
             doc_questions.reply(db, caller, shared["doc_id"], remote["remote_id"], text)
             return thread_id
-        if thread["author"] != plan_docs.PERSON or shared:
-            raise ServiceError("forbidden", "only the asker's supervisor answers a question", 403)
+        raise ServiceError("forbidden", "only the asker's supervisor answers a question", 403)
     if resolve and plan_docs._thread(db, p, thread_id)["kind"] != "comment":
         # refuse before replying: a failed call must leave nothing behind
         raise ServiceError("invalid", "only a comment thread is resolved; a suggestion is accepted or rejected", 400)
@@ -937,6 +965,8 @@ def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any,
         db.conn.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (rid,))
     if resolve:
         plan_docs.resolve(db, plan_id, thread_id)
+    if thread["question"]:
+        doc_questions.sync_soon(db, plan_id)
     return rid
 
 

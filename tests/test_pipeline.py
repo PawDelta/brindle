@@ -48,7 +48,7 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
     monkeypatch.setattr(agents, "_review_profile", lambda *a: "reviewer")
     monkeypatch.setattr(agents, "close_later", lambda *a: None)
     secret = "sk-abcdefghijklmnop123456789"
-    monkeypatch.setattr(launch_health, "capture", lambda a: f"startup\nError: workspace routing discovery failed {secret}\n\n")
+    monkeypatch.setattr(launch_health, "capture", lambda a: f"startup\nError: reviewer process crashed {secret}\n\n")
     launched = []
 
     class FakeProvider:
@@ -117,7 +117,7 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
         launch_health.inspect(db, "rev0", wait=False)
         messages = drain(db)
         assert len(messages) == 2 and launched == []
-        assert all("workspace routing discovery failed" in m and secret not in m for m in messages)
+        assert all("reviewer process crashed" in m and secret not in m for m in messages)
         return
     if guard in ("verdict", "running", "queued", "moved", "resumed", "repane"):
         assert launched == (["rev0"] if guard in ("resumed", "repane") else [])
@@ -147,20 +147,81 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
     assert db.get_agent("w1").pipeline is None
     assert gates.verdict(db, ws.id, sha) is None
     messages = drain(db)
-    assert len(messages) == 1 and "workspace routing discovery failed" in messages[0]
+    assert len(messages) == 1 and "reviewer process crashed" in messages[0]
     assert secret not in messages[0] and "[redacted]" in messages[0]
     if failed_launch:
         assert "new-window failed" in messages[0]
     assert pipeline.review_state(db, ws).startswith("needs you")
     row = db.get_agent("rev0" if failed_launch else launched[0])
-    assert "workspace routing discovery failed" in inbox.needs_you(vars(row), {})
+    assert "reviewer process crashed" in inbox.needs_you(vars(row), {})
     assert secret not in row.failed_why
     monkeypatch.setattr(inbox.view, "snapshot", lambda *a, **kw: [{"id": ws.id, "agents": [vars(row)]}])
     card = next(item for item in inbox.items(db, str(repo), panes) if item.agent_id == row.id)
-    assert "workspace routing discovery failed" in card.detail and secret not in card.detail
+    assert "reviewer process crashed" in card.detail and secret not in card.detail
     if not failed_launch:
         agents.request_review(db, db.get_agent("boss"), ws, "reviewer")
         assert db.get_agent(row.id).failed_why is None
+
+
+@pytest.mark.parametrize("other_provider", [
+    pytest.param(True, marks=pytest.mark.variant("another provider is available, so the person is never told")),
+    False,
+    pytest.param("first-fails", marks=pytest.mark.variant("a fallback that also fails must move on, not stop")),
+])
+def test_reviewer_dead_of_provider_failure_moves_to_another_provider(db, repo, monkeypatch, other_provider):
+    """A Codex reviewer whose CLI can't read its account at startup would die
+    the same way on a plain restart: the restart goes to another provider, and
+    only when none can run does the person hear, in plain words."""
+    from brindle import launch_health
+    from brindle.profiles import load_profile
+    from brindle.service import inbox
+
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    sha = gates.head(ws)
+    add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
+    add(db, ws, "rev0", "review", "reviewer-codex", parent="boss", review_sha=sha)
+    db.update_agent("rev0", provider="codex", review_slot="", status="processing", created_at=1)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(launch_health, "capture", lambda a: (
+        "OpenAI Codex\nError: account/read failed during TUI bootstrap: "
+        "workspace routing discovery failed (code -32603)\n"))
+
+    def can_run(name, ws_, cfg):
+        provider = load_profile(name, ws_.repo_root).provider
+        if provider == "codex" or not other_provider:
+            raise agents.AgentError(f"reviewer profile {name!r} can't run now: {provider} isn't signed in")
+
+    monkeypatch.setattr(agents, "_reviewer_can_run", can_run)
+    launched = []
+
+    def launch(db_, a, ws_, **kw):
+        launched.append(a)
+        if other_provider == "first-fails" and len(launched) == 1:
+            raise OSError("new-window failed")   # the best fallback can't start; the next one must
+        db.update_agent(a.id, tmux_window="%3", status="processing")
+
+    monkeypatch.setattr(agents, "_launch_resolved", launch)
+
+    assert pipeline.on_reviewer_dead(db, db.get_agent("rev0"), ws)
+    if other_provider:
+        started = launched[-1]
+        assert [(a.review_sha, a.provider != "codex") for a in launched] == (
+            [(sha, True)] * (2 if other_provider == "first-fails" else 1))
+        assert len({a.profile for a in launched}) == len(launched)
+        assert db.get_agent(started.id).review_slot == ""
+        assert db.get_agent("w1").pipeline == "reviewing"
+        assert db.get_agent("rev0").failed_why is None
+        assert drain(db) == []
+        return
+    assert launched == [] and db.get_agent("w1").pipeline is None
+    told = inbox.needs_you(vars(db.get_agent("rev0")), {})
+    assert "Codex" in told and not any(raw in told for raw in ("rev0", ws.id, "request_review", "-32603"))
+    [message] = drain(db)
+    assert f'request_review("{ws.id}")' in message and "-32603" in message
 
 
 def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, repo, monkeypatch):

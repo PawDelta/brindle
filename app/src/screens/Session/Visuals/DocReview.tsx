@@ -50,7 +50,7 @@ export interface ThreadLimits {
   resolve(thread: PlanThreadDTO): boolean;
 }
 
-const card = "grid gap-1.5 border-b border-line px-3.5 py-3 text-ink-2";
+const card = "grid min-w-0 [overflow-wrap:anywhere] gap-1.5 border-b border-line px-3.5 py-3 text-ink-2";
 const onLine = "flex items-center gap-1.5 text-[11.5px] text-ink-3";
 /* A thread's number, as it sits beside its text in the doc. */
 export function ThreadNumber({ n, draft = false }: { n: number; draft?: boolean }) {
@@ -73,9 +73,9 @@ function Change({ before, after }: { before: string; after: string }) {
 
 function Who({ who, supervisor = false }: { who: string; supervisor?: boolean }) {
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex min-w-0 items-center gap-1.5">
       <Avatar who={supervisor ? "supervisor" : who} />
-      <b className="font-medium text-ink">{supervisor ? (who === "person" ? "Your supervisor" : `${personName(who)}’s supervisor`) : personName(who)}</b>
+      <b title={personName(who)} className="min-w-0 truncate font-medium text-ink">{supervisor ? (who === "person" ? "Your supervisor" : `${personName(who)}’s supervisor`) : personName(who)}</b>
     </div>
   );
 }
@@ -110,7 +110,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
     <article className={`${card} ${open ? "" : "opacity-[var(--dim)]"} ${active ? "bg-surface-2 shadow-[inset_2px_0_0_var(--sap)]" : ""}`} data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined}>
       <button type="button" className={`${onLine} cursor-pointer text-left hover:text-ink-2`} title="Show it in the doc" onClick={onShow}>
         <ThreadNumber n={t.id} />
-        <span className="min-w-0 truncate">
+        <span title={where} className="min-w-0 truncate">
           {where}
           {suggestion && " · suggestion"}
           {t.question && " · question"}
@@ -120,18 +120,18 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
         <span className="flex-1" />
         <time className="whitespace-nowrap" dateTime={new Date(t.at * 1000).toISOString()} title={new Date(t.at * 1000).toLocaleString()}>{ago(t.at)}</time>
       </button>
-      <Who who={t.author} />
+      <Who who={t.author_name ?? (t.author.startsWith("teammate:") ? "A teammate" : t.author)} />
       {suggestion && <Change before={t.before ?? ""} after={t.after ?? ""} />}
       {t.text && <span className="whitespace-pre-wrap break-words">{t.text}</span>}
       {t.attachments?.map((name) => (
-        <span key={name} className="justify-self-start whitespace-nowrap rounded-sm border border-line px-1.5 py-px font-mono text-[11px] text-ink-2">{name}</span>
+        <span key={name} title={name} className="max-w-full justify-self-start truncate rounded-sm border border-line px-1.5 py-px font-mono text-[11px] text-ink-2">{name}</span>
       ))}
       {!!t.replies?.length && (
         <div className="ml-[9px] grid gap-1.5 border-l border-line-strong pl-2.5">
           {t.replies.map((r) => (
             <div key={r.id} className="grid gap-1.5" data-from-supervisor={r.from_supervisor || undefined}>
               <div className="flex items-center gap-1.5">
-                <Who who={r.from_supervisor ? t.author : r.author} supervisor={r.from_supervisor} />
+                <Who who={r.from_supervisor ? (t.author_name ?? t.author) : (r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author))} supervisor={r.from_supervisor} />
                 <span className="ml-auto text-[11.5px] text-ink-3">{ago(r.at)}</span>
               </div>
               <span className="whitespace-pre-wrap break-words">{r.text}</span>

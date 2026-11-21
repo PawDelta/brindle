@@ -559,6 +559,34 @@ def _author(sub: Any) -> str | None:
     return plan_docs.TEAMMATE + sub if isinstance(sub, str) and sub else None
 
 
+def member_names(doc_id: str, *, client=None, store=None) -> dict[str, str]:
+    """Use the share panel's directory; an unavailable directory must not block sync."""
+    from brindle.pro import auth, shared_reader
+
+    try:
+        directory = shared_reader.people(doc_id, {}, client=client, store=store)
+    except (RuntimeError, ValueError, auth.AuthError, auth.TransportError):
+        return {}
+    return {p["id"]: p["display_name"].strip() or p["email"].strip() or "A teammate"
+            for p in directory["people"]}
+
+
+def _remember_names(db: DB, plan_id: str, names: dict[str, str]) -> bool:
+    with db.tx() as c:
+        before = c.total_changes
+        c.executemany("INSERT INTO plan_teammate_names (plan_id, sub, name) VALUES (?,?,?)"
+                      " ON CONFLICT(plan_id, sub) DO UPDATE SET name=excluded.name WHERE name<>excluded.name",
+                      [(plan_id, sub, name) for sub, name in names.items()])
+        for row in c.execute("SELECT id, author, author_name FROM plan_threads WHERE plan_id=? AND author LIKE ?",
+                             (plan_id, plan_docs.TEAMMATE + "%")).fetchall():
+            name = c.execute("SELECT name FROM plan_teammate_names WHERE plan_id=? AND sub=?",
+                             (plan_id, row["author"][len(plan_docs.TEAMMATE):])).fetchone()
+            label = name["name"] if name else row["author_name"] or "A teammate"
+            if row["author_name"] != label:
+                c.execute("UPDATE plan_threads SET author_name=? WHERE id=?", (label, row["id"]))
+        return c.total_changes != before
+
+
 def _when(at: Any, now: float) -> float:
     return float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else now
 
@@ -711,7 +739,7 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
                 pair(r["id"], (parent["local_id"], "reply", r.get("text") or "", None, None, False), "open")
 
 
-def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
+def _pull(db: DB, p: dict, share_: dict, view: dict, names: dict[str, str]) -> int:
     rev, now = share_["local_rev"], time.time()
     cur = plan_docs.revision(db, p["id"], rev) if view.get("rev") == share_["remote_rev"] else None
     changes = 0
@@ -722,6 +750,7 @@ def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
             changes += _pull_thread(c, p["id"], rev, cur, known, t, now)
         changes += _pull_votes(c, p["id"], share_["owner"], rev, view.get("decisions") or [], now)
     changes += _remember(db, p["id"], view)
+    changes += _remember_names(db, p["id"], names)
     if changes:
         plan_docs._changed(db, p, p["rev"])
     return changes
@@ -845,12 +874,15 @@ def _unsent(db: DB, plan_id: str) -> list:
     first: never sent, or sent and the answer never came back. With them the
     supervisor's suggestions on the live draft (plan_docs.supervise, marked
     from_supervisor), which go up as the person's, their note naming the
-    supervisor; its other threads stay here."""
+    supervisor, and its answers to the person's questions, which go up as
+    the asker's supervisor's (from_supervisor); its other threads stay here."""
     return db.conn.execute(
-        "SELECT * FROM plan_threads WHERE plan_id=? AND (author=? OR (author=? AND parent_id IS NULL"
-        " AND kind='suggestion' AND from_supervisor=1)) AND id NOT IN (SELECT local_id FROM plan_share_threads"
+        "SELECT * FROM plan_threads WHERE plan_id=? AND (author=? OR (author=? AND from_supervisor=1 AND"
+        " ((parent_id IS NULL AND kind='suggestion') OR (kind='reply' AND parent_id IN (SELECT id FROM"
+        " plan_threads WHERE plan_id=? AND author=? AND question=1)))))"
+        " AND id NOT IN (SELECT local_id FROM plan_share_threads"
         " WHERE plan_id=? AND NOT (remote_id<0 AND status=?)) ORDER BY id",
-        (plan_id, plan_docs.PERSON, plan_docs.SUPERVISOR, plan_id, SENDING)).fetchall()
+        (plan_id, plan_docs.PERSON, plan_docs.SUPERVISOR, plan_id, plan_docs.PERSON, plan_id, SENDING)).fetchall()
 
 
 def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict, replica=None) -> None:
@@ -865,6 +897,8 @@ def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict
         if parent is None:
             return
         tail, body = "/comments", {"parent": parent["remote_id"], "text": t["body"]}
+        if t["author"] == plan_docs.SUPERVISOR:     # its answer to the person's question (_unsent)
+            body["from_supervisor"] = True
     else:
         anchor = plan_docs._followed(replica, json.loads(t["anchor"]))
         gone = replica is not None and t["status"] == "accepted"
@@ -1280,6 +1314,7 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
             return {**link(db, p["id"]), "pulled": 0, "pushed": False}
         raise
     _team_active(db, p, store)
+    names = member_names(share_["doc_id"], client=client, store=store)
     imported = _import(db, p, share_, view)
     share_ = link(db, p["id"])
     # The draft's updates go before the threads, so what those are anchored on is there.
@@ -1293,7 +1328,7 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     imported += _carry_over(db, p, share_, view, replica)
     if imported:
         p, share_ = plan_docs._plan(db, p["id"]), link(db, p["id"])
-    pulled = imported + typed + _pull(db, p, share_, view)
+    pulled = imported + typed + _pull(db, p, share_, view, names)
     pushed = _send(db, p, view, client, store, time.time() if now is None else now, acked)
     if pushed or imported or typed:
         plan_docs._changed(db, p, p["rev"])

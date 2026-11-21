@@ -17,7 +17,7 @@ import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
 import type { ThreadActions } from "./DocReview";
 import type { DocLayout } from "./DocText";
-import { Avatar, personName } from "./PlanCards";
+import { Avatar, personName, picksLine } from "./PlanCards";
 import type { Mode, MODES } from "./PlanReader";
 
 /* The spine's ids in reading order; the extras sit inside the section before them. */
@@ -185,8 +185,10 @@ export function Outline({ parts, placed, isOpen, decided, total, current, footer
 
 /* A decision, where its question comes up: picking an option is the person's answer. Sap marks
    one that still needs them; once picked, the card goes quiet and a tick stays. */
-export function DecisionCard({ decision: d, n, of, open, disabled = false, picked, onPick, onComment }: {
+export function DecisionCard({ decision: d, n, of, open, disabled = false, picked, onPick, onComment, nameOf }: {
   decision: PlanDecisionDTO;
+  /* A voter as the card names them ("You", "David"). */
+  nameOf?: (who: string) => string;
   n: number;
   of: number;
   /* The plan still takes picks. */
@@ -200,15 +202,18 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
 }) {
   const waiting = open && !picked;
   const done = !!picked;
+  const whoPicked = picksLine(d, nameOf);
   return (
     <section id={`plan-decision-${d.id}`} role="radiogroup" aria-labelledby={`plan-q-${d.id}`} data-testid="plan-decision" data-decision={d.id} data-state={waiting ? "open" : "decided"}
-      className={`relative mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${waiting ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
-      <div className="flex items-center justify-between gap-3 px-4 pt-3">
+      className={`relative min-w-0 [overflow-wrap:anywhere] mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${waiting ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
         <p className="m-0 text-[11px] font-medium uppercase leading-[1.3] tracking-[0.08em] text-ink-3">{`Decision ${n} of ${of}`}</p>
         {waiting ? <span className={`${pill} text-sap`}>Needs your pick</span>
           : done ? <Tick>Decided{open && <span className="font-normal text-ink-3">· change it any time before you approve</span>}</Tick> : null}
       </div>
       <h3 id={`plan-q-${d.id}`} className="m-0 mt-1 px-4 text-base font-semibold leading-[1.35] tracking-[-0.01em] text-ink">{d.title}</h3>
+      {/* Who picked what, saved as each pick is made: everyone on a shared plan sees the same. */}
+      {whoPicked && <p data-testid="plan-picks" className="m-0 mt-1 px-4 text-[12.5px] leading-normal text-ink-3">{whoPicked}</p>}
       <div className="mt-3">
         {d.options.map((o) => {
           const chosen = picked === o.id;
@@ -221,21 +226,21 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
               <span aria-hidden className={`relative mt-[3px] size-[15px] rounded-full ${chosen ? "bg-pass-soft" : "shadow-[inset_0_0_0_1.5px_var(--line-strong)]"}`}>
                 {chosen && <span className="absolute left-[5px] top-[2.5px] h-2 w-1 rotate-45 border-b-[1.75px] border-r-[1.75px] border-solid border-pass" />}
               </span>
-              <span>
+              <span className="min-w-0">
                 <span className={`flex flex-wrap items-center gap-[9px] text-sm leading-[1.45] ${done && !chosen ? "font-medium text-ink-3" : done ? "font-semibold text-ink" : "font-medium text-ink"}`}>
                   {o.label}
                   {d.mine === o.id && <span className="rounded-sm px-1.5 text-[11px] font-normal leading-[17px] text-ink-2 shadow-[inset_0_0_0_1px_var(--line-strong)]" data-testid="plan-recommended">Recommended</span>}
                   {/* A shared doc's votes: who picked this option. */}
                   {(d.votes?.[o.id]?.length ?? 0) > 0 && (
-                    <span className="ml-auto inline-flex items-center gap-1" data-votes={d.votes![o.id].length} title={`Voted for by ${d.votes![o.id].map(personName).join(", ")}`}>
-                      {d.votes![o.id].map((v) => <Avatar key={v} who={v} small />)}
+                    <span className="ml-auto inline-flex flex-wrap items-center gap-1" data-votes={d.votes![o.id].length} title={`Voted for by ${d.votes![o.id].map((who) => who === "person" ? "You" : nameOf?.(who) ?? "A teammate").join(", ")}`}>
+                      {d.votes![o.id].map((v) => <Avatar key={v} who={v === "person" ? "person" : nameOf?.(v) ?? "A teammate"} small />)}
                     </span>
                   )}
                 </span>
                 {(pros.length > 0 || cons.length > 0 || o.detail) && (
                   <span className={`mt-[3px] grid gap-px text-[13px] leading-normal ${done && !chosen ? "text-ink-3" : "text-ink-2"}`}>
-                    {pros.map((p, i) => <span key={`p${i}`} className="grid grid-cols-[12px_1fr] gap-1"><span aria-hidden className="font-mono text-ink-3">+</span>{p}</span>)}
-                    {cons.map((c, i) => <span key={`c${i}`} className="grid grid-cols-[12px_1fr] gap-1"><span aria-hidden className="font-mono text-ink-3">−</span>{c}</span>)}
+                    {pros.map((p, i) => <span key={`p${i}`} className="grid grid-cols-[12px_minmax(0,1fr)] gap-1"><span aria-hidden className="font-mono text-ink-3">+</span>{p}</span>)}
+                    {cons.map((c, i) => <span key={`c${i}`} className="grid grid-cols-[12px_minmax(0,1fr)] gap-1"><span aria-hidden className="font-mono text-ink-3">−</span>{c}</span>)}
                     {!pros.length && !cons.length && o.detail && <span>{o.detail}</span>}
                   </span>
                 )}
@@ -260,9 +265,9 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
 function Who({ who, children }: { who: string; children?: ReactNode }) {
   const name = personName(who);
   return (
-    <div className="flex items-center gap-[7px] text-xs text-ink-3">
-      <span aria-hidden className="inline-grid size-[18px] flex-none place-items-center rounded-full bg-surface-2 font-mono text-[9px] font-semibold leading-none text-ink-2 shadow-[0_0_0_1px_var(--line-strong)]">{name[0]?.toUpperCase()}</span>
-      <b className="font-medium text-ink">{name}</b>
+    <div className="flex min-w-0 items-center gap-[7px] text-xs text-ink-3">
+      <Avatar who={who} />
+      <b title={name} className="min-w-0 truncate font-medium text-ink">{name}</b>
       {children}
     </div>
   );
@@ -282,10 +287,10 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
     setReplying(false);
   };
   return (
-    <div className={`grid gap-[5px] border-l pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2 ${lit ? "border-branch" : "border-line-strong"}`}
+    <div className={`grid min-w-0 [overflow-wrap:anywhere] gap-[5px] border-l pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2 ${lit ? "border-branch" : "border-line-strong"}`}
       data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined} aria-label={suggestion ? "Suggestion" : "Comment thread"} role="note"
       onMouseEnter={() => onHover(true)} onMouseLeave={() => onHover(false)}>
-      <Who who={t.author}><span>{suggestion ? `suggests · ${ago(t.at)}` : ago(t.at)}</span></Who>
+      <Who who={t.author_name ?? (t.author.startsWith("teammate:") ? "A teammate" : t.author)}><span>{suggestion ? `suggests · ${ago(t.at)}` : ago(t.at)}</span></Who>
       {suggestion && (
         <div className="ml-[25px] whitespace-pre-wrap break-words rounded-sm bg-surface-2 px-2 py-[5px] font-serif text-[13.5px] leading-normal" data-testid="suggestion-change">
           {t.before && <del className="text-fail decoration-1">{t.before}</del>}
@@ -297,7 +302,7 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
       {t.anchor.state === "detached" && <p className="m-0 pl-[25px] text-ink-3">That text has since changed.</p>}
       {t.replies?.map((r) => (
         <div key={r.id} className="contents" data-from-supervisor={r.from_supervisor || undefined}>
-          <Who who={r.from_supervisor ? "supervisor" : r.author}><span>{ago(r.at)}</span></Who>
+          <Who who={r.from_supervisor ? "supervisor" : r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author)}><span>{ago(r.at)}</span></Who>
           <p className="m-0 whitespace-pre-wrap break-words pl-[25px]">{r.text}</p>
         </div>
       ))}

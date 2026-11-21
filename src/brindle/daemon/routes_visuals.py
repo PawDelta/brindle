@@ -874,7 +874,8 @@ def library_people(db: DB, request: Request) -> Any:
     if not ent.org_id:
         return {"people": []}
     members = actions.docs_api("GET", f"/orgs/{quote(ent.org_id, safe='')}/members").get("members")
-    return {"people": [{"sub": m["sub"], "email": m.get("email") or ""} for m in members or []
+    return {"people": [{"sub": m["sub"], "email": m.get("email") or "",
+                        **{k: m[k] for k in ("display_name", "first_name", "last_name", "name") if isinstance(m.get(k), str)}} for m in members or []
                        if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub],
             "me": ent.sub, "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
 

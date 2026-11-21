@@ -18,17 +18,20 @@ const design: SharedDesign = {
 it("a teammate signs off through the Library, keeps a draft across a stale write, and loses the doc with their access", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const nextRead = () => act(async () => { vi.advanceTimersByTime(30_000); });
-  let doc = design;
+  let doc: SharedDesign = { ...design, teammate_names: { u_david: "A teammate", u_reply: "A teammate" }, threads: [{ id: 71, kind: "comment", rev: 1, author: "u_david", author_name: "A teammate", text: "Clarify this.", at: 1, status: "open", anchor: { kind: "section", section: "s" },
+    replies: [{ id: 72, author: "u_reply", author_name: "A teammate", text: "Agreed.", at: 2 }] }] };
   let reading: () => Promise<SharedDesign> = async () => doc;
   const sent: [string, Record<string, unknown>][] = [];
   let answer: (tail: string) => Promise<SharedDesign> = async () => doc;
   const client: SharedDesignClient = {
     sharedDesign: () => reading(),
     writeSharedDesign: (_doc, tail, body) => { sent.push([tail, body]); return answer(tail); },
-    libraryPeople: async () => ({ people: [] }),
+    libraryPeople: async () => ({ people: [{ sub: "u_david", display_name: "David Chen", email: "david@example.test" }, { sub: "u_reply", email: "reply@example.test" }] }),
   };
   await act(async () => { render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />); });
   expect(screen.getByText("Workers run here.")).toBeTruthy();
+  expect(screen.getAllByText("David Chen").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("reply@example.test").length).toBeGreaterThan(0);
   expect(screen.queryByRole("radio", { name: "Editing" })).toBeNull();
 
   // A comment that meets a moved revision: read again, and what was written is still there.

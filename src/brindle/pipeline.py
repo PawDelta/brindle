@@ -1057,35 +1057,101 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
         except ValueError:
             cfg = RepoConfig()
         error = launch_health.last_error(reviewer) or "No error text remains in the dead pane."
+        # The provider's own failure (CLI, account, login, routing, quota) would
+        # stop the same profile again: the one restart moves to another provider.
+        cause = launch_health.provider_failure(error)
+        skipped = ""
         claimed = db.conn.execute("INSERT OR IGNORE INTO review_death_restarts (workspace_id, sha) "
                                   "VALUES (?,?)", (ws.id, sha)).rowcount
         if claimed:
-            parent = db.get_agent(worker.parent_id) if worker.parent_id else None
-            db.update_agent(reviewer.id, unreported_noted=int(time.time()))
-            try:
-                replacement = agents.request_review(
-                    db, parent, ws, reviewer.profile, cfg=cfg,
-                    check_summary=_cached_check_summary(db, ws, cfg, reviewer),
-                    second=bool(slot), slot=slot,
-                    expected_sha=sha,
-                )
-                if replacement is not None:
-                    db.set_result(reviewer.id, f"Replaced by reviewer {replacement.id} after process exit.")
-                    db.update_agent(reviewer.id, status="done")
-                return True
-            except agents.ReviewHeadMoved:
-                return True
-            except (agents.AgentError, tmux.TmuxError, OSError) as exc:
-                error += " Replacement could not start: " + redact.mask(str(exc))[:1000]
-        detail = (f"Reviewer {reviewer.id} exited without a verdict after automatic recovery. "
-                  f"Last pane error: {error} Fix the CLI installation, login or routing, then "
-                  f"request_review(\"{ws.id}\"). Review is still required before merging.")
-        db.update_agent(reviewer.id, status="failed", failed_why="review: " + detail,
+            candidates = [reviewer.profile]
+            if cause is not None:
+                candidates, skipped = _other_provider_reviewers(db, cfg, reviewer, ws, sha)
+            if candidates:
+                parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+                db.update_agent(reviewer.id, unreported_noted=int(time.time()))
+            # One recovery per commit, which goes down the list until one starts.
+            for profile in candidates:
+                try:
+                    replacement = agents.request_review(
+                        db, parent, ws, profile, cfg=cfg,
+                        check_summary=_cached_check_summary(db, ws, cfg, reviewer),
+                        second=bool(slot), slot=slot,
+                        expected_sha=sha,
+                    )
+                    if replacement is not None:
+                        if slot and profile != reviewer.profile:
+                            # In the dead reviewer's slot, whatever its profile.
+                            db.update_agent(replacement.id, review_slot=slot)
+                        db.set_result(reviewer.id, f"Replaced by reviewer {replacement.id} after process exit.")
+                        db.update_agent(reviewer.id, status="done")
+                    return True
+                except agents.ReviewHeadMoved:
+                    return True
+                except (agents.AgentError, tmux.TmuxError, OSError) as exc:
+                    error += f" Replacement {profile} could not start: " + redact.mask(str(exc))[:1000]
+        from brindle import quota
+
+        name = quota.NAMES.get(reviewer.provider or "", reviewer.provider or "the reviewer's provider")
+        if cause is not None:
+            # The person reads this in the Inbox: plain words, no ids or tool calls.
+            person = (f"Couldn't review {ws.branch}: {name} isn't signed in or reachable. "
+                      f"Sign in to {name} or try again.")
+            detail = (f"Reviewer {reviewer.id} ({reviewer.profile}) exited without a verdict: "
+                      f"{cause.cause}. Last pane error: {error} "
+                      + (f"No reviewer on another provider can run ({skipped}). " if skipped else "")
+                      + f"Sign in to {name} or fix its routing, then request_review(\"{ws.id}\"). "
+                      "Review is still required before merging.")
+        else:
+            person = (f"Couldn't review {ws.branch}: its reviewer stopped without a verdict, even after "
+                      f"an automatic restart. Last error: {error} Try again.")
+            detail = (f"Reviewer {reviewer.id} exited without a verdict after automatic recovery. "
+                      f"Last pane error: {error} Fix the CLI installation, login or routing, then "
+                      f"request_review(\"{ws.id}\"). Review is still required before merging.")
+        db.update_agent(reviewer.id, status="failed", failed_why="review: " + person,
                         unreported_noted=int(time.time()))
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, worker.parent_id, f"[brindle pipeline] `{ws.branch}` needs you. {detail}", reviewer.id)
         return True
+
+
+def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Workspace,
+                              sha: str) -> tuple[list[str], str]:
+    """The reviewer profiles on providers other than dead ``reviewer``'s that
+    can run now and the repo allows, best first, cascading the way review
+    routing does (``agents._review_choice``): the repo's reviewer and
+    fallbacks, then the built-in reviewers unless the owner locked the
+    reviewer list. A profile another live reviewer of ``sha`` runs is left to
+    it. Also why each candidate was skipped (the list is empty when none can
+    run)."""
+    from brindle import cascade
+    from brindle.profiles import load_profile
+
+    taken = {a.profile for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id
+             and a.review_sha == sha and a.result is None and agents.alive_or_starting(a)}
+    locked = bool(cfg.routing_locked.get("reviewer"))
+    own = (cfg.review_profile, cfg.reviewer, *cfg.reviewer_fallbacks)
+    pool = [n for n in dict.fromkeys((*own, *(() if locked else cascade.REVIEWERS))) if n and n not in taken]
+
+    def why_not(name: str) -> str | None:
+        try:
+            p = load_profile(name, ws.repo_root)
+        except KeyError as exc:
+            return str(exc)
+        if p.provider == reviewer.provider:
+            return f"{name} runs on {p.provider} too"
+        if p.provider in cfg.exclude_providers:
+            return f"{p.provider} is excluded from routing, skipped {name}"
+        try:
+            agents._reviewer_can_run(name, ws, cfg)
+        except agents.AgentError as exc:
+            return str(exc)
+        return None
+
+    found = cascade.run("reviewer", pool, why_not, repo_root=ws.repo_root,
+                        after=[reviewer.profile], pinned=locked)
+    return found.order, "; ".join(why for _, why in found.skipped)
 
 
 def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
