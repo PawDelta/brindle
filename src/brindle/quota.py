@@ -81,6 +81,7 @@ class Quota:
     updated_at: float = 0.0
     source: str = ""
     overage_unlimited: bool = False
+    overage_reset: bool = False
 
 
 def path() -> Path:
@@ -181,7 +182,7 @@ def _percent_from_dict(w: dict) -> float | None:
 def record(provider: str, windows: list[Window] | None = None, *,
            limited_until: float | None = None, source: str = "", keep_limit: bool = False,
            identity_key: str | None = None, overage_unlimited: bool | None = None,
-           limit_event_id: str | None = None, limit_event_until: float | None = None) -> None:
+           event_seen: dict[str, float] | None = None) -> None:
     """Replace what's known about ``provider``. ``windows=None`` keeps the
     windows it has (for recording only a limit); ``keep_limit`` keeps a
     ``limited_until`` still in the future. ``identity_key`` binds an answer
@@ -212,17 +213,14 @@ def record(provider: str, windows: list[Window] | None = None, *,
     }
     if unlimited:
         entry["overage_unlimited"] = True
-    if limit_event_id is not None:
-        entry["limit_event_id"] = limit_event_id
-        if limit_event_until is not None:
-            entry["limit_event_until"] = limit_event_until
-    elif isinstance(old.get("limit_event_id"), str):
-        # Preserve the last observed rollout limit-event identity/deadline even
-        # across independent CLI limit errors so re-reading an unchanged rollout
-        # never re-infers a fresh cooldown.
-        entry["limit_event_id"] = old["limit_event_id"]
-        if (prev_until := _number(old.get("limit_event_until"))) is not None:
-            entry["limit_event_until"] = prev_until
+    if event_seen is not None:
+        if event_seen:
+            entry["event_seen"] = {k: float(v) for k, v in event_seen.items()}
+    elif isinstance(old.get("event_seen"), dict):
+        # Preserve first-observed timestamps for untimestamped rollout events
+        # even across independent CLI limit errors so re-reading an unchanged
+        # rollout never renews relative window resets or inferred cooldowns.
+        entry["event_seen"] = old["event_seen"]
     if limited_until is None and keep_limit and (_number(old.get("limited_until")) or 0) > now:
         entry["limited_until"] = old["limited_until"]
     data[key] = entry
@@ -300,13 +298,16 @@ def get(provider: str, *, identity_key: str | None = None, now: float | None = N
         return None
     q = _from_entry(provider, entry)
     live = []
+    stale_claude = provider == "claude" and now - q.updated_at > CLAUDE_FRESH_SECONDS
     for w in q.windows:
         if w.resets_at:  # 0 or missing: unknown, so only its age counts
             if w.resets_at <= now:
+                if w.overage and w.name is None and not stale_claude:
+                    q.overage_reset = True
                 continue
         elif now - q.updated_at > CLAUDE_FRESH_SECONDS:
             continue
-        if provider == "claude" and now - q.updated_at > CLAUDE_FRESH_SECONDS:
+        if stale_claude:
             continue
         live.append(w)
     q.windows = live
@@ -342,43 +343,82 @@ def _managed_for(repo_root: str | None):
         return None
 
 
+def _route_var_active(var: str, value: str | None) -> bool:
+    val = (value or "").strip()
+    if not val:
+        return False
+    if var.startswith("CLAUDE_CODE_USE_") and val.lower() in ("0", "false"):
+        return False
+    return True
+
+
 def _effective_route_env(provider: str, repo_root: str | None = None,
                          env: dict[str, str] | None = None) -> dict[str, str]:
-    """Non-secret route variables a launch of ``provider`` receives from
-    stored/enforced org setup, managed_models (for ``repo_root``), process
-    environment, and an explicit profile/agent ``env``."""
+    """Non-secret route variables a launch of ``provider`` receives, following
+    ``agents.agent_env`` precedence and honoring explicit empty values (such as
+    ``connections._selectors`` blanks that clear an inherited/stored cloud route)."""
     out: dict[str, str] = {}
     if provider == "claude":
-        from brindle import company_identity, company_login
+        from brindle import company_identity, company_login, providers
 
+        if providers.claude_org_managed():
+            return out
         try:
-            out.update(company_login.stored_env())
+            enforced = company_identity.enforced_route_env()
         except Exception:  # noqa: BLE001
-            pass
-        try:
-            out.update(company_identity.enforced_route_env() or {})
-        except Exception:  # noqa: BLE001
-            pass
+            enforced = None
+        managed_env: dict[str, str] = {}
         if (m := _managed_for(repo_root)) is not None:
             from brindle.pro import managed_models
 
-            out.update(managed_models.agent_env(m, "claude"))
-        for var in _CLAUDE_NON_SUBSCRIPTION_VARS:
-            if os.environ.get(var):
-                out[var] = os.environ[var]
-        if env:
-            for var in (*_CLAUDE_NON_SUBSCRIPTION_VARS, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-                if env.get(var):
-                    out[var] = env[var]
+            managed_env = managed_models.agent_env(m, "claude")
+        keys = (*_CLAUDE_NON_SUBSCRIPTION_VARS, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+        if enforced is not None:
+            # Under an enforced Enterprise route, inherited pickers and profile
+            # overrides that pick another account are stripped; managed_env and
+            # enforced decide the route.
+            if env:
+                for var in keys:
+                    if var in env and company_identity.profile_may_set(var):
+                        out[var] = env[var]
+            for var in keys:
+                if var in managed_env:
+                    out[var] = managed_env[var]
+            for var in keys:
+                if var in enforced:
+                    out[var] = enforced[var]
+        else:
+            # Lowest to highest, matching agents.agent_env:
+            # inherited process env < company stored_env < profile/connection env < managed_env.
+            for var in _CLAUDE_NON_SUBSCRIPTION_VARS:
+                if var in os.environ:
+                    out[var] = os.environ[var]
+            try:
+                company = company_login.stored_env()
+            except Exception:  # noqa: BLE001
+                company = {}
+            for var in keys:
+                if var in company:
+                    out[var] = company[var]
+            if env:
+                for var in keys:
+                    if var in env:
+                        out[var] = env[var]
+            for var in keys:
+                if var in managed_env:
+                    out[var] = managed_env[var]
     elif provider == "codex":
+        # Inherited process env < profile/connection env < org managed_env.
+        if "OPENAI_BASE_URL" in os.environ:
+            out["OPENAI_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
+        if env and "OPENAI_BASE_URL" in env:
+            out["OPENAI_BASE_URL"] = env["OPENAI_BASE_URL"]
         if (m := _managed_for(repo_root)) is not None:
             from brindle.pro import managed_models
 
-            out.update(managed_models.agent_env(m, "codex"))
-        if os.environ.get("OPENAI_BASE_URL"):
-            out["OPENAI_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
-        if env and env.get("OPENAI_BASE_URL"):
-            out["OPENAI_BASE_URL"] = env["OPENAI_BASE_URL"]
+            managed_env = managed_models.agent_env(m, "codex")
+            if "OPENAI_BASE_URL" in managed_env:
+                out["OPENAI_BASE_URL"] = managed_env["OPENAI_BASE_URL"]
     return out
 
 
@@ -398,15 +438,14 @@ def _route_scope(provider: str, *, repo_root: str | None = None,
         if org_managed:
             parts.append(f"org-managed:{org_managed}")
         for var in _CLAUDE_NON_SUBSCRIPTION_VARS:
-            if route.get(var):
-                parts.append(f"{var}={route[var]}")
-        if env:
-            for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-                if env.get(var):
-                    parts.append(f"env:{var}")
+            if _route_var_active(var, route.get(var)):
+                parts.append(f"{var}={route[var].strip()}")
+        for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            if _route_var_active(var, route.get(var)):
+                parts.append(f"env:{var}")
     elif provider == "codex":
-        if route.get("OPENAI_BASE_URL"):
-            parts.append(f"OPENAI_BASE_URL={route['OPENAI_BASE_URL']}")
+        if _route_var_active("OPENAI_BASE_URL", route.get("OPENAI_BASE_URL")):
+            parts.append(f"OPENAI_BASE_URL={route['OPENAI_BASE_URL'].strip()}")
         if (m := _managed_for(repo_root)) is not None:
             from brindle.pro import managed_models
 
@@ -430,19 +469,24 @@ def effective_windows(q: Quota, *, now: float | None = None) -> tuple[list[Windo
     overage separate. Returns ``(serving_windows, limited_until, has_overage_buffer)``.
 
     Work can run while either the included allowance has room OR optional paid
-    overage (``overage=True`` / ``overage_unlimited=True``) has room. When both
-    are exhausted, the cutoff lifts at the earliest reset that restores either
-    allowance. Once an included window expires (resets), an exhausted optional
-    overage window does not hold work back on its own."""
-    plan = [w for w in q.windows if w.name is None and (now is None or w.resets_at is None or w.resets_at > now)]
+    overage (``overage=True`` / ``overage_unlimited=True`` / reset overage) has
+    room. When both are exhausted, the cutoff lifts at the earliest reset that
+    restores either allowance. Once either allowance expires (resets), the other
+    exhausted allowance does not hold work back on its own."""
+    all_plan = [w for w in q.windows if w.name is None]
+    plan = [w for w in all_plan if now is None or w.resets_at is None or w.resets_at > now]
     included = [w for w in plan if not w.overage]
     overage = [w for w in plan if w.overage]
+    overage_reset = q.overage_reset or (
+        now is not None and any(w.overage and w.resets_at is not None and w.resets_at <= now for w in all_plan)
+    )
     if not included:
         # Optional overage windows alone only remain after included windows reset.
-        return [], None, q.overage_unlimited
+        return [], None, q.overage_unlimited or overage_reset
     included_full = [w for w in included if w.used >= 100.0]
     if not included_full:
-        has_buffer = q.overage_unlimited or (bool(overage) and all(w.used < 100.0 for w in overage))
+        has_buffer = (q.overage_unlimited or overage_reset
+                      or (bool(overage) and all(w.used < 100.0 for w in overage)))
         return included, None, has_buffer
     if q.overage_unlimited:
         return [], None, True
@@ -450,11 +494,15 @@ def effective_windows(q: Quota, *, now: float | None = None) -> tuple[list[Windo
         overage_full = [w for w in overage if w.used >= 100.0]
         if not overage_full:
             return overage, None, False
+        if overage_reset:
+            return [], None, True
         inc_resets = [w.resets_at for w in included_full if w.resets_at is not None]
         ov_resets = [w.resets_at for w in overage_full if w.resets_at is not None]
         candidates = [r for r in (max(inc_resets) if inc_resets else None,
                                   max(ov_resets) if ov_resets else None) if r is not None]
         return overage_full, (min(candidates) if candidates else None), False
+    if overage_reset:
+        return [], None, True
     inc_resets = [w.resets_at for w in included_full if w.resets_at is not None]
     return included_full, (max(inc_resets) if inc_resets else None), False
 
@@ -1077,13 +1125,14 @@ def _codex_cap_name(limits: dict) -> str | None:
 
 def _parse_codex_rate_limits(
     limits: dict, now: float, *, event_base: float | None = None,
-) -> tuple[list[Window], float | None, bool, bool, bool]:
+) -> tuple[list[Window], float | None, bool, bool]:
     """Parse one Codex ``rate_limits`` dict into
-    ``(windows, limited_until, is_model_cap, overage_unlimited, limit_inferred)``.
+    ``(windows, limited_until, is_model_cap, overage_unlimited)``.
 
-    Relative resets and inferred fallback cooldowns bind to ``event_base`` (the
-    rollout event's own timestamp when present) rather than wall-clock ``now``
-    so re-reading an unchanged rollout never renews a limit indefinitely.
+    All relative resets and inferred fallback cooldowns resolve against
+    ``event_base`` (the event's own timestamp when present, or the persisted
+    first-observed time for untimestamped rollout events) so re-reading an
+    unchanged rollout never renews either windows or cooldowns.
     """
     base = now if event_base is None else event_base
     cap_name = _codex_cap_name(limits)
@@ -1136,24 +1185,13 @@ def _parse_codex_rate_limits(
     rl_type = limits.get("rate_limit_reached_type")
     type_reached = isinstance(rl_type, str) and bool(rl_type.strip()) and rl_type.strip().lower() != "none"
     limited_until: float | None = None
-    limit_inferred = False
     if spend_reached or type_reached:
-        explicit_abs = (
-            isinstance(spend_ctrl, dict)
-            and any(_timestamp(spend_ctrl.get(k)) is not None for k in ("resets_at", "reset_at", "reset_time"))
-        )
         reset = _reset_from_dict(spend_ctrl, base) if isinstance(spend_ctrl, dict) else None
-        if reset is not None:
-            limit_inferred = not explicit_abs and event_base is None
-        else:
+        if reset is None:
             future = [w.resets_at for w in windows if w.name is None and w.resets_at and w.resets_at > base]
-            if future:
-                reset = max(future)
-            else:
-                reset = base + FALLBACK_COOLDOWN_MINUTES * 60
-                limit_inferred = True
+            reset = max(future) if future else base + FALLBACK_COOLDOWN_MINUTES * 60
         limited_until = reset
-    return windows, limited_until, cap_name is not None, overage_unlimited, limit_inferred
+    return windows, limited_until, cap_name is not None, overage_unlimited
 
 
 def _windows_from_limits(limits: dict, *, now: float | None = None) -> list[Window]:
@@ -1161,11 +1199,11 @@ def _windows_from_limits(limits: dict, *, now: float | None = None) -> list[Wind
 
 
 def _codex_rollout_state(
-    rollout: Path, now: float,
-) -> tuple[bool, list[Window], float | None, bool, str | None, bool]:
+    rollout: Path, now: float, *, seen_at: dict[str, float] | None = None,
+) -> tuple[bool, list[Window], float | None, bool, dict[str, float]]:
     """Read the newest plan-level ``rate_limits`` (plus any newer per-model caps)
     from ``rollout``. Returns
-    ``(saw_event, windows, limited_until, limit_inferred, limit_event_id, overage_unlimited)``."""
+    ``(saw_event, windows, limited_until, overage_unlimited, observed_events)``."""
     try:
         size = rollout.stat().st_size
         tail_start = max(0, size - ROLLOUT_TAIL_BYTES)
@@ -1173,18 +1211,18 @@ def _codex_rollout_state(
             f.seek(tail_start)
             raw_tail = f.read()
     except OSError:
-        return False, [], None, False, None, False
+        return False, [], None, False, {}
     raw_lines: list[tuple[int, bytes]] = []
     pos = 0
     for chunk in raw_tail.splitlines(keepends=True):
         raw_lines.append((tail_start + pos, chunk.rstrip(b"\r\n")))
         pos += len(chunk)
+    prior = seen_at or {}
+    observed: dict[str, float] = {}
     saw_event = False
     plan_windows: list[Window] | None = None
     model_caps: dict[str, list[Window]] = {}
     limited_until: float | None = None
-    limit_inferred = False
-    limit_event_id: str | None = None
     overage_unlimited = False
     for abs_offset, raw_line in reversed(raw_lines):
         if b'"rate_limits"' not in raw_line:
@@ -1210,7 +1248,14 @@ def _codex_rollout_state(
                 break
             if not isinstance(limits, dict):
                 continue
-            w_list, lim, is_cap, ov_unlim, inferred = _parse_codex_rate_limits(limits, now, event_base=event_ts)
+            event_id = hashlib.sha256(f"{rollout}:{abs_offset}:".encode() + raw_line).hexdigest()[:16]
+            if event_ts is not None:
+                event_base = event_ts
+            else:
+                prev = _number(prior.get(event_id))
+                event_base = prev if prev is not None else now
+                observed[event_id] = event_base
+            w_list, lim, is_cap, ov_unlim = _parse_codex_rate_limits(limits, now, event_base=event_base)
             if is_cap:
                 for w in w_list:
                     if w.name and w.name not in model_caps:
@@ -1222,17 +1267,12 @@ def _codex_rollout_state(
                         if w.name and w.name not in model_caps:
                             model_caps[w.name] = [x for x in w_list if x.name == w.name]
                     limited_until = lim
-                    limit_inferred = inferred
                     overage_unlimited = ov_unlim
-                    if lim is not None:
-                        limit_event_id = hashlib.sha256(
-                            f"{rollout}:{abs_offset}:".encode() + raw_line
-                        ).hexdigest()[:16]
             break
         if plan_windows is not None:
             break
     windows = (plan_windows or []) + [w for ws in model_caps.values() for w in ws]
-    return saw_event, windows, limited_until, limit_inferred, limit_event_id, overage_unlimited
+    return saw_event, windows, limited_until, overage_unlimited, observed
 
 
 def last_codex_limits(rollout: Path) -> list[Window]:
@@ -1251,36 +1291,25 @@ def refresh_codex(home: Path | None = None) -> bool:
     if not rollout:
         return False
     now = time.time()
-    saw_event, windows, limited_until, limit_inferred, limit_event_id, overage_unlimited = (
-        _codex_rollout_state(rollout, now)
+    old = _load().get("codex")
+    prev_seen = old.get("event_seen") if isinstance(old, dict) and isinstance(old.get("event_seen"), dict) else {}
+    saw_event, windows, limited_until, overage_unlimited, observed = (
+        _codex_rollout_state(rollout, now, seen_at=prev_seen)
     )
     if not saw_event:
         return False
-    if limited_until is not None:
-        old = _load().get("codex")
-        if limit_inferred and limit_event_id is not None and isinstance(old, dict) and old.get("limit_event_id") == limit_event_id:
-            prev_until = _number(old.get("limit_event_until"))
-            if prev_until is None:
-                prev_until = _number(old.get("limited_until"))
-            limited_until = prev_until if prev_until is not None else 0.0
-        if limited_until > now:
-            record("codex", windows, limited_until=limited_until, source="codex rollout",
-                   overage_unlimited=overage_unlimited, limit_event_id=limit_event_id,
-                   limit_event_until=limited_until)
-            return True
-        # This rollout's limit cooldown has already expired; remember its event
-        # identity/deadline without renewing it or clobbering any newer CLI limit.
-        record("codex", windows, source="codex rollout", keep_limit=True,
-               overage_unlimited=overage_unlimited, limit_event_id=limit_event_id,
-               limit_event_until=limited_until)
-        return bool(windows or overage_unlimited)
-    if windows or overage_unlimited:
-        record("codex", windows, source="codex rollout", keep_limit=True,
-               overage_unlimited=overage_unlimited)
+    has_live = any(w.resets_at is None or w.resets_at > now for w in windows)
+    if limited_until is not None and limited_until > now:
+        record("codex", windows, limited_until=limited_until, source="codex rollout",
+               overage_unlimited=overage_unlimited, event_seen=observed)
         return True
-    # Explicit null/empty rate_limits: clear stale rollout windows
-    # rather than driving failover on an earlier ChatGPT session's numbers.
-    record("codex", [], source="codex rollout", keep_limit=True)
+    if has_live or overage_unlimited:
+        record("codex", windows, source="codex rollout", keep_limit=True,
+               overage_unlimited=overage_unlimited, event_seen=observed)
+        return True
+    # Explicit null/empty or fully expired rollout state: clear stale windows
+    # while keeping first-observed event timestamps and any independent CLI limit.
+    record("codex", [], source="codex rollout", keep_limit=True, event_seen=observed)
     return False
 
 

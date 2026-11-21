@@ -191,6 +191,26 @@ def test_claude_corporate_status_line_iso_reset_spend_and_extra_usage_overage(tm
     assert health.until == three_pm
     assert provider_health.limit("claude", now=three_pm + 1).ok
 
+    # 4. Overage resetting BEFORE included allowance also lifts the limit: paid overage
+    # returns at NOW + 60 while the included window stays full until NOW + 7200.
+    assert quota.record_claude({
+        "rate_limits": {
+            "five_hour": {"used_percentage": 100, "resets_at": NOW + 7200},
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": 200.0,
+                "monthly_limit": 200.0,
+                "resets_at": NOW + 60,
+            },
+        }
+    })
+    health = provider_health.limit("claude", now=NOW)
+    assert health.state == provider_health.LIMITED and health.until == NOW + 60
+    assert quota.known_headroom("claude", now=NOW) == 0.0
+    assert provider_health.limit("claude", now=NOW + 61).ok
+    assert quota.known_headroom("claude", now=NOW + 61) is None
+    assert quota.status("claude", now=NOW + 61) == "unknown"
+
 
 def test_codex_corporate_rollout_parses_individual_limit_model_cap_credits_and_spend_control(
         tmp_path, brindle_home, clock, monkeypatch):
@@ -291,6 +311,26 @@ def test_codex_corporate_rollout_parses_individual_limit_model_cap_credits_and_s
     assert provider_health.limit("codex", now=clock[0]).ok
     assert quota.get("codex", now=clock[0]) is None
 
+    # 5. Untimestamped rollout with relative window reset (resets_in_seconds) + spend_control_reached:
+    # both the window reset and the limit deadline bind to first-observed time and do not slide forward.
+    t2 = clock[0]
+    _write_codex_rollout(tmp_path, monkeypatch, [
+        {"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+            "limit_id": "codex",
+            "limit_name": None,
+            "primary": {"used_percent": 100.0, "window_minutes": 300, "resets_in_seconds": 60},
+            "spend_control_reached": True,
+            "plan_type": "enterprise",
+        }}},
+    ], name="rollout-2026-11-23T12-00-00-relative.jsonl")
+    assert quota.refresh_codex()
+    assert provider_health.limit("codex", now=t2).until == t2 + 60
+
+    clock[0] = t2 + 120
+    assert not quota.refresh_codex()
+    assert provider_health.limit("codex", now=clock[0]).ok
+    assert quota.get("codex", now=clock[0]) is None
+
 
 def test_corporate_cloud_route_ignores_personal_subscription_and_unknown_usage_drives_no_failover(
         db, repo, tmp_path, brindle_home, clock, monkeypatch):
@@ -325,6 +365,28 @@ def test_corporate_cloud_route_ignores_personal_subscription_and_unknown_usage_d
     assert provider_health.limit("claude", now=NOW).ok
     assert provider_switch.maybe_offer(db, "root", NOW) is None
     assert autopilot._unavailable("developer", RepoConfig(usage_limit=0, limit_headroom=100), str(repo)) is None
+
+    # A saved sign-in connection clears stored/inherited cloud vars with explicit blanks:
+    # a limit recorded on the Bedrock route must not bleed onto the subscription route,
+    # whereas an enforced Enterprise Bedrock route still retains launch precedence.
+    from brindle import company_identity, connections, profiles
+
+    quota.record_limit("claude", now=NOW)
+    assert provider_health.limit("claude", now=NOW).state == provider_health.LIMITED
+    quota.record("claude", [quota.Window(20.0, NOW + DAY, 10080)], source="status line")
+    (brindle_home / "config.json").write_text(
+        json.dumps({connections.KEY: {"claude": {"method": "sign_in"}}}), encoding="utf-8"
+    )
+    sub_prof = connections.apply(profiles.load_profile("developer", str(repo)), str(repo))
+    assert sub_prof.env.get("CLAUDE_CODE_USE_BEDROCK") == ""
+    assert provider_health.limit("claude", env=sub_prof.env, now=NOW).ok
+    assert quota.known_headroom("claude", env=sub_prof.env, now=NOW) == 80.0
+    assert autopilot._unavailable("developer", RepoConfig(usage_limit=95, limit_headroom=10), str(repo)) is None
+
+    with monkeypatch.context() as mp:
+        mp.setattr(company_identity, "enforced_route_env", lambda: {"CLAUDE_CODE_USE_BEDROCK": "1"})
+        assert provider_health.limit("claude", env=sub_prof.env, now=NOW).state == provider_health.LIMITED
+    (brindle_home / "config.json").unlink()
 
     # Corporate Codex gateway present ONLY in launch/profile env (empty daemon os.environ)
     # must ignore a cached 100% personal Codex window and isolate its own real limit errors.
