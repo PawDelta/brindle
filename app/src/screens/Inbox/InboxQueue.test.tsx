@@ -71,7 +71,7 @@ describe("the Inbox queue", () => {
   it("puts each row in its part, threads on one design in one row, sign-off progress as dots", async () => {
     mount([{ ...progress, from_person: { sub: "u_chen", name: null }, signoff: { ...progress.signoff!, waiting: [{ sub: "u_sam", name: null }, { sub: "unknown", name: null }] } },
       { ...comment(11, "u_chen", "c:11"), from_person: { sub: "u_chen", name: null } }, review, asked, comment(12, "u_sam", "c:12")], {}, (_daemon, client) => {
-      vi.spyOn(client, "libraryPeople").mockResolvedValue({ people: [{ sub: "u_chen", display_name: "Chen Wei", email: "chen@example.test" }, { sub: "u_sam", email: "sam@example.test" }] });
+      vi.spyOn(client, "libraryPeople").mockResolvedValue({ people: [{ sub: "u_chen", first_name: "Chen", last_name: "Wei", email: "chen@example.test" }, { sub: "u_sam", email: "sam@example.test" }] });
       return client;
     });
     const waiting = await screen.findByTestId("inbox-waiting");

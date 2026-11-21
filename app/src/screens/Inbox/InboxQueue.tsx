@@ -24,6 +24,7 @@ import type { OpenUrl } from "../../api/open";
 import type { InboxItemDTO, PersonDTO, PlanThreadDTO, SharedDesignDTO } from "../../api/schema";
 import { CheckIcon, ChevronRightIcon, ClockIcon, FileIcon, GearIcon, LockIcon } from "../../components/icons";
 import type { Route } from "../../routes";
+import { displayName } from "../Session/Visuals/PlanCards";
 import { describeItem, itemKey, kindLabel, opensVisual, seenAt, seenKey, REVIEW_KINDS } from "./items";
 import {
   LONG_WAIT_MS, TABS, TABS_FROM, ageOf, clearRow, hiddenByTriage, laterTimes, onTriage, putBack, recordDone, rowSig, rowsOf, setAside, signoffSig,
@@ -206,7 +207,7 @@ export function InboxQueue({ items: receivedItems, synced, fresh, actions, clien
   const namedPerson = (person: PersonDTO | null | undefined) => {
     if (!person) return person;
     const member = directory.find((p) => p.sub === person.sub);
-    return { ...person, name: member?.display_name || (person.name !== "A teammate" && person.name) || member?.email || null };
+    return { ...person, name: displayName(member && { ...member, email: null }) || (person.name !== "A teammate" && person.name) || member?.email || null };
   };
   const items = receivedItems.map((item) => ({ ...item, from_person: namedPerson(item.from_person),
     signoff: item.signoff && { ...item.signoff, waiting: item.signoff.waiting?.map((person) => namedPerson(person)!) } }));
