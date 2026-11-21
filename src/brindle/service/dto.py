@@ -411,6 +411,18 @@ class PlanWorkerDTO(_DTO):
     test_state: Literal["not run", "failing", "passing"] = "not run"
 
 
+class PlanAlongsideDTO(_DTO):
+    """A task the supervisor assigned outside an open plan (assign's
+    outside_plan): it ran at once instead of waiting on the plan. ``reason``:
+    the supervisor's. ``can_stop``: Stop still has something to cancel or remove."""
+
+    task_id: str
+    title: str
+    state: Literal["queued", "working", "in review", "merged", "cancelled"]
+    reason: str
+    can_stop: bool
+
+
 class PlanCommentDTO(_DTO):
     section: str
     text: str
@@ -619,7 +631,9 @@ class PlanDTO(_DTO):
     """A planning doc (brindle.plans): markdown brindle renders itself, split
     into its ``##`` sections. ``state``: open (the person hasn't decided),
     redirected (their comments went back; a new revision is coming) or
-    approved. While open or redirected, the session's assign calls queue."""
+    approved. While open or redirected, the plan's own work queues (assigns
+    linked to its split or to a goal milestone); ``alongside`` is the work
+    the supervisor declared outside it, which runs at once."""
 
     id: str
     session: str
@@ -648,6 +662,8 @@ class PlanDTO(_DTO):
     gate: PlanGateDTO | None = None
     # The Team plan it was shared under has ended: a personal doc, with no gate, until it comes back.
     team_ended: bool = False
+    # "Running alongside this plan": tasks assigned outside it while it was open, oldest first.
+    alongside: list[PlanAlongsideDTO] = []
 
 
 class SharedDesignDTO(PlanDTO):

@@ -3,10 +3,11 @@
    are the live board. */
 
 import type { Plan } from "../../../api/client";
-import type { PlanDecisionDTO, PlanWorkerDTO } from "../../../api/schema";
-import { alert, chip, pill } from "../../../components/ui";
-import { useContext, useSyncExternalStore } from "react";
+import type { PlanAlongsideDTO, PlanDecisionDTO, PlanWorkerDTO } from "../../../api/schema";
+import { alert, chip, pill, quiet } from "../../../components/ui";
+import { useContext, useState, useSyncExternalStore } from "react";
 import { StoreContext } from "../../../store/useStore";
+import { message } from "./chrome";
 import { peerClass } from "./docAwareness";
 
 const card = "flex min-w-0 flex-col gap-2 rounded-lg border bg-canvas p-3 text-[12.5px] text-ink-2";
@@ -150,6 +151,48 @@ const proof: Record<NonNullable<PlanWorkerDTO["test_state"]>, { tone: string; ma
   passing: { tone: "bg-pass-soft text-pass", mark: "✓" },
 };
 const stateTone: Partial<Record<NonNullable<PlanWorkerDTO["state"]>, string>> = { merged: "text-pass", cancelled: "text-fail" };
+
+/* Work the supervisor assigned outside the open plan, with the reason it gave: it runs now
+   instead of waiting on the plan. Stop cancels a queued task or removes a started one's
+   workspace (its branch is kept); it never kills a worker. */
+export function Alongside({ rows, onStop }: { rows: PlanAlongsideDTO[]; onStop?(task: string): Promise<unknown> }) {
+  const [stopping, setStopping] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (!rows.length) return null;
+  const stop = async (task: string) => {
+    setStopping(task);
+    setError(null);
+    try {
+      await onStop!(task);
+    } catch (e) {
+      setError(`Couldn't stop it: ${message(e)}`);
+    } finally {
+      setStopping(null);
+    }
+  };
+  return (
+    <section aria-label="Running alongside this plan" className="grid gap-1.5" data-testid="plan-alongside">
+      <h3 className="text-xs font-semibold text-ink-2">Running alongside this plan</h3>
+      <ul className="grid gap-1">
+        {rows.map((r) => (
+          <li key={r.task_id} className="flex items-baseline gap-3 text-[12.5px]" data-testid={`alongside-${r.task_id}`} data-state={r.state}>
+            <span className="min-w-0 flex-1 truncate">
+              <span className="text-ink">{r.title}</span>
+              <span className="text-ink-3">{` · ${r.reason}`}</span>
+            </span>
+            <span className={`shrink-0 font-mono text-[11px] ${stateTone[r.state] ?? "text-ink-2"}`}>{r.state}</span>
+            {onStop && r.can_stop && (
+              <button type="button" className={`${quiet} -my-0.5 shrink-0 text-xs`} disabled={stopping !== null} aria-label={`Stop ${r.title}`} onClick={() => void stop(r.task_id)}>
+                Stop
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {error && <p role="alert" className={alert}>{error}</p>}
+    </section>
+  );
+}
 
 /* The split as task cards: each worker, the files it changes (a file another worker changes too
    is flagged) and the one test that proves it. Approved, the cards are live: where each worker

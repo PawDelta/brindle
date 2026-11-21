@@ -54,13 +54,13 @@ import { DocStatus, type StatusReviewer } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
-import { Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
+import { Alongside, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
 import { Annotated, DecisionCard, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { StoreContext } from "../../../store/useStore";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -252,7 +252,13 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
   // Read again whenever the session's row says the plan changed (a revision, a verdict).
   const changed = `${visual.id}:${visual.rev}:${visual.answer?.at ?? ""}`;
   const source = useMemo(() => planSource(client, visual.id), [client, visual.id]);
-  const { doc: shown, error, writes } = useDoc(source, `${changed}|${updates}`);
+  // A Stop on work running alongside the plan reads the plan again, ahead of the bus.
+  const [stops, setStops] = useState(0);
+  const { doc: shown, error, writes } = useDoc(source, `${changed}|${updates}|${stops}`);
+  const stopAlongside = client.stopAlongside && (async (task: string) => {
+    await client.stopAlongside!(visual.id, task);
+    setStops((n) => n + 1);
+  });
   const exportClient = client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? (client as ExportClient) : undefined;
   // A decided plan is read, not edited; the engine takes a suggestion until it is approved.
   const allowed = (m: Mode) => m === "viewing" || (!!shown && (m === "editing" ? shown.state === "open" : shown.state !== "approved"));
@@ -283,10 +289,14 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
         <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
           shareLink={planLinkTarget(client, shown.id, repo)}
           chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode, onBack }}
-          top={shown.state === "approved" && (
+          top={shown.state === "approved" ? (
             <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">
               <Tasks plan={shown} shared={overlaps(shown)} />
             </section>
+          ) : !!shown.alongside?.length && (
+            <div className="max-h-[30vh] shrink-0 overflow-auto border-b border-line px-s3 py-3">
+              <Alongside rows={shown.alongside} onStop={stopAlongside || undefined} />
+            </div>
           )} />
       ) : (
         <>

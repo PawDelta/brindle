@@ -143,10 +143,27 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True) -> dict:
                        for s in view.get("sign_offs") or [])).to_json()
 
 
+def _titled(doc_id: str, view: dict, client, store) -> dict:
+    """The design view with the doc's title: the Library's design view carries
+    none, its doc's own entry does. Without it (refused, unreachable) the view
+    stays as it is and the reader says ``UNTITLED``."""
+    from brindle.pro import auth
+
+    if isinstance(view.get("title"), str) and view["title"].strip():
+        return view
+    try:
+        meta = ad.api("GET", ad._doc_path(doc_id), client=client, store=store)
+    except (RuntimeError, auth.AuthError, auth.TransportError):
+        return view
+    title = meta.get("title")
+    return {**view, "title": mask(title)} if isinstance(title, str) and title.strip() else view
+
+
 def _ask(doc_id: str, method: str, tail: str, body: dict | None, client, store) -> dict:
     client, store = ad._session(client, store)
     me = ad.require_entitlement(store).sub
-    return _dto(doc_id, ad.api(method, sd._path(doc_id, tail), body, client=client, store=store), me)
+    view = ad.api(method, sd._path(doc_id, tail), body, client=client, store=store)
+    return _dto(doc_id, _titled(doc_id, view, client, store), me)
 
 
 def _rev(rev: Any) -> int:
@@ -246,6 +263,8 @@ def asked_thread(design: dict, text: str) -> int | None:
 
 # A share link's token: dsl_ and 43 URL-safe characters (docs/share-links-api.md in pawdelta-web).
 LINK_TOKEN = re.compile(r"dsl_[A-Za-z0-9_-]{43}")
+# A Library document id, as a link names it for a reader the design is also shared with.
+DOC_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 LINK_REFUSALS = ("sign_in_required", "org_only", "team_only", "share_links_off", "sso_required")
 NO_LINK = "This link doesn't open a plan for this account. It may have been turned off or replaced."
 
@@ -289,7 +308,9 @@ def read_link(token: Any, *, client=None, store=None) -> dict:
     signed in now: the Library runs the link's own checks (revoked, the org's
     policy, an org or team scope), the same as for the link's web page, so
     this opens nothing the browser wouldn't. Read only: no comments, votes or
-    sign-offs from here, and nothing is kept."""
+    sign-offs from here, and nothing is kept. When the Library names the
+    design (it does only for someone the design is shared with), it opens in
+    the shared reader with what this account may do there (:func:`_as_member`)."""
     from brindle.pro import auth
 
     if not isinstance(token, str) or not LINK_TOKEN.fullmatch(token):
@@ -300,5 +321,37 @@ def read_link(token: Any, *, client=None, store=None) -> dict:
     resp = resp if isinstance(resp, dict) else {}
     if status != 200:
         raise _link_refused(status, resp)
+    doc_id = resp.get("doc_id")
+    if doc_id is not None:
+        if not isinstance(doc_id, str) or not DOC_ID.fullmatch(doc_id):
+            raise ServiceError("upstream", "the Library named a design brindle can't read", 502)
+        member = _as_member(doc_id, resp.get("title"), client, store)
+        if member is not None:
+            return member
     view = {**resp, "can_edit": False, "can_comment": False, "can_suggest": False}
     return _dto(link_id(token), view, me, review=False)
+
+
+def _as_member(doc_id: str, title: Any, client, store) -> dict | None:
+    """The design a link named for someone it is also shared with (through a
+    scope or a reviewer grant): the Library names it only for them. It opens
+    in the shared reader, as the Library's own design view says this account
+    may use it, never more. A refusal there is a not-found, as on the web.
+    None when this account has no Library here (no Team plan): the link's own
+    read-only view, which the link already allows."""
+    try:
+        me = ad.require_entitlement(store).sub
+    except RuntimeError:
+        return None
+    try:
+        view = ad.api("GET", sd._path(doc_id), client=client, store=store)
+    except ad.Refused as e:
+        if e.status in (403, 404):
+            raise ServiceError("not_found", NO_LINK, 404) from e
+        if e.status == 401:
+            raise ServiceError("signed_out", "sign in to brindle again to open this link", 402) from e
+        if e.code == "key_unavailable":
+            raise ServiceError(e.code, "the organization's key for this plan is unavailable", 503) from e
+        raise ServiceError("upstream", mask(str(e)), 502) from e
+    named = {**view, "title": title} if isinstance(title, str) and title.strip() else view
+    return _dto(doc_id, _titled(doc_id, named, client, store), me)

@@ -2,7 +2,9 @@
    (PlanReader.tsx). The daemon reads it through the link as the account signed in
    (brindle/pro/shared_reader.py read_link): the link's own checks decide, as for its web page, so
    nothing opens here that the browser wouldn't. Read only: the person reads it, as on the web.
-   Nothing is kept on this machine, and the token never leaves this screen's memory.
+   Nothing is kept on this machine, and the token never leaves this screen's memory. When the
+   design is also shared with this account, the Library names it and it opens in the Library's
+   reader instead (`member`), with this account's own rights there.
 
    A link that didn't parse, or one the link's checks refuse, says so calmly. Signed out (or the
    sign-in expired), the screen asks the person to sign in and opens the plan once they have. */
@@ -23,18 +25,28 @@ const READ_EVERY_MS = 30_000;
 const VIEWING = MODES.filter((m) => m.id === "viewing");
 const NOT_A_LINK = "Couldn't open this link. It isn't a link to a brindle plan.";
 
-type First = { kind: "reading" } | { kind: "open"; id: string } | { kind: "signed-out" } | { kind: "failed"; error: string };
+type First = { kind: "reading" } | { kind: "open"; id: string; title: string } | { kind: "signed-out" } | { kind: "failed"; error: string };
+
+/* The daemon keys a plan read through its link by "link_…" (never the token). Any other id is the
+   Library's own: the design is shared with this account too, so it opens as the Library opens it,
+   with what the Library lets this account do there. */
+export function isLinkView(id: string): boolean {
+  return id.startsWith("link_");
+}
 
 function why(e: unknown): First {
   if (e instanceof DaemonError && e.status === 402) return { kind: "signed-out" };
   return { kind: "failed", error: `Couldn't open this link. ${message(e)}` };
 }
 
-export function SharedLinkReader({ client, link, onBack, backLabel }: {
+export function SharedLinkReader({ client, link, onBack, backLabel, member }: {
   client: ShareLinkDesignClient;
   link: PlanLink | null;
   onBack(): void;
   backLabel?: string;
+  /* The Library's reader for a design the link names because it is shared with this account
+     (LibraryDesign): editing, comments and sign-off as the Library allows. */
+  member?(design: { id: string; title: string }): ReactNode;
 }) {
   useEscBack(onBack);
   const [first, setFirst] = useState<First>({ kind: "reading" });
@@ -46,7 +58,7 @@ export function SharedLinkReader({ client, link, onBack, backLabel }: {
     let live = true;
     setFirst({ kind: "reading" });
     client.shareLinkDesign(token).then(
-      (doc) => { if (live) setFirst({ kind: "open", id: doc.id }); },
+      (doc) => { if (live) setFirst({ kind: "open", id: doc.id, title: doc.title }); },
       (e: unknown) => { if (live) setFirst(why(e)); },
     );
     return () => { live = false; };
@@ -60,6 +72,7 @@ export function SharedLinkReader({ client, link, onBack, backLabel }: {
   );
   // A sign-in lost while the plan is open: ask for it again, keeping the link.
   const signedOut = useCallback(() => setFirst({ kind: "signed-out" }), []);
+  if (token && first.kind === "open" && member && !isLinkView(first.id)) return <>{member({ id: first.id, title: first.title })}</>;
   if (token && first.kind === "open") return <LinkDoc client={client} token={token} id={first.id} lead={lead} signedOut={signedOut} />;
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="shared-link-reader">

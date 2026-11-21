@@ -57,6 +57,7 @@ export interface ApiSchema {
   PermissionPresetDTO: PermissionPresetDTO;
   PermissionRuleDTO: PermissionRuleDTO;
   PersonDTO: PersonDTO;
+  PlanAlongsideDTO: PlanAlongsideDTO;
   PlanAnchorDTO: PlanAnchorDTO;
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
@@ -957,6 +958,21 @@ export interface PermissionRuleDTO {
   source: string;
 }
 /**
+ * A task the supervisor assigned outside an open plan (assign's
+ * outside_plan): it ran at once instead of waiting on the plan. ``reason``:
+ * the supervisor's. ``can_stop``: Stop still has something to cancel or remove.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanAlongsideDTO".
+ */
+export interface PlanAlongsideDTO {
+  can_stop: boolean;
+  reason: string;
+  state: "queued" | "working" | "in review" | "merged" | "cancelled";
+  task_id: string;
+  title: string;
+}
+/**
  * Where a thread is anchored (brindle.plan_docs): a text range of a
  * section (``text``: ``quote`` between ``start`` and ``end``), a diagram
  * section, a decision (optionally one option) or a whole section, the
@@ -988,12 +1004,15 @@ export interface PlanCommentDTO {
  * A planning doc (brindle.plans): markdown brindle renders itself, split
  * into its ``##`` sections. ``state``: open (the person hasn't decided),
  * redirected (their comments went back; a new revision is coming) or
- * approved. While open or redirected, the session's assign calls queue.
+ * approved. While open or redirected, the plan's own work queues (assigns
+ * linked to its split or to a goal milestone); ``alongside`` is the work
+ * the supervisor declared outside it, which runs at once.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanDTO".
  */
 export interface PlanDTO {
+  alongside?: PlanAlongsideDTO[];
   ask?: string | null;
   can_edit?: boolean;
   created_at: number;
@@ -1570,6 +1589,7 @@ export interface SessionDTO {
  * via the `definition` "SharedDesignDTO".
  */
 export interface SharedDesignDTO {
+  alongside?: PlanAlongsideDTO[];
   ask?: string | null;
   author?: string | null;
   can_comment?: boolean;

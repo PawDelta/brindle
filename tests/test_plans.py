@@ -56,6 +56,14 @@ def session(db, tmp_path, monkeypatch):
     return boss, started
 
 
+def work(db) -> dict:
+    """assign's arguments for the plan's own work, a milestone of the session's goal: an open plan holds only that."""
+    db.add_autopilot("boss", enabled=False)
+    if not db.milestones("boss"):
+        db.set_milestones("boss", [("Org presets", "true", None)])
+    return {"milestone": 1}
+
+
 def messages(db) -> list[str]:
     return [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
 
@@ -271,7 +279,7 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
     assert plans.sections(PLAN)[1][0]["title"] == "Goal" and len(plans.sections(PLAN)[1]) == 2
 
     monkeypatch.setattr(holds, "app_connected", lambda: bool(app_connected))
-    reply = asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    reply = asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
     if not app_connected:
         plans.decide(db, pid, 1, False, note="Revise the split.", person=True)
         asyncio.run(mcp_server.assign("developer", "build the UI"))
@@ -577,8 +585,8 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN, DECISIONS).split()[2]
-    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
-    redirect = {"comments": [{"section": "s1", "text": "Repo file first."}], "person": True}
+    asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
+    redirect ={"comments": [{"section": "s1", "text": "Repo file first."}], "person": True}
     grants = lambda: [r["remaining"] for r in db.conn.execute("SELECT remaining FROM visual_grants")]  # noqa: E731
 
     # One failure inside the verdict's transaction: none of it lands, and the
@@ -705,14 +713,14 @@ def test_required_reviewers_gate(db, session, library, monkeypatch, review, loca
     if state == "ready":
         # All signed, and still only the approval starts it: losing the app can't skip that step.
         monkeypatch.setattr(holds, "app_connected", lambda: False)
-        asyncio.run(mcp_server.assign("developer", "build it"))
+        asyncio.run(mcp_server.assign("developer", "build it", **work(db)))
         assert started == [] and tasks.sweep(db) == 0 and started == []
         assert plans.decide(db, pid, 1, True, person=True)["state"] == "approved" and started == ["build it"]
         assert plans.gate(db, plans.get(db, pid))["state"] == "closed"
         return
     # Refused outright, even with no app connected: teammates sign off from their own machines.
     monkeypatch.setattr(holds, "app_connected", lambda: False)
-    asyncio.run(mcp_server.assign("developer", "build it"))
+    asyncio.run(mcp_server.assign("developer", "build it", **work(db)))
     assert db.list_tasks() == [] and started == []
     with pytest.raises(ServiceError) as e:
         plans.decide(db, pid, 1, True, person=True)
@@ -724,7 +732,7 @@ def test_required_reviewers_request_changes_blocks_and_building_closes_the_revie
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN).split()[2]
     _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")})
-    asyncio.run(mcp_server.assign("developer", "queued before it was blocked"))
+    asyncio.run(mcp_server.assign("developer", "queued before it was blocked", **work(db)))
 
     # Request changes works with reviewers still out, and holds the build whatever was signed.
     assert plans.decide(db, pid, 1, False, note="Rework it.", person=True)["state"] == "redirected"
@@ -781,7 +789,7 @@ def outage(db, session, monkeypatch):
     pid = mcp_server.propose_plan(PLAN).split()[2]
     _shared(db, pid, NO_REVIEW)
     shared_docs._remember(db, pid, NO_REVIEW)
-    asyncio.run(mcp_server.assign("developer", "build it"))
+    asyncio.run(mcp_server.assign("developer", "build it", **work(db)))
     line = SimpleNamespace(pid=pid, view=NO_REVIEW, signed_in="me", calls=[], down=auth.TransportError("no route to 10.0.0.1"),
                            patch=monkeypatch, real_sync=shared_docs.sync)
 
@@ -984,7 +992,7 @@ def test_plan_is_ready_when_the_person_asks_and_the_first_proposal_fills_it(db, 
     pid = plans.holding(db, "boss")["id"]               # the plan exists before the supervisor writes a word
     draft = plans.get(db, pid)
     assert (draft["state"], draft["rev"], draft["sections"]) == ("writing", 0, [])
-    assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything")) and started == []
+    assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything", **work(db))) and started == []
     with pytest.raises(ServiceError) as e:
         plans.decide(db, pid, 0, True, person=True)     # nothing to approve yet
     assert e.value.code == "writing"
@@ -1025,4 +1033,4 @@ def test_only_the_person_decides_and_only_when_they_asked(db, session):
         plans.decide(db, pid, 1, True, person=False)
     assert e.value.code == "forbidden"
     assert plans.get(db, pid)["state"] == "open" and messages(db) == []
-    assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything")) and started == []
+    assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything", **work(db))) and started == []
