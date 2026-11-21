@@ -3737,6 +3737,21 @@ READERS = ("grep", "rg", "head", "tail", "cat", "wc", "sed")
 _LISTING_SAFE = ("git-push", "git-force", "push", "rm-destructive")
 
 
+def _expansion_spans(expansions: list[list[str]]) -> list[list[str]] | None:
+    """Whole and per-file invocations of expanded words, bounded like snapshots.
+
+    An extra glob match must not hide a restriction on an individual file.
+    Keep the other operands when checking each name, including combinations
+    of names from multiple patterns. None means the proof is too large.
+    """
+    choices = [[names, *([name] for name in names)] if len(names) > 1 else [names]
+               for names in expansions]
+    variants = list(itertools.islice(itertools.product(*choices), 501))
+    if len(variants) > 500:
+        return None
+    return [[name for names in variant for name in names] for variant in variants]
+
+
 def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
                     path_denies: list[Rule], assigned: list[bool], redirects: list[tuple[str, str]]) -> bool:
     """Whether no restriction can apply to what the patterns in ``parts``
@@ -3802,7 +3817,10 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
         # that will run as well as the literal spelling above.
         if not _readonly_part(req, argv) or not _reads_clear(req, argv, path_denies):
             return False
-        if _matching_restriction([replace(req, command=" ".join(argv))], None, rules) is not None:
+        spans = _expansion_spans([[words[0]], *(names[1:] or [word]
+                                              for word, names in zip(words[1:], expanded))])
+        if spans is None or _matching_restriction(
+                [replace(req, command=" ".join(span)) for span in spans], None, rules, spans) is not None:
             return False
     return True
 
@@ -5295,6 +5313,7 @@ class ShellPart:
     places: list[str] = field(default_factory=list)
     # Per word of ``written``: whether the shell expands it as a pattern of names.
     patterned: list[bool] = field(default_factory=list)
+    expansions: list[list[str]] = field(default_factory=list)    # names supplied by each written word
     dotglob: bool = False    # a pattern selects dot entries where it runs (_PartReader.options)
     loop: tuple = ()        # read snapshots must be safe for every command of each enclosing loop
     preceded_by_write: bool = False    # a later snapshot cannot assume earlier writes left its matches intact
@@ -5595,6 +5614,7 @@ class _PartReader:
                     part.words.pop()    # the 2 of 2>&1 names a descriptor
                     part.written.pop()
                     part.patterned.pop()
+                    part.expansions.pop()
                     part.references.pop()
                     if not part.words:
                         program = None    # (...) 2>&1: it was no program either
@@ -5640,6 +5660,7 @@ class _PartReader:
             part.references.extend([tuple(ref[2] for ref in word.refs)] * len(names))
             part.written.append(written or (names[0] if known else word.raw))
             part.patterned.append(written is not None)
+            part.expansions.append(names)
             if not known:
                 part.unresolved.append(word.raw)
             part.globs |= written is not None
@@ -6088,6 +6109,16 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             return None    # the message may be one a rule names
         # With the files it redirects to too: a deny on a name sees them.
         spans = [part.words, [*part.words, *part.writes, *part.reads]]
+        if restrictions and part.globs and not part.unknown:
+            # A snapshot may expand one operand to several files. Check each
+            # file with the same command rules before granting any read/pathspec
+            # exemption: an extra match must not hide an exact deny on one file.
+            variants = _expansion_spans(part.expansions)
+            if variants is None:
+                covered("too many expanded commands to check their restrictions")
+                return None
+            for words in variants:
+                spans += [words, [*words, *part.writes, *part.reads]]
         texts = [replace(at, command=_joined(words)) for words in spans]
         matched = _matching_restriction(texts, checks, restrictions, spans)
         if matched is not None and matched.decision == "deny":
