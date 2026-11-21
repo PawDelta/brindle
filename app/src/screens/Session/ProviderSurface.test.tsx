@@ -1,11 +1,10 @@
 import { act, render, waitFor, within } from "@testing-library/react";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { expect, it, vi } from "vitest";
 import type { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
 import { PtyViewsProvider, type PtyViewHandlers, type PtyViews } from "../../api/ptyView";
 import type { AgentDTO } from "../../api/schema";
+import { appThemeSheet, asGround } from "../../test/themes";
 import { ProviderSurface, surfaceCard } from "./ProviderSurface";
 const xterms = vi.hoisted(() => [] as import("@xterm/xterm").Terminal[]);
 vi.mock("@xterm/xterm", async (original) => {
@@ -56,11 +55,7 @@ it("typed_words_reach_the_engine", async () => {
 // colours only at its start: its pane's xterm.js follows (its own colours from its next launch, an accepted exception).
 it.each(["claude", "codex"])("a live %s pane follows the app theme light to dark and back", async (provider) => {
   vi.stubGlobal("matchMedia", () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }));
-  const css = readFileSync(resolve(import.meta.dirname, "../../styles.css"), "utf8");
-  const block = (selector: string) => css.slice(css.indexOf(`${selector} {`), css.indexOf("}", css.indexOf(`${selector} {`)) + 1);
-  const style = document.createElement("style");
-  style.textContent = block(":root") + block(':root[data-theme="light"]');
-  document.head.append(style);
+  const style = appThemeSheet();
   document.documentElement.dataset.theme = "light";
   let shown: ReturnType<typeof render> | undefined;
   try {
@@ -76,7 +71,6 @@ it.each(["claude", "codex"])("a live %s pane follows the app theme light to dark
     const term = xterms.at(-1)!;
     // tmux sends these, and reads xterm's answers to the colour query.
     const fromTmux = (text: string) => act(() => new Promise<void>((done) => { handlers!.onData(new TextEncoder().encode(text)); term.write("", done); }));
-    const asGround = (hex: string) => `\x1b]11;rgb:${[1, 3, 5].map((i) => hex.slice(i, i + 2).repeat(2)).join("/")}\x1b\\`;
     const shellBg = () => getComputedStyle(document.documentElement).getPropertyValue("--shell-bg").trim();
     // Attached in light (tmux 3.8's attach queries, captured): the light pane, its ground told to tmux.
     await fromTmux("\x1b[?1049h\x1b[?996n\x1b]11;?\x1b\\");
