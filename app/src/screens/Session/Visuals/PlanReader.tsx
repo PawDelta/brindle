@@ -499,7 +499,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
   }, [plan.id, shared]);
   const nameOf = (sub: string) => displayName(directory.find((p) => p.sub === sub.replace(/^teammate:/, ""))) || sub;
-  const namedThread = (t: PlanThreadDTO): PlanThreadDTO => ({ ...t, author: nameOf(t.author), replies: t.replies?.map((r) => ({ ...r, author: nameOf(r.author) })) });
   const namedDecision = (d: PlanDecisionDTO): PlanDecisionDTO => ({ ...d,
     votes: d.votes && Object.fromEntries(Object.entries(d.votes).map(([option, voters]) => [option, voters.map(nameOf)])) });
   // A person in a sentence: "You", or their name's first word ("dana.okafor@…" → "Dana").
@@ -1083,7 +1082,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       ...openThreads.map((t) => ({ t, h: home(t.anchor, t.id) })).filter(({ h }) => h.at === at).map(({ t, h }) => ({
         key: `t${t.id}`, anchor: h.anchor,
         // A teammate's suggestions are the author's to judge, and a teammate resolves only their own comments.
-        node: <MarginNote thread={namedThread(t)} busy={busy} canJudge={!teammate && plan.state === "open"} canReply={canComment} canResolve={!teammate || (canComment && t.author === "person")} actions={actions} lit={followed?.thread === String(t.id) || hovered === t.id}
+        node: <MarginNote thread={t} busy={busy} canJudge={!teammate && plan.state === "open"} canReply={canComment} canResolve={!teammate || (canComment && t.author === "person")} actions={actions} lit={followed?.thread === String(t.id) || hovered === t.id}
           onHover={(on) => setHovered(on ? t.id : null)} />,
       })),
       ...(draft && draftAt?.at === at ? [{
@@ -1376,7 +1375,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         </div>
         {sharePanel}
         {!sharingOpen && (columnOpen ? (
-          <Review plan={{ ...plan, threads: threads.map(namedThread) }} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
+          <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
             active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}

@@ -25,10 +25,11 @@ const COLUMN_MODES = MODES.filter((m) => m.id !== "editing");
 
 /* Who wrote and voted, by name where the org's directory knows them. */
 function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
-  const name = (who: string) => displayName(directory.find((p) => p.sub === who.replace(/^teammate:/, ""))) || who;
+  const name = (who: string) => directory.find((p) => p.sub === who)?.email || who;
+  const voterName = (who: string) => displayName(directory.find((p) => p.sub === who.replace(/^teammate:/, ""))) || who;
   return {
     ...doc,
-    decisions: doc.decisions.map((d) => ({ ...d, votes: d.votes && Object.fromEntries(Object.entries(d.votes).map(([option, subs]) => [option, subs.map(name)])) })),
+    decisions: doc.decisions.map((d) => ({ ...d, votes: d.votes && Object.fromEntries(Object.entries(d.votes).map(([option, subs]) => [option, subs.map(voterName)])) })),
     threads: doc.threads?.map((t) => ({ ...t, author: name(t.author), replies: t.replies?.map((r) => ({ ...r, author: name(r.author) })) })),
   };
 }

@@ -42,7 +42,7 @@ it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader
   const plan = doc(1, "Read this", { title: "Longtitle".repeat(40),
     decisions: [{ id: "long", title: decisionTitle, options: [{ id: "a", label: "Longoption".repeat(30) }], votes: { a: ["teammate:63a34f9d"] } }],
     gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["63a34f9d"], reviewers: [{ sub: "63a34f9d", required: true, status: "waiting" }] },
-    threads: [{ id: 1, rev: 1, author: "63a34f9d", at: 1, text: "Comment", kind: "comment", status: "open", anchor: { kind: "section", section: "summary", state: "current" } }] });
+    threads: [{ id: 1, rev: 1, author: name, at: 1, text: "Comment", kind: "comment", status: "open", anchor: { kind: "section", section: "summary", state: "current" } }] });
   const client = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
     sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, signOffPlan: async () => plan, overridePlanPolicy: async () => plan, docScopes: async () => ({ scopes: [] }),
     sharedDesign: async () => ({ ...plan, me: "me", author: "63a34f9d" }), writeSharedDesign: async () => ({ ...plan, me: "me" }),
