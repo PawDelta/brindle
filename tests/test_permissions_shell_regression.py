@@ -107,6 +107,40 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
                  marks=pytest.mark.variant("a special builtin may retain its leading environment assignment")),
     pytest.param('git status && D= && echo "${D:=blocked}" && gh api $D', False, "restricted", id="chain-parameter",
                  marks=pytest.mark.variant("a parameter operator can set a value even as a plain command argument")),
+    # Reduced, anonymised commands from the seven-day replay ending November 20.
+    pytest.param("D={root}; S=tests; git add $D/$S/test_*.py", False, "allow", id="literal-paths-stage",
+                 marks=pytest.mark.variant("literal absolute and relative variables compose a staging glob")),
+    pytest.param("D={root}; S=tests; git add $D/$S/test_*.py", True, "deny", id="literal-paths-denied",
+                 marks=pytest.mark.variant("resolved variable paths cannot hide a protected staging match")),
+    pytest.param('cd "$PWD"; wc -l tests/*.py 2>/dev/null | head -40', False, "allow", id="pwd-tail",
+                 marks=pytest.mark.variant("the replayed PWD cd preserves the cwd for glob reads and tails")),
+    pytest.param('read PWD; cd "$PWD"; cat test_public.py', False, "restricted", id="pwd-setter",
+                 marks=pytest.mark.variant("a changed PWD cannot be mistaken for the initial directory")),
+    pytest.param('cd {root}/tests; git ls-files test_*.py 2>&1 | tail -2 || true; echo done', False, "allow", id="cd-tail",
+                 marks=pytest.mark.variant("glob reads after a literal cd are checked in both possible directories")),
+    pytest.param('cd {root}/tests; git ls-files test_*.py 2>&1 | tail -2 || true; echo done', True, "restricted", id="cd-tail-denied",
+                 marks=pytest.mark.variant("a protected glob match at the cd destination survives a harmless tail")),
+    pytest.param("git ls-files web/content/*.json && cat web/package.json", False, "allow", id="git-files",
+                 marks=pytest.mark.variant("the replayed git ls-files glob uses a filesystem snapshot")),
+    pytest.param("git ls-files web/content/*.json && cat web/package.json", True, "deny", id="git-files-read-deny",
+                 marks=pytest.mark.variant("a custom read deny binds a git snapshot's expanded file")),
+    pytest.param("git add -- web/content/*.json", True, "deny", id="git-pathspec-read-deny",
+                 marks=pytest.mark.variant("explicit pathspec syntax cannot bypass a protected staging match")),
+    pytest.param("git checkout --theirs tests/test_*.py", False, "allow", id="git-checkout-glob",
+                 marks=pytest.mark.variant("conflict checkout snapshots only literal path operands")),
+    pytest.param("git checkout --theirs tests/test_*.py", True, "deny", id="git-checkout-denied",
+                 marks=pytest.mark.variant("conflict checkout still denies protected expanded paths")),
+    pytest.param("git add tests/test_*.py 2>&1 | tail -2; git status | grep public || true; echo done",
+                 False, "allow", id="stage-tails",
+                 marks=pytest.mark.variant("staging snapshots compose with redirects, pipes and fallback tails")),
+    pytest.param("mv tests/test_*.py app/ 2>/dev/null || true; echo done", False, "restricted", id="move-tail",
+                 marks=pytest.mark.variant("a harmless tail never turns moving glob matches into a snapshot read")),
+    pytest.param("rm -rf tests/test_* 2>&1 | head", False, "restricted", id="delete-tail",
+                 marks=pytest.mark.variant("deleting glob matches still requires a prompt")),
+    pytest.param("sed -i '' 's/a/b/' tests/test_*.py | head", False, "restricted", id="edit-tail",
+                 marks=pytest.mark.variant("editing glob matches still requires a prompt")),
+    pytest.param('git add "$(rm -rf tests/test_*)"', False, "restricted", id="write-substitution",
+                 marks=pytest.mark.variant("a destructive glob inside a substitution still needs its own permission")),
 ])
 def test_replayed_shell_constructs_keep_restrictions(tmp_path, command, protected, expected):
     (tmp_path / "tests").mkdir()
@@ -117,10 +151,16 @@ def test_replayed_shell_constructs_keep_restrictions(tmp_path, command, protecte
     (tmp_path / "renders").mkdir()
     (tmp_path / "renders" / "one.png").touch()
     (tmp_path / "renders" / "two words.png").touch()
+    (tmp_path / "web" / "content").mkdir(parents=True)
+    (tmp_path / "web" / "content" / "public.json").touch()
+    if protected:
+        (tmp_path / "web" / "content" / "private.json").touch()
+    (tmp_path / "web" / "package.json").touch()
     here = str(tmp_path)
     command = command.replace("{root}", here)
     req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
     rules = [*permissions.preset_rules("autonomous"), permissions.Rule("bash", "gh api blocked", "exact", "deny"),
+             permissions.Rule("read", str(tmp_path / "web" / "content" / "private.json"), "exact", "deny"),
              permissions.Rule("bash", "strings tests/test_second.py", "exact", "deny"),
              permissions.Rule("bash", "file renders/two words.png renders/two words.png", "exact", "deny")]
     got = permissions.decide(req, rules=rules, unmatched="allow", saved=[], groups={})
