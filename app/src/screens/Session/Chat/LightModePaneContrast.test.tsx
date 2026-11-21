@@ -63,25 +63,78 @@ const contrast = (a: string, b: string) => {
   return (hi + 0.05) / (lo + 0.05);
 };
 
+/* Claude Code's light diff (2.1.330's colour-diff: its light theme's line and word grounds, GitHub's syntax colours,
+   each token as a foreground SGR then a background SGR), in truecolour and as the 256-colour slots it picks without
+   it: a removed line with its changed number, then the added one. Then its orange, on the field, as 174. */
+const fg = (c: string) => `\x1b[38;${c}m`;
+const bg = (c: string) => `\x1b[48;${c}m`;
+const LIGHT_DIFF = {
+  truecolour: { dec: "2;207;34;46", key: "2;167;29;93", ink: "2;51;51;51", num: "2;0;134;179", del: "2;255;168;180", delWord: "2;209;69;75", addDec: "2;36;138;61", add: "2;105;219;124", addWord: "2;47;157;68" },
+  "256-colour": { dec: "5;160", key: "5;125", ink: "5;236", num: "5;31", del: "5;217", delWord: "5;167", addDec: "5;29", add: "5;78", addWord: "5;35" },
+};
+
+function lightDiff(c: typeof LIGHT_DIFF.truecolour): string {
+  return [
+    `${fg(c.dec)}${bg(c.del)}-${fg(c.key)}${bg(c.del)}const${fg(c.ink)}${bg(c.del)} min = ${fg(c.num)}${bg(c.delWord)}200${fg(c.ink)}${bg(c.del)};\x1b[0m`,
+    `${fg(c.addDec)}${bg(c.add)}+${fg(c.key)}${bg(c.add)}const${fg(c.ink)}${bg(c.add)} min = ${fg(c.num)}${bg(c.addWord)}240${fg(c.ink)}${bg(c.add)};\x1b[0m`,
+  ].join("\r\n");
+}
+
+/* The colour a "5;n" or "2;r;g;b" SGR colour names, as xterm draws it. */
+function named(terminal: import("@xterm/xterm").Terminal, colour: string): string {
+  const [kind, ...v] = colour.split(";").map(Number);
+  return kind === 5 ? (terminal as unknown as { _core: Core })._core._themeService.colors.ansi[v[0]].css : `rgb(${v.join(", ")})`;
+}
+
 it("draws Claude's faint 256-colour and truecolour greys readably on the light pane", async () => {
+  let pane: import("../../../api/ptyView").PtyViewHandlers | null = null;
   const props = {
     provider: "claude", prompt: { kind: "unknown" as const, rows: 0 }, composer: null,
     onDropFiles() {}, onComposeText() {},
-    terminal: { at: { server: null, target: "%1" }, open: () => ({ write() {}, resize() {}, focus() {}, close() {} }) },
+    terminal: { at: { server: null, target: "%1" }, open: ((_at, _size, handlers) => { pane = handlers; return { write() {}, resize() {}, focus() {}, close() {} }; }) as import("../../../api/ptyView").PtyViewOpener },
   };
   const view = render(<ChatPane {...props} theme="light" />);
   const terminal = terminals.at(-1)!;
-  await act(() => new Promise<void>(resolve => terminal.write("\x1b[38;5;246mfaint\x1b[0m \x1b[38;2;153;153;153mgrey\x1b[0m", resolve)));
+  // What the pane sends, through the view as it arrives (split anywhere), then xterm's write queue drained.
+  const send = async (...chunks: string[]) => {
+    for (const chunk of chunks) pane!.onData(new TextEncoder().encode(chunk));
+    await act(() => new Promise<void>(resolve => terminal.write("", resolve)));
+  };
+  // Light lifts text to 4.5 on the pane's own field, and only to 3 on grounds the program drew.
+  expect(terminal.options.minimumContrastRatio).toBe(3);
+  await send("\x1b[38;5;246mfaint\x1b[0m \x1b[38;2;153;1", "53;153mgrey\x1b[0m \x1b[38;5;174morange\x1b[0m");
   const ground = "#ffffff";
   const drawn = drawnColours(terminal, 0);
-  expect(drawn.map(d => d.text)).toEqual(["faint", "grey"]);
+  expect(drawn.map(d => d.text.trim())).toEqual(["faint", "grey", "orange"]);
   for (const { css } of drawn) expect(contrast(css, ground)).toBeGreaterThanOrEqual(4.5);
-  // Dark mode keeps the CLI's own colours where they already read.
+  // Claude's light diff keeps its grounds and every colour it sent that reads at 3:1 there (its keywords and ink); what
+  // it sends below that (its blue number on the changed word's ground) is lifted to 3:1, no further.
+  for (const [form, c] of Object.entries(LIGHT_DIFF)) {
+    const sent = lightDiff(c);
+    const half = sent.indexOf("200") - 4; // mid-SGR, before the removed word's ground
+    await send("\x1b[2J\x1b[H", sent.slice(0, half), sent.slice(half));
+    const expected = [
+      [[c.dec, c.del], [c.key, c.del], [c.ink, c.del], [c.num, c.delWord], [c.ink, c.del]],
+      [[c.addDec, c.add], [c.key, c.add], [c.ink, c.add], [c.num, c.addWord], [c.ink, c.add]],
+    ];
+    for (const row of [0, 1]) {
+      const drawn = drawnColours(terminal, row);
+      expect(drawn.map(d => d.ground), `${form} row ${row} grounds`).toEqual(expected[row].map(([, under]) => named(terminal, under)));
+      expected[row].forEach(([text, under], i) => {
+        const [colour, ground] = [named(terminal, text), named(terminal, under)];
+        if (contrast(colour, ground) >= 3) expect(drawn[i].css, `${form} ${drawn[i].text}`).toBe(colour);
+        else expect(contrast(drawn[i].css, ground), `${form} ${drawn[i].text}`).toBeGreaterThanOrEqual(3);
+      });
+    }
+  }
+  // Dark mode lifts every cell against its own ground, and keeps the CLI's own colours where they already read.
   view.rerender(<ChatPane {...props} theme="dark" />);
+  expect(terminal.options.minimumContrastRatio).toBe(4.5);
+  await send("\x1b[2J\x1b[H\x1b[38;5;246mfaint\x1b[0m \x1b[38;2;153;153;153mgrey\x1b[0m");
   expect(drawnColours(terminal, 0).map(d => d.css)).toEqual(["#949494", "rgb(153, 153, 153)"]);
   // Claude Code's dark diff, as it sends it in brindle's panes: an added line on slot 65 with its changed words on
   // 72, a removed word on 174, in the default text colour. As sent these measure 3.5, 2.3 and 2.3 to 1.
-  await act(() => new Promise<void>(resolve => terminal.write("\r\n\x1b[48;5;65m const \x1b[48;5;72mhi\x1b[48;5;65m = 1;\x1b[48;5;174mlo\x1b[49m", resolve)));
+  await send("\r\n\x1b[48;5;65m const \x1b[48;5;72mhi\x1b[48;5;65m = 1;\x1b[48;5;174mlo\x1b[49m");
   const diff = drawnColours(terminal, 1);
   expect(diff.map(d => d.text.trim())).toEqual(["const", "hi", "= 1;", "lo"]);
   for (const { text, css, ground } of diff) expect(contrast(css, ground), text).toBeGreaterThanOrEqual(4.5);

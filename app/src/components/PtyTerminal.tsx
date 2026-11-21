@@ -82,6 +82,7 @@ import { visualLink } from "../screens/Session/Visuals/client";
 import { VISUAL_LINK, VisualLinkContext } from "../screens/Session/Visuals/link";
 import { message } from "../screens/Session/Visuals/chrome";
 import { scrollByWheel } from "./terminalScroll";
+import { GroundContrast } from "./groundContrast";
 import { useAppTheme } from "./useAppTheme";
 
 /* What the view is doing: opening, showing the pane, closed (the client
@@ -163,6 +164,9 @@ export interface PtyTerminalProps {
   theme?: ITheme;
   /* xterm.js's minimum contrast between a cell's text and its ground, applied as it changes (with the theme): 1 (none) unless given. */
   minimumContrastRatio?: number;
+  /* The same floor for text on the terminal's own ground only (groundContrast.ts): text on a ground the program set
+     (a diff's) is drawn as sent. 1 (none) unless given; read as each SGR arrives. */
+  groundContrastRatio?: number;
   /* Rows under the view's foot the client draws and the view clips (the module's comment): none unless given. */
   cropRows?: number;
   /* While rows are cropped, the client's row their mask starts at where that is above the view's foot (a provider's
@@ -263,7 +267,7 @@ export function linkOpener(openUrl: () => OpenUrl, mac: boolean, openVisual?: ()
   };
 }
 
-export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, minimumContrastRatio = 1, cropRows = 0, cropFrom, typeElsewhere, onRows }: PtyTerminalProps) {
+export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, minimumContrastRatio = 1, groundContrastRatio = 1, cropRows = 0, cropFrom, typeElsewhere, onRows }: PtyTerminalProps) {
   const footFrom = useRef(cropFrom);
   footFrom.current = cropFrom;
   const elsewhere = useRef(typeElsewhere);
@@ -278,6 +282,8 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
   themed.current = theme;
   const contrasted = useRef(minimumContrastRatio);
   contrasted.current = minimumContrastRatio;
+  const grounded = useRef(groundContrastRatio);
+  grounded.current = groundContrastRatio;
   const footRows = useRef(cropRows);
   footRows.current = cropRows;
   // The open view's xterm.js and its layout, for a theme or row crop changing while it's open.
@@ -423,9 +429,12 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       read(rows);
     };
     const parsed = term.onWriteParsed(readRows);
+    // Text on the terminal's own ground lifted to groundContrastRatio against xterm's current colours.
+    const lift = new GroundContrast(() => ({ theme: term.options.theme ?? {}, ratio: grounded.current }));
     const pty = open({ server, target }, { cols: term.cols, rows: term.rows }, {
-      onData: (bytes) => {
+      onData: (sent) => {
         if (gone) return;
+        const bytes = lift.feed(sent);
         if (attached) term.write(bytes);
         else term.write(bytes, lookAttached);
       },

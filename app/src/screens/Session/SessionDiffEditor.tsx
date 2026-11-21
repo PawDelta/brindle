@@ -443,7 +443,7 @@ function FileView({ file, split, gone, pin, editable, why, client, root, drafts,
             <section className="border-b border-line" data-testid="draft-moved" aria-label={`Your edit of ${draft.header}`}>
               <div className={`${mono} flex items-center gap-s1 bg-surface-2 px-s2 leading-5 text-ink-2`}>
                 <span className="min-w-0 flex-1 truncate">{draft.header}</span>
-                <span className="shrink-0 font-sans text-xs opacity-80">your edit · the hunk has moved or is gone; these were its lines</span>
+                <span className="shrink-0 font-sans text-xs opacity-[var(--dim)]">your edit · the hunk has moved or is gone; these were its lines</span>
               </div>
               <pre className={`${mono} max-h-40 overflow-auto bg-canvas-2 leading-5 text-ink-3`} data-testid="draft-snapshot">
                 {draft.snapshot.map((line, i) => (
@@ -560,10 +560,10 @@ export function EditBox({ ariaLabel, text, setText, busy, saveable = true, error
         ) : (
           <>
             <LoadingButton className={`${button} px-s1 py-0.5 text-xs`} busy={busy} disabled={busy || !saveable} onClick={onSave}>
-              Save <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘S</kbd>
+              Save <kbd className="ml-1 font-mono text-[10px] opacity-[var(--dim)]">⌘S</kbd>
             </LoadingButton>
             <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={onDone}>
-              Discard <kbd className="ml-1 font-mono text-[10px] opacity-80">esc</kbd>
+              Discard <kbd className="ml-1 font-mono text-[10px] opacity-[var(--dim)]">esc</kbd>
             </button>
           </>
         )}
