@@ -5,6 +5,7 @@ plan, where the person can stop it. Runs through the real assign, hold and
 dispatch code."""
 
 import asyncio
+import time
 
 from starlette.testclient import TestClient
 
@@ -70,6 +71,62 @@ def test_a_pending_reviewer_holds_only_the_shared_plans_work(db, session, librar
     assert "build gate is closed" in asyncio.run(
         mcp_server.assign("developer", "build the schema", plan_worker=f"{pid}:schema"))
     assert [t.task_text for t in db.list_tasks()] == ["bump the release version"]
+
+
+def test_work_linked_to_an_older_plan_runs_alongside_the_open_one(db, session):
+    boss, started = session
+    old = _open_plan(db, boss)
+    plans.decide(db, old, 1, True, person=True)
+    pid = _open_plan(db, boss)
+
+    # Linked to the approved plan, not the open one: it needs the reason like any other work.
+    assert asyncio.run(mcp_server.assign("developer", "build the schema", plan_worker=f"{old}:schema")).startswith(
+        "Not started")
+    reply = asyncio.run(mcp_server.assign("developer", "build the schema", plan_worker=f"{old}:schema",
+                                          outside_plan="finishes the approved presets plan"))
+
+    assert started == ["build the schema"] and "behind plan" not in reply
+    [task] = db.list_tasks()
+    assert [r["task_id"] for r in plans.to_dto(db, plans.get(db, pid))["alongside"]] == [task.id]
+    assert plans._board(db, plans.get(db, old))[0]["task_id"] == task.id     # its own board keeps the link
+
+
+def test_stop_racing_a_start_removes_the_started_workspace_instead_of_cancelling(db, session, monkeypatch, tmp_path):
+    """Dispatch claims the task between Stop's read of it as queued and its cancel: the start wins,
+    and Stop removes the started worker's workspace rather than marking a live worker cancelled."""
+    from brindle import agents, workspaces
+    from brindle.db import Agent, Workspace
+
+    boss, started = session
+    pid = _open_plan(db, boss)
+
+    def delegate(db_, caller, caller_ws, profile, task, mode, **kw):
+        ws = Workspace("ws2", caller_ws.repo_root, "w1", "worktree", "feat/bump", "main", str(tmp_path / "w1"), None,
+                       "brindle-ws2", time.time())
+        db_.add_workspace(ws)
+        db_.add_agent(Agent("w1", ws.id, profile, "claude", caller.id, mode, "processing", "%9", None, time.time()))
+        started.append(task)
+        return db_.get_agent("w1"), ws
+    monkeypatch.setattr(agents, "delegate", delegate)
+    removed: list[str] = []
+    monkeypatch.setattr(workspaces, "remove", lambda db_, ws, **kw: removed.append(ws.id))
+    monkeypatch.setattr(tasks, "start_in_background", lambda task_id: None)   # it waits for room
+    asyncio.run(mcp_server.assign("developer", "bump the release version", outside_plan=HOTFIX))
+    [queued] = db.list_tasks(state="pending")
+
+    read, raced = db.get_task, []
+
+    def read_then_start(task_id):
+        t = read(task_id)
+        if task_id == queued.id and t.state == "pending" and not raced:
+            raced.append(task_id)
+            assert tasks._start_if_ready(db, t, "room on the machine", check_room=False)
+        return t                                    # Stop goes on with the row it read: queued
+    monkeypatch.setattr(db, "get_task", read_then_start)
+    plans.stop_alongside(db, pid, queued.id)
+
+    assert started == ["bump the release version"] and read(queued.id).state == "started"
+    assert removed == ["ws2"]
 
 
 def test_stop_cancels_a_queued_task_running_alongside_the_plan(db, session, monkeypatch):

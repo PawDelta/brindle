@@ -721,7 +721,7 @@ class _Request:
     def plan_scope(self, db: DB, caller: Agent, plan_worker: str | None, milestone: str | None,
                    outside_plan: str | None) -> str | None:
         """While the session's plan is open, every assign says how it relates to it: the
-        plan's own work (``plan_worker``, or a goal ``milestone``) waits for the person's
+        plan's own work (``plan_worker`` naming this plan, or a goal ``milestone``) waits for the person's
         approval and is refused while required reviewers keep the build gate shut; other work
         (``outside_plan``, a reason) starts at once and is listed in the plan's reader. None
         when it may go on; else the refusal. An offer to plan first, which has no plan to
@@ -731,7 +731,10 @@ class _Request:
         plan = plans.holding(db, autopilot.root_of(db, caller.id))
         if plan is None or "id" not in plan:
             return None
-        if (plan_worker or "").strip() or milestone is not None:
+        # A link to another (older) plan of the session isn't this plan's work: it keeps that
+        # board link and, like any other work, needs the outside_plan reason.
+        linked_here = (plan_worker or "").partition(":")[0].strip() == plan["id"]
+        if linked_here or milestone is not None:
             return tasks.build_gate_refusal(db, caller.id)
         reason = " ".join((outside_plan or "").split())[:MAX_OUTSIDE_PLAN]
         if not reason:

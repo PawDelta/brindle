@@ -1265,8 +1265,11 @@ def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
     t = db.get_task(task_id)
     if t is None or t.state not in QUEUED:
         return []
+    # Only from the state just read: a start that claimed it meanwhile wins, and nothing is cancelled.
+    with db.tx() as c:
+        if not c.execute("UPDATE tasks SET state='cancelled' WHERE id=? AND state=?", (t.id, t.state)).rowcount:
+            return []
     cancelled = [t.id]
-    db.update_task(t.id, state="cancelled")
     bus.publish(db, "task.cancelled", repo_root=t.repo_root, task_id=t.id, reason=reason)
     if t.caller_id:
         try:
@@ -1300,6 +1303,8 @@ def cancel(db: DB, caller: Agent | None, task_id: str, reason: str = "") -> str:
     if t.state not in QUEUED:
         raise ValueError(f"Task {task_id} is {t.state}, not queued: only a pending task can be cancelled.")
     ids = _cancel(db, t.id, reason or "cancelled by its caller")
+    if not ids:
+        raise ValueError(f"Task {task_id} just started, so it can't be cancelled: remove_workspace stops it.")
     text = f"Cancelled task {ids[0]}."
     if len(ids) > 1:
         text += f" Also cancelled its dependents: {', '.join(ids[1:])}."
