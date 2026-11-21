@@ -124,6 +124,18 @@ def test_a_variable_assigned_a_home_path_is_checked_as_its_value(tmp_path, comma
     pytest.param('shopt -s expand_aliases; c=$(printf re)ad; alias r=$c\nr $(printf HO)ME <<< blocked; '
                  'git commit -m "$(gh api $HOME)"', id="alias",
                  marks=pytest.mark.variant("an alias makes a literal word a setter")),
+    pytest.param('n=$(echo HO)ME; 2>/dev/null read "$n" <<< blocked; git commit -m "$(gh api $HOME)"',
+                 id="fd-redirect", marks=pytest.mark.variant("a numbered redirect before the command name")),
+    pytest.param('n=$(echo HO)ME; function f { read "$n" <<< blocked; }; f; git commit -m "$(gh api $HOME)"',
+                 id="function-keyword", marks=pytest.mark.variant("a function's body opened after its name")),
+    pytest.param('n=$(echo HO)ME; time -p read "$n" <<< blocked; git commit -m "$(gh api $HOME)"',
+                 id="time-option", marks=pytest.mark.variant("time's option before the command name")),
+    pytest.param('c=re; c+=ad; n=$(echo HO)ME; $c "$n" <<< blocked; git commit -m "$(gh api $HOME)"',
+                 id="append", marks=pytest.mark.variant("+= changes a variable's known value")),
+    pytest.param('c=x; true && c=read; n=$(echo HO)ME; $c "$n" <<< blocked; git commit -m "$(gh api $HOME)"',
+                 id="conditional-reassign", marks=pytest.mark.variant("an assignment that may run leaves a value unknown")),
+    pytest.param('c=x; for c in read; do n=$(echo HO)ME; $c "$n" <<< blocked; git commit -m "$(gh api $HOME)"; done',
+                 id="loop-variable", marks=pytest.mark.variant("a for loop sets its variable")),
     pytest.param('{re,}ad {HO,}ME; git commit -m "$(gh api $HOME)"', id="braces",
                  marks=pytest.mark.variant("brace expansion builds a setter and HOME")),
 ])

@@ -4311,17 +4311,22 @@ _HOME_ANYWHERE = re.compile(r"\b(?:HOME|IFS)\b|\$\{")
 # variables, runs text or makes a later word a setter (alias), "." (source), or a word with a
 # pattern or brace (which may build such a name: {re,}ad, rea?, a[x]=1).
 _HOME_SETTER_NAME = re.compile(
-    r"(?:eval|source|trap|enable|wait|coproc|select|alias|shopt|\.|" + "|".join(sorted(_VARIABLE_SETTERS))
-    + r")|.*[\[*?{].*")
+    r"(?:eval|source|trap|enable|wait|coproc|select|function|alias|shopt|\.|"
+    + "|".join(sorted(_VARIABLE_SETTERS)) + r")|.*[\[*?{].*")
 _SHELL_OPERATOR_CHARS = "();<>|&\n"
-# Words that open or continue a compound command: an assignment after one may not run.
+# Words that open or continue a compound command and are followed by a command: an assignment
+# after one may not run. (function, coproc and select name something first: they are setters.)
 _COMPOUND_WORDS = frozenset({"if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case",
-                             "esac", "{", "}", "!", "function", "select", "coproc", "time"})
+                             "esac", "{", "}", "!"})
+# A leading assignment (x=1, x+=1): the command comes after it.
+_LEADING_ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)(\+?)=")
+# A word that only numbers a redirect's file descriptor (2>x, {fd}>x): the command comes after it.
+_REDIRECT_FD = re.compile(r"\d+|\{[A-Za-z_]\w*\}")
 # Stands in for the home in the resolved words: it names no setter, HOME or pattern.
 _HOME_STAND_IN = "/brindlehome"
 # Stands in for a substitution's output once its own commands are checked: a word only the run knows.
 _RUN_ONLY = "$__brindle_run_only"
-# After one of these, a later word may be the command that runs (command -p $c x).
+# After one of these, a later word may be the command that runs (command -p $c x, time -p x).
 _NAMES_A_COMMAND = _STDIN_RUNNERS | {"command", "builtin", "stdbuf", "caffeinate", "flock", "unbuffer", "chroot"}
 
 
@@ -4361,24 +4366,29 @@ def _home_kept(command: str) -> bool:
     known = {"HOME": _HOME_STAND_IN}
     definite = True    # every statement so far surely ran, in this shell
     words: list[str] = []
-    segment: list[str] = []    # this simple command's words, resolved where they can be
-    unresolved: list[bool] = []
+    assigned: list[tuple[str, str | None]] = []    # this command's leading assignments (value None: unknown)
+    started = False    # whether this simple command has had its command word
     names = True    # whether the next word may name the command that runs
     wrapped = False    # after a wrapper, any later word of this command may
-    redirect = False
-    for token in [*tokens, ";"]:
-        if token and set(token) <= set(_SHELL_OPERATOR_CHARS):
+    redirect = loop_variable = False
+    tokens.append(";")
+
+    def operator(token: str) -> bool:
+        return bool(token) and set(token) <= set(_SHELL_OPERATOR_CHARS)
+
+    for index, token in enumerate(tokens):
+        if operator(token):
             if ("<" in token or ">" in token) and not any(c in token for c in "()"):
                 redirect = True    # its file is the next word; <(...) starts a command instead
                 continue
-            if definite and segment and all(_ASSIGNMENT.match(word) for word in segment):
-                for word, unknown in zip(segment, unresolved):    # a statement of assignments sets variables
-                    name, _, value = word.partition("=")
-                    if unknown:
-                        known.pop(name, None)
-                    else:
-                        known[name] = value
-            segment, unresolved, names, wrapped = [], [], True, False
+            for name, value in assigned:
+                # Alone, assignments set the shell's variables (surely, only on the plain path);
+                # before a command, they may persist (a special builtin, posix mode).
+                if value is not None and definite and not started:
+                    known[name] = value
+                else:
+                    known.pop(name, None)
+            assigned, started, names, wrapped = [], False, True, False
             definite = definite and set(token) <= set(";\n")
             continue
         resolved = re.sub(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))",
@@ -4388,16 +4398,27 @@ def _home_kept(command: str) -> bool:
         if redirect:
             redirect = False
             continue
-        if not segment and token in _COMPOUND_WORDS:
-            definite = False
+        following = tokens[index + 1]
+        if (_REDIRECT_FD.fullmatch(token) and operator(following) and ("<" in following or ">" in following)
+                and not any(c in following for c in "()")):
+            continue    # 2>/dev/null x: the number belongs to the redirect
+        if loop_variable:
+            loop_variable = False
+            known.pop(token, None)    # for x in ...: the loop sets x
             continue
-        segment.append(resolved)
-        unresolved.append(unknown)
-        if names and _ASSIGNMENT.match(token):
-            continue    # a leading assignment: the command comes after it
+        if names and not started and not assigned and token in _COMPOUND_WORDS:
+            definite = False
+            loop_variable = token == "for"
+            continue
+        if names and not started and (found := _LEADING_ASSIGNMENT.match(token)):
+            # x+=1 appends to a value; an unknown value leaves the variable unknown.
+            value = None if found.group(2) or unknown else resolved[found.end():]
+            assigned.append((found.group(1), value))
+            continue
+        started = True
         if names and (unknown or _HOME_SETTER_NAME.fullmatch(resolved)):
             return False    # the command that runs is only the run's, or may set HOME
-        wrapped = wrapped or names and resolved in _NAMES_A_COMMAND
+        wrapped = wrapped or names and resolved in _NAMES_A_COMMAND | {"time"}
         names = wrapped
     return not _HOME_ANYWHERE.search(" ".join(words))
 
