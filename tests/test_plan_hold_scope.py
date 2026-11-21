@@ -1,4 +1,3 @@
-import pytest
 """What an open planning doc holds (brindle.tasks.plan_holds): only its own
 work, tasks linked to its split or to a goal milestone. Other work the
 supervisor declares with assign's outside_plan runs at once, alongside the
@@ -7,6 +6,8 @@ dispatch code."""
 
 import asyncio
 import time
+
+import pytest
 
 from starlette.testclient import TestClient
 
