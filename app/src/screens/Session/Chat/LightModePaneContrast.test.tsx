@@ -1,6 +1,6 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { parseCss, toHsl } from "../../../components/textContrast";
+import { groundLuminance, parseCss, toHsl } from "../../../components/textContrast";
 import { ChatPane } from "./ChatPane";
 
 const terminals = vi.hoisted(() => [] as import("@xterm/xterm").Terminal[]);
@@ -66,13 +66,19 @@ const contrast = (a: string, b: string) => {
 };
 
 /* Claude Code's light diff (2.1.330's colour-diff: its light theme's line and word grounds, GitHub's syntax colours,
-   each token as a foreground SGR then a background SGR), in truecolour and as the 256-colour slots it picks without
-   it: a removed line with its changed number, then the added one. Then its orange, on the field, as 174. */
+   each token as a foreground SGR then a background SGR), in truecolour and as the 256-colour slots it sends without
+   it (chalk's rgbToAnsi256, as captured from live panes: its dark grounds arrive as 65, 72, 95, 174): a removed line
+   with its changed number, then the added one. */
 const fg = (c: string) => `\x1b[38;${c}m`;
 const bg = (c: string) => `\x1b[48;${c}m`;
 const LIGHT_DIFF = {
   truecolour: { dec: "2;207;34;46", key: "2;167;29;93", ink: "2;51;51;51", num: "2;0;134;179", del: "2;255;168;180", delWord: "2;209;69;75", addDec: "2;36;138;61", add: "2;105;219;124", addWord: "2;47;157;68" },
-  "256-colour": { dec: "5;160", key: "5;125", ink: "5;236", num: "5;31", del: "5;217", delWord: "5;167", addDec: "5;29", add: "5;78", addWord: "5;35" },
+  "256-colour": { dec: "5;167", key: "5;132", ink: "5;236", num: "5;38", del: "5;218", delWord: "5;167", addDec: "5;71", add: "5;114", addWord: "5;71" },
+};
+/* A ground reads as remove (red) or add (green) by its hue. */
+const reads = (css: string) => {
+  const [h, s] = toHsl(parseCss(css)!);
+  return s < 0.15 ? "grey" : h >= 330 || h < 25 ? "red" : h >= 80 && h < 165 ? "green" : "other";
 };
 
 function lightDiff(c: typeof LIGHT_DIFF.truecolour): string {
@@ -123,13 +129,21 @@ it("draws Claude's faint 256-colour and truecolour greys readably on the light p
     ];
     for (const row of [0, 1]) {
       const drawn = drawnColours(terminal, row);
-      expect(drawn.map(d => d.ground), `${form} row ${row} grounds`).toEqual(expected[row].map(([, under]) => named(terminal, under)));
+      // The line's ground as sent, red on the removed line and green on the added one.
+      const line = named(terminal, expected[row][0][1]);
+      expect(drawn.filter((_, i) => i !== 3).map(d => d.ground), `${form} row ${row} line grounds`).toEqual(Array(4).fill(line));
+      expect(reads(line), `${form} row ${row} line`).toBe(row === 0 ? "red" : "green");
+      // The changed word's mid-tone ground drawn lighter in its own hue: still red or green, and darker than its line.
+      const [word, sentWord] = [drawn[3].ground, named(terminal, expected[row][3][1])];
+      expect(reads(word), `${form} row ${row} word`).toBe(row === 0 ? "red" : "green");
+      expect(Math.abs(hue(word)[0] - hue(sentWord)[0]), `${form} row ${row} word hue`).toBeLessThan(6);
+      expect(groundLuminance(parseCss(word)!)).toBeLessThan(groundLuminance(parseCss(line)!));
+      expect(contrast(word, line), `${form} row ${row} word against its line`).toBeGreaterThan(1.1);
+      // Every token at 4.5 on its ground, in its own hue.
       expected[row].forEach(([text], i) => {
         const [sentHue, sentSat] = hue(named(terminal, text));
         expect(contrast(drawn[i].css, drawn[i].ground), `${form} ${drawn[i].text}`).toBeGreaterThanOrEqual(4.5);
-        // On the line grounds each colour keeps its hue. The changed word's ground (column 3) is mid-tone: there only
-        // colours within a hair of black or white reach 4.5, so its text is checked for contrast alone.
-        if (i !== 3 && sentSat > 0.2) expect(Math.abs(((hue(drawn[i].css)[0] - sentHue + 540) % 360) - 180), `${form} ${drawn[i].text} hue`).toBeLessThan(12);
+        if (sentSat > 0.2) expect(Math.abs(((hue(drawn[i].css)[0] - sentHue + 540) % 360) - 180), `${form} ${drawn[i].text} hue`).toBeLessThan(12);
       });
       const [, key, ink] = drawn;
       expect(new Set([key.css, ink.css]).size, `${form} row ${row} keyword vs text`).toBe(2);
@@ -142,8 +156,10 @@ it("draws Claude's faint 256-colour and truecolour greys readably on the light p
   expect(drawnColours(terminal, 0).map(d => d.css)).toEqual(["#949494", "rgb(153, 153, 153)"]);
   // Claude Code's dark diff, as it sends it in brindle's panes: an added line on slot 65 with its changed words on
   // 72, a removed word on 174, in the default text colour. As sent these measure 3.5, 2.3 and 2.3 to 1.
-  await send("\r\n\x1b[48;5;65m const \x1b[48;5;72mhi\x1b[48;5;65m = 1;\x1b[48;5;174mlo\x1b[49m");
+  await send("\r\n\x1b[48;5;65m const \x1b[48;5;72mhi\x1b[48;5;65m = 1;\x1b[48;5;174mlo\x1b[48;5;95m gone \x1b[49m");
   const diff = drawnColours(terminal, 1);
-  expect(diff.map(d => d.text.trim())).toEqual(["const", "hi", "= 1;", "lo"]);
+  expect(diff.map(d => d.text.trim())).toEqual(["const", "hi", "= 1;", "lo", "gone"]);
   for (const { text, css, ground } of diff) expect(contrast(css, ground), text).toBeGreaterThanOrEqual(4.5);
+  // Its slot grounds read as add and remove: green for the added line and word, red for the removed.
+  expect(diff.map(d => reads(d.ground))).toEqual(["green", "green", "green", "red", "red"]);
 });
