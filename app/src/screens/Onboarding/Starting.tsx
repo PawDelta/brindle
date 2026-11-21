@@ -1,15 +1,14 @@
 /* The first thing the app shows, the whole window: the engine starts
    inside the app (screens/FirstRun's Launch waits on it here), and the app
-   asks it what is set up (App's first-launch gate). One quiet line and a
-   slim bar; nothing to do. When the asking fails, what went wrong and
-   Retry in the line's place. */
+   asks it what is set up (App's first-launch gate). The logo and a slim
+   bar; nothing to do. When the asking fails, what went wrong and Retry. */
 
 import Logo from "../../components/Logo";
 import { alert, button } from "../../components/ui";
 
-export function Starting({ error, onRetry, line = "Starting brindle…" }: { error?: string | null; onRetry?(): void; /* What the start is doing (Launch's, from the shell). */ line?: string }) {
+export function Starting({ error, onRetry }: { error?: string | null; onRetry?(): void }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-s2 bg-canvas px-s3 text-ink" data-testid="starting">
+    <div className="flex h-full flex-col items-center justify-center gap-s2 bg-canvas px-s3 text-ink" data-testid="starting" role={error ? undefined : "status"} aria-label="Starting brindle">
       <Logo className="text-2xl" />
       {error ? (
         <div className={`${alert} flex max-w-md flex-wrap items-center gap-s2`} role="alert" data-testid="starting-failed">
@@ -21,16 +20,10 @@ export function Starting({ error, onRetry, line = "Starting brindle…" }: { err
           )}
         </div>
       ) : (
-        <>
-          <div className="onb-bar h-1 w-48 overflow-hidden rounded-full bg-line" aria-hidden>
-            <i />
-          </div>
-          <p className="text-sm text-ink-2" role="status">
-            {line}
-          </p>
-        </>
+        <div className="onb-bar h-1 w-48 overflow-hidden rounded-full bg-line" aria-hidden>
+          <i />
+        </div>
       )}
-      <p className="max-w-sm text-center text-xs text-ink-3">The engine runs inside the app, from its own folder. Nothing is added to your PATH or anywhere else on your Mac.</p>
     </div>
   );
 }

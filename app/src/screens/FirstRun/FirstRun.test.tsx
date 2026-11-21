@@ -50,6 +50,17 @@ const NOT_INSTALLED = "brindle isn't installed: no `brindle` on PATH, in ~/.loca
 /* Any instruction to go and type a command. */
 const COMMANDS = /npm install|brew install|apt-get|dnf install|uv tool (upgrade|update-shell)|source \S+env|Install it with|run:/i;
 
+function quietStartup() {
+  const status = screen.getByTestId("starting");
+  const logo = within(status).getByRole("img");
+  expect(logo.querySelector("svg")).toBeTruthy();
+  expect(status.querySelector(".onb-bar > i")).toBeTruthy();
+  const content = status.cloneNode(true) as HTMLElement;
+  content.querySelector('[role="img"]')!.remove();
+  expect(content.textContent?.trim()).toBe("");
+  expect(screen.getByRole("status", { name: "Starting brindle" })).toBe(status);
+}
+
 /* setup.rs's INSTALL_SCRIPT on a clean Mac with Homebrew, as its pty prints it (uv's installer runs quiet). */
 const INSTALL_OUTPUT = [
   "\x1b[32m==>\x1b[0m installing uv (Python tool installer, https://docs.astral.sh/uv)\r\n",
@@ -91,7 +102,7 @@ describe("Launch", () => {
   it("onboarding starts through Launch: the app when the engine is found, else the engine step, which goes on into the app once installed", async () => {
     const found = fakeSetup([detection([...REQUIRED])], [null]);
     render(<Launch setup={found.setup}>{() => <p>the app</p>}</Launch>);
-    expect(screen.getByRole("status").textContent).toBe("Starting brindle…");
+    quietStartup();
     expect(await screen.findByText("the app")).toBeTruthy();
     expect(found.setup.detect).not.toHaveBeenCalled();
     cleanup();
@@ -130,13 +141,14 @@ describe("Launch", () => {
     const shown: string[] = [];
     await waitFor(
       () => {
-        shown.push(screen.queryByRole("status")?.textContent ?? (screen.queryByTestId("first-run-reason") ? "setup" : "app"));
+        if (screen.queryByTestId("starting")) quietStartup();
+        shown.push(screen.queryByRole("status") ? "starting" : (screen.queryByTestId("first-run-reason") ? "setup" : "app"));
         expect(screen.getByText("the app")).toBeTruthy();
       },
       { timeout: 3000, interval: 20 },
     );
     expect(slow.setup.connect).toHaveBeenCalledTimes(4);
-    expect(new Set(shown.slice(0, -1))).toEqual(new Set(["Starting brindle…"]));
+    expect(new Set(shown.slice(0, -1))).toEqual(new Set(["starting"]));
     expect(slow.setup.detect).not.toHaveBeenCalled();
     cleanup();
 
@@ -148,13 +160,13 @@ describe("Launch", () => {
     expect(crashed.setup.connect).toHaveBeenCalledTimes(2);
     cleanup();
 
-    // Meanwhile the screen says what the shell's start is doing: here, stopping the old build's daemon.
+    // Shell progress details stay out of the loading screen.
     let connected = () => {};
     const replacing = fakeSetup([detection([...REQUIRED])], [null]);
     replacing.setup.connect = () => new Promise<void>((resolve) => (connected = resolve));
     replacing.setup.startStep = vi.fn(async () => ({ step: "stopping" as const, pid: 4242, secs: 2 }));
     render(<Launch setup={replacing.setup}>{() => <p>the app</p>}</Launch>);
-    expect((await screen.findByRole("status")).textContent).toContain("4242");
+    quietStartup();
     connected();
     expect(await screen.findByText("the app")).toBeTruthy();
   });
