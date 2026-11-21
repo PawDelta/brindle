@@ -499,7 +499,7 @@ export interface DecisionDTO {
  */
 export interface DesignAccessRequestDTO {
   role: "comment" | "edit";
-  status: "pending" | "granted";
+  status: "pending" | "granted" | "declined";
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

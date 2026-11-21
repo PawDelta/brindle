@@ -1,5 +1,7 @@
 """Recipient Inbox rows and the Library access-request contract."""
 
+import pytest
+
 from brindle import inbox_team
 from brindle.pro import review_queue
 from test_shared_reader import app, lib  # noqa: F401
@@ -26,7 +28,8 @@ def test_viewer_receives_shared_item(db, monkeypatch):
         inbox_team.clear()
 
 
-def test_access_request_reaches_author(db, lib, app, monkeypatch):
+@pytest.mark.parametrize("action", ["grant", "decline"])
+def test_access_request_reaches_author(db, lib, app, monkeypatch, action):
     queued = []
 
     def request(form, headers):
@@ -50,9 +53,9 @@ def test_access_request_reaches_author(db, lib, app, monkeypatch):
         row, = inbox_team.items("u_author")
         assert row.from_person.sub == "user_1" and row.access_role == "edit"
         assert row.inbox_group == "needs_you"
-        lib.calls.routes[f"POST {DESIGN}/access-requests/user_1/grant"] = lambda f, h: (
-            lib.permissions.update({"user_1": {"can_edit": True}}) or 200, lib.view())
-        granted = app.post(f"/v1/shared-designs/{DOC}/access-requests/user_1/grant", json={"role": row.access_role})
-        assert granted.status_code == 200 and granted.json()["can_edit"]
+        lib.calls.routes[f"POST {DESIGN}/access-requests/user_1/{action}"] = lambda f, h: (
+            lib.permissions.update({"user_1": {"can_edit": action == "grant"}}) or 200, lib.view())
+        resolved = app.post(f"/v1/shared-designs/{DOC}/access-requests/user_1/{action}", json={"role": row.access_role})
+        assert resolved.status_code == 200 and resolved.json()["can_edit"] is (action == "grant")
     finally:
         inbox_team.clear()

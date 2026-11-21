@@ -2215,7 +2215,8 @@
         "status": {
           "enum": [
             "pending",
-            "granted"
+            "granted",
+            "declined"
           ],
           "title": "Status",
           "type": "string"
@@ -12233,7 +12234,8 @@
             "status": {
               "enum": [
                 "pending",
-                "granted"
+                "granted",
+                "declined"
               ],
               "title": "Status",
               "type": "string"
@@ -15359,6 +15361,10 @@
     {
       "method": "POST",
       "path": "/v1/shared-designs/{doc_id}/access-requests"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/access-requests/{sub}/decline"
     },
     {
       "method": "POST",

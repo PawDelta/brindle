@@ -573,14 +573,14 @@ function QueueRow(props: RowProps) {
 function GrantAccess({ item, client, actions, refresh }: { item: InboxItemDTO; client: DaemonClient; actions: InboxActions; refresh(): Promise<void> }) {
   const pending = useRef(false);
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
-  const grant = async () => {
+  const [done, setDone] = useState<"grant" | "decline" | null>(null);
+  const resolve = async (action: "grant" | "decline") => {
     if (pending.current || !item.from_person || !item.access_role || item.doc == null) return;
     pending.current = true;
     setBusy(true);
     try {
-      await client.writeSharedDesign(String(item.doc), `access-requests/${encodeURIComponent(item.from_person.sub)}/grant`, { role: item.access_role });
-      setDone(true);
+      await client.writeSharedDesign(String(item.doc), `access-requests/${encodeURIComponent(item.from_person.sub)}/${action}`, { role: item.access_role });
+      setDone(action);
       actions.settle(item);
       await refresh();
     } catch (e) {
@@ -590,9 +590,15 @@ function GrantAccess({ item, client, actions, refresh }: { item: InboxItemDTO; c
       setBusy(false);
     }
   };
-  return <button type="button" className="btn btn-primary text-xs" disabled={busy || done || !item.access_role || !item.from_person || item.doc == null} onClick={stop(() => void grant())}>
-    {done ? "Access granted" : `Grant ${item.access_role} access`}
-  </button>;
+  const disabled = busy || done !== null || !item.access_role || !item.from_person || item.doc == null;
+  return <span className="inline-flex gap-2">
+    <button type="button" className="btn btn-primary text-xs" disabled={disabled} onClick={stop(() => void resolve("grant"))}>
+      {done === "grant" ? "Access granted" : `Grant ${item.access_role} access`}
+    </button>
+    <button type="button" className="btn btn-quiet text-xs" disabled={disabled} onClick={stop(() => void resolve("decline"))}>
+      {done === "decline" ? "Declined" : "Decline"}
+    </button>
+  </span>;
 }
 
 function LaterMenu({ row, onPick }: { row: Row; onPick(until: number, sig?: string): void }) {

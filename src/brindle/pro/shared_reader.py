@@ -190,11 +190,13 @@ def read(doc_id: str, *, client=None, store=None) -> dict:
     return _ask(doc_id, "GET", "", None, client, store)
 
 
-def request_access(doc_id: str, role: Any, sub: str | None = None, *, client=None, store=None) -> dict:
+def request_access(doc_id: str, role: Any, sub: str | None = None, *, action: str = "grant", client=None, store=None) -> dict:
     """Ask as the signed-in reader, or grant a request as its author; the Library checks both."""
     if role not in ("comment", "edit"):
         raise ServiceError("invalid", "request comment or edit access", 400)
-    tail = "/access-requests" + (f"/{quote(sub, safe='')}/grant" if sub is not None else "")
+    if action not in ("grant", "decline"):
+        raise ServiceError("invalid", "grant or decline the access request", 400)
+    tail = "/access-requests" + (f"/{quote(sub, safe='')}/{action}" if sub is not None else "")
     return _ask(doc_id, "POST", tail, {"role": role}, client, store)
 
 

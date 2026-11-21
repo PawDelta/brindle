@@ -719,7 +719,7 @@ class DesignShareLinkDTO(_DTO):
 
 class DesignAccessRequestDTO(_DTO):
     role: Literal["comment", "edit"]
-    status: Literal["pending", "granted"]
+    status: Literal["pending", "granted", "declined"]
 
 
 class SharedDesignDTO(PlanDTO):
