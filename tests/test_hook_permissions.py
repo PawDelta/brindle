@@ -46,7 +46,8 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
 
 
 @pytest.mark.parametrize("mode, command, plain, expected", [
-    ("assign", "git commit -F $(cat message_path)", "git commit -F message.txt", "allow"),
+    pytest.param("assign", "git commit -F $(cat message_path)", "git commit -F message.txt", "allow",
+                 marks=pytest.mark.variant("an unreadable form of an allowed command still returns to the agent")),
     pytest.param("interactive", "git push $(cat remote)", "git push origin feature", "ask",
                  marks=pytest.mark.variant("a supervisor's syntax refusal must preserve a real push approval")),
     pytest.param("assign", "$(cat program) -rf build", "rm -rf build", "deny",
