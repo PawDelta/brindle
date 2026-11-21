@@ -19,9 +19,8 @@ const fileChip = "rounded-sm border border-line bg-surface-2 px-1 font-mono text
 export const passChip = `${chip} whitespace-nowrap border border-pass/40 bg-pass-soft text-pass`;
 
 /* Who wrote or voted: the engine's "person" is the one reading, "supervisor" the session's. */
-/* An email address reads as the name in it: "maya.chen@pawdelta.com" → "Maya Chen". */
 export const personName = (who: string) => (who === "person" ? "You" : who === "supervisor" ? "Supervisor"
-  : /^[^@\s]+@[^@\s]+$/.test(who) ? who.split("@")[0].split(/[._-]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(" ") : who);
+  : who.startsWith("teammate:") ? "A teammate" : who);
 
 /* "A · Your own server" is confirmed as "Confirm A"; a label with no such lead, by its name. */
 export const shortName = (optionLabel: string) => /^([A-Za-z0-9]{1,3})\s*[·:.)-]\s/.exec(optionLabel)?.[1] ?? optionLabel;
@@ -36,9 +35,9 @@ export function picksLine(d: PlanDecisionDTO, name: (who: string) => string = pe
   return picks.map((p) => `${name(p.who.replace(/^teammate:/, ""))}: ${label(p.option)}`).join(" · ");
 }
 
-export const displayName = (person?: { first_name?: string | null; last_name?: string | null; name?: string | null; email?: string | null }) =>
+export const displayName = (person?: { first_name?: string | null; last_name?: string | null; display_name?: string | null; name?: string | null; email?: string | null }) =>
   (person?.first_name?.trim() && person?.last_name?.trim() ? `${person.first_name.trim()} ${person.last_name.trim()}` : "")
-  || person?.name?.trim() || person?.email?.trim() || "";
+  || person?.display_name?.trim() || person?.name?.trim() || person?.email?.trim() || "";
 
 /* First and last name, or the email's first letter. Unknown account IDs get no initials. */
 export const initials = (who: string) => {
@@ -108,7 +107,7 @@ const optionRow = "grid grid-cols-[14px_minmax(0,1.15fr)_minmax(0,1.5fr)_minmax(
 /* A decision's alternatives as a table: one row each, the picked one marked, the supervisor's pick
    "recommended", the trade-offs as + and − lines, the files it would touch, and who voted for it.
    A row is a radio: the person's selection is sent with their verdict. */
-export function Decision({ decision: d, chosen, open, onPick }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void }) {
+export function Decision({ decision: d, chosen, open, onPick, nameOf }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void; nameOf?(who: string): string }) {
   return (
     <div role="radiogroup" aria-label={d.title} className="-mx-2.5 grid min-w-0 [overflow-wrap:anywhere] font-sans text-[13px] leading-normal">
       <div aria-hidden className={`${optionRow} border-line-strong pb-1.5 pt-1 text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3`}>
@@ -154,7 +153,7 @@ export function Decision({ decision: d, chosen, open, onPick }: { decision: Plan
               {o.touches?.map((f) => <code key={f} className="rounded-sm bg-surface-2 px-1 font-mono text-[11.5px] text-ink-2">{f}</code>)}
             </span>
             <span className="flex min-h-5 flex-wrap items-center gap-1 text-ink-3" data-votes={votes.length}>
-              {votes.length ? votes.map((v) => <Avatar key={v} who={v} small />) : "none"}
+              {votes.length ? votes.map((v) => <Avatar key={v} who={v === "person" ? "person" : nameOf?.(v) ?? "A teammate"} small />) : "none"}
             </span>
           </div>
         );

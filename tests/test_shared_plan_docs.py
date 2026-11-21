@@ -48,6 +48,7 @@ class Library:
         self.refuse_vote, self.draft, self.reject_section = False, None, None
         self.title = "Cloud workers"               # the doc's entry; the design view carries no title
         remote.routes.update({
+            f"GET {DESIGN}/people": lambda f, h: (200, {"people": []}),
             f"GET {BASE}": lambda f, h: (200, {"id": DOC, "version": self.rev, "title": self.title}),
             f"GET {DESIGN}/draft": lambda f, h: (200, {"rev": self.rev, "frozen": None, "snapshot": base64.b64encode(
                 self.draft.export_snapshot()).decode()}),
@@ -762,7 +763,8 @@ def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(d
     # Request changes carries teammates' open comments and replies to the supervisor.
     plans.decide(db, pid, 3, False, person=True)
     said = messages(db)[-1]
-    assert "Name the VM rule." in said and "u_a" in said and "Yes." in said and "u_b" in said
+    assert "Name the VM rule." in said and "Yes." in said
+    assert "u_a" not in said and "u_b" not in said
 
 
 class Relay:
@@ -944,7 +946,7 @@ def test_a_teammates_edit_comes_in_as_a_revision_and_later_sends_go_on_it(db, pa
     # A redirected plan is the supervisor's to revise, who hears about the teammate's edit.
     lib.content["sections"][0].update(kind="markdown", markdown="Back to text.")
     plans.decide(db, pid, 3, False, note="Tighten it.", person=True)
-    assert "u_e" in messages(db)[-1]
+    assert "A teammate" in messages(db)[-1] and "u_e" not in messages(db)[-1]
     sd.sync(db, pid, **net)
     assert plans.get(db, pid)["rev"] == 3
 

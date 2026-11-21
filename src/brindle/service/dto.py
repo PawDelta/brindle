@@ -458,6 +458,7 @@ class PlanAnchorDTO(_DTO):
 class PlanReplyDTO(_DTO):
     id: int
     author: str
+    author_name: str | None = None
     text: str
     attachments: list[str] = []
     at: float
@@ -473,6 +474,7 @@ class PlanThreadDTO(_DTO):
     kind: Literal["comment", "suggestion"]
     rev: int
     author: str
+    author_name: str | None = None
     text: str
     anchor: PlanAnchorDTO
     before: str | None = None
@@ -653,6 +655,7 @@ class PlanDTO(_DTO):
     created_at: float
     revisions: list[PlanRevisionDTO] = []
     threads: list[PlanThreadDTO] = []
+    teammate_names: dict[str, str] = {}
     # The person may change the text now (direct edits, accepting suggestions): only while open.
     can_edit: bool = False
     # Its reference from Settings › Doc format's naming (DES-0042), shown beside the

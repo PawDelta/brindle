@@ -232,8 +232,8 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
                   {d.mine === o.id && <span className="rounded-sm px-1.5 text-[11px] font-normal leading-[17px] text-ink-2 shadow-[inset_0_0_0_1px_var(--line-strong)]" data-testid="plan-recommended">Recommended</span>}
                   {/* A shared doc's votes: who picked this option. */}
                   {(d.votes?.[o.id]?.length ?? 0) > 0 && (
-                    <span className="ml-auto inline-flex flex-wrap items-center gap-1" data-votes={d.votes![o.id].length} title={`Voted for by ${d.votes![o.id].map(personName).join(", ")}`}>
-                      {d.votes![o.id].map((v) => <Avatar key={v} who={v} small />)}
+                    <span className="ml-auto inline-flex flex-wrap items-center gap-1" data-votes={d.votes![o.id].length} title={`Voted for by ${d.votes![o.id].map((who) => who === "person" ? "You" : nameOf?.(who) ?? "A teammate").join(", ")}`}>
+                      {d.votes![o.id].map((v) => <Avatar key={v} who={v === "person" ? "person" : nameOf?.(v) ?? "A teammate"} small />)}
                     </span>
                   )}
                 </span>
@@ -290,7 +290,7 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
     <div className={`grid min-w-0 [overflow-wrap:anywhere] gap-[5px] border-l pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2 ${lit ? "border-branch" : "border-line-strong"}`}
       data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined} aria-label={suggestion ? "Suggestion" : "Comment thread"} role="note"
       onMouseEnter={() => onHover(true)} onMouseLeave={() => onHover(false)}>
-      <Who who={t.author}><span>{suggestion ? `suggests · ${ago(t.at)}` : ago(t.at)}</span></Who>
+      <Who who={t.author_name ?? (t.author.startsWith("teammate:") ? "A teammate" : t.author)}><span>{suggestion ? `suggests · ${ago(t.at)}` : ago(t.at)}</span></Who>
       {suggestion && (
         <div className="ml-[25px] whitespace-pre-wrap break-words rounded-sm bg-surface-2 px-2 py-[5px] font-serif text-[13.5px] leading-normal" data-testid="suggestion-change">
           {t.before && <del className="text-fail decoration-1">{t.before}</del>}
@@ -302,7 +302,7 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
       {t.anchor.state === "detached" && <p className="m-0 pl-[25px] text-ink-3">That text has since changed.</p>}
       {t.replies?.map((r) => (
         <div key={r.id} className="contents" data-from-supervisor={r.from_supervisor || undefined}>
-          <Who who={r.from_supervisor ? "supervisor" : r.author}><span>{ago(r.at)}</span></Who>
+          <Who who={r.from_supervisor ? "supervisor" : r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author)}><span>{ago(r.at)}</span></Who>
           <p className="m-0 whitespace-pre-wrap break-words pl-[25px]">{r.text}</p>
         </div>
       ))}

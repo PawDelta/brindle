@@ -20,6 +20,7 @@ class Library:
                         "teams": [{"id": "core", "name": "Core"}], "role": "member",
                         "on_plan": False, "on_plan_role": None} for sub in ("a", "b")]
         path = "/analysis-docs/doc_1/design"
+        remote.routes[f"GET {path}/people"] = lambda f, h: (200, {"people": self.people})
         remote.routes[f"GET {path}/people?q=a&team=core&role=member&on_plan=false"] = lambda f, h: (200, {"people": self.people[:1]})
         for sub in ("a", "b"):
             remote.routes[f"PUT {path}/reviewers/{sub}"] = lambda f, h, sub=sub: self.put(sub, f)

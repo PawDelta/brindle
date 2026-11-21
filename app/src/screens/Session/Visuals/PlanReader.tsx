@@ -499,16 +499,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (shared && plan.state !== "approved") sharing?.syncPlan(plan.id).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
   }, [plan.id, shared]);
-  const nameOf = (sub: string) => {
-    const id = sub.replace(/^teammate:/, "");
-    const ownName = id === (teammate?.me ?? me) && account?.signed_in ? displayName(account) : "";
-    return ownName || displayName(directory.find((p) => p.sub === id)) || sub;
+  const nameOf = (who: string) => {
+    const sub = who.replace(/^teammate:/, "");
+    const ownName = sub === (teammate?.me ?? me) && account?.signed_in ? displayName(account) : "";
+    const member = directory.find((p) => p.sub === sub);
+    const saved = plan.teammate_names?.[sub];
+    return ownName || displayName(member && { ...member, email: null }) || (saved !== "A teammate" && saved) || member?.email || "A teammate";
   };
-  const namedDecision = (d: PlanDecisionDTO): PlanDecisionDTO => ({ ...d,
-    votes: d.votes && Object.fromEntries(Object.entries(d.votes).map(([option, voters]) => [option, voters.map(nameOf)])) });
   // A person in a sentence: "You", or their name's first word ("dana.okafor@…" → "Dana").
   const firstName = (who: string) => {
     if (who === "person" || (!!me && who === me) || who === teammate?.me) return "You";
+    if (nameOf(who) === "A teammate") return "A teammate";
     const name = nameOf(who).split("@")[0].split(/[\s._-]+/)[0] ?? who;
     return name ? name[0].toUpperCase() + name.slice(1) : who;
   };
@@ -1104,7 +1105,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
-        <DecisionCard decision={namedDecision(d)} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={firstName}
+        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={(who) => who === "person" ? "You" : nameOf(who)}
           onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
       </Annotated>
     ));
@@ -1177,7 +1178,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const versionMenu = source.history ? (
       <Menu label={<span data-testid="plan-rev">{`${versionLabel} · History`}</span>} buttonClass={`${quiet} px-[9px] text-xs !text-ink-3`} title="See earlier revisions and what changed"
         place="down" panelClass="w-[380px] max-w-[86vw] max-h-[60vh] overflow-auto" open={historyOpen} onOpenChange={setHistoryOpen} keepMounted testid="plan-history-menu">
-        <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
+        <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan} nameOf={nameOf}
           onCompare={(comparison, close) => { setHistorical(comparison ? { comparison, close } : null); if (comparison) setHistoryOpen(false); }} />
       </Menu>
     ) : <span className="whitespace-nowrap px-[9px] text-xs text-ink-3" data-testid="plan-rev">{versionLabel}</span>;
@@ -1369,7 +1370,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     <span id={`plan-title-decision-${d.id}`}>{`Decision · ${d.title}`}</span>
                     <span className={aside}>{`decision ${i + 1} of ${plan.decisions.length}${mine ? ` · ${mine}` : ""}`}</span>
                   </h3>
-                  <Decision decision={namedDecision(d)} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} />
+                  <Decision decision={d} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} nameOf={nameOf} />
                   <p className="flex max-w-[70ch] flex-wrap items-baseline gap-x-2 font-sans text-[12.5px] leading-normal text-ink-3">
                     {d.challenge && <span>{`${d.mine ? "Against its own pick: " : ""}${d.challenge}`}</span>}
                     {commentButton(() => comment({ kind: "decision", decision: d.id }, decisionName(d.id)))}
@@ -1387,7 +1388,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
             active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
-            historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
+            historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan} nameOf={nameOf}
               onCompare={(comparison, close) => setHistorical(comparison ? { comparison, close } : null)} />}
             history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} work={work} canLink={!teammate || canComment} />
         ) : (

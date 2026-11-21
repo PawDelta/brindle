@@ -646,6 +646,7 @@ export interface PlanReviewerChoice {
 export interface LibraryPerson {
   sub: string;
   email: string;
+  display_name?: string;
   first_name?: string;
   last_name?: string;
   name?: string;

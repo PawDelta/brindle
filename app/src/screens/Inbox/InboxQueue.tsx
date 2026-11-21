@@ -19,11 +19,12 @@
    marks it read on every machine. */
 
 import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import type { DaemonClient } from "../../api/client";
+import type { DaemonClient, LibraryPerson } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
 import type { InboxItemDTO, PersonDTO, PlanThreadDTO, SharedDesignDTO } from "../../api/schema";
 import { CheckIcon, ChevronRightIcon, ClockIcon, FileIcon, GearIcon, LockIcon } from "../../components/icons";
 import type { Route } from "../../routes";
+import { displayName } from "../Session/Visuals/PlanCards";
 import { describeItem, itemKey, kindLabel, opensVisual, seenAt, seenKey, REVIEW_KINDS } from "./items";
 import {
   LONG_WAIT_MS, TABS, TABS_FROM, ageOf, clearRow, hiddenByTriage, laterTimes, onTriage, putBack, recordDone, rowSig, rowsOf, setAside, signoffSig,
@@ -83,7 +84,7 @@ interface Line {
   after: string | null;
 }
 
-const personName = (p: PersonDTO | null | undefined) => p?.name || p?.sub || "Someone";
+const personName = (p: PersonDTO | null | undefined) => p?.name || "A teammate";
 const initial = (name: string) => (name.trim()[0] ?? "?").toUpperCase();
 const people = (row: Row) => [...new Map(row.items.filter((i) => i.from_person).map((i) => [i.from_person!.sub, personName(i.from_person)])).values()];
 const joined = (parts: ReactNode[]) => parts.filter((p) => p !== null && p !== undefined && p !== false && p !== "").map((p, i) => <span key={i}>{i > 0 && <span className="iq-sep" />}{p}</span>);
@@ -195,7 +196,21 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
   }
 }
 
-export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx, waitingExtra, waitingExtraCount = 0 }: InboxQueueProps) {
+export function InboxQueue({ items: receivedItems, synced, fresh, actions, client, refresh, ctx, waitingExtra, waitingExtraCount = 0 }: InboxQueueProps) {
+  const [members, setMembers] = useState<{ client: DaemonClient; people: LibraryPerson[] } | null>(null);
+  useEffect(() => {
+    let active = true;
+    client.libraryPeople().then((got) => { if (active) setMembers({ client, people: got.people }); }, () => {});
+    return () => { active = false; };
+  }, [client]);
+  const directory = members?.client === client ? members.people : [];
+  const namedPerson = (person: PersonDTO | null | undefined) => {
+    if (!person) return person;
+    const member = directory.find((p) => p.sub === person.sub);
+    return { ...person, name: displayName(member && { ...member, email: null }) || (person.name !== "A teammate" && person.name) || member?.email || null };
+  };
+  const items = receivedItems.map((item) => ({ ...item, from_person: namedPerson(item.from_person),
+    signoff: item.signoff && { ...item.signoff, waiting: item.signoff.waiting?.map((person) => namedPerson(person)!) } }));
   const [, redraw] = useReducer((n: number) => n + 1, 0);
   useEffect(() => onTriage(redraw), []);
   const [tab, setTab] = useState("all");
@@ -838,8 +853,8 @@ function Thread({ thread, doc, rev, repo, client, after, onSent }: { thread: Pla
     <form onSubmit={send} data-testid="thread-form" data-thread={thread.id}>
       {thread.anchor.quote && <div className="iq-quote">On “{thread.anchor.quote}”</div>}
       <div className="iq-thread" data-testid="thread">
-        <Msg who={thread.author} at={thread.at} text={thread.text} />
-        {(thread.replies ?? []).map((r) => <Msg key={r.id} who={r.author} at={r.at} text={r.text} />)}
+        <Msg who={thread.author_name ?? (thread.author === "person" ? "You" : "A teammate")} at={thread.at} text={thread.text} />
+        {(thread.replies ?? []).map((r) => <Msg key={r.id} who={r.author_name ?? (r.author === "person" ? "You" : "A teammate")} at={r.at} text={r.text} />)}
       </div>
       <div className="iq-box"><textarea rows={2} placeholder="Reply in this thread…" aria-label="Your reply" data-testid="reply-box" value={text} onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} /></div>

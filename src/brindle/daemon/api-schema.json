@@ -7263,6 +7263,18 @@
               "title": "Author",
               "type": "string"
             },
+            "author_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Author Name"
+            },
             "from_supervisor": {
               "default": false,
               "title": "From Supervisor",
@@ -7412,6 +7424,18 @@
             "author": {
               "title": "Author",
               "type": "string"
+            },
+            "author_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Author Name"
             },
             "before": {
               "anyOf": [
@@ -7806,6 +7830,14 @@
           "default": false,
           "title": "Team Ended",
           "type": "boolean"
+        },
+        "teammate_names": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Teammate Names",
+          "type": "object"
         },
         "threads": {
           "default": [],
@@ -9158,6 +9190,18 @@
           "title": "Author",
           "type": "string"
         },
+        "author_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author Name"
+        },
         "from_supervisor": {
           "default": false,
           "title": "From Supervisor",
@@ -9759,6 +9803,18 @@
               "title": "Author",
               "type": "string"
             },
+            "author_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Author Name"
+            },
             "from_supervisor": {
               "default": false,
               "title": "From Supervisor",
@@ -9820,6 +9876,18 @@
         "author": {
           "title": "Author",
           "type": "string"
+        },
+        "author_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author Name"
         },
         "before": {
           "anyOf": [
@@ -12898,6 +12966,18 @@
               "title": "Author",
               "type": "string"
             },
+            "author_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Author Name"
+            },
             "from_supervisor": {
               "default": false,
               "title": "From Supervisor",
@@ -13047,6 +13127,18 @@
             "author": {
               "title": "Author",
               "type": "string"
+            },
+            "author_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Author Name"
             },
             "before": {
               "anyOf": [
@@ -13477,6 +13569,14 @@
           "default": false,
           "title": "Team Ended",
           "type": "boolean"
+        },
+        "teammate_names": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Teammate Names",
+          "type": "object"
         },
         "threads": {
           "default": [],

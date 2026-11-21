@@ -29,7 +29,7 @@ it("shows the signed-in person's initials from their name, and the email's first
   expect(screen.getByTitle("You").textContent).toBe("H");
   // A teammate known only by an email gets that email's first letter; a named one, their initials.
   render(inTestStore(<><Avatar who="maya.chen@example.test" /><Avatar who="Ravi Shah" /></>, store));
-  expect(screen.getByTitle("Maya Chen").textContent).toBe("M");
+  expect(screen.getByTitle("maya.chen@example.test").textContent).toBe("M");
   expect(screen.getByTitle("Ravi Shah").textContent).toBe("RS");
   render(<><Avatar who="David Michael Jones" /><Avatar who="63a34f9d" /></>);
   expect(screen.getByTitle("David Michael Jones").textContent).toBe("DJ");
@@ -42,7 +42,7 @@ it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader
   const plan = doc(1, "Read this", { title: "Longtitle".repeat(40),
     decisions: [{ id: "long", title: decisionTitle, options: [{ id: "a", label: "Longoption".repeat(30) }], votes: { a: ["teammate:63a34f9d"] } }],
     gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["63a34f9d"], reviewers: [{ sub: "63a34f9d", required: true, status: "waiting" }] },
-    threads: [{ id: 1, rev: 1, author: name, at: 1, text: "Comment", kind: "comment", status: "open", anchor: { kind: "section", section: "summary", state: "current" } }] });
+    threads: [{ id: 1, rev: 1, author: name, author_name: name, at: 1, text: "Comment", kind: "comment", status: "open", anchor: { kind: "section", section: "summary", state: "current" } }] });
   const client = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
     sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, signOffPlan: async () => plan, overridePlanPolicy: async () => plan, docScopes: async () => ({ scopes: [] }),
     sharedDesign: async () => ({ ...plan, me: "me", author: "63a34f9d" }), writeSharedDesign: async () => ({ ...plan, me: "me" }),
@@ -241,9 +241,11 @@ it("asks immediately in the thread without turning the question into a change re
 it("design doc reader", async () => {
   // An emoji leads each section: the engine's offsets count it as one character, the screen as two.
   const summary = "🚀 Workers run on a **machine** the customer controls.";
+  const voter = "64680428-2b70-4a42-839b-1b1e05b51ca4";
   let plan: Plan = { id: visual.id, session: "boss", title: "Cloud workers", rev: 1, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [], reference: "DES-0042",
+    teammate_names: { [voter]: "David Chen" },
     sections: [{ id: "summary", title: "Summary", markdown: summary }, { id: "api", title: "API sketch", markdown: 'POST 🚀 with a "token" in the body.' }],
-    decisions: [{ id: "where", title: "Where cloud workers run", mine: "own", options: [{ id: "own", label: "A · Your own server" }, { id: "hosted", label: "B · PawDelta-hosted" }] }],
+    decisions: [{ id: "where", title: "Where cloud workers run", mine: "own", votes: { own: [`teammate:${voter}`, "teammate:unknown"] }, options: [{ id: "own", label: "A · Your own server" }, { id: "hosted", label: "B · PawDelta-hosted" }] }],
     threads: [{ id: 1, kind: "suggestion", rev: 1, author: "supervisor", text: "Tokens end up in logs.", status: "open", at: 1, before: '"token"', after: '"lease"',
       anchor: { kind: "text", section: "api", start: 14, end: 21, quote: '"token"', state: "current" } }] };
   const calls: unknown[][] = [];
@@ -329,6 +331,9 @@ it("design doc reader", async () => {
 
   // A supervisor's recommendation does not count as the person's selection.
   const section = () => within(screen.getByTestId("plan-doc")).getByRole("region", { name: /Where cloud workers run/ });
+  expect(within(section()).getByTitle("David Chen").textContent).toBe("DC");
+  expect(within(section()).getByTitle("A teammate").textContent).toBe("AT");
+  expect(section().innerHTML).not.toContain(voter);
   expect(decision.getAttribute("data-next")).toBe("true");
   const approve = () => within(screen.getByTestId("plan-verdict")).getByTestId("plan-build") as HTMLButtonElement;
   expect(approve().disabled).toBe(true);
@@ -516,7 +521,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   render(reader(visual));
   const build = (await screen.findByTestId("plan-build")) as HTMLButtonElement;
   expect(build.disabled).toBe(true);
-  expect(build.title).toContain("u_a");
+  expect(build.title).not.toContain("u_a");
   await openShare();
   expect(screen.getByTestId("share-reviewer-u_a").dataset.state).toBe("invited");
   expect(screen.getByTestId("share-reviewer-u_c").dataset.required).toBe("false");

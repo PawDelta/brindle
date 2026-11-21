@@ -69,7 +69,11 @@ describe("the Inbox queue", () => {
   });
 
   it("puts each row in its part, threads on one design in one row, sign-off progress as dots", async () => {
-    mount([progress, comment(11, "u_chen", "c:11"), review, asked, comment(12, "u_sam", "c:12")]);
+    mount([{ ...progress, from_person: { sub: "u_chen", name: null }, signoff: { ...progress.signoff!, waiting: [{ sub: "u_sam", name: null }, { sub: "unknown", name: null }] } },
+      { ...comment(11, "u_chen", "c:11"), from_person: { sub: "u_chen", name: null } }, review, asked, comment(12, "u_sam", "c:12")], {}, (_daemon, client) => {
+      vi.spyOn(client, "libraryPeople").mockResolvedValue({ people: [{ sub: "u_chen", first_name: "Chen", last_name: "Wei", email: "chen@example.test" }, { sub: "u_sam", email: "sam@example.test" }] });
+      return client;
+    });
     const waiting = await screen.findByTestId("inbox-waiting");
     const team = screen.getByTestId("inbox-team");
     // What's stopped comes first: the agent's question before the review request.
@@ -78,6 +82,10 @@ describe("the Inbox queue", () => {
     const pips = within(row("signoff_progress")).getByTestId("signoff-pips");
     expect([pips.dataset.signed, pips.dataset.required]).toEqual(["2", "3"]);
     expect(pips.querySelectorAll("i.on")).toHaveLength(2);
+    await waitFor(() => expect(row("signoff_progress").textContent).toContain("Chen Wei"));
+    expect(row("signoff_progress").textContent).toContain("sam@example.test");
+    expect(row("signoff_progress").textContent).toContain("A teammate");
+    expect(row("shared_doc_comment").textContent).toContain("Chen Wei");
   });
 
   it("opens the first waiting row with its answer box, and Enter sends the answer to the agent", async () => {

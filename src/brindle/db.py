@@ -1269,6 +1269,12 @@ CREATE TABLE IF NOT EXISTS plan_threads (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS plan_threads_plan ON plan_threads(plan_id, parent_id);
+CREATE TABLE IF NOT EXISTS plan_teammate_names (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    sub TEXT NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (plan_id, sub)
+);
 -- Exact Brindle account ownership, recorded at supervisor launch. Unknown is
 -- deliberately absent, never a wildcard when routing a shared-doc question.
 CREATE TABLE IF NOT EXISTS supervisor_accounts (
@@ -1965,6 +1971,8 @@ class DB:
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
         thread_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_threads)")}
+        if "author_name" not in thread_cols:
+            self.conn.execute("ALTER TABLE plan_threads ADD COLUMN author_name TEXT")
         for flag in ("question", "from_supervisor"):
             if flag not in thread_cols:
                 self.conn.execute(f"ALTER TABLE plan_threads ADD COLUMN {flag} INTEGER NOT NULL DEFAULT 0")

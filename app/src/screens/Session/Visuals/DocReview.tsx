@@ -120,7 +120,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
         <span className="flex-1" />
         <time className="whitespace-nowrap" dateTime={new Date(t.at * 1000).toISOString()} title={new Date(t.at * 1000).toLocaleString()}>{ago(t.at)}</time>
       </button>
-      <Who who={t.author} />
+      <Who who={t.author_name ?? (t.author.startsWith("teammate:") ? "A teammate" : t.author)} />
       {suggestion && <Change before={t.before ?? ""} after={t.after ?? ""} />}
       {t.text && <span className="whitespace-pre-wrap break-words">{t.text}</span>}
       {t.attachments?.map((name) => (
@@ -131,7 +131,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
           {t.replies.map((r) => (
             <div key={r.id} className="grid gap-1.5" data-from-supervisor={r.from_supervisor || undefined}>
               <div className="flex items-center gap-1.5">
-                <Who who={r.from_supervisor ? t.author : r.author} supervisor={r.from_supervisor} />
+                <Who who={r.from_supervisor ? (t.author_name ?? t.author) : (r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author))} supervisor={r.from_supervisor} />
                 <span className="ml-auto text-[11.5px] text-ink-3">{ago(r.at)}</span>
               </div>
               <span className="whitespace-pre-wrap break-words">{r.text}</span>
