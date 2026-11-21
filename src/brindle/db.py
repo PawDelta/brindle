@@ -2907,6 +2907,19 @@ class DB:
             return bool(c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
                                   "ON CONFLICT(agent_id, kind) DO NOTHING", (agent_id, kind, value)).rowcount)
 
+    def swap_mark(self, agent_id: str, kind: str, old: str | None, new: str) -> bool:
+        """Set the mark to ``new`` only while it is still ``old`` (None: absent),
+        in one write transaction: of processes that read the same ``old``, one wins."""
+        with self.tx() as c:
+            row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                            (agent_id, kind)).fetchone()
+            if (row["value"] if row else None) != old:
+                return False
+            c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                      "ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                      (agent_id, kind, new))
+            return True
+
     def replace_mark(self, agent_id: str, kind: str, old: str, new: str) -> bool:
         """Set an existing mark from ``old`` to ``new``, never recreating one
         another process retired or changed meanwhile. Returns whether it did."""

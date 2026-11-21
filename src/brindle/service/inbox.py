@@ -19,8 +19,8 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import (agents, autopilot, bus, git, identity_lock, inbox_team, permissions, prompt_answer,
-                     provider_switch, session_sync, sessions, tmux, view)
+from brindle import (agents, autopilot, bus, git, identity_lock, inbox_team, pane_escalation, permission_routing,
+                     permissions, prompt_answer, provider_switch, session_sync, sessions, tmux, view)
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent, Workspace, request_subagent
@@ -379,9 +379,15 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
             asking = [p for p in (pending_permissions(db, row)
                                   if a["status"] == "waiting" or HOLDS.of_agent(row.id) else [])
                       if _answerable(row, p)]
-            out += [InboxItemDTO(kind="permission", reason="asks permission",
-                                 detail=p.request.summary() if p.request else None, permission=p.dto, **link)
+            out += [InboxItemDTO(kind="permission", reason="asks permission", detail=p.request.summary() if p.request
+                                 else None, permission=p.dto, **link) if p.via != "pane"
+                    else InboxItemDTO(kind="permission", reason="needs to run a command outside its sandbox",
+                                      detail=p.dto.wording, permission=p.dto, **link)
                     for p in asking]
+            # A request its supervisor is answering isn't the person's yet, whatever the status says.
+            if (reason and not asking and a["status"] == "waiting"
+                    and (permission_routing.waits_on_supervisor(db, row) or pane_escalation.with_supervisor(db, row))):
+                reason = None
             if reason and not asking:
                 kind = _kind(a, ws, reason)
                 asked = db.get_autopilot(row.id) if kind == "question" else None
@@ -760,6 +766,18 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
         screen = tmux.capture(agent.tmux_window, lines=60, server=agents.server_of(agent))
     except tmux.TmuxError:
         return []
+    if pane_escalation.parse(screen) is not None:
+        # Codex's own sandbox escalation: decided by the rules or the supervisor
+        # first (pane_escalation.route); the person gets it in a sentence.
+        esc = pane_escalation.pending(db, agent, screen)
+        if esc is None:
+            return []
+        req = permissions.Request("codex", "bash", "Bash", command=esc.command)
+        return [Pending("pane", None, req, None, PermissionDTO(
+            via="pane", request_id=esc.request_id, tool="Bash", kind="bash", target=esc.command,
+            digest=esc.key, wording=pane_escalation.sentence(db, agent, esc),
+            choices=[PermissionChoiceDTO(choice="allow_once", label="Allow"),
+                     PermissionChoiceDTO(choice="deny", label="Deny")]))]
     if not get_provider(agent.provider).tool_permission(screen):
         return []
     return [Pending("prompt", None, None, None,
@@ -810,6 +828,20 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
         raise ServiceError("not_found", f"no agent {agent_id}", 404)
     identity_lock.ensure(agent)
     asking = pending_permissions(db, agent)
+    pane = next((p for p in asking if p.via == "pane"), None)
+    if pane is not None:
+        # Codex's own escalation prompt: answered in its pane, only while it shows exactly this request.
+        if pane.dto.request_id != request_id or pane.dto.digest != digest:
+            raise ServiceError("conflict", f"{agent_id} isn't waiting on that request, as shown, any more: "
+                                           "fetch the inbox again", 409)
+        if choice not in ("allow_once", "deny"):
+            raise ServiceError("conflict", f"{agent_id}'s request offers no {choice}", 409)
+        if not pane_escalation.answer(db, agent, request_id, choice):
+            raise ServiceError("conflict", f"{agent_id}'s request was answered or withdrawn meanwhile: "
+                                           "fetch the inbox again", 409)
+        bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
+                          via="pane", cleared=True)
+        return {"choice": choice, "via": "pane", "cleared": True, "rule": None}
     if any(p.via == "prompt" for p in asking):
         raise ServiceError("conflict", f"{agent_id}'s request {TERMINAL}", 409)
     # The one the person answers, by its id: an agent can hold several at once.

@@ -640,7 +640,7 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     Only a waiting worker's pane is read: hooks mark a wait (a permission
     request), a question a turn ended on is forwarded by the turn-end hook
     (prompt_answer.at_turn_end), and startup prompts are settle_startups'."""
-    from brindle import permission_routing, prompt_answer
+    from brindle import pane_escalation, permission_routing, prompt_answer
 
     done = []
     owners = agents.pane_owners(db, panes)
@@ -657,6 +657,13 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         except tmux.TmuxError:
             screen = ""
         if prompt_answer.decline_teach_auto_mode(db, a, screen):
+            continue
+        # A Codex sandbox escalation is the policy's, then the supervisor's, and
+        # only then the person's, in a sentence: never its pane forwarded.
+        stage = pane_escalation.route(db, a, screen)
+        if stage is not None:
+            if stage == "answered":
+                done.append(f"answered worker {a.id}'s sandbox escalation by brindle's permission rules")
             continue
         health = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
                                  (a.id,)).fetchone()
