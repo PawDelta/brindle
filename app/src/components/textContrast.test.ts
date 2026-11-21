@@ -1,6 +1,6 @@
 import { Terminal } from "@xterm/xterm";
 import { expect, it } from "vitest";
-import { TextContrast } from "./textContrast";
+import { contrastRatio, parseCss, TextContrast } from "./textContrast";
 
 /* The cell xterm.js holds at row 0, column `x` once `chunks` went through the lift (split as given): its foreground
    as xterm.js keeps it, and whether it draws faint. */
@@ -31,4 +31,28 @@ it.each([
 it("draws faint text in a readable colour, keeping bold", async () => {
   const cell = await cellAfter(0, "\x1b[1;2mX");
   expect([cell.dim, cell.bold, cell.rgb]).toEqual([false, true, true]);
+});
+
+it.each([
+  ["SGR", "\x1b[38;5;", "246m"],
+  ["OSC", "\x1b]0;", "title\x1b\\"],
+])("refreshes a switched pen after a split %s without corrupting the sequence", async (_kind, first, last) => {
+  let ratio = 1;
+  const theme = { background: "#ffffff", foreground: "#0e1716" };
+  const lift = new TextContrast(() => ({ theme, ratio }));
+  const term = new Terminal({ allowProposedApi: true });
+  const send = (text: string) => new Promise<void>(done => term.write(text, done));
+  try {
+    await send(new TextDecoder().decode(lift.feed(new TextEncoder().encode("\x1b[38;5;246m" + first))));
+    ratio = 4.5;
+    await send(lift.refresh());
+    await send(new TextDecoder().decode(lift.feed(new TextEncoder().encode(last + "X"))));
+    expect(term.buffer.active.getLine(0)!.translateToString(true)).toBe("X");
+    const cell = term.buffer.active.getLine(0)!.getCell(0)!;
+    expect(cell.isFgRGB()).toBe(true);
+    const n = cell.getFgColor();
+    expect(contrastRatio([n >> 16, (n >> 8) & 255, n & 255], parseCss(theme.background)!)).toBeGreaterThanOrEqual(4.5);
+  } finally {
+    term.dispose();
+  }
 });

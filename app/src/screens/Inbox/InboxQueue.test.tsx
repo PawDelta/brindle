@@ -49,6 +49,21 @@ const opened = async (kind: string) => {
 const posts = (daemon: FakeDaemon, path: string) => daemon.requests.filter((r) => r.method === "POST" && r.path === path);
 
 describe("the Inbox queue", () => {
+  it.each(["grant", "decline"])("resolves a reader's requested access from the author Inbox: %s", async (action) => {
+    let resolution: string | null = null;
+    mount([{ kind: "access_requested", reason: "Asked to edit", doc: "ad_1", detail: "Plan",
+      item_key: "access:ad_1:reader", access_role: "edit", from_person: { sub: "reader", name: "Reader" } }], {}, (_daemon, client) => {
+      client.writeSharedDesign = async (_id, tail, body) => {
+        if (body.role === "edit") resolution = tail.endsWith("/grant") ? "grant" : "decline";
+        return {} as SharedDesignDTO;
+      };
+      return client;
+    });
+    const request = await opened("access_requested");
+    await act(async () => fireEvent.click(within(request).getByRole("button", { name: action === "grant" ? "Grant edit access" : "Decline" })));
+    expect(resolution).toBe(action);
+  });
+
   it.each(["passed", "failed", "running", null])("renders the PR's actual checks state: %s", async (checks) => {
     const pr = { kind: "pr_ready", reason: "PR ready", agent_id: "sup1", root_id: "sup1", workspace_id: "proj",
       file_count: 14, checks_state: checks } as InboxItemDTO;

@@ -300,6 +300,7 @@ class InboxItemDTO(_DTO):
     thread_id: int | None = None   # a shared-doc comment's thread in the design
     excerpt: str | None = None     # a shared-doc comment's newest words
     signoff: SignoffDTO | None = None
+    access_role: Literal["comment", "edit"] | None = None
     decision_count: int | None = None  # the requested plan's decisions, when known
     from_name: str | None = None       # an org notice's sender, when supplied
     file_count: int | None = None      # files changed against the session's PR base
@@ -333,6 +334,13 @@ class VisualAnswerDTO(_DTO):
     note: str | None = None
     at: float
     attachments: list[str] = []
+    picks: dict[str, str] | None = None
+
+
+class VisualChoiceDTO(_DTO):
+    id: str
+    question: str
+    options: list[VisualOptionDTO]
 
 
 class VisualDTO(_DTO):
@@ -351,6 +359,8 @@ class VisualDTO(_DTO):
     rev: int
     question: str | None = None
     options: list[VisualOptionDTO] | None = None
+    choices: list[VisualChoiceDTO] | None = None
+    inline_html: str | None = None
     answer: VisualAnswerDTO | None = None
     answered_in_chat: bool = False
     kept: bool
@@ -380,6 +390,18 @@ class PlanOptionDTO(VisualOptionDTO):
     touches: list[str] = []
 
 
+class PlanAnswerDTO(_DTO):
+    """An own answer on a decision (brindle.plan_answers): a row someone typed
+    under the options, picked like one. ``locked`` once someone other than
+    its author picked it: from then on it stays as written."""
+
+    id: str
+    text: str
+    author: str
+    at: float = 0.0
+    locked: bool = False
+
+
 class PlanDecisionDTO(_DTO):
     """A decision that shapes the plan: its alternatives and the supervisor's pick."""
 
@@ -394,6 +416,8 @@ class PlanDecisionDTO(_DTO):
     # confirmed pick, which their verdict starts from.
     votes: dict[str, list[str]] = {}
     confirmed: str | None = None
+    # Own answers, oldest first; a vote or pick may name one by its id.
+    answers: list[PlanAnswerDTO] = []
 
 
 class PlanWorkerDTO(_DTO):
@@ -436,6 +460,8 @@ class PlanVerdictDTO(_DTO):
     at: float
     rev: int
     attachments: list[str] = []
+    # {decision: text} for picks that named an own answer.
+    answers: dict[str, str] = {}
 
 
 class PlanAnchorDTO(_DTO):
@@ -716,6 +742,11 @@ class DesignShareLinkDTO(_DTO):
     link: DesignLinkDTO | None = None
 
 
+class DesignAccessRequestDTO(_DTO):
+    role: Literal["comment", "edit"]
+    status: Literal["pending", "granted", "declined"]
+
+
 class SharedDesignDTO(PlanDTO):
     """A design someone else shared, as the person reviewing it reads it
     (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
@@ -729,6 +760,7 @@ class SharedDesignDTO(PlanDTO):
     can_suggest: bool = False
     can_sign_off: bool = False
     signed_off: bool = False
+    access_request: DesignAccessRequestDTO | None = None
 
 
 class KeptVisualDTO(_DTO):

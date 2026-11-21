@@ -186,6 +186,12 @@ class VisualOption(BaseModel):
                            "choosing it (with no note) lets the session's goal go ahead without a planning offer")
 
 
+class VisualChoice(BaseModel):
+    id: str
+    question: str
+    options: list[VisualOption]
+
+
 @mcp.tool()
 def offer_visual(question: str, kind: Literal["options", "comparison", "flow", "diff", "layout"],
                  options: int = 0, attributes: int = 0,
@@ -211,7 +217,8 @@ def offer_visual(question: str, kind: Literal["options", "comparison", "flow", "
 @mcp.tool()
 def publish_visual(title: str, html: str | None = None, question: str | None = None,
                    options: list[VisualOption] | None = None, visual_id: str | None = None,
-                   asked: str | None = None, html_path: str | None = None) -> str:
+                   asked: str | None = None, html_path: str | None = None,
+                   choices: list[VisualChoice] | None = None) -> str:
     """Show the person a page in the app: a self-contained HTML document
     only after the person explicitly requested one or accepted an offer.
     Each request permits one new visual, regardless of the Visuals setting.
@@ -219,6 +226,11 @@ def publish_visual(title: str, html: str | None = None, question: str | None = N
     fonts). Workers' visuals go to their supervisor's session. To ask a
     choice, pass the question and 2-12 options; the person answers with one
     option id (and maybe a note), which arrives as a message from them.
+    For several inline choices, pass choices [{id, question, options}] and mark
+    each location with <fieldset data-choice="id"> and <button data-option="id">.
+    Or declare groups in HTML with data-question on each fieldset. Inline choice
+    documents are inert: the app handles clicks, scripts do not run. Every group
+    and the optional note arrive in one message after Send.
     visual_id: publish a new revision of one of this session's visuals (it
     asks again: an earlier answer is cleared). A supervisor that published a
     visual with the person's consent (asked, a request or an accepted offer)
@@ -269,10 +281,11 @@ def publish_visual(title: str, html: str | None = None, question: str | None = N
     try:
         v = visuals.publish(db, caller, title, html, question,
                             [o.model_dump() if isinstance(o, BaseModel) else o for o in options or []],
-                            visual_id, asked=asked)
+                            visual_id, asked=asked,
+                            choices=[g.model_dump() if isinstance(g, BaseModel) else g for g in choices] if choices is not None else None)
     except ServiceError as e:
         raise ToolError(e.message) from e
-    asks = " The person's answer arrives as a message." if v["options"] else ""
+    asks = " The person's answer arrives as a message." if v["options"] or v["choices"] else ""
     return f"Published {v['id']} r{v['rev']} (brindle://visual/{v['id']}).{asks}"
 
 

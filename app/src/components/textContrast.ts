@@ -16,7 +16,7 @@
    sends it adds one SGR where xterm.js's foreground or faint should differ from the program's; nothing the program
    sent is removed or reordered. Inverse cells (a cursor, a selection) are drawn as sent. Ratio 1: nothing is added. */
 
-import type { ITheme } from "@xterm/xterm";
+import type { IBufferCell, ITheme, Terminal } from "@xterm/xterm";
 
 export type Rgb = readonly [number, number, number];
 
@@ -133,6 +133,55 @@ const freshHeld = (): Held => ({ fgSgr: "39", bgSgr: "49", dim: false });
    (Claude's line grounds sit at 0.5 to 0.6). Darker grounds (black, a status bar's) are a program's choice and stay. */
 const MID_GROUND = [0.1, 0.45] as const;
 
+/* xterm 6's mutable buffer cells. Its public buffer API is read-only; retain the content and attribute flags while
+   changing only colour bits (Constants.ts CM_MASK | RGB_MASK), and faint (BgFlags.DIM). Both buffers must follow a
+   switch, including text hidden while tmux uses the alternate screen. */
+type MutableCell = IBufferCell & { fg: number; bg: number };
+interface MutableBuffer {
+  getNullCell(): MutableCell;
+  lines: { length: number; get(row: number): { length: number; loadCell(col: number, into: MutableCell): MutableCell; setCell(col: number, cell: MutableCell): void } };
+}
+const colourBits = 0x3ffffff;
+const rgbBits = ([r, g, b]: Rgb) => 0x3000000 | (r << 16) | (g << 8) | b;
+
+export function recontrastBuffer(terminal: Terminal, ratio: number): void {
+  if (ratio <= 1) return; // dark uses the renderer's floor instead
+  const theme = terminal.options.theme ?? {};
+  const colour = (cell: MutableCell, fg: boolean): Rgb => {
+    const n = fg ? cell.getFgColor() : cell.getBgColor();
+    if (fg ? cell.isFgRGB() : cell.isBgRGB()) return [n >> 16, (n >> 8) & 255, n & 255];
+    if (fg ? cell.isFgPalette() : cell.isBgPalette()) return slot(theme, fg && cell.isBold() && n < 8 ? n + 8 : n);
+    return parseCss(fg ? theme.foreground : theme.background) ?? (fg ? [255, 255, 255] : [0, 0, 0]);
+  };
+  for (const view of [terminal.buffer.normal, terminal.buffer.alternate]) {
+    const buffer = (view as unknown as { _buffer: MutableBuffer })._buffer;
+    const cell = buffer.getNullCell();
+    for (let row = 0; row < buffer.lines.length; row++) {
+      const line = buffer.lines.get(row);
+      for (let col = 0; col < line.length; col++) {
+        line.loadCell(col, cell);
+        if (cell.isInverse()) continue;
+        let ground = colour(cell, false);
+        const lum = luminance(ground);
+        if (!cell.isBgDefault() && lum >= MID_GROUND[0] && lum < MID_GROUND[1]) {
+          ground = lightenTo(ground, MID_GROUND[1]);
+          cell.bg = (cell.bg & ~colourBits) | rgbBits(ground);
+        }
+        let text = colour(cell, true);
+        if (cell.isDim()) {
+          text = text.map((c, i) => Math.round((c + ground[i]) / 2)) as unknown as Rgb;
+          cell.bg &= ~0x8000000;
+          cell.fg = (cell.fg & ~colourBits) | rgbBits(text);
+        }
+        const lifted = liftLightness(ground, text, ratio);
+        if (lifted !== text) cell.fg = (cell.fg & ~colourBits) | rgbBits(lifted);
+        line.setCell(col, cell);
+      }
+    }
+  }
+  terminal.refresh(0, terminal.rows - 1);
+}
+
 /* ground in its own hue, its HSL lightness raised until its luminance reaches `target`. A red keeps its saturation at
    0.85 at least: a light red with less reads pink (a removed word must read as removed); greens keep their own. */
 export function lightenTo(ground: Rgb, target: number): Rgb {
@@ -161,17 +210,33 @@ export class TextContrast {
   private state = State.Ground;
   private params = "";
   private inter = "";
+  private refreshPending = false;
   private lifts = new Map<string, string>();
   private readonly encoder = new TextEncoder();
 
   /* theme: the terminal's colours now; ratio: what text reaches against its ground, 1 for nothing added. Both read on
-     every SGR, so a theme switch applies from the next one. */
+     every SGR and on a theme switch. */
   constructor(private readonly current: () => { theme: ITheme; ratio: number }) {}
+
+  /* Re-evaluate the active SGR after a theme change, even if the next bytes contain only ordinary text. */
+  refresh(): string {
+    // A split CSI/OSC must finish before we inject an SGR into xterm's parser.
+    this.refreshPending = this.state !== State.Ground;
+    return this.refreshPending ? "" : this.redraw() ?? "";
+  }
 
   feed(bytes: Uint8Array): Uint8Array {
     let out: Uint8Array[] | null = null;
     let from = 0;
     for (let i = 0; i < bytes.length; i++) {
+      if (this.refreshPending && this.state === State.Ground) {
+        this.refreshPending = false;
+        const refreshed = this.redraw();
+        if (refreshed) {
+          (out ??= []).push(bytes.subarray(from, i), this.encoder.encode(refreshed));
+          from = i;
+        }
+      }
       const added = this.step(bytes[i]);
       if (added) {
         (out ??= []).push(bytes.subarray(from, i + 1), this.encoder.encode(added));

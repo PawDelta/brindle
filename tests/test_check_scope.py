@@ -344,6 +344,40 @@ def test_a_conftest_change_runs_the_tests_using_its_fixtures(repo, monkeypatch, 
         assert run == f"{PYTEST} {' '.join(sorted(ran))}"
 
 
+@pytest.mark.parametrize("reached", [True, False], ids=["one-serial", "no-serial"])
+def test_serial_check_scopes_the_tests_root(repo, monkeypatch, reached):
+    from brindle import coverage_map
+
+    source = "def core():\n    return 1\n"
+    files = {"pkg/__init__.py": "", "pkg/core.py": source,
+             "tests/test_core.py": "def test_plain(): pass\n",
+             "tests/test_serial.py": "import pytest\n\n@pytest.mark.serial\ndef test_serial(): pass\n",
+             "tests/conftest.py": "", "pytest.ini": "[pytest]\nmarkers = serial\n"}
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    sh("git add -A && git commit -qm base", repo)
+    base = sh("git rev-parse HEAD", repo)
+    node = "tests/test_serial.py::test_serial"
+    data = {"commit": base, "tests": [node], "files": {"pkg/core.py": {"core": [0] if reached else []}}}
+    monkeypatch.setattr(coverage_map, "load", lambda root, check: data)
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    (repo / "pkg/core.py").write_text(source.replace("1", "2"))
+    ws = SimpleNamespace(path=str(repo), repo_root=str(repo))
+
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle/config.json").write_text(json.dumps({"scoped_checks": "coverage"}))
+    for cmd in ("pytest -q -m serial", "pytest -q -m serial tests"):
+        scope = check_scope.inferred(cmd, "coverage")
+        selected = check_scope.command(ws, cmd, scope, (base, ["pkg/core.py"]))
+        if reached:
+            assert shlex.split(selected.split(" || ")[0]) == ["pytest", "-q", "-m", "serial", node]
+        else:
+            assert selected is None
+        for path in ("pytest.ini", "tests/conftest.py", ".brindle/config.json"):
+            assert check_scope.command(ws, cmd, scope, (base, [path])) == cmd
+
+
 def test_a_script_changed_since_the_map_runs_the_tests_that_run_it(repo, monkeypatch):
     """Main changed a script after the map was recorded and the branch changes
     only another module: the script's tests (it runs as a child process, so

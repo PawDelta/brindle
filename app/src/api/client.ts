@@ -454,6 +454,7 @@ export interface VisualOption {
 }
 
 export interface VisualAnswer {
+  picks?: Record<string, string> | null;
   option: string | null;
   note: string;
   at: number;
@@ -462,6 +463,8 @@ export interface VisualAnswer {
 }
 
 export interface VisualDTO {
+  choices?: { id: string; question: string; options: { id: string; label: string; detail?: string | null }[] }[] | null;
+  inline_html?: string | null;
   id: string;
   session: string;
   /* The agent that receives the answer, and whether its provider takes files. */
@@ -805,6 +808,9 @@ interface WireDoc extends Omit<WireListedDoc, "doc_id"> {
 
 export interface AnalysisDoc {
   id: string;
+  /* The caller's effective grants, computed by the Library. */
+  can_edit?: boolean;
+  can_comment?: boolean;
   title?: string;
   kind?: string;
   scope?: DocScope;
@@ -932,6 +938,7 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   /* A shared design's review state (shared-designs-api.md: GET /analysis-docs/{id} `design`):
      the revision on screen, who is asked to review (`required` or optional) and who has signed it. */
   design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean; folder?: DesignFolderRef | null; threads?: { status?: string }[];
+    can_edit?: boolean; can_comment?: boolean;
     /* The design's decisions as the server keeps them; `confirmed` is the option this reader chose. */
     decisions?: { id: string; title?: string; confirmed?: string | null }[] } | null;
   /* The plan's tasks when the design is a plan on this machine, in their board state (GET /analysis-docs/{id} `tasks`). */
@@ -998,9 +1005,24 @@ export type ExportDestination = "download" | "google_docs" | "sharepoint";
 /* GET /analysis-docs/policy (the rest of the org's policy passes through untouched). */
 export interface DocPolicy {
   export_destinations?: ExportDestination[];
+  share_links?: "anyone" | "org" | "off";
 }
 
 export type DocSwitchName = "store" | "share" | "assist" | "prompt_analysis" | "import_upload";
+
+export type OrgSettingName = DocSwitchName | "share_links";
+export type OrgSwitchState = "off" | "default_on" | "enforced_on" | "enforced_off";
+export interface OrgSettings {
+  org_id: string;
+  actor_sub: string;
+  can_edit_org: boolean;
+  can_edit_groups: boolean;
+  policy: {
+    switches: Partial<Record<DocSwitchName, OrgSwitchState>>;
+    groups: Record<string, { switches: Partial<Record<DocSwitchName, OrgSwitchState>> }>;
+    share_links?: "anyone" | "org" | "off";
+  };
+}
 
 /* GET /analysis-docs/switches: one of the person's own switches. `choice` is
    theirs (null while unset), `on` what applies, `locked` whether their org
@@ -2157,8 +2179,8 @@ export class DaemonClient {
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
-  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
-    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
+  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[], picks?: Record<string, string>) {
+    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}), ...(picks ? { picks } : {}) });
   }
 
   /* The person won't answer the revision on screen; the agent is told, the Inbox card clears. */
@@ -2349,6 +2371,16 @@ export class DaemonClient {
   /* The person's pick on one decision (Confirm A); the verdict starts from these. */
   confirmPlan(id: string, rev: number, decision: string, option: string) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
+  }
+
+  /* The person's own answer on a decision (brindle/plan_answers.py), picked as it is added. */
+  addPlanAnswer(id: string, rev: number, decision: string, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers`, { rev, decision, text });
+  }
+
+  /* Reword the person's own answer ({ text }) or take it back ({ remove: true }), until someone else picks it. */
+  changePlanAnswer(id: string, rev: number, answer: string, change: { text: string } | { remove: true }) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers/${encodeURIComponent(answer)}`, { rev, ...change });
   }
 
   /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */
@@ -2641,6 +2673,16 @@ export class DaemonClient {
   /* The person's own doc switches, and which their org has locked. */
   async docSwitches(repo?: string) {
     return (await this.get<{ switches: DocSwitch[] }>("/analysis-docs/switches", { repo })).switches;
+  }
+
+  orgSettings() {
+    return this.get<OrgSettings>("/org-settings");
+  }
+
+  setOrgSetting(state: OrgSettings, name: OrgSettingName, value: string, group?: string) {
+    const switches = group ? state.policy.groups[group].switches : state.policy.switches;
+    const previous = name === "share_links" ? state.policy.share_links ?? "org" : switches[name] ?? "off";
+    return this.put<OrgSettings>("/org-settings", { org_id: state.org_id, actor_sub: state.actor_sub, name, value, previous, group });
   }
 
   /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked.

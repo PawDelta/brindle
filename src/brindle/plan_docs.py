@@ -932,8 +932,10 @@ def confirm(db: DB, plan_id: str, rev: Any, decision: Any, option: Any, *, voter
     if p["state"] != "open":
         _editable(p)
     _on_screen(p, rev)
+    from brindle import plan_answers   # an own answer is picked like an option
+
     d = next((d for d in p["decisions"] if d["id"] == decision), None)
-    if d is None or option not in {o["id"] for o in d["options"]}:
+    if d is None or option not in plan_answers.choices(db.conn, p).get(d["id"], ()):
         raise ServiceError("invalid", "confirm one of this revision's decisions and one of its options", 400)
     with db.tx() as c:
         c.execute("INSERT INTO plan_votes (plan_id, decision_id, voter, option_id, rev, at) VALUES (?,?,?,?,?,?)"
@@ -943,8 +945,10 @@ def confirm(db: DB, plan_id: str, rev: Any, decision: Any, option: Any, *, voter
 
 
 def _votes(db: DB, p: dict) -> dict[str, dict[str, str]]:
-    """{decision: {voter: option}}, for this revision's decisions and options only."""
-    valid = {d["id"]: {o["id"] for o in d["options"]} for d in p["decisions"]}
+    """{decision: {voter: option}}, for this revision's decisions and options (own answers included) only."""
+    from brindle import plan_answers
+
+    valid = plan_answers.choices(db.conn, p)
     out: dict[str, dict[str, str]] = {}
     for r in db.conn.execute("SELECT decision_id, voter, option_id FROM plan_votes WHERE plan_id=?", (p["id"],)):
         if r["option_id"] in valid.get(r["decision_id"], ()):
@@ -1165,14 +1169,17 @@ def fields(db: DB, p: dict) -> dict:
     their votes, every revision, the threads."""
     replica = draft(db, p)
     cur = current(db, p, replica)
+    from brindle import plan_answers
+
     votes = _votes(db, p)
+    answers = plan_answers.dto(db.conn, p)
     decisions = []
     for d in p["decisions"]:
         mine = votes.get(d["id"], {})
         by_option: dict[str, list[str]] = {}
         for voter, option in sorted(mine.items()):
             by_option.setdefault(option, []).append(voter)
-        decisions.append({**d, "votes": by_option, "confirmed": mine.get(PERSON)})
+        decisions.append({**d, "votes": by_option, "confirmed": mine.get(PERSON), "answers": answers.get(d["id"], [])})
     rows = [dict(r) for r in db.conn.execute("SELECT * FROM plan_threads WHERE plan_id=? ORDER BY id", (p["id"],))]
     replies: dict[int, list[dict]] = {}
     for r in rows:

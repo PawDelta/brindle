@@ -14,7 +14,7 @@ import { itemKey } from "./items";
 export type Part = "wait" | "team";
 
 /* inbox_team.TEAM_KINDS: rows that ask nothing of the person. */
-const TEAM_KINDS = ["signoff_progress", "shared_doc_comment", "signed_off", "changes_requested", "org_notice"];
+const TEAM_KINDS = ["signoff_progress", "shared_doc_comment", "signed_off", "changes_requested", "org_notice", "shared_with_you"];
 
 export const partOf = (item: InboxItemDTO): Part =>
   item.inbox_group ? (item.inbox_group === "from_team" ? "team" : "wait") : TEAM_KINDS.includes(item.kind) ? "team" : "wait";
@@ -78,7 +78,7 @@ export const TABS: { key: string; label: string; kinds: string[] }[] = [
   { key: "permissions", label: "Permissions", kinds: ["permission"] },
   { key: "reviews", label: "Reviews", kinds: ["review_requested", "review", "merge_failed", "changes_requested"] },
   { key: "prs", label: "PRs", kinds: ["pr_ready", "pr_failed", "pr_opened"] },
-  { key: "plans", label: "Plans", kinds: ["plan", "plan_offer", "signoff_progress", "signed_off", "visual"] },
+  { key: "plans", label: "Plans", kinds: ["plan", "plan_offer", "signoff_progress", "signed_off", "visual", "shared_with_you", "access_requested"] },
   { key: "comments", label: "Comments", kinds: ["shared_doc_comment", "doc"] },
   { key: "notices", label: "Notices", kinds: ["org_notice", "org_blocked"] },
 ];

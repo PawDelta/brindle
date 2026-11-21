@@ -26,6 +26,7 @@ export interface ApiSchema {
   CloudOptionsDTO: CloudOptionsDTO;
   ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
+  DesignAccessRequestDTO: DesignAccessRequestDTO;
   DesignLinkDTO: DesignLinkDTO;
   DesignLinkScopeDTO: DesignLinkScopeDTO;
   DesignShareLinkDTO: DesignShareLinkDTO;
@@ -62,6 +63,7 @@ export interface ApiSchema {
   PersonDTO: PersonDTO;
   PlanAlongsideDTO: PlanAlongsideDTO;
   PlanAnchorDTO: PlanAnchorDTO;
+  PlanAnswerDTO: PlanAnswerDTO;
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
@@ -109,6 +111,7 @@ export interface ApiSchema {
   SignoffDTO: SignoffDTO;
   StoppedAgentDTO: StoppedAgentDTO;
   VisualAnswerDTO: VisualAnswerDTO;
+  VisualChoiceDTO: VisualChoiceDTO;
   VisualDTO: VisualDTO;
   VisualOptionDTO: VisualOptionDTO;
   WorkspaceDTO: WorkspaceDTO;
@@ -494,6 +497,14 @@ export interface DecisionDTO {
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "DesignAccessRequestDTO".
+ */
+export interface DesignAccessRequestDTO {
+  role: "comment" | "edit";
+  status: "pending" | "granted" | "declined";
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "DesignLinkDTO".
  */
 export interface DesignLinkDTO {
@@ -642,6 +653,7 @@ export interface InboxChoiceDTO {
  * via the `definition` "InboxItemDTO".
  */
 export interface InboxItemDTO {
+  access_role?: ("comment" | "edit") | null;
   action?: InboxActionDTO | null;
   agent_id?: string | null;
   checks_state?: ("passed" | "failed" | "running") | null;
@@ -776,6 +788,9 @@ export interface VisualAnswerDTO {
   attachments?: string[];
   note?: string | null;
   option: string | null;
+  picks?: {
+    [k: string]: string;
+  } | null;
 }
 /**
  * A Library folder (GET /v1/library/folders): the server's, plus ``repo``,
@@ -1031,6 +1046,21 @@ export interface PlanAnchorDTO {
   state?: "current" | "moved" | "detached";
 }
 /**
+ * An own answer on a decision (brindle.plan_answers): a row someone typed
+ * under the options, picked like one. ``locked`` once someone other than
+ * its author picked it: from then on it stays as written.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanAnswerDTO".
+ */
+export interface PlanAnswerDTO {
+  at?: number;
+  author: string;
+  id: string;
+  locked?: boolean;
+  text: string;
+}
+/**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanCommentDTO".
  */
@@ -1082,6 +1112,7 @@ export interface PlanDTO {
  * via the `definition` "PlanDecisionDTO".
  */
 export interface PlanDecisionDTO {
+  answers?: PlanAnswerDTO[];
   challenge?: string | null;
   confirmed?: string | null;
   id: string;
@@ -1321,6 +1352,9 @@ export interface PlanReplyDTO {
  * via the `definition` "PlanVerdictDTO".
  */
 export interface PlanVerdictDTO {
+  answers?: {
+    [k: string]: string;
+  };
   approved: boolean;
   at: number;
   attachments?: string[];
@@ -1669,6 +1703,7 @@ export interface ShareTeamDTO {
  * via the `definition` "SharedDesignDTO".
  */
 export interface SharedDesignDTO {
+  access_request?: DesignAccessRequestDTO | null;
   alongside?: PlanAlongsideDTO[];
   ask?: string | null;
   author?: string | null;
@@ -1701,6 +1736,24 @@ export interface SharedDesignDTO {
   verdict?: PlanVerdictDTO | null;
 }
 /**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualChoiceDTO".
+ */
+export interface VisualChoiceDTO {
+  id: string;
+  options: VisualOptionDTO[];
+  question: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualOptionDTO".
+ */
+export interface VisualOptionDTO {
+  detail?: string | null;
+  id: string;
+  label: string;
+}
+/**
  * A visual in a session (brindle.visuals). ``rev``: its current revision,
  * served at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.
  * ``unread``: a revision the person hasn't opened yet. ``holding``: the queued
@@ -1715,9 +1768,11 @@ export interface VisualDTO {
   answer_agent_id: string;
   answered_in_chat?: boolean;
   by: string;
+  choices?: VisualChoiceDTO[] | null;
   created_at: number;
   holding?: number;
   id: string;
+  inline_html?: string | null;
   kept: boolean;
   kind: "visual" | "plan";
   options?: VisualOptionDTO[] | null;
@@ -1726,15 +1781,6 @@ export interface VisualDTO {
   session: string;
   title: string;
   unread: boolean;
-}
-/**
- * This interface was referenced by `ApiSchema`'s JSON-Schema
- * via the `definition` "VisualOptionDTO".
- */
-export interface VisualOptionDTO {
-  detail?: string | null;
-  id: string;
-  label: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

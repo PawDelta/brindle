@@ -126,7 +126,7 @@ export function prebuildVisual(id: string, rev: number): () => void {
    (the one spare), and released when it changes or the session view goes. */
 export function useSpareVisual(visuals: readonly VisualDTO[] | null) {
   const next = (visuals ?? [])
-    .filter((v) => v.kind === "visual" && v.unread)
+    .filter((v) => v.kind === "visual" && v.unread && !v.choices?.length)
     .reduce<VisualDTO | null>((newest, v) => (!newest || v.created_at > newest.created_at ? v : newest), null);
   const id = next?.id;
   const rev = next?.rev;

@@ -527,9 +527,11 @@ def set_reviewer(db: DB, plan_id: str, sub: str, required: bool | None, *, clien
     _review_open(p)
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
+    resource = "reviewers" if required is None else "permissions"
     view = review_policies.ask(db, p, "DELETE" if required is None else "PUT",
-                               _path(share_["doc_id"], f"/reviewers/{quote(sub, safe='')}"),
-                               None if required is None else {"required": required}, client=client, store=store)
+                               _path(share_["doc_id"], f"/{resource}/{quote(sub, safe='')}"),
+                               None if required is None else {"role": "reviewer", "required": required},
+                               client=client, store=store)
     if _remember(db, p["id"], view):
         plan_docs._changed(db, p, p["rev"])
     return link(db, p["id"])
@@ -749,6 +751,9 @@ def _pull(db: DB, p: dict, share_: dict, view: dict, names: dict[str, str]) -> i
         for t in view.get("threads") or []:
             changes += _pull_thread(c, p["id"], rev, cur, known, t, now)
         changes += _pull_votes(c, p["id"], share_["owner"], rev, view.get("decisions") or [], now)
+        from brindle import plan_answers
+
+        changes += plan_answers.pull(c, p["id"], share_["owner"], view, now)
     changes += _remember(db, p["id"], view)
     changes += _remember_names(db, p["id"], names)
     if changes:
@@ -1097,6 +1102,9 @@ def _send(db: DB, p: dict, view: dict, client, store, now: float, acked: dict | 
         pushed = not drafting and _send_text(db, p["id"], head)
         _send_threads(db, p["id"], share_["owner"], head, plan_docs.draft(db, p) if drafting else None, acked)
         _send_actions(db, p["id"], head, drafting, acked)
+        from brindle import plan_answers
+
+        plan_answers.push(db, p["id"], share_["owner"], head)        # before the picks, which may name them
         _send_votes(db, p["id"], head)
         if head.rev != view.get("rev"):        # a new head: votes on the old one no longer count
             local_rev = link(db, p["id"])["local_rev"]
