@@ -45,6 +45,46 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd .. && git status")) is None
 
 
+@pytest.mark.parametrize("mode, command, plain, expected", [
+    ("assign", "git commit -F $(cat message_path)", "git commit -F message.txt", "allow"),
+    pytest.param("interactive", "git push $(cat remote)", "git push origin feature", "ask",
+                 marks=pytest.mark.variant("a supervisor's syntax refusal must preserve a real push approval")),
+    pytest.param("assign", "$(cat program) -rf build", "rm -rf build", "deny",
+                 marks=pytest.mark.variant("an unreadable destructive program must never bypass a plain deny")),
+], ids=["rewrite-allow", "rewrite-ask", "rewrite-deny"])
+def test_unreadable_shell_returns_to_agent_before_plain_rules_apply(db, ws, monkeypatch, mode, command, plain, expected):
+    from brindle import permissions as p
+    from brindle.config import set_local
+    from brindle.daemon.holds import Holder
+
+    a = replace(worker(db, ws), mode=mode, parent_id=None if mode == "interactive" else "boss")
+    db.update_agent(a.id, mode=a.mode, parent_id=a.parent_id)
+    set_local(ws.repo_root, "permission_policy", "on")
+    p.apply_preset("standard")
+    p.add_rule("bash", "git commit", "allow", "prefix")
+    p.add_rule("bash", "git push", "ask", "prefix")
+    p.add_rule("bash", "rm -rf", "deny", "prefix")
+    monkeypatch.setattr(Holder, "register", lambda *args, **kwargs: False)
+    monkeypatch.setattr("brindle.permission_routing.tell_waiting_on_person", lambda *args: None)
+
+    pre = agents.pre_tool_decision(db, a, bash(command))
+    reply = agents.permission_request_decision(db, a, bash(command))
+    assert db.permission_requests_of(a.id) == []
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"
+    decision = reply["hookSpecificOutput"]["decision"]
+    assert decision["behavior"] == "deny"
+    # Rewriting guidance is the requested hook contract, not a generic refusal.
+    assert "plain commands" in decision["message"]
+
+    rewritten = agents.permission_request_decision(db, a, bash(plain))
+    if expected == "ask":
+        assert rewritten is None
+        assert len(db.permission_requests_of(a.id)) == 1
+    else:
+        assert rewritten["hookSpecificOutput"]["decision"]["behavior"] == expected
+        assert db.permission_requests_of(a.id) == []
+
+
 @pytest.mark.parametrize("command, bound, extra", [
     pytest.param("ls *.py", False, None, id="shell_syntax_fallback-glob",
                  marks=pytest.mark.variant("shell fallback must preserve restrictions for this spelling")),

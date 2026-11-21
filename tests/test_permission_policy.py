@@ -164,11 +164,11 @@ def _bypass(command, why):
                  marks=pytest.mark.variant("shell syntax must preserve the decision of every part")),
     pytest.param("git status && git push", "deny",
                  marks=pytest.mark.variant("shell syntax must preserve the decision of every part")),
-    _bypass("git diff | sh", "a pipe into an uncovered command"),
+    pytest.param("git diff | sh", "deny", marks=pytest.mark.variant("a pipe into an interpreter cannot be checked")),
     _bypass("git log $(rm x)", "command substitution"),
     _bypass("git log `id`", "backticks"),
-    _bypass("git status && (rm x)", "a subshell"),
-    _bypass("git diff <(rm x)", "process substitution"),
+    pytest.param("git status && (rm x)", "deny", marks=pytest.mark.variant("an unreadable subshell returns to the agent")),
+    pytest.param("git diff <(rm x)", "deny", marks=pytest.mark.variant("process substitution returns to the agent")),
     _bypass("git show > out", "a redirection that writes a file"),
     _bypass("git status && echo x >> out", "an append after an allowed part"),
     pytest.param("git show < ~/.ssh/id_rsa", "deny",
@@ -349,10 +349,10 @@ def test_autonomous_starts_claude_without_prompts(db, ws, monkeypatch, preset, p
         if preset == "autonomous":
             assert pre_tool(ON_FRESH_ACCOUNT.replace(ENV_PART, "")) == allowed
 
-    # A person's own "ask" for what brindle can't verify, which no later prompt would catch here.
+    # Even an unchecked "ask" returns syntax work to the agent before requesting approval.
     if no_prompt and preset == "autonomous":
         permissions.set_groups({"shell": {"subcategories": {"unchecked": "ask"}}})
-        assert pre_tool("echo `\\whoami`") == "ask"
+        assert pre_tool("echo `\\whoami`") == "deny"
 
     # A saved approval's use is spent where the call is decided: no PermissionRequest follows here.
     if no_prompt:
