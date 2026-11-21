@@ -38,5 +38,5 @@ export function LibraryDesign({ client, docId, title, repo, onBack, backLabel = 
     return <PlanReader client={client} visual={whose.visual} repo={repo} onBack={onBack} backLabel={backLabel} work={work} onChanged={(visual) => setLoaded({ id: docId, whose: { kind: "author", visual } })} />;
   }
   if (whose.kind === "teammate") return <SharedDesignReader client={client} docId={docId} title={title} repo={repo} onBack={onBack} backLabel={backLabel} work={work} />;
-  return <p className="p-s3 text-sm text-ink-3" role={whose.kind === "failed" ? "alert" : "status"}>{whose.kind === "failed" ? `Couldn't open this design: ${whose.error}` : "Opening…"}</p>;
+  return <p className="p-s3 text-sm text-ink-3" role={whose.kind === "failed" ? "alert" : "status"}>{whose.kind === "failed" ? `Couldn't open this plan: ${whose.error}` : "Opening…"}</p>;
 }

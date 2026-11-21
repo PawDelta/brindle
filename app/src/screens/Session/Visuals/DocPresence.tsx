@@ -139,7 +139,7 @@ export function DocPresence({ client, visual, isAuthor, name, onState, onCapabil
           : null;
   return (
     <>
-      <ul aria-label="Others in this document" className="m-0 flex list-none p-0" title={peers.length ? `${peers.map((p) => p.name).join(", ")} ${peers.length === 1 ? "is" : "are"} in this doc` : undefined}>
+      <ul aria-label="Others in this plan" className="m-0 flex list-none p-0" title={peers.length ? `${peers.map((p) => p.name).join(", ")} ${peers.length === 1 ? "is" : "are"} in this plan` : undefined}>
         {peers.map((peer, i) => (
           <li key={peer.name} className={`inline-flex rounded-full ${i ? "-ml-[5px] shadow-[0_0_0_1.5px_var(--canvas)]" : ""}`} data-peer={peer.name}>
             <Avatar who={peer.name} />

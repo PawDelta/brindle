@@ -24,7 +24,7 @@ const KINDS: { kind: DocSectionKind; name: string }[] = [
 
 const BLOCKS: { block: DocFormatBlock; name: string; help: string }[] = [
   { block: "sign_off", name: "Sign-off", help: "Approve, a reviewer's sign-off and the author's Freeze wait until it is filled." },
-  { block: "share", name: "Sharing", help: "The doc can't be shared to the Library until it is filled." },
+  { block: "share", name: "Sharing", help: "The plan can't be shared to the Library until it is filled." },
 ];
 
 /* The first template someone makes: the sections most designs need. */
@@ -92,7 +92,7 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
     const first = draft.templates.length === 0;
     const made: DocTemplate = {
       id: newId(draft.templates),
-      name: first ? "Design doc" : "New template",
+      name: first ? "Plan" : "New template",
       default: first,
       sections: first ? STARTER : [{ title: "Summary", kind: "text", required: true, hint: null }],
     };
@@ -125,9 +125,9 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
     <section id="doc-format" aria-labelledby="doc-format-title" className="flex scroll-mt-s2 flex-col gap-s2" data-testid="doc-format">
       <header className="flex flex-wrap items-baseline gap-x-s2">
         <h2 id="doc-format-title" className={h2}>
-          Doc format
+          Plan format
         </h2>
-        <span className="text-xs text-ink-3">How designs are structured and named. Supervisors follow the template when they write a design; people can add sections but not remove required ones.</span>
+        <span className="text-xs text-ink-3">How plans are structured and named. Supervisors follow the template when they write a plan; people can add sections but not remove required ones.</span>
       </header>
 
       <div className="grid gap-s3 md:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]">
@@ -154,7 +154,7 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
                   {t.name}
                   <span className="text-[11px] font-normal text-ink-3">
                     {t.default ? "default · " : ""}
-                    {view.used[t.id] ?? 0} {view.used[t.id] === 1 ? "doc" : "docs"}
+                    {view.used[t.id] ?? 0} {view.used[t.id] === 1 ? "plan" : "plans"}
                   </span>
                 </button>
               ))}
@@ -176,7 +176,7 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
                 ? `Next: ${view.next_reference}. Shown beside the title.`
                 : view.source === "org" && view.resolved.naming.reference
                   ? "Your organization numbers them in order. Shown beside the title."
-                  : "Use {number} where the doc's number goes."}
+                  : "Use {number} where the plan's number goes."}
             </p>
           </div>
         </div>
@@ -192,7 +192,7 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
                     checked={template.default}
                     onChange={(e) => change({ ...draft, templates: draft.templates.map((t) => ({ ...t, default: t.id === open ? e.target.checked : e.target.checked ? false : t.default })) })}
                   />
-                  New docs start from it
+                  New plans start from it
                 </label>
                 <span className="flex-1" />
                 <button
@@ -253,7 +253,7 @@ export function DocFormat({ client }: { client: DocFormatClient }) {
               >
                 + Add a section
               </button>
-              <p className="text-[11px] text-ink-3">Decisions always come last, each with its options and a recommendation. Docs already written keep the template they were written with.</p>
+              <p className="text-[11px] text-ink-3">Decisions always come last, each with its options and a recommendation. Plans already written keep the template they were written with.</p>
             </div>
           )}
 

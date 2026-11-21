@@ -358,7 +358,7 @@ export function DocEditor({ client, visual, section, name, label, isAuthor = fal
       <div ref={host} data-testid={`doc-editor-${section}`} className="min-h-[1.65em]" />
       {state !== "live" && (
         <p className="text-xs text-ink-3" role="status">
-          {state === "connecting" ? "Connecting to the live text…" : "Disconnected: the text is read only until the doc is opened again."}
+          {state === "connecting" ? "Connecting to the live text…" : "Disconnected: the text is read only until the plan is opened again."}
         </p>
       )}
     </div>

@@ -151,8 +151,8 @@ export function ShareLinkPanel({ target, state, onState }: {
   const locked = state.access === "off" || link?.access === "off";
   return (
     <section className="sec" data-testid="share-link" data-state={busy ? "saving" : error ? "error" : "ready"}>
-      <div className="lab"><b>Link</b>{(link || locked) && <button type="button" className="sp-btn q end" aria-label="Revoke link" disabled={busy} onClick={revoke}>Revoke</button>}</div>
-      {locked ? <p className="hint" style={{ marginTop: 2 }}>{org?.name ?? "Your organization"} has turned share links off, so a link opens for no one.</p> : <>
+      <div className="lab"><b>Plan link</b>{(link || locked) && <button type="button" className="sp-btn q end" aria-label="Revoke link" disabled={busy} onClick={revoke}>Revoke</button>}</div>
+      {locked ? <p className="hint" style={{ marginTop: 2 }}>{org?.name ?? "Your organization"} has turned plan links off, so no one can open this plan by link.</p> : <>
         <div className="line">
           {state.scoped ? <label className="sel"><select aria-label="Link audience" value={selection} disabled={busy || !scopes} className="min-w-0 appearance-none bg-transparent outline-none"
             onChange={(e) => change(e.target.value, permission)}>
@@ -163,10 +163,10 @@ export function ShareLinkPanel({ target, state, onState }: {
             onChange={(e) => change(selection, e.target.value as "view" | "edit")}><option value="view">can view</option><option value="edit">can edit</option></select><ShareChevron /></label>
         </div>
         <div className="line">{link ? <input className="url" readOnly aria-label="Share link" value={link.url} onFocus={(e) => e.currentTarget.select()} />
-          : <span className="grow text-xs text-ink-3">No link yet. Copy link makes one.</span>}
+          : <span className="grow text-xs text-ink-3">Copy link to create a link to this plan.</span>}
           <button type="button" className="sp-btn s" disabled={busy || !valid} onClick={copy}>{copied ? "Copied" : "Copy link"}</button>
         </div>
-        {link && <p className="hint">Opens in the browser for people it covers. Everyone else gets the not-found page.</p>}
+        {link && <p className="hint">People with access can open this plan in their browser. Everyone else sees a page saying it couldn't be found.</p>}
       </>}
       {error && <p role="alert" className="hint bad">{error}</p>}
     </section>

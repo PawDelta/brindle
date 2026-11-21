@@ -15,9 +15,9 @@ export type DocSwitchesClient = Pick<DaemonClient, "docSwitches" | "setDocSwitch
 
 const ABOUT: Record<DocSwitchName, { name: string; help: string }> = {
   store: { name: "Library location", help: "Where your approved plans are kept." },
-  share: { name: "Sharing", help: "Let your docs be shared with your teams and organisation." },
-  assist: { name: "Briefs", help: "Give new work a brief from the docs that match it." },
-  prompt_analysis: { name: "Prompt analysis", help: "Record which docs your prompts matched (never the prompt itself)." },
+  share: { name: "Sharing", help: "Let your plans be shared with your teams and organisation." },
+  assist: { name: "Briefs", help: "Give new work a brief from the plans that match it." },
+  prompt_analysis: { name: "Prompt analysis", help: "Record which plans your prompts matched (never the prompt itself)." },
   import_upload: { name: "Imported folders", help: "Let folders you add to your library be uploaded." },
 };
 

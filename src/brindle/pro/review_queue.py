@@ -28,7 +28,7 @@ def _items(raw: object) -> list[dict]:
         if isinstance(r, dict) and isinstance(r.get("doc_id"), str) and r["doc_id"]:
             title, author = r.get("title"), r.get("author")
             count = r.get("decision_count")
-            out.append({"doc_id": r["doc_id"], "title": title if isinstance(title, str) and title else "Design doc",
+            out.append({"doc_id": r["doc_id"], "title": title if isinstance(title, str) and title else "Plan",
                         "decision_count": count if type(count) is int and count >= 0 else None,
                         "author": author if isinstance(author, str) and author else None})
     return out
@@ -55,7 +55,7 @@ def account(client=None, store=None) -> tuple[object, str, str | None] | None:
     def owner(record: dict) -> str:
         ent = license.verify(record.get("entitlement") or "", issuer=record.get("base_url"), grace=0)
         if ad.FEATURE not in ent.features:
-            raise license.NotEntitled("no analysis doc library")
+            raise license.NotEntitled("no plan library")
         return ent.sub
 
     if airgap.enabled():

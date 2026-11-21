@@ -992,7 +992,7 @@ describe("App", () => {
     expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
     const rail = within(nav()).getByRole("navigation", { name: "Library" });
     // All designs, Needs you and the five stages, then the Sources. No tab strip on the page, and no repo picker on the designs.
-    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["All designs", "Needs you", "Drafting", "In review", "Approved", "Building", "Shipped", "Map", "Imported docs", "Decisions", "Kept docs"]);
+    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["All plans", "Needs you", "Drafting", "In review", "Approved", "Building", "Shipped", "Map", "Imported docs", "Decisions", "Kept docs"]);
     expect(within(screen.getByRole("main")).queryByRole("tablist")).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Repo" })).toBeNull();
     // A Source's row counts what it holds, opens today's view of it, and is marked.
@@ -1056,7 +1056,7 @@ describe("App", () => {
     expect(within(rail).getByRole("button", { name: /^Approved/ }).textContent).toContain("1");
     expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");
     expect(within(rail).getByRole("button", { name: /^Drafting/ }).textContent).toContain("1");
-    expect(within(rail).getByRole("button", { name: /^All designs/ }).textContent).toContain("4");
+    expect(within(rail).getByRole("button", { name: /^All plans/ }).textContent).toContain("4");
     // Choosing a stage opens the Library narrowed to it, and they are the designs its count counted.
     const listed = () => [...screen.getByTestId("docs").querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"));
     fireEvent.click(within(rail).getByRole("button", { name: /^In review/ }));

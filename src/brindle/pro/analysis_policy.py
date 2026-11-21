@@ -23,13 +23,13 @@ def cache_path(org: str):
 def _policy(body: dict) -> dict:
     if not isinstance(body, dict) or not isinstance(body.get("switches"), dict) \
             or not isinstance(body.get("groups"), dict):
-        raise auth.AuthError("backend returned no analysis-doc policy", code="bad_response")
+        raise auth.AuthError("backend returned no plan library policy", code="bad_response")
     if "share_links" in body and body["share_links"] not in ("anyone", "org", "off"):
         raise auth.AuthError("malformed share-link policy", code="bad_response")
     for switches in [body["switches"], *(g.get("switches") if isinstance(g, dict) else None
                                        for g in body["groups"].values())]:
         if not isinstance(switches, dict) or any(v not in STATES for v in switches.values()):
-            raise auth.AuthError("malformed analysis-doc switches", code="bad_response")
+            raise auth.AuthError("malformed plan library settings", code="bad_response")
     return body
 
 

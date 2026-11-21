@@ -111,7 +111,7 @@ export function ResultsPanel({ results, error, docs }: { results: DocResults | n
   return (
     <section className={`${card} flex flex-col gap-s2 px-s2 py-s2`} aria-label="Results" data-testid="results">
       <header className="flex flex-wrap items-baseline gap-s1">
-        <span className={label}>What your docs did{results ? ` · last ${results.days} days` : ""}</span>
+        <span className={label}>What your plans did{results ? ` · last ${results.days} days` : ""}</span>
       </header>
       {error && <p className="text-sm text-ink-3">Could not work out the results: {error}</p>}
       {!error && !results && <p className="text-sm text-ink-3">Working it out…</p>}
@@ -156,7 +156,7 @@ export function ResultsPanel({ results, error, docs }: { results: DocResults | n
       )}
       {top.length > 0 && (
         <div className="flex flex-col gap-0.5">
-          <span className={label}>Docs used most</span>
+          <span className={label}>Plans used most</span>
           {top.map((d) => (
             <div key={d.id} className="flex justify-between gap-s1 text-sm text-ink-2">
               <span>{d.title || d.id}</span>
@@ -270,7 +270,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
   }) : [];
 
   return (
-    <section className="flex flex-col gap-s2" aria-label="Doc" data-testid="reader">
+    <section className="flex flex-col gap-s2" aria-label="Plan" data-testid="reader">
       <div className="flex flex-wrap items-center justify-between gap-s1">
         <button type="button" className={quiet} onClick={onBack}>
           ← Library
@@ -305,7 +305,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
       {menu === "export" && <ExportMenu client={client} id={id} title={doc?.title} repo={repo} pickFolder={pickFolder} onSaid={setSaid} />}
       {menu === "delete" && (
         <div role="alert" className={`${alert} flex flex-wrap items-center justify-between gap-s1`}>
-          <span>{stranded ?? "Delete this doc from the library? Briefs stop using it. This can't be undone."}</span>
+          <span>{stranded ?? "Delete this plan from the library? Briefs stop using it. This can't be undone."}</span>
           <button type="button" className={button} disabled={busy} data-state={stranded ? "shared-plan" : undefined} onClick={() => void remove()}>
             {stranded ? "Stop sharing and delete" : "Delete for good"}
           </button>
@@ -318,7 +318,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
       )}
       {error && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
-          <span>Could not open the doc: {error}</span>
+          <span>Could not open the plan: {error}</span>
           <button type="button" className={button} onClick={load}>
             Try again
           </button>
@@ -336,7 +336,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
               </div>
             ))}
           </article>
-          <aside className="flex min-w-0 flex-col gap-s1 text-sm" aria-label="Design record">
+          <aside className="flex min-w-0 flex-col gap-s1 text-sm" aria-label="Plan record">
             {!!doc.revisions?.length && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Revisions">
               <h3 className={label}>Revisions</h3>
               {doc.revisions.map((r) => <div key={r.rev} data-revision={r.rev}><b>rev {r.rev}</b><span className="text-ink-3"> · {r.author} · {shortDate(r.at)}</span><p>{r.source}{r.changed.length > 0 && ` · ${r.changed.join(", ")}`}</p></div>)}
@@ -584,7 +584,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   const clear = () => { setQuery(""); setScope(""); setAuthor(""); setReviewer(""); setChanged(""); setSession(undefined); };
 
   const picked = folder ? placed.find((f) => f.key === folder) : undefined;
-  const heading = picked ? picked.name : inRepo ? repoName(inRepo, repos) : stage ? LIBRARY_STAGES.find((s) => s.id === stage)!.label : "All designs";
+  const heading = picked ? picked.name : inRepo ? repoName(inRepo, repos) : stage ? LIBRARY_STAGES.find((s) => s.id === stage)!.label : "All plans";
   const repoCount = new Set(shown.flatMap((d) => placeOf(d.id)?.repo ?? [])).size;
   const counted = `${shown.length}${repoCount > 1 ? ` in ${repoCount} repos` : ""}`;
 
@@ -630,7 +630,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   }
 
   return (
-    <section className={`flex min-h-0 flex-1 flex-col ${layout === "board" && shown.length > 0 ? "overflow-hidden" : "overflow-auto"}`} aria-label="Docs" data-testid="docs" data-layout={layout}>
+    <section className={`flex min-h-0 flex-1 flex-col ${layout === "board" && shown.length > 0 ? "overflow-hidden" : "overflow-auto"}`} aria-label="Plans" data-testid="docs" data-layout={layout}>
       {(session || onBack) && (
         <div className="flex flex-wrap items-center gap-s1 px-8 pt-s2" data-testid="session-filter">
           {session && (
@@ -641,7 +641,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
               </button>
             </span>
           )}
-          {session && <span className="text-xs text-ink-3">Showing the docs one session wrote or used.</span>}
+          {session && <span className="text-xs text-ink-3">Showing the plans one session wrote or used.</span>}
           <span className="flex-1" />
           {onBack && (
             <button type="button" className={`${quiet} text-xs`} onClick={onBack}>
@@ -659,7 +659,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       </div>
       <label className="mx-8 mt-3.5 flex items-center gap-2.5 border-b border-line-strong px-0.5 py-1.5 text-ink-3">
         <SearchIcon size={14} />
-        <input ref={box} type="search" className="flex-1 border-0 bg-transparent text-sm text-ink outline-none placeholder:text-ink-3" aria-label="Search the library" placeholder="Search designs, comments, decisions and imported docs" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <input ref={box} type="search" className="flex-1 border-0 bg-transparent text-sm text-ink outline-none placeholder:text-ink-3" aria-label="Search the library" placeholder="Search plans, comments, decisions and imported docs" value={query} onChange={(e) => setQuery(e.target.value)} />
         <kbd className="rounded-[3px] border border-line-strong px-1 font-mono text-[10.5px] text-ink-3">⌘K</kbd>
       </label>
       <div className="flex flex-wrap items-center gap-1.5 px-8 pb-3.5 pt-3" role="group" aria-label="Library filters">
@@ -681,8 +681,8 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       {(q || search.searching || search.incomplete) && <p role="status" className="px-8 pb-2 text-xs text-ink-3">{search.searching ? "Searching…" : `${shown.length + sourceHits.length} matches`}{search.incomplete && " · Some sources could not be searched."}</p>}
       {listing.state === "unavailable" && (
         <div className={`${card} mx-8 flex flex-col gap-1 py-s2 text-sm`} data-testid="docs-unavailable">
-          <h2 className={h2}>No designs available</h2>
-          <p className="text-ink-2">Plans you approve and designs you share are saved here, with the record of what was agreed and why.</p>
+          <h2 className={h2}>No plans available</h2>
+          <p className="text-ink-2">Plans you approve or share are saved here, with the record of what was agreed and why.</p>
           <p className="text-xs text-ink-3">{listing.error}</p>
         </div>
       )}
@@ -695,8 +695,8 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
         </div>
       )}
       {listing.state === "loading" && <p className="px-8 text-sm text-ink-3">Loading…</p>}
-      {listing.state === "loaded" && docs.length === 0 && sourceHits.length === 0 && !search.searching && !q && <div data-testid="library-empty" className={`${card} mx-8 flex flex-col gap-s1 py-s3`}><h2 className={h2}>No designs saved yet</h2><p className="text-sm text-ink-2">Plans you approve and designs you share are saved here, with the record of what was agreed and why.</p><ol className="list-decimal pl-s2 text-sm text-ink-2"><li>Ask for a plan in a session.</li><li>Review it and approve the design.</li><li>Find it here when you need it again.</li></ol></div>}
-      {listing.state === "loaded" && (docs.length > 0 || q) && shown.length === 0 && sourceHits.length === 0 && !search.searching && <p className="px-8 text-sm text-ink-2">No design matches.</p>}
+      {listing.state === "loaded" && docs.length === 0 && sourceHits.length === 0 && !search.searching && !q && <div data-testid="library-empty" className={`${card} mx-8 flex flex-col gap-s1 py-s3`}><h2 className={h2}>No plans saved yet</h2><p className="text-sm text-ink-2">Plans you approve or share are saved here, with the record of what was agreed and why.</p><ol className="list-decimal pl-s2 text-sm text-ink-2"><li>Ask for a plan in a session.</li><li>Review it and approve the plan.</li><li>Find it here when you need it again.</li></ol></div>}
+      {listing.state === "loaded" && (docs.length > 0 || q) && shown.length === 0 && sourceHits.length === 0 && !search.searching && <p className="px-8 text-sm text-ink-2">No plan matches.</p>}
       {shown.length > 0 && layout === "list" && <LibraryList groups={groups} queue={queue} records={records} scopes={scopes} matches={q ? matches : undefined} onOpen={setOpen} />}
       {shown.length > 0 && layout === "board" && (
         <LibraryBoard docs={shown} queue={queue} records={records} onOpen={setOpen} folderOf={(id) => {
@@ -717,14 +717,14 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
             {results && <span className={label}>Last {results.days} days</span>}
             {results?.enough && results.with_brief !== null && results.without_brief !== null ? (
               <>
-                <span><b className="font-mono text-sm font-semibold text-ink">{results.briefed}</b> tasks started from a design's brief</span>
+                <span><b className="font-mono text-sm font-semibold text-ink">{results.briefed}</b> tasks started from a plan's brief</span>
                 {results.without_brief > 0 && <span><b className="font-mono text-sm font-semibold text-ink">{signed(Math.round(((results.with_brief - results.without_brief) / results.without_brief) * 100))}</b> review rounds against similar tasks without one</span>}
               </>
             ) : (
-              <span>{resultsError ? "Could not work out what your docs did." : "Not enough finished tasks yet to say what your docs did."}</span>
+              <span>{resultsError ? "Could not work out what your plans did." : "Not enough finished tasks yet to say what your plans did."}</span>
             )}
             <span className="flex-1" />
-            <button type="button" className={`${quiet} text-xs`} aria-expanded={showResults} onClick={() => setShowResults(!showResults)}>What your docs did {showResults ? "▾" : "▸"}</button>
+            <button type="button" className={`${quiet} text-xs`} aria-expanded={showResults} onClick={() => setShowResults(!showResults)}>What your plans did {showResults ? "▾" : "▸"}</button>
           </div>
         </>
       )}

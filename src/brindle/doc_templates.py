@@ -147,10 +147,10 @@ def _blocks(raw: Any) -> list[str]:
 def check(raw: Any) -> dict:
     """A level's format as stored: only the keys it sets, each checked."""
     if not isinstance(raw, dict):
-        raise ServiceError("invalid", "a doc format is {templates?, naming?, blocks?}", 400)
+        raise ServiceError("invalid", "a plan format is {templates?, naming?, blocks?}", 400)
     unknown = set(raw) - set(FIELDS)
     if unknown:
-        raise ServiceError("invalid", f"a doc format has no {', '.join(sorted(unknown))}", 400)
+        raise ServiceError("invalid", f"a plan format has no {', '.join(sorted(unknown))}", 400)
     out: dict = {}
     if raw.get("templates") is not None:
         out["templates"] = _templates(raw["templates"])
@@ -313,12 +313,12 @@ class ProStore:
             return
         code = got.get("error")         # the Library's {error, error_description, ...}
         if status == 403:
-            raise ServiceError("forbidden", "only your organization's admins can change its doc format", 403)
+            raise ServiceError("forbidden", "only your organization's admins can change its plan format", 403)
         if status == 422 and code == "locked":
             raise ServiceError("locked", "a level above locks the template setting, so this level can't "
                                "change it", 409, locked_by=got.get("locked_by"))
         if status == 409:
-            raise ServiceError("conflict", "your organization's doc format changed meanwhile: reload it", 409)
+            raise ServiceError("conflict", "your organization's plan format changed meanwhile: reload it", 409)
         if status == 422 and isinstance(got.get("error_description"), str):
             raise ServiceError("invalid", redact.mask(got["error_description"]), 400)
         raise ServiceError("upstream", f"the Library refused it (HTTP {status})", 502)

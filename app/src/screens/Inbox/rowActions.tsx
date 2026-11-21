@@ -44,7 +44,7 @@ export function itemDetail(item: InboxItemDTO): ReactNode {
       </div>
       <p data-testid="offer-scale">{offer.workers} {offer.workers === 1 ? "worker" : "workers"} · {offer.repos} {offer.repos === 1 ? "repository" : "repositories"}</p>
       <p><strong>Why brindle is offering: </strong>{offer.reasons.join(" ") || "The work qualified when this offer was made; the plan has since changed."}</p>
-      <p>Yes: the supervisor writes a planning doc for you to approve before more workers start. Not now: the work goes ahead as is.</p>
+      <p>Yes: the supervisor writes a plan for you to approve before more workers start. Not now: the work goes ahead as is.</p>
     </div>;
   }
   if (item.kind === "proposed_checks") {

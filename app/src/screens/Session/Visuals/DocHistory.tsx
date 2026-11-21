@@ -42,11 +42,11 @@ export function DocHistory({ events, current, onPick }: { events: HistoryEvent[]
     return (
       <div className="grid gap-1.5 px-3.5 py-3 text-ink-3" data-testid="doc-history" data-state="pending">
         <span className={`${label} text-[11px]`}>History</span>
-        <p>Every revision, freeze, reopen and sign-off of this doc will be listed here in order, with who and when. Pick a revision to see what it changed in the doc.</p>
+        <p>Every revision, freeze, reopen and sign-off of this plan will be listed here in order, with who and when. Pick a revision to see what it changed in the plan.</p>
       </div>
     );
   }
-  if (events.length === 0) return <p className="px-3.5 py-3 text-ink-3" data-testid="doc-history" data-state="empty">Nothing has happened to this doc yet.</p>;
+  if (events.length === 0) return <p className="px-3.5 py-3 text-ink-3" data-testid="doc-history" data-state="empty">Nothing has happened to this plan yet.</p>;
   return (
     <ol className="m-0 list-none px-3.5 py-1.5" data-testid="doc-history" data-state="ready">
       {events.map((e) => {
@@ -217,8 +217,8 @@ export function WorkItems({ items }: { items: WorkItem[] | null }) {
   return (
     <div className="grid gap-2 border-t border-line px-3.5 py-3" data-testid="doc-work-items" data-state={items ? "ready" : "pending"}>
       <span className={`${label} text-[11px]`}>Work items</span>
-      {!items ? <p className="text-ink-3">Items in Azure Boards or Jira linked to this design and its tasks will be listed here, with their state.</p>
-        : items.length === 0 ? <p className="text-ink-3">No work items are linked to this design.</p>
+      {!items ? <p className="text-ink-3">Items in Azure Boards or Jira linked to this plan and its tasks will be listed here, with their state.</p>
+        : items.length === 0 ? <p className="text-ink-3">No work items are linked to this plan.</p>
         : items.map((w) => (
           <div key={w.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5">
             <b className="truncate font-medium text-ink">{w.title}</b>

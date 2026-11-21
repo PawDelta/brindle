@@ -8,7 +8,7 @@ import type { Mode } from "./PlanReader";
 
 export function MarkdownButton({ pressed, onToggle }: { pressed: boolean; onToggle(): void }) {
   return (
-    <button type="button" aria-pressed={pressed} title="Show the doc as Markdown, or as the page" data-testid="doc-markdown-switch" onClick={onToggle}
+    <button type="button" aria-pressed={pressed} title="Show the plan as Markdown, or as the page" data-testid="doc-markdown-switch" onClick={onToggle}
       className={`${button} text-xs ${pressed ? "!border-transparent bg-branch-soft text-branch" : ""}`}>
       <svg viewBox="0 0 16 16" aria-hidden className="size-3.5 fill-none stroke-current stroke-[1.5]" strokeLinecap="round" strokeLinejoin="round"><path d="M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5" /></svg>
       Markdown

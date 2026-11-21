@@ -108,7 +108,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
   };
   return (
     <article className={`${card} ${open ? "" : "opacity-[var(--dim)]"} ${active ? "bg-surface-2 shadow-[inset_2px_0_0_var(--sap)]" : ""}`} data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined}>
-      <button type="button" className={`${onLine} cursor-pointer text-left hover:text-ink-2`} title="Show it in the doc" onClick={onShow}>
+      <button type="button" className={`${onLine} cursor-pointer text-left hover:text-ink-2`} title="Show it in the plan" onClick={onShow}>
         <ThreadNumber n={t.id} />
         <span title={where} className="min-w-0 truncate">
           {where}
@@ -191,9 +191,9 @@ export function DraftCard({ draft, number, stale, busy, onSend, onCancel, change
       </span>
       {draft.kind === "suggest" && (change && hasChange
         ? <Change before={change.before} after={change.after} />
-        : <p className="font-medium text-ink">Type your change in the doc: what you delete is struck through, what you type is green.</p>)}
+        : <p className="font-medium text-ink">Type your change in the plan: what you delete is struck through, what you type is green.</p>)}
       <textarea className={`${field} ${draft.kind === "suggest" ? "min-h-8" : "min-h-16"} w-full text-[12.5px]`} aria-label={words.name} placeholder={words.placeholder} autoFocus={draft.kind !== "suggest"} value={text} onChange={(e) => setText(e.target.value)} />
-      {stale && <p role="alert" className="text-xs text-sap">This part of the doc changed in a newer revision. Cancel, and start again on the new text.</p>}
+      {stale && <p role="alert" className="text-xs text-sap">This part of the plan changed in a newer revision. Cancel, and start again on the new text.</p>}
       <div className="flex items-center gap-1.5">
         <button type="submit" className={`${draft.kind === "suggest" ? main : button} text-xs`} disabled={!ready || busy}>{asComment ? "Send as comment" : words.send}</button>
         <button type="button" className={`${quiet} text-xs`} onClick={onCancel}>{draft.kind === "suggest" ? "Discard" : "Cancel"}</button>
@@ -256,7 +256,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
     body = (
       <>
         <div className="flex flex-col gap-2.5 px-3.5 py-3" data-testid="plan-tasks">
-          {plan.split.length === 0 ? <p className="text-ink-3">This design has no split yet.</p>
+          {plan.split.length === 0 ? <p className="text-ink-3">This plan has no split yet.</p>
             : plan.state === "approved" ? <p className="text-ink-3">Its tasks are the live board above.</p>
             : work ? null : <Tasks plan={plan} shared={shared} />}
         </div>
@@ -284,7 +284,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
               </button>
             ))}
           </div>
-        ) : !sheet && <p className="px-3.5 py-3 text-ink-3">This design has no decisions to take.</p>}
+        ) : !sheet && <p className="px-3.5 py-3 text-ink-3">This plan has no decisions to take.</p>}
         {sheet}
       </>
     );
@@ -293,7 +293,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
       <>
         {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} onSend={onDraftSend} onCancel={onDraftCancel} change={draftChange} />}
         {open.map(thread)}
-        {open.length === 0 && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the doc to comment on it.</p>}
+        {open.length === 0 && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the plan to comment on it.</p>}
         {answered.length > 0 && (
           <div data-testid="plan-resolved">
             <p className={`${label} border-b border-line px-3.5 pb-1.5 pt-3 text-[11px]`}>{`Resolved · ${answered.length}`}</p>
@@ -364,7 +364,7 @@ export function SignOffSheet({ version, rows, since, onShowChanges }: {
           {since.changes.length === 0 ? <span className="text-ink-3">Nothing has changed.</span> : since.changes.map((c) => (
             <span key={c.rev} className="text-ink-2"><span className="font-mono text-[11.5px] text-ink-3">{`rev ${c.rev}`}</span>{` · ${c.sections.join(", ") || "the text"}`}</span>
           ))}
-          {since.changes.length > 0 && onShowChanges && <button type="button" className={`${quiet} -ml-2 justify-self-start text-xs`} onClick={onShowChanges}>Show these changes in the doc</button>}
+          {since.changes.length > 0 && onShowChanges && <button type="button" className={`${quiet} -ml-2 justify-self-start text-xs`} onClick={onShowChanges}>Show these changes in the plan</button>}
         </div>
       )}
     </>
