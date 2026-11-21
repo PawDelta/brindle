@@ -23,6 +23,19 @@ export const passChip = `${chip} whitespace-nowrap border border-pass/40 bg-pass
 export const personName = (who: string) => (who === "person" ? "You" : who === "supervisor" ? "Supervisor"
   : /^[^@\s]+@[^@\s]+$/.test(who) ? who.split("@")[0].split(/[._-]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(" ") : who);
 
+/* "A · Your own server" is confirmed as "Confirm A"; a label with no such lead, by its name. */
+export const shortName = (optionLabel: string) => /^([A-Za-z0-9]{1,3})\s*[·:.)-]\s/.exec(optionLabel)?.[1] ?? optionLabel;
+
+/* Who picked what on a decision, the person first: "You: A · David: B". A teammate's pick on the
+   author's own plan comes as "teammate:<account>"; `name` gives an account its name where known. */
+export function picksLine(d: PlanDecisionDTO, name: (who: string) => string = personName): string {
+  const label = (option: string) => shortName(d.options.find((o) => o.id === option)?.label ?? option);
+  const picks = Object.entries(d.votes ?? {}).flatMap(([option, voters]) => voters.map((who) => ({ who, option })))
+    .filter((p) => d.options.some((o) => o.id === p.option))
+    .sort((a, b) => Number(b.who === "person") - Number(a.who === "person"));
+  return picks.map((p) => `${name(p.who.replace(/^teammate:/, ""))}: ${label(p.option)}`).join(" · ");
+}
+
 /* Two letters for a person: "Maya Chen" → MC, "dana.okafor@…" → DO, "ravi@…" → RA. */
 export const initials = (who: string) => {
   const words = who.split("@")[0].split(/[\s._-]+/).filter(Boolean);

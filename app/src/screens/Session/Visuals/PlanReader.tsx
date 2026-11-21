@@ -56,7 +56,7 @@ import { DocStatus, type StatusReviewer } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
-import { Alongside, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
+import { Alongside, Decision, Tasks, overlaps, passChip, personName, shortName } from "./PlanCards";
 import { Annotated, DecisionCard, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
@@ -312,8 +312,6 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
 
 const LEDE = "lede";
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-/* "A · Your own server" is confirmed as "Confirm A"; a label with no such lead, by its name. */
-const shortName = (optionLabel: string) => /^([A-Za-z0-9]{1,3})\s*[·:.)-]\s/.exec(optionLabel)?.[1] ?? optionLabel;
 const heading = "relative m-0 flex items-baseline justify-between gap-3 font-serif text-[17px] font-semibold leading-[1.3] text-ink";
 const margin = "absolute -left-7 top-[0.3em] font-mono text-xs font-normal text-ink-3";
 const aside = "inline-flex items-center gap-1.5 whitespace-nowrap font-sans text-xs font-normal text-ink-3";
@@ -546,8 +544,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const editStale = !!editing && bodyOf(editing.section) !== editing.source;
 
   // A decision is settled for an open plan only after the person picks an option. A supervisor
-  // recommendation is displayed, but does not count as the person's choice.
-  const drafted = (d: PlanDecisionDTO) => (d.options.some((o) => o.id === picks[d.id]) ? picks[d.id] : undefined);
+  // recommendation is displayed, but does not count as the person's choice. A pick is saved as it
+  // is made (`confirmed`), so one made before the doc was last closed still counts; `picks` holds
+  // a pick on its way there.
+  const valid = (d: PlanDecisionDTO, option: string | null | undefined) => (option && d.options.some((o) => o.id === option) ? option : undefined);
+  const drafted = (d: PlanDecisionDTO) => valid(d, picks[d.id]) ?? valid(d, d.confirmed);
   const chosen = (d: PlanDecisionDTO) => (open ? drafted(d) : plan.verdict?.picks?.[d.id]) ?? d.confirmed ?? d.mine ?? null;
   const settled = (d: PlanDecisionDTO) => !open || !!drafted(d);
   const next = plan.decisions.find((d) => !settled(d));
@@ -722,12 +723,20 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (followed) show(document.querySelector(`[data-testid="thread-${followed.thread}"]`), "nearest");
   }, [followed]);
   const jump = (decision: string) => show(document.getElementById(`plan-decision-${decision}`));
-  // A pick: the author's travels with their verdict; a teammate's is their vote, and counts as
-  // decided only once the Library has it (one write at a time: the cards take no pick meanwhile).
+  // A pick is saved as it is made (the author's on this machine, and through the Library to
+  // everyone on a shared plan; a teammate's is their vote there), so closing the doc before
+  // Approve loses nothing. Each pick is its own write, sent at once, and one at a time: while one
+  // is out the cards take no pick, so no pick ever waits on this screen to be sent. The author's
+  // shows at once (and goes back to what was there if it isn't saved); a teammate's counts as
+  // decided only once the Library has it.
   const pickOption = async (decision: string, option: string) => {
-    if (!teammate) return setPicks((p) => ({ ...p, [decision]: option }));
     if (historical || busy) return;
-    if ((await write(() => source.vote(plan.rev, decision, option))) && alive.current) setPicks((p) => ({ ...p, [decision]: option }));
+    const before = picks[decision];
+    if (!teammate) setPicks((p) => ({ ...p, [decision]: option }));
+    const saved = await write(() => source.vote(plan.rev, decision, option));
+    if (!alive.current) return;
+    if (saved) setPicks((p) => ({ ...p, [decision]: option }));
+    else if (!teammate) setPicks((p) => (p[decision] === option ? { ...p, [decision]: before } : p));
   };
 
   // The bottom bar's actions.
@@ -1086,7 +1095,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
-        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={!!teammate && busy} picked={open ? drafted(d) ?? null : chosen(d)}
+        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={firstName}
           onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
       </Annotated>
     ));
@@ -1352,7 +1361,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     <span id={`plan-title-decision-${d.id}`}>{`Decision · ${d.title}`}</span>
                     <span className={aside}>{`decision ${i + 1} of ${plan.decisions.length}${mine ? ` · ${mine}` : ""}`}</span>
                   </h3>
-                  <Decision decision={d} chosen={chosen(d)} open={open} onPick={(o) => setPicks((p) => ({ ...p, [d.id]: o }))} />
+                  <Decision decision={d} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} />
                   <p className="flex max-w-[70ch] flex-wrap items-baseline gap-x-2 font-sans text-[12.5px] leading-normal text-ink-3">
                     {d.challenge && <span>{`${d.mine ? "Against its own pick: " : ""}${d.challenge}`}</span>}
                     {commentButton(() => comment({ kind: "decision", decision: d.id }, decisionName(d.id)))}
