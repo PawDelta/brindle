@@ -24,9 +24,16 @@ def identity() -> str | None:
     if not isinstance(account, dict):
         return None
     parts = [account.get("accountUuid"), account.get("organizationUuid")]
-    if not all(isinstance(part, str) and part.strip() for part in parts):
-        return None
-    return json.dumps(parts)
+    if all(isinstance(part, str) and part.strip() for part in parts):
+        return json.dumps(parts)
+    # Corporate SSO/Enterprise configs can carry organizationUuid (or orgId)
+    # without an accountUuid; scope by org (plus email when present) so
+    # org accounts stay isolated from each other and from empty configs.
+    org = account.get("organizationUuid") or account.get("orgId")
+    if isinstance(org, str) and org.strip():
+        acct = account.get("accountUuid") or account.get("emailAddress") or ""
+        return json.dumps([acct.strip() if isinstance(acct, str) else "", org.strip()])
+    return None
 
 
 def cache_key(provider: str, *, who: str | None = None) -> str | None:
@@ -34,3 +41,14 @@ def cache_key(provider: str, *, who: str | None = None) -> str | None:
         return provider
     who = who or identity()
     return "claude:" + hashlib.sha256(who.encode()).hexdigest() if who else None
+
+
+def route_limit_key(provider: str) -> str:
+    """Fallback quota.json key for real CLI limit errors when no subscription
+    identity applies (Bedrock, Vertex, API keys, explicit OAuth tokens)."""
+    return f"{provider}:limit"
+
+
+def limit_key(provider: str, *, who: str | None = None) -> str:
+    """Key under which a real CLI limit error is stored for ``provider``."""
+    return cache_key(provider, who=who) or route_limit_key(provider)

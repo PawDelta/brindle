@@ -6686,12 +6686,12 @@ def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
         log.exception("brindle: couldn't read the messages absorbed into %s's turn", agent.id)
 
 
-def _note_health(record, provider: str | None) -> None:
+def _note_health(record, provider: str | None, *args, **kwargs) -> None:
     """Record a provider-health event from a hook; never fails the hook."""
     if not provider:
         return
     try:
-        record(provider)
+        record(provider, *args, **kwargs)
     except OSError:
         log.exception("brindle: couldn't record provider health")
 
@@ -6999,13 +6999,18 @@ def _handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | Non
                 flush(db, agent_id)
     elif event == "stop-failure":
         # The turn ended on an API error; no Stop hook follows.
-        err_fields = " ".join(
+        from brindle import quota
+
+        raw_err = " ".join(
             str(payload.get(k) or "") for k in (
                 "error", "error_type", "error_details", "last_assistant_message",
                 "message", "reason", "details", "status", "status_code", "code"
             )
-        ).lower()
-        is_rate_limit = bool(re.search(r"\b(429|rate_limit_error|rate_limit|rate-limit|overloaded|resource_exhausted)\b", err_fields))
+        )
+        err_fields = raw_err.lower()
+        is_quota_limit = quota.is_limit_error(err_fields)
+        is_rate_limit = is_quota_limit or bool(re.search(
+            r"\b(429|rate_limit_error|rate_limit|rate-limit|overloaded|resource_exhausted)\b", err_fields))
         auth_enums = {
             "oauth_org_not_allowed", "billing_error", "authentication_error",
             "permission_error", "invalid_api_key", "account_suspended", "revoked_api_key"
@@ -7033,6 +7038,17 @@ def _handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | Non
 
         # An overloaded API (529) is the provider's capacity, not this account's usage.
         overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
+        if is_quota_limit and not overloaded and not is_auth and not is_model:
+            from brindle import provider_switch
+            from brindle.config import RepoConfig, load_repo_config
+
+            ws = db.get_workspace(agent.workspace_id)
+            cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
+            _note_health(quota.record_limit, agent.provider, cfg, until=quota.parse_limit_reset(raw_err))
+            try:
+                provider_switch.sweep(db, time.time())
+            except Exception:  # noqa: BLE001 - a hook never fails over a switch sweep
+                log.exception("brindle: couldn't sweep provider switches after limit error")
         if is_rate_limit and not overloaded:
             _note_health(provider_health.record_rate_limited, agent.provider)
         elif not is_auth and not is_model:

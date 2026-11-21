@@ -184,7 +184,7 @@ def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: 
             decision = policy._decide("delegation", cfg, repo_root, lambda p: p.check_assign(info))
             if not decision.allowed:
                 continue
-        q = None if quota._key_billed(provider) else quota.get(provider)
+        q = None if quota._non_subscription_route(provider) else quota.get(provider)
         window = quota.fullest(replace(q, windows=[w for w in q.windows
                                                    if w.resets_at is None or w.resets_at > now])) if q else None
         headroom = max(0.0, 100.0 - window.used) if window else 100.0

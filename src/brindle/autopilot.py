@@ -969,18 +969,19 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     if not health.ok:
         return f"{health.reason}, skipped {name}"
     if p.provider in quota.PROVIDERS:
-        room = quota.headroom(p.provider, cfg, repo_root)
-        # Reserve enough allowance to finish the expected size of task. Unknown
-        # weights get the full margin; a local server has no usage allowance.
-        margin = (0 if p.provider == "native" else max(0, min(100, cfg.limit_headroom))
-                  * {"light": 0.25, "medium": 0.5}.get(weight, 1))
-        if room <= 100 - cfg.usage_limit + margin:
-            label = quota.NAMES.get(p.provider, p.provider)
-            if p.provider == "native":
-                return f"local model server not answering, skipped {name}"
-            if room <= 0:
-                return f"{label} limit reached, skipped {name}"
-            return f"{label} at {100 - room:.0f}%, skipped {name}"
+        room = quota.known_headroom(p.provider, cfg, repo_root)
+        if room is not None:
+            # Reserve enough allowance to finish the expected size of task. Unknown
+            # weights get the full margin; a local server has no usage allowance.
+            margin = (0 if p.provider == "native" else max(0, min(100, cfg.limit_headroom))
+                      * {"light": 0.25, "medium": 0.5}.get(weight, 1))
+            if room <= 100 - cfg.usage_limit + margin:
+                label = quota.NAMES.get(p.provider, p.provider)
+                if p.provider == "native":
+                    return f"local model server not answering, skipped {name}"
+                if room <= 0:
+                    return f"{label} limit reached, skipped {name}"
+                return f"{label} at {100 - room:.0f}%, skipped {name}"
     return None
 
 
@@ -2649,12 +2650,14 @@ def usage() -> dict | None:
     w = quota.fullest(q) if q else None
     if w is None:
         return None
-    name = "five_hour" if w.minutes == 300 else "seven_day"
+    name = {300: "five_hour", 1440: "daily", 10080: "seven_day", 43200: "monthly"}.get(
+        w.minutes or 0, f"{w.minutes}m" if w.minutes else "usage")
     return {"window": name, "used": w.used, "resets_at": w.resets_at}
 
 
 def usage_note(u: dict) -> str:
-    window = "5-hour" if u["window"] == "five_hour" else "weekly"
+    window = {"five_hour": "5-hour", "daily": "daily", "seven_day": "weekly", "monthly": "monthly"}.get(
+        u["window"], u["window"])
     resets = ""
     if isinstance(u.get("resets_at"), (int, float)):
         resets = f", resets {time.strftime('%-I:%M%p', time.localtime(u['resets_at'])).lower()}"

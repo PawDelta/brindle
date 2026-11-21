@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -33,6 +34,33 @@ NAMES = {"claude": "Claude", "codex": "Codex", "antigravity": "Antigravity", "na
 PROVIDERS = tuple(NAMES)
 # Claude Code's status line names its windows; the rest are told by length.
 CLAUDE_WINDOWS = {"five_hour": 300, "seven_day": 10080}
+CLAUDE_PLAN_WINDOWS = {
+    "five_hour": 300, "session": 300,
+    "twenty_four_hour": 1440, "one_day": 1440, "daily": 1440,
+    "seven_day": 10080, "weekly": 10080, "seven_day_org": 10080,
+    "organization": 10080, "org": 10080, "team": 10080, "workspace": 10080, "seat": 10080,
+    "thirty_day": 43200, "monthly": 43200, "month": 43200,
+    "spend": 43200, "spend_limit": 43200, "monthly_spend": 43200, "budget": 43200,
+}
+_CLAUDE_PLAN_SCOPES = frozenset({
+    "all models", "all", "organization", "org", "team", "workspace", "seat",
+    "enterprise", "company", "extra usage", "spend", "monthly", "included",
+})
+_CLAUDE_MODEL_WINDOW_PREFIXES = (("seven_day_", 10080), ("five_hour_", 300), ("thirty_day_", 43200))
+_CLAUDE_NON_SUBSCRIPTION_VARS = (
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL",
+)
+_SPEND_RATIO_PAIRS = (
+    ("used_credits", "monthly_limit"), ("used_credits", "credit_limit"),
+    ("used_credits", "limit_credits"), ("used_credits", "limit"),
+    ("used_usd", "limit_usd"), ("spent_usd", "limit_usd"),
+    ("spent", "limit"), ("spent", "budget"),
+    ("current_spend", "spend_limit"), ("spend", "spend_limit"),
+    ("used_cents", "limit_cents"), ("used", "limit"),
+)
+_CODEX_PLAN_NAMES = frozenset({
+    "codex", "default", "all", "workspace", "organization", "org", "team", "enterprise", "seat",
+})
 
 
 @dataclass
@@ -77,7 +105,74 @@ def _save(data: dict) -> None:
 
 
 def _number(v) -> float | None:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+        return float(v)
+    return None
+
+
+def _num_or_str(v) -> float | None:
+    n = _number(v)
+    if n is not None:
+        return n
+    if isinstance(v, str):
+        cleaned = v.strip().lstrip("$").replace(",", "")
+        if cleaned:
+            try:
+                parsed = float(cleaned)
+                return parsed if math.isfinite(parsed) else None
+            except ValueError:
+                return None
+    return None
+
+
+def _timestamp(v) -> float | None:
+    n = _number(v)
+    if n is not None:
+        return n if n > 0 else None
+    if isinstance(v, str) and v.strip():
+        try:
+            dt = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            ts = dt.timestamp()
+        except (OverflowError, OSError):
+            return None
+        return ts if math.isfinite(ts) and ts > 0 else None
+    return None
+
+
+def _reset_from_dict(w: dict, now: float) -> float | None:
+    for key in ("resets_at", "reset_at", "reset_time"):
+        ts = _timestamp(w.get(key))
+        if ts is not None:
+            return ts
+    for key in ("resets_in_seconds", "reset_after_seconds"):
+        delta = _number(w.get(key))
+        if delta is not None and delta > 0:
+            return now + delta
+    return None
+
+
+def _percent_from_dict(w: dict) -> float | None:
+    for key in ("used_percentage", "used_percent", "utilization"):
+        n = _number(w.get(key))
+        if n is not None and n >= 0:
+            return n
+    frac = _number(w.get("used_fraction"))
+    if frac is not None and 0 <= frac <= 1:
+        return frac * 100.0
+    rem = _number(w.get("remaining_fraction"))
+    if rem is not None and 0 <= rem <= 1:
+        return (1.0 - rem) * 100.0
+    for used_k, limit_k in _SPEND_RATIO_PAIRS:
+        used = _num_or_str(w.get(used_k))
+        lim = _num_or_str(w.get(limit_k))
+        if used is not None and lim is not None and used >= 0 and lim > 0:
+            return max(0.0, (used / lim) * 100.0)
+    return None
 
 
 def record(provider: str, windows: list[Window] | None = None, *,
@@ -116,14 +211,20 @@ def record(provider: str, windows: list[Window] | None = None, *,
             pass
 
 
-def record_limit(provider: str, cfg: RepoConfig | None = None, *, now: float | None = None) -> float:
-    """The provider just refused work on its limit: it's unavailable for the
-    repo's ``limit_cooldown_minutes`` (default 300 for Antigravity)."""
+def record_limit(provider: str, cfg: RepoConfig | None = None, *, now: float | None = None,
+                 until: float | None = None) -> float:
+    """The provider just refused work on its limit: it's unavailable until
+    ``until`` (when the error gave a future reset time) or for the repo's
+    ``limit_cooldown_minutes`` (default 300 for Antigravity)."""
+    cur = time.time() if now is None else now
     minutes = getattr(cfg, "limit_cooldown_minutes", None) or DEFAULT_COOLDOWN_MINUTES.get(
         provider, FALLBACK_COOLDOWN_MINUTES)
-    until = (now if now is not None else time.time()) + minutes * 60
-    record(provider, None, limited_until=until, source="limit error")
-    return until
+    parsed_until = _number(until)
+    target = parsed_until if parsed_until is not None and parsed_until > cur else cur + minutes * 60
+    key = (subscription_usage.route_limit_key(provider) if _non_subscription_route(provider)
+           else subscription_usage.limit_key(provider))
+    record(provider, None, limited_until=target, source="limit error", identity_key=key)
+    return target
 
 
 def _from_entry(provider: str, e: dict) -> Quota:
@@ -134,19 +235,35 @@ def _from_entry(provider: str, e: dict) -> Quota:
                  _number(e.get("updated_at")) or 0.0, str(e.get("source") or ""))
 
 
+def _route_limit_only(provider: str, data: dict, now: float) -> Quota | None:
+    entry = data.get(subscription_usage.route_limit_key(provider))
+    if not isinstance(entry, dict):
+        return None
+    until = _number(entry.get("limited_until"))
+    if until is None or until <= now:
+        return None
+    return Quota(provider, [], until, _number(entry.get("updated_at")) or 0.0,
+                 str(entry.get("source") or "limit error"))
+
+
 def get(provider: str, *, identity_key: str | None = None, now: float | None = None) -> Quota | None:
     """What's known about ``provider`` at ``now`` (default the clock):
     windows past their reset dropped, an expired limit cleared. None when
     nothing current is known. ``identity_key`` keeps a read/modify/write on
     its captured subscription."""
+    now = time.time() if now is None else now
+    if identity_key is None and _non_subscription_route(provider):
+        return _route_limit_only(provider, _load(), now)
     if provider == "codex":
         _refresh_codex_lazily()
     key = identity_key if identity_key is not None else subscription_usage.cache_key(provider)
-    entry = _load().get(key) if key else None
+    data = _load()
+    if not key:
+        return _route_limit_only(provider, data, now)
+    entry = data.get(key)
     if not isinstance(entry, dict):
         return None
     q = _from_entry(provider, entry)
-    now = time.time() if now is None else now
     live = []
     for w in q.windows:
         if w.resets_at:  # 0 or missing: unknown, so only its age counts
@@ -179,35 +296,91 @@ def _key_billed(provider: str) -> bool:
     return providers.claude_credential().keyed
 
 
+def _non_subscription_route(provider: str) -> bool:
+    """Whether ``provider`` runs on a route without personal subscription
+    windows (API key, token, Bedrock/Vertex/Foundry, corporate gateway, or
+    org-managed settings). Never reads Codex auth/token files."""
+    if _key_billed(provider):
+        return True
+    if provider == "claude":
+        from brindle import company_identity, company_login, providers
+
+        if providers.claude_org_managed():
+            return True
+        if any(os.environ.get(var) for var in _CLAUDE_NON_SUBSCRIPTION_VARS):
+            return True
+        try:
+            stored = company_login.stored_env()
+        except Exception:  # noqa: BLE001
+            stored = {}
+        try:
+            enforced = company_identity.enforced_route_env() or {}
+        except Exception:  # noqa: BLE001
+            enforced = {}
+        return any(stored.get(var) or enforced.get(var) for var in _CLAUDE_NON_SUBSCRIPTION_VARS)
+    if provider == "codex":
+        return bool(os.environ.get("OPENAI_BASE_URL"))
+    return False
+
+
+def known_headroom(provider: str, cfg: RepoConfig | None = None, repo_root: str | None = None,
+                   *, now: float | None = None) -> float | None:
+    """Percent of ``provider``'s allowance left when known: 100 minus its
+    fullest plan window, 0 while limited, or None when usage is unknown."""
+    if provider == "native":
+        return 0.0 if _native_down(repo_root) else 100.0
+    cur = time.time() if now is None else now
+    q = get(provider, now=cur)
+    if q is None:
+        return None
+    if q.limited_until and q.limited_until > cur:
+        return 0.0
+    if _non_subscription_route(provider):
+        return None
+    w = fullest(q)
+    return None if w is None else max(0.0, 100.0 - w.used)
+
+
 def headroom(provider: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> float:
     """Percent of the provider's allowance left: 100 minus its fullest window,
     0 while it's limited. 100 when nothing is known."""
+    room = known_headroom(provider, cfg, repo_root)
+    return 100.0 if room is None else room
+
+
+def status(provider: str, repo_root: str | None = None, *, now: float | None = None) -> str:
+    """``"limited"``, ``"ok"``, or ``"unknown"`` for ``provider``'s usage."""
     if provider == "native":
-        return 0.0 if _native_down(repo_root) else 100.0
-    if _key_billed(provider):
-        return 100.0
-    q = get(provider)
+        return "limited" if _native_down(repo_root) else "ok"
+    cur = time.time() if now is None else now
+    q = get(provider, now=cur)
     if q is None:
-        return 100.0
-    if q.limited_until and q.limited_until > time.time():
-        return 0.0
+        return "unknown"
+    if q.limited_until and q.limited_until > cur:
+        return "limited"
+    if _non_subscription_route(provider):
+        return "unknown"
     w = fullest(q)
-    return 100.0 if w is None else max(0.0, 100.0 - w.used)
+    if w is None:
+        return "unknown"
+    return "limited" if w.used >= 100.0 and w.resets_at is not None else "ok"
 
 
 def window_name(minutes: int | None) -> str:
-    return {300: "5-hour", 10080: "weekly", 43200: "monthly"}.get(minutes or 0, f"{minutes}-minute" if minutes else "usage")
+    return {300: "5-hour", 1440: "daily", 10080: "weekly", 43200: "monthly"}.get(
+        minutes or 0, f"{minutes}-minute" if minutes else "usage")
 
 
 def window_short(minutes: int | None) -> str:
-    return {300: "5h", 10080: "wk", 43200: "mo"}.get(minutes or 0, f"{minutes}m" if minutes else "use")
+    return {300: "5h", 1440: "1d", 10080: "wk", 43200: "mo"}.get(
+        minutes or 0, f"{minutes}m" if minutes else "use")
 
 
 def left_by_window(provider: str) -> list[tuple[str, int]]:
     """``(window, percent left)`` for each live window, shortest first and
     one-model caps last: ``[("5h", 64), ("wk", 91), ("Fable", 89)]``. Empty
     while limited, billed per token, or when nothing current is known."""
-    if provider == "native" or _key_billed(provider):
+    if provider == "native" or _non_subscription_route(provider):
         return []
     q = get(provider)
     if q is None or q.limited_until:
@@ -234,13 +407,13 @@ def note(provider: str, repo_root: str | None = None) -> str | None:
     name = NAMES.get(provider, provider)
     if provider == "native":
         return "local model server not answering" if _native_down(repo_root) else None
+    q = get(provider)
+    if q is not None and q.limited_until:
+        return f"{name} limit reached, available again {_when(q.limited_until)}"
     if _key_billed(provider):
         return f"{name} is pay per token (API key), no subscription window"
-    q = get(provider)
-    if q is None:
+    if _non_subscription_route(provider) or q is None:
         return None
-    if q.limited_until:
-        return f"{name} limit reached, available again {_when(q.limited_until)}"
     w = fullest(q)
     if w is None:
         return None
@@ -257,27 +430,85 @@ def notes(repo_root: str | None = None, *, native: bool = True) -> list[str]:
 # -- Claude: the status line data -------------------------------------------------------
 
 
+def _claude_status_window(name: str, data: dict, now: float) -> Window | None:
+    used = _percent_from_dict(data)
+    if used is None:
+        return None
+    minutes_raw = _number(data.get("window_minutes"))
+    key = name.strip().lower()
+    if key in CLAUDE_PLAN_WINDOWS:
+        minutes = int(minutes_raw) if minutes_raw and minutes_raw > 0 else CLAUDE_PLAN_WINDOWS[key]
+        return Window(used, _reset_from_dict(data, now), minutes, None)
+    for prefix, default_min in _CLAUDE_MODEL_WINDOW_PREFIXES:
+        if key.startswith(prefix) and len(key) > len(prefix):
+            scope = key[len(prefix):].replace("_", " ").strip()
+            cap_name = None if scope in _CLAUDE_PLAN_SCOPES else scope.title()
+            minutes = int(minutes_raw) if minutes_raw and minutes_raw > 0 else default_min
+            return Window(used, _reset_from_dict(data, now), minutes, cap_name)
+    return None
+
+
+def _parse_claude_extra_usage(extra: dict, now: float) -> tuple[bool, Window | None, bool]:
+    """Return ``(enabled, spend_window, unlimited)`` for a Claude ``extra_usage`` block."""
+    enabled = bool(extra.get("is_enabled") if "is_enabled" in extra else extra.get("enabled", True))
+    if not enabled:
+        return False, None, False
+    used = _percent_from_dict(extra)
+    if used is not None:
+        minutes_raw = _number(extra.get("window_minutes"))
+        minutes = int(minutes_raw) if minutes_raw and minutes_raw > 0 else 43200
+        return True, Window(used, _reset_from_dict(extra, now), minutes, None), False
+    limit_keys = ("monthly_limit", "credit_limit", "limit_credits", "limit_usd", "spend_limit", "limit")
+    unlimited = bool(extra.get("unlimited")) or (
+        any(k in extra for k in limit_keys) and all(extra.get(k) is None for k in limit_keys if k in extra)
+    )
+    return True, None, unlimited
+
+
 def record_claude(status: dict) -> bool:
     """Keep the plan usage Claude Code gives its status line (Claude.ai
-    subscriptions only). True when it carried any."""
+    subscriptions and Enterprise/Team accounts). True when it carried any."""
+    if _non_subscription_route("claude"):
+        return False
     who = subscription_usage.identity()
     bound = os.environ.get(subscription_usage.STATUS_IDENTITY)
     if who is None or (bound and bound != who):
         return False
     key = subscription_usage.cache_key("claude", who=who)
     limits = status.get("rate_limits")
-    if not isinstance(limits, dict):
+    extra_raw = (limits.get("extra_usage") if isinstance(limits, dict) else None) or status.get("extra_usage")
+    if not isinstance(limits, dict) and not isinstance(extra_raw, dict):
         return False
-    windows = []
-    for name, minutes in CLAUDE_WINDOWS.items():
-        w = limits.get(name)
-        if isinstance(w, dict) and _number(w.get("used_percentage")) is not None:
-            windows.append(Window(float(w["used_percentage"]), _number(w.get("resets_at")), minutes))
-    if not windows:
+    now = time.time()
+    extra_enabled, extra_win, extra_unlimited = (
+        _parse_claude_extra_usage(extra_raw, now) if isinstance(extra_raw, dict) else (False, None, False)
+    )
+    plan_windows: list[Window] = []
+    cap_windows: list[Window] = []
+    if isinstance(limits, dict):
+        for name, w in limits.items():
+            if not isinstance(name, str) or name == "extra_usage" or not isinstance(w, dict):
+                continue
+            parsed = _claude_status_window(name, w, now)
+            if parsed is None:
+                continue
+            (cap_windows if parsed.name else plan_windows).append(parsed)
+    # When extra_usage (paid overage) is enabled and still has room (or is unlimited),
+    # an exhausted included window spills into overage rather than cutting off work.
+    dropped_exhausted = False
+    if extra_enabled and (extra_unlimited or (extra_win is not None and extra_win.used < 100.0)):
+        kept = [w for w in plan_windows if w.used < 100.0]
+        dropped_exhausted = len(kept) < len(plan_windows)
+        plan_windows = kept
+    if extra_win is not None:
+        plan_windows.append(extra_win)
+    windows = plan_windows + cap_windows
+    if not windows and not dropped_exhausted:
         return False
-    # The status line has no one-model caps; keep the ones ``claude /usage`` gave.
+    # Preserve one-model caps from ``claude /usage`` that the status line didn't supply.
     old = get("claude", identity_key=key)
-    windows += [w for w in (old.windows if old else []) if w.name]
+    seen_caps = {w.name for w in cap_windows}
+    windows += [w for w in (old.windows if old else []) if w.name and w.name not in seen_caps]
     record("claude", windows, source="status line", keep_limit=True, identity_key=key)
     return True
 
@@ -286,8 +517,20 @@ def record_claude(status: dict) -> bool:
 
 CLAUDE_USAGE_REFRESH_SECONDS = 30 * 60
 CLAUDE_USAGE_TIMEOUT = 30
-_USAGE_LINE = re.compile(r"^\s*Current (session|week)(?: \(([^)]+)\))?:\s*(\d+(?:\.\d+)?)% used"
-                         r"(?:\s*·\s*resets (.+?))?\s*(?:\(([^)]+)\))?\s*$")
+_USAGE_HEADER = re.compile(
+    r"^\s*(?:"
+    r"Current\s+(session|day|week|month|spend)"
+    r"|(Extra\s+usage|Monthly\s+spend|Current\s+spend|Spend\s+limit"
+    r"|Organization\s+(?:limit|usage|spend)|Org\s+(?:limit|usage|spend)"
+    r"|Team\s+(?:limit|usage|spend)|Workspace\s+(?:limit|usage|spend)|Seat\s+(?:limit|usage|spend)"
+    r"|Daily|Weekly|Monthly)"
+    r")(?:\s*\(([^)]+)\))?\s*(?::\s*(.*))?$",
+    re.I,
+)
+_PCT_USED = re.compile(r"(\d+(?:\.\d+)?)%\s*used", re.I)
+_PCT_LEFT = re.compile(r"(\d+(?:\.\d+)?)%\s*(?:left|remaining)", re.I)
+_SPEND_RATIO = re.compile(r"\$\s*([\d,]+(?:\.\d+)?)\s*(?:/|of)\s*\$\s*([\d,]+(?:\.\d+)?)", re.I)
+_RESETS_CLAUSE = re.compile(r"(?:[·,\-]\s*|\b)resets?\s+(?:at\s+)?(.+?)(?:\s*\(([^)]+)\))?\s*$", re.I)
 _claude_usage_at = 0.0
 _claude_usage_identity: str | None = None
 # Every sidebar asks; this file's mtime is when any process of this brindle
@@ -296,19 +539,25 @@ CLAUDE_USAGE_STAMP = "claude-usage.stamp"
 
 
 def _reset_time(text: str, zone: str | None, now: float) -> float | None:
-    """"Oct 12 at 6:10pm" / "6:10pm" in ``zone`` (else local time) as epoch seconds."""
+    """"Oct 12 at 6:10pm" / "Dec 1" / "6:10pm" / ISO-8601 in ``zone`` (else local time) as epoch seconds."""
+    ts = _timestamp(text)
+    if ts is not None:
+        return ts
     try:
-        tz = ZoneInfo(zone) if zone else None
+        tz = ZoneInfo(zone.strip()) if zone and zone.strip() else None
     except (ZoneInfoNotFoundError, ValueError):
         tz = None
     today = datetime.fromtimestamp(now, tz)
-    text = text.strip().replace(" at ", " ").upper()
-    for fmt in ("%b %d %I:%M%p", "%b %d %I%p", "%I:%M%p", "%I%p"):
+    cleaned = re.sub(r"\s+", " ", text.strip().replace(",", "")).replace(" at ", " ").upper()
+    for fmt in ("%b %d %Y %I:%M%p", "%b %d %Y %I%p", "%b %d %Y",
+                "%b %d %I:%M%p", "%b %d %I%p", "%b %d", "%I:%M%p", "%I%p"):
         try:
-            t = datetime.strptime(text, fmt)
+            t = datetime.strptime(cleaned, fmt)
         except ValueError:
             continue
-        if "%b" in fmt:
+        if "%Y" in fmt:
+            t = t.replace(tzinfo=tz)
+        elif "%b" in fmt:
             t = t.replace(year=today.year, tzinfo=tz)
             if t.timestamp() < now - 86400:      # "Jan 2" read in late December
                 t = t.replace(year=today.year + 1)
@@ -320,24 +569,115 @@ def _reset_time(text: str, zone: str | None, now: float) -> float | None:
     return None
 
 
+def _claude_span_minutes(current_span: str | None, label: str | None) -> int | None:
+    if current_span:
+        return {"session": 300, "day": 1440, "week": 10080, "month": 43200, "spend": 43200}.get(current_span.lower())
+    low = (label or "").lower()
+    if "daily" in low:
+        return 1440
+    if "weekly" in low:
+        return 10080
+    if any(w in low for w in ("month", "spend", "extra")):
+        return 43200
+    return 10080
+
+
+def _parse_usage_percent(body: str) -> float | None:
+    m = _PCT_USED.search(body)
+    if m:
+        return float(m.group(1))
+    m = _PCT_LEFT.search(body)
+    if m:
+        return max(0.0, 100.0 - float(m.group(1)))
+    m = _SPEND_RATIO.search(body)
+    if m:
+        used = _num_or_str(m.group(1))
+        lim = _num_or_str(m.group(2))
+        if used is not None and lim is not None and used >= 0 and lim > 0:
+            return max(0.0, (used / lim) * 100.0)
+    return None
+
+
+def _parse_reset_clause(body: str, now: float) -> float | None:
+    m = _RESETS_CLAUSE.search(body)
+    if not m:
+        return None
+    return _reset_time(m.group(1), m.group(2), now)
+
+
 def parse_claude_usage(text: str, now: float | None = None) -> list[Window]:
-    """The windows in ``claude /usage``'s answer::
+    """The windows in ``claude /usage``'s answer, including corporate org,
+    monthly, and spend-based lines::
 
         Current session: 36% used · resets Oct 12 at 6:10pm (America/New_York)
         Current week (all models): 9% used · resets Oct 19 at 1pm (America/New_York)
+        Current week (organization): 85% used · resets Nov 23 at 9am (UTC)
+        Extra usage: $150.00 / $200.00 spent · resets Dec 1 (UTC)
         Current week (Fable): 11% used · resets Oct 19 at 1pm (America/New_York)
     """
     now = time.time() if now is None else now
-    windows = []
-    for line in text.splitlines():
-        m = _USAGE_LINE.match(line)
+    lines = text.splitlines()
+    windows: list[Window] = []
+    i = 0
+    while i < len(lines):
+        m = _USAGE_HEADER.match(lines[i])
         if not m:
+            i += 1
             continue
-        span, model, used, resets, zone = m.groups()
-        windows.append(Window(float(used), _reset_time(resets, zone, now) if resets else None,
-                              CLAUDE_WINDOWS["five_hour" if span == "session" else "seven_day"],
-                              None if model in (None, "all models") else model))
+        cur_span, named_label, scope, rest = m.groups()
+        minutes = _claude_span_minutes(cur_span, named_label)
+        cap_name = None if (scope is None or scope.strip().lower() in _CLAUDE_PLAN_SCOPES) else scope.strip()
+        body = (rest or "").strip()
+        j = i + 1
+        if not body:
+            # Multi-line block layout: header line, then progress/value line, optional Resets line.
+            block_parts: list[str] = []
+            while j < len(lines) and len(block_parts) < 2:
+                nxt = lines[j].strip()
+                if not nxt or _USAGE_HEADER.match(lines[j]):
+                    break
+                block_parts.append(nxt)
+                j += 1
+            body = " · ".join(block_parts)
+        used = _parse_usage_percent(body)
+        if used is not None:
+            resets_at = _parse_reset_clause(body, now)
+            if resets_at is None and j < len(lines) and re.match(r"^\s*resets?\b", lines[j], re.I):
+                resets_at = _parse_reset_clause(lines[j], now)
+                j += 1
+            windows.append(Window(used, resets_at, minutes, cap_name))
+        i = j
     return windows
+
+
+# -- real CLI limit-error detection -----------------------------------------------------
+
+_LIMIT_ERROR_RE = re.compile(
+    r"you'?ve hit your (?:[\w\s-]{0,30} )?limit"
+    r"|hit (?:your |the )?(?:[\w\s-]{0,20} )?(?:usage|spend(?:ing)?|quota|monthly|weekly|daily|session|organization|org|workspace|team) limit"
+    r"|(?:usage|quota|spend(?:ing)?|extra usage|organization|org|workspace|team|monthly|weekly|daily|session) (?:limit|cap|control) (?:reached|exceeded|hit|exhausted)"
+    r"|quota (?:exceeded|exhausted)"
+    r"|\b(?:resource_exhausted|spend_control_reached|spend_limit_reached|usage_limit_reached|quota_exceeded)\b"
+    r"|out of (?:usage|quota|credits)|credits? exhausted",
+    re.I,
+)
+_LIMIT_RESET_RE = re.compile(r"resets?\s+(?:at\s+)?([^\n·()]+?)(?:\s*\(([^)]+)\))?(?:\s*[·.,]|$)", re.I)
+
+
+def is_limit_error(text: str | None) -> bool:
+    """Whether ``text`` reports an actual usage, quota, or spend limit cutoff
+    (not a plain transient 429 or an auth/billing credential failure)."""
+    return bool(text and _LIMIT_ERROR_RE.search(text))
+
+
+def parse_limit_reset(text: str | None, now: float | None = None) -> float | None:
+    """Extract a reset timestamp from a CLI limit error message, or None."""
+    if not text:
+        return None
+    m = _LIMIT_RESET_RE.search(text)
+    if not m:
+        return None
+    return _reset_time(m.group(1), m.group(2), time.time() if now is None else now)
 
 
 def _claim_usage_refresh(force: bool, key: str, *, stamp_name: str = CLAUDE_USAGE_STAMP) -> float | None:
@@ -375,6 +715,8 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
     from brindle import provider_homes, spawn
     from brindle.providers import claude_binary
 
+    if _non_subscription_route("claude"):
+        return False
     key = subscription_usage.cache_key("claude")
     if key is None:
         return False
@@ -390,7 +732,7 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
         _claude_usage_at = asked     # another process asked: its answer is in the shared record
         return False
     _claude_usage_at = time.time()
-    if _key_billed("claude"):
+    if _non_subscription_route("claude"):
         return False
     try:
         # No MCP servers: the answer needs none, and each would be one more
@@ -514,28 +856,105 @@ def newest_rollout(home: Path | None = None) -> Path | None:
     return best
 
 
-def _windows_from_limits(limits: dict) -> list[Window]:
-    windows = []
+def _codex_window(w: dict, now: float, *, name: str | None = None) -> Window | None:
+    used = _percent_from_dict(w)
+    if used is None:
+        return None
+    minutes = _number(w.get("window_minutes"))
+    return Window(used, _reset_from_dict(w, now), int(minutes) if minutes and minutes > 0 else None, name)
+
+
+def _codex_cap_name(limits: dict) -> str | None:
+    limit_name = limits.get("limit_name")
+    if isinstance(limit_name, str) and limit_name.strip():
+        if limit_name.strip().lower() not in _CODEX_PLAN_NAMES:
+            return limit_name.strip()
+    return None
+
+
+def _parse_codex_rate_limits(limits: dict, now: float) -> tuple[list[Window], float | None, bool, bool]:
+    """Parse one Codex ``rate_limits`` dict into
+    ``(windows, limited_until, is_model_cap, credits_covering)``."""
+    cap_name = _codex_cap_name(limits)
+    windows: list[Window] = []
     for slot in ("primary", "secondary"):
         w = limits.get(slot)
-        if not isinstance(w, dict) or _number(w.get("used_percent")) is None:
-            continue
-        minutes = w.get("window_minutes")
-        windows.append(Window(float(w["used_percent"]), _number(w.get("resets_at")),
-                              int(minutes) if isinstance(minutes, (int, float)) else None))
-    return windows
+        if isinstance(w, dict):
+            parsed = _codex_window(w, now, name=cap_name)
+            if parsed is not None:
+                windows.append(parsed)
+    # Corporate per-seat individual_limit: flat window dict or nested primary/secondary.
+    ind = limits.get("individual_limit")
+    if isinstance(ind, dict):
+        nested = [p for slot in ("primary", "secondary")
+                  if isinstance(ind.get(slot), dict) and (p := _codex_window(ind[slot], now)) is not None]
+        if nested:
+            windows.extend(nested)
+        elif (flat := _codex_window(ind, now)) is not None:
+            windows.append(flat)
+    extra_list = limits.get("additional_rate_limits")
+    if isinstance(extra_list, list):
+        for item in extra_list:
+            if not isinstance(item, dict):
+                continue
+            item_name = item.get("limit_name")
+            sub = item.get("rate_limit")
+            if isinstance(item_name, str) and item_name.strip() and isinstance(sub, dict):
+                for slot in ("primary", "secondary"):
+                    w = sub.get(slot)
+                    if isinstance(w, dict) and (p := _codex_window(w, now, name=item_name.strip())) is not None:
+                        windows.append(p)
+    credits = limits.get("credits")
+    has_overage_credits = False
+    if isinstance(credits, dict):
+        bal = _num_or_str(credits.get("balance"))
+        has_overage_credits = bool(credits.get("unlimited")) or (
+            bool(credits.get("has_credits")) and bal is not None and bal > 0
+        )
+        if (credit_win := _codex_window(credits, now)) is not None:
+            windows.append(credit_win)
+    spend_ctrl = limits.get("spend_control_reached")
+    spend_reached = (spend_ctrl is True) or (
+        isinstance(spend_ctrl, dict) and bool(spend_ctrl.get("reached") or spend_ctrl.get("is_reached"))
+    )
+    rl_type = limits.get("rate_limit_reached_type")
+    type_reached = isinstance(rl_type, str) and bool(rl_type.strip()) and rl_type.strip().lower() != "none"
+    limited_until: float | None = None
+    if spend_reached or type_reached:
+        reset = _reset_from_dict(spend_ctrl, now) if isinstance(spend_ctrl, dict) else None
+        if reset is None:
+            future = [w.resets_at for w in windows if w.name is None and w.resets_at and w.resets_at > now]
+            reset = max(future) if future else now + FALLBACK_COOLDOWN_MINUTES * 60
+        limited_until = reset
+    # Workspace credits cover overage past 100% of an included window until spend control
+    # or an explicit rate_limit_reached_type triggers.
+    credits_covering = False
+    if has_overage_credits and limited_until is None and cap_name is None:
+        if any(w.name is None and w.used >= 100.0 for w in windows):
+            credits_covering = True
+            windows = [w for w in windows if w.name is not None or w.used < 100.0]
+    return windows, limited_until, cap_name is not None, credits_covering
 
 
-def last_codex_limits(rollout: Path) -> list[Window]:
-    """The windows of the last event in ``rollout`` carrying ``rate_limits``,
-    reading from the end."""
+def _windows_from_limits(limits: dict, *, now: float | None = None) -> list[Window]:
+    return _parse_codex_rate_limits(limits, time.time() if now is None else now)[0]
+
+
+def _codex_rollout_state(rollout: Path, now: float) -> tuple[bool, list[Window], float | None, bool]:
+    """Read the newest plan-level ``rate_limits`` (plus any newer per-model caps)
+    from ``rollout``. Returns ``(saw_event, windows, limited_until, credits_covering)``."""
     try:
         size = rollout.stat().st_size
         with rollout.open("rb") as f:
             f.seek(max(0, size - ROLLOUT_TAIL_BYTES))
             tail = f.read().decode("utf-8", errors="replace")
     except OSError:
-        return []
+        return False, [], None, False
+    saw_event = False
+    plan_windows: list[Window] | None = None
+    model_caps: dict[str, list[Window]] = {}
+    limited_until: float | None = None
+    credits_covering = False
     for line in reversed(tail.splitlines()):
         if '"rate_limits"' not in line:
             continue
@@ -545,22 +964,64 @@ def last_codex_limits(rollout: Path) -> list[Window]:
             continue
         payload = event.get("payload") if isinstance(event, dict) else None
         for holder in (payload, event):
-            limits = holder.get("rate_limits") if isinstance(holder, dict) else None
-            if isinstance(limits, dict):
-                windows = _windows_from_limits(limits)
-                if windows:
-                    return windows
-    return []
+            if not isinstance(holder, dict) or "rate_limits" not in holder:
+                continue
+            saw_event = True
+            limits = holder.get("rate_limits")
+            if limits is None:
+                if plan_windows is None:
+                    plan_windows = []
+                break
+            if not isinstance(limits, dict):
+                continue
+            w_list, lim, is_cap, covering = _parse_codex_rate_limits(limits, now)
+            if is_cap:
+                for w in w_list:
+                    if w.name and w.name not in model_caps:
+                        model_caps[w.name] = [x for x in w_list if x.name == w.name]
+            else:
+                if plan_windows is None:
+                    plan_windows = [w for w in w_list if w.name is None]
+                    for w in w_list:
+                        if w.name and w.name not in model_caps:
+                            model_caps[w.name] = [x for x in w_list if x.name == w.name]
+                    limited_until = lim
+                    credits_covering = covering
+            break
+        if plan_windows is not None:
+            break
+    windows = (plan_windows or []) + [w for ws in model_caps.values() for w in ws]
+    return saw_event, windows, limited_until, credits_covering
+
+
+def last_codex_limits(rollout: Path) -> list[Window]:
+    """The windows of the last event in ``rollout`` carrying ``rate_limits``,
+    reading from the end."""
+    return _codex_rollout_state(rollout, time.time())[1]
 
 
 def refresh_codex(home: Path | None = None) -> bool:
-    """Record Codex's limits from its newest rollout. True when it had any."""
-    rollout = newest_rollout(home)
-    windows = last_codex_limits(rollout) if rollout else []
-    if not windows:
+    """Record Codex's limits from its newest rollout. True when it recorded
+    current limits or confirmed credit-covered usage; clears stale windows
+    when the newest rollout explicitly reports ``rate_limits: null``."""
+    if _non_subscription_route("codex"):
         return False
-    record("codex", windows, source="codex rollout", keep_limit=True)
-    return True
+    rollout = newest_rollout(home)
+    if not rollout:
+        return False
+    saw_event, windows, limited_until, credits_covering = _codex_rollout_state(rollout, time.time())
+    if not saw_event:
+        return False
+    if limited_until is not None:
+        record("codex", windows, limited_until=limited_until, source="codex rollout")
+        return True
+    if windows:
+        record("codex", windows, source="codex rollout", keep_limit=True)
+        return True
+    # Explicit null/empty/credit-covered rate_limits: clear stale rollout windows
+    # rather than driving failover on an earlier ChatGPT session's numbers.
+    record("codex", [], source="codex rollout", keep_limit=True)
+    return credits_covering
 
 
 def _refresh_codex_lazily() -> None:

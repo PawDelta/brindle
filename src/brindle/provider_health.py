@@ -258,14 +258,25 @@ def _projected_full(readings: list, now: float) -> bool:
 
 def _quota_state(provider: str, model: str | None, now: float, entry: dict) -> Health | None:
     """``limited`` or ``closing`` from the subscription windows, or None.
-    Whether Claude is billed per key (which may read the key store) is asked
-    only once there is a state to give: a hook reads this on every tool call."""
-    state = _windows_state(provider, model, now, entry)
-    return None if state is not None and quota._key_billed(provider) else state
-
-
-def _windows_state(provider: str, model: str | None, now: float, entry: dict) -> Health | None:
+    A real recorded limit error (``limited_until``) applies even on keyed or
+    cloud corporate routes; subscription windows are ignored there. Whether
+    Claude is on a non-subscription route (which may read the key store) is
+    asked only once a window has a state to give: a hook reads this on every
+    tool call."""
     q = quota.get(provider, now=now)
+    if q is None:
+        return None
+    label = quota.NAMES.get(provider, provider)
+    if q.limited_until is not None and q.limited_until > now:
+        return Health(LIMITED, q.limited_until, f"{label} limit reached")
+    state = _windows_state(provider, model, now, entry, q=q)
+    return None if state is not None and quota._non_subscription_route(provider) else state
+
+
+def _windows_state(provider: str, model: str | None, now: float, entry: dict,
+                   *, q: quota.Quota | None = None) -> Health | None:
+    if q is None:
+        q = quota.get(provider, now=now)
     if q is None:
         return None
     label = quota.NAMES.get(provider, provider)
