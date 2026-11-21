@@ -419,8 +419,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [refreshes, setRefreshes] = useState(0);
   const [raw, setRaw] = useState(false);
   const [sharingOpen, setSharingOpen] = useState(false);
-  // Asked again as the menu opens and once the plan is shared: sharing is what puts it in the Library.
-  const link = useShareLink(shareLink, `${sharingOpen}:${!!receivedPlan.gate}`);
+  // Asked again as the menu opens, once the plan is shared (sharing is what puts it in the Library),
+  // and after Stop sharing for everyone, which turns the link off.
+  const [unshared, setUnshared] = useState(0);
+  const link = useShareLink(shareLink, `${sharingOpen}:${!!receivedPlan.gate}:${unshared}`);
   const [briefOpen, setBriefOpen] = useState(false);
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
   // A suggestion's section text as it is being typed on the page (SuggestEditor).
@@ -974,7 +976,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     signOff={sharing && ownReviewer && plan.state !== "approved" ? { sub: ownReviewer.sub!, disabled: busy || reviewBlocked,
       run: () => void reviewWrite(() => sharing.signOffPlan(plan.id, plan.rev, reviewVersion)) } : undefined}
     nameOf={nameOf} writes={writes} onBusy={setBusy} visible={sharingOpen && !historical} onClose={() => setSharingOpen(false)}
-    teams={scopes} directory={directory} owned={!teammate} previewRules={gate ? undefined : previewRules}>
+    teams={scopes} directory={directory} owned={!teammate} previewRules={gate ? undefined : previewRules} onStopAll={() => setUnshared((n) => n + 1)}>
     {!!gate?.policies?.length && <section className="sec"><Policies plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} busy={busy} nameOf={nameOf} write={reviewWrite} /></section>}
     {linked && <ShareLinkPanel target={linked.target} state={linked.state} onState={link.setState} />}
   </SharePanel>;

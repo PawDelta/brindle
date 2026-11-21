@@ -51,9 +51,9 @@ const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.s
 type Person = { sub: string; name: string; access: ShareAccessLevel | null; signOff: "required" | "optional" | null };
 type Work = { key: string; label: string; run(): Promise<Plan> };
 /* A write out now, or one the Library refused, kept so Try again sends the same one. */
-type Busy = Record<string, { state: "saving" | "failed"; refused?: Work }>;
+type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string }>;
 
-export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, signOff, teams = [], directory = [], owned = false, previewRules }: {
+export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, signOff, teams = [], directory = [], owned = false, previewRules, onStopAll }: {
   plan: Plan; target?: SharePeopleTarget; nameOf(sub: string): string; writes: Writes;
   onBusy(busy: boolean): void; visible: boolean; onClose(): void; children?: ReactNode;
   signOff?: { sub: string; disabled: boolean; run(): void };
@@ -65,6 +65,8 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   owned?: boolean;
   /* The org rules a first share will meet, for the revision on screen. */
   previewRules?: () => Promise<PolicyPreviewRow[]>;
+  /* Stop sharing for everyone landed: it turned the share link off too, so its section reads it again. */
+  onStopAll?(): void;
 }) {
   const shared = !!plan.gate;
   const [access, setAccess] = useState<ShareAccess | null>(null);
@@ -89,8 +91,8 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const mounted = useRef(true);
   const accessGeneration = useRef(0);
   const searchGeneration = useRef(0);
-  const latest = useRef({ target, writes, onBusy });
-  latest.current = { target, writes, onBusy };
+  const latest = useRef({ target, writes, onBusy, onStopAll });
+  latest.current = { target, writes, onBusy, onStopAll };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; searchGeneration.current++; }; }, []);
   useEffect(() => {
     if (!visible) return;
@@ -167,8 +169,10 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       try {
         answered.current = await work.run();
         if (mounted.current) setBusy((old) => { const next = { ...old }; delete next[work.key]; return next; });
-      } catch {
-        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", refused: work } }));
+        if (work.key === "all") latest.current.onStopAll?.();
+      } catch (e) {
+        const why = e instanceof Error ? e.message : "";
+        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", refused: work, why } }));
       } finally {
         flight.current.delete(work.key);
         out.current--;
@@ -219,11 +223,17 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const signed = waiting.filter((p) => reviewerOf(p.sub)?.status === "signed_off").map((p) => firstWord(p.name));
   const buildNote = unsigned.length ? `The build starts when ${list(unsigned)} sign${unsigned.length > 1 ? "" : "s"} off.${signed.length ? ` ${list(signed)} already ${signed.length > 1 ? "have" : "has"}.` : ""}` : null;
 
-  const status = (key: string, label: string) => {
+  // A refused write keeps its row, its error and Try again; `cancel` drops one that never landed.
+  const status = (key: string, label: string, cancel?: () => void) => {
     const b = busy[key];
     if (!b) return null;
     return b.state === "saving" ? <span className="st"><i className="spin" />Saving…</span>
-      : <><span className="st bad">{b.refused?.label ?? label}</span><button className="sp-btn q end" data-testid={`share-try-${key}`} onClick={() => b.refused && run(b.refused)}>Try again</button></>;
+      : <><span className="st bad" title={b.why}>{b.refused?.label ?? label}</span><button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => b.refused && run(b.refused)}>Try again</button>
+        {cancel && <button className="sp-btn q end" onClick={cancel}>Cancel</button>}</>;
+  };
+  const drop = (sub: string) => {
+    setAdded((old) => { const next = { ...old }; delete next[sub]; return next; });
+    setBusy((old) => { const next = { ...old }; delete next[`person:${sub}`]; return next; });
   };
 
   const personRow = (p: Person) => {
@@ -233,14 +243,18 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const must = (p.signOff ?? (r?.required ? "required" : null)) === "required";
     const state = busy[key]?.state ?? (r?.status === "signed_off" ? "signed_off" : "waiting");
     const level = p.access;
+    // Added here but not yet in the Library: nothing to change until the add lands.
+    const pending = !!added[p.sub] && !access?.people.some((a) => a.sub === p.sub);
+    const why = busy[key]?.state === "failed" ? busy[key]?.why : undefined;
     return <Fragment key={key}>
       <div className={`r who ${menu === key ? "act" : ""}`} data-testid={`share-person-${p.sub}`} data-state={state} data-access={level ?? ""} data-sign-off={p.signOff ?? (r ? (r.required ? "required" : "optional") : "none")}>
         <i className="av">{initials(p.name)}</i>
         <span className="grid grow"><span className="nm" title={p.name}>{p.name}</span>
-          {note && <span className={`note ${note.tone}`}>{note.tone === "ok" && <ShareCheck />}{note.text}</span>}</span>
-        {status(key, "Couldn't save") ?? (signOff?.sub === p.sub && r?.status !== "signed_off"
+          {why ? <span className="note bad" role="alert">{why}</span>
+            : note && <span className={`note ${note.tone}`}>{note.tone === "ok" && <ShareCheck />}{note.text}</span>}</span>
+        {status(key, "Couldn't save", pending ? () => drop(p.sub) : undefined) ?? (signOff?.sub === p.sub && r?.status !== "signed_off"
           ? <button className="sp-btn q end" disabled={signOff.disabled} onClick={signOff.run}>Sign off</button> : null)}
-        {target && level ? <button className="sel" aria-haspopup="menu" aria-expanded={menu === key} aria-label={`What ${p.name} can do`} disabled={busy[key]?.state === "saving"} onClick={() => setMenu(menu === key ? null : key)}>{CAN[level]}<ShareChevron /></button>
+        {pending ? !busy[key] && level && <span className="st">{CAN[level]}</span> : target && level ? <button className="sel" aria-haspopup="menu" aria-expanded={menu === key} aria-label={`What ${p.name} can do`} disabled={busy[key]?.state === "saving"} onClick={() => setMenu(menu === key ? null : key)}>{CAN[level]}<ShareChevron /></button>
           : level && <span className="st">{CAN[level]}</span>}
       </div>
       {menu === key && target && level && <div className="menu" role="menu" data-testid={`share-menu-${p.sub}`}>
@@ -324,18 +338,20 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         </div>}
     </section>}
     <section className="sec fill" data-testid="share-access">
-      {listed ? <>
+      {/* A first add shows here at once, and stays with its error if the upload is refused. */}
+      {(listed || people.length > 0) && <>
         <div className="lab"><b>Who has access</b><span>{[count && `${count} ${count === 1 ? "person" : "people"}`, scopes.length && `${scopes.length} ${scopes.length === 1 ? "team" : "teams"}`].filter(Boolean).join(" · ")}</span></div>
         {owned && <div className="r who" data-testid="share-owner"><i className="av">{initials("You")}</i><span className="grid grow"><span className="nm">You</span><span className="note">Author</span></span><span className="st">Owner</span></div>}
         {people.map(personRow)}
         {scopes.map(scopeRow)}
         {buildNote && <p className="hint">{buildNote}</p>}
-        {target?.stopAll && (people.length > 0 || scopes.length > 0) && (stopping
+        {listed && target?.stopAll && (people.length > 0 || scopes.length > 0) && (stopping
           ? <div className="msg" data-testid="share-stop-confirm"><span className="grow">Stop sharing with everyone? Only you will be able to open it.</span>
             <button className="sp-btn s" onClick={() => { setStopping(false); run({ key: "all", label: "Couldn't stop sharing", run: () => latest.current.target!.stopAll!() }); }}>Stop sharing</button>
             <button className="sp-btn q end" onClick={() => setStopping(false)}>Cancel</button></div>
           : <div className="line">{status("all", "Couldn't stop sharing") ?? <button className="sp-btn q stop" data-testid="share-stop-all" onClick={() => setStopping(true)}>Stop sharing</button>}</div>)}
-      </> : <>
+      </>}
+      {!listed && <>
         {target?.shareScope && offered.length > 0 && <><div className="lab"><b>Your teams</b></div>{offered.map((t) => teamRow(t, false))}</>}
         {rules?.plan === plan.id && rules.rev === plan.rev && rules.rows.length > 0 && <><div className="lab"><b>{org} asks for</b></div><PolicyPreview rows={rules.rows} /></>}
         {target && <p className="hint" data-testid="share-upload">{access?.kept_here === false

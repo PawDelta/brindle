@@ -123,8 +123,15 @@ def revoke_scope(call: Call, kind: Any, scope_id: Any) -> dict:
 
 
 def stop(call: Call) -> dict:
-    """Stop sharing with everyone: each person and each scope, one at a time.
-    The owner keeps it, and an org rule that asks for review still asks."""
+    """Stop sharing with everyone: its share link first, then each person and
+    each scope, one at a time. Any refusal stops it there and is raised, so
+    nobody is told it stopped while someone still has it. The owner keeps it,
+    and an org rule that asks for review still asks."""
+    try:
+        call("DELETE", "/design/share-link")
+    except ad.Refused as e:
+        if e.status != 404:          # no link to turn off
+            raise
     now = read(call)
     for person in now["people"]:
         revoke(call, person["sub"])

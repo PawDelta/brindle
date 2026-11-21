@@ -27,7 +27,7 @@ function library(start: Partial<ShareAccess> = {}, signed: string[] = []) {
   const write = (call: string, sub: string, change: () => void) => new Promise<Plan>((resolve, reject) => {
     const finish = () => {
       calls.push(call);
-      if (refuse.delete(sub)) { reject(new Error("conflict")); return; }
+      if (refuse.delete(sub)) { reject(new Error(`The Library refused ${call}.`)); return; }
       change();
       resolve(plan());
     };
@@ -47,15 +47,15 @@ function library(start: Partial<ShareAccess> = {}, signed: string[] = []) {
     revoke: (sub) => write(`revoke ${sub}`, sub, () => { state.people = state.people.filter((p) => p.sub !== sub); }),
     revokeScope: (scope) => write(`revokeScope ${scope.kind}:${scope.id}`, scope.id, () => { state.scopes = state.scopes.filter((s) => s.id !== scope.id); }),
     shareScope: (scope) => write(`shareScope ${scope.kind}:${scope.id}`, scope.id, () => { state.shared = true; state.scopes = [...state.scopes, scope]; }),
-    stopAll: () => write("stopAll", "", () => { state.people = []; state.scopes = []; }),
+    stopAll: () => write("stopAll", "all", () => { state.people = []; state.scopes = []; }),
   };
   return { state, calls, target, refuse, plan, held, set hold(on: boolean) { hold = on; } };
 }
 
-function Reader({ lib, directory = [] }: { lib: ReturnType<typeof library>; directory?: LibraryPerson[] }) {
+function Reader({ lib, directory = [], onStopAll }: { lib: ReturnType<typeof library>; directory?: LibraryPerson[]; onStopAll?: () => void }) {
   const [plan, setPlan] = useState(lib.plan());
   const [visible, show] = useState(true);
-  return <><button onClick={() => show(true)}>Open</button><SharePanel plan={plan} target={lib.target} nameOf={(s) => s} onBusy={() => {}} owned
+  return <><button onClick={() => show(true)}>Open</button><SharePanel plan={plan} target={lib.target} nameOf={(s) => s} onBusy={() => {}} owned onStopAll={onStopAll}
     teams={teams} directory={directory} writes={{ begin: () => true, end: (p) => setPlan(p ?? lib.plan()) }} visible={visible} onClose={() => show(false)} /></>;
 }
 const row = (sub: string) => screen.getByTestId(`share-person-${sub}`);
@@ -147,16 +147,23 @@ it("keeps other people's changes when one fails, and sends only that one again",
 it("stops sharing with one person, one team, or everyone", async () => {
   const lib = library({ scopes: [{ kind: "group", id: "platform" }, { kind: "org", id: "o1" }], people: [
     { sub: "sam", name: null, access: "edit", sign_off: null }, { sub: "lena", name: null, access: "view", sign_off: "required" }] });
-  await act(async () => render(<Reader lib={lib} />));
+  let linkReads = 0;
+  await act(async () => render(<Reader lib={lib} onStopAll={() => linkReads++} />));
   await choose("sam", "Stop sharing");
   expect(screen.queryByTestId("share-person-sam")).toBeNull();
   fireEvent.click(within(screen.getByTestId("share-scope-group-platform")).getByRole("button", { name: /can do$/ }));
   await act(async () => fireEvent.click(within(screen.getByTestId("share-menu-group-platform")).getByRole("menuitem", { name: "Stop sharing" })));
   expect(screen.queryByTestId("share-scope-group-platform")).toBeNull();
   expect(screen.getByTestId("share-scope-org-o1")).toBeTruthy();
+  // Refused: everyone keeps it, the link section isn't told it stopped, and Try again sends it again.
+  lib.refuse.add("all");
   fireEvent.click(screen.getByTestId("share-stop-all"));
   await act(async () => fireEvent.click(within(screen.getByTestId("share-stop-confirm")).getByRole("button", { name: "Stop sharing" })));
-  expect(lib.calls).toEqual(["revoke sam", "revokeScope group:platform", "stopAll"]);
+  expect(row("lena")).toBeTruthy();
+  expect(linkReads).toBe(0);
+  await act(async () => fireEvent.click(screen.getByTestId("share-try-all")));
+  expect(linkReads).toBe(1);
+  expect(lib.calls).toEqual(["revoke sam", "revokeScope group:platform", "stopAll", "stopAll"]);
   expect(screen.queryByTestId("share-person-lena")).toBeNull();
   expect(screen.queryByTestId("share-scope-org-o1")).toBeNull();
 });
@@ -170,8 +177,21 @@ it("shares a plan nobody has yet from the same panel, saying it uploads a plan k
   await act(async () => fireEvent.change(screen.getByTestId("share-search"), { target: { value: "ort" } }));
   fireEvent.click(within(screen.getByTestId("share-result-lena")).getByRole("button"));
   expect(within(screen.getByTestId("share-add")).getByText(/uploaded from this Mac/)).toBeTruthy();
+  // The upload is refused twice: the row stays with the Library's error, Try again sends it again, and Cancel drops it.
+  lib.refuse.add("lena");
   await act(async () => fireEvent.click(screen.getByTestId("share-add-confirm")));
-  expect(lib.calls).toEqual(["invite lena comment false"]);
+  expect(row("lena").dataset.state).toBe("failed");
+  expect(within(row("lena")).getByRole("alert").textContent).toBe("The Library refused invite lena comment false.");
+  lib.refuse.add("lena");
+  await act(async () => fireEvent.click(within(row("lena")).getByRole("button", { name: "Try again" })));
+  expect(row("lena").dataset.state).toBe("failed");
+  fireEvent.click(within(row("lena")).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByTestId("share-person-lena")).toBeNull();
+  expect(screen.getByTestId("share-upload")).toBeTruthy();
+  await act(async () => fireEvent.change(screen.getByTestId("share-search"), { target: { value: "ort" } }));
+  fireEvent.click(within(screen.getByTestId("share-result-lena")).getByRole("button"));
+  await act(async () => fireEvent.click(screen.getByTestId("share-add-confirm")));
+  expect(lib.calls).toEqual(Array(3).fill("invite lena comment false"));
   expect(row("lena").dataset.access).toBe("comment");
   expect(screen.queryByTestId("share-upload")).toBeNull();
 });

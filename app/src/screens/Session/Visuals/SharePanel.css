@@ -71,6 +71,7 @@
 .share-panel .note{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;line-height:1.45;color:var(--ink-3)}
 .share-panel .note.ok{color:var(--pass)}
 .share-panel .note.wait{color:var(--sap)}
+.share-panel .note.bad{color:var(--fail)}
 .share-panel .mx{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-3)}
 .share-panel .mi.box{justify-content:flex-start;gap:8px;padding-top:6px;padding-bottom:6px}
 .share-panel .mi.sep{border-top:1px solid var(--line);border-radius:0 0 4px 4px;margin-top:4px}

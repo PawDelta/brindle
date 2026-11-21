@@ -33,9 +33,21 @@ class PeopleLibrary(AccessLibrary):
                 f"DELETE {BASE}/share/user/{sub}": lambda f, h, sub=sub: self.revoke(sub),
             })
         remote.routes[f"DELETE {BASE}/share/group/t_1"] = lambda f, h: self.drop(TEAM)
+        remote.routes[f"DELETE {DESIGN}/share-link"] = self.unlink
+        self.link, self.unlink_status = None, 200
+
+    def unlink(self, form, headers):
+        if self.link is None:
+            return 404, {"error": "not_found"}
+        if self.unlink_status != 200:
+            return self.unlink_status, {"error": "unavailable"}
+        self.link = None
+        return 200, {"link": None}
 
     def readable(self):
-        return super().readable() or {"kind": "user", "id": self.actor} in self.scopes
+        # "stranger" holds the plan's share link and nothing else.
+        return (super().readable() or {"kind": "user", "id": self.actor} in self.scopes
+                or (self.actor == "stranger" and self.link is not None))
 
     def role(self, sub, form):
         self.permissions[sub] = dict(ROLES[form["role"]])
@@ -148,3 +160,19 @@ def test_stop_sharing_revokes_people_teams_and_the_whole_plan(panel):
     left = app.get(f"/v1/plans/{pid}/access").json()
     assert left["shared"] and left["people"] == [] and left["scopes"] == []
     assert library.scopes == [{"kind": "user", "id": library.author}]
+
+
+@pytest.mark.parametrize("unlink", [200, 503])
+def test_stop_sharing_turns_the_link_off_or_fails_without_revoking_anyone(panel, unlink):
+    pid, library, app = panel
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "view"}).status_code == 200
+    library.link, library.unlink_status = {"url": "https://plans.example/dsl_1"}, unlink
+    assert as_(library, app, "stranger") is not None
+    stopped = app.delete(f"/v1/plans/{pid}/access")
+    if unlink == 200:
+        assert stopped.status_code == 200, stopped.json()
+        assert as_(library, app, "stranger") is None and as_(library, app, "ann") is None
+    else:
+        # The refusal reaches the panel, and nobody was told it stopped while the link still opens it.
+        assert stopped.status_code >= 500
+        assert as_(library, app, "stranger") is not None and as_(library, app, "ann") is not None
