@@ -82,7 +82,7 @@ it("keeps two readers present without section editors and removes a departing re
   const live = daemon.client();
   const reader = (me: string) => {
     const design: SharedDesign = { id: "doc", session: "", title: "Readers", rev: 1, state: "open", markdown: "Text", lede: "Text", sections: [], decisions: [], split: [], queued: 0, created_at: 1, me, author: "Ann" };
-    const client = { visualLive: live.visualLive.bind(live), libraryPeople: async () => ({ people: [] }), sharedDesign: async () => design, writeSharedDesign: async () => design };
+    const client = { visualLive: live.visualLive.bind(live), libraryPeople: async () => ({ people: ["Bo", "Cy", "Dee"].map((sub) => ({ sub, display_name: sub, email: "" })) }), sharedDesign: async () => design, writeSharedDesign: async () => design };
     return render(<SharedDesignReader client={client} docId="doc" onBack={() => {}} />);
   };
   const bo = reader("Bo");
