@@ -63,7 +63,8 @@ parts run one by one, and a part that's denied or asks does so at any depth.
 What the reader can't tell (a program only the run knows, an eval, a program
 fed what it will run, syntax it doesn't read) gets shell/unchecked's answer
 (brindle.permission_groups.unverifiable); an unresolved syntax ask returns
-to the agent as a deny with rewrite guidance.
+to the agent as a deny with rewrite guidance, unless only opaque code input
+remains for the person to decide on.
 
 Where rules come from (``source``): ``preset`` (seeded by the chosen preset),
 ``repo`` (``<repo>/.brindle/permissions.json``: only its deny rules are used,
@@ -3629,7 +3630,7 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
     if syntax and alone and unchecked == "allow" and unread and not any(isinstance(e, _DenyMayCover) for e in unread):
         return Decision("allow", f"brindle can't check it, and the {permission_groups.UNVERIFIABLE} setting runs "
                                  f"such commands", ruled.rule if ruled else None)
-    if syntax:
+    if syntax and not _opaque_code_only(req):
         # A syntax ask is work for the agent, before any real approval can be
         # requested. Keep the marker internal until all parts and settings
         # have been checked, so readable commands retain their normal rules.
@@ -4600,11 +4601,12 @@ def _script_word(command: str, i: int, *, credential_scan: bool = False) -> tupl
 
 
 def _script_tokens(command: str, *, credential_scan: bool = False,
-                   partial: list[tuple] | None = None) -> list[tuple] | None:
+                   partial: list[tuple] | None = None, code_input: bool = False) -> list[tuple] | None:
     """``("word", _Word)``, ``("op", text, spaced)`` and ``("heredoc", body,
     expands, spaced)`` for each word, operator and heredoc of ``command``,
     or None for what _flat_script doesn't read: a comment, a subshell,
-    process substitution, ``;;`` or an unclosed heredoc."""
+    process substitution, ``;;`` or an unclosed heredoc. ``code_input`` reads
+    input process substitutions only to classify an ask, never to allow it."""
     from brindle.native.permissions import _tokens
 
     out: list[tuple] = [] if partial is None else partial
@@ -4638,6 +4640,13 @@ def _script_tokens(command: str, *, credential_scan: bool = False,
             i = n if end < 0 else end
             continue
         if c in ";&|<>()":
+            if code_input and command.startswith("<(", i):
+                end = _substitution_end(command, i)
+                if end is None or end < n and command[end] not in " \t\n;&|<>()":
+                    return None
+                out.append(("word", _Word(command[i:end], spaced, [], [command[i + 2:end - 1]])))
+                i, spaced = end, False
+                continue
             op = next(o for o in _SCRIPT_OPERATORS if command.startswith(o, i))
             if not credential_scan and (op in (";;", "(", ")")
                                         or op in ("<", ">") and command.startswith("(", i + 1)):
@@ -4894,10 +4903,11 @@ class _Flattener:
     commands it runs."""
 
     def __init__(self, cwd: str, *, credential_scan: bool = False, reading: bool = False,
-                 snapshot_loops: bool = False):
+                 snapshot_loops: bool = False, code_input: bool = False):
         self.cwd = cwd
         self.credential_scan = credential_scan
         self.snapshot_loops = snapshot_loops
+        self.code_input = code_input
         self.runners = _CODE_RUNNERS if reading else _STDIN_RUNNERS    # _PartReader's: any program that runs a heredoc
         self.reading = reading
         self.out: list[str] = []
@@ -4935,7 +4945,7 @@ class _Flattener:
             raise ValueError("too many commands")
 
     def script(self, command: str, env: dict, top: bool = True) -> None:
-        tokens = _script_tokens(command, credential_scan=self.credential_scan)
+        tokens = _script_tokens(command, credential_scan=self.credential_scan, code_input=self.code_input)
         if tokens is None:
             raise ValueError("unreadable syntax")
         if _heredoc_readers(tokens) & self.runners:
@@ -5066,7 +5076,7 @@ class _Flattener:
 
     def substitution(self, inner: str, env: dict) -> None:
         sub = _Flattener(self.cwd, credential_scan=self.credential_scan, reading=self.reading,
-                         snapshot_loops=self.snapshot_loops)
+                         snapshot_loops=self.snapshot_loops, code_input=self.code_input)
         sub.ids, sub.scope = self.ids, self.scope + (next(self.ids),)    # a subshell of its own
         sub.loop = self.loop
         sub.script(inner, dict(env), top=False)    # what HOME is here is what the outer script left
@@ -5333,6 +5343,10 @@ class _Unverifiable(ValueError):
     knows): the unverifiable answer even where nothing would have asked."""
 
 
+class _OpaqueCode(_Unverifiable):
+    """Code supplied at runtime that a rewrite cannot make checkable."""
+
+
 class _Malformed(_Unverifiable):
     """Syntax the shell itself won't accept: an unclosed quote or structure."""
 
@@ -5420,10 +5434,13 @@ def _source_word(program: str, args: list[str]) -> str | None:
 
 
 class _PartReader:
-    def __init__(self, req: Request, *, credential_scan: bool = False, snapshot_loops: bool = False):
+    def __init__(self, req: Request, *, credential_scan: bool = False, snapshot_loops: bool = False,
+                 code_input: bool = False):
         self.req = req
         self.credential_scan = credential_scan
         self.snapshot_loops = snapshot_loops
+        self.code_input = code_input
+        self.opaque = False
         self.fed = False    # what's being read inherits a pipe's input
         self.input_stays = False    # an exec gave the shell input: everything after it reads that
         self.cwd: str | None = req.cwd or req.worktree or None
@@ -5540,7 +5557,7 @@ class _PartReader:
         shell (an eval's words inside an if or a pipeline may not); ``chains``:
         whether a cd's && chain is followed in it (not in an eval's words)."""
         # Read with the scan's tolerance: what even that can't is no shell syntax at all.
-        tokens = _script_tokens(command, credential_scan=True)
+        tokens = _script_tokens(command, credential_scan=True, code_input=self.code_input)
         if tokens is None:
             raise _Malformed("unclosed syntax")
         try:
@@ -5555,7 +5572,7 @@ class _PartReader:
         if readers & _CODE_RUNNERS:
             raise ValueError("a heredoc a program may run as code")
         flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan, reading=not self.credential_scan,
-                               snapshot_loops=self.snapshot_loops)
+                               snapshot_loops=self.snapshot_loops, code_input=self.code_input)
         flattener.ids, flattener.scope = self.ids, self.scope
         flattener.loop = self.loop
         try:
@@ -5573,7 +5590,12 @@ class _PartReader:
             self.fed = outer or fed or self.input_stays
             self.scope = scope
             self.loop = inside
-            self.part(line, definite and sure, chains and chained, chains and leads)
+            try:
+                self.part(line, definite and sure, chains and chained, chains and leads)
+            except _OpaqueCode:
+                if not self.code_input:
+                    raise
+                self.opaque = self.wrote = True
         self.fed, self.scope, self.loop = outer, shell, loop
 
     def inner(self, command: str) -> None:
@@ -5588,7 +5610,7 @@ class _PartReader:
         """One simple command; ``chained``: it runs only if the one before it
         succeeded (_Flattener.chained); ``leads``: what follows it runs only if
         it succeeded."""
-        tokens = _script_tokens(line, credential_scan=self.credential_scan)
+        tokens = _script_tokens(line, credential_scan=self.credential_scan, code_input=self.code_input)
         if tokens is None or any(t[0] == "heredoc" for t in tokens):
             raise ValueError("unreadable syntax")
         if not chained:
@@ -5693,7 +5715,13 @@ class _PartReader:
             self.read(" ".join(part.words[2 if part.words[1:2] == ["--"] else 1:]), definite, chains=False)
             return
         if program == "eval":
+            if not (part.globs or part.writes or part.reads):
+                raise _OpaqueCode("eval runs what only the run knows")
             raise _Unverifiable("eval runs what only the run knows")
+        if (program in ("source", ".") and self.code_input and len(part.words) >= 2
+                and part.words[1].startswith("<(") and part.unresolved == [part.words[1]]
+                and not (part.globs or part.writes or part.reads)):
+            raise _OpaqueCode("source runs process output")
         if program in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
         part.dotglob = self.options[self.scope] = _dotglob_after(part, self.dotglob())
@@ -5744,9 +5772,13 @@ class _PartReader:
             if name.startswith("python") and "PYTHONINSPECT=" in part.line:    # env PYTHONINSPECT=1 python3 -c x
                 source = None
             if source in part.unresolved or source is None and any(arg in part.unresolved for arg in args):
+                if (self.code_input and source is not None and source.startswith("<(")
+                        and part.unresolved == [source]):
+                    part.unknown = False    # only this process output is left to the person
+                    raise _OpaqueCode(f"{name} runs process output")
                 raise _Unverifiable(f"{name} runs what only the run knows")
             if source is None and fed:
-                raise _Unverifiable(f"{name} runs what it is fed")
+                raise _OpaqueCode(f"{name} runs what it is fed")
             if code:
                 # nullglob drops unmatched words instead of passing them literally.
                 # Keep pattern proofs conservative inside that shell.
@@ -5875,6 +5907,21 @@ def shell_parts(req: Request, why: list[ValueError] | None = None, *,
             why.append(e)
         return None
     return reader.parts or None
+
+
+def _opaque_code_only(req: Request) -> bool:
+    """Whether runtime code input is the only obstacle to reading the command.
+
+    This second pass classifies an unresolved ask; it never approves a command.
+    Continue past opaque code so a later expansion or unsupported construct
+    still returns to the agent for rewriting.
+    """
+    reader = _PartReader(req, code_input=True)
+    try:
+        reader.read(req.command)
+    except ValueError:
+        return False
+    return reader.opaque and all(not (part.unknown or part.globs or part.redirect_glob) for part in reader.parts)
 
 
 

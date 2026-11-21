@@ -95,7 +95,7 @@ def test_an_agent_cannot_change_the_permission_rules(monkeypatch):
     pytest.param("git status | sed 's/a/b/w out'", "ask", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("git status | sort -o out", "ask", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("git status | uniq input out", "ask", marks=pytest.mark.variant("bypass attempt")),
-    pytest.param('eval "$COMMAND"', "deny",
+    pytest.param('eval "$COMMAND"', "ask",
                  marks=pytest.mark.variant("shell parser must preserve restrictions through this syntax")),
     pytest.param('env VAR=$value echo ready', "deny",
                  marks=pytest.mark.variant("unquoted env assignment can split and select another executable")),
