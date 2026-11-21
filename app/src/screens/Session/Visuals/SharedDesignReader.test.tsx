@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { DaemonError, type DesignShareLink, type SharedDesign } from "../../../api/client";
 import type { ShareLinkClient, SharedDesignClient } from "./client";
 import { SharedDesignReader } from "./SharedDesignReader";
+import { AccessRequest } from "./AccessRequest";
 
 afterEach(() => {
   cleanup();
@@ -27,17 +28,33 @@ it.each([
   if (!can_comment) expect(screen.queryByRole("button", { name: "Comment" })).toBeNull();
 });
 
-it("asks the author for access and keeps a sent request disabled", async () => {
+it.each(["s", "context"])("asks the author for access and keeps a sent request disabled in section %s", async (section) => {
   const requests: string[] = [];
   const client: SharedDesignClient = {
-    sharedDesign: async () => ({ ...design, can_comment: false, can_suggest: false, can_sign_off: false }),
-    writeSharedDesign: async (_id, _tail, body) => { requests.push(String(body.role)); return { ...design, can_comment: false }; },
+    sharedDesign: async () => ({ ...design, sections: [{ id: section, title: "Context", markdown: "Context." }], can_comment: false, can_suggest: false, can_sign_off: false }),
+    writeSharedDesign: async (_id, _tail, body) => { requests.push(String(body.role)); return { ...design, can_comment: false, access_request: { role: "comment", status: "pending" } }; },
     libraryPeople: async () => ({ people: [] }),
   };
   await act(async () => { render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />); });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Ask to comment" })));
   expect(requests).toEqual(["comment"]);
   expect(screen.getByRole("button", { name: "Comment access requested" }).hasAttribute("disabled")).toBe(true);
+});
+
+it("reconciles a sent access request with a later decline without remounting", async () => {
+  const viewer = { ...design, can_comment: false };
+  const client: SharedDesignClient = {
+    sharedDesign: async () => viewer,
+    writeSharedDesign: async () => ({ ...viewer, access_request: { role: "comment", status: "pending" } }),
+    libraryPeople: async () => ({ people: [] }),
+  };
+  const { rerender } = render(<AccessRequest client={client} doc={viewer} />);
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Ask to comment" })));
+  expect(screen.getByRole("button", { name: "Comment access requested" }).hasAttribute("disabled")).toBe(true);
+  rerender(<AccessRequest client={client} doc={{ ...viewer, access_request: { role: "comment", status: "pending" } }} />);
+  expect(screen.getByRole("button", { name: "Comment access requested" }).hasAttribute("disabled")).toBe(true);
+  rerender(<AccessRequest client={client} doc={{ ...viewer, access_request: { role: "comment", status: "declined" } }} />);
+  expect(screen.getByRole("button", { name: "Ask to comment" }).hasAttribute("disabled")).toBe(false);
 });
 
 it("a teammate signs off through the Library, keeps a draft across a stale write, and loses the doc with their access", async () => {

@@ -1193,6 +1193,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             share={!historical && shareMenu} />
         )}
         {!chrome && presence && <div className="hidden">{presence}</div>}
+        {teammate && top}
         <div ref={setStripHost} className="contents" />
         {typing && !historical && <FormatBar />}
         <div className="flex min-h-0 flex-1 bg-canvas" data-testid="plan-design-doc">
