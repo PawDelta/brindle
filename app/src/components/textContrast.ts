@@ -133,9 +133,11 @@ const freshHeld = (): Held => ({ fgSgr: "39", bgSgr: "49", dim: false });
    (Claude's line grounds sit at 0.5 to 0.6). Darker grounds (black, a status bar's) are a program's choice and stay. */
 const MID_GROUND = [0.1, 0.45] as const;
 
-/* ground in its own hue, its HSL lightness raised until its luminance reaches `target`. */
+/* ground in its own hue, its HSL lightness raised until its luminance reaches `target`. A red keeps its saturation at
+   0.85 at least: a light red with less reads pink (a removed word must read as removed); greens keep their own. */
 export function lightenTo(ground: Rgb, target: number): Rgb {
-  const [h, s, l] = toHsl(ground);
+  const [h, s0, l] = toHsl(ground);
+  const s = h >= 345 || h < 15 ? Math.max(s0, 0.85) : s0;
   let low = l, high = 1;
   for (let i = 0; i < 24; i++) {
     const mid = (low + high) / 2;

@@ -129,6 +129,9 @@ export function chatTheme(theme: ChatTheme): ITheme {
   if (theme === "light") {
     extendedAnsi[237 - 16] = "#e9eded";
     extendedAnsi[231 - 16] = PALETTES.light.foreground!;
+    // Without truecolour Claude draws its light diff's removed lines on 218 (its rgb(255,168,180) as chalk picks a
+    // slot), which the cube makes a pink, rgb(255,175,215) at 330°: drawn as its light red neighbour 217 (0°) instead.
+    extendedAnsi[218 - 16] = "#ffafaf";
   }
   return { ...PALETTES[theme], extendedAnsi };
 }

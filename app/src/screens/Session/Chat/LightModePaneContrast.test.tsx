@@ -75,10 +75,10 @@ const LIGHT_DIFF = {
   truecolour: { dec: "2;207;34;46", key: "2;167;29;93", ink: "2;51;51;51", num: "2;0;134;179", del: "2;255;168;180", delWord: "2;209;69;75", addDec: "2;36;138;61", add: "2;105;219;124", addWord: "2;47;157;68" },
   "256-colour": { dec: "5;167", key: "5;132", ink: "5;236", num: "5;38", del: "5;218", delWord: "5;167", addDec: "5;71", add: "5;114", addWord: "5;71" },
 };
-/* A ground reads as remove (red) or add (green) by its hue. */
+/* A ground reads as remove (red, not pink: within 15° of 0°) or add (green) by its hue. */
 const reads = (css: string) => {
   const [h, s] = toHsl(parseCss(css)!);
-  return s < 0.15 ? "grey" : h >= 330 || h < 25 ? "red" : h >= 80 && h < 165 ? "green" : "other";
+  return s < 0.15 ? "grey" : h >= 345 || h < 15 ? "red" : h >= 80 && h < 165 ? "green" : h >= 270 ? "pink" : "other";
 };
 
 function lightDiff(c: typeof LIGHT_DIFF.truecolour): string {
@@ -136,7 +136,9 @@ it("draws Claude's faint 256-colour and truecolour greys readably on the light p
       // The changed word's mid-tone ground drawn lighter in its own hue: still red or green, and darker than its line.
       const [word, sentWord] = [drawn[3].ground, named(terminal, expected[row][3][1])];
       expect(reads(word), `${form} row ${row} word`).toBe(row === 0 ? "red" : "green");
-      expect(Math.abs(hue(word)[0] - hue(sentWord)[0]), `${form} row ${row} word hue`).toBeLessThan(6);
+      expect(Math.abs(((hue(word)[0] - hue(sentWord)[0] + 540) % 360) - 180), `${form} row ${row} word hue`).toBeLessThan(6);
+      // A removed word's lighter ground stays a red, not a pastel pink.
+      if (row === 0) expect(hue(word)[1], `${form} word saturation`).toBeGreaterThanOrEqual(0.8);
       expect(groundLuminance(parseCss(word)!)).toBeLessThan(groundLuminance(parseCss(line)!));
       expect(contrast(word, line), `${form} row ${row} word against its line`).toBeGreaterThan(1.1);
       // Every token at 4.5 on its ground, in its own hue.
