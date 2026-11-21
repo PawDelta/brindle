@@ -196,6 +196,31 @@ def test_rows_marked_read_stay_read_on_another_machine(db, library, daemon):
     assert shown == {"signoff_progress": True, "shared_doc_comment": True, "review_requested": True}
 
 
+def test_mark_all_read_survives_an_in_flight_feed(db, library, daemon, monkeypatch):
+    lifecycle._poll_review_queue()
+    keys = [i["item_key"] for i in _inbox(daemon) if i["inbox_group"] == "from_team"]
+    call = library.call
+
+    def overlapping_read(method, path, body=None, token=None):
+        response = call(method, path, body, token)
+        if (method, path) == ("GET", inbox_team.FEED):
+            # The feed has captured unread rows, but its answer arrives after the read acknowledgement.
+            marked = daemon.post("/v1/inbox/read", json={"item_keys": keys})
+            assert marked.status_code == 200
+            assert set(marked.json()["read"]) == set(keys)
+        return response
+
+    with monkeypatch.context() as patch:
+        patch.setattr(library, "call", overlapping_read)
+        inbox_team.poll(db)
+    shown = [i for i in _inbox(daemon) if i["item_key"] in keys]
+    assert len(shown) == len(keys) and all(i["read"] for i in shown)
+    inbox_team.clear()
+    lifecycle._poll_review_queue()
+    shown = [i for i in _inbox(daemon) if i["item_key"] in keys]
+    assert len(shown) == len(keys) and all(i["read"] for i in shown)
+
+
 def _legacy_key(item: dict) -> str:
     """The dismissal key an Inbox card had before the team Inbox: its fields then, hashed."""
     before = ("kind", "reason", "agent_id", "workspace_id", "root_id", "detail", "notice_id", "request_id",
