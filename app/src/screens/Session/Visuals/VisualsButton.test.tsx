@@ -56,11 +56,17 @@ describe("VisualsButton", () => {
     expect(screen.getByTestId("visuals-dot").getAttribute("aria-label")).toBe("unread");
   });
 
-  it("renders the document icon beside the Docs name", () => {
+  it("renders the page icon without a visible label and names the button accessibly", () => {
     const { container } = renderButton([doc({ id: "v_1" })]);
     const button = screen.getByTestId("visuals-button");
-    expect(button.textContent).toBe("Docs");
-    expect(button.querySelector("svg")!.innerHTML).toBe(render(<FileIcon />).container.querySelector("svg")!.innerHTML);
+    expect(button.textContent).toBe("");
+    expect(button.getAttribute("aria-label")).toBe("Documents");
+    expect(button.getAttribute("title")).toBe("Documents");
+    const icon = button.querySelector("svg")!;
+    const expectedIcon = render(<FileIcon />).container.querySelector("svg")!;
+    expect(icon.getAttribute("viewBox")).toBe(expectedIcon.getAttribute("viewBox"));
+    expect(icon.querySelector("path")?.getAttribute("d")).toBe(expectedIcon.querySelector("path")?.getAttribute("d"));
+    expect(icon.querySelectorAll("path")[1]?.getAttribute("d")).toBe(expectedIcon.querySelectorAll("path")[1]?.getAttribute("d"));
     expect(container.querySelector("svg")).toBe(button.querySelector("svg"));
   });
 });
