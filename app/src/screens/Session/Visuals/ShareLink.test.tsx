@@ -18,7 +18,7 @@ it("copies the selected organization or team URL from the plan menu", async () =
     revokePlanShareLink: async () => ({ available: true, link: null }),
   }, "p1")!;
   await act(async () => render(<Menu target={target} fresh={0} />));
-  const picker = screen.getByRole("combobox");
+  const picker = screen.getByRole("combobox", { name: "Link audience" });
   fireEvent.change(picker, { target: { value: "team:g" } });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy link" })));
   expect(copied).toEqual(["https://plans.pawdelta.com/acme/core/plan/token"]);
@@ -74,7 +74,7 @@ it("adopts a delayed audience refresh while retaining choices across unchanged a
   };
   const { rerender } = render(<Menu target={target} fresh={0} />);
   await act(async () => reads[0](org));
-  const picker = screen.getByRole("combobox") as HTMLSelectElement;
+  const picker = screen.getByRole("combobox", { name: "Link audience" }) as HTMLSelectElement;
   rerender(<Menu target={target} fresh={1} />);
   fireEvent.change(picker, { target: { value: "team:g" } });
   await act(async () => reads[1]({ ...org }));

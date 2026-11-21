@@ -666,6 +666,53 @@ class PlanDTO(_DTO):
     alongside: list[PlanAlongsideDTO] = []
 
 
+class ShareTeamDTO(_DTO):
+    id: str
+    name: str
+
+
+class SharePersonDTO(_DTO):
+    id: str
+    display_name: str
+    email: str
+    teams: list[ShareTeamDTO]
+    role: str
+    on_plan: bool
+    on_plan_role: Literal["author", "required", "optional", "editor", "suggester", "commenter"] | None = None
+
+
+class SharePeopleDTO(_DTO):
+    people: list[SharePersonDTO]
+
+
+class ShareLinkSettingsDTO(_DTO):
+    scope: Literal["org", "team"] | None = None
+    team: str | None = None
+    permission: Literal["view", "edit"] = "view"
+
+
+class DesignLinkScopeDTO(_DTO):
+    kind: Literal["org", "team"]
+    org_id: str
+    team: str | None = None
+
+
+class DesignLinkDTO(_DTO):
+    url: str
+    created_at: float | None = None
+    access: Literal["anyone", "org", "off"]
+    permission: Literal["view", "edit"] = "view"
+    scope: DesignLinkScopeDTO | None = None
+
+
+class DesignShareLinkDTO(_DTO):
+    available: bool
+    scoped: bool = False
+    access: Literal["anyone", "org", "off"] | None = None
+    reason: str | None = None
+    link: DesignLinkDTO | None = None
+
+
 class SharedDesignDTO(PlanDTO):
     """A design someone else shared, as the person reviewing it reads it
     (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no

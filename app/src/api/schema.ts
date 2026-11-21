@@ -26,6 +26,9 @@ export interface ApiSchema {
   CloudOptionsDTO: CloudOptionsDTO;
   ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
+  DesignLinkDTO: DesignLinkDTO;
+  DesignLinkScopeDTO: DesignLinkScopeDTO;
+  DesignShareLinkDTO: DesignShareLinkDTO;
   DesignTaskDTO: DesignTaskDTO;
   GcloudOptionsDTO: GcloudOptionsDTO;
   GitHubConnectionDTO: GitHubConnectionDTO;
@@ -98,6 +101,10 @@ export interface ApiSchema {
   RuleDTO: RuleDTO;
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
+  ShareLinkSettingsDTO: ShareLinkSettingsDTO;
+  SharePeopleDTO: SharePeopleDTO;
+  SharePersonDTO: SharePersonDTO;
+  ShareTeamDTO: ShareTeamDTO;
   SharedDesignDTO: SharedDesignDTO;
   SignoffDTO: SignoffDTO;
   StoppedAgentDTO: StoppedAgentDTO;
@@ -484,6 +491,37 @@ export interface DecisionDTO {
   scope: string[];
   status: string;
   topic: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "DesignLinkDTO".
+ */
+export interface DesignLinkDTO {
+  access: "anyone" | "org" | "off";
+  created_at?: number | null;
+  permission?: "view" | "edit";
+  scope?: DesignLinkScopeDTO | null;
+  url: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "DesignLinkScopeDTO".
+ */
+export interface DesignLinkScopeDTO {
+  kind: "org" | "team";
+  org_id: string;
+  team?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "DesignShareLinkDTO".
+ */
+export interface DesignShareLinkDTO {
+  access?: ("anyone" | "org" | "off") | null;
+  available: boolean;
+  link?: DesignLinkDTO | null;
+  reason?: string | null;
+  scoped?: boolean;
 }
 /**
  * One task of a design's plan (GET /v1/analysis-docs/{id} ``tasks``), in
@@ -1577,6 +1615,43 @@ export interface SessionDTO {
   status: string;
   status_since?: number | null;
   workspace_id: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ShareLinkSettingsDTO".
+ */
+export interface ShareLinkSettingsDTO {
+  permission?: "view" | "edit";
+  scope?: ("org" | "team") | null;
+  team?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "SharePeopleDTO".
+ */
+export interface SharePeopleDTO {
+  people: SharePersonDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "SharePersonDTO".
+ */
+export interface SharePersonDTO {
+  display_name: string;
+  email: string;
+  id: string;
+  on_plan: boolean;
+  on_plan_role?: ("author" | "required" | "optional" | "editor" | "suggester" | "commenter") | null;
+  role: string;
+  teams: ShareTeamDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ShareTeamDTO".
+ */
+export interface ShareTeamDTO {
+  id: string;
+  name: string;
 }
 /**
  * A design someone else shared, as the person reviewing it reads it

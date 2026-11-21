@@ -2202,6 +2202,280 @@
       "title": "DecisionDTO",
       "type": "object"
     },
+    "DesignLinkDTO": {
+      "$defs": {
+        "DesignLinkScopeDTO": {
+          "properties": {
+            "kind": {
+              "enum": [
+                "org",
+                "team"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "team": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Team"
+            }
+          },
+          "required": [
+            "kind",
+            "org_id"
+          ],
+          "title": "DesignLinkScopeDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "access": {
+          "enum": [
+            "anyone",
+            "org",
+            "off"
+          ],
+          "title": "Access",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "permission": {
+          "default": "view",
+          "enum": [
+            "view",
+            "edit"
+          ],
+          "title": "Permission",
+          "type": "string"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DesignLinkScopeDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "access"
+      ],
+      "title": "DesignLinkDTO",
+      "type": "object"
+    },
+    "DesignLinkScopeDTO": {
+      "properties": {
+        "kind": {
+          "enum": [
+            "org",
+            "team"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "team": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Team"
+        }
+      },
+      "required": [
+        "kind",
+        "org_id"
+      ],
+      "title": "DesignLinkScopeDTO",
+      "type": "object"
+    },
+    "DesignShareLinkDTO": {
+      "$defs": {
+        "DesignLinkDTO": {
+          "properties": {
+            "access": {
+              "enum": [
+                "anyone",
+                "org",
+                "off"
+              ],
+              "title": "Access",
+              "type": "string"
+            },
+            "created_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Created At"
+            },
+            "permission": {
+              "default": "view",
+              "enum": [
+                "view",
+                "edit"
+              ],
+              "title": "Permission",
+              "type": "string"
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DesignLinkScopeDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "url": {
+              "title": "Url",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "access"
+          ],
+          "title": "DesignLinkDTO",
+          "type": "object"
+        },
+        "DesignLinkScopeDTO": {
+          "properties": {
+            "kind": {
+              "enum": [
+                "org",
+                "team"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "team": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Team"
+            }
+          },
+          "required": [
+            "kind",
+            "org_id"
+          ],
+          "title": "DesignLinkScopeDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "enum": [
+                "anyone",
+                "org",
+                "off"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access"
+        },
+        "available": {
+          "title": "Available",
+          "type": "boolean"
+        },
+        "link": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DesignLinkDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "scoped": {
+          "default": false,
+          "title": "Scoped",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "available"
+      ],
+      "title": "DesignShareLinkDTO",
+      "type": "object"
+    },
     "DesignTaskDTO": {
       "description": "One task of a design's plan (GET /v1/analysis-docs/{id} ``tasks``), in\nits board state: queued, working, in review, merged or cancelled.",
       "properties": {
@@ -11594,6 +11868,245 @@
       "title": "SessionDTO",
       "type": "object"
     },
+    "ShareLinkSettingsDTO": {
+      "properties": {
+        "permission": {
+          "default": "view",
+          "enum": [
+            "view",
+            "edit"
+          ],
+          "title": "Permission",
+          "type": "string"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "org",
+                "team"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope"
+        },
+        "team": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Team"
+        }
+      },
+      "title": "ShareLinkSettingsDTO",
+      "type": "object"
+    },
+    "SharePeopleDTO": {
+      "$defs": {
+        "SharePersonDTO": {
+          "properties": {
+            "display_name": {
+              "title": "Display Name",
+              "type": "string"
+            },
+            "email": {
+              "title": "Email",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "on_plan": {
+              "title": "On Plan",
+              "type": "boolean"
+            },
+            "on_plan_role": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "author",
+                    "required",
+                    "optional",
+                    "editor",
+                    "suggester",
+                    "commenter"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "On Plan Role"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            },
+            "teams": {
+              "items": {
+                "$ref": "#/$defs/ShareTeamDTO"
+              },
+              "title": "Teams",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "display_name",
+            "email",
+            "teams",
+            "role",
+            "on_plan"
+          ],
+          "title": "SharePersonDTO",
+          "type": "object"
+        },
+        "ShareTeamDTO": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "ShareTeamDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "people": {
+          "items": {
+            "$ref": "#/$defs/SharePersonDTO"
+          },
+          "title": "People",
+          "type": "array"
+        }
+      },
+      "required": [
+        "people"
+      ],
+      "title": "SharePeopleDTO",
+      "type": "object"
+    },
+    "SharePersonDTO": {
+      "$defs": {
+        "ShareTeamDTO": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "ShareTeamDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "email": {
+          "title": "Email",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "on_plan": {
+          "title": "On Plan",
+          "type": "boolean"
+        },
+        "on_plan_role": {
+          "anyOf": [
+            {
+              "enum": [
+                "author",
+                "required",
+                "optional",
+                "editor",
+                "suggester",
+                "commenter"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "On Plan Role"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "teams": {
+          "items": {
+            "$ref": "#/$defs/ShareTeamDTO"
+          },
+          "title": "Teams",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "display_name",
+        "email",
+        "teams",
+        "role",
+        "on_plan"
+      ],
+      "title": "SharePersonDTO",
+      "type": "object"
+    },
+    "ShareTeamDTO": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "ShareTeamDTO",
+      "type": "object"
+    },
     "SharedDesignDTO": {
       "$defs": {
         "PlanAlongsideDTO": {
@@ -14156,11 +14669,23 @@
     },
     {
       "method": "GET",
+      "path": "/v1/library/designs/{id}/people"
+    },
+    {
+      "method": "GET",
       "path": "/v1/library/designs/{id}/plan"
     },
     {
       "method": "POST",
       "path": "/v1/library/designs/{id}/question"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/library/designs/{id}/reviewers/{sub}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/library/designs/{id}/reviewers/{sub}"
     },
     {
       "method": "DELETE",
@@ -14172,6 +14697,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/library/designs/{id}/share-link"
+    },
+    {
+      "method": "PUT",
       "path": "/v1/library/designs/{id}/share-link"
     },
     {
@@ -14327,6 +14856,10 @@
       "path": "/v1/plans/{id}/history"
     },
     {
+      "method": "GET",
+      "path": "/v1/plans/{id}/people"
+    },
+    {
       "method": "POST",
       "path": "/v1/plans/{id}/policy-ask"
     },
@@ -14341,6 +14874,14 @@
     {
       "method": "POST",
       "path": "/v1/plans/{id}/reviewers"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/plans/{id}/reviewers/{sub}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/plans/{id}/reviewers/{sub}"
     },
     {
       "method": "GET",
@@ -14364,6 +14905,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/share-link"
+    },
+    {
+      "method": "PUT",
       "path": "/v1/plans/{id}/share-link"
     },
     {
