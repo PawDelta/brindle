@@ -338,6 +338,14 @@ def pause_for_exit(recovery: Recovery | None = None) -> list[str]:
             server = tmux.current_server()
             left, seen = [], {root.id for root in roots}
             tries = {e["id"]: e.get("tries") for e in reversed(unresumed)}      # stopping is no fresh start for them
+            # A record can outlive recovery (a missing worker, or a manual resume).
+            # Once the whole session is back at work, this pause begins a new
+            # recovery, rather than spending an old attempt budget again. A chat
+            # still starting or missing any worker keeps its count across starts.
+            for root in roots:
+                if (tries.get(root.id) and root.status in ("idle", "processing", "waiting")
+                        and agents.panes_match(db, root.id, set())):
+                    tries.pop(root.id)
 
             def recorded(session: str) -> dict:
                 return {"id": session, "server": server, **({"tries": tries[session]} if tries.get(session) else {})}
