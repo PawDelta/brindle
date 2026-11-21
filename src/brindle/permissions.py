@@ -4919,8 +4919,29 @@ class _Flattener:
         self.walk(nodes, env, True)
 
     def walk(self, nodes: list[tuple], env: dict, definite: bool, chains: bool = True, fed: bool = False) -> None:
+        success_env = None
         for node in nodes:
             if node[0] == "cmd":
+                on_success = (definite and chains and self.track and not node[4] and node[2] == "&&"
+                              and node[3] in ("", ";", "\n", "&&"))
+                if on_success:
+                    if success_env is None:
+                        success_env = dict(env)
+                    words = [t[1] for t in node[1] if t[0] == "word"]
+                    head = next((w for w in words if not _ASSIGNMENT.match(w.raw)), None)
+                    mutates = any(_REFERENCE.fullmatch(w.raw[start:end]) is None
+                                  for w in words for start, end, _, _ in w.refs)
+                    mutates |= any(w.raw.startswith("{") and _REDIRECT_FD.fullmatch(w.raw) for w in words)
+                    if mutates or head is not None and (head.plain() is None
+                            or head.raw in _VARIABLE_SETTERS | _WRAPPERS | {"trap"}
+                            or words and _LEADING_ASSIGNMENT.match(words[0].raw)):
+                        # A setter may name its target indirectly, and a special
+                        # builtin may retain leading environment assignments.
+                        # Track only plain assignments and ordinary commands.
+                        success_env.clear()
+                        env.clear()
+                else:
+                    success_env = None
                 self.track &= not node[4]
                 chained = (chains and node[2] in ("&&", "|", "|&"),
                            chains and node[2] in ("", ";", "\n", "&&", "&") and node[3] == "&&")
@@ -4928,10 +4949,20 @@ class _Flattener:
                 kept = self.scope
                 if node[2] in ("|", "|&") or node[3] in ("|", "|&", "&"):
                     self.scope = kept + (next(self.ids),)
-                self.command(node[1], env, definite and node[2] in ("", ";", "\n")
-                             and node[3] in ("", ";", "\n", "&&", "||"), chained, fed or node[2] in ("|", "|&"))
+                self.command(node[1], success_env if on_success else env, definite and node[2] in ("", ";", "\n")
+                             and node[3] in ("", ";", "\n", "&&", "||"), chained, fed or node[2] in ("|", "|&"),
+                             known_assignments=on_success)
+                if on_success:
+                    # These values hold only if every preceding && succeeded.
+                    # Outside that chain, even a previously known value may have changed.
+                    assigned = _assigned_in([node])
+                    if assigned is None:
+                        env.clear()
+                    for name in assigned or ():
+                        env.pop(name, None)
                 self.scope = kept
                 continue
+            success_env = None
             self.changed = True
             kept = self.scope
             if node[-1]:    # ( ... ), a piped or backgrounded group, loop or if: a subshell of its own
@@ -5083,7 +5114,8 @@ class _Flattener:
                 i += 1
 
     def command(self, tokens: list[tuple], env: dict, definite: bool,
-                chained: tuple[bool, bool] = (False, False), fed: bool = False) -> None:
+                chained: tuple[bool, bool] = (False, False), fed: bool = False,
+                *, known_assignments: bool = False) -> None:
         from brindle.native.permissions import _tokens
 
         words = [t[1] for t in tokens if t[0] == "word"]
@@ -5116,7 +5148,7 @@ class _Flattener:
                     self.named.append(text)
                 # Read as written: its quotes make one value of x="gh auth token".
                 found = _tokens(value) if value else [(False, "")]
-                known = (definite and not word.substitutions and "~" not in text and found is not None
+                known = ((definite or known_assignments) and not word.substitutions and "~" not in text and found is not None
                          and len(found) == 1 and not found[0][0])
                 if known:
                     env[name] = ("lit", found[0][1])
@@ -5870,6 +5902,10 @@ def _glob_patterns_overlap(left: str, right: str) -> bool:
     """Whether two * / ? patterns may share a string. Unsupported classes
     and a proof too large to finish are overlap, never proof of disjointness.
     Stars may also consume spaces and slashes: this overestimates shell globs."""
+    # A simple bracket class consumes exactly one character. Widen it to ?:
+    # disjointness still proves safety without evaluating ranges or locale.
+    # Leave POSIX classes, collating symbols and unusual spellings unknown.
+    left, right = (re.sub(r"\[[!^]?[A-Za-z0-9_-]+\]", "?", pattern) for pattern in (left, right))
     if "[" in left or "[" in right:
         return True
     pending = [(0, 0)]
@@ -5912,6 +5948,30 @@ def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
                for literal in literals for fragment in literal.split())
 
 
+def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule]) -> bool:
+    """A bounded glob snapshot for reads and explicit pytest invocations.
+
+    Read snapshots may race with new files; writers still need the stronger
+    pattern proof. Unknown expansions, redirects and changed working directories
+    never qualify. Both the written and expanded invocation must be a read.
+    """
+    if (part.unknown or part.assigned or part.writes or part.reads or part.cwd is None or len(part.words) > 500
+            or any("**" in word for word in part.written)):
+        return False
+
+    def reading(words: list[str]) -> bool:
+        args = words
+        if args[:2] == ["uv", "run"]:
+            args = args[2:]
+        if args and _runner_name(args[0]) in ("python", "python3") and args[1:3] == ["-m", "pytest"]:
+            args = args[2:]
+        if args and args[0] == "pytest":
+            return True
+        return words[0] in ("ls", "cat", "head", "tail", "wc", "grep", "rg", "git") and _readonly_part(req, words)
+
+    return reading(part.written) and reading(part.words) and _reads_clear(req, part.words, path_denies)
+
+
 @_whole_command
 def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                why: list[ValueError] | None = None) -> tuple[list[ShellPart], Decision | None] | None:
@@ -5949,6 +6009,8 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
         spans = [part.words, [*part.words, *part.writes, *part.reads]]
         texts = [replace(at, command=_joined(words)) for words in spans]
         matched = _matching_restriction(texts, checks, restrictions, spans)
+        if matched is not None and matched.decision == "deny":
+            return parts, matched
         # An unmatched pattern (an API URL's ? too) needs no expansion proof
         # when neither its unchanged words nor a possible expansion can match
         # a restriction: a matching file can appear before the command runs. The
@@ -5957,7 +6019,8 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
         literal_patterns = (not part.expanded and not part.unknown and matched is None
                             and not any(_patterns_may_restrict(rule, part) for rule in restrictions)
                             and not any("**" in word for word in part.written))
-        if restrictions and (part.redirect_glob or part.globs and not literal_patterns and not (places and (
+        if restrictions and (part.redirect_glob or part.globs and not literal_patterns
+                             and not _snapshot_read(at, part, path_denies) and not (places and (
                 _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
                                                         [part.assigned], [("<", path) for path in part.reads])
                                         for place in places)))):
@@ -5974,8 +6037,6 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             if not places or not all(_reads_clear(place, operands, kept) for place in places):
                 covered("it may read a file a deny covers, or where brindle can't tell")
             return None
-        if matched is not None and matched.decision == "deny":
-            return parts, matched
         for path in part.reads:
             read = replace(req, kind="read", command=None, path=path)
             denied = next((r for r in path_denies if rule_matches(r, read)), None)
