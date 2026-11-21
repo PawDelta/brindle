@@ -241,8 +241,9 @@ export class TextContrast {
   private csi(final: string): string | null {
     const { params, inter } = this;
     if (final === "m" && !inter && !/^[<=>?]/.test(params)) return this.sgr(params);
-    if (final === "p" && inter === "!" && !params) {
-      // DECSTR, as xterm.js does it: attributes back to default, and the active buffer's saved ones with them.
+    if (final === "p" && inter === "!" && /^[\d;:]*$/.test(params)) {
+      // DECSTR, as xterm.js does it (any numeric parameters, CSI 0 ! p included; a private prefix is another
+      // sequence): attributes back to default, and the active buffer's saved ones with them.
       this.pen = freshPen();
       this.held = freshHeld();
       this.saved[this.buffer] = fresh();

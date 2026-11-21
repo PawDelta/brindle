@@ -19,6 +19,7 @@ async function cellAfter(x: number, ...chunks: string[]) {
 // text gets with no history, never one lifted from a grey xterm.js no longer holds.
 it.each([
   ["a soft reset clears what was saved", "\x1b[38;5;246m\x1b7\x1b[!p\x1b8", ""],
+  ["a soft reset with an explicit 0 does too", "\x1b[38;5;246m\x1b7\x1b[0!p\x1b8\x1b[48;5;217m", "\x1b[48;5;217m"],
   ["a restore with nothing saved gives the defaults", "\x1b[38;5;246m\x1b8", ""],
   ["the alternate buffer's save is its own", "\x1b[38;5;246m\x1b[?1049h\x1b[39m\x1b7\x1b[?1049l", "\x1b[38;5;246m"],
 ])("%s", async (_case, history, control) => {
