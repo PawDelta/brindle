@@ -527,7 +527,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
-it("a plan being written offers no sign-off, the same plan can be signed once proposed, and a superseded one stays closed", async () => {
+it("a plan being written offers no sign-off, the same plan can be signed once proposed, and superseded or ended plans stay closed", async () => {
   let plan = doc(0, "", { state: "writing", sections: [] });
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan };
   const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
@@ -544,6 +544,14 @@ it("a plan being written offers no sign-off, the same plan can be signed once pr
   await act(async () => view.rerender(reader({ ...visual, rev: 3 })));
   await waitFor(() => expect(screen.getByTestId("plan-decided").dataset.state).toBe("superseded"));
   expect(screen.queryByTestId("plan-build")).toBeNull();
+
+  plan = { ...plan, state: "closed" };
+  await act(async () => view.rerender(reader({ ...visual, rev: 4 })));
+  await waitFor(() => expect(screen.getByTestId("plan-decided").dataset.state).toBe("closed"));
+  expect(screen.getByTestId("plan-status").dataset.presentation).toBe("closed");
+  expect(screen.getByText("Workers run on your machine.")).toBeTruthy();
+  expect(screen.queryByTestId("plan-build")).toBeNull();
+  expect(screen.queryByTestId("plan-cancel")).toBeNull();
 });
 
 it("a design doc whose Team plan ended says so, once, and only then", async () => {

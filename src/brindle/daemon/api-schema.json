@@ -7796,7 +7796,8 @@
             "approved",
             "writing",
             "superseded",
-            "cancelled"
+            "cancelled",
+            "closed"
           ],
           "title": "State",
           "type": "string"
@@ -13466,7 +13467,8 @@
             "approved",
             "writing",
             "superseded",
-            "cancelled"
+            "cancelled",
+            "closed"
           ],
           "title": "State",
           "type": "string"
