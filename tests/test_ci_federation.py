@@ -427,6 +427,9 @@ def test_scrub_job_removes_job_secrets_but_the_agents_still_reach_the_proxy(upst
            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "t", "ACTIONS_ID_TOKEN_REQUEST_URL": "https://t", "PATH": "/bin"}
     for k, v in env.items():
         monkeypatch.setenv(k, v)
+    # scrub_job sets ANTHROPIC_BASE_URL in os.environ for the proxy; record it
+    # on monkeypatch's undo stack so teardown removes it for later tests.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
     # A process can inherit job secrets absent from the explicit worker env.
     monkeypatch.setenv("ACTIONS_RUNTIME_TOKEN", "inherited-job-secret")
     ci_client.scrub_job(env, fed)

@@ -97,7 +97,8 @@ def _key_billed(profile) -> bool:
             or connections._key(profile.provider)[0] is not None)
 
 
-def limited_until(provider: str, now: float, model: str | None = None) -> float | None:
+def limited_until(provider: str, now: float, model: str | None = None, *,
+                  repo_root: str | None = None, env: dict[str, str] | None = None) -> float | None:
     """When ``provider`` (running ``model``) can take a supervisor again, or
     None while it can now: ``provider_health.limit``, the definition routing
     and the reviewer check use too (limited, closing, rate limited or
@@ -108,7 +109,7 @@ def limited_until(provider: str, now: float, model: str | None = None) -> float 
         return None
     from brindle import provider_health
 
-    health = provider_health.limit(provider, model, now=now)
+    health = provider_health.limit(provider, model, now=now, repo_root=repo_root, env=env)
     return None if health.ok else health.until
 
 
@@ -122,6 +123,17 @@ def _supervisor_profile(provider: str, repo_root: str | None, name: str | None =
     if repo_root:
         profile = agents._with_supervisor_choice(profile, provider, repo_root)
     return replace(profile, provider=provider)
+
+
+def _supervisor_env(provider: str, repo_root: str | None, name: str | None = None) -> dict[str, str] | None:
+    """The profile/connection env a supervisor on ``provider`` runs with, or None."""
+    from brindle import connections
+
+    try:
+        profile = connections.apply(_supervisor_profile(provider, repo_root, name), repo_root)
+    except Exception:  # noqa: BLE001 - never fail switch checks over a missing profile
+        return None
+    return dict(profile.env) if profile.env else None
 
 
 def _supervisor_model(provider: str, repo_root: str | None, name: str | None = None) -> str | None:
@@ -159,7 +171,6 @@ def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: 
     for provider in SUPERVISOR_PROVIDERS:
         if (provider == current or (cfg and provider in cfg.exclude_providers)
                 or not gate.access.allows(provider)
-                or (not allow_limited and limited_until(provider, now) is not None)
                 or not usable(provider, repo_root)):
             continue
         # Judge the identity a supervisor launched with this provider would use,
@@ -170,13 +181,16 @@ def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: 
                 continue
             profile = managed_models.apply_profile(gate.managed, profile)
         profile = connections.apply(profile, repo_root)
+        route_env = dict(profile.env) if profile.env else None
+        if not allow_limited and limited_until(provider, now, repo_root=repo_root, env=route_env) is not None:
+            continue
         if quota_switch() == "auto" and (managed_models.has_org_key(gate.managed, provider)
                                           or _key_billed(profile)):
             continue
         model = autopilot.effective_profile_model(profile, repo_root) or None
         if not gate.access.allows_profile(profile.name, provider, model):
             continue
-        if not allow_limited and model and limited_until(provider, now, model) is not None:
+        if not allow_limited and model and limited_until(provider, now, model, repo_root=repo_root, env=route_env) is not None:
             continue    # a cap on the model this supervisor would run
         if cfg is not None:
             info = policy.AssignInfo(repo_root=repo_root, profile=profile.name,
@@ -184,9 +198,16 @@ def _targets(current: str, repo_root: str | None, now: float, *, allow_limited: 
             decision = policy._decide("delegation", cfg, repo_root, lambda p: p.check_assign(info))
             if not decision.allowed:
                 continue
-        q = None if quota._key_billed(provider) else quota.get(provider)
-        window = quota.fullest(replace(q, windows=[w for w in q.windows
-                                                   if w.resets_at is None or w.resets_at > now])) if q else None
+        if quota._non_subscription_route(provider, repo_root=repo_root, env=route_env):
+            q = None
+        else:
+            q_kw = {}
+            if repo_root is not None:
+                q_kw["repo_root"] = repo_root
+            if route_env is not None:
+                q_kw["env"] = route_env
+            q = quota.get(provider, **q_kw)
+        window = quota.fullest(q, now=now) if q else None
         headroom = max(0.0, 100.0 - window.used) if window else 100.0
         targets.append((provider, headroom))
     targets.sort(key=lambda item: -item[1])
@@ -236,7 +257,8 @@ def pick_target(current: str, repo_root: str | None, now: float) -> str | None:
     return next(iter(_targets(current, repo_root, now)), None)
 
 
-def confirmed_until(provider: str, now: float, model: str | None = None) -> float | None:
+def confirmed_until(provider: str, now: float, model: str | None = None, *,
+                    repo_root: str | None = None, env: dict[str, str] | None = None) -> float | None:
     """When ``provider``'s confirmed limit lifts, or None while there is
     none: a recorded limit, or a full account window (or a full one-model
     cap on ``model``). Only this moves a supervisor away. A forecast
@@ -247,7 +269,7 @@ def confirmed_until(provider: str, now: float, model: str | None = None) -> floa
         return None
     from brindle import provider_health
 
-    return provider_health.limited_until(provider, model, now=now)
+    return provider_health.limited_until(provider, model, now=now, repo_root=repo_root, env=env)
 
 
 def out_of_quota(db: DB, root_id: str, now: float) -> float | None:
@@ -261,8 +283,11 @@ def out_of_quota(db: DB, root_id: str, now: float) -> float | None:
             or identity_lock.locked_by(root.id)):
         return None
     ws = db.get_workspace(root.workspace_id)
+    repo_root = ws.repo_root if ws else None
     return confirmed_until(root.provider, now,
-                           _supervisor_model(root.provider, ws.repo_root if ws else None, root.profile))
+                           _supervisor_model(root.provider, repo_root, root.profile),
+                           repo_root=repo_root,
+                           env=_supervisor_env(root.provider, repo_root, root.profile))
 
 
 # -- offers ----------------------------------------------------------------------
