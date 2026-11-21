@@ -21,6 +21,7 @@ import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
 import { ORGS, REPO, data } from "./fixtures";
 import { installLibrary, libraryInbox } from "./library";
 import { inboxMain, inboxMany, inboxNews, installThreads, seedDoneToday } from "./inbox";
+import { installLibraryUx, libraryUxScene, playLibraryUx, prepareLibraryUx } from "./libraryUx";
 import { wideCheckout, wideDiff } from "./wideDiff";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
 import { ChatPaneScene } from "./chatPane";
@@ -96,6 +97,11 @@ const SCENES: Record<string, Route> = {
   "knowledge-record": { screen: "knowledge" },
   "knowledge-search": { screen: "knowledge" },
   settings: { screen: "settings" },
+  // Settings › Library for the Library and sharing UX review (shots/libraryUx.ts).
+  "settings-library": { screen: "settings" },
+  "settings-library-servers": { screen: "settings" },
+  "settings-library-locked": { screen: "settings" },
+  "settings-library-admin": { screen: "settings" },
   "settings-usage": { screen: "settings", tab: "usage" },
   "settings-edit": { screen: "settings" },
   account: { screen: "account" },
@@ -409,7 +415,10 @@ if (inboxScene) {
   if (scene === "inbox" || scene === "inbox-clear" || scene === "inbox-thread") seedDoneToday();
   else localStorage.removeItem("brindle.inbox.triage");
 }
+// Settings › Library (shots/libraryUx.ts): the person's Library switches, which the fake daemon doesn't serve.
+if (libraryUxScene(scene)) prepareLibraryUx(daemon, scene);
 const client = daemon.client();
+if (libraryUxScene(scene)) installLibraryUx(client, scene);
 if (libraryScene) installLibrary(client);
 if (inboxScene) installThreads(client);
 // Loading: the first inbox never arrives.
@@ -544,6 +553,7 @@ void sync.idle().then(() =>
     // What the press opened is on screen by now; what THEN asks the daemon for (a search) too, after its debounce.
     setTimeout(() => {
       if (Object.hasOwn(THEN, scene)) THEN[scene]();
+      if (libraryUxScene(scene)) playLibraryUx(scene);
       setTimeout(() => {
         document.documentElement.dataset.ready = "1";
       }, 600);
