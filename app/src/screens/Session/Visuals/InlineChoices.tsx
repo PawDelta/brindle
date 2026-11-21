@@ -35,8 +35,14 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
           item.dataset.option = option.id;
           field.append(item);
         }
-        // The visible answer must match the declared answer delivered to the supervisor.
-        item.textContent = option.label;
+        // Keep the preview and explanatory children intact. The app adds the canonical
+        // answer label separately so the visible/accessibility label matches delivery.
+        const label = doc.createElement("span");
+        label.setAttribute("data-choice-label", "");
+        label.style.display = "block";
+        label.textContent = option.label;
+        item.append(label);
+        item.setAttribute("aria-label", option.label);
       }
     }
     return `<!doctype html>${doc.documentElement.outerHTML}`;

@@ -87,7 +87,7 @@ describe("visuals", () => {
     const row = { ...visual, options: undefined, choices: [
       { id: "sharing", question: "Access?", options: visual.options! },
       { id: "layout", question: "Layout?", options: visual.options! },
-    ], inline_html: '<fieldset data-choice="sharing"><button data-option="A">Tag</button><button data-option="B">Gate</button></fieldset><fieldset data-choice="layout"><button data-option="A">Tag</button><button data-option="B">Gate</button></fieldset><script>parent.postMessage({type:"choice",option:"B"})</script>' };
+    ], inline_html: '<fieldset data-choice="sharing"><button data-option="A">Tag</button><button data-option="B">Gate</button></fieldset><fieldset data-choice="layout"><button data-option="A">Tag</button><button data-option="B"><svg viewBox="0 0 100 60"><rect width="100" height="60" fill="#8055c7" /></svg><span class="preview-detail">A preview of the layout</span></button></fieldset><script>parent.postMessage({type:"choice",option:"B"})</script>' };
     const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
       if (String(url).endsWith("/answer")) sent.push(JSON.parse(init!.body as string));
       return new Response(JSON.stringify({ ...row, answer: { option: null, picks: { sharing: "A", layout: "B" }, at: now } }));
@@ -100,7 +100,12 @@ describe("visuals", () => {
     expect(frame.contentDocument!.querySelector("script")).toBeNull();
     fireEvent.click(frame.contentDocument!.querySelector('[data-choice="sharing"] [data-option="A"]')!);
     expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(frame.contentDocument!.querySelector('[data-choice="layout"] [data-option="B"]')!);
+    const richOption = frame.contentDocument!.querySelector('[data-choice="layout"] [data-option="B"]')!;
+    const preview = richOption.querySelector("svg rect");
+    expect(preview).not.toBeNull();
+    expect(richOption.querySelector(".preview-detail")).not.toBeNull();
+    fireEvent.click(preview!);
+    expect(richOption.getAttribute("aria-checked")).toBe("true");
     fireEvent.change(screen.getByRole("textbox", { name: "Add a note" }), { target: { value: "Keep it simple" } });
     fireEvent.click(screen.getByTestId("visual-send"));
     await waitFor(() => expect(sent).toEqual([{ rev: 2, picks: { sharing: "A", layout: "B" }, note: "Keep it simple" }]));
