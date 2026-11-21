@@ -36,7 +36,7 @@ def test_closing_session_removes_plan_inbox_card(db, proposed):
 
 
 @pytest.mark.parametrize("state", [
-    "open",
+    pytest.param("open", marks=pytest.mark.variant("the common case: an open plan closes with its session")),
     pytest.param("redirected", marks=pytest.mark.variant("a plan awaiting revision must close too")),
 ])
 def test_closing_session_closes_plan(db, proposed, state):

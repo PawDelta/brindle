@@ -163,7 +163,11 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
         assert db.get_agent(row.id).failed_why is None
 
 
-@pytest.mark.parametrize("other_provider", [True, False, "first-fails"])
+@pytest.mark.parametrize("other_provider", [
+    pytest.param(True, marks=pytest.mark.variant("another provider is available, so the person is never told")),
+    False,
+    pytest.param("first-fails", marks=pytest.mark.variant("a fallback that also fails must move on, not stop")),
+])
 def test_reviewer_dead_of_provider_failure_moves_to_another_provider(db, repo, monkeypatch, other_provider):
     """A Codex reviewer whose CLI can't read its account at startup would die
     the same way on a plain restart: the restart goes to another provider, and
