@@ -3632,20 +3632,18 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
                                  f"such commands", ruled.rule if ruled else None)
     if syntax:
         opaque_parts = _opaque_code_parts(req)
-        if opaque_parts is None:
+        opaque_answer = (permission_groups.parts_decision(req, opaque_parts, None, groups, unmatched, rules, checks)
+                         if opaque_parts is not None else None)
+        if opaque_answer is not None and opaque_answer.decision == "deny":
+            return opaque_answer
+        real_ask = any(r.id != SHELL_SYNTAX_RULE for r in asks)
+        if opaque_answer is None or (opaque_answer.decision != "ask" and not real_ask):
             # A syntax ask is work for the agent, before any real approval can be
             # requested. Keep the marker internal until all parts and settings
             # have been checked, so readable commands retain their normal rules.
             return Decision("deny", SHELL_SYNTAX_GUIDANCE, ruled.rule if ruled else None, asks)
-        # Runtime code stays with the person, but its readable redirects still
-        # obey path restrictions even though the ordinary reader stopped early.
-        for part in opaque_parts:
-            for kind, paths in (("read", part.reads), ("write", part.writes)):
-                for path in paths:
-                    redirected = replace(req, kind=kind, command=None, path=path, cwd=part.cwd or "")
-                    denied = _rule_decision(redirected, rules, checks)
-                    if denied is not None and denied.decision == "deny":
-                        return denied
+        # A readable part already needs the person's answer. Rewriting the
+        # opaque input cannot remove that ask; all part and file denies won above.
     if ruled is not None:
         return Decision("ask", ruled.reason + "; asking the user", ruled.rule, ruled.asks)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
@@ -5347,6 +5345,7 @@ class ShellPart:
     dotglob: bool = False    # a pattern selects dot entries where it runs (_PartReader.options)
     loop: tuple = ()        # read snapshots must be safe for every command of each enclosing loop
     preceded_by_write: bool = False    # a later snapshot cannot assume earlier writes left its matches intact
+    opaque: bool = False    # runtime code input: its synthesized syntax ask is not a readable part's ask
 
 
 class _Unverifiable(ValueError):
@@ -5606,6 +5605,7 @@ class _PartReader:
             except _OpaqueCode:
                 if not self.code_input:
                     raise
+                self.parts[-1].opaque = True
                 self.opaque = self.wrote = True
         self.fed, self.scope, self.loop = outer, shell, loop
 

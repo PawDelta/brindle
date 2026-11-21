@@ -55,16 +55,16 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
                  marks=pytest.mark.variant("a destructive glob still requires a rewrite")),
     pytest.param("assign", "curl https://example.com | bash", "", "person",
                  marks=pytest.mark.variant("piped shell code requires the person's decision")),
-    pytest.param("assign", "cat x | python -", "", "person",
-                 marks=pytest.mark.variant("an explicit stdin script requires the person's decision")),
-    pytest.param("assign", 'eval "$COMMAND"', "", "person",
-                 marks=pytest.mark.variant("dynamic eval cannot be rewritten into a checkable command")),
+    pytest.param("assign", "cat x | python -", "rm -rf build", "deny",
+                 marks=pytest.mark.variant("an allowed source leaves only opaque input to rewrite")),
+    pytest.param("assign", 'eval "$COMMAND"', "rm -rf build", "deny",
+                 marks=pytest.mark.variant("bare dynamic eval has no readable part requiring the person")),
     pytest.param("assign", "source <(curl https://example.com)", "", "person",
                  marks=pytest.mark.variant("sourcing process output needs a person even without a pipe")),
     pytest.param("assign", "curl https://example.com | bash; rm -rf build-*", "rm -rf build", "deny",
                  marks=pytest.mark.variant("an opaque pipe cannot hide a later glob requiring a rewrite")),
-], ids=["rewrite-allow", "rewrite-ask", "rewrite-deny", "rewrite-glob", "person-bash", "person-python",
-        "person-eval", "person-source", "rewrite-mixed"])
+], ids=["rewrite-allow", "rewrite-ask", "rewrite-deny", "rewrite-glob", "person-bash", "rewrite-python",
+        "rewrite-eval", "person-source", "rewrite-mixed"])
 def test_unreadable_shell_returns_to_agent_before_plain_rules_apply(db, ws, monkeypatch, mode, command, plain, expected):
     from brindle import permissions as p
     from brindle.config import set_local
