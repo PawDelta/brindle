@@ -955,7 +955,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const shareMenu = (canShare || linked) && <button type="button" className={`${button} text-xs ${sharingOpen ? "!border-transparent bg-branch-soft text-branch" : ""}`}
     aria-expanded={sharingOpen} onClick={() => setSharingOpen((o) => !o)}>Share</button>;
   const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
+  const ownReviewer = signers.find((r) => r.you && r.status !== "signed_off");
   const sharePanel = (canShare || linked) && <SharePanel plan={plan} target={sharePeople}
+    signOff={sharing && ownReviewer && plan.state !== "approved" ? { sub: ownReviewer.sub!, disabled: busy || reviewBlocked,
+      run: () => void reviewWrite(() => sharing.signOffPlan(plan.id, plan.rev, reviewVersion)) } : undefined}
     nameOf={nameOf} writes={writes} onBusy={setBusy} visible={sharingOpen && !historical} onClose={() => setSharingOpen(false)} fallback={canShare && reviewersPanel}>
     {sharePeople && !!gate?.policies?.length && <section className="sec"><Policies plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} busy={busy} nameOf={nameOf} write={reviewWrite} /></section>}
     {linked && <ShareLinkPanel target={linked.target} state={linked.state} onState={link.setState} />}

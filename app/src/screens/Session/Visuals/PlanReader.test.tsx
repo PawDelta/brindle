@@ -10,7 +10,7 @@ import { Avatar } from "./PlanCards";
 import { changeBetween } from "./DocText";
 import { PlanReader, REVIEW_COLLAPSED_KEY } from "./PlanReader";
 import { SharedDesignReader } from "./SharedDesignReader";
-import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
+import type { PlanDocClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 
 afterEach(() => {
   cleanup();
@@ -446,21 +446,28 @@ it("a design doc Request changes the engine refuses as nothing to send shows the
 it("a design doc's build button follows the gate: reviewers listed, disabled with the reason, enabled when ready", async () => {
   const row = (sub: string, status: "signed_off" | "waiting", required = true) => ({ sub, required, status });
   let plan = doc(1, "Workers run on your machine.", { gate: { state: "waiting", reason: "Waiting on u_a (1 of 2 required sign-offs).", required: 2, signed: 1, waiting_on: ["u_a"],
-    reviewers: [row("u_b", "signed_off"), row("u_a", "waiting"), row("u_c", "waiting", false)] } });
+    reviewers: [row("u_b", "signed_off"), { ...row("u_a", "waiting"), you: true }, row("u_c", "waiting", false)] } });
   const decided: boolean[] = [];
-  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
+  const client: PlansClient & PlanDocClient & VisualsClient & PlanSharingClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
+    sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, overridePlanPolicy: async () => plan,
+    libraryPeople: async () => ({ people: [], me: "u_a" }), docScopes: async () => ({ scopes: [] }),
+    planPeople: async () => ({ people: [] }), setPlanReviewer: async () => plan, removePlanReviewer: async () => plan,
+    signOffPlan: async (id, rev) => {
+      if (id !== plan.id || rev !== plan.rev) throw new Error("stale sign-off");
+      return (plan = { ...plan, gate: { ...plan.gate!, state: "ready", reason: null, signed: 2, waiting_on: [],
+        reviewers: plan.gate!.reviewers!.map((r) => r.you ? { ...r, status: "signed_off" } : r) } });
+    },
     decidePlan: async (_id, verdict) => { decided.push(verdict.approved); return plan; } };
   const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
-  const view = render(reader(visual));
+  render(reader(visual));
   const build = (await screen.findByTestId("plan-build")) as HTMLButtonElement;
   expect(build.disabled).toBe(true);
   expect(build.title).toContain("u_a");
   await openShare();
-  expect(screen.getByTestId("plan-reviewer-u_a").dataset.status).toBe("waiting");
-  expect(screen.getByTestId("plan-reviewer-u_c").dataset.required).toBe("false");
-
-  plan = { ...plan, gate: { ...plan.gate!, state: "ready", reason: null, signed: 2, waiting_on: [] } };
-  await act(async () => view.rerender(reader({ ...visual, answer: { option: "x", note: "", at: 5 } })));
+  expect(screen.getByTestId("share-reviewer-u_a").dataset.state).toBe("invited");
+  expect(screen.getByTestId("share-reviewer-u_c").dataset.required).toBe("false");
+  await act(async () => fireEvent.click(within(screen.getByTestId("share-reviewer-u_a")).getByRole("button", { name: "Sign off" })));
+  expect(screen.getByTestId("share-reviewer-u_a").dataset.state).toBe("signed_off");
   expect(screen.getByTestId("plan-build").dataset.gate).toBe("ready");
   await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
   expect(decided).toEqual([true]);

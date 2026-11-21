@@ -18,9 +18,10 @@ function ShareCheck() {
 const initials = (name: string) => name.split(/[\s@._-]+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase();
 type Row = { sub: string; required: boolean; name: string; state: "signed_off" | "invited" | "inviting" | "failed"; action?: boolean | null };
 
-export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, fallback }: {
+export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, fallback, signOff }: {
   plan: Plan; target?: SharePeopleTarget; nameOf(sub: string): string; writes: Writes;
   onBusy(busy: boolean): void; visible: boolean; onClose(): void; children?: ReactNode; fallback?: ReactNode;
+  signOff?: { sub: string; disabled: boolean; run(): void };
 }) {
   const [typed, setTyped] = useState("");
   const [team, setTeam] = useState("");
@@ -88,7 +89,9 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       if (!current.writes.begin()) return;
       current.onBusy(true);
     }
-    const before = committed.find((r) => r.sub === sub);
+    // A completed invite can still be local while another person's write is queued.
+    // Its confirmed role, rather than the reader's older snapshot, is the rollback target.
+    const before = pending[sub] ?? committed.find((r) => r.sub === sub);
     flight.current.add(sub);
     setPending((old) => ({ ...old, [sub]: { sub, name, required: required ?? before?.required ?? true, state: "inviting", action: required } }));
     setMenu(null);
@@ -178,6 +181,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
               <span className={`st ${r.state === "signed_off" ? "ok" : r.state === "failed" ? "bad" : ""}`}>
                 {r.state === "inviting" && <i className="spin" />}{r.state === "signed_off" ? <><ShareCheck />Signed off</> : r.state === "inviting" ? "Inviting…" : r.state === "failed" ? r.action === null ? "Couldn't remove" : "Couldn't invite" : "Invited"}
               </span>{r.state === "failed" && <button className="sp-btn q end" data-testid={`share-try-${r.sub}`} onClick={() => send(r.sub, r.action!, r.name)}>Try again</button>}
+              {signOff?.sub === r.sub && r.state !== "signed_off" && <button className="sp-btn q end" disabled={signOff.disabled} onClick={signOff.run}>Sign off</button>}
             </div>{menu === r.sub && <div className="menu" style={{ width: 170, marginLeft: 28, marginRight: "auto" }}><button className="mi" onClick={() => send(r.sub, !r.required, r.name)}>Make {r.required ? "optional" : "required"}</button><button className="mi" onClick={() => send(r.sub, null, r.name)}>Remove from plan</button></div>}</Fragment>)}
           </Fragment>;
         })}

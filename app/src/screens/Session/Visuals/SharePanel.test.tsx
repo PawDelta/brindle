@@ -17,10 +17,12 @@ it("keeps two invitations visible, isolates a failure, and sends that person aga
   let remote = empty;
   const complete: (() => void)[] = [];
   let fail = true;
+  let refuseRoleChange = false;
   const target: SharePeopleTarget = {
     search: async () => ({ people }),
     put: (sub, required) => new Promise<Plan>((resolve, reject) => complete.push(() => {
       if (sub === "lena" && fail) { reject(new Error("conflict")); return; }
+      if (sub === "sam" && !required && refuseRoleChange) { reject(new Error("conflict")); return; }
       remote = { ...remote, gate: { ...remote.gate!, reviewers: [...remote.gate!.reviewers!.filter((r) => r.sub !== sub), { sub, required, status: "waiting" }] } };
       resolve(remote);
     })),
@@ -62,6 +64,27 @@ it("keeps two invitations visible, isolates a failure, and sends that person aga
   expect(screen.queryByTestId("share-reviewer-sam")).toBeNull();
   expect(remote.gate!.reviewers!.map((r) => r.sub)).toEqual(["lena"]);
   expect((screen.getByTestId("share-search") as HTMLInputElement).value).toBe("");
+
+  fireEvent.click(within(screen.getByTestId("share-reviewer-lena")).getByRole("button"));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Remove from plan" })));
+  fireEvent.click(screen.getByTestId("share-add-all"));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "As required" })));
+  await act(async () => complete.shift()!());
+  // Sam's invite is confirmed while Lena's is still queued, before the reader receives new props.
+  expect(screen.getByTestId("share-reviewer-lena").dataset.state).toBe("inviting");
+  fireEvent.click(within(screen.getByTestId("share-reviewer-sam")).getByRole("button"));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Make optional" })));
+  await act(async () => complete.shift()!());
+  refuseRoleChange = true;
+  await act(async () => complete.shift()!());
+  expect(remote.gate!.reviewers!.find((r) => r.sub === "sam")!.required).toBe(true);
+  expect(screen.getByTestId("share-reviewer-sam").dataset.required).toBe("true");
+  expect(screen.getByTestId("share-reviewer-sam").dataset.state).toBe("failed");
+  refuseRoleChange = false;
+  await act(async () => fireEvent.click(screen.getByTestId("share-try-sam")));
+  await act(async () => complete.shift()!());
+  expect(remote.gate!.reviewers!.find((r) => r.sub === "sam")!.required).toBe(false);
+  expect(screen.getByTestId("share-reviewer-sam").dataset.required).toBe("false");
 });
 
 it("discards stale searches and searches a pasted list under the selected team", async () => {
