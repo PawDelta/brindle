@@ -200,6 +200,14 @@ def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
 
 def reviewer(doc_id: str, sub: str, required: bool | None, *, client=None, store=None) -> dict:
     """Change one person without replacing anyone else's invitation."""
+    if required is not None:
+        client, store = ad._session(client, store)
+        ad.require_entitlement(store)
+        held = ad.api("GET", sd._path(doc_id), client=client, store=store).get("permissions") or {}
+        grant = {"can_edit": False, **held.get(sub, {}), **sd.REVIEWER_GRANT}
+        if grant != held.get(sub):
+            ad.api("PUT", sd._path(doc_id, "/permissions"), {"permissions": {**held, sub: grant}},
+                   client=client, store=store)
     return _ask(doc_id, "DELETE" if required is None else "PUT", f"/reviewers/{quote(sub, safe='')}",
                 None if required is None else {"required": required}, client, store)
 

@@ -527,6 +527,8 @@ def set_reviewer(db: DB, plan_id: str, sub: str, required: bool | None, *, clien
     _review_open(p)
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
+    if required is not None:
+        _grant(db, p, share_["doc_id"], [{"sub": sub}], None, client, store)
     view = review_policies.ask(db, p, "DELETE" if required is None else "PUT",
                                _path(share_["doc_id"], f"/reviewers/{quote(sub, safe='')}"),
                                None if required is None else {"required": required}, client=client, store=store)

@@ -14,12 +14,15 @@ from test_pro_remote_learning import login_as
 class Library:
     def __init__(self, remote):
         self.reviewers = {}
+        self.permissions = {}
         self.link = None
         self.fail = "b"
         self.people = [{"id": sub, "display_name": sub.upper(), "email": f"{sub}@example.com",
                         "teams": [{"id": "core", "name": "Core"}], "role": "member",
                         "on_plan": False, "on_plan_role": None} for sub in ("a", "b")]
         path = "/analysis-docs/doc_1/design"
+        remote.routes[f"GET {path}"] = lambda f, h: (200, self.view())
+        remote.routes[f"PUT {path}/permissions"] = self.set_permissions
         remote.routes[f"GET {path}/people"] = lambda f, h: (200, {"people": self.people})
         remote.routes[f"GET {path}/people?q=a&team=core&role=member&on_plan=false"] = lambda f, h: (200, {"people": self.people[:1]})
         for sub in ("a", "b"):
@@ -33,7 +36,12 @@ class Library:
         return {"rev": 1, "title": "Design", "lede": "", "ask": None,
                 "sections": [{"id": "summary", "title": "Summary", "kind": "markdown", "markdown": "A design."}], "decisions": [], "split": [],
                 "reviewers": [{"sub": sub, "required": required} for sub, required in self.reviewers.items()],
+                "permissions": self.permissions,
                 "sign_offs": [], "pending_reviewers": list(self.reviewers), "policy_reviewers": [], "ready": False}
+
+    def set_permissions(self, form, headers):
+        self.permissions = dict(form["permissions"])
+        return 200, self.view()
 
     def put(self, sub, form):
         if self.fail == sub:
