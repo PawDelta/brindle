@@ -284,7 +284,8 @@ it("design doc reader", async () => {
   expect(section().getAttribute("data-state")).toBe("undecided");
   fireEvent.click(screen.getByRole("tab", { name: /Decisions/ }));
   expect(within(screen.getByTestId("plan-todo")).getByRole("button").getAttribute("data-state")).toBe("current");
-  fireEvent.click(within(section()).getByRole("radio", { name: "B · PawDelta-hosted" }));
+  await act(async () => fireEvent.click(within(section()).getByRole("radio", { name: "B · PawDelta-hosted" })));
+  expect(calls.pop()).toEqual(["confirm", 3, "where", "hosted"]);
   expect(approve().disabled).toBe(false);
   expect(section().getAttribute("data-state")).toBeNull();
   await act(async () => fireEvent.click(approve()));

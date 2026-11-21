@@ -17,7 +17,7 @@ import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
 import type { ThreadActions } from "./DocReview";
 import type { DocLayout } from "./DocText";
-import { Avatar, personName } from "./PlanCards";
+import { Avatar, personName, picksLine } from "./PlanCards";
 import type { Mode, MODES } from "./PlanReader";
 
 /* The spine's ids in reading order; the extras sit inside the section before them. */
@@ -185,8 +185,10 @@ export function Outline({ parts, placed, isOpen, decided, total, current, footer
 
 /* A decision, where its question comes up: picking an option is the person's answer. Sap marks
    one that still needs them; once picked, the card goes quiet and a tick stays. */
-export function DecisionCard({ decision: d, n, of, open, disabled = false, picked, onPick, onComment }: {
+export function DecisionCard({ decision: d, n, of, open, disabled = false, picked, onPick, onComment, nameOf }: {
   decision: PlanDecisionDTO;
+  /* A voter as the card names them ("You", "David"). */
+  nameOf?: (who: string) => string;
   n: number;
   of: number;
   /* The plan still takes picks. */
@@ -200,6 +202,7 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
 }) {
   const waiting = open && !picked;
   const done = !!picked;
+  const whoPicked = picksLine(d, nameOf);
   return (
     <section id={`plan-decision-${d.id}`} role="radiogroup" aria-labelledby={`plan-q-${d.id}`} data-testid="plan-decision" data-decision={d.id} data-state={waiting ? "open" : "decided"}
       className={`relative mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${waiting ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
@@ -209,6 +212,8 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
           : done ? <Tick>Decided{open && <span className="font-normal text-ink-3">· change it any time before you approve</span>}</Tick> : null}
       </div>
       <h3 id={`plan-q-${d.id}`} className="m-0 mt-1 px-4 text-base font-semibold leading-[1.35] tracking-[-0.01em] text-ink">{d.title}</h3>
+      {/* Who picked what, saved as each pick is made: everyone on a shared plan sees the same. */}
+      {whoPicked && <p data-testid="plan-picks" className="m-0 mt-1 px-4 text-[12.5px] leading-normal text-ink-3">{whoPicked}</p>}
       <div className="mt-3">
         {d.options.map((o) => {
           const chosen = picked === o.id;

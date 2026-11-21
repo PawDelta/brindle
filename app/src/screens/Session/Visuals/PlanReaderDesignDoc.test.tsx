@@ -99,12 +99,56 @@ it("reads a spine plan as the planning doc: the outline marks open decisions, ea
   expect(card("store").dataset.state).toBe("decided");
   expect(rows().map((a) => a.dataset.state)).toEqual(["decided", "decided", "open"]);
   expect(approve().disabled).toBe(true);
-  fireEvent.click(within(card("reach")).getAllByRole("radio")[0]);
+  // Each pick is saved as it is made: Approve waits for the last save to come back.
+  await act(async () => fireEvent.click(within(card("reach")).getAllByRole("radio")[0]));
   expect(screen.getByTestId("plan-next").dataset.state).toBe("ready");
   expect(approve().disabled).toBe(false);
   await act(async () => fireEvent.click(approve()));
   expect(verdicts).toEqual([expect.objectContaining({ approved: true, picks: { store: "b", loud: "a", reach: "a" } })]);
   expect(screen.queryByTestId("task-outbox")).toBeNull();
+});
+
+it("saves each pick as it is made: reopened, the doc keeps it, counts it decided, says who picked what, and Approve sends it", async () => {
+  // The engine as it keeps picks: each voter's one pick per decision. A teammate picked already.
+  let plan = spine({ threads: [], decisions: spine().decisions.map((d) => (d.id === "store" ? { ...d, votes: { a: ["teammate:dana.okafor"] } } : d)) });
+  const confirms: unknown[] = [];
+  const verdicts: unknown[] = [];
+  const client: PlansClient & PlanDocClient & VisualsClient = {
+    ...visuals, ...writes(plan), plan: async () => plan, decidePlan: async (_id, verdict) => { verdicts.push(verdict); return plan; },
+    confirmPlan: async (_id, rev, decision, option) => {
+      confirms.push([rev, decision, option]);
+      plan = { ...plan, decisions: plan.decisions.map((d) => {
+        if (d.id !== decision) return d;
+        const votes = Object.fromEntries(Object.entries(d.votes ?? {}).map(([o, who]) => [o, who.filter((w) => w !== "person")]));
+        return { ...d, confirmed: option, votes: { ...votes, [option]: [...(votes[option] ?? []), "person"] } };
+      }) };
+      return plan;
+    },
+  };
+  const open = async () => {
+    render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+    await screen.findByTestId("plan-outline");
+    return screen.getByTestId("plan-doc");
+  };
+  let doc = await open();
+  const card = (id: string) => doc.querySelector<HTMLElement>(`[data-testid=plan-decision][data-decision=${id}]`)!;
+  await act(async () => fireEvent.click(within(card("store")).getAllByRole("radio")[1]));
+  expect(confirms).toEqual([[1, "store", "b"]]);
+
+  // Closed before Approve and opened again: the pick is still made, and counts.
+  cleanup();
+  doc = await open();
+  expect(card("store").dataset.state).toBe("decided");
+  expect(within(card("store")).getAllByRole("radio").map((r) => (r as HTMLInputElement).checked)).toEqual([false, true]);
+  expect(screen.getByTestId("plan-next").dataset.left).toBe("2");
+  expect(within(card("store")).getByTestId("plan-picks").textContent).toBe("You: A queue · Dana: A table");
+
+  await act(async () => fireEvent.click(within(card("loud")).getAllByRole("radio")[0]));
+  await act(async () => fireEvent.click(within(card("reach")).getAllByRole("radio")[0]));
+  const approve = screen.getByTestId("plan-build") as HTMLButtonElement;
+  expect(approve.disabled).toBe(false);
+  await act(async () => fireEvent.click(approve));
+  expect(verdicts).toEqual([expect.objectContaining({ approved: true, picks: { store: "b", loud: "a", reach: "a" } })]);
 });
 
 /* Shared for team review, one required reviewer still to sign. */
