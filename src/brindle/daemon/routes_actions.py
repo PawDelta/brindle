@@ -2387,6 +2387,12 @@ def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str 
     return docs_api(method, f"/orgs/{quote(ent.org_id, safe='')}/analysis-docs/{tail}", body, repo=repo)
 
 
+def put_org_settings(db: DB, params: dict, body: Body) -> Any:
+    from brindle.daemon.org_settings import save
+
+    return save(body)
+
+
 def put_doc_destination(db: DB, params: dict, body: Body) -> Any:
     """Connect the team's export destination (``kind``, ``target``, ``credential``; admin only)."""
     payload = {"kind": _get(body, "kind", required=True),
@@ -3433,6 +3439,7 @@ ROUTES = [
     Route("/v1/analysis-docs/destination", _endpoint(put_doc_destination), methods=["PUT"]),
     Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
     Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
+    Route("/v1/org-settings", _endpoint(put_org_settings), methods=["PUT"]),
     _post("/library/folders", create_library_folder),
     Route("/v1/library/designs/{id}/work-items", _endpoint(design_work_items), methods=["GET"]),
     Route("/v1/library/designs/{id}/work-items", _endpoint(create_design_work_items), methods=["POST"]),

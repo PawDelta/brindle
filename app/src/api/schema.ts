@@ -62,6 +62,7 @@ export interface ApiSchema {
   PersonDTO: PersonDTO;
   PlanAlongsideDTO: PlanAlongsideDTO;
   PlanAnchorDTO: PlanAnchorDTO;
+  PlanAnswerDTO: PlanAnswerDTO;
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
@@ -1035,6 +1036,21 @@ export interface PlanAnchorDTO {
   state?: "current" | "moved" | "detached";
 }
 /**
+ * An own answer on a decision (brindle.plan_answers): a row someone typed
+ * under the options, picked like one. ``locked`` once someone other than
+ * its author picked it: from then on it stays as written.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanAnswerDTO".
+ */
+export interface PlanAnswerDTO {
+  at?: number;
+  author: string;
+  id: string;
+  locked?: boolean;
+  text: string;
+}
+/**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanCommentDTO".
  */
@@ -1086,6 +1102,7 @@ export interface PlanDTO {
  * via the `definition` "PlanDecisionDTO".
  */
 export interface PlanDecisionDTO {
+  answers?: PlanAnswerDTO[];
   challenge?: string | null;
   confirmed?: string | null;
   id: string;
@@ -1325,6 +1342,9 @@ export interface PlanReplyDTO {
  * via the `definition` "PlanVerdictDTO".
  */
 export interface PlanVerdictDTO {
+  answers?: {
+    [k: string]: string;
+  };
   approved: boolean;
   at: number;
   attachments?: string[];
