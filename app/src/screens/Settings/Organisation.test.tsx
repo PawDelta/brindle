@@ -57,3 +57,17 @@ it("keeps Team organisation rows read-only while allowing group settings", async
   await waitFor(() => expect(screen.getByTestId("org-setting-assist").getAttribute("data-state")).toBe("reading"));
   expect(state.policy.groups.engineering.switches.assist).toBe("off");
 });
+
+it("shows enforced organisation values over opposing group choices", async () => {
+  const state: OrgSettings = { org_id: "org_enterprise", actor_sub: "u_admin", can_edit_org: true, can_edit_groups: true,
+    policy: { switches: { assist: "enforced_off", store: "enforced_on" },
+      groups: { engineering: { switches: { assist: "default_on", store: "enforced_off" } } } } };
+  render(<Organisation client={{ orgSettings: vi.fn().mockResolvedValue(state), setOrgSetting: vi.fn() }} />);
+  fireEvent.change(await screen.findByRole("combobox", { name: "Settings for" }), { target: { value: "engineering" } });
+  const briefs = within(screen.getByTestId("org-setting-assist"));
+  const storage = within(screen.getByTestId("org-setting-store"));
+  expect(briefs.getByText("Off", { exact: true })).toBeTruthy();
+  expect(storage.getByText("brindle servers", { exact: true })).toBeTruthy();
+  expect(briefs.queryByRole("button")).toBeNull();
+  expect(storage.queryByRole("button")).toBeNull();
+});

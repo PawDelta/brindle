@@ -66,8 +66,10 @@ export function Organisation({ client }: { client: Pick<DaemonClient, "orgSettin
     return () => { generation.current++; };
   }, [client, reload]);
 
+  const organisationSwitches = state?.can_edit_org ? state.policy.switches : {};
   const view = state && scope ? { ...state, policy: { ...state.policy, switches: {
-    ...(state.can_edit_org ? state.policy.switches : {}), ...state.policy.groups[scope]?.switches,
+    ...organisationSwitches, ...state.policy.groups[scope]?.switches,
+    ...Object.fromEntries(Object.entries(organisationSwitches).filter(([, value]) => value?.startsWith("enforced_"))),
   } } } : state;
   const canEdit = (id: OrgSettingName) => !!state && (scope
     ? state.can_edit_groups && !(state.can_edit_org && state.policy.switches[id as keyof typeof state.policy.switches]?.startsWith("enforced_"))
@@ -129,7 +131,7 @@ export function Organisation({ client }: { client: Pick<DaemonClient, "orgSettin
           <div className="flex items-baseline justify-between gap-s2"><div><h4 className="text-sm font-medium">{row.name}</h4><p className="text-xs text-ink-3">{row.help}</p></div><span className="text-xs font-medium uppercase tracking-wider text-branch">Changing</span></div>
           <fieldset disabled={busy} className="flex flex-col gap-1.5"><legend className="sr-only">{row.name}</legend>{choices(row.id).map(choice => <label key={choice.value} className="flex items-start gap-2.5 text-sm"><input type="radio" name={`org-${row.id}`} value={choice.value} checked={selected === choice.value} onChange={() => setSelected(choice.value)} className="mt-1 accent-branch" /><span>{choice.name}<span className="block text-xs text-ink-3">{choice.help}</span></span></label>)}</fieldset>
           {row.id !== "share_links" && <label className="flex items-center gap-2.5 border-t border-line pt-s1 text-sm"><input type="checkbox" checked={membersChoose} disabled={busy} onChange={e => setMembersChoose(e.target.checked)} />Members can change this<span className="text-ink-3">· unticked, it moves to Set for everyone</span></label>}
-          <p className="text-[13px] text-ink-2">{membersChoose && row.id !== "share_links" ? "This becomes the starting value. Members keep their own choices." : row.id === "store" ? `This fixes the Library location for ${scope ? "this group" : "everyone"}. Plans follow that location when brindle next resolves the member's settings.` : `This applies to ${scope ? "this group" : "everyone"}. Members see the value in Settings and cannot change it.`}</p>
+          <p className="text-[13px] text-ink-2">{membersChoose && row.id !== "share_links" ? "This becomes the starting value. Members keep their own choices." : row.id === "store" ? `This fixes the Library destination for ${scope ? "this group" : "everyone"}. Existing plans stay where they are; this change does not move them.` : `This applies to ${scope ? "this group" : "everyone"}. Members see the value in Settings and cannot change it.`}</p>
           <div className="flex justify-end gap-s1"><button type="button" className={quiet} disabled={busy} onClick={() => setEditing(null)}>Cancel</button><button type="button" className={main} disabled={busy} onClick={() => void save()}>{busy ? "Saving…" : scope ? "Save for group" : "Save for everyone"}</button></div>
         </div> : <div className="grid grid-cols-[minmax(0,1fr)_minmax(120px,280px)_64px] items-center gap-x-s3"><div><h4 className="text-sm font-medium">{row.name}</h4><p className="text-xs text-ink-3">{row.help}</p></div><span className="text-sm">{display(view, row.id)}</span>{canEdit(row.id) ? <button type="button" className={`${quiet} justify-self-end text-xs`} aria-label={`Change ${row.name}`} disabled={busy} onClick={() => open(row.id)}>Change</button> : <span className="text-xs text-ink-3">{scope ? "Org policy" : "Enterprise"}</span>}</div>}
       </div>)}
