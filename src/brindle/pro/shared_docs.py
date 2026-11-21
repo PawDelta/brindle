@@ -753,7 +753,7 @@ def _pull(db: DB, p: dict, share_: dict, view: dict, names: dict[str, str]) -> i
         changes += _pull_votes(c, p["id"], share_["owner"], rev, view.get("decisions") or [], now)
         from brindle import plan_answers
 
-        changes += plan_answers.pull(c, p["id"], share_["owner"], view.get("decisions"), now)
+        changes += plan_answers.pull(c, p["id"], share_["owner"], view, now)
     changes += _remember(db, p["id"], view)
     changes += _remember_names(db, p["id"], names)
     if changes:
@@ -1104,7 +1104,7 @@ def _send(db: DB, p: dict, view: dict, client, store, now: float, acked: dict | 
         _send_actions(db, p["id"], head, drafting, acked)
         from brindle import plan_answers
 
-        plan_answers.push(db, p["id"], head)        # before the picks, which may name them
+        plan_answers.push(db, p["id"], share_["owner"], head)        # before the picks, which may name them
         _send_votes(db, p["id"], head)
         if head.rev != view.get("rev"):        # a new head: votes on the old one no longer count
             local_rev = link(db, p["id"])["local_rev"]

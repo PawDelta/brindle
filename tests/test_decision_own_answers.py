@@ -134,14 +134,46 @@ def test_an_older_library_keeps_own_answers_here_without_barring_the_review(db, 
     assert [a["text"] for a in _decision(db, pid)["answers"]] == [TEXT]
 
 
-def test_an_answer_someone_else_picked_cant_be_removed(db, shared):
+@pytest.mark.parametrize("change", [
+    pytest.param({"rev": 1, "text": "something else"}, id="edit"),
+    pytest.param({"rev": 1, "remove": True}, id="remove"),
+])
+def test_an_answer_someone_else_picked_cant_be_changed(db, shared, change):
     pid, lib, net = shared
     answer = _add(pid)
     sd.sync(db, pid, **net)
-    lib.lib.votes = {"d1": {answer: ["user_1", "u_c"]}}               # a teammate picked it too
+    lib.lib.votes = {"d1": {answer: ["user_1", "u_c"]}}       # a teammate picks it before this machine hears of it
+    assert _write(pid, f"answers/{answer}", change)[0] == 200
     sd.sync(db, pid, **net)
 
-    assert _decision(db, pid)["answers"][0]["locked"] is True
-    for change in ({"rev": 1, "remove": True}, {"rev": 1, "text": "something else"}):
-        assert _write(pid, f"answers/{answer}", change)[0] == 409
-    assert [a["text"] for a in _decision(db, pid)["answers"]] == [TEXT]
+    assert [(a["text"], a["locked"]) for a in _decision(db, pid)["answers"]] == [(TEXT, True)]   # the Library's words stand
+    assert [a["text"] for a in lib.answers["d1"]] == [TEXT]
+    for again in ({"rev": 1, "remove": True}, {"rev": 1, "text": "something else"}):
+        assert _write(pid, f"answers/{answer}", again)[0] == 409
+
+
+def test_an_org_rule_refusing_an_answer_bars_the_review(db, shared, backend):
+    pid, lib, net = shared
+    answer = _add(pid)
+    sd.sync(db, pid, **net)
+    backend.routes[f"PUT {DESIGN}/answers/{answer}"] = [(403, {"error": "policy_denied"})]
+    _write(pid, f"answers/{answer}", {"rev": 1, "text": "something else"})
+    sd.sync(db, pid, **net)
+
+    assert db.conn.execute("SELECT access_refused FROM plan_shares WHERE plan_id=?", (pid,)).fetchone()[0] is not None
+    assert plans.gate(db, plans.get(db, pid))["state"] != "ready"
+    assert [a["text"] for a in _decision(db, pid)["answers"]] == ["something else"]   # kept for the next sync
+
+
+def test_an_answer_changed_or_removed_elsewhere_comes_here(db, shared):
+    pid, lib, net = shared
+    answer = _add(pid)
+    sd.sync(db, pid, **net)
+    lib.answers["d1"][0]["text"] = "reworded on the laptop"           # its author, from another machine
+    sd.sync(db, pid, **net)
+    assert [a["text"] for a in _decision(db, pid)["answers"]] == ["reworded on the laptop"]
+    assert [a["text"] for a in lib.answers["d1"]] == ["reworded on the laptop"]
+
+    lib.drop(answer)
+    sd.sync(db, pid, **net)
+    assert (_decision(db, pid)["answers"], lib.answers["d1"]) == ([], [])

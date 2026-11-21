@@ -77,9 +77,13 @@ def dto(conn, p: dict) -> dict[str, list[dict]]:
 
 
 def chosen(conn, p: dict, picks: dict[str, str]) -> dict[str, dict]:
-    """The answers ``picks`` names, by decision: what a verdict quotes."""
+    """The answers ``picks`` names, by decision: what a verdict quotes. Once
+    someone else picked one, only the words the Library agreed to count: an
+    edit here it hasn't taken can't reach the supervisor."""
     answers = {a["answer_id"]: a for rows in by_decision(conn, p).values() for a in rows}
-    return {d: answers[o] for d, o in picks.items() if o in answers and answers[o]["decision_id"] == d}
+    out = {d: answers[o] for d, o in picks.items() if o in answers and answers[o]["decision_id"] == d}
+    return {d: {**a, "text": a["sent_text"]} if a["sent_text"] is not None and a["text"] != a["sent_text"]
+            and _pickers(conn, p["id"], a) else a for d, a in out.items()}
 
 
 def new_id() -> str:
@@ -178,19 +182,68 @@ def _theirs(decisions: Any) -> list[tuple[str, dict]]:
     return out
 
 
-def pull(c, plan_id: str, owner: str, decisions: Any, now: float) -> int:
-    """Make the teammates' answers the Library's current ones, and note which
-    of the person's it holds. The person's from elsewhere (their account on
-    another machine) come in as theirs."""
-    mine = {a["answer_id"]: a for a in _rows(c, plan_id, removed=True) if a["author"] == plan_docs.PERSON}
-    wanted, changes = {}, 0
-    for decision, a in _theirs(decisions):
+def _set(c, plan_id: str, answer_id: str, **fields: Any) -> None:
+    c.execute(f"UPDATE plan_answers SET {', '.join(f'{k}=?' for k in fields)} WHERE plan_id=? AND answer_id=?",
+              (*fields.values(), plan_id, answer_id))
+
+
+def _drop(c, plan_id: str, a: dict) -> None:
+    c.execute("DELETE FROM plan_answers WHERE plan_id=? AND answer_id=?", (plan_id, a["answer_id"]))
+    c.execute("DELETE FROM plan_votes WHERE plan_id=? AND decision_id=? AND option_id=?",
+              (plan_id, a["decision_id"], a["answer_id"]))
+
+
+def reconcile(c, plan_id: str, owner: str, view: dict) -> int:
+    """Line the person's answers up with what the Library holds of them on
+    ``view``'s revision. ``sent_text`` is the last text both sides agreed on:
+    a local edit or removal is still to be sent only while the Library's
+    answer is that text and nobody else has picked it. Anything else is the
+    Library's to say, and it wins: a change made elsewhere (their account on
+    another machine), a change made there at the same time as one here, and
+    an answer someone else has picked, which stays as written. One the
+    Library held on this revision and no longer does was removed there."""
+    rev = view.get("rev")
+    if not isinstance(rev, int) or isinstance(rev, bool):
+        return 0
+    decisions = view.get("decisions") or []
+    theirs = {a["id"]: a for _, a in _theirs(decisions) if a["author"] == owner}
+    picked = {option for d in decisions if isinstance(d, dict) and isinstance(d.get("votes"), dict)
+              for option, subs in d["votes"].items() if isinstance(subs, list) and any(s != owner for s in subs)}
+    changes = 0
+    for a in _rows(c, plan_id, removed=True):
+        if a["author"] != plan_docs.PERSON:
+            continue
+        got = theirs.get(a["answer_id"])
+        if got is None:
+            if a["sent_text"] is not None and a["sent_rev"] == rev:
+                _drop(c, plan_id, a)
+                changes += 1
+            continue
+        text = mask(got["text"])[:MAX_TEXT]
+        pending = bool(a["removed"]) or a["text"] != a["sent_text"]
+        if pending and text == a["sent_text"] and a["answer_id"] not in picked:
+            continue
+        if (a["text"], a["sent_text"], a["sent_rev"], a["removed"]) != (text, text, rev, 0):
+            _set(c, plan_id, a["answer_id"], text=text, sent_text=text, sent_rev=rev, removed=0)
+            changes += 1
+    return changes
+
+
+def pull(c, plan_id: str, owner: str, view: dict, now: float) -> int:
+    """Make the teammates' answers the Library's current ones and line the
+    person's up with it (:func:`reconcile`). The person's from elsewhere
+    (their account on another machine) come in as theirs."""
+    changes = reconcile(c, plan_id, owner, view)
+    mine = {a["answer_id"] for a in _rows(c, plan_id, removed=True) if a["author"] == plan_docs.PERSON}
+    wanted = {}
+    for decision, a in _theirs(view.get("decisions")):
         text, at = mask(a["text"])[:MAX_TEXT], a.get("at") if isinstance(a.get("at"), (int, float)) else now
         if a["author"] != owner:
             wanted[a["id"]] = (decision, plan_docs.TEAMMATE + a["author"], text, float(at))
         elif a["id"] not in mine:
-            c.execute("INSERT OR IGNORE INTO plan_answers (plan_id, answer_id, decision_id, author, text, at, sent_text)"
-                      " VALUES (?,?,?,?,?,?,?)", (plan_id, a["id"], decision, plan_docs.PERSON, text, float(at), text))
+            c.execute("INSERT OR IGNORE INTO plan_answers (plan_id, answer_id, decision_id, author, text, at, sent_text,"
+                      " sent_rev) VALUES (?,?,?,?,?,?,?,?)",
+                      (plan_id, a["id"], decision, plan_docs.PERSON, text, float(at), text, view.get("rev")))
             changes += 1
     held = {a["answer_id"]: (a["decision_id"], a["author"], a["text"], a["at"])
             for a in _rows(c, plan_id) if a["author"].startswith(plan_docs.TEAMMATE)}
@@ -202,51 +255,66 @@ def pull(c, plan_id: str, owner: str, decisions: Any, now: float) -> int:
     return changes
 
 
-def push(db: DB, plan_id: str, head) -> None:
-    """Send the person's answers the Library's head doesn't hold as they are
-    here: new ones, edited ones and removed ones. Before their picks, which
-    may name them. A refusal (an older Library has no /answers) keeps them
-    here and the rest still go. Not through ``head.send``: an older Library
-    answers 404 for /answers, which there would read as this account losing
-    access to the doc and bar its review."""
+UNSUPPORTED = (404, 405)    # an older Library's answer to POST /answers: it has no own answers yet
+
+
+def push(db: DB, plan_id: str, owner: str, head) -> None:
+    """Send the person's answers as they are here and not on the Library's
+    head: new ones, edited ones and removed ones. Before their picks, which
+    may name them. Each write is judged as ``head.write`` judges one: an
+    access or org-rule refusal is kept on the plan and bars its review, and
+    an answer older than it can't clear it. The one exception is an older
+    Library's 404/405 to a new answer: it has no /answers, and the answers
+    stay on this machine. When the Library says an answer was picked by
+    someone else, the change here is taken back and its answer stands."""
     from brindle.pro import analysis_docs as ad
     from brindle.pro import review_policies
     from brindle.pro import shared_docs as sd
 
-    def write(method: str, tail: str, body: dict | None) -> bool:
+    def write(method: str, tail: str, body: dict | None, unsupported: tuple = ()) -> tuple[int, dict]:
         status, resp = ad._call(method, sd._path(head.doc_id, tail), body, client=head.client, store=head.store)
+        resp = resp if isinstance(resp, dict) else {}
         if status == 200:
-            head.view = resp
+            head.view, head.refused = resp, False
             review_policies.seen(db, head.p, resp)
-            return True
-        log.info("shared doc %s: %s %s refused (%s), kept for the next sync", head.doc_id, method, tail,
-                 resp.get("error") if isinstance(resp, dict) else status)
-        return False
+        elif status not in unsupported:
+            review_policies.refused(db, head.p, resp, status)
+            head.refused = (head.refused or resp.get("error") in review_policies.REFUSALS
+                            or status in review_policies.ACCESS_REFUSED)
+        if status != 200:
+            log.info("shared doc %s: %s %s refused (%s), kept for the next sync", head.doc_id, method, tail,
+                     resp.get("error") or status)
+        return status, resp
 
+    with db.tx() as c:
+        reconcile(c, plan_id, owner, head.view)
     on_head = {d["id"] for d in head.view.get("decisions") or [] if isinstance(d, dict)}
-    theirs = {a["id"]: a for _, a in _theirs(head.view.get("decisions"))}
+    theirs = {a["id"]: a for _, a in _theirs(head.view.get("decisions")) if a["author"] == owner}
     for a in _rows(db.conn, plan_id, removed=True):
         if a["author"] != plan_docs.PERSON:
             continue
-        sent = None
+        got, rev = theirs.get(a["answer_id"]), head.rev
         if a["removed"]:
-            if a["answer_id"] not in theirs or write("DELETE", f"/answers/{a['answer_id']}?rev={head.rev}", None):
-                with db.tx() as c:
-                    c.execute("DELETE FROM plan_answers WHERE plan_id=? AND answer_id=? AND removed=1",
-                              (plan_id, a["answer_id"]))
+            status, resp = (200, {}) if got is None else write("DELETE", f"/answers/{a['answer_id']}?rev={rev}", None)
+            with db.tx() as c:
+                if status == 200:
+                    c.execute("DELETE FROM plan_answers WHERE plan_id=? AND answer_id=?", (plan_id, a["answer_id"]))
+                elif resp.get("error") == "picked":
+                    stands = mask(got["text"])[:MAX_TEXT]
+                    _set(c, plan_id, a["answer_id"], removed=0, text=stands, sent_text=stands, sent_rev=rev)
             continue
         if a["decision_id"] not in on_head:
             continue
-        if a["answer_id"] not in theirs:
-            if write("POST", "/answers", {"rev": head.rev, "decision": a["decision_id"], "id": a["answer_id"],
-                                          "text": a["text"]}):
-                sent = a["text"]
-        elif theirs[a["answer_id"]]["text"] != a["text"]:
-            if write("PUT", f"/answers/{a['answer_id']}", {"rev": head.rev, "text": a["text"]}):
-                sent = a["text"]
-        elif a["sent_text"] is None:
-            sent = a["text"]
-        if sent is not None:
-            with db.tx() as c:
-                c.execute("UPDATE plan_answers SET sent_text=? WHERE plan_id=? AND answer_id=?",
-                          (sent, plan_id, a["answer_id"]))
+        if got is None:
+            status, resp = write("POST", "/answers", {"rev": rev, "decision": a["decision_id"], "id": a["answer_id"],
+                                                      "text": a["text"]}, UNSUPPORTED)
+        elif got["text"] != a["text"]:
+            status, resp = write("PUT", f"/answers/{a['answer_id']}", {"rev": rev, "text": a["text"]})
+        else:
+            status, resp = 200, {}
+        with db.tx() as c:
+            if status == 200:
+                _set(c, plan_id, a["answer_id"], sent_text=a["text"], sent_rev=rev)
+            elif got is not None and resp.get("error") == "picked":
+                stands = mask(got["text"])[:MAX_TEXT]
+                _set(c, plan_id, a["answer_id"], text=stands, sent_text=stands, sent_rev=rev)
