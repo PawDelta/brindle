@@ -114,6 +114,13 @@ function diffLines(theme: ChatTheme, truecolour: boolean): string[] {
   ];
 }
 
+/* &claude=light|dark: the theme Claude Code draws in, where it isn't the app's: a pane still in the theme it was
+   launched with after the app switched (what a pane did before it followed switches). */
+function claudeTheme(app: ChatTheme): ChatTheme {
+  const asked = new URLSearchParams(location.search).get("claude");
+  return asked === "light" || asked === "dark" ? asked : app;
+}
+
 function diffOutput(theme: ChatTheme): string[] {
   const accents = theme === "light"
     ? [`${ESC}38;5;174m✻ Working… (orange, 174)${ESC}0m  ${ESC}38;5;248msubtle grey (248)${ESC}0m  ${ESC}38;5;241minactive grey (241)${ESC}0m  ${ESC}38;5;137mwarning (137)${ESC}0m  ${ESC}38;5;65msuccess (65)${ESC}0m`]
@@ -200,7 +207,7 @@ export function ChatPaneScene({ scene, theme }: { scene: string; theme: ChatThem
       <ChatPane provider="claude" theme={theme} prompt={prompt}
         terminal={openCaptured
           ? { at: { server: null, target: "chat:1" }, open: openCaptured, onRows }
-          : { at: { server: null, target: "chat:1" }, open: opener(prompt.kind, scene === "chat-pane-diff" ? diffOutput(theme) : OUTPUT) }}
+          : { at: { server: null, target: "chat:1" }, open: opener(prompt.kind, scene === "chat-pane-diff" ? diffOutput(claudeTheme(theme)) : OUTPUT) }}
         composer={composer} onDropFiles={() => {}} onComposeText={() => {}} />
     </main>
   );
