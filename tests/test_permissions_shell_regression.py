@@ -74,6 +74,14 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
                  marks=pytest.mark.variant("replayed pytest file globs use their bounded matches")),
     pytest.param("uv run pytest tests/test_*.py -q", True, "deny", id="pytest-denied-file",
                  marks=pytest.mark.variant("a resolved pytest filename still matches a bash deny")),
+    pytest.param("strings {root}/app/*", False, "allow", id="strings-files",
+                 marks=pytest.mark.variant("replayed strings over application binaries uses a read snapshot")),
+    pytest.param("file renders/*.png", False, "allow", id="file-glob",
+                 marks=pytest.mark.variant("replayed file inspection uses a read snapshot")),
+    pytest.param('for f in tests/*.py; do echo "$f"; head "$f"; done', False, "allow", id="read-loop",
+                 marks=pytest.mark.variant("a glob loop can snapshot when every body command only reads")),
+    pytest.param('for f in tests/*.py; do echo "$f"; touch marker; done', False, "restricted", id="write-loop",
+                 marks=pytest.mark.variant("a write anywhere in the loop prevents its read snapshot")),
     pytest.param("cp tests/test_*.py output/", False, "restricted", id="writer",
                  marks=pytest.mark.variant("filesystem snapshot proof is restricted to reads and test runs")),
     pytest.param("gh api bl[ox]cked", False, "restricted", id="bracket-overlap",
@@ -99,7 +107,12 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
 def test_replayed_shell_constructs_keep_restrictions(tmp_path, command, protected, expected):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / ("test_daemon.json.py" if protected else "test_public.py")).touch()
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "binary").touch()
+    (tmp_path / "renders").mkdir()
+    (tmp_path / "renders" / "one.png").touch()
     here = str(tmp_path)
+    command = command.replace("{root}", here)
     req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
     rules = [*permissions.preset_rules("autonomous"), permissions.Rule("bash", "gh api blocked", "exact", "deny")]
     got = permissions.decide(req, rules=rules, unmatched="allow", saved=[], groups={})

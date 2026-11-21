@@ -4890,14 +4890,17 @@ class _Flattener:
         self.scopes: list[tuple] = []
         self.scope: tuple = ()
         self.ids = itertools.count()
+        self.loop: tuple = ()    # enclosing for loops; -1 marks an unbounded conditional/loop body
+        self.loops: list[tuple] = []
 
     def emit(self, command: str, definite: bool = False, chained: tuple[bool, bool] = (False, False),
-             fed: bool = False, scope: tuple | None = None) -> None:
+             fed: bool = False, scope: tuple | None = None, loop: tuple | None = None) -> None:
         self.out.append(command)
         self.definite.append(definite)
         self.chained.append(chained if self.track else (False, False))
         self.fed.append(fed)
         self.scopes.append(self.scope if scope is None else scope)
+        self.loops.append(self.loop if loop is None else loop)
         if len(self.out) > _FLAT_LIMIT:
             raise ValueError("too many commands")
 
@@ -4985,15 +4988,20 @@ class _Flattener:
             env.clear()
         for name in assigned or ():
             env.pop(name, None)    # a later pass sees what an earlier one set
+        kept = self.loop
         if node[0] == "maybe":
+            self.loop += (-1,)
             self.walk(body, env, False, False, fed_in)
+            self.loop = kept
             return
+        self.loop += (next(self.ids),) if all(value is not None for value in values) else (-1,)
         for value in dict.fromkeys(values):
             if value is None:
                 env.pop(node[1], None)
             else:
                 env[node[1]] = value
             self.walk(body, env, False, False, fed_in)
+        self.loop = kept
         env.pop(node[1], None)
 
     def loop_values(self, words: list[_Word] | None, env: dict) -> list[tuple | None]:
@@ -5023,9 +5031,10 @@ class _Flattener:
     def substitution(self, inner: str, env: dict) -> None:
         sub = _Flattener(self.cwd, credential_scan=self.credential_scan, reading=self.reading)
         sub.ids, sub.scope = self.ids, self.scope + (next(self.ids),)    # a subshell of its own
+        sub.loop = self.loop
         sub.script(inner, dict(env), top=False)    # what HOME is here is what the outer script left
-        for command, fed, scope in zip(sub.out, sub.fed, sub.scopes):
-            self.emit(command, fed=fed, scope=scope)
+        for command, fed, scope, loop in zip(sub.out, sub.fed, sub.scopes, sub.loops):
+            self.emit(command, fed=fed, scope=scope, loop=loop)
         self.named += sub.named
 
     def resolved(self, text: str) -> str:
@@ -5277,6 +5286,7 @@ class ShellPart:
     # Per word of ``written``: whether the shell expands it as a pattern of names.
     patterned: list[bool] = field(default_factory=list)
     dotglob: bool = False    # a pattern selects dot entries where it runs (_PartReader.options)
+    loop: tuple = ()        # read snapshots must be safe for every command of each enclosing loop
 
 
 class _Unverifiable(ValueError):
@@ -5393,6 +5403,7 @@ class _PartReader:
         self.ids = itertools.count()
         self.options: dict[tuple, bool] = {}
         self.arrays: list[tuple[list[str], bool]] = []    # each array list scan() met, and dotglob there
+        self.loop: tuple = ()
 
     def dotglob(self) -> bool:
         """dotglob in the current subshell: as it left it, else as its nearest parent did."""
@@ -5505,6 +5516,7 @@ class _PartReader:
             raise ValueError("a heredoc a program may run as code")
         flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan, reading=not self.credential_scan)
         flattener.ids, flattener.scope = self.ids, self.scope
+        flattener.loop = self.loop
         try:
             flattener.script(command, {})
         except ValueError:
@@ -5514,13 +5526,14 @@ class _PartReader:
             self.scan(command)
             return
         self.named += flattener.named
-        outer, shell = self.fed, self.scope
-        for line, sure, (chained, leads), fed, scope in zip(flattener.out, flattener.definite, flattener.chained,
-                                                            flattener.fed, flattener.scopes):
+        outer, shell, loop = self.fed, self.scope, self.loop
+        for line, sure, (chained, leads), fed, scope, inside in zip(
+                flattener.out, flattener.definite, flattener.chained, flattener.fed, flattener.scopes, flattener.loops):
             self.fed = outer or fed or self.input_stays
             self.scope = scope
+            self.loop = inside
             self.part(line, definite and sure, chains and chained, chains and leads)
-        self.fed, self.scope = outer, shell
+        self.fed, self.scope, self.loop = outer, shell, loop
 
     def inner(self, command: str) -> None:
         """A substitution's commands: they run in a subshell of their own."""
@@ -5539,7 +5552,7 @@ class _PartReader:
             raise ValueError("unreadable syntax")
         if not chained:
             self.cwd = self.settled
-        part = ShellPart([], line, self.cwd)
+        part = ShellPart([], line, self.cwd, loop=self.loop)
         self.expanded = self.tilde = False
         program: str | None = None
         runner_unknown, env_assignments = False, False
@@ -5948,15 +5961,15 @@ def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
                for literal in literals for fragment in literal.split())
 
 
-def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule]) -> bool:
+def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule], blocked_loops: set[int]) -> bool:
     """A bounded glob snapshot for reads and explicit pytest invocations.
 
     Read snapshots may race with new files; writers still need the stronger
-    pattern proof. Unknown expansions, redirects and changed working directories
+    pattern proof. Unknown expansions, redirects and unknown working directories
     never qualify. Both the written and expanded invocation must be a read.
     """
     if (part.unknown or part.assigned or part.writes or part.reads or part.cwd is None or len(part.words) > 500
-            or any("**" in word for word in part.written)):
+            or any("**" in word for word in part.written) or not blocked_loops.isdisjoint(part.loop)):
         return False
 
     def reading(words: list[str]) -> bool:
@@ -5967,7 +5980,7 @@ def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule]) -> bo
             args = args[2:]
         if args and args[0] == "pytest":
             return True
-        return words[0] in ("ls", "cat", "head", "tail", "wc", "grep", "rg", "git") and _readonly_part(req, words)
+        return words[0] != "tee" and _readonly_part(req, words)
 
     return reading(part.written) and reading(part.words) and _reads_clear(req, part.words, path_denies)
 
@@ -5990,6 +6003,12 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
     parts = shell_parts(req, why)
     if parts is None:
         return None
+    blocked_loops = {-1}
+    for part in parts:
+        at = replace(req, cwd=part.cwd or req.cwd)
+        if part.loop and (part.assigned or part.writes or not _readonly_part(at, part.written)
+                         or not _readonly_part(at, part.words)):
+            blocked_loops.update(part.loop)
     path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny" and r.match_type != "tracked"]
     write_denies = any(r.kind in ("write", "edit") and r.decision == "deny" for r in rules)
     found = None
@@ -6020,7 +6039,7 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                             and not any(_patterns_may_restrict(rule, part) for rule in restrictions)
                             and not any("**" in word for word in part.written))
         if restrictions and (part.redirect_glob or part.globs and not literal_patterns
-                             and not _snapshot_read(at, part, path_denies) and not (places and (
+                             and not _snapshot_read(at, part, path_denies, blocked_loops) and not (places and (
                 _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
                                                         [part.assigned], [("<", path) for path in part.reads])
                                         for place in places)))):
