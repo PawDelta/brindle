@@ -4302,18 +4302,54 @@ _REFERENCE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=")
 
 
-# What may set HOME, or a variable under a built-up name: a bare HOME word (HOME=x, read HOME,
-# ${HOME:=x}), a builtin that sets variables, an indirect ${!x}, eval, source or ".".
-_HOME_SETTERS = re.compile(r"\bHOME\b|\$\{!|\b(?:eval|source|" + "|".join(sorted(_VARIABLE_SETTERS))
-                           + r")\b|(?:^|[\s;&|(){}`])\.(?=\s)")
+# In a command's words as the shell reads them (quotes and line continuations gone), what may
+# set HOME, or a variable under a name only the run knows: a HOME word (HOME=x, read HOME,
+# ${HOME:=x}, ((HOME=1))), a builtin that sets variables or runs text, "." (source), arithmetic
+# (which assigns what a value names: x='HOME=1'; ((x)), ${s:x}, a[x]), a pattern or a brace
+# expansion (which may build a name: {re,}ad, H?ME) or a ${...} beyond a plain reference.
+_HOME_SETTERS = re.compile(
+    r"\bHOME\b|\b(?:eval|source|trap|enable|wait|coproc|select|" + "|".join(sorted(_VARIABLE_SETTERS)) + r")\b"
+    r"|(?:^|\s)\.(?=\s|$)|\(\(|\$\[|[\[*?{]")
+# What leaves the next word in command position.
+_COMMAND_PREFIXES = frozenset({"!", "{", "}", "if", "then", "elif", "else", "while", "until", "do", "time",
+                               "command", "builtin", "exec", "nohup", "env", "sudo", "nice", "case", "in"})
+_SHELL_OPERATOR_CHARS = "();<>|&\n"
 
 
 def _home_unchanged(command: str) -> bool:
     """Whether nothing in the command being checked (all of it, when
     ``command`` is a part of it re-read alone) may set HOME: then its $HOME
-    is the home the run starts with."""
-    text = _OUTERMOST.get() or command
-    return not _HOME_SETTERS.search(re.sub(r"\$(?:HOME\b|\{HOME\})", "", text))
+    is the home the run starts with. Read from the words the shell sees, and
+    False wherever that can't be told: a command name only the run knows
+    may be a setter (c=read; $c x)."""
+    lexer = shlex.shlex((_OUTERMOST.get() or command).replace("\\\n", ""), posix=True,
+                        punctuation_chars=_SHELL_OPERATOR_CHARS)
+    lexer.whitespace = " \t\r"
+    lexer.commenters = ""
+    lexer.wordchars += "$`{}[]!@%^+,:#"
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    plain = re.sub(r"\$\{([A-Za-z_]\w*)\}", r"$\1", " ".join(tokens))    # ${x} is $x
+    if _HOME_SETTERS.search(re.sub(r"\$HOME\b", "", plain)):
+        return False
+    start = True
+    redirect = False
+    for token in tokens:
+        if token and set(token) <= set(_SHELL_OPERATOR_CHARS):
+            redirect = "<" in token or ">" in token
+            start = start or not redirect
+            continue
+        if redirect:    # a redirect's file
+            redirect = False
+            continue
+        if start and (token in _COMMAND_PREFIXES or _ASSIGNMENT.match(token)):
+            continue
+        if start and token[:1] in "$`":
+            return False
+        start = False
+    return True
 
 
 @dataclass

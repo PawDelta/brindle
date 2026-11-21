@@ -101,6 +101,14 @@ def test_a_variable_assigned_a_home_path_is_checked_as_its_value(tmp_path, comma
                  marks=pytest.mark.variant("a builtin that may set HOME")),
     pytest.param('n=HOME; eval "$n=blocked"; git commit -m "$(gh api $HOME)"', id="eval",
                  marks=pytest.mark.variant("an eval may set HOME under a built-up name")),
+    pytest.param('HOM\\\nE=blocked; git commit -m "$(gh api $HOME)"', id="continuation",
+                 marks=pytest.mark.variant("a line continuation splits the name as written")),
+    pytest.param("n=HO'ME'; re'ad' \"$n\"; git commit -m \"$(gh api $HOME)\"", id="quoted",
+                 marks=pytest.mark.variant("quotes split a setter's and the variable's names as written")),
+    pytest.param('c=re; n=HO; ${c}ad ${n}ME; git commit -m "$(gh api $HOME)"', id="computed-name",
+                 marks=pytest.mark.variant("a command name only the run knows may be a setter")),
+    pytest.param('{re,}ad {HO,}ME; git commit -m "$(gh api $HOME)"', id="braces",
+                 marks=pytest.mark.variant("brace expansion builds a setter and HOME")),
 ])
 def test_home_the_command_may_change_stays_unknown_in_its_substitutions(tmp_path, command):
     here = str(tmp_path)
