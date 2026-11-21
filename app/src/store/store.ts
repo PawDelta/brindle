@@ -6,7 +6,8 @@
    status, a removed workspace, a git sweep, liveness, org status) it patches.
    Any other event marks the store stale, and sync.ts fetches a fresh snapshot. */
 
-import type { AccountDTO, InboxItemDTO, WorkspaceDTO } from "../api/schema";
+import type { InboxItemDTO, WorkspaceDTO } from "../api/schema";
+import type { AccountInfo } from "../api/client";
 import type { AppUpdateStatus } from "../api/tauri";
 import type { BusEvent, OrgNotice, StreamMessage, StreamState } from "../api/events";
 import { isPastWorker } from "./overview";
@@ -20,7 +21,7 @@ export interface AppState {
   /* Invalidates pending reads that could restore a closed or rewound agent. */
   lifecycleVersion: number;
   /* Shared identity, refreshed by the sidebar and Account page. */
-  account: AccountDTO | null;
+  account: AccountInfo | null;
   /* The newest bus event id applied: what a reconnect resumes from. */
   lastEventId: number;
   workspaces: WorkspaceDTO[];
@@ -60,7 +61,7 @@ export interface AppState {
 }
 
 export type Action =
-  | { type: "account"; account: AccountDTO }
+  | { type: "account"; account: AccountInfo }
   | { type: "app_update"; status: AppUpdateStatus }
   | { type: "connection"; state: StreamState }
   /* `since`: the newest bus event applied when the reads began (sync.ts); the store's own when absent. */
