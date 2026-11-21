@@ -13,18 +13,18 @@ export type PlanDocClient = Pick<DaemonClient, "commentPlan" | "replyPlan" | "re
 
 /* Team review through the Library (brindle/pro/shared_docs.py). Not every build of the screen has it. */
 export type PlanSharingClient = Pick<DaemonClient, "sharePlan" | "setPlanReviewers" | "syncPlan" | "signOffPlan" | "overridePlanPolicy" | "libraryPeople" | "docScopes"> &
-  Partial<Pick<DaemonClient, "askPlanPolicyAgain" | "previewPlanPolicies" | "stopSharingPlan">>;
+  Partial<Pick<DaemonClient, "askPlanPolicyAgain" | "previewPlanPolicies" | "stopSharingPlan" | "planPeople" | "setPlanReviewer" | "removePlanReviewer">>;
 
 /* A design someone else shared, read and reviewed from the Library (brindle/pro/shared_reader.py). */
-export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "sharedDesignHistory" | "sharedDesignRevisionChanges">>;
+export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "sharedDesignHistory" | "sharedDesignRevisionChanges" | "designPeople" | "setDesignReviewer" | "removeDesignReviewer">>;
 
 /* A design opened from its share link (lib/deeplink.ts): read only, through the link. */
 export type ShareLinkDesignClient = Pick<DaemonClient, "shareLinkDesign">;
 
 /* A design's share link, for its editors on Pro and up (brindle/pro/share_links.py). */
-export type ShareLinkClient = Pick<DaemonClient, "designShareLink" | "copyDesignShareLink" | "revokeDesignShareLink"> & Partial<Pick<DaemonClient, "docScopes">>;
+export type ShareLinkClient = Pick<DaemonClient, "designShareLink" | "copyDesignShareLink" | "revokeDesignShareLink"> & Partial<Pick<DaemonClient, "docScopes" | "updateDesignShareLink">>;
 /* The same, for the author's plan by its id. */
-export type PlanShareLinkClient = Pick<DaemonClient, "planShareLink" | "copyPlanShareLink" | "revokePlanShareLink"> & Partial<Pick<DaemonClient, "docScopes">>;
+export type PlanShareLinkClient = Pick<DaemonClient, "planShareLink" | "copyPlanShareLink" | "revokePlanShareLink"> & Partial<Pick<DaemonClient, "docScopes" | "updatePlanShareLink">>;
 
 export type KeptVisualsClient = Pick<DaemonClient, "keptVisuals">;
 

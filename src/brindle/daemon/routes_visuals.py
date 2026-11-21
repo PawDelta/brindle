@@ -556,6 +556,21 @@ def plan_reviewers(db: DB, params: dict, body: dict) -> Any:
     return _library(db, params["id"], lambda sd: sd.set_reviewers(db, params["id"], body.get("reviewers")))
 
 
+def plan_reviewer_put(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.set_reviewer(
+        db, params["id"], params["sub"], _get(body, "required", bool, default=True, required=True)))
+
+
+def plan_reviewer_delete(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.set_reviewer(db, params["id"], params["sub"], None))
+
+
+@_json
+def plan_people(db: DB, request: Request) -> Any:
+    return _shared_design(request.query_params.get("repo") or None,
+                          lambda r: r.people(_plan_doc(db, request.path_params["id"]), dict(request.query_params)))
+
+
 def plan_sync(db: DB, params: dict, body: dict) -> Any:
     return _library(db, params["id"], lambda sd: sd.sync(db, params["id"]))
 
@@ -666,6 +681,21 @@ def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
 def shared_design(db: DB, request: Request) -> Any:
     doc = request.path_params["doc_id"]
     return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc))
+
+
+@_json
+def design_people(db: DB, request: Request) -> Any:
+    return _shared_design(request.query_params.get("repo") or None,
+                          lambda r: r.people(request.path_params["id"], dict(request.query_params)))
+
+
+def design_reviewer_put(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.reviewer(
+        params["id"], params["sub"], _get(body, "required", bool, default=True, required=True)))
+
+
+def design_reviewer_delete(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(params.get("repo") or None, lambda r: r.reviewer(params["id"], params["sub"], None))
 
 
 @_json
@@ -785,7 +815,12 @@ def share_link(db: DB, request: Request) -> Any:
 
 def share_link_copy(db: DB, params: dict, body: dict) -> Any:
     """The link to copy: the design's own, or a new one when it has none."""
-    return _share_link(_get(body, "repo"), lambda s: s.copy(params["id"], scope=_get(body, "scope"), team=_get(body, "team")))
+    return _share_link(_get(body, "repo"), lambda s: s.copy(params["id"], scope=_get(body, "scope"), team=_get(body, "team"),
+                                                        permission=_get(body, "permission")))
+
+
+def share_link_update(db: DB, params: dict, body: dict) -> Any:
+    return _share_link(_get(body, "repo"), lambda s: s.update(params["id"], body))
 
 
 def share_link_revoke(db: DB, params: dict, body: dict) -> Any:
@@ -814,7 +849,12 @@ def plan_share_link(db: DB, request: Request) -> Any:
 
 def plan_share_link_copy(db: DB, params: dict, body: dict) -> Any:
     return _share_link(_get(body, "repo"), lambda s: s.copy(_plan_doc(db, params["id"]),
-                                                        scope=_get(body, "scope"), team=_get(body, "team")))
+                                                        scope=_get(body, "scope"), team=_get(body, "team"),
+                                                        permission=_get(body, "permission")))
+
+
+def plan_share_link_update(db: DB, params: dict, body: dict) -> Any:
+    return _share_link(_get(body, "repo"), lambda s: s.update(_plan_doc(db, params["id"]), body))
 
 
 def plan_share_link_revoke(db: DB, params: dict, body: dict) -> Any:
@@ -857,6 +897,14 @@ def kept_page(db: DB, request: Request) -> Path:
 
 
 ROUTES = [
+    Route("/v1/library/designs/{id}/people", design_people),
+    Route("/v1/library/designs/{id}/reviewers/{sub}", _endpoint(design_reviewer_put), methods=["PUT"]),
+    Route("/v1/library/designs/{id}/reviewers/{sub}", _endpoint(design_reviewer_delete), methods=["DELETE"]),
+    Route("/v1/library/designs/{id}/share-link", _endpoint(share_link_update), methods=["PUT"]),
+    Route("/v1/plans/{id}/people", plan_people),
+    Route("/v1/plans/{id}/reviewers/{sub}", _endpoint(plan_reviewer_put), methods=["PUT"]),
+    Route("/v1/plans/{id}/reviewers/{sub}", _endpoint(plan_reviewer_delete), methods=["DELETE"]),
+    Route("/v1/plans/{id}/share-link", _endpoint(plan_share_link_update), methods=["PUT"]),
     WebSocketRoute("/v1/visuals/{id}/live", visual_live),
     Route("/v1/library/designs/{id}/question", _endpoint(doc_question), methods=["POST"]),
     Route("/v1/library/designs/{id}/plan", library_design_plan),

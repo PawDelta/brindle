@@ -90,6 +90,7 @@ def _link(raw: Any) -> dict | None:
     return {"url": raw["url"],
             "created_at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
             "access": raw["access"] if raw.get("access") in ACCESS else "anyone",
+            "permission": raw.get("permission") if raw.get("permission") in ("view", "edit") else "view",
             "scope": raw.get("scope") if isinstance(raw.get("scope"), dict) else None}
 
 
@@ -158,7 +159,7 @@ def _access(client, store) -> tuple[str, str | None]:
     return policy.get("share_links", "org"), ent.org_id
 
 
-def copy(doc_id: str, *, scope=None, team=None, client=None, store=None) -> dict:
+def copy(doc_id: str, *, scope=None, team=None, permission=None, client=None, store=None) -> dict:
     """Reuse the design's link unless an explicit audience selection differs. Asked again
     in its turn, so copies that overlap all get the one link."""
     with TURNS.hold(doc_id):
@@ -172,12 +173,27 @@ def copy(doc_id: str, *, scope=None, team=None, client=None, store=None) -> dict
         body = {"scope": scope} if scope else None
         if team:
             body["team"] = team
+        if permission is not None:
+            if permission not in ("view", "edit"):
+                raise ServiceError("invalid_request", "choose view or edit for this link", 422)
+            body = {**(body or {}), "permission": permission}
         link = state["link"]
         existing = (link or {}).get("scope") or {}
         if not link or (scope is not None and (existing.get("kind") != scope or existing.get("team") != team)):
             link = _ask("POST", doc_id, client, store, body)
+        elif permission is not None and link["permission"] != permission:
+            link = _ask("PUT", doc_id, client, store, body)
     if link is None:
         raise ServiceError("upstream", "the Library made no link", 502)
+    return {**state, "link": link}
+
+
+def update(doc_id: str, body: dict, *, client=None, store=None) -> dict:
+    """Update access without replacing the link's token or creator."""
+    with TURNS.hold(doc_id):
+        state = read(doc_id, client=client, store=store)
+        link = _ask("PUT", doc_id, client, store,
+                    {k: v for k, v in body.items() if k in ("scope", "team", "permission")})
     return {**state, "link": link}
 
 

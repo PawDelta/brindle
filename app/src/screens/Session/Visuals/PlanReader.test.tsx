@@ -520,9 +520,16 @@ it("the author's plan opened in its session offers its Library link by plan id, 
     store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 1, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: {} } });
   });
   await openShare();
+  const panel = screen.getByTestId("plan-share");
+  expect(panel.parentElement).toBe(screen.getByTestId("plan-doc").parentElement);
+  expect(screen.queryByTestId("plan-review")).toBeNull();
+  fireEvent.mouseDown(screen.getByTestId("plan-doc"));
+  expect(panel.hidden).toBe(false);
   await act(async () => fireEvent.click(within(await screen.findByTestId("share-link")).getByRole("button", { name: "Copy link" })));
   expect(copies).toEqual([plan.id]);
   expect((within(screen.getByTestId("share-link")).getByRole("textbox") as HTMLInputElement).value).toBe(url);
+  fireEvent.click(screen.getByRole("button", { name: "Close share" }));
+  expect(panel.hidden).toBe(true);
 });
 
 it("a doc the Library can't confirm says why in plain words, with Sign in, and Stop sharing goes on to build", async () => {

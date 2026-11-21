@@ -41,13 +41,15 @@ import { CloudLoginStatus, useCloudLogin } from "../../Inbox/CloudSignIn";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
 import type { PlanDocClient, PlanShareLinkClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
-import { Popover, ReaderBar } from "./DocBar";
+import { ReaderBar } from "./DocBar";
 import { Diagram } from "./DocDiagram";
 import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
 import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { DocMarkdown } from "./DocMarkdown";
 import { DraftCard, Review, ReviewStrip, SignOffSheet, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
 import { Reviewers } from "./DocReviewers";
+import { SharePanel } from "./SharePanel";
+import { Policies } from "./DocPolicies";
 import type { LiveClient } from "./DocEditor";
 import { DocPresence, type LiveCapability } from "./DocPresence";
 import { DocStatus, type StatusReviewer } from "./DocStatus";
@@ -941,7 +943,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} since={sinceRevs && lastRead !== null ? { from: lastRead, changes: sinceRevs } : null} onShowChanges={() => setTab("history")} />
   ) : undefined;
 
-  // Who reviews it, and sharing it: over the page from the toolbar's Share, not a row of the header.
+  // Before its first Library share, retain the scope choice and policy preview.
   const reviewersPanel = (
     <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
       <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={reviewWrite} reviewVersion={reviewVersion} reviewBlocked={reviewBlocked} />
@@ -950,12 +952,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const canShare = !!gate || (!!sharing && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
   // The link: Pro and up (the daemon says `available`), for whoever may edit the design.
   const linked = shareLink && link.state?.available ? { target: shareLink, state: link.state } : null;
-  const shareMenu = (canShare || linked) && (
-    <Popover label="Share" open={sharingOpen} onOpenChange={setSharingOpen} testid="plan-share">
-      {canShare && reviewersPanel}
-      {linked && <ShareLinkPanel target={linked.target} state={linked.state} onState={link.setState} />}
-    </Popover>
-  );
+  const shareMenu = (canShare || linked) && <button type="button" className={`${button} text-xs ${sharingOpen ? "!border-transparent bg-branch-soft text-branch" : ""}`}
+    aria-expanded={sharingOpen} onClick={() => setSharingOpen((o) => !o)}>Share</button>;
+  const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
+  const sharePanel = (canShare || linked) && <SharePanel plan={plan} target={sharePeople}
+    nameOf={nameOf} writes={writes} onBusy={setBusy} visible={sharingOpen && !historical} onClose={() => setSharingOpen(false)} fallback={canShare && reviewersPanel}>
+    {sharePeople && !!gate?.policies?.length && <section className="sec"><Policies plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} busy={busy} nameOf={nameOf} write={reviewWrite} /></section>}
+    {linked && <ShareLinkPanel target={linked.target} state={linked.state} onState={link.setState} />}
+  </SharePanel>;
   const presence = docLive && (
     <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={myName} onState={setLiveState} onCapability={setLiveCapability} onText={setLiveTexts} refreshes={refreshes}
       mode={mode} stripHost={stripHost} reviewers={reviewerNames} onHistory={designDoc ? () => setHistoryOpen(true) : () => { if (collapsed) collapse(false); setTab("history"); }} />
@@ -1215,6 +1219,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             )}
             {highlightBar}
           </div>
+          {sharePanel}
         </div>
         <footer className="flex min-h-[60px] flex-wrap items-center justify-between gap-x-5 gap-y-3 border-t border-line-strong bg-canvas-2 px-4 py-2.5 font-sans" data-testid="plan-verdict">
           {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? teammateBar : open ? (
@@ -1356,7 +1361,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           </article>}
           {highlightBar}
         </div>
-        {columnOpen ? (
+        {sharePanel}
+        {!sharingOpen && (columnOpen ? (
           <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
@@ -1366,7 +1372,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} work={work} canLink={!teammate || canComment} />
         ) : (
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />
-        )}
+        ))}
       </div>
       <footer className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2.5 border-t border-line-strong bg-canvas-2 px-s2 py-3" data-testid="plan-verdict">
         {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? (

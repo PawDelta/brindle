@@ -3,13 +3,15 @@
    machine, and a design someone else shared, read from the Library by its doc id. */
 
 import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type SharedDesign } from "../../../api/client";
-import type { PlanDocClient, PlansClient, ShareLinkDesignClient, SharedDesignClient } from "./client";
+import type { PlanDocClient, PlansClient, PlanSharingClient, ShareLinkDesignClient, SharedDesignClient } from "./client";
+import type { SharePeopleTarget } from "./SharePanel";
 import type { HistoryClient } from "./DocHistory";
 
 export interface DocSource<P extends Plan = Plan> {
   /* The doc's own id there: a plan's, or a Library doc's. Anything kept about a doc is keyed by it. */
   readonly id: string;
   history?: HistoryClient;
+  people?: SharePeopleTarget;
   read(): Promise<P>;
   comment(rev: number, anchor: PlanAnchor, text: string, question: boolean): Promise<P>;
   reply(rev: number, thread: number, text: string): Promise<P>;
@@ -22,9 +24,14 @@ export interface DocSource<P extends Plan = Plan> {
   lost?(e: unknown): boolean;
 }
 
-export function planSource(client: PlansClient & PlanDocClient, id: string): DocSource {
+export function planSource(client: PlansClient & PlanDocClient & Partial<PlanSharingClient>, id: string): DocSource {
   return {
     id,
+    people: client.planPeople && client.setPlanReviewer && client.removePlanReviewer ? {
+      search: (query) => client.planPeople!(id, query),
+      put: (sub, required) => client.setPlanReviewer!(id, sub, required),
+      remove: (sub) => client.removePlanReviewer!(id, sub),
+    } : undefined,
     history: client.planHistory && client.planRevisionChanges ? {
       planHistory: (planId) => client.planHistory!(planId),
       planRevisionChanges: (planId, rev) => client.planRevisionChanges!(planId, rev),
@@ -61,6 +68,11 @@ export function sharedSource(client: SharedDesignClient, id: string, repo?: stri
   const send = (tail: string, body: Record<string, unknown>) => client.writeSharedDesign(id, tail, repo ? { ...body, repo } : body);
   return {
     id,
+    people: client.designPeople && client.setDesignReviewer && client.removeDesignReviewer ? {
+      search: (query) => client.designPeople!(id, query, repo),
+      put: (sub, required) => client.setDesignReviewer!(id, sub, required, repo),
+      remove: (sub) => client.removeDesignReviewer!(id, sub, repo),
+    } : undefined,
     history: client.sharedDesignHistory && client.sharedDesignRevisionChanges ? {
       planHistory: (docId) => client.sharedDesignHistory!(docId, repo),
       planRevisionChanges: (docId, rev) => client.sharedDesignRevisionChanges!(docId, rev, repo),
