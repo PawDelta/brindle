@@ -6470,6 +6470,40 @@
       "title": "PlanAnchorDTO",
       "type": "object"
     },
+    "PlanAnswerDTO": {
+      "description": "An own answer on a decision (brindle.plan_answers): a row someone typed\nunder the options, picked like one. ``locked`` once someone other than\nits author picked it: from then on it stays as written.",
+      "properties": {
+        "at": {
+          "default": 0.0,
+          "title": "At",
+          "type": "number"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "locked": {
+          "default": false,
+          "title": "Locked",
+          "type": "boolean"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "author"
+      ],
+      "title": "PlanAnswerDTO",
+      "type": "object"
+    },
     "PlanCommentDTO": {
       "properties": {
         "section": {
@@ -6633,6 +6667,40 @@
           "title": "PlanAnchorDTO",
           "type": "object"
         },
+        "PlanAnswerDTO": {
+          "description": "An own answer on a decision (brindle.plan_answers): a row someone typed\nunder the options, picked like one. ``locked`` once someone other than\nits author picked it: from then on it stays as written.",
+          "properties": {
+            "at": {
+              "default": 0.0,
+              "title": "At",
+              "type": "number"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "text",
+            "author"
+          ],
+          "title": "PlanAnswerDTO",
+          "type": "object"
+        },
         "PlanCommentDTO": {
           "properties": {
             "section": {
@@ -6654,6 +6722,14 @@
         "PlanDecisionDTO": {
           "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
           "properties": {
+            "answers": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanAnswerDTO"
+              },
+              "title": "Answers",
+              "type": "array"
+            },
             "challenge": {
               "anyOf": [
                 {
@@ -7570,6 +7646,14 @@
         },
         "PlanVerdictDTO": {
           "properties": {
+            "answers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Answers",
+              "type": "object"
+            },
             "approved": {
               "title": "Approved",
               "type": "boolean"
@@ -7897,6 +7981,40 @@
     },
     "PlanDecisionDTO": {
       "$defs": {
+        "PlanAnswerDTO": {
+          "description": "An own answer on a decision (brindle.plan_answers): a row someone typed\nunder the options, picked like one. ``locked`` once someone other than\nits author picked it: from then on it stays as written.",
+          "properties": {
+            "at": {
+              "default": 0.0,
+              "title": "At",
+              "type": "number"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "text",
+            "author"
+          ],
+          "title": "PlanAnswerDTO",
+          "type": "object"
+        },
         "PlanOptionDTO": {
           "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
           "properties": {
@@ -7955,6 +8073,14 @@
       },
       "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
       "properties": {
+        "answers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanAnswerDTO"
+          },
+          "title": "Answers",
+          "type": "array"
+        },
         "challenge": {
           "anyOf": [
             {
@@ -9289,9 +9415,51 @@
     },
     "PlanRevisionDetailDTO": {
       "$defs": {
+        "PlanAnswerDTO": {
+          "description": "An own answer on a decision (brindle.plan_answers): a row someone typed\nunder the options, picked like one. ``locked`` once someone other than\nits author picked it: from then on it stays as written.",
+          "properties": {
+            "at": {
+              "default": 0.0,
+              "title": "At",
+              "type": "number"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "text",
+            "author"
+          ],
+          "title": "PlanAnswerDTO",
+          "type": "object"
+        },
         "PlanDecisionDTO": {
           "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
           "properties": {
+            "answers": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanAnswerDTO"
+              },
+              "title": "Answers",
+              "type": "array"
+            },
             "challenge": {
               "anyOf": [
                 {
@@ -10042,6 +10210,14 @@
         }
       },
       "properties": {
+        "answers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Answers",
+          "type": "object"
+        },
         "approved": {
           "title": "Approved",
           "type": "boolean"
@@ -12336,6 +12512,40 @@
           "title": "PlanAnchorDTO",
           "type": "object"
         },
+        "PlanAnswerDTO": {
+          "description": "An own answer on a decision (brindle.plan_answers): a row someone typed\nunder the options, picked like one. ``locked`` once someone other than\nits author picked it: from then on it stays as written.",
+          "properties": {
+            "at": {
+              "default": 0.0,
+              "title": "At",
+              "type": "number"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "text",
+            "author"
+          ],
+          "title": "PlanAnswerDTO",
+          "type": "object"
+        },
         "PlanCommentDTO": {
           "properties": {
             "section": {
@@ -12357,6 +12567,14 @@
         "PlanDecisionDTO": {
           "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
           "properties": {
+            "answers": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanAnswerDTO"
+              },
+              "title": "Answers",
+              "type": "array"
+            },
             "challenge": {
               "anyOf": [
                 {
@@ -13273,6 +13491,14 @@
         },
         "PlanVerdictDTO": {
           "properties": {
+            "answers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Answers",
+              "type": "object"
+            },
             "approved": {
               "title": "Approved",
               "type": "boolean"
@@ -15091,6 +15317,14 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/answers"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/answers/{answer}"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/cancel"
     },
     {
@@ -15432,6 +15666,14 @@
     {
       "method": "GET",
       "path": "/v1/shared-designs/{doc_id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/answers"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/answers/{answer}"
     },
     {
       "method": "POST",

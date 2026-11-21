@@ -530,6 +530,25 @@ def plan_confirm(db: DB, params: dict, body: dict) -> Any:
     return _plan_now(db, params["id"])
 
 
+def plan_answer_add(db: DB, params: dict, body: dict) -> Any:
+    """The person's own answer on a decision, picked as it is added (brindle.plan_answers)."""
+    from brindle import plan_answers
+
+    plan_answers.add(db, params["id"], body.get("rev"), body.get("decision"), body.get("text"))
+    return _plan_now(db, params["id"])
+
+
+def plan_answer_change(db: DB, params: dict, body: dict) -> Any:
+    """Reword the person's own answer ({rev, text}) or take it back ({rev, remove: true})."""
+    from brindle import plan_answers
+
+    if body.get("remove") is True:
+        plan_answers.remove(db, params["id"], body.get("rev"), params["answer"])
+    else:
+        plan_answers.edit(db, params["id"], body.get("rev"), params["answer"], body.get("text"))
+    return _plan_now(db, params["id"])
+
+
 # Team review through the Library (brindle.pro.shared_docs). Each answers with
 # the plan as it is now, its build gate included.
 
@@ -747,6 +766,19 @@ def shared_design_vote(db: DB, params: dict, body: dict) -> Any:
                                                                body.get("option")))
 
 
+def shared_design_answer_add(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.add_answer(params["doc_id"], body.get("rev"),
+                                                                     body.get("decision"), body.get("text")))
+
+
+def shared_design_answer_change(db: DB, params: dict, body: dict) -> Any:
+    if body.get("remove") is True:
+        return _shared_design(_get(body, "repo"), lambda r: r.remove_answer(params["doc_id"], body.get("rev"),
+                                                                            params["answer"]))
+    return _shared_design(_get(body, "repo"), lambda r: r.edit_answer(params["doc_id"], body.get("rev"),
+                                                                      params["answer"], body.get("text")))
+
+
 def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
     return _shared_design(_get(body, "repo"), lambda r: r.sign_off(params["doc_id"], body.get("rev")))
 
@@ -935,6 +967,8 @@ ROUTES = [
     Route("/v1/plans/{id}/suggestions", _endpoint(plan_suggest), methods=["POST"]),
     Route("/v1/plans/{id}/edit", _endpoint(plan_edit), methods=["POST"]),
     Route("/v1/plans/{id}/confirm", _endpoint(plan_confirm), methods=["POST"]),
+    Route("/v1/plans/{id}/answers", _endpoint(plan_answer_add), methods=["POST"]),
+    Route("/v1/plans/{id}/answers/{answer}", _endpoint(plan_answer_change), methods=["POST"]),
     Route("/v1/plans/{id}/threads/{tid:int}/resolve", _endpoint(plan_resolve), methods=["POST"]),
     Route("/v1/plans/{id}/threads/{tid:int}/accept", _endpoint(plan_accept), methods=["POST"]),
     Route("/v1/plans/{id}/threads/{tid:int}/reject", _endpoint(plan_reject), methods=["POST"]),
@@ -961,6 +995,8 @@ ROUTES = [
     Route("/v1/shared-designs/{doc_id}/suggestions", _endpoint(shared_design_suggest), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/threads/{tid:int}", _endpoint(shared_design_thread), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/votes", _endpoint(shared_design_vote), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/answers", _endpoint(shared_design_answer_add), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/answers/{answer}", _endpoint(shared_design_answer_change), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/sign-offs", _endpoint(shared_design_sign_off), methods=["POST"]),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),

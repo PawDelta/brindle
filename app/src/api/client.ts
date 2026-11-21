@@ -2354,6 +2354,16 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
   }
 
+  /* The person's own answer on a decision (brindle/plan_answers.py), picked as it is added. */
+  addPlanAnswer(id: string, rev: number, decision: string, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers`, { rev, decision, text });
+  }
+
+  /* Reword the person's own answer ({ text }) or take it back ({ remove: true }), until someone else picks it. */
+  changePlanAnswer(id: string, rev: number, answer: string, change: { text: string } | { remove: true }) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers/${encodeURIComponent(answer)}`, { rev, ...change });
+  }
+
   /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */
   sharePlan(id: string, scope: { kind: string; id: string }, reviewers: PlanReviewerChoice[]) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/share`, { scope, reviewers });
