@@ -139,15 +139,13 @@ export function chatTheme(theme: ChatTheme): ITheme {
    sends its dark diff grounds as 256-colour slots (rgb(34,92,43) as 65, the changed words' rgb(56,166,96) as 72), and
    the default text measures 3.5:1 and 2.3:1 on them; text that already reads is drawn as sent.
 
-   Light: text on the pane's own white field is lifted to 4.5:1 (groundContrastRatio, groundContrast.ts): there
-   Claude Code's light accents and their 256-colour stand-ins (its orange as 174, its subtle grey as 248) measure 2.4
-   to 4.4:1. Its diffs bring their own grounds and GitHub syntax colours, and those keep Claude's colours wherever
-   they reach 3:1 (minimumContrastRatio): a 4.5 floor there redrew its keywords (3.9:1 on the line grounds) and, on
-   the changed words' grounds (rgb(47,157,68), rgb(209,69,75), which nothing but black lifts to 4.5), turned every
-   highlighted token black or white. Its own colours as sent go as low as 1.1:1 there (its blue numbers on the red
-   word), so 3 still lifts those, darkened in their own hue. */
-export function chatContrast(theme: ChatTheme): { minimumContrastRatio: number; groundContrastRatio: number } {
-  return theme === "light" ? { minimumContrastRatio: 3, groundContrastRatio: 4.5 } : { minimumContrastRatio: 4.5, groundContrastRatio: 1 };
+   Light: every cell's text reaches 4.5:1 by its lightness alone (textContrastRatio, textContrast.ts), and xterm.js's
+   own floor is off. On the white field Claude Code's light accents and their 256-colour stand-ins (its orange as 174,
+   its subtle grey as 248) measure 2.4 to 4.4:1; its diffs bring their own grounds and GitHub syntax colours, down to
+   1.1:1 (its blue numbers on the red changed word). xterm.js's floor there stepped every syntax colour on the changed
+   words' grounds (rgb(47,157,68), rgb(209,69,75)) to black or white; by lightness each keeps its hue. */
+export function chatContrast(theme: ChatTheme): { minimumContrastRatio: number; textContrastRatio: number } {
+  return theme === "light" ? { minimumContrastRatio: 1, textContrastRatio: 4.5 } : { minimumContrastRatio: 4.5, textContrastRatio: 1 };
 }
 
 // -- clipping: add rows to terminal geometry, clip the bottom, preserve output -

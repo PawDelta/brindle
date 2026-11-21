@@ -1,5 +1,6 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { parseCss, toHsl } from "../../../components/textContrast";
 import { ChatPane } from "./ChatPane";
 
 const terminals = vi.hoisted(() => [] as import("@xterm/xterm").Terminal[]);
@@ -32,7 +33,7 @@ interface Core {
 
 /* The colour xterm's DOM renderer draws each span of a row in: its inline colour where it set one (truecolour, or
    adjusted for contrast), else the palette slot its xterm-fg-N class names. */
-function drawnColours(terminal: import("@xterm/xterm").Terminal, row: number): { text: string; css: string; ground: string }[] {
+function drawnColours(terminal: import("@xterm/xterm").Terminal, row: number): { text: string; css: string; ground: string; dim: boolean }[] {
   const core = (terminal as unknown as { _core: Core })._core;
   const renderer = core._renderService._renderer.value;
   const line = (terminal.buffer.active as unknown as { _buffer: { lines: { get(i: number): unknown } } })._buffer.lines.get(row);
@@ -44,6 +45,7 @@ function drawnColours(terminal: import("@xterm/xterm").Terminal, row: number): {
     const ground = /background-color:\s*([^;]+)/.exec(style)?.[1].trim() ?? /xterm-bg-(\d+)/.exec(span.className)?.[1];
     return {
       text: span.textContent!,
+      dim: span.classList.contains("xterm-dim"),
       css: inline ?? (slot === undefined ? core._themeService.colors.foreground.css : core._themeService.colors.ansi[Number(slot)].css),
       ground: ground === undefined ? core._themeService.colors.background.css : ground.startsWith("#") || ground.startsWith("rgb") ? ground : core._themeService.colors.ansi[Number(ground)].css,
     };
@@ -100,15 +102,17 @@ it("draws Claude's faint 256-colour and truecolour greys readably on the light p
     for (const chunk of chunks) pane!.onData(new TextEncoder().encode(chunk));
     await act(() => new Promise<void>(resolve => terminal.write("", resolve)));
   };
-  // Light lifts text to 4.5 on the pane's own field, and only to 3 on grounds the program drew.
-  expect(terminal.options.minimumContrastRatio).toBe(3);
-  await send("\x1b[38;5;246mfaint\x1b[0m \x1b[38;2;153;1", "53;153mgrey\x1b[0m \x1b[38;5;174morange\x1b[0m");
+  // Light: xterm.js's own floor is off; the pane's stream lifts every cell's text by its lightness.
+  expect(terminal.options.minimumContrastRatio).toBe(1);
+  // Claude's greys and orange on the field, and faint text, which is drawn in a colour rather than at half strength.
+  await send("\x1b[38;5;246mfaint\x1b[0m \x1b[38;2;153;1", "53;153mgrey\x1b[0m \x1b[38;5;174morange\x1b[0m \x1b[2mdim\x1b[22m");
   const ground = "#ffffff";
   const drawn = drawnColours(terminal, 0);
-  expect(drawn.map(d => d.text.trim())).toEqual(["faint", "grey", "orange"]);
+  expect(drawn.map(d => [d.text.trim(), d.dim])).toEqual([["faint", false], ["grey", false], ["orange", false], ["dim", false]]);
   for (const { css } of drawn) expect(contrast(css, ground)).toBeGreaterThanOrEqual(4.5);
-  // Claude's light diff keeps its grounds and every colour it sent that reads at 3:1 there (its keywords and ink); what
-  // it sends below that (its blue number on the changed word's ground) is lifted to 3:1, no further.
+  // Claude's light diff: its grounds as sent; every token at 4.5 on its ground, in its own hue; keyword, text and
+  // number still three colours on each ground, so the syntax still reads.
+  const hue = (css: string) => toHsl(parseCss(css)!);
   for (const [form, c] of Object.entries(LIGHT_DIFF)) {
     const sent = lightDiff(c);
     const half = sent.indexOf("200") - 4; // mid-SGR, before the removed word's ground
@@ -120,11 +124,15 @@ it("draws Claude's faint 256-colour and truecolour greys readably on the light p
     for (const row of [0, 1]) {
       const drawn = drawnColours(terminal, row);
       expect(drawn.map(d => d.ground), `${form} row ${row} grounds`).toEqual(expected[row].map(([, under]) => named(terminal, under)));
-      expected[row].forEach(([text, under], i) => {
-        const [colour, ground] = [named(terminal, text), named(terminal, under)];
-        if (contrast(colour, ground) >= 3) expect(drawn[i].css, `${form} ${drawn[i].text}`).toBe(colour);
-        else expect(contrast(drawn[i].css, ground), `${form} ${drawn[i].text}`).toBeGreaterThanOrEqual(3);
+      expected[row].forEach(([text], i) => {
+        const [sentHue, sentSat] = hue(named(terminal, text));
+        expect(contrast(drawn[i].css, drawn[i].ground), `${form} ${drawn[i].text}`).toBeGreaterThanOrEqual(4.5);
+        // On the line grounds each colour keeps its hue. The changed word's ground (column 3) is mid-tone: there only
+        // colours within a hair of black or white reach 4.5, so its text is checked for contrast alone.
+        if (i !== 3 && sentSat > 0.2) expect(Math.abs(((hue(drawn[i].css)[0] - sentHue + 540) % 360) - 180), `${form} ${drawn[i].text} hue`).toBeLessThan(12);
       });
+      const [, key, ink] = drawn;
+      expect(new Set([key.css, ink.css]).size, `${form} row ${row} keyword vs text`).toBe(2);
     }
   }
   // Dark mode lifts every cell against its own ground, and keeps the CLI's own colours where they already read.
