@@ -200,8 +200,10 @@ def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
 
 def reviewer(doc_id: str, sub: str, required: bool | None, *, client=None, store=None) -> dict:
     """Change one person without replacing anyone else's invitation."""
-    return _ask(doc_id, "DELETE" if required is None else "PUT", f"/reviewers/{quote(sub, safe='')}",
-                None if required is None else {"required": required}, client, store)
+    resource = "reviewers" if required is None else "permissions"
+    return _ask(doc_id, "DELETE" if required is None else "PUT",
+                f"/{resource}/{quote(sub, safe='')}",
+                None if required is None else {"role": "reviewer", "required": required}, client, store)
 
 
 def timeline(doc_id: str, *, client=None, store=None) -> dict:

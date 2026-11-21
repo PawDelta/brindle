@@ -549,7 +549,8 @@ def _library(db: DB, plan_id: str, work: Callable[[Any], Any]) -> Any:
 
 def plan_share(db: DB, params: dict, body: dict) -> Any:
     return _library(db, params["id"], lambda sd: sd.share(db, params["id"], body.get("scope"),
-                                                          reviewers=body.get("reviewers")))
+                                                          reviewers=body.get("reviewers"),
+                                                          permissions=_get(body, "permissions", dict)))
 
 
 def plan_reviewers(db: DB, params: dict, body: dict) -> Any:
