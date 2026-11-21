@@ -3967,6 +3967,32 @@ def _ask_strictness(rule: Rule) -> tuple:
     return life, limits.get("minutes") or 0, reach
 
 
+# The whole command being checked while its substitutions are re-read alone
+# (_restriction_in_parts, read_parts): whether HOME may change is judged on all of it.
+_OUTERMOST: ContextVar[str | None] = ContextVar("brindle_outermost_command", default=None)
+
+
+@contextmanager
+def _whole_command_read(command: str) -> Iterator[None]:
+    """Checks made inside read ``command`` as the whole command being
+    checked, unless they already re-read part of an outer one."""
+    token = _OUTERMOST.set(_OUTERMOST.get() or command)
+    try:
+        yield
+    finally:
+        _OUTERMOST.reset(token)
+
+
+def _whole_command(check):
+    """Runs ``check`` under _whole_command_read(its request's command)."""
+    @functools.wraps(check)
+    def wrapper(req: Request, *args, **kwargs):
+        with _whole_command_read(req.command or ""):
+            return check(req, *args, **kwargs)
+    return wrapper
+
+
+@_whole_command
 def _restriction_in_parts(req: Request, *, checks: list[str] | None,
                           rules: list[Rule]) -> Decision | None:
     """The deny (else ask) that a part of ``req``'s shell command is subject
@@ -4274,6 +4300,20 @@ _STDIN_RUNNERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "xargs",
 _FLAT_LIMIT = 500
 _REFERENCE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=")
+
+
+# What may set HOME, or a variable under a built-up name: a bare HOME word (HOME=x, read HOME,
+# ${HOME:=x}), a builtin that sets variables, an indirect ${!x}, eval, source or ".".
+_HOME_SETTERS = re.compile(r"\bHOME\b|\$\{!|\b(?:eval|source|" + "|".join(sorted(_VARIABLE_SETTERS))
+                           + r")\b|(?:^|[\s;&|(){}`])\.(?=\s)")
+
+
+def _home_unchanged(command: str) -> bool:
+    """Whether nothing in the command being checked (all of it, when
+    ``command`` is a part of it re-read alone) may set HOME: then its $HOME
+    is the home the run starts with."""
+    text = _OUTERMOST.get() or command
+    return not _HOME_SETTERS.search(re.sub(r"\$(?:HOME\b|\{HOME\})", "", text))
 
 
 @dataclass
@@ -4754,16 +4794,21 @@ class _Flattener:
         if len(self.out) > _FLAT_LIMIT:
             raise ValueError("too many commands")
 
-    def script(self, command: str, env: dict) -> None:
+    def script(self, command: str, env: dict, top: bool = True) -> None:
         tokens = _script_tokens(command, credential_scan=self.credential_scan)
         if tokens is None:
             raise ValueError("unreadable syntax")
         if _heredoc_readers(tokens) & self.runners:
             raise ValueError("a heredoc may be run as commands")
         nodes, _ = _script_tree(_script_items(tokens))
-        # The shell's $HOME is known before the run (what the checker reads a word's ~ as): it is
-        # resolved in every word, so W=$HOME/x; git -C $W status and "$HOME"/.aws name real paths.
-        env.setdefault("HOME", ("lit", os.path.expanduser("~")))
+        if self.credential_scan:
+            # The shell's $HOME is known before the run: a credential scan resolves it (and ~) to the
+            # real home in every word, so "$HOME"/.aws or d="$HOME"; cat "$d/.npmrc" names the store.
+            env.setdefault("HOME", ("lit", os.path.expanduser("~")))
+        elif top and _home_unchanged(command):
+            # Otherwise only at the top of a command that can't change HOME anywhere, its
+            # substitutions included, so W=$HOME/x; git -C $W status names a real path.
+            env.setdefault("HOME", ("lit", os.path.expanduser("~")))
         self.walk(nodes, env, True)
 
     def walk(self, nodes: list[tuple], env: dict, definite: bool, chains: bool = True, fed: bool = False) -> None:
@@ -4840,7 +4885,7 @@ class _Flattener:
     def substitution(self, inner: str, env: dict) -> None:
         sub = _Flattener(self.cwd, credential_scan=self.credential_scan, reading=self.reading)
         sub.ids, sub.scope = self.ids, self.scope + (next(self.ids),)    # a subshell of its own
-        sub.script(inner, dict(env))
+        sub.script(inner, dict(env), top=False)    # what HOME is here is what the outer script left
         for command, fed, scope in zip(sub.out, sub.fed, sub.scopes):
             self.emit(command, fed=fed, scope=scope)
         self.named += sub.named
@@ -5614,6 +5659,7 @@ class _PartReader:
         return target if os.path.isdir(target) else None
 
 
+@_whole_command
 def shell_parts(req: Request, why: list[ValueError] | None = None) -> list[ShellPart] | None:
     """The simple commands ``req``'s shell command runs (ShellPart), or None
     when brindle can't verify what it runs (see the section above; ``why``
@@ -5759,6 +5805,7 @@ def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
                for literal in literals for fragment in literal.split())
 
 
+@_whole_command
 def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                why: list[ValueError] | None = None) -> tuple[list[ShellPart], Decision | None] | None:
     """``req``'s shell command as ShellParts with the deny (else ask) a rule

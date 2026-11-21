@@ -90,3 +90,20 @@ def test_a_variable_assigned_a_home_path_is_checked_as_its_value(tmp_path, comma
     permissions.apply_preset("autonomous")
     got = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
     assert (got.decision, got.rule.id if got.rule else None) == (decision, rule), got.reason
+
+
+@pytest.mark.parametrize("command", [
+    pytest.param('HOME=blocked; git commit -m "$(gh api $HOME)"', id="reassigned",
+                 marks=pytest.mark.variant("a substitution re-read alone must not take $HOME for the home")),
+    pytest.param('HOME=$(pwd); git commit -m "$(gh api $HOME)"', id="computed",
+                 marks=pytest.mark.variant("a home only the run knows stays unknown in a nested script")),
+    pytest.param('read HOME; git commit -m "$(gh api $HOME)"', id="read",
+                 marks=pytest.mark.variant("a builtin that may set HOME")),
+    pytest.param('n=HOME; eval "$n=blocked"; git commit -m "$(gh api $HOME)"', id="eval",
+                 marks=pytest.mark.variant("an eval may set HOME under a built-up name")),
+])
+def test_home_the_command_may_change_stays_unknown_in_its_substitutions(tmp_path, command):
+    here = str(tmp_path)
+    rules = [permissions.Rule("bash", "gh api blocked", "prefix", "deny")]
+    req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
+    assert permissions.decide(req, rules=rules, unmatched="allow", saved=[], groups={}).decision == "deny"
