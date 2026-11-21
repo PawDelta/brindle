@@ -51,7 +51,7 @@ export const initials = (who: string) => {
 
 const noSubscribe = () => () => {};
 /* The signed-in account; a reader rendered without the app's store (a test, a preview) has none. */
-function useAccount() {
+export function useAccount() {
   const store = useContext(StoreContext);
   return useSyncExternalStore(store?.subscribe ?? noSubscribe, () => store?.getState().account ?? null);
 }

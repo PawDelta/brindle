@@ -56,7 +56,7 @@ import { DocStatus } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
-import { Alongside, Decision, Tasks, displayName, overlaps, passChip, personName, shortName } from "./PlanCards";
+import { Alongside, Decision, Tasks, displayName, overlaps, passChip, personName, shortName, useAccount } from "./PlanCards";
 import { Annotated, DecisionCard, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
@@ -481,6 +481,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const sharing: PlanSharingClient | undefined = client?.sharePlan && client.setPlanReviewers && client.syncPlan && client.signOffPlan && client.overridePlanPolicy && client.libraryPeople && client.docScopes ? (client as PlanSharingClient) : undefined;
   const [authorDirectory, setDirectory] = useState<LibraryPerson[]>([]);
   const directory = teammate?.directory ?? authorDirectory;
+  const account = useAccount();
   const [adminOrg, setAdminOrg] = useState<string | null>(null);
   const [me, setMe] = useState<string | null>(null);
   const [scopes, setScopes] = useState<DocScope[]>([]);
@@ -498,7 +499,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (shared && plan.state !== "approved") sharing?.syncPlan(plan.id).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
   }, [plan.id, shared]);
-  const nameOf = (sub: string) => displayName(directory.find((p) => p.sub === sub.replace(/^teammate:/, ""))) || sub;
+  const nameOf = (sub: string) => {
+    const id = sub.replace(/^teammate:/, "");
+    const ownName = id === (teammate?.me ?? me) && account?.signed_in ? displayName(account) : "";
+    return ownName || displayName(directory.find((p) => p.sub === id)) || sub;
+  };
   const namedDecision = (d: PlanDecisionDTO): PlanDecisionDTO => ({ ...d,
     votes: d.votes && Object.fromEntries(Object.entries(d.votes).map(([option, voters]) => [option, voters.map(nameOf)])) });
   // A person in a sentence: "You", or their name's first word ("dana.okafor@…" → "Dana").

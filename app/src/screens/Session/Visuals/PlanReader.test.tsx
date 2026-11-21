@@ -67,6 +67,26 @@ it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader
 /* Who reviews the doc, and sharing it, open over the page from the toolbar's Share. */
 const openShare = async () => fireEvent.click(await screen.findByRole("button", { name: "Share" }));
 
+it("uses the signed-in account for a read-only reviewer's own avatar without a directory entry", async () => {
+  const me = "63a34f9d";
+  const plan = { ...doc(1, "Read this"), me, can_edit: false,
+    gate: { state: "waiting" as const, required: 1, signed: 0, waiting_on: [me], reviewers: [{ sub: me, required: true, status: "waiting" as const }] } };
+  const client = { sharedDesign: async () => plan, writeSharedDesign: async () => plan, libraryPeople: async () => ({ people: [] }) };
+  const store = createAppStore();
+  const account = { signed_in: true, first_name: "David", last_name: "Jones", name: "Other Name", email: "david@example.test" };
+  store.dispatch({ type: "account", account });
+  render(inTestStore(<SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />, store));
+  await openShare();
+  const row = screen.getByTestId(`plan-reviewer-${me}`);
+  expect(row.querySelector("span[style]")?.textContent).toBe("DJ");
+  expect(row.dataset.status).toBe("waiting");
+  expect(within(screen.getByTestId("plan-share")).queryByTestId("share-search")).toBeNull();
+  act(() => store.dispatch({ type: "account", account: { signed_in: true, name: "Maya Chen", email: account.email } }));
+  expect(row.querySelector("span[style]")?.textContent).toBe("MC");
+  act(() => store.dispatch({ type: "account", account: { signed_in: true, email: account.email } }));
+  expect(row.querySelector("span[style]")?.textContent).toBe("D");
+});
+
 const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Presets", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
 const visuals: VisualsClient = {
   visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual,
