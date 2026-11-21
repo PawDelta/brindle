@@ -14,7 +14,7 @@ import type { LibraryStage } from "../../routes";
 
 export type DesignReview = NonNullable<AnalysisDocDetail["design"]>;
 /* What the Library reads from a design's detail. */
-export type DesignRecord = Pick<AnalysisDocDetail, "design" | "tasks" | "threads" | "decisions" | "verdict" | "work_item">;
+export type DesignRecord = Pick<AnalysisDocDetail, "design" | "tasks" | "threads" | "decisions" | "verdict" | "work_item" | "can_edit" | "can_comment">;
 /* The five stages a design reaches, in order: the board's columns. */
 export type DesignStage = Exclude<LibraryStage, "needs-you">;
 export const BOARD_STAGES: { id: DesignStage; label: string }[] = [
@@ -79,7 +79,7 @@ export function stageCounts(docs: AnalysisDoc[], queue: Queue, records: Map<stri
 /* Each listed design's record (from its detail). A failed read is skipped: the design shows as Drafting. */
 export async function loadRecords(client: Pick<DaemonClient, "doc"> & Partial<Pick<DaemonClient, "libraryWorkItems">>, docs: AnalysisDoc[], repo?: string): Promise<Map<string, DesignRecord>> {
   const [got, work] = await Promise.all([
-    Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item }), () => null))),
+    Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item, can_edit: x.can_edit, can_comment: x.can_comment }), () => null))),
     // The linked work item is a nicety: a failed or refused read leaves the column empty, never the list.
     client.libraryWorkItems ? loadWorkItems(client.libraryWorkItems.bind(client), docs.map((d) => d.id), repo) : Promise.resolve({}),
   ]);

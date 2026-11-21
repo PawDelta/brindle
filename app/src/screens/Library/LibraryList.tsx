@@ -24,7 +24,8 @@ function Row({ doc, record, queue, scopes, match, onOpen }: { doc: AnalysisDoc; 
   const stage = stageOf(doc.id, queue, record);
   const need = needsYou(doc.id, queue);
   const work = record?.work_item ?? doc.work_item;
-  const grants = record?.design;
+  const grants = record?.design?.can_edit !== undefined || record?.design?.can_comment !== undefined ? record.design
+    : record?.can_edit !== undefined || record?.can_comment !== undefined ? record : doc;
   const access = grants?.can_edit ? "you can edit" : grants?.can_comment ? "you can comment"
     : grants?.can_edit === false && grants.can_comment === false ? "you can view" : null;
   return (

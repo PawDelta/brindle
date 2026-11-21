@@ -805,6 +805,9 @@ interface WireDoc extends Omit<WireListedDoc, "doc_id"> {
 
 export interface AnalysisDoc {
   id: string;
+  /* The caller's effective grants, computed by the Library. */
+  can_edit?: boolean;
+  can_comment?: boolean;
   title?: string;
   kind?: string;
   scope?: DocScope;
