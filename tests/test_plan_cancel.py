@@ -9,7 +9,7 @@ from starlette.testclient import TestClient
 
 from brindle import mcp_server, plans, tasks, visual_offers
 from brindle.daemon.app import build_app
-from test_plans import AUTH, ONE, PLAN, TOKEN, _shared, messages, session, library  # noqa: F401 - fixtures
+from test_plans import AUTH, ONE, PLAN, TOKEN, _shared, work, messages, session, library  # noqa: F401 - fixtures
 
 
 @pytest.mark.parametrize("how", [
@@ -22,7 +22,7 @@ def test_cancelled_plan_keeps_its_held_tasks_queued_and_names_them(how, db, sess
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN).split()[2]
-    asyncio.run(mcp_server.assign("developer", "build the schema", branch="feat/schema"))
+    asyncio.run(mcp_server.assign("developer", "build the schema", branch="feat/schema", **work(db)))
     [held] = db.list_tasks(state="pending")
     assert started == [] and tasks.plan_holds(db, held)
 
@@ -57,7 +57,7 @@ def test_cancel_between_an_assign_queuing_and_its_reply_holds_that_task_too(db, 
         plans.cancel(db, pid, 1, person=True)
         release(self)
     monkeypatch.setattr(mcp_server._Request, "answer", cancel_then_release)
-    asyncio.run(mcp_server.assign("developer", "build the schema", branch="feat/schema"))
+    asyncio.run(mcp_server.assign("developer", "build the schema", branch="feat/schema", **work(db)))
 
     [held] = db.list_tasks()
     assert db.cancelled_hold(held.id) == pid
@@ -69,8 +69,8 @@ def test_start_now_starts_the_held_task_and_cancel_task_gives_up_the_other(db, s
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN).split()[2]
-    asyncio.run(mcp_server.assign("developer", "build the schema"))
-    asyncio.run(mcp_server.assign("developer", "build the UI"))
+    asyncio.run(mcp_server.assign("developer", "build the schema", **work(db)))
+    asyncio.run(mcp_server.assign("developer", "build the UI", **work(db)))
     keep, drop = sorted(db.list_tasks(state="pending"), key=lambda t: t.created_at)
     plans.cancel(db, pid, 1, person=True)
 

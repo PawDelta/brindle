@@ -527,6 +527,8 @@ def _task_state(db: DB, task: Task) -> str:
     agent = db.get_agent(task.agent_id) if task.agent_id else None
     if agent and (agent.pipeline in ("reviewing", "ready") or (not agent.pipeline and agent.result)):
         return "in review"
+    if agent is None and task.state == "started" and task.agent_id:
+        return "cancelled"      # its workspace was removed unmerged (a Stop, remove_workspace)
     return "working" if agent else "queued"
 
 
