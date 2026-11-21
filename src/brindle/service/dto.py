@@ -380,6 +380,18 @@ class PlanOptionDTO(VisualOptionDTO):
     touches: list[str] = []
 
 
+class PlanAnswerDTO(_DTO):
+    """An own answer on a decision (brindle.plan_answers): a row someone typed
+    under the options, picked like one. ``locked`` once someone other than
+    its author picked it: from then on it stays as written."""
+
+    id: str
+    text: str
+    author: str
+    at: float = 0.0
+    locked: bool = False
+
+
 class PlanDecisionDTO(_DTO):
     """A decision that shapes the plan: its alternatives and the supervisor's pick."""
 
@@ -394,6 +406,8 @@ class PlanDecisionDTO(_DTO):
     # confirmed pick, which their verdict starts from.
     votes: dict[str, list[str]] = {}
     confirmed: str | None = None
+    # Own answers, oldest first; a vote or pick may name one by its id.
+    answers: list[PlanAnswerDTO] = []
 
 
 class PlanWorkerDTO(_DTO):
@@ -436,6 +450,8 @@ class PlanVerdictDTO(_DTO):
     at: float
     rev: int
     attachments: list[str] = []
+    # {decision: text} for picks that named an own answer.
+    answers: dict[str, str] = {}
 
 
 class PlanAnchorDTO(_DTO):
