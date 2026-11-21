@@ -47,6 +47,8 @@ def clock(monkeypatch):
 def _claude_login(tmp_path, monkeypatch, account: dict):
     cfg = tmp_path / ".claude.json"
     cfg.write_text(json.dumps({"oauthAccount": account}), encoding="utf-8")
+    for var in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(providers, "claude_global_config", lambda: str(cfg))
     monkeypatch.setattr(provider_homes, "launch_env", lambda provider: {"CLAUDE_CONFIG_DIR": str(tmp_path)})
     monkeypatch.setattr(quota, "_key_billed", lambda provider: False)
