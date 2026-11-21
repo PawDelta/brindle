@@ -6038,6 +6038,47 @@
       "title": "PersonDTO",
       "type": "object"
     },
+    "PlanAlongsideDTO": {
+      "description": "A task the supervisor assigned outside an open plan (assign's\noutside_plan): it ran at once instead of waiting on the plan. ``reason``:\nthe supervisor's. ``can_stop``: Stop still has something to cancel or remove.",
+      "properties": {
+        "can_stop": {
+          "title": "Can Stop",
+          "type": "boolean"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "working",
+            "in review",
+            "merged",
+            "cancelled"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "title",
+        "state",
+        "reason",
+        "can_stop"
+      ],
+      "title": "PlanAlongsideDTO",
+      "type": "object"
+    },
     "PlanAnchorDTO": {
       "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
       "properties": {
@@ -6160,6 +6201,47 @@
     },
     "PlanDTO": {
       "$defs": {
+        "PlanAlongsideDTO": {
+          "description": "A task the supervisor assigned outside an open plan (assign's\noutside_plan): it ran at once instead of waiting on the plan. ``reason``:\nthe supervisor's. ``can_stop``: Stop still has something to cancel or remove.",
+          "properties": {
+            "can_stop": {
+              "title": "Can Stop",
+              "type": "boolean"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "queued",
+                "working",
+                "in review",
+                "merged",
+                "cancelled"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "task_id": {
+              "title": "Task Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "title",
+            "state",
+            "reason",
+            "can_stop"
+          ],
+          "title": "PlanAlongsideDTO",
+          "type": "object"
+        },
         "PlanAnchorDTO": {
           "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
           "properties": {
@@ -7326,8 +7408,16 @@
           "type": "object"
         }
       },
-      "description": "A planning doc (brindle.plans): markdown brindle renders itself, split\ninto its ``##`` sections. ``state``: open (the person hasn't decided),\nredirected (their comments went back; a new revision is coming) or\napproved. While open or redirected, the session's assign calls queue.",
+      "description": "A planning doc (brindle.plans): markdown brindle renders itself, split\ninto its ``##`` sections. ``state``: open (the person hasn't decided),\nredirected (their comments went back; a new revision is coming) or\napproved. While open or redirected, the plan's own work queues (assigns\nlinked to its split or to a goal milestone); ``alongside`` is the work\nthe supervisor declared outside it, which runs at once.",
       "properties": {
+        "alongside": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanAlongsideDTO"
+          },
+          "title": "Alongside",
+          "type": "array"
+        },
         "ask": {
           "anyOf": [
             {
@@ -11506,6 +11596,47 @@
     },
     "SharedDesignDTO": {
       "$defs": {
+        "PlanAlongsideDTO": {
+          "description": "A task the supervisor assigned outside an open plan (assign's\noutside_plan): it ran at once instead of waiting on the plan. ``reason``:\nthe supervisor's. ``can_stop``: Stop still has something to cancel or remove.",
+          "properties": {
+            "can_stop": {
+              "title": "Can Stop",
+              "type": "boolean"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "queued",
+                "working",
+                "in review",
+                "merged",
+                "cancelled"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "task_id": {
+              "title": "Task Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "title",
+            "state",
+            "reason",
+            "can_stop"
+          ],
+          "title": "PlanAlongsideDTO",
+          "type": "object"
+        },
         "PlanAnchorDTO": {
           "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
           "properties": {
@@ -12674,6 +12805,14 @@
       },
       "description": "A design someone else shared, as the person reviewing it reads it\n(brindle.pro.shared_reader): ``id`` is its Library doc id and it has no\nplan on this machine. ``can_*``: what the Library lets this account do,\n``can_sign_off`` false only when it can't be one of the signers.\n``author``: who wrote it, ``person`` if that is this account.",
       "properties": {
+        "alongside": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanAlongsideDTO"
+          },
+          "title": "Alongside",
+          "type": "array"
+        },
         "ask": {
           "anyOf": [
             {
@@ -14158,6 +14297,10 @@
     {
       "method": "GET",
       "path": "/v1/plans/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/alongside/{task}/stop"
     },
     {
       "method": "POST",

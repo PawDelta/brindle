@@ -12,12 +12,14 @@ import { useWork } from "./WorkPanel";
 
 type Whose = { kind: "asking" } | { kind: "author"; visual: VisualDTO } | { kind: "teammate" } | { kind: "failed"; error: string };
 
-export function LibraryDesign({ client, docId, title, repo, onBack }: {
+export function LibraryDesign({ client, docId, title, repo, onBack, backLabel = "Library" }: {
   client: DaemonClient;
   docId: string;
   title?: string;
   repo?: string;
   onBack(): void;
+  /* Where Back goes, in words. */
+  backLabel?: string;
 }) {
   const work = useWork(client, docId, repo);
   const [whose, setWhose] = useState<Whose>({ kind: "asking" });
@@ -31,8 +33,8 @@ export function LibraryDesign({ client, docId, title, repo, onBack }: {
     return () => { live = false; };
   }, [client, docId]);
   if (whose.kind === "author") {
-    return <PlanReader client={client} visual={whose.visual} repo={repo} onBack={onBack} backLabel="Library" work={work} onChanged={(visual) => setWhose({ kind: "author", visual })} />;
+    return <PlanReader client={client} visual={whose.visual} repo={repo} onBack={onBack} backLabel={backLabel} work={work} onChanged={(visual) => setWhose({ kind: "author", visual })} />;
   }
-  if (whose.kind === "teammate") return <SharedDesignReader client={client} docId={docId} title={title} repo={repo} onBack={onBack} backLabel="Library" work={work} />;
+  if (whose.kind === "teammate") return <SharedDesignReader client={client} docId={docId} title={title} repo={repo} onBack={onBack} backLabel={backLabel} work={work} />;
   return <p className="p-s3 text-sm text-ink-3" role={whose.kind === "failed" ? "alert" : "status"}>{whose.kind === "failed" ? `Couldn't open this design: ${whose.error}` : "Opening…"}</p>;
 }

@@ -329,9 +329,13 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     `section` id where the question comes up (none: open-questions).
     `split` has each worker's files and the one test that proves it done;
     it is for plan_worker linking and the board only, the person never sees
-    it. brindle renders the doc itself. While it's open, every
-    assign in this session is queued and starts only once the person
-    approves. What they wrote since your last revision (each comment,
+    it. brindle renders the doc itself. While it's open, only the plan's
+    own work waits: an assign linked with plan_worker (or to a goal
+    milestone) is queued and starts once the person approves (a shared
+    plan's, once its required reviewers sign off too). Other work needs
+    assign's outside_plan reason: it starts at once and the person sees it
+    under "Running alongside this plan"; an assign with neither is refused.
+    What they wrote since your last revision (each comment,
     suggestion and reply, naming its thread #N) arrives in one message when
     they Approve or Request changes. Answer a thread with reply_plan_thread;
     publish the next revision with plan_id. ask: their request restated in
@@ -521,6 +525,7 @@ def edit_analysis_doc(doc: str, files: list[dict], clashed_branch: str | None = 
 FAST_PATH_WEIGHTS = ("light", "medium")
 FAST_PATH_NOTE = ("Fast path: no goal or milestones needed. brindle gives the branch one light review "
                   "and the repo's checks, then merges it; relay the result to the user in one line.")
+MAX_OUTSIDE_PLAN = 200   # characters of assign's outside_plan reason the plan's reader shows
 
 
 def _remind_goal(db: DB, caller: Agent | None, text: str, fast: bool = False) -> str:
@@ -710,6 +715,35 @@ class _Request:
         self._queued: list[str] = []
         self._start: set[str] = set()
         self.plan_worker: tuple[str, str] | None = None
+        # (plan id, reason): the task runs alongside that open plan (assign's outside_plan).
+        self.alongside: tuple[str, str] | None = None
+
+    def plan_scope(self, db: DB, caller: Agent, plan_worker: str | None, milestone: str | None,
+                   outside_plan: str | None) -> str | None:
+        """While the session's plan is open, every assign says how it relates to it: the
+        plan's own work (``plan_worker`` naming this plan, or a goal ``milestone``) waits for the person's
+        approval and is refused while required reviewers keep the build gate shut; other work
+        (``outside_plan``, a reason) starts at once and is listed in the plan's reader. None
+        when it may go on; else the refusal. An offer to plan first, which has no plan to
+        link to yet, holds everything as before."""
+        from brindle import plans
+
+        plan = plans.holding(db, autopilot.root_of(db, caller.id))
+        if plan is None or "id" not in plan:
+            return None
+        # A link to another (older) plan of the session isn't this plan's work: it keeps that
+        # board link and, like any other work, needs the outside_plan reason.
+        linked_here = (plan_worker or "").partition(":")[0].strip() == plan["id"]
+        if linked_here or milestone is not None:
+            return tasks.build_gate_refusal(db, caller.id)
+        reason = " ".join((outside_plan or "").split())[:MAX_OUTSIDE_PLAN]
+        if not reason:
+            return (f"Not started: plan {plan['id']} is open, so say how this task relates to it. Its own work "
+                    f"takes plan_worker=\"{plan['id']}:<split-id>\" (or the goal milestone it serves) and waits "
+                    "for the person's approval. Separate work takes outside_plan=\"<why it can't wait>\": it "
+                    "starts now and the plan's reader lists it, with that reason, as running alongside.")
+        self.alongside = (plan["id"], reason)
+        return None
 
     def link_plan(self, db: DB, caller: Agent, ref: str | None) -> str | None:
         from brindle import plans
@@ -741,6 +775,10 @@ class _Request:
             if not linked:
                 tasks.drop_unanswered(db, [t.id])
                 return db.get_task(existing)
+        if self.alongside:
+            from brindle import plans
+
+            plans.record_alongside(db, self.alongside[0], t.id, self.alongside[1])
         with self._lock:
             self._queued.append(t.id)
             if start:
@@ -957,11 +995,17 @@ async def handoff(
     files: list[str] | None = None, depends_on: list[str] | None = None,
     plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
     dry_run: bool = False, milestone: int | str | None = None, plan_worker: str | None = None,
-    goal: str | dict | None = None,
+    goal: str | dict | None = None, outside_plan: str | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
 
     plan_worker: plan-id:split-id from propose_plan, linking this task to its live board card.
+
+    outside_plan: while your planning doc is open, say how each task relates
+    to it, as for assign: plan_worker (or milestone) for the plan's own work,
+    which waits for the person's approval, or outside_plan, a short reason,
+    for separate work, which starts now and is listed in the plan's reader.
+    Without either it is refused.
 
     milestone: the goal milestone (its number or title) the worker works on;
     default the first unverified one. Shown as in progress while it runs.
@@ -1052,9 +1096,9 @@ async def handoff(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
-        shut = tasks.build_gate_refusal(db, caller.id)
-        if shut:
-            return shut
+        refused = req.plan_scope(db, caller, plan_worker, ms_title, outside_plan)
+        if refused:
+            return refused
         linked = req.link_plan(db, caller, plan_worker)
         if linked:
             return linked
@@ -1121,6 +1165,7 @@ async def assign(
     weight: str | None = None, repo: str | None = None, dry_run: bool = False,
     milestone: int | str | None = None, plan_worker: str | None = None,
     design_heavy: bool = False, fast_path: bool = False, goal: str | dict | None = None,
+    outside_plan: str | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
 
@@ -1130,6 +1175,15 @@ async def assign(
     merge; no goal, milestones or completion audit. Ignored when the setting is off.
 
     plan_worker: plan-id:split-id from propose_plan, linking this task to its live board card.
+
+    outside_plan: while your planning doc (propose_plan) is open, every
+    assign says how it relates to it. The plan's own work names it with
+    plan_worker (or the goal milestone it serves): it is queued until the
+    person approves the plan (and, for a shared plan, until its required
+    reviewers sign off). Separate work gives outside_plan, a short reason
+    (e.g. "hotfix for the failing release build"): it starts at once and the
+    plan's reader lists it, with that reason, under "Running alongside this
+    plan", where the person can stop it. An assign with neither is refused.
 
     milestone: the goal milestone (its number or title) the worker works on;
     default the first unverified one. Shown as in progress while it runs.
@@ -1233,9 +1287,9 @@ async def assign(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
-        shut = tasks.build_gate_refusal(db, caller.id)
-        if shut:
-            return shut
+        refused = req.plan_scope(db, caller, plan_worker, ms_title, outside_plan)
+        if refused:
+            return refused
         linked = req.link_plan(db, caller, plan_worker)
         if linked:
             return linked
@@ -1261,7 +1315,8 @@ async def assign(
         from brindle import plans
 
         plan = plans.holding(db, autopilot.root_of(db, caller.id))
-        if plan:
+        if plan and req.alongside is None:
+            # The plan's own work (or anything, behind an offer to plan first).
             # Queued and released like any other (start=True): its start finds
             # the plan holding it, so an approval landing before the release
             # still starts it, and one after starts it from the queue.
@@ -1295,6 +1350,9 @@ async def assign(
         notes = "".join(f"\nprofile: {w}" for w in why)
         if learned and not why:
             notes += f"\nprofile chosen by learning: {profile}"
+        if req.alongside:
+            notes += (f"\nRunning alongside plan {req.alongside[0]}: the plan's reader lists it with your reason, "
+                      "and the person can stop it there.")
         if fast:
             notes += f"\n{FAST_PATH_NOTE}"
         elif fast_path:

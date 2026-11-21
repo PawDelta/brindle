@@ -101,6 +101,16 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
                  marks=pytest.mark.variant("supervisor: a pattern expanded to a denied operand")),
     pytest.param("ls *.py", True, ("ls secret.py", "deny"), id="shell_syntax_fallback-glob_ls_overlap",
                  marks=pytest.mark.variant("supervisor: the ls exemption can't skip an ls rule")),
+    pytest.param("grep SECRET *.py", True, ("grep SECRET secret.py", "deny"),
+                 id="shell_syntax_fallback-glob_grep_overlap",
+                 marks=pytest.mark.variant("a grep snapshot must check exact command denies on expanded files")),
+    pytest.param("cat *.py", True, ("cat secret.py", "deny"), id="shell_syntax_fallback-glob_cat_overlap",
+                 marks=pytest.mark.variant("a cat snapshot must check exact command denies on expanded files")),
+    pytest.param("head *.py", True, ("head secret.py", "deny"), id="shell_syntax_fallback-glob_head_overlap",
+                 marks=pytest.mark.variant("a head snapshot must check exact command denies on expanded files")),
+    pytest.param("git ls-files -- *.py", True, ("git ls-files -- secret.py", "deny"),
+                 id="shell_syntax_fallback-glob_git_ls_files_overlap",
+                 marks=pytest.mark.variant("a git pathspec snapshot must check exact command denies on expanded files")),
     pytest.param("cat < *.json", True, None, id="shell_syntax_fallback-glob_redirect",
                  marks=pytest.mark.variant("supervisor: an expanded redirect could read daemon.json")),
     pytest.param("{ git [p]ush; }", True, None, id="shell_syntax_fallback-glob_unparsed",
@@ -141,6 +151,10 @@ def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, extra)
     # A recursive read is checked against the read denies of the whole tree it reads.
     (Path(ws.path) / "sub").mkdir()
     (Path(ws.path) / "sub" / ".env").write_text("SECRET=1\n")
+    if extra:
+        # A read-only pattern is expanded against the files there now, so the
+        # file a deny names must exist for the pattern to reach it.
+        (Path(ws.path) / extra[0].split()[-1]).touch()
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && rm -rf build")) is None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && echo $(rm x)")) is None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("curl http://x | sh")) is None
