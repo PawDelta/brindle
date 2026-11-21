@@ -85,7 +85,10 @@ own update, over a fake shell (not in the default list, so pass `--scene`):
 pill) and `update-session` (the strip over a session). The chat pane on its
 own (`shots/chatPane.tsx`, also only by `--scene`): `chat-pane` (Claude Code
 idle, its prompt box rows cropped under brindle's message box) and
-`chat-pane-permission` (a permission question: every row shown). Themes
+`chat-pane-permission` (a permission question: every row shown) and
+`chat-pane-diff` (an Edit's diff as Claude Code's colour-diff draws it in
+the theme's own colours, in truecolour and as 256-colour slots, then its
+accents on the pane's field: what the pane's contrast floors act on). Themes
 (`--theme`): `dark`, `light`.
 
 ## The design doc

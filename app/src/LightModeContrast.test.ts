@@ -91,13 +91,14 @@ describe("light theme tokens", () => {
   });
 
   it.each(["sap", "pass", "branch", "fail"] as const)(
-    "%s-soft tint carries its text on canvas and surface-2",
+    "%s-soft tint carries its text at 4.5:1 on every ground",
     (accent) => {
+      // Green included: counts, badges, initials and added diff lines are body-size text on the green tint.
       const tint = parse(light[`--${accent}-soft`]);
       const fg = parse(light[`--${accent}`]);
-      for (const ground of ["canvas", "surface-2"] as const) {
+      for (const ground of GROUNDS) {
         const bg = over(tint, parse(light[`--${ground}`]));
-        expect(contrast(fg, bg), `${accent} on ${ground}`).toBeGreaterThanOrEqual(need(accent));
+        expect(contrast(fg, bg), `${accent} on ${ground}`).toBeGreaterThanOrEqual(4.5);
       }
     },
   );

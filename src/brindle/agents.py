@@ -489,6 +489,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
     # so a few of them don't each start one per core. Passed explicitly, since
     # a pane can inherit an older tmux environment; a profile's value still wins.
     env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
+    # Claude Code's "auto" theme starts from COLORFGBG until the terminal answers (providers.CLAUDE_THEMES): a pane
+    # starts with no client attached, so it would draw dark until the app first shows it. A profile's value wins.
+    if agent is not None and agent.provider == "claude":
+        env.setdefault("COLORFGBG", providers.claude_colorfgbg())
     # An agent's own `git push` to GitHub signs in through brindle's GitHub connection,
     # else (where git's helper is the keychain's) through gh: not git's keychain helper,
     # whose dialog nobody in a pane can answer (see git.pane_git_config).

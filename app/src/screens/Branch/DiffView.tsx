@@ -174,10 +174,10 @@ function HunkEditor({ file, hunk, access, onSaved, onDone }: { file: FileDiff; h
         )}
         <span className="flex-1" />
         <button type="button" className={`${button} px-s1 py-0.5 text-xs`} disabled={busy} onClick={() => void save()}>
-          Save <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘S</kbd>
+          Save <kbd className="ml-1 font-mono text-[10px] opacity-[var(--dim)]">⌘S</kbd>
         </button>
         <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={onDone}>
-          Discard <kbd className="ml-1 font-mono text-[10px] opacity-80">esc</kbd>
+          Discard <kbd className="ml-1 font-mono text-[10px] opacity-[var(--dim)]">esc</kbd>
         </button>
       </div>
     </div>

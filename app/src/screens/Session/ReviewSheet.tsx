@@ -290,7 +290,7 @@ function PrStep({ client, root, diff, openUrl, onClose }: { client: DaemonClient
         ) : (
           <>
             <LoadingButton className={main} busy={job.busy} disabled={!loaded || job.busy || !title.trim()} onClick={open} data-testid="open-pr">
-              Open PR <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘↵</kbd>
+              Open PR <kbd className="ml-1 font-mono text-[10px] opacity-[var(--dim)]">⌘↵</kbd>
             </LoadingButton>
           </>
         )}

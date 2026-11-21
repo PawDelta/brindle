@@ -521,13 +521,22 @@ def trust_folder(path: str) -> bool:
 
 
 # The first-run answers a person gives Claude Code once on their own machine.
-# Claude Code's built-in truecolor themes (its ANSI themes draw the input box and
-# messages with the terminal's own grey slots, wrong in both of the app's themes).
-CLAUDE_THEMES = {"light": "light", "dark": "dark"}
+# Claude Code's theme in brindle's config folder, for either app theme: "auto",
+# its built-in light or dark (truecolor: its ANSI themes draw the input box and
+# messages with the terminal's own grey slots, wrong in both of the app's themes)
+# by the terminal's background. It asks that (OSC 11) at start, starting from
+# COLORFGBG until it is answered (claude_colorfgbg: a pane starts with no client
+# attached), and again whenever the terminal reports a theme change (mode 2031):
+# the app's view reports each switch to its tmux client, and tmux passes it to the
+# pane, so a running pane follows the app both ways (PtyTerminal's themeChanged).
+CLAUDE_THEMES = {"light": "auto", "dark": "auto"}
 # The values brindle itself ever wrote into its own config folder's settings.json:
 # only these are replaced to follow the app's theme. Anything else is the
 # person's own pick and is kept.
-OWNED_THEMES = ("dark", "light", "dark-ansi", "light-ansi")
+OWNED_THEMES = ("auto", "dark", "light", "dark-ansi", "light-ansi")
+# COLORFGBG ("foreground;background" as ANSI slots) for each app theme: Claude Code
+# reads a background slot of 0-6 or 8 as dark, any other as light.
+CLAUDE_COLORFGBG = {"light": "0;15", "dark": "15;0"}
 APP_THEME_SETTING = "app_theme"   # ~/.brindle/config.json: the app's last reported theme
 API_KEY_SUFFIX = 20   # Claude Code records an approved key by its last 20 characters
 
@@ -540,10 +549,16 @@ def app_theme() -> str:
     return got if got in CLAUDE_THEMES else "dark"
 
 
+def claude_colorfgbg() -> str:
+    """COLORFGBG for a Claude Code pane launched now: the app's theme, which its
+    "auto" theme starts from until the terminal answers its background query."""
+    return CLAUDE_COLORFGBG[app_theme()]
+
+
 def set_app_theme(theme: str) -> None:
     """Remember the app's theme across restarts and bring brindle's Claude
-    config folder's theme in line. Panes already running keep the theme they
-    started with; the next launch picks this one up."""
+    config folder's theme in line (to "auto"). Panes already running follow
+    through their terminal (CLAUDE_THEMES); the next launch starts in this one."""
     from brindle import config
 
     if theme not in CLAUDE_THEMES:
