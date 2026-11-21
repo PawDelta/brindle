@@ -1001,9 +1001,24 @@ export type ExportDestination = "download" | "google_docs" | "sharepoint";
 /* GET /analysis-docs/policy (the rest of the org's policy passes through untouched). */
 export interface DocPolicy {
   export_destinations?: ExportDestination[];
+  share_links?: "anyone" | "org" | "off";
 }
 
 export type DocSwitchName = "store" | "share" | "assist" | "prompt_analysis" | "import_upload";
+
+export type OrgSettingName = DocSwitchName | "share_links";
+export type OrgSwitchState = "off" | "default_on" | "enforced_on" | "enforced_off";
+export interface OrgSettings {
+  org_id: string;
+  actor_sub: string;
+  can_edit_org: boolean;
+  can_edit_groups: boolean;
+  policy: {
+    switches: Partial<Record<DocSwitchName, OrgSwitchState>>;
+    groups: Record<string, { switches: Partial<Record<DocSwitchName, OrgSwitchState>> }>;
+    share_links?: "anyone" | "org" | "off";
+  };
+}
 
 /* GET /analysis-docs/switches: one of the person's own switches. `choice` is
    theirs (null while unset), `on` what applies, `locked` whether their org
@@ -2354,6 +2369,16 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
   }
 
+  /* The person's own answer on a decision (brindle/plan_answers.py), picked as it is added. */
+  addPlanAnswer(id: string, rev: number, decision: string, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers`, { rev, decision, text });
+  }
+
+  /* Reword the person's own answer ({ text }) or take it back ({ remove: true }), until someone else picks it. */
+  changePlanAnswer(id: string, rev: number, answer: string, change: { text: string } | { remove: true }) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers/${encodeURIComponent(answer)}`, { rev, ...change });
+  }
+
   /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */
   sharePlan(id: string, scope: { kind: string; id: string }, reviewers: PlanReviewerChoice[]) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/share`, { scope, reviewers });
@@ -2644,6 +2669,16 @@ export class DaemonClient {
   /* The person's own doc switches, and which their org has locked. */
   async docSwitches(repo?: string) {
     return (await this.get<{ switches: DocSwitch[] }>("/analysis-docs/switches", { repo })).switches;
+  }
+
+  orgSettings() {
+    return this.get<OrgSettings>("/org-settings");
+  }
+
+  setOrgSetting(state: OrgSettings, name: OrgSettingName, value: string, group?: string) {
+    const switches = group ? state.policy.groups[group].switches : state.policy.switches;
+    const previous = name === "share_links" ? state.policy.share_links ?? "org" : switches[name] ?? "off";
+    return this.put<OrgSettings>("/org-settings", { org_id: state.org_id, actor_sub: state.actor_sub, name, value, previous, group });
   }
 
   /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked.

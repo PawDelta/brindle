@@ -1299,6 +1299,24 @@ CREATE TABLE IF NOT EXISTS plan_votes (
     at REAL NOT NULL,
     PRIMARY KEY (plan_id, decision_id, voter)
 );
+-- Own answers on a plan's decisions (brindle.plan_docs.add_answer): an option
+-- row someone typed, layered on the revision's immutable options. author is
+-- 'person' or 'teammate:<account>'. For a shared plan, sent_text is the text
+-- the Library last acknowledged for the person's answer on revision sent_rev
+-- (NULL: never sent), and removed keeps a sent answer the person took back
+-- until the Library has dropped it too.
+CREATE TABLE IF NOT EXISTS plan_answers (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    answer_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    author TEXT NOT NULL,
+    text TEXT NOT NULL,
+    at REAL NOT NULL,
+    sent_text TEXT,
+    sent_rev INTEGER,
+    removed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (plan_id, answer_id)
+);
 -- The doc format a plan was written with (brindle.doc_templates): its
 -- template, kept as it was so a later change never rewrites the doc, and
 -- its reference (DES-0042). No row: the plan was written without a format.

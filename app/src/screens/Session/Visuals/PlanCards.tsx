@@ -28,9 +28,11 @@ export const shortName = (optionLabel: string) => /^([A-Za-z0-9]{1,3})\s*[·:.)-
 /* Who picked what on a decision, the person first: "You: A · David: B". A teammate's pick on the
    author's own plan comes as "teammate:<account>"; `name` gives an account its name where known. */
 export function picksLine(d: PlanDecisionDTO, name: (who: string) => string = personName): string {
-  const label = (option: string) => shortName(d.options.find((o) => o.id === option)?.label ?? option);
+  /* An own answer (brindle/plan_answers.py) by its words: "You: Other: ‘only on holidays’". */
+  const own = (option: string) => d.answers?.find((a) => a.id === option);
+  const label = (option: string) => (own(option) ? `Other: ‘${own(option)!.text}’` : shortName(d.options.find((o) => o.id === option)?.label ?? option));
   const picks = Object.entries(d.votes ?? {}).flatMap(([option, voters]) => voters.map((who) => ({ who, option })))
-    .filter((p) => d.options.some((o) => o.id === p.option))
+    .filter((p) => d.options.some((o) => o.id === p.option) || !!own(p.option))
     .sort((a, b) => Number(b.who === "person") - Number(a.who === "person"));
   return picks.map((p) => `${name(p.who.replace(/^teammate:/, ""))}: ${label(p.option)}`).join(" · ");
 }

@@ -11,7 +11,7 @@ const SWITCHES: DocSwitch[] = [
 ];
 
 function setup(setDocSwitch = vi.fn()) {
-  const client = { docSwitches: vi.fn().mockResolvedValue(SWITCHES), setDocSwitch };
+  const client = { docSwitches: vi.fn().mockResolvedValue(SWITCHES), setDocSwitch, docPolicy: vi.fn().mockResolvedValue({ share_links: "org" }) };
   render(<DocSwitches client={client} />);
   return client;
 }
@@ -19,8 +19,12 @@ function setup(setDocSwitch = vi.fn()) {
 describe("DocSwitches", () => {
   it("sets an unlocked switch and shows a locked one with the org's value, unchangeable", async () => {
     const client = setup(vi.fn().mockResolvedValue({ switches: [SWITCHES[0], { ...SWITCHES[1], on: false, choice: "off" }] }));
-    const mac = (await screen.findByRole("radio", { name: "This Mac" })) as HTMLButtonElement;
-    expect(mac.disabled && mac.getAttribute("aria-checked") === "false").toBe(true);
+    const store = await screen.findByTestId("doc-switch-store");
+    expect(store.getAttribute("data-state")).toBe("locked");
+    expect(store.querySelector("button")).toBeNull();
+    expect(store.querySelector("svg")).not.toBeNull();
+    expect(screen.getByTestId("doc-policy-links").getAttribute("data-state")).toBe("locked");
+    expect(screen.getByTestId("doc-policy-links").querySelector("button")).toBeNull();
     fireEvent.click(screen.getByRole("switch", { name: "Sharing" }));
     await waitFor(() => expect(screen.getByRole("switch", { name: "Sharing" }).getAttribute("aria-checked")).toBe("false"));
     expect(client.setDocSwitch).toHaveBeenCalledWith("share", false);
@@ -31,7 +35,7 @@ describe("DocSwitches", () => {
     const servers = [{ ...free, on: true, choice: "on" as const }];
     const setDocSwitch = vi.fn().mockResolvedValueOnce({ switches: servers, moved: 2, left: 1 })
       .mockResolvedValueOnce({ switches: servers, moved: 1, left: 0 });
-    render(<DocSwitches client={{ docSwitches: vi.fn().mockResolvedValue([free]), setDocSwitch }} />);
+    render(<DocSwitches client={{ docSwitches: vi.fn().mockResolvedValue([free]), setDocSwitch, docPolicy: vi.fn().mockResolvedValue({}) }} />);
     fireEvent.click(await screen.findByRole("radio", { name: "brindle servers" }));
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByRole("radio", { name: "brindle servers" }).getAttribute("aria-checked")).toBe("true");
@@ -50,7 +54,7 @@ describe("DocSwitches", () => {
     const servers = local.map(s => ({ ...s, on: true }));
     const setDocSwitch = vi.fn().mockResolvedValueOnce({ switches: servers, moved: 6, left: 0 })
       .mockResolvedValueOnce({ switches: local, moved: 6, left: 0 });
-    render(<DocSwitches client={{ docSwitches: vi.fn().mockResolvedValue(local), setDocSwitch }} />);
+    render(<DocSwitches client={{ docSwitches: vi.fn().mockResolvedValue(local), setDocSwitch, docPolicy: vi.fn().mockResolvedValue({}) }} />);
     fireEvent.click(await screen.findByRole("radio", { name: "brindle servers" }));
     expect((await screen.findByRole("status")).textContent).toContain("6 plans moved to brindle servers. Sharing, Briefs, Imported folders and Prompt analysis are on.");
     for (const toggle of screen.getAllByRole("switch")) {
@@ -69,8 +73,8 @@ describe("DocSwitches", () => {
       ...(["share", "assist", "import_upload", "prompt_analysis"] as const).map(name => ({ name, on: false, choice: null, locked: name === "assist", org: name === "assist" ? "enforced_off" as const : null })),
     ];
     const setDocSwitch = vi.fn();
-    render(<DocSwitches client={{ docSwitches: vi.fn().mockResolvedValue(local), setDocSwitch }} />);
-    await screen.findByRole("radio", { name: "This Mac" });
+    render(<DocSwitches client={{ docSwitches: vi.fn().mockResolvedValue(local), setDocSwitch, docPolicy: vi.fn().mockResolvedValue({}) }} />);
+    await screen.findByTestId("doc-switch-store");
     for (const toggle of screen.getAllByRole("switch")) {
       expect((toggle as HTMLButtonElement).disabled).toBe(true);
       expect(document.getElementById(toggle.getAttribute("aria-describedby")!)?.textContent).toBeTruthy();
