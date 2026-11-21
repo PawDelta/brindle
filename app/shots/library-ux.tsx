@@ -238,7 +238,7 @@ function Doc({ status, children, wide, foot }: { status: ReactNode; children: Re
           <div className="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-sans text-[12.5px] text-ink-2">{status}</div>
           <p className="mt-5 font-serif text-[15px] leading-[1.68] text-ink-2">Pro sessions keep running on a machine the customer controls; results land as reviewed pull requests.</p>
           <div className="mt-5 border-t border-line pt-4 font-serif text-[17px] font-semibold">1 · Context</div>
-          <p className="mt-2 font-serif text-[15px] leading-[1.68] text-ink-2">A session stops when the laptop sleeps. Teams asked for work that carries on overnight and is ready to review in the morning, without handing their code to a machine they don't run.</p>
+          <p className="mt-2 font-serif text-[15px] leading-[1.68] text-ink-2">A session stops when the laptop lid closes. Teams asked for work that carries on overnight and is ready to review in the morning, without handing their code to a machine they don't run.</p>
         </div>
         {foot && <div className="flex min-h-[52px] flex-none items-center gap-3 border-t border-line-strong bg-canvas-2 px-4 font-sans">{foot}</div>}
       </div>
@@ -436,7 +436,7 @@ function RecipientLibrary() {
       <div className={`${cols} ${label} mt-5 border-b border-line-strong pb-2`}><span>Design</span><span>Stage</span><span>Shared with</span><span>You can</span><span className="text-right">Changed</span></div>
       {row("Cloud workers for Pro", "Pro sessions keep running on a machine the customer controls…", stage("var(--sap)", "Your review"), "Founding Team and 3 people", "by Maya Chen", "Comment · must sign off", "5h")}
       {row("OS sandbox for worker shells", "Worker shells run under the OS sandbox with the worktree…", stage("var(--ink-2)", "In review"), "Founding Team", "by Maya Chen", "View", "3d")}
-      {row("Rate limits for the public API", "Per-key limits with a burst allowance; 429s carry a retry time.", stage("var(--ink-2)", "In review"), "PawDelta and 2 people", "by Chen Wei", "Edit", "1d")}
+      {row("Rate limits for the public API", "Per-key limits with a burst allowance; a refusal says when to come back.", stage("var(--ink-2)", "In review"), "PawDelta and 2 people", "by Chen Wei", "Edit", "1d")}
       {row("Sidebar at every window size", "The context gives way first when the window is short…", stage("var(--ink-2)", "Shipped"), "Founding Team", "by you", "Owner", "Nov 7")}
       {row("Release flow: gate on CI", "Build first, then tag: a release tag only exists for a commit…", stage("var(--ink-2)", "Drafting"), "Only you", "kept on this Mac", "Owner", "Oct 30")}
     </div>
