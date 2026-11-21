@@ -3967,6 +3967,32 @@ def _ask_strictness(rule: Rule) -> tuple:
     return life, limits.get("minutes") or 0, reach
 
 
+# The whole command being checked while its substitutions are re-read alone
+# (_restriction_in_parts, read_parts): whether HOME may change is judged on all of it.
+_OUTERMOST: ContextVar[str | None] = ContextVar("brindle_outermost_command", default=None)
+
+
+@contextmanager
+def _whole_command_read(command: str) -> Iterator[None]:
+    """Checks made inside read ``command`` as the whole command being
+    checked, unless they already re-read part of an outer one."""
+    token = _OUTERMOST.set(_OUTERMOST.get() or command)
+    try:
+        yield
+    finally:
+        _OUTERMOST.reset(token)
+
+
+def _whole_command(check):
+    """Runs ``check`` under _whole_command_read(its request's command)."""
+    @functools.wraps(check)
+    def wrapper(req: Request, *args, **kwargs):
+        with _whole_command_read(req.command or ""):
+            return check(req, *args, **kwargs)
+    return wrapper
+
+
+@_whole_command
 def _restriction_in_parts(req: Request, *, checks: list[str] | None,
                           rules: list[Rule]) -> Decision | None:
     """The deny (else ask) that a part of ``req``'s shell command is subject
@@ -4274,6 +4300,127 @@ _STDIN_RUNNERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "xargs",
 _FLAT_LIMIT = 500
 _REFERENCE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=")
+
+
+# In any of a command's words (expansions resolved where they can be), what may set HOME even
+# as an argument: a HOME word (HOME=x, read HOME, ${HOME:=x}), IFS (it changes how words
+# split) or a ${...} beyond a plain reference (${x:=y}, ${!x}, ${a[x]}, whose subscript is
+# arithmetic, which assigns what a value names: x='HOME=1').
+_HOME_ANYWHERE = re.compile(r"\b(?:HOME|IFS)\b|\$\{")
+# A word that may name the command that runs, and may then set HOME: a builtin that sets
+# variables, runs text or makes a later word a setter (alias), "." (source), or a word with a
+# pattern or brace (which may build such a name: {re,}ad, rea?, a[x]=1).
+_HOME_SETTER_NAME = re.compile(
+    r"(?:eval|source|trap|enable|wait|coproc|select|function|alias|shopt|\.|"
+    + "|".join(sorted(_VARIABLE_SETTERS)) + r")|.*[\[*?{].*")
+_SHELL_OPERATOR_CHARS = "();<>|&\n"
+# Words that open or continue a compound command and are followed by a command: an assignment
+# after one may not run. (function, coproc and select name something first: they are setters.)
+_COMPOUND_WORDS = frozenset({"if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case",
+                             "esac", "{", "}", "!"})
+# A leading assignment (x=1, x+=1): the command comes after it.
+_LEADING_ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)(\+?)=")
+# A word that only numbers a redirect's file descriptor (2>x, {fd}>x): the command comes after it.
+_REDIRECT_FD = re.compile(r"\d+|\{[A-Za-z_]\w*\}")
+# Stands in for the home in the resolved words: it names no setter, HOME or pattern.
+_HOME_STAND_IN = "/brindlehome"
+# Stands in for a substitution's output once its own commands are checked: a word only the run knows.
+_RUN_ONLY = "$__brindle_run_only"
+# After one of these, a later word may be the command that runs (command -p $c x, time -p x).
+_NAMES_A_COMMAND = _STDIN_RUNNERS | {"command", "builtin", "stdbuf", "caffeinate", "flock", "unbuffer", "chroot"}
+
+
+def _home_unchanged(command: str) -> bool:
+    """Whether nothing in the command being checked (all of it, when
+    ``command`` is a part of it re-read alone) may set HOME: then its $HOME
+    is the home the run starts with."""
+    return _home_kept((_OUTERMOST.get() or command).replace("\\\n", ""))
+
+
+def _home_kept(command: str) -> bool:
+    """Whether ``command`` surely leaves HOME as it found it, read from its
+    words as the shell sees them (quotes gone). A word that may name the
+    command that runs (each simple command's first, or any after a wrapper
+    such as command -p) must resolve to literal text: $HOME, or a variable a
+    plain statement before it assigned a literal value. Else it may build a
+    setter's name (c=a; re${c}d HOME). A literal command's arguments can't
+    change this shell's HOME, so they may be only the run's (echo "$USER");
+    each substitution's own commands are checked in turn. Then no word may
+    name a setter (_HOME_SETTER_NAME), and none may change HOME as an
+    argument (_HOME_ANYWHERE)."""
+    if re.search(r"\(\(|\$\[", command):
+        return False    # arithmetic: it assigns what a value names
+    spans = _substitution_spans(command)
+    if spans is None or not all(_home_kept(inner) for _, _, inner, _ in spans):
+        return False
+    for start, end, _, _ in reversed(spans):
+        command = command[:start] + _RUN_ONLY + command[end:]
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_OPERATOR_CHARS)
+    lexer.whitespace = " \t\r"
+    lexer.commenters = ""
+    lexer.wordchars += "$`{}[]!@%^+,:#"
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    known = {"HOME": _HOME_STAND_IN}
+    definite = True    # every statement so far surely ran, in this shell
+    words: list[str] = []
+    assigned: list[tuple[str, str | None]] = []    # this command's leading assignments (value None: unknown)
+    started = False    # whether this simple command has had its command word
+    names = True    # whether the next word may name the command that runs
+    wrapped = False    # after a wrapper, any later word of this command may
+    redirect = loop_variable = False
+    tokens.append(";")
+
+    def operator(token: str) -> bool:
+        return bool(token) and set(token) <= set(_SHELL_OPERATOR_CHARS)
+
+    for index, token in enumerate(tokens):
+        if operator(token):
+            if ("<" in token or ">" in token) and not any(c in token for c in "()"):
+                redirect = True    # its file is the next word; <(...) starts a command instead
+                continue
+            for name, value in assigned:
+                # Alone, assignments set the shell's variables (surely, only on the plain path);
+                # before a command, they may persist (a special builtin, posix mode).
+                if value is not None and definite and not started:
+                    known[name] = value
+                else:
+                    known.pop(name, None)
+            assigned, started, names, wrapped = [], False, True, False
+            definite = definite and set(token) <= set(";\n")
+            continue
+        resolved = re.sub(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))",
+                          lambda found: known.get(found.group(1) or found.group(2), found.group(0)), token)
+        unknown = "$" in resolved or "`" in resolved
+        words.append(re.sub(r"\$\{([A-Za-z_]\w*)\}", r"$\1", resolved))    # ${x} is $x
+        if redirect:
+            redirect = False
+            continue
+        following = tokens[index + 1]
+        if (_REDIRECT_FD.fullmatch(token) and operator(following) and ("<" in following or ">" in following)
+                and not any(c in following for c in "()")):
+            continue    # 2>/dev/null x: the number belongs to the redirect
+        if loop_variable:
+            loop_variable = False
+            known.pop(token, None)    # for x in ...: the loop sets x
+            continue
+        if names and not started and not assigned and token in _COMPOUND_WORDS:
+            definite = False
+            loop_variable = token == "for"
+            continue
+        if names and not started and (found := _LEADING_ASSIGNMENT.match(token)):
+            # x+=1 appends to a value; an unknown value leaves the variable unknown.
+            value = None if found.group(2) or unknown else resolved[found.end():]
+            assigned.append((found.group(1), value))
+            continue
+        started = True
+        if names and (unknown or _HOME_SETTER_NAME.fullmatch(resolved)):
+            return False    # the command that runs is only the run's, or may set HOME
+        wrapped = wrapped or names and resolved in _NAMES_A_COMMAND | {"time"}
+        names = wrapped
+    return not _HOME_ANYWHERE.search(" ".join(words))
 
 
 @dataclass
@@ -4754,7 +4901,7 @@ class _Flattener:
         if len(self.out) > _FLAT_LIMIT:
             raise ValueError("too many commands")
 
-    def script(self, command: str, env: dict) -> None:
+    def script(self, command: str, env: dict, top: bool = True) -> None:
         tokens = _script_tokens(command, credential_scan=self.credential_scan)
         if tokens is None:
             raise ValueError("unreadable syntax")
@@ -4764,6 +4911,10 @@ class _Flattener:
         if self.credential_scan:
             # The shell's $HOME is known before the run: a credential scan resolves it (and ~) to the
             # real home in every word, so "$HOME"/.aws or d="$HOME"; cat "$d/.npmrc" names the store.
+            env.setdefault("HOME", ("lit", os.path.expanduser("~")))
+        elif top and _home_unchanged(command):
+            # Otherwise only at the top of a command that can't change HOME anywhere, its
+            # substitutions included, so W=$HOME/x; git -C $W status names a real path.
             env.setdefault("HOME", ("lit", os.path.expanduser("~")))
         self.walk(nodes, env, True)
 
@@ -4841,7 +4992,7 @@ class _Flattener:
     def substitution(self, inner: str, env: dict) -> None:
         sub = _Flattener(self.cwd, credential_scan=self.credential_scan, reading=self.reading)
         sub.ids, sub.scope = self.ids, self.scope + (next(self.ids),)    # a subshell of its own
-        sub.script(inner, dict(env))
+        sub.script(inner, dict(env), top=False)    # what HOME is here is what the outer script left
         for command, fed, scope in zip(sub.out, sub.fed, sub.scopes):
             self.emit(command, fed=fed, scope=scope)
         self.named += sub.named
@@ -4954,6 +5105,12 @@ class _Flattener:
                 for inner in word.substitutions:
                     self.substitution(inner, seen)
                 value = self.text(word, seen, assignment=True)[len(name) + 1:]
+                home = seen.get("HOME")
+                if re.match(r"~(?=/|$)", value) and home is not None and home[0] == "lit":
+                    # An unquoted leading ~ is the home, expanded once as the value is assigned
+                    # (W=~/x); a quoted one, ~user or another ~ in it stays unknown.
+                    value = f'"{_dq_escaped(home[1])}"{value[1:]}'
+                    self.changed = True
                 text = self.resolved(value)
                 if self.credential_scan:
                     self.named.append(text)
@@ -5609,6 +5766,7 @@ class _PartReader:
         return target if os.path.isdir(target) else None
 
 
+@_whole_command
 def shell_parts(req: Request, why: list[ValueError] | None = None) -> list[ShellPart] | None:
     """The simple commands ``req``'s shell command runs (ShellPart), or None
     when brindle can't verify what it runs (see the section above; ``why``
@@ -5754,6 +5912,7 @@ def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
                for literal in literals for fragment in literal.split())
 
 
+@_whole_command
 def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                why: list[ValueError] | None = None) -> tuple[list[ShellPart], Decision | None] | None:
     """``req``'s shell command as ShellParts with the deny (else ask) a rule
