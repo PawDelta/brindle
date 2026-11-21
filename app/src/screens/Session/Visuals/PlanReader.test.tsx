@@ -371,8 +371,10 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Reply" }));
   fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "Yes, rented too." } });
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" }));
-  // A decision pick is local and can be made while the reply is in flight.
-  fireEvent.click(within(screen.getByRole("radiogroup", { name: "Where" })).getByRole("radio", { name: "A · Own" }));
+  // A pick is a write too: while the reply is in flight the decision takes none.
+  const hosted = within(screen.getByRole("radiogroup", { name: "Where" })).getByRole("radio", { name: "B · Hosted" });
+  fireEvent.click(hosted);
+  expect([hosted.getAttribute("aria-disabled"), hosted.getAttribute("aria-checked")]).toEqual(["true", "false"]);
   expect((bar().getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(true);
   await act(async () => reply(replied));
   // The read sent before the reply came back lands after it, without the reply: it is dropped.

@@ -725,33 +725,19 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const jump = (decision: string) => show(document.getElementById(`plan-decision-${decision}`));
   // A pick is saved as it is made (the author's on this machine, and through the Library to
   // everyone on a shared plan; a teammate's is their vote there), so closing the doc before
-  // Approve loses nothing. The author's shows at once, is saved as soon as no other write is out
-  // (below), and travels with their verdict too. A teammate's counts as decided only once the
-  // Library has it: one write at a time, so the cards take no pick meanwhile.
+  // Approve loses nothing. Each pick is its own write, sent at once, and one at a time: while one
+  // is out the cards take no pick, so no pick ever waits on this screen to be sent. The author's
+  // shows at once (and goes back to what was there if it isn't saved); a teammate's counts as
+  // decided only once the Library has it.
   const pickOption = async (decision: string, option: string) => {
-    if (historical) return;
-    if (!teammate) return setPicks((p) => ({ ...p, [decision]: option }));
-    if (busy) return;
-    if ((await write(() => source.vote(plan.rev, decision, option))) && alive.current) setPicks((p) => ({ ...p, [decision]: option }));
+    if (historical || busy) return;
+    const before = picks[decision];
+    if (!teammate) setPicks((p) => ({ ...p, [decision]: option }));
+    const saved = await write(() => source.vote(plan.rev, decision, option));
+    if (!alive.current) return;
+    if (saved) setPicks((p) => ({ ...p, [decision]: option }));
+    else if (!teammate) setPicks((p) => (p[decision] === option ? { ...p, [decision]: before } : p));
   };
-  // The author's picks the engine doesn't hold yet, saved one at a time as the doc is free. Each is
-  // sent once: one the engine refused stays a pick on screen (and in the verdict), not a resend.
-  const tried = useRef(new Set<string>());
-  const unsaved = !teammate && open && !historical ? plan.decisions.flatMap((d) => {
-    const option = valid(d, picks[d.id]);
-    const key = `${plan.rev}:${d.id}:${option}`;
-    return option && option !== d.confirmed && !tried.current.has(key) ? [{ decision: d.id, option, key }] : [];
-  })[0] : undefined;
-  useEffect(() => {
-    if (!unsaved || busy) return;
-    tried.current.add(unsaved.key);
-    let refused = false;
-    void send(() => source.vote(plan.rev, unsaved.decision, unsaved.option), () => { refused = true; }).then((now) => {
-      // Not sent at all (another write held the doc): it goes once that write is back.
-      if (now === null && !refused) tried.current.delete(unsaved.key);
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- sent per pick, when the doc is free
-  }, [unsaved?.key, busy, plan]);
 
   // The bottom bar's actions.
   const target = visual?.answer_agent_id;
@@ -1109,7 +1095,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
-        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={!!teammate && busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={firstName}
+        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={firstName}
           onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
       </Annotated>
     ));
@@ -1375,7 +1361,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     <span id={`plan-title-decision-${d.id}`}>{`Decision · ${d.title}`}</span>
                     <span className={aside}>{`decision ${i + 1} of ${plan.decisions.length}${mine ? ` · ${mine}` : ""}`}</span>
                   </h3>
-                  <Decision decision={d} chosen={chosen(d)} open={open} onPick={(o) => void pickOption(d.id, o)} />
+                  <Decision decision={d} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} />
                   <p className="flex max-w-[70ch] flex-wrap items-baseline gap-x-2 font-sans text-[12.5px] leading-normal text-ink-3">
                     {d.challenge && <span>{`${d.mine ? "Against its own pick: " : ""}${d.challenge}`}</span>}
                     {commentButton(() => comment({ kind: "decision", decision: d.id }, decisionName(d.id)))}
