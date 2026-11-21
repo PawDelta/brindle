@@ -31,6 +31,37 @@ it("shows the signed-in person's initials from their name, and the email's first
   render(inTestStore(<><Avatar who="maya.chen@example.test" /><Avatar who="Ravi Shah" /></>, store));
   expect(screen.getByTitle("Maya Chen").textContent).toBe("M");
   expect(screen.getByTitle("Ravi Shah").textContent).toBe("RS");
+  render(<><Avatar who="David Michael Jones" /><Avatar who="63a34f9d" /></>);
+  expect(screen.getByTitle("David Michael Jones").textContent).toBe("DJ");
+  expect(screen.getByTitle("63a34f9d").textContent).toBe("?");
+});
+
+it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader's named comments and header", async (reader) => {
+  const name = `David ${"Longsurname".repeat(12)} Jones`;
+  const decisionTitle = "Longdecision".repeat(30);
+  const plan = doc(1, "Read this", { title: "Longtitle".repeat(40),
+    decisions: [{ id: "long", title: decisionTitle, options: [{ id: "a", label: "Longoption".repeat(30) }], votes: { a: ["teammate:63a34f9d"] } }],
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["63a34f9d"], reviewers: [{ sub: "63a34f9d", required: true, status: "waiting" }] },
+    threads: [{ id: 1, rev: 1, author: "63a34f9d", at: 1, text: "Comment", kind: "comment", status: "open", anchor: { kind: "section", section: "summary", state: "current" } }] });
+  const client = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
+    sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, signOffPlan: async () => plan, overridePlanPolicy: async () => plan, docScopes: async () => ({ scopes: [] }),
+    sharedDesign: async () => ({ ...plan, me: "me", author: "63a34f9d" }), writeSharedDesign: async () => ({ ...plan, me: "me" }),
+    libraryPeople: async () => ({ people: [{ sub: "63a34f9d", email: "david@example.test", first_name: "David", last_name: name.slice(6), name: "Dave" }] }) };
+  render(reader === "shared" ? <SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />
+    : <PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const share = await screen.findByRole("button", { name: "Share" });
+  expect(share.getAttribute("aria-label")).toBe("Share");
+  expect(share.textContent).toBe("");
+  expect(share.querySelector("svg")).toBeTruthy();
+  expect(screen.getByTestId("plan-status").querySelector("span[style]")).toBeNull();
+  expect(screen.getByTestId("plan-doc").querySelector("dt")).toBeNull();
+  expect(screen.getByRole("heading", { level: 1 }).className).toContain("[overflow-wrap:anywhere]");
+  const comment = await screen.findByTestId("thread-1");
+  expect(comment.querySelector("span[style][title]")?.textContent).toBe("DJ");
+  expect(within(comment).getByText(name).className).toContain("truncate");
+  const decision = screen.getByRole("radiogroup", { name: decisionTitle });
+  expect(decision.className).toContain("[overflow-wrap:anywhere]");
+  expect(within(decision).getByTitle(name).textContent).toBe("DJ");
 });
 
 /* Who reviews the doc, and sharing it, open over the page from the toolbar's Share. */
