@@ -101,6 +101,8 @@ function titleOf(row: Row): string {
     case "org_notice":
       return n > 1 ? `${n} notices from your ${item.detail || "admin"}` : item.reason;
     case "signoff_progress":
+    case "shared_with_you":
+    case "access_requested":
     case "shared_doc_comment":
     case "changes_requested":
     case "signed_off":
@@ -166,6 +168,10 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
       return [<><b>{who ?? "An agent"}</b> waits at its prompt</>, session, branch && <span className="mono">{branch}</span>, <span className="iq-wait">paused until you answer</span>];
     case "review_requested":
       return row.items.length > 1 ? row.items.map((i) => <>{i.detail || "Design doc"} {decisionCount(i)}</>) : [<><b>{personName(item.from_person)}</b> asked for your review</>, "plan", decisionCount(item)];
+    case "shared_with_you":
+      return [<><b>{personName(item.from_person)}</b> shared this plan with you</>];
+    case "access_requested":
+      return [<><b>{personName(item.from_person)}</b> asked to {item.access_role}</>];
     case "signoff_progress": {
       const s = item.signoff;
       const waiting = (s?.waiting ?? []).map(personName);
@@ -564,6 +570,31 @@ function QueueRow(props: RowProps) {
   );
 }
 
+function GrantAccess({ item, client, actions, refresh }: { item: InboxItemDTO; client: DaemonClient; actions: InboxActions; refresh(): Promise<void> }) {
+  const pending = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const grant = async () => {
+    if (pending.current || !item.from_person || !item.access_role || item.doc == null) return;
+    pending.current = true;
+    setBusy(true);
+    try {
+      await client.writeSharedDesign(String(item.doc), `access-requests/${encodeURIComponent(item.from_person.sub)}/grant`, { role: item.access_role });
+      setDone(true);
+      actions.settle(item);
+      await refresh();
+    } catch (e) {
+      actions.report(item, e instanceof Error ? e.message : String(e));
+    } finally {
+      pending.current = false;
+      setBusy(false);
+    }
+  };
+  return <button type="button" className="btn btn-primary text-xs" disabled={busy || done || !item.access_role || !item.from_person || item.doc == null} onClick={stop(() => void grant())}>
+    {done ? "Access granted" : `Grant ${item.access_role} access`}
+  </button>;
+}
+
 function LaterMenu({ row, onPick }: { row: Row; onPick(until: number, sig?: string): void }) {
   return (
     <div className="iq-menu" role="menu" aria-label="Later" data-testid="later-menu">
@@ -574,7 +605,7 @@ function LaterMenu({ row, onPick }: { row: Row; onPick(until: number, sig?: stri
 }
 
 /* The row's one action while it is closed: done here (Open PR, Mark read, Review, Open plan) or opening the row (Answer, Reply). */
-function goOf({ row, ctx, actions, settle, markRead, onToggle, refresh }: RowProps, inBody = false): ReactNode {
+function goOf({ row, ctx, actions, settle, markRead, onToggle, refresh, client }: RowProps, inBody = false): ReactNode {
   const item = row.items[0];
   const many = row.items.length > 1;
   // In the open row it is the screen's one green action.
@@ -594,10 +625,13 @@ function goOf({ row, ctx, actions, settle, markRead, onToggle, refresh }: RowPro
         nav({ screen: "shared-design", doc: String(item.doc), title: item.detail ?? undefined, repo: ctx.repo(item) ?? undefined });
       });
     case "signoff_progress":
+    case "shared_with_you":
       return btn("Open plan", item.doc == null || !nav ? undefined : () => {
         markRead();
         nav({ screen: "shared-design", doc: String(item.doc), title: item.detail ?? undefined, repo: ctx.repo(item) ?? undefined });
       });
+    case "access_requested":
+      return <GrantAccess item={item} client={client} actions={actions} refresh={refresh} />;
     case "changes_requested":
     case "signed_off":
       return btn("Open plan", item.doc == null || !nav ? undefined : () => nav({ screen: "knowledge", view: "docs", doc: item.doc! }));

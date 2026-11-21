@@ -24,6 +24,9 @@ function Row({ doc, record, queue, scopes, match, onOpen }: { doc: AnalysisDoc; 
   const stage = stageOf(doc.id, queue, record);
   const need = needsYou(doc.id, queue);
   const work = record?.work_item ?? doc.work_item;
+  const grants = record?.design;
+  const access = grants?.can_edit ? "you can edit" : grants?.can_comment ? "you can comment"
+    : grants?.can_edit === false && grants.can_comment === false ? "you can view" : null;
   return (
     <li data-doc={doc.id} data-stage={stage} data-needs-you={need ?? undefined} data-to-decide={openItems(doc, record).decide}>
       <button type="button" className={`${COLUMNS} w-full border-b border-line py-[9px] text-left hover:bg-surface-2`} onClick={onOpen}>
@@ -37,7 +40,7 @@ function Row({ doc, record, queue, scopes, match, onOpen }: { doc: AnalysisDoc; 
         </span>
         <SignOffs record={record} />
         <span className="truncate text-xs text-ink-3">{openLine(doc, record)}</span>
-        <span className="truncate text-xs text-ink-2">{scopeLabel(doc.scope, scopes)}</span>
+        <span className="text-xs text-ink-2">{scopeLabel(doc.scope, scopes)}{access && <span className="block text-ink-3">{access}</span>}</span>
         <span className="text-right text-xs text-ink-3">{changedAgo(doc.updated_at ?? doc.created_at)}</span>
       </button>
     </li>

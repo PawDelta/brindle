@@ -2202,6 +2202,32 @@
       "title": "DecisionDTO",
       "type": "object"
     },
+    "DesignAccessRequestDTO": {
+      "properties": {
+        "role": {
+          "enum": [
+            "comment",
+            "edit"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "granted"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "status"
+      ],
+      "title": "DesignAccessRequestDTO",
+      "type": "object"
+    },
     "DesignLinkDTO": {
       "$defs": {
         "DesignLinkScopeDTO": {
@@ -3391,6 +3417,22 @@
         }
       },
       "properties": {
+        "access_role": {
+          "anyOf": [
+            {
+              "enum": [
+                "comment",
+                "edit"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Role"
+        },
         "action": {
           "anyOf": [
             {
@@ -12178,6 +12220,32 @@
     },
     "SharedDesignDTO": {
       "$defs": {
+        "DesignAccessRequestDTO": {
+          "properties": {
+            "role": {
+              "enum": [
+                "comment",
+                "edit"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "granted"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "status"
+          ],
+          "title": "DesignAccessRequestDTO",
+          "type": "object"
+        },
         "PlanAlongsideDTO": {
           "description": "A task the supervisor assigned outside an open plan (assign's\noutside_plan): it ran at once instead of waiting on the plan. ``reason``:\nthe supervisor's. ``can_stop``: Stop still has something to cancel or remove.",
           "properties": {
@@ -13411,6 +13479,17 @@
       },
       "description": "A design someone else shared, as the person reviewing it reads it\n(brindle.pro.shared_reader): ``id`` is its Library doc id and it has no\nplan on this machine. ``can_*``: what the Library lets this account do,\n``can_sign_off`` false only when it can't be one of the signers.\n``author``: who wrote it, ``person`` if that is this account.",
       "properties": {
+        "access_request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DesignAccessRequestDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "alongside": {
           "default": [],
           "items": {
@@ -15276,6 +15355,14 @@
     {
       "method": "GET",
       "path": "/v1/shared-designs/{doc_id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/access-requests"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/access-requests/{sub}/grant"
     },
     {
       "method": "POST",

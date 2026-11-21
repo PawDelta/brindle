@@ -309,7 +309,7 @@ def _dismiss_key(item: InboxItemDTO) -> str:
     if item.kind == "permission" and item.agent_id and item.permission and item.permission.request_id:
         return permission_dismiss_key(item.agent_id, item.permission.request_id)
     data = item.to_json()
-    for k in ("decision_count", "from_name", "file_count", "checks_state"):
+    for k in ("decision_count", "from_name", "file_count", "checks_state", "access_role"):
         data.pop(k, None)  # enrichment preserves existing dismissal keys
     if data.get("choices") is None:
         data.pop("choices", None)   # added later: an item without choices keeps the key it always had

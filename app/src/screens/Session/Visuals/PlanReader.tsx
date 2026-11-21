@@ -937,14 +937,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     : !open && !teammate ?(plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
     : frozen ? "Locked for sign-off"
     : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off";
-  const statusLine = plan.state === "writing" ? "The supervisor is writing this plan"
+  const accessLine = plan.can_edit ? "You can edit" : canComment ? "You can comment" : "You can view";
+  const statusLine = teammate ? accessLine : plan.state === "writing" ? "The supervisor is writing this plan"
     : plan.state === "closed" ? "Closed: its session ended"
     : plan.state === "superseded" ? "You asked for a newer plan; this one is closed"
     : plan.state === "cancelled" ? "Closed without approval; the tasks it held wait for the supervisor"
-    : teammate?.signedOff ? `You signed off ${frozen ? `version ${frozen.id}` : `r${plan.rev}`}`
     : frozen && gate ? `Version ${frozen.id} · ${gate.signed} of ${plural(gate.required, "sign-off")}`
     : gate && useLiveReview && open ? `Still being written · sign-off opens when ${teammate ? authorName : "you"} freeze${teammate ? "s" : ""} a version`
-    : teammate ? "Its author builds it once every required reviewer signs off"
     : !open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it")
     : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off";
   const changedAt = Math.max(plan.created_at, ...(plan.revisions ?? []).map((r) => r.at));
@@ -1163,7 +1162,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <>
               <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink">
                 {teammate.signedOff ? <Tick className="!text-[13.5px] !font-semibold">{frozen ? `You signed off version ${frozen.id}` : `You signed off r${plan.rev}`}</Tick>
-                  : teammate.rights.signOff ? (frozen ? signName : "Ready for your sign-off") : gateWhy || "Read and comment"}
+                  : teammate.rights.signOff ? (frozen ? signName : "Ready for your sign-off") : accessLine}
               </span>
               {summary && <span className="text-xs text-ink-3">{summary}</span>}
             </>
@@ -1401,7 +1400,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Next</span>
-                <span className="truncate">{next ? next.title : teammate.signedOff ? (frozen ? `You signed off version ${frozen.id}` : `You signed off r${plan.rev}`) : teammate.rights.signOff ? (frozen ? signName : "Sign off this revision") : gateWhy || "Read and comment"}</span>
+                <span className="truncate">{next ? next.title : teammate.signedOff ? (frozen ? `You signed off version ${frozen.id}` : `You signed off r${plan.rev}`) : teammate.rights.signOff ? (frozen ? signName : "Sign off this revision") : accessLine}</span>
               </span>
               <span className="text-xs text-ink-3">{summary}</span>
             </div>

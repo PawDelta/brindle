@@ -17,6 +17,7 @@ import { ReaderBar } from "./DocBar";
 import { DesignDoc, MODES, useDoc, type Mode, type Teammate } from "./PlanReader";
 import type { Work } from "./WorkPanel";
 import { displayName } from "./PlanCards";
+import { AccessRequest } from "./AccessRequest";
 
 /* How often a design open here is read again: what teammates wrote, and whether it can still be opened. */
 const READ_EVERY_MS = 30_000;
@@ -87,6 +88,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="shared-design-reader">
       {shown && teammate ? (
         <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work}
+          top={<AccessRequest key={docId} client={client} doc={shown} repo={repo} />}
           shareLink={shown.can_edit ? designLinkTarget(client, docId, repo) : undefined}
           liveClient={client.visualLive ? client as LiveClient : undefined}
           chrome={{ lead, modes: client.visualLive ? MODES : COLUMN_MODES, allowed, onMode: setMode }} />

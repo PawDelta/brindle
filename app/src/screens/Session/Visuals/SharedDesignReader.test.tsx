@@ -15,6 +15,31 @@ const design: SharedDesign = {
   gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["u_me"], reviewers: [{ sub: "u_me", required: true, status: "waiting", you: true }] },
 };
 
+it.each([
+  [false, false, "You can view"], [false, true, "You can comment"], [true, true, "You can edit"],
+])("shows actual access for edit=%s comment=%s", async (can_edit, can_comment, line) => {
+  const client: SharedDesignClient = {
+    sharedDesign: async () => ({ ...design, can_edit, can_comment, can_suggest: false, can_sign_off: false }),
+    writeSharedDesign: async () => design, libraryPeople: async () => ({ people: [] }),
+  };
+  await act(async () => { render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />); });
+  expect(screen.getAllByText(line).length).toBeGreaterThanOrEqual(2);
+  if (!can_comment) expect(screen.queryByRole("button", { name: "Comment" })).toBeNull();
+});
+
+it("asks the author for access and keeps a sent request disabled", async () => {
+  const requests: string[] = [];
+  const client: SharedDesignClient = {
+    sharedDesign: async () => ({ ...design, can_comment: false, can_suggest: false, can_sign_off: false }),
+    writeSharedDesign: async (_id, _tail, body) => { requests.push(String(body.role)); return { ...design, can_comment: false }; },
+    libraryPeople: async () => ({ people: [] }),
+  };
+  await act(async () => { render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />); });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Ask to comment" })));
+  expect(requests).toEqual(["comment"]);
+  expect(screen.getByRole("button", { name: "Comment access requested" }).hasAttribute("disabled")).toBe(true);
+});
+
 it("a teammate signs off through the Library, keeps a draft across a stale write, and loses the doc with their access", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const nextRead = () => act(async () => { vi.advanceTimersByTime(30_000); });
