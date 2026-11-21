@@ -4865,9 +4865,11 @@ class _Flattener:
     pattern)`` for a for loop's pattern word), and collects the simple
     commands it runs."""
 
-    def __init__(self, cwd: str, *, credential_scan: bool = False, reading: bool = False):
+    def __init__(self, cwd: str, *, credential_scan: bool = False, reading: bool = False,
+                 snapshot_loops: bool = False):
         self.cwd = cwd
         self.credential_scan = credential_scan
+        self.snapshot_loops = snapshot_loops
         self.runners = _CODE_RUNNERS if reading else _STDIN_RUNNERS    # _PartReader's: any program that runs a heredoc
         self.reading = reading
         self.out: list[str] = []
@@ -5023,13 +5025,20 @@ class _Flattener:
             if found is not None and not any(is_op for is_op, _ in found):
                 values += [("lit", value) for _, value in found]
             elif RESTRICTION_WORD.fullmatch(text) and " " not in text:
-                values.append(("glob", text))
+                if self.snapshot_loops:
+                    names = _bounded_glob(text, self.cwd) if self.cwd and "**" not in text else None
+                    if not names or len(values) + len(names) > _FLAT_LIMIT:
+                        raise ValueError("a loop list without bounded literal matches")
+                    values += [("lit", name) for name in names]
+                else:
+                    values.append(("glob", text))
             else:
                 return [None]
         return values
 
     def substitution(self, inner: str, env: dict) -> None:
-        sub = _Flattener(self.cwd, credential_scan=self.credential_scan, reading=self.reading)
+        sub = _Flattener(self.cwd, credential_scan=self.credential_scan, reading=self.reading,
+                         snapshot_loops=self.snapshot_loops)
         sub.ids, sub.scope = self.ids, self.scope + (next(self.ids),)    # a subshell of its own
         sub.loop = self.loop
         sub.script(inner, dict(env), top=False)    # what HOME is here is what the outer script left
@@ -5381,9 +5390,10 @@ def _source_word(program: str, args: list[str]) -> str | None:
 
 
 class _PartReader:
-    def __init__(self, req: Request, *, credential_scan: bool = False):
+    def __init__(self, req: Request, *, credential_scan: bool = False, snapshot_loops: bool = False):
         self.req = req
         self.credential_scan = credential_scan
+        self.snapshot_loops = snapshot_loops
         self.fed = False    # what's being read inherits a pipe's input
         self.input_stays = False    # an exec gave the shell input: everything after it reads that
         self.cwd: str | None = req.cwd or req.worktree or None
@@ -5514,7 +5524,8 @@ class _PartReader:
             raise _Unverifiable("a shell runs its input as commands")
         if readers & _CODE_RUNNERS:
             raise ValueError("a heredoc a program may run as code")
-        flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan, reading=not self.credential_scan)
+        flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan, reading=not self.credential_scan,
+                               snapshot_loops=self.snapshot_loops)
         flattener.ids, flattener.scope = self.ids, self.scope
         flattener.loop = self.loop
         try:
@@ -5812,13 +5823,14 @@ class _PartReader:
 
 
 @_whole_command
-def shell_parts(req: Request, why: list[ValueError] | None = None) -> list[ShellPart] | None:
+def shell_parts(req: Request, why: list[ValueError] | None = None, *,
+                snapshot_loops: bool = False) -> list[ShellPart] | None:
     """The simple commands ``req``'s shell command runs (ShellPart), or None
     when brindle can't verify what it runs (see the section above; ``why``
     gets the reason)."""
     if req.kind != "bash" or not req.command:
         return None
-    reader = _PartReader(req)
+    reader = _PartReader(req, snapshot_loops=snapshot_loops)
     try:
         reader.read(req.command)
     except ValueError as e:
@@ -5961,7 +5973,7 @@ def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
                for literal in literals for fragment in literal.split())
 
 
-def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule], blocked_loops: set[int]) -> bool:
+def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule]) -> bool:
     """A bounded glob snapshot for reads and explicit pytest invocations.
 
     Read snapshots may race with new files; writers still need the stronger
@@ -5969,7 +5981,7 @@ def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule], block
     never qualify. Both the written and expanded invocation must be a read.
     """
     if (part.unknown or part.assigned or part.writes or part.reads or part.cwd is None or len(part.words) > 500
-            or any("**" in word for word in part.written) or not blocked_loops.isdisjoint(part.loop)):
+            or any("**" in word for word in part.written) or part.loop):
         return False
 
     def reading(words: list[str]) -> bool:
@@ -6003,12 +6015,20 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
     parts = shell_parts(req, why)
     if parts is None:
         return None
-    blocked_loops = {-1}
-    for part in parts:
-        at = replace(req, cwd=part.cwd or req.cwd)
-        if part.loop and (part.assigned or part.writes or not _readonly_part(at, part.written)
-                         or not _readonly_part(at, part.words)):
-            blocked_loops.update(part.loop)
+    loop_parts = [part for part in parts if part.loop]
+    # The symbolic first pass proves that every loop body only reads and stays
+    # in the directory the flattener knows. Only then may its glob lists become
+    # individual literal bindings. A pattern substituted for "$f" is not one
+    # invocation with every match: each iteration needs its own normal rules.
+    def loop_readonly(part: ShellPart) -> bool:
+        return (-1 not in part.loop and not (part.unknown or part.assigned or part.writes or part.reads)
+                and part.cwd is not None and part.cwd == (req.cwd or req.worktree)
+                and _readonly_part(req, part.written) and _readonly_part(req, part.words))
+
+    if loop_parts and any(part.globs for part in loop_parts) and all(map(loop_readonly, loop_parts)):
+        snapshots = shell_parts(req, snapshot_loops=True)
+        if snapshots is not None and all(loop_readonly(part) for part in snapshots if part.loop):
+            parts = snapshots
     path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny" and r.match_type != "tracked"]
     write_denies = any(r.kind in ("write", "edit") and r.decision == "deny" for r in rules)
     found = None
@@ -6039,7 +6059,7 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                             and not any(_patterns_may_restrict(rule, part) for rule in restrictions)
                             and not any("**" in word for word in part.written))
         if restrictions and (part.redirect_glob or part.globs and not literal_patterns
-                             and not _snapshot_read(at, part, path_denies, blocked_loops) and not (places and (
+                             and not _snapshot_read(at, part, path_denies) and not (places and (
                 _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
                                                         [part.assigned], [("<", path) for path in part.reads])
                                         for place in places)))):

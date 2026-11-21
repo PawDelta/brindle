@@ -80,6 +80,10 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
                  marks=pytest.mark.variant("replayed file inspection uses a read snapshot")),
     pytest.param('for f in tests/*.py; do echo "$f"; head "$f"; done', False, "allow", id="read-loop",
                  marks=pytest.mark.variant("a glob loop can snapshot when every body command only reads")),
+    pytest.param('for f in tests/*.py; do strings "$f"; done', False, "deny", id="loop-iteration-deny",
+                 marks=pytest.mark.variant("a deny on the second glob iteration sees its individual invocation")),
+    pytest.param('for f in renders/*.png; do file "$f" "$f"; done', False, "deny", id="loop-repeated-binding",
+                 marks=pytest.mark.variant("each quoted reference keeps the same individual filename with spaces")),
     pytest.param('for f in tests/*.py; do echo "$f"; touch marker; done', False, "restricted", id="write-loop",
                  marks=pytest.mark.variant("a write anywhere in the loop prevents its read snapshot")),
     pytest.param("cp tests/test_*.py output/", False, "restricted", id="writer",
@@ -107,14 +111,18 @@ def test_query_globs_still_require_proof_when_the_shell_can_change_arguments(tmp
 def test_replayed_shell_constructs_keep_restrictions(tmp_path, command, protected, expected):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / ("test_daemon.json.py" if protected else "test_public.py")).touch()
+    (tmp_path / "tests" / "test_second.py").touch()
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "binary").touch()
     (tmp_path / "renders").mkdir()
     (tmp_path / "renders" / "one.png").touch()
+    (tmp_path / "renders" / "two words.png").touch()
     here = str(tmp_path)
     command = command.replace("{root}", here)
     req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
-    rules = [*permissions.preset_rules("autonomous"), permissions.Rule("bash", "gh api blocked", "exact", "deny")]
+    rules = [*permissions.preset_rules("autonomous"), permissions.Rule("bash", "gh api blocked", "exact", "deny"),
+             permissions.Rule("bash", "strings tests/test_second.py", "exact", "deny"),
+             permissions.Rule("bash", "file renders/two words.png renders/two words.png", "exact", "deny")]
     got = permissions.decide(req, rules=rules, unmatched="allow", saved=[], groups={})
     assert got.decision in (("ask", "deny") if expected == "restricted" else (expected,)), got.reason
 
