@@ -107,6 +107,10 @@ def test_a_variable_assigned_a_home_path_is_checked_as_its_value(tmp_path, comma
                  marks=pytest.mark.variant("quotes split a setter's and the variable's names as written")),
     pytest.param('c=re; n=HO; ${c}ad ${n}ME; git commit -m "$(gh api $HOME)"', id="computed-name",
                  marks=pytest.mark.variant("a command name only the run knows may be a setter")),
+    pytest.param('c=a; n=HO; re${c}d ${n}ME <<< blocked; git commit -m "$(gh api $HOME)"', id="mid-word",
+                 marks=pytest.mark.variant("an expansion inside a command name")),
+    pytest.param('c=re; n=HO; command -p ${c}ad ${n}ME; git commit -m "$(gh api $HOME)"', id="wrapper-option",
+                 marks=pytest.mark.variant("a computed command name after a wrapper's option")),
     pytest.param('{re,}ad {HO,}ME; git commit -m "$(gh api $HOME)"', id="braces",
                  marks=pytest.mark.variant("brace expansion builds a setter and HOME")),
 ])

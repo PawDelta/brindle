@@ -4302,26 +4302,30 @@ _REFERENCE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=")
 
 
-# In a command's words as the shell reads them (quotes and line continuations gone), what may
-# set HOME, or a variable under a name only the run knows: a HOME word (HOME=x, read HOME,
-# ${HOME:=x}, ((HOME=1))), a builtin that sets variables or runs text, "." (source), arithmetic
-# (which assigns what a value names: x='HOME=1'; ((x)), ${s:x}, a[x]), a pattern or a brace
-# expansion (which may build a name: {re,}ad, H?ME) or a ${...} beyond a plain reference.
+# In a command's words once every expansion is resolved to literal text, what may set HOME:
+# a HOME word (HOME=x, read HOME, ${HOME:=x}, ((HOME=1))), a builtin that sets variables or runs
+# text, "." (source), IFS (it changes how words split), arithmetic (it assigns what a value
+# names: x='HOME=1'; ((x)), a[x]), or a pattern or brace (which may build a name: {re,}ad, H?ME).
 _HOME_SETTERS = re.compile(
-    r"\bHOME\b|\b(?:eval|source|trap|enable|wait|coproc|select|" + "|".join(sorted(_VARIABLE_SETTERS)) + r")\b"
-    r"|(?:^|\s)\.(?=\s|$)|\(\(|\$\[|[\[*?{]")
-# What leaves the next word in command position.
-_COMMAND_PREFIXES = frozenset({"!", "{", "}", "if", "then", "elif", "else", "while", "until", "do", "time",
-                               "command", "builtin", "exec", "nohup", "env", "sudo", "nice", "case", "in"})
+    r"\b(?:HOME|IFS)\b|\b(?:eval|source|trap|enable|wait|coproc|select|" + "|".join(sorted(_VARIABLE_SETTERS))
+    + r")\b|(?:^|\s)\.(?=\s|$)|\(\(|[\[*?{]")
 _SHELL_OPERATOR_CHARS = "();<>|&\n"
+# Words that open or continue a compound command: an assignment after one may not run.
+_COMPOUND_WORDS = frozenset({"if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case",
+                             "esac", "{", "}", "!", "function", "select", "coproc", "time"})
+# Stands in for the home in the resolved words: it names no setter, HOME or pattern.
+_HOME_STAND_IN = "/brindlehome"
 
 
 def _home_unchanged(command: str) -> bool:
     """Whether nothing in the command being checked (all of it, when
     ``command`` is a part of it re-read alone) may set HOME: then its $HOME
-    is the home the run starts with. Read from the words the shell sees, and
-    False wherever that can't be told: a command name only the run knows
-    may be a setter (c=read; $c x)."""
+    is the home the run starts with. Every expansion in its words (quotes and
+    line continuations gone) must resolve to literal text: $HOME, or a
+    variable a plain statement before it assigned a literal value (W=~/x;
+    git -C $W). Anything else (a $(...), a variable only the run knows, a
+    ${x:-y}) may build a setter's name (c=a; re${c}d HOME), so it gives
+    False, as does a setter or HOME in what the words resolve to."""
     lexer = shlex.shlex((_OUTERMOST.get() or command).replace("\\\n", ""), posix=True,
                         punctuation_chars=_SHELL_OPERATOR_CHARS)
     lexer.whitespace = " \t\r"
@@ -4331,25 +4335,28 @@ def _home_unchanged(command: str) -> bool:
         tokens = list(lexer)
     except ValueError:
         return False
-    plain = re.sub(r"\$\{([A-Za-z_]\w*)\}", r"$\1", " ".join(tokens))    # ${x} is $x
-    if _HOME_SETTERS.search(re.sub(r"\$HOME\b", "", plain)):
-        return False
-    start = True
-    redirect = False
-    for token in tokens:
+    known = {"HOME": _HOME_STAND_IN}
+    definite = True    # every statement so far surely ran, in this shell
+    words: list[str] = []
+    segment: list[str] = []
+    for token in [*tokens, ";"]:
         if token and set(token) <= set(_SHELL_OPERATOR_CHARS):
-            redirect = "<" in token or ">" in token
-            start = start or not redirect
+            if definite and segment and all(_ASSIGNMENT.match(word) for word in segment):
+                for word in segment:    # a statement of assignments only sets shell variables
+                    name, _, value = word.partition("=")
+                    known[name] = value
+            segment = []
+            definite = definite and set(token) <= set(";\n")
             continue
-        if redirect:    # a redirect's file
-            redirect = False
-            continue
-        if start and (token in _COMMAND_PREFIXES or _ASSIGNMENT.match(token)):
-            continue
-        if start and token[:1] in "$`":
-            return False
-        start = False
-    return True
+        if not segment and token in _COMPOUND_WORDS:
+            definite = False
+        resolved = re.sub(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))",
+                          lambda found: known.get(found.group(1) or found.group(2), "$"), token)
+        if "$" in resolved or "`" in resolved:
+            return False    # an expansion only the run knows
+        segment.append(resolved)
+        words.append(resolved)
+    return not _HOME_SETTERS.search(" ".join(words))
 
 
 @dataclass
