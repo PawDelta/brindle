@@ -19,9 +19,8 @@ const fileChip = "rounded-sm border border-line bg-surface-2 px-1 font-mono text
 export const passChip = `${chip} whitespace-nowrap border border-pass/40 bg-pass-soft text-pass`;
 
 /* Who wrote or voted: the engine's "person" is the one reading, "supervisor" the session's. */
-/* An email address reads as the name in it: "maya.chen@pawdelta.com" → "Maya Chen". */
 export const personName = (who: string) => (who === "person" ? "You" : who === "supervisor" ? "Supervisor"
-  : /^[^@\s]+@[^@\s]+$/.test(who) ? who.split("@")[0].split(/[._-]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(" ") : who);
+  : who.startsWith("teammate:") ? "A teammate" : who);
 
 /* "A · Your own server" is confirmed as "Confirm A"; a label with no such lead, by its name. */
 export const shortName = (optionLabel: string) => /^([A-Za-z0-9]{1,3})\s*[·:.)-]\s/.exec(optionLabel)?.[1] ?? optionLabel;

@@ -83,7 +83,7 @@ interface Line {
   after: string | null;
 }
 
-const personName = (p: PersonDTO | null | undefined) => p?.name || p?.sub || "Someone";
+const personName = (p: PersonDTO | null | undefined) => p?.name || "A teammate";
 const initial = (name: string) => (name.trim()[0] ?? "?").toUpperCase();
 const people = (row: Row) => [...new Map(row.items.filter((i) => i.from_person).map((i) => [i.from_person!.sub, personName(i.from_person)])).values()];
 const joined = (parts: ReactNode[]) => parts.filter((p) => p !== null && p !== undefined && p !== false && p !== "").map((p, i) => <span key={i}>{i > 0 && <span className="iq-sep" />}{p}</span>);
@@ -838,8 +838,8 @@ function Thread({ thread, doc, rev, repo, client, after, onSent }: { thread: Pla
     <form onSubmit={send} data-testid="thread-form" data-thread={thread.id}>
       {thread.anchor.quote && <div className="iq-quote">On “{thread.anchor.quote}”</div>}
       <div className="iq-thread" data-testid="thread">
-        <Msg who={thread.author} at={thread.at} text={thread.text} />
-        {(thread.replies ?? []).map((r) => <Msg key={r.id} who={r.author} at={r.at} text={r.text} />)}
+        <Msg who={thread.author_name ?? (thread.author === "person" ? "You" : "A teammate")} at={thread.at} text={thread.text} />
+        {(thread.replies ?? []).map((r) => <Msg key={r.id} who={r.author_name ?? (r.author === "person" ? "You" : "A teammate")} at={r.at} text={r.text} />)}
       </div>
       <div className="iq-box"><textarea rows={2} placeholder="Reply in this thread…" aria-label="Your reply" data-testid="reply-box" value={text} onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} /></div>

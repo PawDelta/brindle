@@ -145,7 +145,7 @@ async function openPlan(client: PlansClient & PlanDocClient & VisualsClient) {
 }
 
 it("saves each pick as it is made, a change back included: reopened, the doc keeps it, counts it decided, says who picked what, and Approve sends it", async () => {
-  const { client, confirms, verdicts } = pickEngine({ decisions: spine().decisions.map((d) => (d.id === "store" ? { ...d, votes: { a: ["teammate:dana.okafor"] } } : d)) });
+  const { client, confirms, verdicts } = pickEngine({ teammate_names: { "dana.okafor": "Dana Okafor" }, decisions: spine().decisions.map((d) => (d.id === "store" ? { ...d, votes: { a: ["teammate:dana.okafor"] } } : d)) });
   let card = await openPlan(client);
   for (const option of [0, 1, 0]) await act(async () => fireEvent.click(radios(card("store"))[option]));
   expect(confirms).toEqual([[1, "store", "a"], [1, "store", "b"], [1, "store", "a"]]);
@@ -156,7 +156,7 @@ it("saves each pick as it is made, a change back included: reopened, the doc kee
   expect(card("store").dataset.state).toBe("decided");
   expect(radios(card("store")).map((r) => r.checked)).toEqual([true, false]);
   expect(screen.getByTestId("plan-next").dataset.left).toBe("2");
-  expect(within(card("store")).getByTestId("plan-picks").textContent).toBe("You: A table · Dana: A table");
+  expect(within(card("store")).getByTestId("plan-picks").textContent).toBe("You: A table · Dana Okafor: A table");
 
   await act(async () => fireEvent.click(radios(card("loud"))[0]));
   await act(async () => fireEvent.click(radios(card("reach"))[1]));
@@ -203,12 +203,12 @@ it("an author's pick on a shared plan, still waiting on a reviewer, reaches a te
   }) });
   const teammate: SharedDesignClient = {
     sharedDesign: async () => read(), writeSharedDesign: async () => read(),
-    libraryPeople: async () => ({ people: [{ sub: "u_author", email: "dana.okafor@example.test" }] }),
+    libraryPeople: async () => ({ people: [{ sub: "u_author", display_name: "Dana Okafor", email: "dana.okafor@example.test" }] }),
   };
   render(<SharedDesignReader client={teammate} docId={design.id} onBack={() => {}} />);
   const doc = await screen.findByTestId("plan-doc");
   const store = doc.querySelector<HTMLElement>("[data-testid=plan-decision][data-decision=store]")!;
-  await waitFor(() => expect(within(store).getByTestId("plan-picks").textContent).toBe("You: A table · Dana: A queue"));
+  await waitFor(() => expect(within(store).getByTestId("plan-picks").textContent).toBe("You: A table · Dana Okafor: A queue"));
   expect(store.dataset.state).toBe("decided");
   expect(screen.getByTestId("plan-next").dataset.left).toBe("2");
 });

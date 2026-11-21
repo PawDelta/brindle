@@ -498,10 +498,15 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (shared && plan.state !== "approved") sharing?.syncPlan(plan.id).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
   }, [plan.id, shared]);
-  const nameOf = (sub: string) => directory.find((p) => p.sub === sub)?.email || sub;
+  const nameOf = (who: string) => {
+    const sub = who.replace(/^teammate:/, "");
+    const member = directory.find((p) => p.sub === sub);
+    return plan.teammate_names?.[sub] || member?.display_name || member?.email || "A teammate";
+  };
   // A person in a sentence: "You", or their name's first word ("dana.okafor@…" → "Dana").
   const firstName = (who: string) => {
     if (who === "person" || (!!me && who === me) || who === teammate?.me) return "You";
+    if (nameOf(who) === "A teammate") return "A teammate";
     const name = nameOf(who).split("@")[0].split(/[\s._-]+/)[0] ?? who;
     return name ? name[0].toUpperCase() + name.slice(1) : who;
   };
@@ -938,7 +943,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     : teammate ? "Its author builds it once every required reviewer signs off"
     : !open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it")
     : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off";
-  const statusReviewers: StatusReviewer[] = signers.map((r) => ({ key: r.sub!, who: r.you ? "person" : nameOf(r.sub!), name: r.you ? "You" : firstName(r.sub!), required: r.required, signed: r.status === "signed_off" }));
+  const statusReviewers: StatusReviewer[] = signers.map((r) => ({ key: r.sub!, who: r.you ? "person" : nameOf(r.sub!), name: r.you ? "You" : nameOf(r.sub!), required: r.required, signed: r.status === "signed_off" }));
   const changedAt = Math.max(plan.created_at, ...(plan.revisions ?? []).map((r) => r.at));
   const byline = `by ${teammate ? (teammate.author ? personName(nameOf(teammate.author)) : "its author") : "you and your supervisor"} · changed ${ago(changedAt)}`;
 
@@ -1095,7 +1100,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
-        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={firstName}
+        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={(who) => who === "person" ? "You" : nameOf(who)}
           onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
       </Annotated>
     ));
@@ -1168,7 +1173,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const versionMenu = source.history ? (
       <Menu label={<span data-testid="plan-rev">{`${versionLabel} · History`}</span>} buttonClass={`${quiet} px-[9px] text-xs !text-ink-3`} title="See earlier revisions and what changed"
         place="down" panelClass="w-[380px] max-w-[86vw] max-h-[60vh] overflow-auto" open={historyOpen} onOpenChange={setHistoryOpen} keepMounted testid="plan-history-menu">
-        <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
+        <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan} nameOf={nameOf}
           onCompare={(comparison, close) => { setHistorical(comparison ? { comparison, close } : null); if (comparison) setHistoryOpen(false); }} />
       </Menu>
     ) : <span className="whitespace-nowrap px-[9px] text-xs text-ink-3" data-testid="plan-rev">{versionLabel}</span>;
@@ -1379,7 +1384,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
             active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
-            historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan}
+            historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={receivedPlan} nameOf={nameOf}
               onCompare={(comparison, close) => setHistorical(comparison ? { comparison, close } : null)} />}
             history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} work={work} canLink={!teammate || canComment} />
         ) : (

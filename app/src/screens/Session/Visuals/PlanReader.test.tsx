@@ -29,7 +29,7 @@ it("shows the signed-in person's initials from their name, and the email's first
   expect(screen.getByTitle("You").textContent).toBe("H");
   // A teammate known only by an email gets that email's first letter; a named one, their initials.
   render(inTestStore(<><Avatar who="maya.chen@example.test" /><Avatar who="Ravi Shah" /></>, store));
-  expect(screen.getByTitle("Maya Chen").textContent).toBe("M");
+  expect(screen.getByTitle("maya.chen@example.test").textContent).toBe("M");
   expect(screen.getByTitle("Ravi Shah").textContent).toBe("RS");
 });
 
@@ -465,7 +465,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   render(reader(visual));
   const build = (await screen.findByTestId("plan-build")) as HTMLButtonElement;
   expect(build.disabled).toBe(true);
-  expect(build.title).toContain("u_a");
+  expect(build.title).not.toContain("u_a");
   await openShare();
   expect(screen.getByTestId("share-reviewer-u_a").dataset.state).toBe("invited");
   expect(screen.getByTestId("share-reviewer-u_c").dataset.required).toBe("false");

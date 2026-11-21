@@ -646,6 +646,7 @@ export interface PlanReviewerChoice {
 export interface LibraryPerson {
   sub: string;
   email: string;
+  display_name?: string;
 }
 
 /* An org admin's waiver of a review rule for one revision, or a stand-in for it until `until` (Unix seconds). */

@@ -91,8 +91,9 @@ export function historyEvents(entries: DocHistoryEntry[]): HistoryEvent[] {
 /* Drop into the History tab. Pass onCompare to put the comparison in the reader's document
    pane; without it the component includes its own read-only document preview. Increment refresh
    after a live action or sync. No writes are made when selecting or opening an old revision. */
-export function DocumentHistory({ client, planId, refresh, onCompare }: {
+export function DocumentHistory({ client, planId, refresh, onCompare, nameOf }: {
   client: HistoryClient; planId: string; refresh?: unknown;
+  nameOf?(sub: string): string;
   onCompare?(comparison: DocRevisionComparison | null, close: () => void): void;
 }) {
   const [events, setEvents] = useState<HistoryEvent[] | null>(null);
@@ -136,7 +137,7 @@ export function DocumentHistory({ client, planId, refresh, onCompare }: {
   const close = () => { request.current++; setLoading(false); setComparison(null); compareCallback.current?.(null, close); };
   return <div aria-busy={loading}>
     {error && <p role="alert" className="px-3.5 py-3 text-sap">History could not be loaded.</p>}
-    <DocHistory events={events} current={comparison?.revision.rev} onPick={(rev) => { void pick(rev); }} />
+    <DocHistory events={events?.map((e) => ({ ...e, who: e.who === "You" ? "You" : e.who === "supervisor" ? "Supervisor" : nameOf?.(e.who) ?? "A teammate" })) ?? null} current={comparison?.revision.rev} onPick={(rev) => { void pick(rev); }} />
     {comparison && (onCompare
       ? <button type="button" className={quiet} onClick={close}>Back to the latest</button>
       : <DocHistoryComparison key={comparison.revision.rev} comparison={comparison} onClose={close} />)}
