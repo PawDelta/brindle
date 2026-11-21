@@ -154,6 +154,7 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
         can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
         can_comment=_can(view, me, "can_comment"), can_suggest=_can(view, me, "can_suggest"),
         can_sign_off=review and _can_sign(view, me, author),
+        access_request=view.get("access_request"),
         signed_off=any(isinstance(s, dict) and s.get("sub") == me and s.get("rev") == view["rev"]
                        for s in view.get("sign_offs") or [])).to_json()
 
@@ -197,6 +198,16 @@ def _text(text: Any) -> str:
 def read(doc_id: str, *, client=None, store=None) -> dict:
     """The design as this account may read it now."""
     return _ask(doc_id, "GET", "", None, client, store)
+
+
+def request_access(doc_id: str, role: Any, sub: str | None = None, *, action: str = "grant", client=None, store=None) -> dict:
+    """Ask as the signed-in reader, or grant a request as its author; the Library checks both."""
+    if role not in ("comment", "edit"):
+        raise ServiceError("invalid", "request comment or edit access", 400)
+    if action not in ("grant", "decline"):
+        raise ServiceError("invalid", "grant or decline the access request", 400)
+    tail = "/access-requests" + (f"/{quote(sub, safe='')}/{action}" if sub is not None else "")
+    return _ask(doc_id, "POST", tail, {"role": role}, client, store)
 
 
 def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:

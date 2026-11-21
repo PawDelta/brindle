@@ -300,6 +300,7 @@ class InboxItemDTO(_DTO):
     thread_id: int | None = None   # a shared-doc comment's thread in the design
     excerpt: str | None = None     # a shared-doc comment's newest words
     signoff: SignoffDTO | None = None
+    access_role: Literal["comment", "edit"] | None = None
     decision_count: int | None = None  # the requested plan's decisions, when known
     from_name: str | None = None       # an org notice's sender, when supplied
     file_count: int | None = None      # files changed against the session's PR base
@@ -741,6 +742,11 @@ class DesignShareLinkDTO(_DTO):
     link: DesignLinkDTO | None = None
 
 
+class DesignAccessRequestDTO(_DTO):
+    role: Literal["comment", "edit"]
+    status: Literal["pending", "granted", "declined"]
+
+
 class SharedDesignDTO(PlanDTO):
     """A design someone else shared, as the person reviewing it reads it
     (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
@@ -754,6 +760,7 @@ class SharedDesignDTO(PlanDTO):
     can_suggest: bool = False
     can_sign_off: bool = False
     signed_off: bool = False
+    access_request: DesignAccessRequestDTO | None = None
 
 
 class KeptVisualDTO(_DTO):

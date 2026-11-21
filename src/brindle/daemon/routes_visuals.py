@@ -783,6 +783,16 @@ def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
     return _shared_design(_get(body, "repo"), lambda r: r.sign_off(params["doc_id"], body.get("rev")))
 
 
+def shared_design_access(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.request_access(
+        params["doc_id"], body.get("role"), params.get("sub")))
+
+
+def shared_design_access_decline(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.request_access(
+        params["doc_id"], body.get("role"), params["sub"], action="decline"))
+
+
 def share_link_design(db: DB, params: dict, body: dict) -> Any:
     """A plan opened from its share link (the app's brindle://plan/… deep link),
     read through the link as the account signed in now. The token comes in the
@@ -998,6 +1008,9 @@ ROUTES = [
     Route("/v1/shared-designs/{doc_id}/answers", _endpoint(shared_design_answer_add), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/answers/{answer}", _endpoint(shared_design_answer_change), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/sign-offs", _endpoint(shared_design_sign_off), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/access-requests", _endpoint(shared_design_access), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/access-requests/{sub}/grant", _endpoint(shared_design_access), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/access-requests/{sub}/decline", _endpoint(shared_design_access_decline), methods=["POST"]),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),
     Route("/v1/kept-visuals/{id}/html", kept_page),

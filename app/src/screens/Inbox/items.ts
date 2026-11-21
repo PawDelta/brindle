@@ -23,11 +23,13 @@ export function loginProvider(item: InboxItemDTO, provider?: string | null): Log
 }
 
 /* Shared design docs (service/inbox._review_items): each card opens the doc. */
-export const REVIEW_KINDS = ["review_requested", "changes_requested", "signed_off"];
+export const REVIEW_KINDS = ["review_requested", "changes_requested", "signed_off", "shared_with_you", "access_requested"];
 
 export const KIND_LABEL: Record<string, string> = {
   doc: "Doc to read",
   review_requested: "Review requested",
+  shared_with_you: "Shared with you",
+  access_requested: "Access requested",
   changes_requested: "Changes requested",
   signed_off: "Signed off",
   waiting: "Waiting for you",
@@ -220,7 +222,7 @@ export const itemKey = (item: InboxItemDTO) => {
     id = item.fix ?? "";
   } else if (item.kind === "org_blocked") {
     id = item.reason;
-  } else if ((item.kind === "signoff_progress" || item.kind === "shared_doc_comment") && item.item_key) {
+  } else if (["signoff_progress", "shared_doc_comment", "shared_with_you", "access_requested"].includes(item.kind) && item.item_key) {
     // A team row belongs to no agent: its Library key tells one design's progress, or one thread, from the next.
     id = item.item_key;
   }

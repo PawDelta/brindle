@@ -26,6 +26,7 @@ export interface ApiSchema {
   CloudOptionsDTO: CloudOptionsDTO;
   ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
+  DesignAccessRequestDTO: DesignAccessRequestDTO;
   DesignLinkDTO: DesignLinkDTO;
   DesignLinkScopeDTO: DesignLinkScopeDTO;
   DesignShareLinkDTO: DesignShareLinkDTO;
@@ -496,6 +497,14 @@ export interface DecisionDTO {
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "DesignAccessRequestDTO".
+ */
+export interface DesignAccessRequestDTO {
+  role: "comment" | "edit";
+  status: "pending" | "granted" | "declined";
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "DesignLinkDTO".
  */
 export interface DesignLinkDTO {
@@ -644,6 +653,7 @@ export interface InboxChoiceDTO {
  * via the `definition` "InboxItemDTO".
  */
 export interface InboxItemDTO {
+  access_role?: ("comment" | "edit") | null;
   action?: InboxActionDTO | null;
   agent_id?: string | null;
   checks_state?: ("passed" | "failed" | "running") | null;
@@ -1693,6 +1703,7 @@ export interface ShareTeamDTO {
  * via the `definition` "SharedDesignDTO".
  */
 export interface SharedDesignDTO {
+  access_request?: DesignAccessRequestDTO | null;
   alongside?: PlanAlongsideDTO[];
   ask?: string | null;
   author?: string | null;

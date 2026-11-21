@@ -31,13 +31,14 @@ READ = "/me/inbox/read"
 CHANGED = "inbox.changed"
 NEEDS_YOU, FROM_TEAM = "needs_you", "from_team"
 REVIEW, SIGNED, COMMENT = "review_requested", "signed_off", "shared_doc_comment"   # the feed's kinds
+SHARED, ACCESS = "shared_with_you", "access_requested"
 PROGRESS = "signoff_progress"       # the Inbox's own kind for a design's sign-offs ("signed_off" is the
                                     # author's local card once every sign-off is in)
-NEW_KINDS = (PROGRESS, COMMENT)     # Inbox kinds that only exist with the team Inbox
+NEW_KINDS = (PROGRESS, COMMENT, SHARED, ACCESS)     # Inbox kinds that only exist with the team Inbox
 # Rows that ask nothing of the person: a teammate's action, or an admin's notice
 # (the owner-approved Inbox lists notices under From the team). Every other kind
 # waits on them, a review request among them: the plan can't go on until they review it.
-TEAM_KINDS = (PROGRESS, COMMENT, SIGNED, "changes_requested", "org_notice")
+TEAM_KINDS = (PROGRESS, COMMENT, SIGNED, SHARED, "changes_requested", "org_notice")
 MAX_KEYS = 200                      # per POST /me/inbox/read
 
 _lock = threading.Lock()
@@ -69,7 +70,7 @@ def _rows(raw: object) -> list[dict]:
     rows = raw.get("items") if isinstance(raw, dict) else None
     out = []
     for r in rows if isinstance(rows, list) else []:
-        if not isinstance(r, dict) or r.get("kind") not in (REVIEW, SIGNED, COMMENT):
+        if not isinstance(r, dict) or r.get("kind") not in (REVIEW, SIGNED, COMMENT, SHARED, ACCESS):
             continue
         doc, key = r.get("doc_id"), r.get("item_key")
         if not isinstance(doc, str) or not doc or not isinstance(key, str) or not key:
@@ -78,7 +79,11 @@ def _rows(raw: object) -> list[dict]:
         row = {"kind": r["kind"], "key": key, "doc_id": doc, "read": r.get("read") is True,
                "title": title if isinstance(title, str) and title else "Design doc",
                "created_at": _int(r.get("created_at"))}
-        if r["kind"] == REVIEW:
+        if r["kind"] == ACCESS:
+            if r.get("role") not in ("comment", "edit") or person(r.get("requester")) is None:
+                continue
+            row.update(requester=person(r["requester"]), role=r["role"])
+        elif r["kind"] in (REVIEW, SHARED):
             row["sender"] = person(r.get("sender"))
             count = r.get("decision_count")
             row["decision_count"] = count if type(count) is int and count >= 0 else None
@@ -209,6 +214,14 @@ def items(sub: str | None) -> list[InboxItemDTO]:
             signoff=SignoffDTO(rev=newest["rev"], signed=newest["signed"], required=newest["required"],
                                waiting=newest["waiting"]))))
     for r in rows:
+        if r["kind"] in (SHARED, ACCESS):
+            access = r["kind"] == ACCESS
+            out.append((r["created_at"], InboxItemDTO(
+                kind=r["kind"], reason=f"Asked to {r['role']}" if access else "Shared with you",
+                inbox_group=NEEDS_YOU if access else FROM_TEAM, doc=r["doc_id"], detail=r["title"],
+                from_person=r["requester"] if access else r["sender"], item_key=r["key"], read=r["read"],
+                access_role=r["role"] if access else None)))
+            continue
         if r["kind"] != COMMENT:
             continue
         what = "Suggested" if r["suggestion"] else "Commented"
