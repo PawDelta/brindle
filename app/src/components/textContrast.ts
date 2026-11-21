@@ -113,17 +113,41 @@ interface Pen {
   fg: Colour;
   fgSgr: string;       // the SGR parameters that set fg ("39", "31", "38;5;246", "38;2;r;g;b")
   bg: Colour;
+  bgSgr: string;       // and bg ("49", "41", "48;5;167", "48;2;r;g;b")
   bold: boolean;
   dim: boolean;
   inverse: boolean;
 }
 
-/* What xterm.js holds of what this changes: its foreground SGR and whether it draws faint. */
-interface Held { fgSgr: string; dim: boolean }
+/* What xterm.js holds of what this changes: its foreground and background SGRs and whether it draws faint. */
+interface Held { fgSgr: string; bgSgr: string; dim: boolean }
 interface Saved { pen: Pen; held: Held }
 
-const freshPen = (): Pen => ({ fg: { kind: "default" }, fgSgr: "39", bg: { kind: "default" }, bold: false, dim: false, inverse: false });
-const freshHeld = (): Held => ({ fgSgr: "39", dim: false });
+const freshPen = (): Pen => ({ fg: { kind: "default" }, fgSgr: "39", bg: { kind: "default" }, bgSgr: "49", bold: false, dim: false, inverse: false });
+const freshHeld = (): Held => ({ fgSgr: "39", bgSgr: "49", dim: false });
+
+/* A ground the program set that is mid-tone (luminance between MID_GROUND[0] and [1]) leaves text no room to keep its
+   hue at 4.5:1: only near-black or near-white reaches it. Claude Code's light diff draws its changed words on two such
+   grounds (rgb(209,69,75) at 0.18, rgb(47,157,68) at 0.25). While lifting, such a ground is drawn lighter in its own hue,
+   at MID_GROUND[1], where text keeps its hue at 4.5:1 and the ground stays darker and more saturated than its line's
+   (Claude's line grounds sit at 0.5 to 0.6). Darker grounds (black, a status bar's) are a program's choice and stay. */
+const MID_GROUND = [0.1, 0.45] as const;
+
+/* ground in its own hue, its HSL lightness raised until its luminance reaches `target`. A red keeps its saturation at
+   0.85 at least: a light red with less reads pink (a removed word must read as removed); greens keep their own. */
+export function lightenTo(ground: Rgb, target: number): Rgb {
+  const [h, s0, l] = toHsl(ground);
+  const s = h >= 345 || h < 15 ? Math.max(s0, 0.85) : s0;
+  let low = l, high = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (low + high) / 2;
+    if (luminance(fromHsl(h, s, mid)) >= target) high = mid;
+    else low = mid;
+  }
+  return fromHsl(h, s, high);
+}
+
+export const groundLuminance = (rgb: Rgb) => luminance(rgb);
 const fresh = (): Saved => ({ pen: freshPen(), held: freshHeld() });
 
 const enum State { Ground, Esc, EscInter, Csi, Str, StrEsc }
@@ -217,8 +241,9 @@ export class TextContrast {
   private csi(final: string): string | null {
     const { params, inter } = this;
     if (final === "m" && !inter && !/^[<=>?]/.test(params)) return this.sgr(params);
-    if (final === "p" && inter === "!" && !params) {
-      // DECSTR, as xterm.js does it: attributes back to default, and the active buffer's saved ones with them.
+    if (final === "p" && inter === "!" && /^[\d;:]*$/.test(params)) {
+      // DECSTR, as xterm.js does it (any numeric parameters, CSI 0 ! p included; a private prefix is another
+      // sequence): attributes back to default, and the active buffer's saved ones with them.
       this.pen = freshPen();
       this.held = freshHeld();
       this.saved[this.buffer] = fresh();
@@ -245,6 +270,7 @@ export class TextContrast {
   private sgr(params: string): string | null {
     const pen = this.pen;
     let fgSet = false;
+    let bgSet = false;
     let dimTouched = false;
     const groups = params.split(";");
     for (let i = 0; i < groups.length; i++) {
@@ -257,7 +283,11 @@ export class TextContrast {
           fgSet = true;
           pen.fg = colour;
           pen.fgSgr = colour.kind === "slot" ? `38;5;${colour.n}` : `38;2;${(colour as { rgb: Rgb }).rgb.join(";")}`;
-        } else if (sub[0] === "48" && colour) pen.bg = colour;
+        } else if (sub[0] === "48" && colour) {
+          bgSet = true;
+          pen.bg = colour;
+          pen.bgSgr = colour.kind === "slot" ? `48;5;${colour.n}` : `48;2;${(colour as { rgb: Rgb }).rgb.join(";")}`;
+        }
         continue;
       }
       const code = group === "" ? 0 : Number(group);
@@ -270,10 +300,14 @@ export class TextContrast {
           fgSet = true;
           pen.fg = colour;
           pen.fgSgr = colour.kind === "slot" ? `38;5;${colour.n}` : `38;2;${(colour as { rgb: Rgb }).rgb.join(";")}`;
-        } else if (code === 48 && colour) pen.bg = colour;
+        } else if (code === 48 && colour) {
+          bgSet = true;
+          pen.bg = colour;
+          pen.bgSgr = colour.kind === "slot" ? `48;5;${colour.n}` : `48;2;${(colour as { rgb: Rgb }).rgb.join(";")}`;
+        }
       } else if (code === 0) {
         Object.assign(pen, freshPen());
-        fgSet = dimTouched = true;
+        fgSet = bgSet = dimTouched = true;
       } else if (code === 1) pen.bold = true;
       else if (code === 2) {
         pen.dim = true;
@@ -291,12 +325,15 @@ export class TextContrast {
         fgSet = true;
         pen.fg = { kind: "default" };
         pen.fgSgr = "39";
-      } else if (code >= 40 && code <= 47) pen.bg = { kind: "slot", n: code - 40 };
-      else if (code >= 100 && code <= 107) pen.bg = { kind: "slot", n: code - 92 };
-      else if (code === 49) pen.bg = { kind: "default" };
+      } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107) || code === 49) {
+        bgSet = true;
+        pen.bg = code === 49 ? { kind: "default" } : { kind: "slot", n: code >= 100 ? code - 92 : code - 40 };
+        pen.bgSgr = String(code);
+      }
     }
-    // What xterm.js holds now: the program's fg and faint where this SGR set them, what it held before otherwise.
+    // What xterm.js holds now: the program's colours and faint where this SGR set them, what it held before otherwise.
     if (fgSet) this.held.fgSgr = pen.fgSgr;
+    if (bgSet) this.held.bgSgr = pen.bgSgr;
     if (dimTouched) this.held.dim = pen.dim;
     return this.redraw();
   }
@@ -306,20 +343,35 @@ export class TextContrast {
     const { pen, held } = this;
     const { theme, ratio } = this.current();
     const lifting = ratio > 1 && !pen.inverse;
+    const ground = lifting ? this.ground(theme) : null;
     const wantDim = lifting ? false : pen.dim;
-    const wantFg = lifting ? this.liftedFg(theme, ratio) : pen.fgSgr;
+    const wantBg = ground?.lightened ? `48;2;${ground.rgb.join(";")}` : pen.bgSgr;
+    const wantFg = ground ? this.liftedFg(theme, ground.rgb, ratio) : pen.fgSgr;
     const parts: string[] = [];
     if (held.dim && !wantDim) parts.push(pen.bold ? "22;1" : "22");   // 22 ends bold too: put it back
     if (!held.dim && wantDim) parts.push("2");
+    if (held.bgSgr !== wantBg) parts.push(wantBg);
     if (held.fgSgr !== wantFg) parts.push(wantFg);
     held.dim = wantDim;
+    held.bgSgr = wantBg;
     held.fgSgr = wantFg;
     return parts.length ? `\x1b[${parts.join(";")}m` : null;
   }
 
-  private liftedFg(theme: ITheme, ratio: number): string {
+  /* The cell's ground as it should be drawn: the program's, or a mid-tone one it set lightened (MID_GROUND). */
+  private ground(theme: ITheme): { rgb: Rgb; lightened: boolean } {
+    const rgb = this.colour(theme, this.pen.bg, false);
+    if (this.pen.bg.kind === "default") return { rgb, lightened: false };
+    const lum = luminance(rgb);
+    if (lum < MID_GROUND[0] || lum >= MID_GROUND[1]) return { rgb, lightened: false };
+    const key = `ground|${rgb.join(",")}`;
+    let lighter = this.lifts.get(key);
+    if (lighter === undefined) this.lifts.set(key, (lighter = lightenTo(rgb, MID_GROUND[1]).join(",")));
+    return { rgb: lighter.split(",").map(Number) as unknown as Rgb, lightened: true };
+  }
+
+  private liftedFg(theme: ITheme, ground: Rgb, ratio: number): string {
     const { pen } = this;
-    const ground = this.colour(theme, pen.bg, false);
     let text = this.colour(theme, pen.fg, true);
     // Faint as xterm.js draws it: the text halfway to its ground.
     if (pen.dim) text = text.map((c, i) => Math.round((c + ground[i]) / 2)) as unknown as Rgb;

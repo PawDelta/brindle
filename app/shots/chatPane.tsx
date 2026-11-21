@@ -68,18 +68,11 @@ const OUTPUT = [
    SGR), in truecolour and in the 256-colour slots its own quantizer picks without truecolour; then its accents on the
    pane's field (its orange, subtle and inactive greys, as 256-colour slots). */
 type Rgb = [number, number, number];
-const CUBE = [0, 95, 135, 175, 215, 255];
+/* The 256-colour slot Claude Code sends for a colour without truecolour: chalk's rgbToAnsi256 (live panes' captured
+   dark diff grounds, 65 72 95 174, are its slots for Claude's dark theme). */
 function slot256([r, g, b]: Rgb): number {
-  const level = (m: number) => (m < 48 ? 0 : m < 115 ? 1 : m < 155 ? 2 : m < 195 ? 3 : m < 235 ? 4 : 5);
-  const [o, i, n] = [level(r), level(g), level(b)];
-  const cube = 16 + 36 * o + 6 * i + n;
-  const avg = Math.round((r + g + b) / 3);
-  if (avg < 5) return 16;
-  if (avg > 244 && o === i && i === n) return cube;
-  const d = Math.max(0, Math.min(23, Math.round((avg - 8) / 10)));
-  const grey = 8 + d * 10;
-  const far = (r - CUBE[o]) ** 2 + (g - CUBE[i]) ** 2 + (b - CUBE[n]) ** 2;
-  return (r - grey) ** 2 + (g - grey) ** 2 + (b - grey) ** 2 < far ? 232 + d : cube;
+  if (r === g && g === b) return r < 8 ? 16 : r > 248 ? 231 : Math.round(((r - 8) / 247) * 24) + 232;
+  return 16 + 36 * Math.round((r / 255) * 5) + 6 * Math.round((g / 255) * 5) + Math.round((b / 255) * 5);
 }
 const DIFF_COLOURS = {
   light: {
