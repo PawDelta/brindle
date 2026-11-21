@@ -7039,17 +7039,20 @@ def _handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | Non
         # An overloaded API (529) is the provider's capacity, not this account's usage.
         overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
         if is_quota_limit and not overloaded and not is_auth and not is_model:
-            from brindle import provider_switch
+            from brindle import limit_report, provider_switch
             from brindle.config import RepoConfig, load_repo_config
 
             ws = db.get_workspace(agent.workspace_id)
             cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
-            _note_health(quota.record_limit, agent.provider, cfg, until=quota.parse_limit_reset(raw_err))
+            route_env = limit_report._agent_route_env(agent, ws)
+            _note_health(quota.record_limit, agent.provider, cfg,
+                         until=quota.parse_limit_reset(raw_err),
+                         repo_root=ws.repo_root if ws else None, env=route_env)
             try:
                 provider_switch.sweep(db, time.time())
             except Exception:  # noqa: BLE001 - a hook never fails over a switch sweep
                 log.exception("brindle: couldn't sweep provider switches after limit error")
-        if is_rate_limit and not overloaded:
+        elif is_rate_limit and not overloaded:
             _note_health(provider_health.record_rate_limited, agent.provider)
         elif not is_auth and not is_model:
             _note_health(provider_health.record_error, agent.provider)

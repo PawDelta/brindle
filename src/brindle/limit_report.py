@@ -175,11 +175,27 @@ def told(db: DB, agent: Agent) -> bool:
     return db.mark(agent.id, agents.API_ERROR_MARK) == agents.api_error_stop(agent)
 
 
+def _agent_route_env(agent: Agent, ws: Workspace | None) -> dict[str, str] | None:
+    from brindle import connections
+    from brindle.profiles import load_profile
+
+    if not agent.profile:
+        return None
+    repo_root = ws.repo_root if ws else None
+    try:
+        prof = connections.apply(load_profile(agent.profile, repo_root), repo_root)
+    except Exception:  # noqa: BLE001 - never fail a health check over a profile lookup
+        return None
+    return dict(prof.env) if prof.env else None
+
+
 def health_of(db: DB, agent: Agent, now: float | None = None) -> provider_health.Health | None:
     """``agent``'s provider (and model) health, or None when it can't be read."""
     ws = db.get_workspace(agent.workspace_id)
     try:
-        return provider_health.limit(agent.provider, model_of(agent, ws) or None, now=now)
+        return provider_health.limit(agent.provider, model_of(agent, ws) or None, now=now,
+                                     repo_root=ws.repo_root if ws else None,
+                                     env=_agent_route_env(agent, ws))
     except OSError:
         log.exception("brindle: couldn't read %s's provider health", agent.id)
         return None

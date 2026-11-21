@@ -256,21 +256,29 @@ def _projected_full(readings: list, now: float) -> bool:
     return u1 + rate * (now - t1 + PROJECTION_AHEAD_SECONDS) >= FULL_PERCENT
 
 
-def _quota_state(provider: str, model: str | None, now: float, entry: dict) -> Health | None:
+def _quota_state(provider: str, model: str | None, now: float, entry: dict, *,
+                 repo_root: str | None = None, env: dict[str, str] | None = None) -> Health | None:
     """``limited`` or ``closing`` from the subscription windows, or None.
     A real recorded limit error (``limited_until``) applies even on keyed or
     cloud corporate routes; subscription windows are ignored there. Whether
     Claude is on a non-subscription route (which may read the key store) is
     asked only once a window has a state to give: a hook reads this on every
     tool call."""
-    q = quota.get(provider, now=now)
+    kw = {"now": now}
+    if repo_root is not None:
+        kw["repo_root"] = repo_root
+    if env is not None:
+        kw["env"] = env
+    q = quota.get(provider, **kw)
     if q is None:
         return None
     label = quota.NAMES.get(provider, provider)
     if q.limited_until is not None and q.limited_until > now:
         return Health(LIMITED, q.limited_until, f"{label} limit reached")
     state = _windows_state(provider, model, now, entry, q=q)
-    return None if state is not None and quota._non_subscription_route(provider) else state
+    if state is not None and quota._non_subscription_route(provider, repo_root=repo_root, env=env):
+        return None
+    return state
 
 
 def _windows_state(provider: str, model: str | None, now: float, entry: dict,
@@ -282,20 +290,25 @@ def _windows_state(provider: str, model: str | None, now: float, entry: dict,
     label = quota.NAMES.get(provider, provider)
     if q.limited_until is not None and q.limited_until > now:
         return Health(LIMITED, q.limited_until, f"{label} limit reached")
-    windows = [w for w in q.windows if (w.resets_at is None or w.resets_at > now)
-               and (w.name is None or _cap_applies(w.name, model))]
-    full = [w for w in windows if w.used >= FULL_PERCENT and w.resets_at is not None]
-    if full:
-        w = max(full, key=lambda w: w.resets_at)
-        return Health(LIMITED, w.resets_at, f"{label} {w.name} limit reached" if w.name
-                      else f"{label} limit reached")
+    serving_plan, plan_limited_until, has_overage_buffer = quota.effective_windows(q, now=now)
+    caps = [w for w in q.windows if w.name is not None and _cap_applies(w.name, model)
+            and (w.resets_at is None or w.resets_at > now)]
+    full_caps = [w for w in caps if w.used >= FULL_PERCENT and w.resets_at is not None]
+    if plan_limited_until is not None or full_caps:
+        if plan_limited_until is not None and (not full_caps or plan_limited_until >= max(w.resets_at for w in full_caps)):
+            return Health(LIMITED, plan_limited_until, f"{label} limit reached")
+        w = max(full_caps, key=lambda w: w.resets_at)
+        return Health(LIMITED, w.resets_at, f"{label} {w.name} limit reached")
     notice = (_num(entry.get("notice_at")) or 0) > now - NOTICE_SECONDS
     throttled = (_num(entry.get("rate_limited_at")) or 0) > now - NOTICE_SECONDS
     readings = [r for r in entry.get("readings", []) if isinstance(r, list) and len(r) == 3]
     projected = _projected_full(readings, now)
     # Each window on its own: one that lifts within CLOSING_MIN_RESET_SECONDS
     # (or whose reset is unknown) is waited for, and never hides another.
-    for w in sorted(windows, key=lambda w: -w.used):
+    # Included plan windows do not warn ``closing`` while paid/unlimited overage
+    # can still absorb work past 100%.
+    closing_candidates = list(caps) + ([] if has_overage_buffer else list(serving_plan))
+    for w in sorted(closing_candidates, key=lambda w: -w.used):
         if w.resets_at is None or w.resets_at - now <= CLOSING_MIN_RESET_SECONDS:
             continue
         tracked = w.name is None and projected and readings[-1][2] == w.resets_at
@@ -305,24 +318,27 @@ def _windows_state(provider: str, model: str | None, now: float, entry: dict,
     return None
 
 
-def closing(provider: str, model: str | None = None, *, now: float | None = None) -> Health | None:
+def closing(provider: str, model: str | None = None, *, now: float | None = None,
+            repo_root: str | None = None, env: dict[str, str] | None = None) -> Health | None:
     """``provider``'s (or ``model``'s) ``closing`` state, or None. Unlike
     ``limit``, a rate limit or error run doesn't mask it: a worker should
     save its work whatever else is going on."""
     now = _clock() if now is None else now
     entry = _load().get(_key(provider))
-    q = _quota_state(provider, model, now, entry if isinstance(entry, dict) else {})
+    q = _quota_state(provider, model, now, entry if isinstance(entry, dict) else {},
+                     repo_root=repo_root, env=env)
     return q if q is not None and q.state == CLOSING else None
 
 
-def limit(provider: str, model: str | None = None, *, now: float | None = None) -> Health:
+def limit(provider: str, model: str | None = None, *, now: float | None = None,
+          repo_root: str | None = None, env: dict[str, str] | None = None) -> Health:
     """The quota side of ``check``: ``limited``, ``rate_limited``,
     ``erroring`` or ``closing``, else ``ok``. Nothing about install, sign-in
     or refusals, so it is cheap."""
     now = _clock() if now is None else now
     entry = _load().get(_key(provider))
     entry = entry if isinstance(entry, dict) else {}
-    q = _quota_state(provider, model, now, entry)
+    q = _quota_state(provider, model, now, entry, repo_root=repo_root, env=env)
     if q is not None and q.state == LIMITED:
         return q
     label = quota.NAMES.get(provider, provider)
@@ -335,9 +351,10 @@ def limit(provider: str, model: str | None = None, *, now: float | None = None) 
     return q or _OK
 
 
-def limited_until(provider: str, model: str | None = None, *, now: float | None = None) -> float | None:
+def limited_until(provider: str, model: str | None = None, *, now: float | None = None,
+                  repo_root: str | None = None, env: dict[str, str] | None = None) -> float | None:
     """When ``provider``'s (or ``model``'s) limit lifts, or None while in quota."""
-    h = limit(provider, model, now=now)
+    h = limit(provider, model, now=now, repo_root=repo_root, env=env)
     return h.until if h.state == LIMITED else None
 
 
@@ -360,4 +377,4 @@ def check(provider: str, *, model: str | None = None, profile: str | None = None
         if why:
             return Health(SIGNED_OUT, None, why) if providers.signed_out(provider, env) \
                 else Health(NOT_INSTALLED, None, why)
-    return limit(provider, model, now=now)
+    return limit(provider, model, now=now, repo_root=repo_root, env=env)

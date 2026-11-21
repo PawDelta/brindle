@@ -955,13 +955,17 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
         problem = str(e)
     if problem:
         return f"{problem}, skipped {name}"
-    from brindle import provider_health
+    from brindle import connections, provider_health
 
+    try:
+        route_env = dict(connections.apply(p, repo_root).env)
+    except Exception:  # noqa: BLE001 - never fail routing over a saved connection lookup
+        route_env = dict(p.env or {})
     cli = CLI_FOR_PROVIDER.get(p.provider)
     # One definition of "can take work now" (refused, installed, signed in,
     # limited, rate limited, erroring, closing); the headroom margin below is routing's own.
     health = provider_health.check(p.provider, model=effective_profile_model(p, repo_root) or None,
-                                   profile=name, repo_root=repo_root, env=p.env, installed=bool(cli))
+                                   profile=name, repo_root=repo_root, env=route_env, installed=bool(cli))
     if health.state == provider_health.SIGNED_OUT:
         return f"{cli} isn't signed in, skipped {name}"
     if health.state == provider_health.NOT_INSTALLED:
@@ -969,7 +973,10 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     if not health.ok:
         return f"{health.reason}, skipped {name}"
     if p.provider in quota.PROVIDERS:
-        room = quota.known_headroom(p.provider, cfg, repo_root)
+        if quota.headroom is quota._DEFAULT_HEADROOM:
+            room = quota.known_headroom(p.provider, cfg, repo_root, env=route_env)
+        else:
+            room = quota.headroom(p.provider, cfg, repo_root)
         if room is not None:
             # Reserve enough allowance to finish the expected size of task. Unknown
             # weights get the full margin; a local server has no usage allowance.

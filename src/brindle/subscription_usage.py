@@ -43,12 +43,15 @@ def cache_key(provider: str, *, who: str | None = None) -> str | None:
     return "claude:" + hashlib.sha256(who.encode()).hexdigest() if who else None
 
 
-def route_limit_key(provider: str) -> str:
+def route_limit_key(provider: str, route: str | None = None) -> str:
     """Fallback quota.json key for real CLI limit errors when no subscription
-    identity applies (Bedrock, Vertex, API keys, explicit OAuth tokens)."""
-    return f"{provider}:limit"
+    identity applies (Bedrock, Vertex, API keys, corporate gateways, explicit
+    OAuth tokens), optionally scoped by a secret-free route fingerprint."""
+    return f"{provider}:limit:{route}" if route else f"{provider}:limit"
 
 
-def limit_key(provider: str, *, who: str | None = None) -> str:
+def limit_key(provider: str, *, who: str | None = None, route: str | None = None) -> str:
     """Key under which a real CLI limit error is stored for ``provider``."""
+    if route:
+        return route_limit_key(provider, route)
     return cache_key(provider, who=who) or route_limit_key(provider)

@@ -37,9 +37,11 @@ DAY = 24 * HOUR
 
 @pytest.fixture
 def clock(monkeypatch):
-    monkeypatch.setattr(time, "time", lambda: NOW)
-    monkeypatch.setattr(quota.time, "time", lambda: NOW)
-    monkeypatch.setattr(provider_health, "_clock", lambda: NOW)
+    cur = [NOW]
+    monkeypatch.setattr(time, "time", lambda: cur[0])
+    monkeypatch.setattr(quota.time, "time", lambda: cur[0])
+    monkeypatch.setattr(provider_health, "_clock", lambda: cur[0])
+    return cur
 
 
 def _claude_login(tmp_path, monkeypatch, account: dict):
@@ -71,7 +73,8 @@ def _session(db, repo, provider: str = "claude", root_id: str = "root"):
 
 def test_claude_corporate_cli_usage_parses_org_spend_and_no_weekly(tmp_path, brindle_home, clock, monkeypatch):
     """Enterprise/Team `/usage` output: org-scoped windows are plan-wide (not one-model caps),
-    spend ratios compute exact percent, date-only resets parse, and no-weekly accounts work."""
+    spend ratios compute exact percent, date-only resets parse, no-weekly accounts work, and
+    included vs Extra usage overage follows the same availability rules as status-line data."""
     _claude_login(tmp_path, monkeypatch, {"organizationUuid": "org-ent-1", "emailAddress": "dev@corp.example"})
 
     org_text = (
@@ -83,7 +86,7 @@ def test_claude_corporate_cli_usage_parses_org_spend_and_no_weekly(tmp_path, bri
     plan = [w for w in windows if w.name is None]
     caps = [w for w in windows if w.name is not None]
 
-    assert [(w.used, w.minutes) for w in plan] == [(85.0, 10080), (75.0, 43200)]
+    assert [(w.used, w.minutes, w.overage) for w in plan] == [(85.0, 10080, False), (75.0, 43200, True)]
     assert all(w.resets_at is not None and w.resets_at > NOW for w in plan)
     assert [(w.name, w.used) for w in caps] == [("Fable", 12.0)]
 
@@ -91,6 +94,36 @@ def test_claude_corporate_cli_usage_parses_org_spend_and_no_weekly(tmp_path, bri
     quota.record("claude", windows, source="claude /usage")
     assert quota.fullest(quota.get("claude", now=NOW)).used == 85.0
     assert quota.known_headroom("claude") == 15.0
+
+    # Shared included-vs-overage rules on `/usage` output:
+    # 1) Included 100% + Extra usage $40/$200 -> overage still serves work (NOT limited).
+    overage_text = (
+        "Current session: 100% used · resets Nov 21 at 3pm (UTC)\n"
+        "Extra usage: $40.00 / $200.00 spent · resets Dec 1 (UTC)\n"
+    )
+    quota.record("claude", quota.parse_claude_usage(overage_text, now=NOW), source="claude /usage")
+    assert provider_health.limit("claude", now=NOW).ok
+    assert quota.known_headroom("claude") == 80.0
+
+    # 2) Included 20% + Extra usage $200/$200 -> included still serves work (NOT limited).
+    included_text = (
+        "Current session: 20% used · resets Nov 21 at 3pm (UTC)\n"
+        "Extra usage: $200.00 / $200.00 spent · resets Dec 1 (UTC)\n"
+    )
+    quota.record("claude", quota.parse_claude_usage(included_text, now=NOW), source="claude /usage")
+    assert provider_health.limit("claude", now=NOW).ok
+    assert quota.known_headroom("claude") == 80.0
+
+    # 3) Both at 100% -> LIMITED until the earlier reset (3pm UTC), recovering once included resets.
+    both_full_text = (
+        "Current session: 100% used · resets Nov 21 at 3pm (UTC)\n"
+        "Extra usage: $200.00 / $200.00 spent · resets Dec 1 (UTC)\n"
+    )
+    quota.record("claude", quota.parse_claude_usage(both_full_text, now=NOW), source="claude /usage")
+    three_pm = datetime(2026, 11, 21, 15, 0, tzinfo=timezone.utc).timestamp()
+    health = provider_health.limit("claude", now=NOW)
+    assert health.state == provider_health.LIMITED and health.until == three_pm
+    assert provider_health.limit("claude", now=three_pm + 1).ok
 
     # Corporate account with only a monthly spend limit (no weekly window at all).
     spend_only = "Monthly spend: $90.00 / $120.00 · resets Dec 1 (UTC)\n"
@@ -103,11 +136,27 @@ def test_claude_corporate_cli_usage_parses_org_spend_and_no_weekly(tmp_path, bri
 
 
 def test_claude_corporate_status_line_iso_reset_spend_and_extra_usage_overage(tmp_path, brindle_home, clock, monkeypatch):
-    """Status-line payloads with ISO resets, spend ratios, and extra_usage overage parse accurately
-    and do not fail over early while paid extra usage still has room."""
+    """Status-line payloads keep included allowance and optional paid extra_usage separate:
+    either allowance can serve work, and when both are full recovery happens at the earlier reset."""
     _claude_login(tmp_path, monkeypatch, {"accountUuid": "acct-1", "organizationUuid": "org-ent-1"})
+    three_pm = datetime(2026, 11, 21, 15, 0, tzinfo=timezone.utc).timestamp()
 
-    # Base 5h window is at 100%, but extra_usage is enabled at $40 / $200 (20%) -> NOT limited yet.
+    # 1. Included at 20%, paid extra_usage at 100% -> included allowance still serves work (NOT limited).
+    assert quota.record_claude({
+        "rate_limits": {
+            "five_hour": {"used_percentage": 20, "resets_at": "2026-11-21T15:00:00Z"},
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": 200.0,
+                "monthly_limit": 200.0,
+                "resets_at": "2026-12-01T00:00:00Z",
+            },
+        }
+    })
+    assert provider_health.limit("claude", now=NOW).ok
+    assert quota.known_headroom("claude") == 80.0
+
+    # 2. Base 5h window is at 100%, but extra_usage is enabled at $40 / $200 (20%) -> NOT limited yet.
     assert quota.record_claude({
         "rate_limits": {
             "five_hour": {"used_percentage": 100, "resets_at": "2026-11-21T15:00:00Z"},
@@ -122,7 +171,8 @@ def test_claude_corporate_status_line_iso_reset_spend_and_extra_usage_overage(tm
     assert provider_health.limit("claude", now=NOW).ok
     assert quota.known_headroom("claude") == 80.0
 
-    # Once the extra_usage spend cap itself reaches 100%, Claude IS limited until its ISO reset.
+    # 3. Once BOTH included and extra_usage reach 100%, Claude IS limited until the earlier reset
+    # (when the 5h included allowance returns), and recovers once 5h resets even though monthly overage hasn't.
     assert quota.record_claude({
         "rate_limits": {
             "five_hour": {"used_percentage": 100, "resets_at": "2026-11-21T15:00:00Z"},
@@ -136,13 +186,15 @@ def test_claude_corporate_status_line_iso_reset_spend_and_extra_usage_overage(tm
     })
     health = provider_health.limit("claude", now=NOW)
     assert health.state == provider_health.LIMITED
-    assert health.until == datetime(2026, 12, 1, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert health.until == three_pm
+    assert provider_health.limit("claude", now=three_pm + 1).ok
 
 
 def test_codex_corporate_rollout_parses_individual_limit_model_cap_credits_and_spend_control(
         tmp_path, brindle_home, clock, monkeypatch):
     """Codex corporate rollouts: individual_limit counts as plan-wide, named model caps stay scoped,
-    workspace credits prevent premature cutoff, and spend_control_reached triggers LIMITED."""
+    workspace credits prevent premature cutoff, spend_control_reached triggers LIMITED, and re-reading
+    an unchanged rollout after the original cooldown expires does NOT renew the limit."""
     reset = NOW + 3 * DAY
 
     # 1. Per-model cap (Spark at 100%) must NOT limit general Codex models; individual_limit (72%) does apply.
@@ -187,9 +239,10 @@ def test_codex_corporate_rollout_parses_individual_limit_model_cap_credits_and_s
     assert quota.refresh_codex()
     assert provider_health.limit("codex", now=NOW).ok
 
-    # 3. Corporate spend_control_reached (with no weekly window!) DOES trigger LIMITED.
+    # 3. Corporate spend_control_reached (with no weekly window) triggers LIMITED bound to the event
+    # timestamp; advancing the clock past the deadline and re-reading the unchanged rollout recovers.
     _write_codex_rollout(tmp_path, monkeypatch, [
-        {"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+        {"timestamp": "2026-11-21T12:00:00Z", "type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
             "limit_id": "codex",
             "limit_name": None,
             "primary": None,
@@ -201,8 +254,40 @@ def test_codex_corporate_rollout_parses_individual_limit_model_cap_credits_and_s
         }}},
     ])
     assert quota.refresh_codex()
+    expected_deadline = NOW + quota.FALLBACK_COOLDOWN_MINUTES * 60
     health = provider_health.limit("codex", now=NOW)
-    assert health.state == provider_health.LIMITED and health.until is not None and health.until > NOW
+    assert health.state == provider_health.LIMITED and health.until == expected_deadline
+
+    clock[0] = NOW + DAY
+    assert not quota.refresh_codex()
+    assert provider_health.limit("codex", now=clock[0]).ok
+    assert quota.get("codex", now=clock[0]) is None
+
+    # 4. Even an untimestamped spend_control_reached event pins its first-observed deadline by event
+    # identity so repeated refreshes never extend the cooldown past expiry.
+    t1 = clock[0]
+    _write_codex_rollout(tmp_path, monkeypatch, [
+        {"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+            "limit_id": "codex",
+            "limit_name": None,
+            "primary": None,
+            "secondary": None,
+            "spend_control_reached": True,
+            "plan_type": "enterprise",
+        }}},
+    ], name="rollout-2026-11-22T12-00-00-untimestamped.jsonl")
+    assert quota.refresh_codex()
+    pinned_until = t1 + quota.FALLBACK_COOLDOWN_MINUTES * 60
+    assert provider_health.limit("codex", now=t1).until == pinned_until
+
+    clock[0] = t1 + HOUR
+    assert quota.refresh_codex()
+    assert provider_health.limit("codex", now=clock[0]).until == pinned_until
+
+    clock[0] = t1 + DAY
+    assert not quota.refresh_codex()
+    assert provider_health.limit("codex", now=clock[0]).ok
+    assert quota.get("codex", now=clock[0]) is None
 
 
 def test_corporate_cloud_route_ignores_personal_subscription_and_unknown_usage_drives_no_failover(
@@ -217,13 +302,13 @@ def test_corporate_cloud_route_ignores_personal_subscription_and_unknown_usage_d
     # Switch to corporate Bedrock via company_login stored env (not os.environ).
     monkeypatch.setattr(company_login, "stored_env", lambda: {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-east-1"})
     runs = []
-    monkeypatch.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""))
-
-    assert quota.get("claude", now=NOW) is None
-    assert quota.status("claude", now=NOW) == "unknown"
-    assert quota.known_headroom("claude") is None
-    assert not quota.refresh_claude_usage(force=True)
-    assert runs == []
+    with monkeypatch.context() as mp:
+        mp.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""))
+        assert quota.get("claude", now=NOW) is None
+        assert quota.status("claude", now=NOW) == "unknown"
+        assert quota.known_headroom("claude") is None
+        assert not quota.refresh_claude_usage(force=True)
+        assert runs == []
 
     # Unknown usage must NOT trigger failover or block routing (even with an aggressive usage_limit).
     monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw: [])
@@ -239,38 +324,102 @@ def test_corporate_cloud_route_ignores_personal_subscription_and_unknown_usage_d
     assert provider_switch.maybe_offer(db, "root", NOW) is None
     assert autopilot._unavailable("developer", RepoConfig(usage_limit=0, limit_headroom=100), str(repo)) is None
 
-    # Unknown usage on Codex (after switching to API-key/null rate_limits rollout) clears stale windows
-    # and does NOT block Codex from being chosen as a failover target.
+    # Corporate Codex gateway present ONLY in launch/profile env (empty daemon os.environ)
+    # must ignore a cached 100% personal Codex window and isolate its own real limit errors.
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setattr(quota, "_refresh_codex_lazily", lambda: None)
     quota.record("codex", [quota.Window(100.0, NOW + DAY, 10080)], source="codex rollout")
+    assert provider_health.limit("codex", now=NOW).state == provider_health.LIMITED
+
+    corp_env = {"OPENAI_BASE_URL": "https://gw.corp.example/v1"}
+    other_env = {"OPENAI_BASE_URL": "https://other-gw.corp.example/v1"}
+    assert provider_health.check("codex", env=corp_env, installed=False, now=NOW).ok
+    assert quota.status("codex", env=corp_env, now=NOW) == "unknown"
+    assert quota.known_headroom("codex", env=corp_env) is None
+
+    # A profile supplying OPENAI_BASE_URL is not blocked by the cached personal Codex window,
+    # and a Codex supervisor running it does not fail over on personal Codex usage.
+    agents_dir = repo / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "corp-codex.md").write_text(
+        "---\nprovider: codex\nenv.OPENAI_BASE_URL: https://gw.corp.example/v1\n---\nCorporate Codex.\n",
+        encoding="utf-8",
+    )
+    assert autopilot._unavailable("corp-codex", RepoConfig(usage_limit=0, limit_headroom=100), str(repo)) is None
+    ws_id = db.get_agent("root").workspace_id
+    db.add_agent(Agent("codex-sup", ws_id, "corp-codex", "codex", None, "interactive",
+                       "running", "@2", None, NOW))
+    db.add_autopilot("codex-sup")
+    assert provider_switch.out_of_quota(db, "codex-sup", NOW) is None
+
+    # A real limit error on that corporate gateway is isolated to that route.
+    agents.handle_hook(db, "codex-sup", "stop-failure", {
+        "error": "rate_limit_error",
+        "error_details": "spend_control_reached",
+    })
+    assert provider_health.limit("codex", env=corp_env, now=NOW).state == provider_health.LIMITED
+    assert provider_switch.out_of_quota(db, "codex-sup", NOW) is not None
+    assert provider_health.limit("codex", env=other_env, now=NOW).ok
+
+    # Unknown usage on personal Codex (after switching to API-key/null rate_limits rollout) clears
+    # stale windows and does NOT block Codex from being chosen as a failover target.
     _write_codex_rollout(tmp_path, monkeypatch, [
         {"type": "event_msg", "payload": {"type": "token_count", "rate_limits": None}},
     ])
     quota.refresh_codex()
     assert quota.get("codex", now=NOW) is None
     assert quota.status("codex", now=NOW) == "unknown"
+    assert provider_health.limit("codex", now=NOW).ok
+    assert provider_health.limit("codex", env=corp_env, now=NOW).state == provider_health.LIMITED
     assert provider_switch.pick_target("claude", str(repo), NOW) == "codex"
 
 
-def test_claude_usage_403_and_unbounded_spend_report_unknown(tmp_path, brindle_home, clock, monkeypatch):
-    """HTTP 403, missing fields, and unbounded spend from a corporate account must report unknown,
-    never a guessed 0% or 100%."""
+def test_claude_usage_403_and_unbounded_spend_report_unknown(db, repo, tmp_path, brindle_home, clock, monkeypatch):
+    """Confirmed HTTP 403 or unusable/unbounded spend from a corporate account invalidates stale
+    cached usage (never leaving a stale 100% window to drive failover), while preserving any
+    independently recorded real CLI limit error."""
     _claude_login(tmp_path, monkeypatch, {"accountUuid": "corp-1", "organizationUuid": "org-ent-2"})
     monkeypatch.setattr(quota, "_claude_usage_at", 0.0)
     monkeypatch.setattr(quota, "_claude_usage_identity", None)
     monkeypatch.setattr(providers, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw: [])
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: tmux.PaneSnapshot())
+    monkeypatch.setattr(quota, "_refresh_codex_lazily", lambda: None)
 
-    # 403 from /usage -> unknown, no windows recorded.
+    _session(db, repo, provider="claude")
+    # Seed a stale 100% cached window that currently drives LIMITED + failover offer.
+    quota.record("claude", [quota.Window(100.0, NOW + DAY, 10080)], source="status line")
+    assert provider_health.limit("claude", now=NOW).state == provider_health.LIMITED
+    assert provider_switch.out_of_quota(db, "root", NOW) is not None
+
+    # Confirmed 403 from /usage -> invalidates stale window; usage becomes unknown and does NOT fail over.
     monkeypatch.setattr(spawn, "read", lambda argv, **kw: subprocess.CompletedProcess(
         argv, 1, "", "Error: 403 Forbidden: usage endpoint not available for enterprise org"))
     assert not quota.refresh_claude_usage(force=True)
     assert quota.get("claude", now=NOW) is None
     assert quota.status("claude", now=NOW) == "unknown"
+    assert quota.known_headroom("claude") is None
+    assert provider_health.limit("claude", now=NOW).ok
+    assert provider_switch.maybe_offer(db, "root", NOW) is None
 
-    # Unbounded spend ($84 spent, no cap) and missing percentage fields -> unknown.
+    # Confirmed unbounded spend on exit 0 also invalidates stale cached windows.
+    quota.record("claude", [quota.Window(100.0, NOW + DAY, 10080)], source="status line")
+    monkeypatch.setattr(spawn, "read", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 0, "Extra usage: $84.00 spent · resets Dec 1 (UTC)\n", ""))
+    assert not quota.refresh_claude_usage(force=True)
+    assert quota.get("claude", now=NOW) is None
+    assert provider_health.limit("claude", now=NOW).ok
+
+    # An independently recorded real limit error is preserved across a 403 refresh.
+    quota.record_limit("claude", now=NOW)
+    monkeypatch.setattr(spawn, "read", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 1, "", "Error: 403 Forbidden: usage endpoint not available for enterprise org"))
+    assert not quota.refresh_claude_usage(force=True)
+    assert provider_health.limit("claude", now=NOW).state == provider_health.LIMITED
+
+    # Missing percentage fields in status-line payloads never synthesize 0% or 100%.
     assert quota.parse_claude_usage("Extra usage: $84.00 spent · resets Dec 1 (UTC)\n", now=NOW) == []
     assert not quota.record_claude({"rate_limits": {"five_hour": {"used_percentage": None}, "seven_day": {}}})
-    assert quota.get("claude", now=NOW) is None
-    assert quota.status("claude", now=NOW) == "unknown"
 
 
 def test_real_limit_error_on_corporate_unknown_usage_still_triggers_failover(
