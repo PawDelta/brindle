@@ -15237,6 +15237,14 @@
     },
     {
       "method": "GET",
+      "path": "/v1/org-settings"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/org-settings"
+    },
+    {
+      "method": "GET",
       "path": "/v1/permissions"
     },
     {

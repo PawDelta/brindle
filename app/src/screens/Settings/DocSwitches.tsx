@@ -7,11 +7,11 @@
    plan, or an engine without the route, the section isn't shown. */
 
 import { useEffect, useState } from "react";
-import type { DaemonClient, DocSwitch, DocSwitchName } from "../../api/client";
+import type { DaemonClient, DocPolicy, DocSwitch, DocSwitchName } from "../../api/client";
 import { plain } from "../../api/wording";
 import { alert, card, h2, notice } from "../../components/ui";
 
-export type DocSwitchesClient = Pick<DaemonClient, "docSwitches" | "setDocSwitch">;
+export type DocSwitchesClient = Pick<DaemonClient, "docSwitches" | "setDocSwitch" | "docPolicy">;
 
 const ABOUT: Record<DocSwitchName, { name: string; help: string }> = {
   store: { name: "Library location", help: "Where your approved plans are kept." },
@@ -30,8 +30,12 @@ const LOCATIONS: { on: boolean; label: string; help: string }[] = [
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 const where = (on: boolean) => (on ? "brindle servers" : "This Mac");
 
+const PolicyLock = () => <svg aria-hidden className="inline-block size-[13px] flex-none text-ink-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="3.5" y="7" width="9" height="6.5" rx="1.2" /><path d="M5.5 7V5a2.5 2.5 0 015 0v2" /></svg>;
+const lockedValue = (s: DocSwitch) => s.name === "store" ? where(s.on) : s.name === "share" && s.on ? "People, teams and everyone here" : s.on ? "On" : "Off";
+
 export function DocSwitches({ client }: { client: DocSwitchesClient }) {
   const [switches, setSwitches] = useState<DocSwitch[] | null>(null);
+  const [policy, setPolicy] = useState<DocPolicy>({});
   const [busy, setBusy] = useState<DocSwitchName | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [move, setMove] = useState<{ on: boolean; moved: number; left: number } | null>(null);
@@ -42,6 +46,7 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
       (s) => live && setSwitches(s),
       () => undefined,
     );
+    client.docPolicy().then(p => { if (live) setPolicy(p); }, () => undefined);
     return () => {
       live = false;
     };
@@ -73,10 +78,10 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
     }
   };
 
+  const hasLocked = switches.some(s => s.locked) || policy.share_links !== undefined;
   const renderSwitch = (s: DocSwitch) => {
     const about = ABOUT[s.name] ?? { name: s.name, help: "" };
-    const locked = `Set by your organisation: ${s.org === "enforced_on" ? "on" : "off"}.`;
-    const help = s.locked ? `${locked} ${s.reason ?? ""}`.trim()
+    const help = s.locked ? about.help
       : !onServers ? s.name === "share"
         ? "Needs brindle servers. On this Mac you can still share one plan at a time from its Share panel."
         : "Needs brindle servers. Move your plans to brindle servers to turn this on."
@@ -87,7 +92,7 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
           <div className="text-sm font-medium">{about.name}</div>
           <p id={`doc-switch-${s.name}-help`} className="text-xs text-ink-3">{help}</p>
         </div>
-        <button
+        {s.locked ? <span className="inline-flex items-center gap-1.5 text-[13px]"><PolicyLock />{lockedValue(s)}</span> : <button
           type="button"
           role="switch"
           aria-checked={s.on}
@@ -98,7 +103,7 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
           onClick={() => void set(s.name, !s.on)}
         >
           <span aria-hidden className={`absolute top-0.5 size-3.5 rounded-full transition-[left] ${s.on ? "left-[18px] bg-on-branch" : "left-0.5 bg-ink-3"}`} />
-        </button>
+        </button>}
       </div>
     );
   };
@@ -109,10 +114,19 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
         <h2 id="doc-switches-title" className={h2}>Library</h2>
         <span className="text-xs text-ink-3">Where your approved plans live and what brindle does with them.</span>
       </header>
-      {store && (
+      {hasLocked && <h3 className="px-s2 pt-s1 text-xs font-medium uppercase text-ink-3">Set by your organisation</h3>}
+      {store?.locked && <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-s3 border-t border-line px-s2 py-s1" data-testid="doc-switch-store" data-state="locked">
+        <div><div className="text-sm font-medium">{ABOUT.store.name}</div><p className="text-xs text-ink-3">{ABOUT.store.help}</p></div>
+        <span className="inline-flex items-center gap-1.5 text-[13px]"><PolicyLock />{lockedValue(store)}</span>
+      </div>}
+      {hasLocked && <div className="flex flex-col divide-y divide-line border-y border-line">{serverSwitches.filter(s => s.locked && s.name === "share").map(renderSwitch)}
+        {policy.share_links !== undefined && <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-s3 px-s2 py-s1" data-testid="doc-policy-links" data-state="locked"><div><div className="text-sm font-medium">Plan links</div><p className="text-xs text-ink-3">Who a plan's link opens for.</p></div><span className="inline-flex items-center gap-1.5 text-[13px]"><PolicyLock />{policy.share_links === "anyone" ? "Anyone with the link" : policy.share_links === "org" ? "People in your organisation" : "Off"}</span></div>}
+        {serverSwitches.filter(s => s.locked && s.name !== "share").map(renderSwitch)}
+      </div>}
+      {switches.some(s => !s.locked) && <h3 className="px-s2 pt-s1 text-xs font-medium uppercase text-ink-3">Yours to change</h3>}
+      {store && !store.locked && (
         <div className={`${card} px-s2 py-s1`} data-testid="doc-switch-store">
           <div className="text-sm font-medium">Keep my plans</div>
-          {store.locked && <p className="text-xs text-ink-3">{`Set by your organisation: ${where(store.org === "enforced_on")}. ${store.reason ?? ""}`.trim()}</p>}
           <div role="radiogroup" aria-label={ABOUT.store.name} className="mt-s1 flex flex-col gap-s1">
             {LOCATIONS.map(l => (
               <button
@@ -145,11 +159,12 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
         </div>
       )}
       <div role="group" aria-labelledby="doc-server-switches-title" className="mt-s2">
-        <h3 id="doc-server-switches-title" className="px-s2 py-s1 text-xs font-medium uppercase text-ink-3">With plans on brindle servers</h3>
+        <h3 id="doc-server-switches-title" className="sr-only">Library switches you can change</h3>
         <div className={`${card} flex flex-col divide-y divide-line`}>
-          {serverSwitches.map(renderSwitch)}
+          {serverSwitches.filter(s => !s.locked).map(renderSwitch)}
         </div>
       </div>
+      {hasLocked && <p className="flex items-center gap-1.5 px-s2 text-xs text-ink-3"><PolicyLock />Set by your organisation. Ask an organisation owner or admin to change these.</p>}
       {move && move.left > 0 && (
         <div role="alert" className={alert}>
           {move.left} {move.left === 1 ? "plan wasn't" : "plans weren't"} moved yet.{" "}
