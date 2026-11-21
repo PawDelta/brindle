@@ -1,3 +1,4 @@
+import pytest
 """What an open planning doc holds (brindle.tasks.plan_holds): only its own
 work, tasks linked to its split or to a goal milestone. Other work the
 supervisor declares with assign's outside_plan runs at once, alongside the
@@ -22,6 +23,7 @@ def _open_plan(db, boss) -> str:
     return mcp_server.propose_plan(PLAN, split=SPLIT).split()[2]
 
 
+@pytest.mark.variant("unrelated work held behind an open plan: the owner's reported stall")
 def test_unrelated_work_with_a_reason_starts_while_the_plan_is_open(db, session):
     boss, started = session
     pid = _open_plan(db, boss)
@@ -34,6 +36,7 @@ def test_unrelated_work_with_a_reason_starts_while_the_plan_is_open(db, session)
         "bump the release version", HOTFIX, "working", True)
 
 
+@pytest.mark.variant("the plan's own task released early alongside unrelated work")
 def test_plan_worker_task_stays_held_while_alongside_work_runs(db, session):
     boss, started = session
     pid = _open_plan(db, boss)
@@ -50,6 +53,7 @@ def test_plan_worker_task_stays_held_while_alongside_work_runs(db, session):
     assert started == ["bump the release version", "build the schema"]
 
 
+@pytest.mark.variant("plan work slipping past the hold with no link and no reason")
 def test_an_assign_with_no_link_and_no_reason_is_refused(db, session):
     boss, started = session
     pid = _open_plan(db, boss)
@@ -60,6 +64,7 @@ def test_an_assign_with_no_link_and_no_reason_is_refused(db, session):
     assert db.list_tasks() == [] and started == []
 
 
+@pytest.mark.variant("a pending reviewer freezing the whole session, the owner's second stall")
 def test_a_pending_reviewer_holds_only_the_shared_plans_work(db, session, library):
     boss, started = session
     pid = _open_plan(db, boss)
@@ -73,6 +78,7 @@ def test_a_pending_reviewer_holds_only_the_shared_plans_work(db, session, librar
     assert [t.task_text for t in db.list_tasks()] == ["bump the release version"]
 
 
+@pytest.mark.variant("work for an older approved plan wrongly held by a newer open one")
 def test_work_linked_to_an_older_plan_runs_alongside_the_open_one(db, session):
     boss, started = session
     old = _open_plan(db, boss)
